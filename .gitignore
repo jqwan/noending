@@ -1,0 +1,12 @@
+# Node / frontend
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Editor & OS
+.DS_Store
+*.log
+.tmp/

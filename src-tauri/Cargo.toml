@@ -1,0 +1,27 @@
+[package]
+name = "noending"
+version = "0.1.0"
+description = "NoEnding — Conversations end. Context doesn't."
+authors = ["NoEnding"]
+edition = "2021"
+
+[lib]
+name = "noending"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+thiserror = "2"
+
+[profile.release]
+lto = true
+strip = true
