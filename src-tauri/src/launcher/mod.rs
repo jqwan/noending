@@ -156,7 +156,10 @@ impl SessionLauncher {
             &intent.id,
             launch_status::PENDING,
             None,
-            &format!("launched_via={};pid={:?}", outcome.launched_via, outcome.pid),
+            &format!(
+                "launched_via={};pid={:?}",
+                outcome.launched_via, outcome.pid
+            ),
         )?;
 
         // 6. bindings will be created when discovery matches the intent
@@ -171,7 +174,8 @@ impl SessionLauncher {
             note: if ctx_file.is_some() {
                 "新 Session 启动后会在发现时通过 LaunchIntent 自动建立显式 Workstream 绑定。".into()
             } else {
-                "已直接启动（未携带 Workstream Context）；此启动未选择 Workstream，允许 0 绑定。".into()
+                "已直接启动（未携带 Workstream Context）；此启动未选择 Workstream，允许 0 绑定。"
+                    .into()
             },
             launch_intent_id: Some(intent.id),
         })
@@ -202,7 +206,14 @@ impl SessionLauncher {
         for extra in extra_workstream_ids {
             if !ws_ids.contains(extra) {
                 ws_ids.push(extra.clone());
-                record_binding(db, session_id, extra, "related", binding_source::USER_ASSIGNED, 1.0)?;
+                record_binding(
+                    db,
+                    session_id,
+                    extra,
+                    "related",
+                    binding_source::USER_ASSIGNED,
+                    1.0,
+                )?;
             }
         }
 
@@ -237,7 +248,14 @@ impl SessionLauncher {
             ws_ids.first().map(|s| s.as_str()).unwrap_or(""),
         );
         for ws_id in &ws_ids {
-            record_binding(db, session_id, ws_id, "related", binding_source::USER_ASSIGNED, 1.0)?;
+            record_binding(
+                db,
+                session_id,
+                ws_id,
+                "related",
+                binding_source::USER_ASSIGNED,
+                1.0,
+            )?;
             db.record_delivery(&ContextDelivery {
                 id: new_id(),
                 session_id: session_id.to_string(),
@@ -289,7 +307,11 @@ fn delivered_revisions_by_workstream(
     by_ws
 }
 
-fn resolve_install(db: &Db, agent: Agent) -> Result<crate::platform::exec_resolver::AgentInstallation> {    match db.get_installation(agent)? {
+fn resolve_install(
+    db: &Db,
+    agent: Agent,
+) -> Result<crate::platform::exec_resolver::AgentInstallation> {
+    match db.get_installation(agent)? {
         Some(i) if std::path::Path::new(&i.executable_path).exists() => Ok(i),
         _ => {
             let i = crate::platform::exec_resolver::resolve(agent)?;
@@ -345,7 +367,8 @@ pub fn record_binding(
 /// winner → auto-match; several close candidates → ambiguous (never
 /// silently guess); nothing → stays pending for a later reconcile.
 pub fn try_match_launch_intents(db: &Db, session: &Session) -> Result<bool> {
-    let pending = db.list_launch_intents(&[launch_status::PENDING, launch_status::AMBIGUOUS], 100)?;
+    let pending =
+        db.list_launch_intents(&[launch_status::PENDING, launch_status::AMBIGUOUS], 100)?;
     if pending.is_empty() {
         return Ok(false);
     }
@@ -483,7 +506,8 @@ pub fn apply_match(db: &Db, intent: &LaunchIntent, session: &Session) -> Result<
 /// Pending intents that never produced a session expire; ambiguous ones
 /// wait for the user and only expire after 3× the TTL.
 pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
-    let pending = db.list_launch_intents(&[launch_status::PENDING, launch_status::AMBIGUOUS], 500)?;
+    let pending =
+        db.list_launch_intents(&[launch_status::PENDING, launch_status::AMBIGUOUS], 500)?;
     let now_ts = chrono::Utc::now();
     let mut expired = 0;
     for intent in pending {
@@ -494,7 +518,12 @@ pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
         };
         if let Ok(launched) = chrono::DateTime::parse_from_rfc3339(&intent.launched_at) {
             if now_ts - launched.with_timezone(&chrono::Utc) > chrono::Duration::seconds(ttl) {
-                db.update_launch_intent(&intent.id, launch_status::EXPIRED, None, "超时未发现匹配 Session")?;
+                db.update_launch_intent(
+                    &intent.id,
+                    launch_status::EXPIRED,
+                    None,
+                    "超时未发现匹配 Session",
+                )?;
                 expired += 1;
             }
         }
@@ -547,7 +576,11 @@ pub fn ingest_and_sync_session(
 }
 
 /// Ingest + sync a single session delta. Returns number of applied mutations.
-pub fn sync_one_session(db: &Db, engine: &crate::sync::SyncEngine, session: &Session) -> Result<usize> {
+pub fn sync_one_session(
+    db: &Db,
+    engine: &crate::sync::SyncEngine,
+    session: &Session,
+) -> Result<usize> {
     sync_one_session_with_engine(db, engine, session)
 }
 

@@ -71,7 +71,10 @@ impl PiAdapter {
                 Some("session") => {
                     session_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
                     cwd = v.get("cwd").and_then(|c| c.as_str()).map(|c| c.to_string());
-                    started_at = v.get("timestamp").and_then(|t| t.as_str()).map(|t| t.to_string());
+                    started_at = v
+                        .get("timestamp")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.to_string());
                 }
                 Some("message") => {
                     if first_user_text.is_none() {
@@ -80,7 +83,8 @@ impl PiAdapter {
                                 let (text, _) =
                                     content_text(msg.get("content").unwrap_or(&Value::Null));
                                 if !text.is_empty() {
-                                    first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                                    first_user_text =
+                                        Some(crate::adapters::truncate_text(&text, 400));
                                 }
                             }
                         }
@@ -96,7 +100,10 @@ impl PiAdapter {
         // fallback: filename carries <ts>_<uuid>
         let file_name = path.file_stem().map(|s| s.to_string_lossy().to_string());
         let session_id = session_id.or_else(|| {
-            file_name.as_deref().and_then(|n| n.rsplit('_').next()).map(|s| s.to_string())
+            file_name
+                .as_deref()
+                .and_then(|n| n.rsplit('_').next())
+                .map(|s| s.to_string())
         });
         let session_id = match session_id {
             Some(s) if !s.is_empty() => s,
@@ -151,7 +158,10 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                 // Any .jsonl is a candidate; only the content fingerprint
                 // accepts it. One bad file never aborts the whole scan.
                 if detect_format(&p) != Some(Agent::Pi) {
-                    eprintln!("[discover] skip {} (content fingerprint is not pi)", p.display());
+                    eprintln!(
+                        "[discover] skip {} (content fingerprint is not pi)",
+                        p.display()
+                    );
                     continue;
                 }
                 match Self::parse_session_file(&p) {
@@ -168,10 +178,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         let path = PathBuf::from(&session.raw_path);
         read_jsonl_delta(&path, cursor, &|_idx, v| {
             let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let source_event_id = v
-                .get("id")
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string());
+            let source_event_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
 
             let (kind, text) = match vtype {
                 "message" => {
@@ -214,7 +221,9 @@ impl crate::adapters::AgentAdapter for PiAdapter {
     ) -> Result<AgentCommand> {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::context_prompt(context_file)?.into_iter().collect(),
+            args: crate::adapters::context_prompt(context_file)?
+                .into_iter()
+                .collect(),
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -243,11 +252,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
     ) -> Result<AgentCommand> {
         // pi -p: non-interactive; --no-session keeps analysis ephemeral;
         // --no-tools makes it a pure text model call (safe + cheap).
-        let mut args: Vec<String> = vec![
-            "-p".into(),
-            "--no-session".into(),
-            "--no-tools".into(),
-        ];
+        let mut args: Vec<String> = vec!["-p".into(), "--no-session".into(), "--no-tools".into()];
         if let Some(p) = &opts.provider {
             args.extend(["--provider".into(), p.clone()]);
         }

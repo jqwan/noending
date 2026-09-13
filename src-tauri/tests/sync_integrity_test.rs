@@ -9,9 +9,7 @@
 //! - every status change leaves an audit revision.
 
 use noending::domain::{binding_source, Agent, Session, SessionWorkstreamBinding};
-use noending::storage::{
-    insert_sync_run_conn, new_id, now, set_processed_sequence_conn, Db,
-};
+use noending::storage::{insert_sync_run_conn, new_id, now, set_processed_sequence_conn, Db};
 use noending::sync::merge::MergeEngine;
 use noending::sync::{create_item, ContextMutation, MergeContext};
 
@@ -52,7 +50,13 @@ fn ws_row(db: &Db, title: &str) -> noending::domain::Workstream {
     w
 }
 
-fn user_item(db: &Db, ws_id: &str, authority: &str, title: &str, content: &str) -> noending::domain::ContextItem {
+fn user_item(
+    db: &Db,
+    ws_id: &str,
+    authority: &str,
+    title: &str,
+    content: &str,
+) -> noending::domain::ContextItem {
     create_item(
         db,
         ws_id,
@@ -101,7 +105,10 @@ fn mutation_failure_rolls_back_entire_run() {
         },
     ];
 
-    let ctx = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
     let run = noending::domain::SyncRun {
         id: ctx.run_id.clone(),
         session_id: s.id.clone(),
@@ -125,7 +132,10 @@ fn mutation_failure_rolls_back_entire_run() {
         set_processed_sequence_conn(tx, &s.id, 5)?;
         Ok(())
     });
-    assert!(result.is_err(), "the FK violation must fail the transaction");
+    assert!(
+        result.is_err(),
+        "the FK violation must fail the transaction"
+    );
 
     // everything rolled back
     assert!(
@@ -133,7 +143,11 @@ fn mutation_failure_rolls_back_entire_run() {
         "the first (valid) mutation must NOT survive the rollback"
     );
     assert_eq!(db.list_sync_runs(50).unwrap().len(), 0, "no SyncRun row");
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0, "processed cursor unchanged");
+    assert_eq!(
+        db.get_processed_sequence(&s.id).unwrap(),
+        0,
+        "processed cursor unchanged"
+    );
 }
 
 /// Retrying after a rollback applies the batch exactly once; retrying an
@@ -156,7 +170,10 @@ fn retry_after_rollback_applies_once_and_commit_is_idempotent() {
     };
 
     // 1st attempt fails mid-batch (bad second mutation)
-    let ctx = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
     let mut mutations = mk_mutations();
     mutations.push(ContextMutation::Add {
         workstream_id: "missing-ws".into(),
@@ -175,7 +192,10 @@ fn retry_after_rollback_applies_once_and_commit_is_idempotent() {
     assert!(failed.is_err());
 
     // retry with only the good mutation succeeds exactly once
-    let ctx2 = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx2 = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
     db.tx(|tx| {
         for m in mk_mutations() {
             MergeEngine.apply(tx, &m, &ctx2)?;
@@ -186,17 +206,21 @@ fn retry_after_rollback_applies_once_and_commit_is_idempotent() {
     assert_eq!(db.items_for_workstream(&ws.id, true).unwrap().len(), 1);
 
     // applying the same mutation again is a deterministic skip (dedup)
-    let ctx3 = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
-    let applied_again = db.tx(|tx| {
-        let mut applied = 0;
-        for m in mk_mutations() {
-            if MergeEngine.apply(tx, &m, &ctx3)? {
-                applied += 1;
+    let ctx3 = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
+    let applied_again = db
+        .tx(|tx| {
+            let mut applied = 0;
+            for m in mk_mutations() {
+                if MergeEngine.apply(tx, &m, &ctx3)? {
+                    applied += 1;
+                }
             }
-        }
-        Ok(applied)
-    })
-    .unwrap();
+            Ok(applied)
+        })
+        .unwrap();
     assert_eq!(applied_again, 0, "identical re-apply is a no-op");
     assert_eq!(db.items_for_workstream(&ws.id, true).unwrap().len(), 1);
 }
@@ -240,16 +264,30 @@ fn read_cursor_and_processed_cursor_are_separate() {
     };
 
     // ingest batch 1 (real user message so the extractor produces mutations)
-    let batch1 = vec![parsed(1, "我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据")];
+    let batch1 = vec![parsed(
+        1,
+        "我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据",
+    )];
     let stored1 = db
         .append_source_events(&s.id, &batch1, &source(50), "/tmp/x.jsonl")
         .unwrap();
     assert_eq!(stored1.len(), 1);
-    assert_eq!(db.get_source_cursor(&s.id).unwrap().last_sequence, 1, "read cursor advanced");
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0, "processed cursor behind");
+    assert_eq!(
+        db.get_source_cursor(&s.id).unwrap().last_sequence,
+        1,
+        "read cursor advanced"
+    );
+    assert_eq!(
+        db.get_processed_sequence(&s.id).unwrap(),
+        0,
+        "processed cursor behind"
+    );
 
     // ingest batch 2 — still not synced (simulates a crash after ingest)
-    let batch2 = vec![parsed(2, "补充约束：不能把密钥提交到代码仓库，必须使用环境变量")];
+    let batch2 = vec![parsed(
+        2,
+        "补充约束：不能把密钥提交到代码仓库，必须使用环境变量",
+    )];
     let stored2 = db
         .append_source_events(&s.id, &batch2, &source(120), "/tmp/x.jsonl")
         .unwrap();
@@ -264,7 +302,11 @@ fn read_cursor_and_processed_cursor_are_separate() {
         .run_session_sync(&db, &s, &pending, 0, pending.last().unwrap().sequence)
         .unwrap();
     assert!(out.applied > 0);
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 2, "processed caught up");
+    assert_eq!(
+        db.get_processed_sequence(&s.id).unwrap(),
+        2,
+        "processed caught up"
+    );
     assert_eq!(
         db.items_for_workstream(&ws.id, true).unwrap().len(),
         out.applied as usize,
@@ -311,7 +353,9 @@ fn nonblocking_sync_path_processes_pending_events() {
                 source_position: "line:1".into(),
                 ts: Some(now()),
                 kind: "user_message".into(),
-                text: Some("我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据".into()),
+                text: Some(
+                    "我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据".into(),
+                ),
                 metadata: serde_json::json!({}),
             }],
             &source,
@@ -328,7 +372,11 @@ fn nonblocking_sync_path_processes_pending_events() {
     assert!(applied > 0, "pending events processed through the nb path");
 
     let guard = db_lock.lock().unwrap();
-    assert_eq!(guard.get_processed_sequence(&s.id).unwrap(), 1, "processed cursor advanced");
+    assert_eq!(
+        guard.get_processed_sequence(&s.id).unwrap(),
+        1,
+        "processed cursor advanced"
+    );
     assert!(
         !guard.items_for_workstream(&ws.id, true).unwrap().is_empty(),
         "mutations were committed"
@@ -343,7 +391,13 @@ fn nonblocking_sync_path_processes_pending_events() {
 fn agent_update_of_user_item_creates_conflict_not_overwrite() {
     let db = open_db("auth-update");
     let ws = ws_row(&db, "auth ws");
-    let created = user_item(&db, &ws.id, "user_edit", "保持 macOS 一等支持", "Windows 和 macOS 都是一等公民");
+    let created = user_item(
+        &db,
+        &ws.id,
+        "user_edit",
+        "保持 macOS 一等支持",
+        "Windows 和 macOS 都是一等公民",
+    );
     let item = db.get_item(&created.id).unwrap().unwrap();
     let original_head = item.current_revision_id.clone();
 
@@ -354,13 +408,19 @@ fn agent_update_of_user_item_creates_conflict_not_overwrite() {
         source_refs: vec!["session-event:e1".into()],
         authority: "agent_inferred".into(),
     };
-    let ctx = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
     let applied = db.tx(|tx| MergeEngine.apply(tx, &m, &ctx)).unwrap();
     assert!(applied, "the disagreement is recorded (as a conflict)");
 
     let after = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(after.status, "active", "user item untouched");
-    assert_eq!(after.current_revision_id, original_head, "content not replaced");
+    assert_eq!(
+        after.current_revision_id, original_head,
+        "content not replaced"
+    );
 
     let conflicts = db.conflicts_for_workstream(&ws.id, false).unwrap();
     assert_eq!(conflicts.len(), 1, "a ContextConflict was created");
@@ -377,11 +437,20 @@ fn agent_update_of_user_item_creates_conflict_not_overwrite() {
 fn agent_supersede_and_resolve_of_user_items_never_apply() {
     let db = open_db("auth-supersede");
     let ws = ws_row(&db, "supersede ws");
-    let created = user_item(&db, &ws.id, "user_explicit", "数据库继续用 SQLite", "用户明确决定");
+    let created = user_item(
+        &db,
+        &ws.id,
+        "user_explicit",
+        "数据库继续用 SQLite",
+        "用户明确决定",
+    );
     let item = db.get_item(&created.id).unwrap().unwrap();
     let original_head = item.current_revision_id.clone();
 
-    let ctx = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
 
     let sup = ContextMutation::Supersede {
         item_id: item.id.clone(),
@@ -401,10 +470,17 @@ fn agent_supersede_and_resolve_of_user_items_never_apply() {
     };
     assert!(db.tx(|tx| MergeEngine.apply(tx, &res, &ctx)).unwrap());
     let after = db.get_item(&item.id).unwrap().unwrap();
-    assert_eq!(after.status, "active", "user_explicit not resolved by agent");
+    assert_eq!(
+        after.status, "active",
+        "user_explicit not resolved by agent"
+    );
 
     let conflicts = db.conflicts_for_workstream(&ws.id, false).unwrap();
-    assert_eq!(conflicts.len(), 2, "both attempts materialized as conflicts");
+    assert_eq!(
+        conflicts.len(),
+        2,
+        "both attempts materialized as conflicts"
+    );
 }
 
 #[test]
@@ -426,7 +502,10 @@ fn agent_may_evolve_agent_owned_items_with_full_trail() {
     )
     .unwrap();
 
-    let ctx = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
     let update = ContextMutation::Update {
         item_id: item.id.clone(),
         title: "初步猜测（修订）".into(),
@@ -436,7 +515,10 @@ fn agent_may_evolve_agent_owned_items_with_full_trail() {
     };
     assert!(db.tx(|tx| MergeEngine.apply(tx, &update, &ctx)).unwrap());
     let after = db.get_item(&item.id).unwrap().unwrap();
-    assert_ne!(after.current_revision_id, item.current_revision_id, "revision advanced");
+    assert_ne!(
+        after.current_revision_id, item.current_revision_id,
+        "revision advanced"
+    );
 
     // supersede of an agent item: allowed, leaves audit revision on the old item
     let sup = ContextMutation::Supersede {
@@ -558,18 +640,23 @@ fn explicit_bindings_cannot_be_downgraded() {
 
     // derived classification state
     use noending::domain::SessionClassificationState;
-    assert_eq!(SessionClassificationState::derive(&[]), SessionClassificationState::Unassigned);
+    assert_eq!(
+        SessionClassificationState::derive(&[]),
+        SessionClassificationState::Unassigned
+    );
     assert_eq!(
         SessionClassificationState::derive(&bound),
         SessionClassificationState::Assigned
     );
-    let partial = vec![SessionWorkstreamBinding { source: binding_source::AUTO.into(), ..bound[0].clone() }];
+    let partial = vec![SessionWorkstreamBinding {
+        source: binding_source::AUTO.into(),
+        ..bound[0].clone()
+    }];
     assert_eq!(
         SessionClassificationState::derive(&partial),
         SessionClassificationState::PartiallyAssigned
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Head integrity: an applied Update must persist its revision BEFORE the
@@ -586,7 +673,11 @@ fn head_is_resolvable(db: &Db, ws_id: &str, item_id: &str) {
         .clone();
     assert_eq!(
         rev.id,
-        db.get_item(item_id).unwrap().unwrap().current_revision_id.unwrap(),
+        db.get_item(item_id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap(),
         "listed head revision must be the stored head"
     );
 }
@@ -596,7 +687,10 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
     let db = open_db("head-update");
     let _s = session_row(&db);
     let ws = ws_row(&db, "head integrity");
-    let ctx = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
 
     let add = ContextMutation::Add {
         workstream_id: ws.id.clone(),
@@ -626,7 +720,11 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
     assert_eq!(history.len(), 2, "update must append a revision");
     assert_eq!(history[1].title, "updated state");
     assert_eq!(
-        db.get_item(&item_id).unwrap().unwrap().current_revision_id.unwrap(),
+        db.get_item(&item_id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap(),
         history[1].id,
         "head must point at a persisted revision"
     );
@@ -638,7 +736,10 @@ fn dedup_update_path_also_persists_revision() {
     let db = open_db("head-dedup");
     let _s = session_row(&db);
     let ws = ws_row(&db, "head integrity dedup");
-    let ctx = MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
 
     let add = ContextMutation::Add {
         workstream_id: ws.id.clone(),
@@ -649,7 +750,10 @@ fn dedup_update_path_also_persists_revision() {
         authority: "agent_inferred".into(),
     };
     MergeEngine.apply(&db.0, &add, &ctx).unwrap();
-    let item_id = db.items_for_workstream(&ws.id, true).unwrap()[0].0.id.clone();
+    let item_id = db.items_for_workstream(&ws.id, true).unwrap()[0]
+        .0
+        .id
+        .clone();
 
     // Same kind + same normalized title + different content → the dedup
     // branch updates the existing item instead of adding a new one.
@@ -663,10 +767,21 @@ fn dedup_update_path_also_persists_revision() {
     };
     assert!(MergeEngine.apply(&db.0, &add_again, &ctx).unwrap());
 
-    assert_eq!(db.items_for_workstream(&ws.id, true).unwrap().len(), 1, "deduped, not duplicated");
+    assert_eq!(
+        db.items_for_workstream(&ws.id, true).unwrap().len(),
+        1,
+        "deduped, not duplicated"
+    );
     let history = db.item_history(&item_id).unwrap();
     assert_eq!(history.len(), 2);
-    assert_eq!(db.get_item(&item_id).unwrap().unwrap().current_revision_id.unwrap(), history[1].id);
+    assert_eq!(
+        db.get_item(&item_id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap(),
+        history[1].id
+    );
     head_is_resolvable(&db, &ws.id, &item_id);
 }
 
@@ -707,8 +822,14 @@ fn stale_commit_is_discarded_when_processed_cursor_moved() {
         metadata: serde_json::json!({}),
     };
     let events = vec![
-        mk(1, "决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据"),
-        mk(2, "补充约束：不能把密钥提交到代码仓库，必须使用环境变量管理"),
+        mk(
+            1,
+            "决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据",
+        ),
+        mk(
+            2,
+            "补充约束：不能把密钥提交到代码仓库，必须使用环境变量管理",
+        ),
     ];
     db.append_events(&events).unwrap();
 
@@ -724,7 +845,10 @@ fn stale_commit_is_discarded_when_processed_cursor_moved() {
     let out = engine
         .commit(&db, &s, &pre, vec![], "heuristic", vec![])
         .unwrap();
-    assert_eq!(out.status, "stale", "stale run must be discarded, not applied");
+    assert_eq!(
+        out.status, "stale",
+        "stale run must be discarded, not applied"
+    );
     assert_eq!(out.applied, 0);
     assert_eq!(
         db.get_processed_sequence(&s.id).unwrap(),
@@ -758,7 +882,9 @@ fn auto_classification_persists_as_binding_on_commit() {
         source_position: "line:1".into(),
         ts: Some(now()),
         kind: "user_message".into(),
-        text: Some("我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度".into()),
+        text: Some(
+            "我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度".into(),
+        ),
         raw_ref: "/tmp/x.jsonl#line:1".into(),
         metadata: serde_json::json!({}),
     };
@@ -772,7 +898,9 @@ fn auto_classification_persists_as_binding_on_commit() {
 
     let bound = db.bindings_for_session(&s.id).unwrap();
     assert!(
-        bound.iter().any(|b| b.workstream_id == ws.id && b.source == binding_source::AUTO),
+        bound
+            .iter()
+            .any(|b| b.workstream_id == ws.id && b.source == binding_source::AUTO),
         "auto classification must persist as a binding, got {:?}",
         bound
     );
@@ -806,10 +934,12 @@ fn binding_source_precedence_beats_equal_confidence() {
         last_used_at: now(),
     };
 
-    db.bind(&mk(binding_source::EXPLICIT_LAUNCH, "primary")).unwrap();
+    db.bind(&mk(binding_source::EXPLICIT_LAUNCH, "primary"))
+        .unwrap();
     // a later user_assigned resume at the SAME confidence must not rewrite
     // the explicit provenance (nor steal the primary role)
-    db.bind(&mk(binding_source::USER_ASSIGNED, "related")).unwrap();
+    db.bind(&mk(binding_source::USER_ASSIGNED, "related"))
+        .unwrap();
     let b = &db.bindings_for_session(&s.id).unwrap()[0];
     assert_eq!(b.source, binding_source::EXPLICIT_LAUNCH);
     assert_eq!(b.role, "primary");
@@ -820,7 +950,8 @@ fn binding_source_precedence_beats_equal_confidence() {
     assert_eq!(b.source, binding_source::EXPLICIT_LAUNCH);
 
     // equal-rank replacement still works (user_assigned over user_assigned)
-    db.bind(&mk(binding_source::USER_ASSIGNED, "related")).unwrap();
+    db.bind(&mk(binding_source::USER_ASSIGNED, "related"))
+        .unwrap();
     let fresh_ws = ws_row(&db, "precedence ws 2");
     db.bind(&SessionWorkstreamBinding {
         workstream_id: fresh_ws.id.clone(),
@@ -834,4 +965,129 @@ fn binding_source_precedence_beats_equal_confidence() {
         .find(|b| b.workstream_id == fresh_ws.id)
         .unwrap();
     assert_eq!(b2.source, binding_source::USER_ASSIGNED);
+}
+
+/// Automatic classification is a revisable guess: once it persists as a
+/// binding it must NOT freeze the session — new evidence pointing at a
+/// different workstream re-classifies and REPLACES the previous automatic
+/// binding (strong provenance — explicit launch / user assignment — is what
+/// actually freezes candidates).
+#[test]
+fn automatic_binding_is_replaced_when_classification_changes() {
+    let db = open_db("auto-reclassify");
+    let s = session_row(&db);
+    let ws_a = ws_row(&db, "量化回测引擎");
+    let ws_b = ws_row(&db, "前端界面重构");
+
+    let ev = |seq: i64, text: &str| noending::domain::SessionEvent {
+        id: new_id(),
+        session_id: s.id.clone(),
+        sequence: seq,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: format!("line:{}", seq),
+        ts: Some(now()),
+        kind: "user_message".into(),
+        text: Some(text.into()),
+        raw_ref: format!("/tmp/x.jsonl#line:{}", seq),
+        metadata: serde_json::json!({}),
+    };
+    let engine = noending::sync::SyncEngine::default();
+
+    // batch 1: evidence points at A → auto binding to A
+    let e1 = ev(
+        1,
+        "我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度",
+    );
+    db.append_events(std::slice::from_ref(&e1)).unwrap();
+    let out = engine
+        .run_session_sync(&db, &s, std::slice::from_ref(&e1), 0, 1)
+        .unwrap();
+    assert_eq!(out.status, "ok");
+    let bound = db.bindings_for_session(&s.id).unwrap();
+    assert!(
+        bound
+            .iter()
+            .any(|b| b.workstream_id == ws_a.id && b.source == binding_source::AUTO),
+        "classified to A, got {:?}",
+        bound
+    );
+
+    // batch 2: evidence now points at B — the weak auto guess is replaced,
+    // not frozen and not accumulated beside the fresh one
+    let e2 = ev(
+        2,
+        "接下来做前端界面的重构，把面板布局和交互流程全部重新设计一遍",
+    );
+    db.append_events(std::slice::from_ref(&e2)).unwrap();
+    let out = engine
+        .run_session_sync(&db, &s, std::slice::from_ref(&e2), 1, 2)
+        .unwrap();
+    assert_eq!(out.status, "ok");
+    let bound = db.bindings_for_session(&s.id).unwrap();
+    assert!(
+        bound
+            .iter()
+            .any(|b| b.workstream_id == ws_b.id && b.source == binding_source::AUTO),
+        "re-classified to B, got {:?}",
+        bound
+    );
+    assert!(
+        !bound.iter().any(|b| b.workstream_id == ws_a.id),
+        "stale automatic binding to A must not survive the re-classification"
+    );
+}
+
+/// A user-assigned (strong) binding freezes the candidates: later events
+/// never re-classify away from what the user chose, even when the keywords
+/// of another workstream dominate the new batch.
+#[test]
+fn strong_binding_freezes_candidates_against_reclassification() {
+    let db = open_db("strong-freeze");
+    let s = session_row(&db);
+    let ws_a = ws_row(&db, "量化回测引擎");
+    let ws_b = ws_row(&db, "前端界面重构");
+    db.bind(&SessionWorkstreamBinding {
+        session_id: s.id.clone(),
+        workstream_id: ws_a.id.clone(),
+        role: "primary".into(),
+        source: binding_source::USER_ASSIGNED.into(),
+        confidence: 1.0,
+        last_seen_revision: None,
+        last_sync_cursor: 0,
+        created_at: now(),
+        last_used_at: now(),
+    })
+    .unwrap();
+
+    let e1 = noending::domain::SessionEvent {
+        id: new_id(),
+        session_id: s.id.clone(),
+        sequence: 1,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: "line:1".into(),
+        ts: Some(now()),
+        kind: "user_message".into(),
+        text: Some("接下来做前端界面的重构，把面板布局和交互流程全部重新设计一遍".into()),
+        raw_ref: "/tmp/x.jsonl#line:1".into(),
+        metadata: serde_json::json!({}),
+    };
+    db.append_events(std::slice::from_ref(&e1)).unwrap();
+    let engine = noending::sync::SyncEngine::default();
+    engine
+        .run_session_sync(&db, &s, std::slice::from_ref(&e1), 0, 1)
+        .unwrap();
+
+    let bound = db.bindings_for_session(&s.id).unwrap();
+    assert!(
+        bound
+            .iter()
+            .any(|b| b.workstream_id == ws_a.id && b.source == binding_source::USER_ASSIGNED),
+        "strong binding survives"
+    );
+    assert!(
+        !bound.iter().any(|b| b.workstream_id == ws_b.id),
+        "keyword match against another workstream must not add candidates"
+    );
 }

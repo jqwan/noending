@@ -99,7 +99,9 @@ pub fn ingest_and_sync_session_nb(
         (stored.len() as i64, pre)
     }; // lock released
 
-    let Some(pre) = pre else { return Ok((stored, 0)) };
+    let Some(pre) = pre else {
+        return Ok((stored, 0));
+    };
 
     // Phase 2 (NO lock): extraction — may run the agent CLI for minutes.
     let (mutations, runtime, diagnostics) = engine.extract(session, &pre)?;
@@ -116,7 +118,10 @@ pub fn ingest_and_sync_session_nb(
 /// Ensure a session row exists for a discovered session.
 /// Returns the internal id and whether this session is NEW to us — new
 /// sessions are the only ones allowed to claim a pending LaunchIntent.
-pub fn ensure_session_row(db: &Db, d: &crate::adapters::DiscoveredSession) -> Result<(Session, bool)> {
+pub fn ensure_session_row(
+    db: &Db,
+    d: &crate::adapters::DiscoveredSession,
+) -> Result<(Session, bool)> {
     let title = d
         .first_user_text
         .as_deref()
@@ -199,7 +204,11 @@ where
         let discovered = match adapter.discover_sessions_in(&roots) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[reconcile] {} discovery failed: {}", adapter.agent().display_name(), e);
+                eprintln!(
+                    "[reconcile] {} discovery failed: {}",
+                    adapter.agent().display_name(),
+                    e
+                );
                 continue;
             }
         };
@@ -312,7 +321,9 @@ where
 /// resolver (and the user) may act on.
 pub fn record_session_project_evidence(db: &Db, session: &Session) {
     let Some(cwd) = &session.cwd else { return };
-    let Ok(projects) = db.list_projects() else { return };
+    let Ok(projects) = db.list_projects() else {
+        return;
+    };
     let cwd_norm = cwd.to_lowercase().replace(['\\', '/'], "");
     for p in projects {
         let token = p.name.to_lowercase().replace([' ', '-'], "");

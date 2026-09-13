@@ -39,22 +39,58 @@ pub fn collect_prompt_inputs(db: &Db, candidates: &[String]) -> Result<PromptInp
                 "- id={} | {} | goal: {}",
                 w.id,
                 w.title,
-                if w.description.is_empty() { "(none)" } else { &w.description }
+                if w.description.is_empty() {
+                    "(none)"
+                } else {
+                    &w.description
+                }
             ));
         }
     }
     let mut item_lines = Vec::new();
     for id in candidates {
         for (item, rev) in db.items_for_workstream(id, false)? {
-            item_lines.push(format!("- item_id={} | {} | {}", item.id, item.kind, rev.title));
+            item_lines.push(format!(
+                "- item_id={} | {} | {}",
+                item.id, item.kind, rev.title
+            ));
         }
     }
-    Ok(PromptInputs { ws_lines, item_lines })
+    Ok(PromptInputs {
+        ws_lines,
+        item_lines,
+    })
 }
 
-const DECISION_HINTS: [&str; 8] = ["决定", "确定采用", "就用", "decided", "decision:", "we'll use", "选择", "定为"];
-const CONSTRAINT_HINTS: [&str; 8] = ["不能", "禁止", "不允许", "must not", "don't change", "不要动", "保持兼容", "constraint"];
-const TODO_HINTS: [&str; 7] = ["todo", "待办", "接下来要", "下一步", "next step", "待完成", "需要先"];
+const DECISION_HINTS: [&str; 8] = [
+    "决定",
+    "确定采用",
+    "就用",
+    "decided",
+    "decision:",
+    "we'll use",
+    "选择",
+    "定为",
+];
+const CONSTRAINT_HINTS: [&str; 8] = [
+    "不能",
+    "禁止",
+    "不允许",
+    "must not",
+    "don't change",
+    "不要动",
+    "保持兼容",
+    "constraint",
+];
+const TODO_HINTS: [&str; 7] = [
+    "todo",
+    "待办",
+    "接下来要",
+    "下一步",
+    "next step",
+    "待完成",
+    "需要先",
+];
 const QUESTION_HINTS: [&str; 5] = ["？", "?", "为什么", "是否", "how to"];
 
 pub struct HeuristicExtractor;
@@ -95,7 +131,19 @@ impl ContextExtractor for HeuristicExtractor {
             };
 
             if e.kind == "user_message" && text.len() > 20 && !looks_like_command(text) {
-                if contains_any(text, &["目标", "要做", "实现", "完成", "build", "implement", "规划", "设计"]) {
+                if contains_any(
+                    text,
+                    &[
+                        "目标",
+                        "要做",
+                        "实现",
+                        "完成",
+                        "build",
+                        "implement",
+                        "规划",
+                        "设计",
+                    ],
+                ) {
                     out.push(ContextMutation::Add {
                         workstream_id: primary.clone(),
                         item_kind: "current_state".into(),
@@ -149,7 +197,7 @@ pub struct CliExtractor {
 /// Assistant runtime configuration, persisted in settings.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AssistantConfig {
-    pub agent: String,    // codex | claude_code | pi | none
+    pub agent: String, // codex | claude_code | pi | none
     pub model: String,
     pub provider: String, // pi only (openai-codex | lmstudio | ...)
     pub effort: String,   // codex reasoning effort / pi thinking level
@@ -195,9 +243,21 @@ impl AssistantConfig {
 
     pub fn exec_options(&self) -> ExecOptions {
         ExecOptions {
-            model: if self.model.is_empty() { None } else { Some(self.model.clone()) },
-            provider: if self.provider.is_empty() { None } else { Some(self.provider.clone()) },
-            effort: if self.effort.is_empty() { None } else { Some(self.effort.clone()) },
+            model: if self.model.is_empty() {
+                None
+            } else {
+                Some(self.model.clone())
+            },
+            provider: if self.provider.is_empty() {
+                None
+            } else {
+                Some(self.provider.clone())
+            },
+            effort: if self.effort.is_empty() {
+                None
+            } else {
+                Some(self.effort.clone())
+            },
         }
     }
 }
@@ -238,7 +298,8 @@ impl ContextExtractor for CliExtractor {
     ) -> Result<ExtractOutput> {
         let install = crate::platform::exec_resolver::resolve(self.agent)?;
         let adapter = crate::adapters::adapter_for(self.agent);
-        let (prompt, ref_map) = build_extraction_prompt(session, events, candidate_workstream_ids, inputs)?;
+        let (prompt, ref_map) =
+            build_extraction_prompt(session, events, candidate_workstream_ids, inputs)?;
         let cmd = adapter.build_exec_command(&install, &self.opts, &prompt)?;
         let out = crate::platform::exec_runner::run_headless(&cmd, self.timeout_secs)?;
         let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
@@ -278,9 +339,21 @@ struct RawMutation {
 }
 
 const ALLOWED_KINDS: [&str; 15] = [
-    "goal", "current_state", "constraint", "decision", "open_question",
-    "todo", "finding", "issue", "risk", "note", "reference", "artifact",
-    "requirement", "decision_detail", "research_note",
+    "goal",
+    "current_state",
+    "constraint",
+    "decision",
+    "open_question",
+    "todo",
+    "finding",
+    "issue",
+    "risk",
+    "note",
+    "reference",
+    "artifact",
+    "requirement",
+    "decision_detail",
+    "research_note",
 ];
 
 fn build_extraction_prompt(
@@ -299,7 +372,11 @@ fn build_extraction_prompt(
         ev_lines.push(format!(
             "{} [{}] {}",
             short_ref,
-            if e.kind == "user_message" { "user" } else { "agent" },
+            if e.kind == "user_message" {
+                "user"
+            } else {
+                "agent"
+            },
             crate::adapters::truncate_text(e.text.as_deref().unwrap_or(""), 600)
         ));
         ref_map.push(PromptEventRef {
@@ -334,7 +411,11 @@ fn build_extraction_prompt(
 
 Session: {agent} / {sid}"##,
         ws = ws_lines.join("\n"),
-        items = if item_lines.is_empty() { "(none)".to_string() } else { item_lines.join("\n") },
+        items = if item_lines.is_empty() {
+            "(none)".to_string()
+        } else {
+            item_lines.join("\n")
+        },
         events = ev_lines.join("\n"),
         agent = session.agent.display_name(),
         sid = session.agent_session_id,
@@ -451,7 +532,8 @@ pub fn parse_mutations(
                     || !ALLOWED_KINDS.contains(&r.item_kind.as_str())
                     || r.title.trim().is_empty()
                 {
-                    diagnostics.push("模型输出 add 条目缺少合法 workstream/kind/title，已忽略".into());
+                    diagnostics
+                        .push("模型输出 add 条目缺少合法 workstream/kind/title，已忽略".into());
                     continue;
                 }
                 out.push(ContextMutation::Add {
@@ -527,7 +609,10 @@ pub fn parse_mutations(
         }
     }
     out.truncate(8);
-    Ok(ExtractOutput { mutations: out, diagnostics })
+    Ok(ExtractOutput {
+        mutations: out,
+        diagnostics,
+    })
 }
 
 fn contains_any(text: &str, hints: &[&str]) -> bool {
@@ -617,7 +702,12 @@ mod tests {
         let out = parse(text);
         assert_eq!(out.mutations.len(), 1, "invalid workstream filtered out");
         match &out.mutations[0] {
-            ContextMutation::Add { workstream_id, source_refs, authority, .. } => {
+            ContextMutation::Add {
+                workstream_id,
+                source_refs,
+                authority,
+                ..
+            } => {
                 assert_eq!(workstream_id, "ws1");
                 assert_eq!(source_refs, &vec!["session-event:e-bbb".to_string()]);
                 // #2 is an assistant message: agent's own statement.
@@ -645,7 +735,10 @@ mod tests {
         let out = parse(text);
         match &out.mutations[0] {
             ContextMutation::Add { authority, .. } => {
-                assert_eq!(authority, "user_explicit", "mixed refs protect the user's voice");
+                assert_eq!(
+                    authority, "user_explicit",
+                    "mixed refs protect the user's voice"
+                );
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -692,7 +785,10 @@ mod tests {
             }
             other => panic!("unexpected: {:?}", other),
         }
-        assert!(out.diagnostics.iter().any(|d| d.contains("#999")), "diagnostics mention the bad ref");
+        assert!(
+            out.diagnostics.iter().any(|d| d.contains("#999")),
+            "diagnostics mention the bad ref"
+        );
     }
 
     #[test]
@@ -732,7 +828,11 @@ mod tests {
         assert!(!out.mutations.is_empty());
         for m in &out.mutations {
             match m {
-                ContextMutation::Add { authority, source_refs, .. } => {
+                ContextMutation::Add {
+                    authority,
+                    source_refs,
+                    ..
+                } => {
                     assert_eq!(authority, "user_explicit", "user words keep user authority");
                     assert_eq!(source_refs[0], "session-event:e-1");
                 }

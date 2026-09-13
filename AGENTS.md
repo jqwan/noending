@@ -25,13 +25,16 @@ When changing the system, preserve these rules:
 * Raw Agent session files are **read-only**. Never modify or delete them.
 * Ingested Session Events are **append-only history**. Never overwrite historical events.
 * Event identity is app-owned and stable. Source file position is metadata, not identity.
+* The fallback event-identity chain continues from the **SourceCursor's tail hash** (the current source chain), never from "the last event in the store" — after a compact the store is ahead of the source.
+* A schema change to identity semantics requires a **data migration**, not just a column addition.
 * `SourceReference` must remain resolvable after truncate, compact, rewrite, retry, or re-ingest.
 * `processed_cursor` must only move forward after a successful atomic Sync commit.
 * A Sync run must be **all-or-nothing**: Context mutations, audit records, conflicts, SyncRun and cursor advancement commit together.
 * Never silently overwrite `user_explicit` or `user_edit` Context with Agent-derived information. Preserve disagreement as `ContextConflict`.
 * Every Context change must leave an auditable Revision.
 * Resume Context is based on **delivered revision snapshots**, not timestamps or full-history replay.
-* User-selected Workstream bindings are stronger than automatic classification.
+* The token budget filters **before** rendering: `bundle.sections` describes exactly what the markdown delivers, so delivery snapshots can never over-report.
+* User-selected Workstream bindings are stronger than automatic classification; automatic bindings stay **revisable** — re-classification replaces them, it never freezes them.
 * macOS and Windows are first-class platforms.
 
 When uncertain, prefer **preserving history, provenance, and user intent** over convenience.

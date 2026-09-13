@@ -33,7 +33,11 @@ fn drain(mut reader: impl Read, buf: &mut String) {
 pub fn run_headless(cmd: &AgentCommand, timeout_secs: u64) -> Result<HeadlessOutput> {
     let mut child: Child = Command::new(&cmd.program)
         .args(&cmd.args)
-        .current_dir(cmd.cwd.as_deref().unwrap_or_else(|| std::path::Path::new("/tmp")))
+        .current_dir(
+            cmd.cwd
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new("/tmp")),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

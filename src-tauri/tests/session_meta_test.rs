@@ -34,23 +34,46 @@ fn discovery_refreshes_stale_cwd_on_existing_row() {
 
     // Old ingestion wrote a decode-era cwd; discovery now reads the truth
     // from the transcript content.
-    let first = ensure_session_row(&database, &discovered(&agent_session_id, Some("/Users/jqk/projects/r/stock/quant"), "2026-08-18T14:30:00Z"))
-        .unwrap()
-        .0;
-    assert_eq!(first.cwd.as_deref(), Some("/Users/jqk/projects/r/stock/quant"));
+    let first = ensure_session_row(
+        &database,
+        &discovered(
+            &agent_session_id,
+            Some("/Users/jqk/projects/r/stock/quant"),
+            "2026-08-18T14:30:00Z",
+        ),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        first.cwd.as_deref(),
+        Some("/Users/jqk/projects/r/stock/quant")
+    );
 
     let (second, is_new) = ensure_session_row(
         &database,
-        &discovered(&agent_session_id, Some("/Users/jqk/projects/r/stock_quant"), "2026-08-19T09:00:00Z"),
+        &discovered(
+            &agent_session_id,
+            Some("/Users/jqk/projects/r/stock_quant"),
+            "2026-08-19T09:00:00Z",
+        ),
     )
     .unwrap();
     assert!(!is_new);
     assert_eq!(second.id, first.id, "same external session, same row");
-    assert_eq!(second.cwd.as_deref(), Some("/Users/jqk/projects/r/stock_quant"));
+    assert_eq!(
+        second.cwd.as_deref(),
+        Some("/Users/jqk/projects/r/stock_quant")
+    );
 
     let stored: Session = database.get_session(&first.id).unwrap().unwrap();
-    assert_eq!(stored.cwd.as_deref(), Some("/Users/jqk/projects/r/stock_quant"));
-    assert_eq!(stored.last_activity_at.as_deref(), Some("2026-08-19T09:00:00Z"));
+    assert_eq!(
+        stored.cwd.as_deref(),
+        Some("/Users/jqk/projects/r/stock_quant")
+    );
+    assert_eq!(
+        stored.last_activity_at.as_deref(),
+        Some("2026-08-19T09:00:00Z")
+    );
 }
 
 #[test]
@@ -58,17 +81,33 @@ fn discovery_without_cwd_keeps_stored_value() {
     let database = db("keep");
     let agent_session_id = format!("meta-{}", new_id());
 
-    let first = ensure_session_row(&database, &discovered(&agent_session_id, Some("/Users/jqk/projects/r/stock_quant"), "2026-08-18T14:30:00Z"))
-        .unwrap()
-        .0;
+    let first = ensure_session_row(
+        &database,
+        &discovered(
+            &agent_session_id,
+            Some("/Users/jqk/projects/r/stock_quant"),
+            "2026-08-18T14:30:00Z",
+        ),
+    )
+    .unwrap()
+    .0;
 
     // A later scan that fails to read cwd (empty file, parse gap) must not
     // wipe the stored value.
-    let (second, _) = ensure_session_row(&database, &discovered(&agent_session_id, None, "2026-08-18T14:30:00Z"))
-        .unwrap();
-    assert_eq!(second.cwd.as_deref(), Some("/Users/jqk/projects/r/stock_quant"));
+    let (second, _) = ensure_session_row(
+        &database,
+        &discovered(&agent_session_id, None, "2026-08-18T14:30:00Z"),
+    )
+    .unwrap();
+    assert_eq!(
+        second.cwd.as_deref(),
+        Some("/Users/jqk/projects/r/stock_quant")
+    );
     let stored: Session = database.get_session(&first.id).unwrap().unwrap();
-    assert_eq!(stored.cwd.as_deref(), Some("/Users/jqk/projects/r/stock_quant"));
+    assert_eq!(
+        stored.cwd.as_deref(),
+        Some("/Users/jqk/projects/r/stock_quant")
+    );
 }
 
 #[test]
@@ -82,7 +121,11 @@ fn discovery_title_only_fills_missing_value() {
     let first = ensure_session_row(&database, &d).unwrap().0;
     assert!(first.title.is_none());
 
-    let (_, _) = ensure_session_row(&database, &discovered(&agent_session_id, Some("/tmp/w"), "2026-08-18T14:31:00Z")).unwrap();
+    let (_, _) = ensure_session_row(
+        &database,
+        &discovered(&agent_session_id, Some("/tmp/w"), "2026-08-18T14:31:00Z"),
+    )
+    .unwrap();
     let stored: Session = database.get_session(&first.id).unwrap().unwrap();
     assert_eq!(stored.title.as_deref(), Some("帮我看看这个量化脚本"));
 }
@@ -92,14 +135,25 @@ fn unchanged_discovery_rewrites_nothing() {
     let database = db("stable");
     let agent_session_id = format!("meta-{}", new_id());
 
-    let first = ensure_session_row(&database, &discovered(&agent_session_id, Some("/Users/jqk/projects/r/stock_quant"), "2026-08-18T14:30:00Z"))
-        .unwrap()
-        .0;
+    let first = ensure_session_row(
+        &database,
+        &discovered(
+            &agent_session_id,
+            Some("/Users/jqk/projects/r/stock_quant"),
+            "2026-08-18T14:30:00Z",
+        ),
+    )
+    .unwrap()
+    .0;
 
     // Identical scan: row must come back byte-identical (same id, no churn).
     let (again, is_new) = ensure_session_row(
         &database,
-        &discovered(&agent_session_id, Some("/Users/jqk/projects/r/stock_quant"), "2026-08-18T14:30:00Z"),
+        &discovered(
+            &agent_session_id,
+            Some("/Users/jqk/projects/r/stock_quant"),
+            "2026-08-18T14:30:00Z",
+        ),
     )
     .unwrap();
     assert!(!is_new);

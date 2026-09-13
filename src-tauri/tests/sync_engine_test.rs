@@ -4,7 +4,7 @@
 use noending::domain::{
     binding_source, Agent, Session, SessionEvent, SessionWorkstreamBinding, SourceCursor,
 };
-use noending::storage::{now, new_id, Db};
+use noending::storage::{new_id, now, Db};
 use noending::{context, sync};
 
 fn open_temp_db() -> Db {
@@ -25,7 +25,12 @@ fn create_project(db: &Db, name: &str) -> noending::domain::Project {
     p
 }
 
-fn create_workstream(db: &Db, project_id: &str, title: &str, description: &str) -> noending::domain::Workstream {
+fn create_workstream(
+    db: &Db,
+    project_id: &str,
+    title: &str,
+    description: &str,
+) -> noending::domain::Workstream {
     let w = noending::domain::Workstream {
         id: new_id(),
         project_id: Some(project_id.into()),
@@ -100,9 +105,24 @@ fn sync_engine_extracts_and_merges() {
 
     let engine = sync::SyncEngine::default();
     let events = vec![
-        event(&session, 1, "user_message", "我们决定使用 SQLite FTS5 做全文搜索，不再引入向量数据库，决定采用这个方案。"),
-        event(&session, 2, "assistant_message", "好的。注意约束：不能修改现有 API，保持向后兼容。"),
-        event(&session, 3, "user_message", "接下来要实现 SessionCursor 增量读取。"),
+        event(
+            &session,
+            1,
+            "user_message",
+            "我们决定使用 SQLite FTS5 做全文搜索，不再引入向量数据库，决定采用这个方案。",
+        ),
+        event(
+            &session,
+            2,
+            "assistant_message",
+            "好的。注意约束：不能修改现有 API，保持向后兼容。",
+        ),
+        event(
+            &session,
+            3,
+            "user_message",
+            "接下来要实现 SessionCursor 增量读取。",
+        ),
     ];
     db.append_events(&events).unwrap();
 
@@ -114,8 +134,16 @@ fn sync_engine_extracts_and_merges() {
 
     let items = db.items_for_workstream(&ws.id, true).unwrap();
     let kinds: Vec<&str> = items.iter().map(|(i, _)| i.kind.as_str()).collect();
-    assert!(kinds.contains(&"decision"), "decision extracted, got {:?}", kinds);
-    assert!(kinds.contains(&"constraint"), "constraint extracted, got {:?}", kinds);
+    assert!(
+        kinds.contains(&"decision"),
+        "decision extracted, got {:?}",
+        kinds
+    );
+    assert!(
+        kinds.contains(&"constraint"),
+        "constraint extracted, got {:?}",
+        kinds
+    );
 
     // processed cursor advanced
     assert_eq!(db.get_processed_sequence(&session.id).unwrap(), 3);
@@ -125,7 +153,10 @@ fn sync_engine_extracts_and_merges() {
         .iter()
         .find(|(i, _)| i.kind == "decision")
         .expect("decision item");
-    assert_eq!(decision.0.authority, "user_explicit", "user message keeps user authority");
+    assert_eq!(
+        decision.0.authority, "user_explicit",
+        "user message keeps user authority"
+    );
     assert!(
         decision.0.created_by.starts_with("sync:"),
         "created_by records the extractor, got {}",
@@ -146,7 +177,10 @@ fn sync_engine_extracts_and_merges() {
         .run_session_sync(&db, &session, &events, 0, 3)
         .expect("fingerprint retry");
     assert_eq!(out3.applied, 0, "completed run must be skipped");
-    assert!(out3.summary.contains("幂等"), "retry summary explains the skip");
+    assert!(
+        out3.summary.contains("幂等"),
+        "retry summary explains the skip"
+    );
 }
 
 #[test]
@@ -155,8 +189,32 @@ fn context_bundle_contains_core_sections() {
     let project = create_project(&db, "Trip");
     let ws = create_workstream(&db, &project.id, "行程设计", "");
 
-    sync::create_item(&db, &ws.id, "goal", "规划关西七日行程", "覆盖京都大阪奈良", "user_explicit", "user_edit", &[], None, "user").unwrap();
-    sync::create_item(&db, &ws.id, "constraint", "预算不超过 3 万", "", "user_edit", "user_edit", &[], None, "user").unwrap();
+    sync::create_item(
+        &db,
+        &ws.id,
+        "goal",
+        "规划关西七日行程",
+        "覆盖京都大阪奈良",
+        "user_explicit",
+        "user_edit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+    sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "预算不超过 3 万",
+        "",
+        "user_edit",
+        "user_edit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
 
     let bundle = context::build_bundle(&db, "new", None, &[ws.id.clone()], 4000).unwrap();
     assert!(bundle.markdown.contains("Goal"));

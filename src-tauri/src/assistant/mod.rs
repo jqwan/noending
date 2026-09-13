@@ -43,9 +43,13 @@ fn split_action(text: &str) -> (String, Option<ActionProposal>) {
         let after = &text[start + ACTION_FENCE_BEGIN.len()..];
         if let Some(end) = after.find(ACTION_FENCE_END) {
             let json = after[..end].trim();
-            let content = format!("{}{}", &text[..start], &after[end + ACTION_FENCE_END.len()..])
-                .trim()
-                .to_string();
+            let content = format!(
+                "{}{}",
+                &text[..start],
+                &after[end + ACTION_FENCE_END.len()..]
+            )
+            .trim()
+            .to_string();
             match serde_json::from_str::<ActionProposal>(json) {
                 Ok(a) => return (content, Some(a)),
                 Err(e) => {
@@ -81,7 +85,11 @@ fn build_domain_snapshot(db: &Db, query: &str) -> Result<String> {
             w.id,
             w.title,
             w.lifecycle,
-            if w.description.is_empty() { "" } else { &w.description }
+            if w.description.is_empty() {
+                ""
+            } else {
+                &w.description
+            }
         ));
     }
 
@@ -91,12 +99,18 @@ fn build_domain_snapshot(db: &Db, query: &str) -> Result<String> {
         snap.push_str("(none)\n");
     }
     for h in &hits {
-        snap.push_str(&format!("- [{}] {} | parent={}\n", h.kind, h.title, h.parent_id));
+        snap.push_str(&format!(
+            "- [{}] {} | parent={}\n",
+            h.kind, h.title, h.parent_id
+        ));
     }
 
     snap.push_str("\n== 最近同步 ==\n");
     for r in db.list_sync_runs(5)? {
-        snap.push_str(&format!("- [{}] {} ({})\n", r.created_at, r.summary, r.runtime));
+        snap.push_str(&format!(
+            "- [{}] {} ({})\n",
+            r.created_at, r.summary, r.runtime
+        ));
     }
 
     Ok(snap)
@@ -108,7 +122,11 @@ fn build_conversation_history(msgs: &[AssistantMessageRow]) -> String {
     for m in &msgs[start..] {
         out.push_str(&format!(
             "{}: {}\n",
-            if m.role == "user" { "用户" } else { "Assistant" },
+            if m.role == "user" {
+                "用户"
+            } else {
+                "Assistant"
+            },
             crate::adapters::truncate_text(&m.content, 500)
         ));
     }
@@ -146,7 +164,10 @@ impl AssistantService {
                 let out = crate::platform::exec_runner::run_headless(&cmd, 180)?;
                 let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
                 if text.is_empty() {
-                    ("（模型返回为空，请重试或更换 Assistant 模型。）".to_string(), "empty".to_string())
+                    (
+                        "（模型返回为空，请重试或更换 Assistant 模型。）".to_string(),
+                        "empty".to_string(),
+                    )
                 } else {
                     (text, crate::sync::ContextExtractor::name(&cli))
                 }
@@ -160,7 +181,11 @@ impl AssistantService {
                     format!(
                         "尚未配置 Assistant 模型，以下是通过检索找到的相关内容：\n{}",
                         hits.iter()
-                            .map(|h| format!("- [{}] {}", h.kind, crate::adapters::truncate_text(&h.title, 80)))
+                            .map(|h| format!(
+                                "- [{}] {}",
+                                h.kind,
+                                crate::adapters::truncate_text(&h.title, 80)
+                            ))
                             .collect::<Vec<_>>()
                             .join("\n")
                     )
@@ -173,7 +198,13 @@ impl AssistantService {
         let action_json = action
             .as_ref()
             .map(|a| serde_json::to_string(a).unwrap_or_default());
-        db.insert_assistant_message(&sid, "assistant", &content, action_json.as_deref(), Some(&runtime))?;
+        db.insert_assistant_message(
+            &sid,
+            "assistant",
+            &content,
+            action_json.as_deref(),
+            Some(&runtime),
+        )?;
 
         Ok(AssistantReply {
             session_id: sid,
@@ -184,7 +215,11 @@ impl AssistantService {
     }
 
     /// Execute a user-confirmed action proposal via the Session Launcher.
-    pub fn execute_action(db: &Db, action: &ActionProposal, app_data: &std::path::Path) -> Result<serde_json::Value> {
+    pub fn execute_action(
+        db: &Db,
+        action: &ActionProposal,
+        app_data: &std::path::Path,
+    ) -> Result<serde_json::Value> {
         let launcher = crate::launcher::SessionLauncher {
             app_data_dir: app_data.to_path_buf(),
         };
@@ -195,8 +230,15 @@ impl AssistantService {
                     .as_deref()
                     .and_then(crate::domain::Agent::parse)
                     .ok_or_else(|| other("动作缺少有效 agent"))?;
-                let r = launcher.new_session(db, agent, &action.workstream_ids, action.cwd.as_deref())?;
-                Ok(serde_json::json!({ "ok": true, "kind": "launch", "launched_via": r.launched_via, "note": r.note }))
+                let r = launcher.new_session(
+                    db,
+                    agent,
+                    &action.workstream_ids,
+                    action.cwd.as_deref(),
+                )?;
+                Ok(
+                    serde_json::json!({ "ok": true, "kind": "launch", "launched_via": r.launched_via, "note": r.note }),
+                )
             }
             "resume_session" => {
                 let sid = action
@@ -204,7 +246,9 @@ impl AssistantService {
                     .as_deref()
                     .ok_or_else(|| other("动作缺少 session_id"))?;
                 let r = launcher.resume_session(db, sid, &action.extra_workstream_ids)?;
-                Ok(serde_json::json!({ "ok": true, "kind": "resume", "launched_via": r.launched_via, "note": r.note }))
+                Ok(
+                    serde_json::json!({ "ok": true, "kind": "resume", "launched_via": r.launched_via, "note": r.note }),
+                )
             }
             other_action => Err(other(format!("未知动作: {}", other_action))),
         }

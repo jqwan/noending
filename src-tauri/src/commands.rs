@@ -7,7 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::*;
 use crate::error::{other, Result};
-use crate::storage::{now, new_id, Db};
+use crate::storage::{new_id, now, Db};
 
 pub struct AppState {
     pub db: std::sync::Mutex<Db>,
@@ -60,7 +60,11 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
 // ---------------- Projects ----------------
 
 #[tauri::command]
-pub fn create_project(state: State<AppState>, name: String, description: String) -> Result<Project> {
+pub fn create_project(
+    state: State<AppState>,
+    name: String,
+    description: String,
+) -> Result<Project> {
     crate::storage::ensure_not_empty("项目名称", &name)?;
     let p = Project {
         id: new_id(),
@@ -116,7 +120,10 @@ pub fn add_project_resource(
 }
 
 #[tauri::command]
-pub fn list_project_resources(state: State<AppState>, project_id: String) -> Result<Vec<ProjectResource>> {
+pub fn list_project_resources(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<Vec<ProjectResource>> {
     with_db(&state, |db| db.list_resources(&project_id))
 }
 
@@ -165,7 +172,10 @@ pub fn update_workstream(state: State<AppState>, workstream: Workstream) -> Resu
 }
 
 #[tauri::command]
-pub fn list_workstreams(state: State<AppState>, project_id: Option<String>) -> Result<Vec<Workstream>> {
+pub fn list_workstreams(
+    state: State<AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<Workstream>> {
     with_db(&state, |db| db.list_workstreams(project_id.as_deref()))
 }
 
@@ -175,14 +185,23 @@ pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Resu
         let mut w = db
             .get_workstream(&workstream_id)?
             .ok_or_else(|| other("Workstream 不存在"))?;
-        w.visibility = if w.visibility == "archived" { "normal" } else { "archived" }.into();
+        w.visibility = if w.visibility == "archived" {
+            "normal"
+        } else {
+            "archived"
+        }
+        .into();
         w.updated_at = now();
         db.upsert_workstream(&w)
     })
 }
 
 #[tauri::command]
-pub fn merge_workstreams(state: State<AppState>, source_id: String, target_id: String) -> Result<()> {
+pub fn merge_workstreams(
+    state: State<AppState>,
+    source_id: String,
+    target_id: String,
+) -> Result<()> {
     with_db(&state, |db| {
         let source = db
             .get_workstream(&source_id)?
@@ -297,7 +316,10 @@ pub fn set_item_status(state: State<AppState>, item_id: String, status: String) 
 }
 
 #[tauri::command]
-pub fn get_item_history(state: State<AppState>, item_id: String) -> Result<Vec<ContextItemRevision>> {
+pub fn get_item_history(
+    state: State<AppState>,
+    item_id: String,
+) -> Result<Vec<ContextItemRevision>> {
     with_db(&state, |db| db.item_history(&item_id))
 }
 
@@ -320,7 +342,10 @@ pub struct WorkstreamContext {
 }
 
 #[tauri::command]
-pub fn get_workstream_context(state: State<AppState>, workstream_id: String) -> Result<WorkstreamContext> {
+pub fn get_workstream_context(
+    state: State<AppState>,
+    workstream_id: String,
+) -> Result<WorkstreamContext> {
     with_db(&state, |db| {
         let workstream = db
             .get_workstream(&workstream_id)?
@@ -390,17 +415,16 @@ pub fn list_sessions(
 ) -> Result<Vec<Session>> {
     let agent = agent.and_then(|a| Agent::parse(&a));
     with_db(&state, |db| {
-        db.list_sessions(crate::storage::SessionFilter {
-            project_id,
-            agent,
-        })
+        db.list_sessions(crate::storage::SessionFilter { project_id, agent })
     })
 }
 
 #[tauri::command]
 pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<SessionDetail> {
     with_db(&state, |db| {
-        let session = db.get_session(&session_id)?.ok_or_else(|| other("Session 不存在"))?;
+        let session = db
+            .get_session(&session_id)?
+            .ok_or_else(|| other("Session 不存在"))?;
         let events = db.get_events(&session_id, None, 500)?;
         let cursor = db.get_cursor(&session_id)?;
         let processed_cursor = db.get_processed_sequence(&session_id)?;
@@ -408,9 +432,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             .bindings_for_session(&session_id)?
             .into_iter()
             .map(|b| {
-                let title = db
-                    .get_workstream(&b.workstream_id)?
-                    .map(|w| w.title);
+                let title = db.get_workstream(&b.workstream_id)?.map(|w| w.title);
                 Ok((b, title))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -429,7 +451,11 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
 }
 
 #[tauri::command]
-pub fn assign_session_project(state: State<AppState>, session_id: String, project_id: Option<String>) -> Result<()> {
+pub fn assign_session_project(
+    state: State<AppState>,
+    session_id: String,
+    project_id: Option<String>,
+) -> Result<()> {
     with_db(&state, |db| {
         db.0.execute(
             "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
@@ -455,9 +481,14 @@ pub fn assign_session_project(state: State<AppState>, session_id: String, projec
 /// cwd/repo only ever *suggest*: return the scored suggestion from recorded
 /// evidence, never assign anything.
 #[tauri::command]
-pub fn suggest_session_project(state: State<AppState>, session_id: String) -> Result<serde_json::Value> {
+pub fn suggest_session_project(
+    state: State<AppState>,
+    session_id: String,
+) -> Result<serde_json::Value> {
     with_db(&state, |db| {
-        let session = db.get_session(&session_id)?.ok_or_else(|| other("Session 不存在"))?;
+        let session = db
+            .get_session(&session_id)?
+            .ok_or_else(|| other("Session 不存在"))?;
         // record fresh evidence for the current cwd, then resolve
         crate::ingestion::record_session_project_evidence(db, &session);
         match db.resolve_project_affinity(&session_id)? {
@@ -466,7 +497,9 @@ pub fn suggest_session_project(state: State<AppState>, session_id: String) -> Re
                     .get_project(&project_id)?
                     .map(|p| p.name)
                     .unwrap_or_default();
-                Ok(serde_json::json!({ "project_id": project_id, "project_name": name, "score": score }))
+                Ok(
+                    serde_json::json!({ "project_id": project_id, "project_name": name, "score": score }),
+                )
             }
             None => Ok(serde_json::json!({ "project_id": null, "score": 0.0 })),
         }
@@ -481,7 +514,14 @@ pub fn bind_session_workstream(
     role: String,
 ) -> Result<()> {
     with_db(&state, |db| {
-        crate::launcher::record_binding(db, &session_id, &workstream_id, &role, binding_source::USER_ASSIGNED, 1.0)
+        crate::launcher::record_binding(
+            db,
+            &session_id,
+            &workstream_id,
+            &role,
+            binding_source::USER_ASSIGNED,
+            1.0,
+        )
     })
 }
 
@@ -565,7 +605,9 @@ pub fn reingest_source(
 #[tauri::command]
 pub fn sync_session(state: State<AppState>, session_id: String) -> Result<serde_json::Value> {
     with_db(&state, |db| {
-        let session = db.get_session(&session_id)?.ok_or_else(|| other("Session 不存在"))?;
+        let session = db
+            .get_session(&session_id)?
+            .ok_or_else(|| other("Session 不存在"))?;
         let engine = crate::sync::SyncEngine::from_settings(db);
         let applied = crate::launcher::sync_one_session_with_engine(db, &engine, &session)?;
         Ok(serde_json::json!({ "applied": applied }))
@@ -626,9 +668,16 @@ pub fn launch_new_session(
     cwd: Option<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
-    let app_data = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
-    let launcher = crate::launcher::SessionLauncher { app_data_dir: app_data };
-    with_db(&state, |db| launcher.new_session(db, agent, &workstream_ids, cwd.as_deref()))
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let launcher = crate::launcher::SessionLauncher {
+        app_data_dir: app_data,
+    };
+    with_db(&state, |db| {
+        launcher.new_session(db, agent, &workstream_ids, cwd.as_deref())
+    })
 }
 
 #[tauri::command]
@@ -638,9 +687,16 @@ pub fn launch_resume_session(
     session_id: String,
     extra_workstream_ids: Vec<String>,
 ) -> Result<crate::launcher::LaunchResult> {
-    let app_data = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
-    let launcher = crate::launcher::SessionLauncher { app_data_dir: app_data };
-    with_db(&state, |db| launcher.resume_session(db, &session_id, &extra_workstream_ids))
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let launcher = crate::launcher::SessionLauncher {
+        app_data_dir: app_data,
+    };
+    with_db(&state, |db| {
+        launcher.resume_session(db, &session_id, &extra_workstream_ids)
+    })
 }
 
 /// Preview a context bundle. Resume mode MUST carry the session id — the
@@ -659,7 +715,9 @@ pub fn preview_context_bundle(
                 let sid = session_id
                     .as_deref()
                     .ok_or_else(|| other("Resume 预览必须提供 session_id"))?;
-                let session = db.get_session(sid)?.ok_or_else(|| other("Session 不存在"))?;
+                let session = db
+                    .get_session(sid)?
+                    .ok_or_else(|| other("Session 不存在"))?;
                 crate::context::build_bundle(db, "resume", Some(&session), &workstream_ids, 4000)
             }
             _ => crate::context::build_bundle(db, "new", None, &workstream_ids, 4000),
@@ -679,7 +737,10 @@ pub struct IngestSourceView {
 
 fn source_view(src: IngestSource) -> IngestSourceView {
     let exists = std::path::Path::new(&src.path).is_dir();
-    IngestSourceView { source: src, exists }
+    IngestSourceView {
+        source: src,
+        exists,
+    }
 }
 
 #[tauri::command]
@@ -719,8 +780,14 @@ pub fn add_ingest_source(
 }
 
 #[tauri::command]
-pub fn set_ingest_source_enabled(state: State<AppState>, source_id: String, enabled: bool) -> Result<()> {
-    with_db(&state, |db| db.set_ingest_source_enabled(&source_id, enabled))
+pub fn set_ingest_source_enabled(
+    state: State<AppState>,
+    source_id: String,
+    enabled: bool,
+) -> Result<()> {
+    with_db(&state, |db| {
+        db.set_ingest_source_enabled(&source_id, enabled)
+    })
 }
 
 #[tauri::command]
@@ -731,8 +798,14 @@ pub fn remove_ingest_source(state: State<AppState>, source_id: String) -> Result
 // ---------------- Search / misc ----------------
 
 #[tauri::command]
-pub fn search(state: State<AppState>, query: String, limit: Option<i64>) -> Result<Vec<crate::search::SearchHit>> {
-    with_db(&state, |db| crate::search::search(db, &query, limit.unwrap_or(30)))
+pub fn search(
+    state: State<AppState>,
+    query: String,
+    limit: Option<i64>,
+) -> Result<Vec<crate::search::SearchHit>> {
+    with_db(&state, |db| {
+        crate::search::search(db, &query, limit.unwrap_or(30))
+    })
 }
 
 #[tauri::command]
@@ -741,7 +814,8 @@ pub fn get_stats(state: State<AppState>) -> Result<serde_json::Value> {
 }
 
 #[tauri::command]
-pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {    let mut out = serde_json::Map::new();
+pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
+    let mut out = serde_json::Map::new();
     for agent in Agent::all() {
         let install = with_db(&state, |db| db.get_installation(agent))?;
         out.insert(
@@ -766,7 +840,9 @@ pub fn assistant_send(
     session_id: Option<String>,
     text: String,
 ) -> Result<crate::assistant::AssistantReply> {
-    let reply = with_db(&state, |db| crate::assistant::AssistantService::chat(db, session_id.as_deref(), &text))?;
+    let reply = with_db(&state, |db| {
+        crate::assistant::AssistantService::chat(db, session_id.as_deref(), &text)
+    })?;
     let _ = app.emit("assistant-reply", &reply);
     Ok(reply)
 }
@@ -780,8 +856,12 @@ pub fn assistant_messages(
 }
 
 #[tauri::command]
-pub fn assistant_config_get(state: State<AppState>) -> Result<crate::sync::extractor::AssistantConfig> {
-    with_db(&state, |db| Ok(crate::sync::extractor::AssistantConfig::from_settings(db)))
+pub fn assistant_config_get(
+    state: State<AppState>,
+) -> Result<crate::sync::extractor::AssistantConfig> {
+    with_db(&state, |db| {
+        Ok(crate::sync::extractor::AssistantConfig::from_settings(db))
+    })
 }
 
 #[tauri::command]
@@ -794,7 +874,10 @@ pub fn assistant_config_set(
 ) -> Result<()> {
     with_db(&state, |db| {
         crate::sync::extractor::AssistantConfig {
-            agent, model, provider, effort,
+            agent,
+            model,
+            provider,
+            effort,
         }
         .save(db)
     })
@@ -806,8 +889,13 @@ pub fn assistant_execute_action(
     state: State<AppState>,
     action_json: String,
 ) -> Result<serde_json::Value> {
-    let action: crate::assistant::ActionProposal = serde_json::from_str(&action_json)
-        .map_err(|e| other(format!("动作解析失败: {}", e)))?;
-    let app_data = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
-    with_db(&state, |db| crate::assistant::AssistantService::execute_action(db, &action, &app_data))
+    let action: crate::assistant::ActionProposal =
+        serde_json::from_str(&action_json).map_err(|e| other(format!("动作解析失败: {}", e)))?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    with_db(&state, |db| {
+        crate::assistant::AssistantService::execute_action(db, &action, &app_data)
+    })
 }

@@ -95,7 +95,12 @@ fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
     let ws_b = ws_row(&db, "Workstream B", None);
 
     // user picks A + B in the New Session dialog, then NoEnding launches
-    let intent = pending_intent(&db, Agent::Codex, vec![ws_a.id.clone(), ws_b.id.clone()], None);
+    let intent = pending_intent(
+        &db,
+        Agent::Codex,
+        vec![ws_a.id.clone(), ws_b.id.clone()],
+        None,
+    );
 
     // the agent CLI creates its session; we discover it afterwards
     let session = session_row(&db, Agent::Codex, Some(now()), None);
@@ -107,12 +112,17 @@ fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
     // both explicit selections are bound with confidence 1.0
     let bindings = db.bindings_for_session(&session.id).unwrap();
     assert_eq!(bindings.len(), 2, "A + B → two bindings");
-    assert!(bindings.iter().all(|b| b.source == binding_source::EXPLICIT_LAUNCH));
+    assert!(bindings
+        .iter()
+        .all(|b| b.source == binding_source::EXPLICIT_LAUNCH));
     assert!(bindings.iter().all(|b| b.confidence == 1.0));
 
     let intent = db.get_launch_intent(&intent.id).unwrap().unwrap();
     assert_eq!(intent.status, launch_status::MATCHED);
-    assert_eq!(intent.matched_session_id.as_deref(), Some(session.id.as_str()));
+    assert_eq!(
+        intent.matched_session_id.as_deref(),
+        Some(session.id.as_str())
+    );
 
     // classification is derived as fully assigned
     assert_eq!(
@@ -157,7 +167,10 @@ fn ambiguous_candidates_wait_for_the_user() {
     let ambiguous = db
         .list_launch_intents(&[launch_status::AMBIGUOUS], 10)
         .unwrap();
-    assert!(!ambiguous.is_empty(), "the best candidate is marked ambiguous");
+    assert!(
+        !ambiguous.is_empty(),
+        "the best candidate is marked ambiguous"
+    );
     assert!(
         db.bindings_for_session(&session.id).unwrap().is_empty(),
         "no bindings before the user resolves"
@@ -182,13 +195,16 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
     assert!(!launcher::try_match_launch_intents(&db, &claude_session).unwrap());
 
     // expire pending intents that are older than the TTL
-    db.update_launch_intent(&intent.id, launch_status::PENDING, None, "").unwrap();
-    db.0
-        .execute(
-            "UPDATE launch_intents SET launched_at = ?2 WHERE id = ?1",
-            rusqlite::params![intent.id, (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339()],
-        )
+    db.update_launch_intent(&intent.id, launch_status::PENDING, None, "")
         .unwrap();
+    db.0.execute(
+        "UPDATE launch_intents SET launched_at = ?2 WHERE id = ?1",
+        rusqlite::params![
+            intent.id,
+            (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339()
+        ],
+    )
+    .unwrap();
     let expired = launcher::expire_stale_launch_intents(&db).unwrap();
     assert_eq!(expired, 1);
     assert_eq!(
@@ -311,7 +327,10 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
     // no changes since delivery → only the minimal reminder, no full re-dump
     let unchanged = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
     assert!(unchanged.markdown.contains("Current Task Reminder"));
-    assert!(!unchanged.markdown.contains("约束二"), "unchanged items are not repeated");
+    assert!(
+        !unchanged.markdown.contains("约束二"),
+        "unchanged items are not repeated"
+    );
 }
 
 #[test]
@@ -356,12 +375,24 @@ fn resume_delta_shows_changes_and_disappearances() {
     .unwrap();
 
     let delta = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
-    assert!(delta.markdown.contains("新决定：切换构建工具"), "new item appears");
+    assert!(
+        delta.markdown.contains("新决定：切换构建工具"),
+        "new item appears"
+    );
     assert!(delta.markdown.contains("Changed Since Your Last Activity"));
-    assert!(delta.markdown.contains("约束乙"), "resolved item name appears…");
-    assert!(delta.markdown.contains("Resolved / Superseded"), "…in the disappeared section");
+    assert!(
+        delta.markdown.contains("约束乙"),
+        "resolved item name appears…"
+    );
+    assert!(
+        delta.markdown.contains("Resolved / Superseded"),
+        "…in the disappeared section"
+    );
     // the unchanged item is not repeated in full
-    assert!(!delta.sections.iter().any(|sec| sec.title == "决策甲" && sec.kind == "constraint"));
+    assert!(!delta
+        .sections
+        .iter()
+        .any(|sec| sec.title == "决策甲" && sec.kind == "constraint"));
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +448,8 @@ fn multi_workstream_bundle_dedups_and_labels_primary_related() {
     })
     .unwrap();
 
-    let bundle = context::build_bundle(&db, "new", None, &[ws1.id.clone(), ws2.id.clone()], 8000).unwrap();
+    let bundle =
+        context::build_bundle(&db, "new", None, &[ws1.id.clone(), ws2.id.clone()], 8000).unwrap();
     assert!(bundle.markdown.contains("## 主 Workstream"));
     assert!(bundle.markdown.contains("Related Workstream"));
     // dedup: the shared constraint appears once (primary wins)
@@ -442,7 +474,10 @@ fn upsert_workstream_moves_between_projects_and_to_standalone() {
     w.project_id = Some(pb.id.clone());
     w.updated_at = now();
     db.upsert_workstream(&w).unwrap();
-    assert_eq!(db.get_workstream(&w.id).unwrap().unwrap().project_id, Some(pb.id.clone()));
+    assert_eq!(
+        db.get_workstream(&w.id).unwrap().unwrap().project_id,
+        Some(pb.id.clone())
+    );
 
     // B → NULL (standalone)
     w.project_id = None;
@@ -464,17 +499,19 @@ fn delete_project_detaches_without_archiving() {
     let p = project_row(&db, "Doomed Project");
     let w = ws_row(&db, "Surviving Workstream", Some(&p.id));
     let s = session_row(&db, Agent::Codex, Some(now()), None);
-    db.0
-        .execute(
-            "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
-            rusqlite::params![s.id, p.id],
-        )
-        .unwrap();
+    db.0.execute(
+        "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
+        rusqlite::params![s.id, p.id],
+    )
+    .unwrap();
 
     db.delete_project(&p.id).unwrap();
 
     assert!(db.get_project(&p.id).unwrap().is_none(), "project gone");
-    let w = db.get_workstream(&w.id).unwrap().expect("workstream survives");
+    let w = db
+        .get_workstream(&w.id)
+        .unwrap()
+        .expect("workstream survives");
     assert_eq!(w.project_id, None, "workstream detached");
     assert_eq!(w.visibility, "normal", "workstream NOT archived");
     assert_eq!(w.lifecycle, "open", "workstream lifecycle untouched");
@@ -490,12 +527,11 @@ fn list_sessions_all_filter_combinations() {
     let p = project_row(&db, "P");
     let s_codex = session_row(&db, Agent::Codex, Some(now()), None);
     let _s_pi = session_row(&db, Agent::Pi, Some(now()), None);
-    db.0
-        .execute(
-            "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
-            rusqlite::params![s_codex.id, p.id],
-        )
-        .unwrap();
+    db.0.execute(
+        "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
+        rusqlite::params![s_codex.id, p.id],
+    )
+    .unwrap();
 
     let agent_only = db
         .list_sessions(noending::storage::SessionFilter {
@@ -532,16 +568,24 @@ fn list_sessions_all_filter_combinations() {
 #[test]
 fn auto_created_workstream_may_have_no_project() {
     let db = open_db("auto-ws");
-    let ctx = noending::sync::MergeContext { run_id: new_id(), runtime: "heuristic".into() };
+    let ctx = noending::sync::MergeContext {
+        run_id: new_id(),
+        runtime: "heuristic".into(),
+    };
     let m = noending::sync::ContextMutation::CreateWorkstream {
         project_id: None,
         title: "自动发现的新工作流".into(),
         reason: "会话中出现新的长期主题".into(),
     };
-    let applied = db.tx(|tx| noending::sync::merge::MergeEngine.apply(tx, &m, &ctx)).unwrap();
+    let applied = db
+        .tx(|tx| noending::sync::merge::MergeEngine.apply(tx, &m, &ctx))
+        .unwrap();
     assert!(applied);
     let all = db.list_workstreams(None).unwrap();
-    let auto = all.iter().find(|w| w.title == "自动发现的新工作流").expect("created");
+    let auto = all
+        .iter()
+        .find(|w| w.title == "自动发现的新工作流")
+        .expect("created");
     assert_eq!(auto.project_id, None, "no project home required");
 }
 
@@ -551,7 +595,12 @@ fn auto_created_workstream_may_have_no_project() {
 fn project_affinity_evidence_and_resolution() {
     let db = open_db("affinity");
     let p = project_row(&db, "noending");
-    let s = session_row(&db, Agent::Codex, Some(now()), Some("/Users/jqk/projects/noending".into()));
+    let s = session_row(
+        &db,
+        Agent::Codex,
+        Some(now()),
+        Some("/Users/jqk/projects/noending".into()),
+    );
 
     // evidence recorded from cwd (as reconcile does)
     let e = ProjectAffinityEvidence {
@@ -622,7 +671,10 @@ fn event_ref_roundtrip() {
     let ev = &stored[0];
 
     // stable reference
-    let by_id = db.get_event_by_ref(&format!("session-event:{}", ev.id)).unwrap().unwrap();
+    let by_id = db
+        .get_event_by_ref(&format!("session-event:{}", ev.id))
+        .unwrap()
+        .unwrap();
     assert_eq!(by_id.id, ev.id);
     // legacy positional reference
     let legacy = db
@@ -631,7 +683,10 @@ fn event_ref_roundtrip() {
         .unwrap();
     assert_eq!(legacy.id, ev.id);
     // unknown ref → None, never fabricated
-    assert!(db.get_event_by_ref("session-event:missing").unwrap().is_none());
+    assert!(db
+        .get_event_by_ref("session-event:missing")
+        .unwrap()
+        .is_none());
 }
 
 /// A fresh cursor row exists per session with sane defaults.
@@ -647,6 +702,7 @@ fn source_cursor_roundtrip() {
         last_seen_size: 1000,
         mtime: Some(1234.5),
         prefix_hash: "abc123".into(),
+        identity_tail_hash: "deadbeef".into(),
         last_sequence: 7,
     };
     db.set_source_cursor(&c).unwrap();
@@ -655,6 +711,7 @@ fn source_cursor_roundtrip() {
     assert_eq!(back.generation, 3);
     assert_eq!(back.byte_offset, 900);
     assert_eq!(back.prefix_hash, "abc123");
+    assert_eq!(back.identity_tail_hash, "deadbeef");
     assert_eq!(back.last_sequence, 7);
     assert_eq!(db.get_cursor(&s.id).unwrap(), 7);
 }
@@ -669,7 +726,13 @@ fn launch_intent_match_records_delivery_snapshot() {
     let items = seed_context(&db, &ws.id, &["已交付约束"]);
     assert!(!items.is_empty());
     // create_item returns the in-memory item; the head revision lives in DB
-    let head_rev = |item_id: &str| db.get_item(item_id).unwrap().unwrap().current_revision_id.unwrap();
+    let head_rev = |item_id: &str| {
+        db.get_item(item_id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap()
+    };
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
     // intent snapshot: what the launched session actually received
@@ -707,7 +770,10 @@ fn launch_intent_match_records_delivery_snapshot() {
 
     // …and the delivery recorded per workstream from the snapshot
     let deliveries = db.latest_deliveries(&s.id).unwrap();
-    let d = deliveries.iter().find(|d| d.workstream_id == ws.id).expect("delivery recorded");
+    let d = deliveries
+        .iter()
+        .find(|d| d.workstream_id == ws.id)
+        .expect("delivery recorded");
     assert_eq!(d.bundle_id, "bundle-1");
     assert_eq!(
         d.delivered_revisions,
@@ -736,7 +802,13 @@ fn multi_workstream_delivery_groups_revisions_by_workstream() {
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
     // simulate what resume_session now records: grouped by section owner
-    let head_rev = |item_id: &str| db.get_item(item_id).unwrap().unwrap().current_revision_id.unwrap();
+    let head_rev = |item_id: &str| {
+        db.get_item(item_id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap()
+    };
     let by_ws = std::collections::BTreeMap::from([
         (ws_a.id.clone(), vec![head_rev(&a.id)]),
         (ws_b.id.clone(), vec![head_rev(&b.id)]),
@@ -761,5 +833,100 @@ fn multi_workstream_delivery_groups_revisions_by_workstream() {
             .find(|d| d.workstream_id == ws.id)
             .unwrap();
         assert_eq!(d.delivered_revisions, vec![head_rev(&expected_rev.id)]);
+    }
+}
+
+/// The token budget filters SECTIONS before rendering, so `bundle.sections`
+/// describes exactly what the markdown delivered. A delivery snapshot is
+/// derived from sections — if budget truncation happened after rendering,
+/// context the agent never received would be recorded as "delivered" and
+/// the next resume would skip it as a false delta.
+#[test]
+fn token_budget_limits_sections_to_actually_delivered_content() {
+    let db = open_db("budget");
+    let ws = ws_row(&db, "budget ws", None);
+
+    // two small core items, then a dozen large ones: whatever the exact
+    // cut point, some sections must fit and some must not
+    // (create_item returns the in-memory item without its head pointer —
+    // re-read from the DB to get the persisted revision id)
+    let head_rev = |item_id: &str| -> String {
+        db.get_item(item_id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap()
+    };
+    let mut named: Vec<(String, String)> = Vec::new();
+    // items render newest-first (updated_at DESC): create the LARGE ones
+    // first so the two small ones sort to the top and fit the budget
+    for i in 0..12 {
+        let title = format!("大条目{i:02}");
+        let item = noending::sync::create_item(
+            &db,
+            &ws.id,
+            "constraint",
+            &title,
+            &"很长的上下文内容。".repeat(80),
+            "user_edit",
+            "user_edit",
+            &[],
+            None,
+            "user",
+        )
+        .unwrap();
+        named.push((title, head_rev(&item.id)));
+    }
+    for title in ["预算内约束A", "预算内约束B"] {
+        let item = noending::sync::create_item(
+            &db,
+            &ws.id,
+            "constraint",
+            title,
+            &format!("content of {}", title),
+            "user_edit",
+            "user_edit",
+            &[],
+            None,
+            "user",
+        )
+        .unwrap();
+        named.push((title.into(), head_rev(&item.id)));
+    }
+
+    let bundle = context::build_bundle(&db, "new", None, &[ws.id.clone()], 200).unwrap();
+
+    assert!(
+        bundle.approx_tokens <= 200,
+        "budget respected, got {}",
+        bundle.approx_tokens
+    );
+    let delivered: Vec<String> = bundle
+        .sections
+        .iter()
+        .filter_map(|s| s.revision_id.clone())
+        .collect();
+    assert!(
+        delivered.len() < named.len(),
+        "budget actually excluded sections ({}/{} delivered)",
+        delivered.len(),
+        named.len()
+    );
+    assert!(!delivered.is_empty(), "some sections still fit the budget");
+    assert!(
+        bundle.markdown.contains("… (上下文因预算被截断)"),
+        "truncation is visible in the delivered markdown"
+    );
+
+    // the invariant that matters for delivery snapshots: a section is
+    // claimed as delivered ⟺ its content is actually in the markdown
+    for (title, rev) in &named {
+        let is_delivered = delivered.contains(rev);
+        assert_eq!(
+            is_delivered,
+            bundle.markdown.contains(title.as_str()),
+            "section '{}' delivered/markdown mismatch",
+            title
+        );
     }
 }

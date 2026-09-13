@@ -37,7 +37,10 @@ fn content_text(content: &Value) -> String {
                     }
                     Some("tool_result") => {
                         let t = content_text(item.get("content").unwrap_or(&Value::Null));
-                        parts.push(crate::adapters::truncate_text(&format!("[tool_result] {}", t), 300));
+                        parts.push(crate::adapters::truncate_text(
+                            &format!("[tool_result] {}", t),
+                            300,
+                        ));
                     }
                     _ => {}
                 }
@@ -77,12 +80,21 @@ impl ClaudeAdapter {
                     .map(|c| c.to_string());
             }
             if session_id.is_none() {
-                session_id = v.get("sessionId").and_then(|s| s.as_str()).map(|s| s.to_string());
+                session_id = v
+                    .get("sessionId")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
             }
             if started_at.is_none() {
-                started_at = v.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+                started_at = v
+                    .get("timestamp")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string());
             }
-            last_ts = v.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+            last_ts = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string());
             if first_user_text.is_none()
                 && v.get("type").and_then(|t| t.as_str()) == Some("user")
                 && v.get("isSidechain").and_then(|s| s.as_bool()) != Some(true)
@@ -165,7 +177,10 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         let path = PathBuf::from(&session.raw_path);
         read_jsonl_delta(&path, cursor, &|_idx, v| {
             let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let sidechain = v.get("isSidechain").and_then(|s| s.as_bool()).unwrap_or(false);
+            let sidechain = v
+                .get("isSidechain")
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
             let source_event_id = v
                 .get("uuid")
                 .and_then(|s| s.as_str())
@@ -196,14 +211,20 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
                 }
                 "summary" => (
                     "compact",
-                    v.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                    v.get("summary")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     serde_json::json!({}),
                 ),
                 _ => return None,
             };
 
             let mut meta = serde_json::Map::new();
-            meta.insert("agent".into(), serde_json::Value::String("claude_code".into()));
+            meta.insert(
+                "agent".into(),
+                serde_json::Value::String("claude_code".into()),
+            );
             meta.insert("type".into(), serde_json::Value::String(vtype.to_string()));
             if let Some(obj) = extra.as_object() {
                 for (k, v2) in obj {
@@ -228,7 +249,9 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
     ) -> Result<AgentCommand> {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::context_prompt(context_file)?.into_iter().collect(),
+            args: crate::adapters::context_prompt(context_file)?
+                .into_iter()
+                .collect(),
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }

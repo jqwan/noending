@@ -88,7 +88,10 @@ impl CodexAdapter {
                     .ok_or_else(|| crate::error::other("无效的 rollout 文件名"))?;
                 let id = stem.rsplit('-').take(5).collect::<Vec<_>>();
                 if id.len() < 5 {
-                    return Err(crate::error::other(format!("无法解析 Codex session id: {}", stem)));
+                    return Err(crate::error::other(format!(
+                        "无法解析 Codex session id: {}",
+                        stem
+                    )));
                 }
                 id.into_iter().rev().collect::<Vec<_>>().join("-")
             }
@@ -147,7 +150,10 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                 // The filename only pre-filters; the content decides. One
                 // bad file never aborts the whole scan.
                 if detect_format(&p) != Some(Agent::Codex) {
-                    eprintln!("[discover] skip {} (content fingerprint is not codex)", p.display());
+                    eprintln!(
+                        "[discover] skip {} (content fingerprint is not codex)",
+                        p.display()
+                    );
                     continue;
                 }
                 match Self::parse_rollout(&p) {
@@ -189,7 +195,10 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                             "tool_call",
                             format!(
                                 "{} {}",
-                                payload.get("name").and_then(|n| n.as_str()).unwrap_or("tool"),
+                                payload
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("tool"),
                                 payload
                                     .get("arguments")
                                     .and_then(|a| a.as_str())
@@ -237,7 +246,9 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     ) -> Result<AgentCommand> {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::context_prompt(context_file)?.into_iter().collect(),
+            args: crate::adapters::context_prompt(context_file)?
+                .into_iter()
+                .collect(),
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }

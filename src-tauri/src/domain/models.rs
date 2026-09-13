@@ -39,7 +39,7 @@ pub struct Workstream {
     pub project_id: Option<Id>,
     pub title: String,
     pub description: String,
-    pub lifecycle: String, // open | completed | abandoned
+    pub lifecycle: String,  // open | completed | abandoned
     pub visibility: String, // normal | archived
     pub created_at: String,
     pub updated_at: String,
@@ -142,6 +142,14 @@ pub struct SourceCursor {
     /// the file's prefix — a same-size-or-larger rewrite is caught here.
     /// Empty on legacy cursors (forces one full re-scan to backfill).
     pub prefix_hash: String,
+    /// Identity hash of the last event on the CURRENT source chain — the
+    /// base the next append batch continues from. This lives on the cursor,
+    /// not "last event in the store": after a compact + dedup re-scan the
+    /// store's tail is NEWER than the source's tail (old events are kept,
+    /// append-only), and continuing the chain from it would make the next
+    /// append invisible to the following re-scan. Empty on legacy cursors
+    /// (falls back to the last stored event until the next full re-scan).
+    pub identity_tail_hash: String,
     /// Max app-assigned event sequence ingested so far (read cursor).
     pub last_sequence: i64,
 }
@@ -190,7 +198,7 @@ pub struct SourceCursorUpdate {
 pub struct SessionWorkstreamBinding {
     pub session_id: Id,
     pub workstream_id: Id,
-    pub role: String, // primary | related
+    pub role: String,   // primary | related
     pub source: String, // explicit_launch_selection | user_assigned | automatic_classification
     pub confidence: f64,
     pub last_seen_revision: Option<String>,
@@ -230,9 +238,7 @@ impl SessionClassificationState {
         if bindings.is_empty() {
             return SessionClassificationState::Unassigned;
         }
-        let has_explicit = bindings
-            .iter()
-            .any(|b| b.source != binding_source::AUTO);
+        let has_explicit = bindings.iter().any(|b| b.source != binding_source::AUTO);
         if has_explicit {
             SessionClassificationState::Assigned
         } else {
@@ -300,7 +306,7 @@ pub struct ContextItem {
     pub id: Id,
     pub workstream_id: Id,
     pub kind: String,
-    pub status: String, // active | superseded | resolved | obsolete | deleted
+    pub status: String,     // active | superseded | resolved | obsolete | deleted
     pub authority: String, // user_explicit | user_edit | system_observed | agent_statement | agent_inferred
     pub created_by: String, // user | sync:<runtime> | assistant | ...
     pub current_revision_id: Option<Id>,
@@ -329,10 +335,10 @@ pub struct ContextItemRevision {
 pub struct ContextConflict {
     pub id: Id,
     pub workstream_id: Id,
-    pub left_item_id: Id,  // usually the pre-existing (often user) side
+    pub left_item_id: Id,          // usually the pre-existing (often user) side
     pub right_item_id: Option<Id>, // the incoming agent side, when it became an item
-    pub conflict_type: String, // authority | content | value
-    pub status: String,        // open | resolved | dismissed
+    pub conflict_type: String,     // authority | content | value
+    pub status: String,            // open | resolved | dismissed
     pub resolution: Option<String>,
     pub created_at: String,
     pub updated_at: String,

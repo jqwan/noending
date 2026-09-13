@@ -44,9 +44,9 @@ pub fn run() {
             // the reconcile thread resolves handle.state::<AppState>(), which
             // panics when the state has not been managed yet.
             app.manage(commands::AppState {
-        db: Mutex::new(db),
-        sync_in_progress: std::sync::atomic::AtomicBool::new(false),
-    });
+                db: Mutex::new(db),
+                sync_in_progress: std::sync::atomic::AtomicBool::new(false),
+            });
 
             // make pre-existing events searchable (idempotent)
             {
@@ -74,7 +74,10 @@ pub fn run() {
                             sync::SyncEngine::from_settings(&guard)
                         };
                         ingestion::reconcile_with_engine(&state.db, &engine, &|s| {
-                            eprintln!("[reconcile] processing: {}", s.title.as_deref().unwrap_or("(untitled)"));
+                            eprintln!(
+                                "[reconcile] processing: {}",
+                                s.title.as_deref().unwrap_or("(untitled)")
+                            );
                         })
                     })();
                     state.sync_in_progress.store(false, Ordering::SeqCst);

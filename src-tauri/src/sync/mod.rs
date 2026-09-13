@@ -24,13 +24,16 @@ pub mod extractor;
 pub mod merge;
 pub mod policy;
 
-use sha2::{Digest, Sha256};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::sync::{Mutex, MutexGuard};
 
-use crate::domain::{ContextItem, ContextItemRevision, Session, SessionEvent, SyncRun};
+use crate::domain::{
+    binding_source, ContextItem, ContextItemRevision, Session, SessionEvent,
+    SessionWorkstreamBinding, SyncRun,
+};
 use crate::error::{other, Result};
-use crate::storage::{now, new_id, Db};
+use crate::storage::{new_id, now, Db};
 
 /// A proposed change to a workstream's context, produced by the Assistant.
 /// `source_refs` are stable event references ("session-event:<id>"); a
@@ -90,7 +93,10 @@ pub struct ExtractOutput {
 
 impl ExtractOutput {
     pub fn mutations(mutations: Vec<ContextMutation>) -> Self {
-        Self { mutations, diagnostics: vec![] }
+        Self {
+            mutations,
+            diagnostics: vec![],
+        }
     }
 }
 
@@ -178,13 +184,11 @@ impl SyncEngine {
     pub fn from_settings(db: &Db) -> Self {
         let cfg = extractor::CliExtractor::from_settings(db);
         match cfg {
-            Some(cli) if crate::adapters::adapter_for(cli.agent).detect().is_some() => {
-                Self {
-                    heuristic: extractor::HeuristicExtractor,
-                    merger: merge::MergeEngine,
-                    llm: Some(cli),
-                }
-            }
+            Some(cli) if crate::adapters::adapter_for(cli.agent).detect().is_some() => Self {
+                heuristic: extractor::HeuristicExtractor,
+                merger: merge::MergeEngine,
+                llm: Some(cli),
+            },
             _ => Self::default(),
         }
     }
@@ -216,15 +220,25 @@ impl SyncEngine {
         // 1. candidate workstreams: bound ones, plus keyword-matched ones.
         //     Auto-classified candidates are remembered as such so commit
         //     can persist the classification as a real binding.
-        let bound: Vec<String> = db
-            .bindings_for_session(&session.id)?
-            .into_iter()
-            .map(|b| b.workstream_id)
+        //     STRONG provenance (explicit launch / user assignment) freezes
+        //     the candidates; automatic_classification is only a guess and
+        //     must stay revisable — it never blocks re-classification when
+        //     the evidence in new events points elsewhere.
+        let bound: Vec<SessionWorkstreamBinding> = db.bindings_for_session(&session.id)?;
+        let strong: Vec<String> = bound
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.source.as_str(),
+                    binding_source::EXPLICIT_LAUNCH | binding_source::USER_ASSIGNED
+                )
+            })
+            .map(|b| b.workstream_id.clone())
             .collect();
-        let (candidates, candidates_are_automatic) = if bound.is_empty() {
+        let (candidates, candidates_are_automatic) = if strong.is_empty() {
             (self.auto_classify(db, session, events), true)
         } else {
-            (bound, false)
+            (strong, false)
         };
 
         // 2. pre-filter: only meaningful message kinds
@@ -281,12 +295,20 @@ impl SyncEngine {
                 Ok(o) => Ok((o.mutations, cli.name(), o.diagnostics)),
                 Err(e) => {
                     eprintln!("[sync] cli extractor failed, falling back: {}", e);
-                    let o = self.heuristic.extract(session, &refs, &pre.candidates, &pre.inputs)?;
-                    Ok((o.mutations, format!("{}->heuristic", cli.name()), o.diagnostics))
+                    let o = self
+                        .heuristic
+                        .extract(session, &refs, &pre.candidates, &pre.inputs)?;
+                    Ok((
+                        o.mutations,
+                        format!("{}->heuristic", cli.name()),
+                        o.diagnostics,
+                    ))
                 }
             }
         } else {
-            let o = self.heuristic.extract(session, &refs, &pre.candidates, &pre.inputs)?;
+            let o = self
+                .heuristic
+                .extract(session, &refs, &pre.candidates, &pre.inputs)?;
             Ok((o.mutations, "heuristic".to_string(), o.diagnostics))
         }
     }
@@ -310,8 +332,6 @@ impl SyncEngine {
         runtime: &str,
         diagnostics: Vec<String>,
     ) -> Result<SyncJobOutput> {
-        use crate::domain::{binding_source, SessionWorkstreamBinding};
-
         let ctx = MergeContext {
             run_id: pre.run_id.clone(),
             runtime: runtime.to_string(),
@@ -353,7 +373,19 @@ impl SyncEngine {
             // Persist auto-classification so the session's UI state matches
             // what sync actually used. Binding precedence keeps any explicit
             // or user binding strictly stronger than this one.
-            if pre.candidates_are_automatic {
+            //
+            // A fresh classification REPLACES the previous automatic guess
+            // instead of accumulating stale auto bindings beside it — auto
+            // bindings are revisable by design. When the new classification
+            // is empty there is no signal, so the old guess is kept rather
+            // than dropped. (Strong bindings are never touched here: prepare
+            // only reaches the automatic path when none exist, and
+            // bind_conn's precedence still guards a racing explicit bind.)
+            if pre.candidates_are_automatic && !pre.candidates.is_empty() {
+                tx.execute(
+                    "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND source = ?2",
+                    rusqlite::params![session.id, binding_source::AUTO],
+                )?;
                 for ws_id in &pre.candidates {
                     crate::storage::bind_conn(
                         tx,

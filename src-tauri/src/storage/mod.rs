@@ -18,7 +18,11 @@ pub struct Db(pub Connection);
 /// Bump on any schema change. Fresh databases are stamped directly; older
 /// (lower-version) databases are brought up by the idempotent ALTERs in
 /// migrate(); higher versions refuse to open.
-pub const SCHEMA_VERSION: i64 = 2;
+///
+/// History: v2 added `prefix_hash` / `context_bundle_revisions`; v3 added
+/// `identity_tail_hash` and recomputes legacy event identity hashes for the
+/// chained adjacency identity (see [`event_identity_hash`]).
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -105,9 +109,7 @@ impl Db {
         // clear message instead of failing later with "no such column".
         // (v0 = pre-versioning dev database: current-shape tables, so the
         // idempotent column additions below bring it up to date.)
-        let current_version: i64 = self
-            .0
-            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let current_version: i64 = self.0.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if current_version > SCHEMA_VERSION {
             return Err(other(format!(
                 "数据库 schema 版本 (v{}) 高于当前应用支持的 v{}，请先备份数据库文件后重建或降级应用。",
@@ -178,6 +180,7 @@ impl Db {
               generation INTEGER NOT NULL DEFAULT 0,
               byte_offset INTEGER NOT NULL DEFAULT 0,
               prefix_hash TEXT NOT NULL DEFAULT '',
+              identity_tail_hash TEXT NOT NULL DEFAULT '',
               mtime REAL,
               processed_sequence INTEGER NOT NULL DEFAULT 0
             );
@@ -353,6 +356,7 @@ impl Db {
         // ignored on already-current databases).
         for stmt in [
             "ALTER TABLE session_cursors ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE session_cursors ADD COLUMN identity_tail_hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE launch_intents ADD COLUMN context_bundle_revisions TEXT",
         ] {
             if let Err(e) = self.0.execute_batch(stmt) {
@@ -364,8 +368,85 @@ impl Db {
 
         register_binding_rank_fn(&self.0)?;
 
-        self.0
-            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // v2 → v3: legacy fallback identity hashes predate the chained
+        // adjacency identity and must be recomputed once, or the first full
+        // re-scan after the upgrade would re-insert every pre-upgrade event.
+        if current_version < 3 {
+            self.recompute_event_identity_hashes()?;
+        }
+
+        self.0.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(())
+    }
+
+    /// One-time identity migration (user_version < 3): recompute every
+    /// session's `source_identity_hash` in sequence order with the current
+    /// chained semantics — native-id events hash their id (unchanged), the
+    /// rest chain from the previous event starting at
+    /// [`IDENTITY_GENESIS`]. Event ids never change, so SourceReferences
+    /// stay resolvable; the UNIQUE index can only gain uniqueness because a
+    /// chain is strictly more discriminating than the old content hash.
+    /// Also bootstraps each session's cursor `identity_tail_hash` so appends
+    /// chain correctly even before the next full re-scan.
+    fn recompute_event_identity_hashes(&self) -> Result<()> {
+        let session_ids: Vec<String> = {
+            let mut st = self
+                .0
+                .prepare("SELECT DISTINCT session_id FROM session_events")?;
+            let rows = st
+                .query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for sid in session_ids {
+            self.tx(|tx| {
+                let rows: Vec<(String, Option<String>, String, Option<String>, Option<String>)> = {
+                    let mut st = tx.prepare(
+                        "SELECT id, source_event_id, kind, ts, text FROM session_events
+                         WHERE session_id = ?1 ORDER BY sequence",
+                    )?;
+                    let rows = st
+                        .query_map(params![sid], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                        })?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    rows
+                };
+                if rows.is_empty() {
+                    return Ok(());
+                }
+                // Pass 1 parks every hash on a per-row reserved value so the
+                // pass-2 updates can never collide with a not-yet-updated row.
+                tx.execute(
+                    "UPDATE session_events SET source_identity_hash = 'migrating:' || id
+                     WHERE session_id = ?1",
+                    params![sid],
+                )?;
+                let mut prev_hash = IDENTITY_GENESIS.to_string();
+                let mut last_hash = String::new();
+                for (id, source_event_id, kind, ts, text) in &rows {
+                    let hash = event_identity_hash(
+                        &prev_hash,
+                        source_event_id.as_deref(),
+                        kind,
+                        ts.as_deref(),
+                        text.as_deref(),
+                    );
+                    tx.execute(
+                        "UPDATE session_events SET source_identity_hash = ?2 WHERE id = ?1",
+                        params![id, hash],
+                    )?;
+                    prev_hash = hash.clone();
+                    last_hash = hash;
+                }
+                tx.execute(
+                    "UPDATE session_cursors SET identity_tail_hash = ?2
+                     WHERE session_id = ?1 AND (identity_tail_hash IS NULL OR identity_tail_hash = '')",
+                    params![sid, last_hash],
+                )?;
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 
@@ -423,8 +504,14 @@ impl Db {
                 "UPDATE workstreams SET project_id = NULL, updated_at = ?2 WHERE project_id = ?1",
                 params![id, now()],
             )?;
-            tx.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?1", params![id])?;
-            tx.execute("DELETE FROM project_resources WHERE project_id = ?1", params![id])?;
+            tx.execute(
+                "UPDATE sessions SET project_id = NULL WHERE project_id = ?1",
+                params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM project_resources WHERE project_id = ?1",
+                params![id],
+            )?;
             tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
             Ok(())
         })?;
@@ -436,7 +523,14 @@ impl Db {
         self.0.execute(
             "INSERT INTO project_resources (id, project_id, kind, uri, metadata, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![r.id, r.project_id, r.kind, r.uri, r.metadata.to_string(), r.created_at],
+            params![
+                r.id,
+                r.project_id,
+                r.kind,
+                r.uri,
+                r.metadata.to_string(),
+                r.created_at
+            ],
         )?;
         Ok(())
     }
@@ -462,7 +556,8 @@ impl Db {
     }
 
     pub fn remove_resource(&self, id: &str) -> Result<()> {
-        self.0.execute("DELETE FROM project_resources WHERE id = ?1", params![id])?;
+        self.0
+            .execute("DELETE FROM project_resources WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -507,7 +602,8 @@ impl Db {
     }
 
     pub fn delete_workstream(&self, id: &str) -> Result<()> {
-        self.0.execute("DELETE FROM workstreams WHERE id = ?1", params![id])?;
+        self.0
+            .execute("DELETE FROM workstreams WHERE id = ?1", params![id])?;
         self.unindex("workstream", id);
         Ok(())
     }
@@ -517,7 +613,11 @@ impl Db {
     pub fn upsert_session(&self, s: &Session) -> Result<bool> {
         let existed = self
             .0
-            .query_row("SELECT 1 FROM sessions WHERE id = ?1", params![s.id], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![s.id],
+                |_| Ok(()),
+            )
             .optional()?
             .is_some();
         self.0.execute(
@@ -540,11 +640,19 @@ impl Db {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         Ok(self
             .0
-            .query_row("SELECT * FROM sessions WHERE id = ?1", params![id], row_session)
+            .query_row(
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![id],
+                row_session,
+            )
             .optional()?)
     }
 
-    pub fn find_session_by_agent_id(&self, agent: Agent, agent_session_id: &str) -> Result<Option<Session>> {
+    pub fn find_session_by_agent_id(
+        &self,
+        agent: Agent,
+        agent_session_id: &str,
+    ) -> Result<Option<Session>> {
         Ok(self
             .0
             .query_row(
@@ -607,8 +715,13 @@ impl Db {
     /// Returns the events that were actually newly stored.
     ///
     /// The identity chain starts from genesis when the batch is a full
-    /// re-scan (start_byte_offset == 0) and from the last stored event
-    /// otherwise — see [`event_identity_hash`].
+    /// re-scan (start_byte_offset == 0); an append continues from the
+    /// cursor's `identity_tail_hash` — the tail of the CURRENT source chain,
+    /// never "last event in the store" (after a compact + dedup the store
+    /// holds newer history the source no longer has) — see
+    /// [`event_identity_hash`]. The tail advances with every batch whether
+    /// or not rows were new (dedup reproduces the same hash), so the cursor
+    /// always describes the source, not the store.
     pub fn append_source_events(
         &self,
         session_id: &str,
@@ -623,17 +736,31 @@ impl Db {
                 |r| r.get::<_, i64>(0),
             )?;
             let mut next_seq: i64 = max_seq + 1;
-            let mut prev_hash: String = if source.start_byte_offset == 0 {
-                IDENTITY_GENESIS.to_string()
-            } else {
-                tx.query_row(
-                    "SELECT source_identity_hash FROM session_events
-                     WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            let stored_tail: Option<String> = tx
+                .query_row(
+                    "SELECT identity_tail_hash FROM session_cursors WHERE session_id = ?1",
                     params![session_id],
                     |r| r.get::<_, String>(0),
                 )
                 .optional()?
-                .unwrap_or_else(|| IDENTITY_GENESIS.to_string())
+                .filter(|h| !h.is_empty());
+            let mut prev_hash: String = if source.start_byte_offset == 0 {
+                IDENTITY_GENESIS.to_string()
+            } else {
+                match stored_tail.clone() {
+                    Some(tail) => tail,
+                    // Legacy cursor without a tail: fall back to the last
+                    // stored event; the next full re-scan self-heals anyway.
+                    None => tx
+                        .query_row(
+                            "SELECT source_identity_hash FROM session_events
+                             WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                            params![session_id],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .unwrap_or_else(|| IDENTITY_GENESIS.to_string()),
+                }
             };
             let mut stored = Vec::with_capacity(parsed.len());
             {
@@ -688,6 +815,14 @@ impl Db {
                     }
                 }
             }
+            // Tail of the source chain after this batch: the last computed
+            // hash when the batch had events (inserted or deduped — identical
+            // either way), otherwise whatever the cursor already held.
+            let new_tail = if parsed.is_empty() {
+                stored_tail.unwrap_or_default()
+            } else {
+                prev_hash
+            };
             upsert_source_cursor_conn(
                 tx,
                 &SourceCursor {
@@ -698,6 +833,7 @@ impl Db {
                     last_seen_size: source.last_seen_size,
                     mtime: source.mtime,
                     prefix_hash: source.prefix_hash.clone(),
+                    identity_tail_hash: new_tail,
                     last_sequence: if stored.is_empty() {
                         // keep previous max; nothing new was appended
                         tx.query_row(
@@ -723,7 +859,12 @@ impl Db {
         })
     }
 
-    pub fn get_events(&self, session_id: &str, after: Option<i64>, limit: i64) -> Result<Vec<SessionEvent>> {
+    pub fn get_events(
+        &self,
+        session_id: &str,
+        after: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<SessionEvent>> {
         get_events_conn(&self.0, session_id, after, limit)
     }
 
@@ -747,10 +888,7 @@ impl Db {
     }
 
     fn query_event(&self, sql: &str, p: impl rusqlite::Params) -> Result<Option<SessionEvent>> {
-        Ok(self
-            .0
-            .query_row(sql, p, row_event)
-            .optional()?)
+        Ok(self.0.query_row(sql, p, row_event).optional()?)
     }
 
     pub fn event_count(&self, session_id: &str) -> Result<i64> {
@@ -767,7 +905,7 @@ impl Db {
         Ok(self
             .0
             .query_row(
-                "SELECT session_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, last_sequence
+                "SELECT session_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash, last_sequence
                  FROM session_cursors WHERE session_id = ?1",
                 params![session_id],
                 |r| {
@@ -779,7 +917,8 @@ impl Db {
                         last_seen_size: r.get::<_, i64>(4)?.max(0) as u64,
                         mtime: r.get(5)?,
                         prefix_hash: r.get(6)?,
-                        last_sequence: r.get(7)?,
+                        identity_tail_hash: r.get(7)?,
+                        last_sequence: r.get(8)?,
                     })
                 },
             )
@@ -842,7 +981,10 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn bindings_for_workstream(&self, workstream_id: &str) -> Result<Vec<SessionWorkstreamBinding>> {
+    pub fn bindings_for_workstream(
+        &self,
+        workstream_id: &str,
+    ) -> Result<Vec<SessionWorkstreamBinding>> {
         let mut st = self.0.prepare(
             "SELECT session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at
              FROM session_workstream_bindings WHERE workstream_id = ?1",
@@ -853,7 +995,13 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn update_binding_sync(&self, session_id: &str, workstream_id: &str, cursor: i64, last_seen_revision: Option<&str>) -> Result<()> {
+    pub fn update_binding_sync(
+        &self,
+        session_id: &str,
+        workstream_id: &str,
+        cursor: i64,
+        last_seen_revision: Option<&str>,
+    ) -> Result<()> {
         self.0.execute(
             "UPDATE session_workstream_bindings
              SET last_sync_cursor = ?3, last_seen_revision = COALESCE(?4, last_seen_revision)
@@ -874,7 +1022,12 @@ impl Db {
         insert_revision_conn(&self.0, r)
     }
 
-    pub fn set_item_head(&self, item_id: &str, revision_id: &str, status: Option<&str>) -> Result<()> {
+    pub fn set_item_head(
+        &self,
+        item_id: &str,
+        revision_id: &str,
+        status: Option<&str>,
+    ) -> Result<()> {
         if let Some(s) = status {
             self.0.execute(
                 "UPDATE context_items SET current_revision_id = ?2, status = ?3, updated_at = ?4 WHERE id = ?1",
@@ -909,7 +1062,9 @@ impl Db {
         run_id: Option<&str>,
         source_refs: &[String],
     ) -> Result<()> {
-        self.tx(|tx| apply_status_change_conn(tx, item_id, new_status, actor, reason, run_id, source_refs))
+        self.tx(|tx| {
+            apply_status_change_conn(tx, item_id, new_status, actor, reason, run_id, source_refs)
+        })
     }
 
     pub fn set_item_authority(&self, item_id: &str, authority: &str) -> Result<()> {
@@ -928,7 +1083,11 @@ impl Db {
         get_revision_conn(&self.0, id)
     }
 
-    pub fn items_for_workstream(&self, workstream_id: &str, include_inactive: bool) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
+    pub fn items_for_workstream(
+        &self,
+        workstream_id: &str,
+        include_inactive: bool,
+    ) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
         items_for_workstream_conn(&self.0, workstream_id, include_inactive)
     }
 
@@ -943,7 +1102,11 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn active_items_since(&self, workstream_id: &str, since: &str) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
+    pub fn active_items_since(
+        &self,
+        workstream_id: &str,
+        since: &str,
+    ) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
         let mut st = self.0.prepare(
             "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.created_by, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
                     r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
@@ -967,8 +1130,16 @@ impl Db {
         insert_conflict_conn(&self.0, c)
     }
 
-    pub fn conflicts_for_workstream(&self, workstream_id: &str, include_closed: bool) -> Result<Vec<ContextConflict>> {
-        let filter = if include_closed { "" } else { " AND status = 'open'" };
+    pub fn conflicts_for_workstream(
+        &self,
+        workstream_id: &str,
+        include_closed: bool,
+    ) -> Result<Vec<ContextConflict>> {
+        let filter = if include_closed {
+            ""
+        } else {
+            " AND status = 'open'"
+        };
         let sql = format!(
             "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at
              FROM context_conflicts WHERE workstream_id = ?1{} ORDER BY created_at DESC",
@@ -992,7 +1163,12 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn update_conflict_status(&self, conflict_id: &str, status: &str, resolution: Option<&str>) -> Result<()> {
+    pub fn update_conflict_status(
+        &self,
+        conflict_id: &str,
+        status: &str,
+        resolution: Option<&str>,
+    ) -> Result<()> {
         self.0.execute(
             "UPDATE context_conflicts SET status = ?2, resolution = COALESCE(?3, resolution), updated_at = ?4 WHERE id = ?1",
             params![conflict_id, status, resolution, now()],
@@ -1089,7 +1265,10 @@ impl Db {
         let mut st = self.0.prepare(&sql)?;
         let statuses: Vec<String> = statuses.iter().map(|s| s.to_string()).collect();
         let rows = st
-            .query_map(rusqlite::params_from_iter(statuses.iter()), row_launch_intent)?
+            .query_map(
+                rusqlite::params_from_iter(statuses.iter()),
+                row_launch_intent,
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1171,7 +1350,12 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn add_ingest_source(&self, agent: Agent, path: &str, enabled: bool) -> Result<IngestSource> {
+    pub fn add_ingest_source(
+        &self,
+        agent: Agent,
+        path: &str,
+        enabled: bool,
+    ) -> Result<IngestSource> {
         let src = IngestSource {
             id: new_id(),
             agent,
@@ -1180,18 +1364,26 @@ impl Db {
             origin: "user".into(),
             created_at: now(),
         };
-        self.0.execute(
-            "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
+        self.0
+            .execute(
+                "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![src.id, src.agent.as_str(), src.path, src.enabled as i64, src.origin, src.created_at],
-        )
-        .map_err(|e| {
-            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
-                crate::error::other("该数据源已存在")
-            } else {
-                crate::error::AppError::from(e)
-            }
-        })?;
+                params![
+                    src.id,
+                    src.agent.as_str(),
+                    src.path,
+                    src.enabled as i64,
+                    src.origin,
+                    src.created_at
+                ],
+            )
+            .map_err(|e| {
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+                    crate::error::other("该数据源已存在")
+                } else {
+                    crate::error::AppError::from(e)
+                }
+            })?;
         Ok(src)
     }
 
@@ -1215,7 +1407,7 @@ impl Db {
     pub fn reset_session_source_cursor(&self, session_id: &str) -> Result<()> {
         self.0.execute(
             "UPDATE session_cursors
-             SET byte_offset = 0, last_seen_size = 0, prefix_hash = ''
+             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = ''
              WHERE session_id = ?1",
             params![session_id],
         )?;
@@ -1255,7 +1447,11 @@ impl Db {
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .0
-            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
@@ -1274,7 +1470,11 @@ impl Db {
         if let Some(id) = session_id {
             let exists = self
                 .0
-                .query_row("SELECT 1 FROM assistant_sessions WHERE id = ?1", params![id], |_| Ok(()))
+                .query_row(
+                    "SELECT 1 FROM assistant_sessions WHERE id = ?1",
+                    params![id],
+                    |_| Ok(()),
+                )
                 .optional()?;
             if exists.is_some() {
                 return Ok(id.to_string());
@@ -1307,7 +1507,11 @@ impl Db {
         Ok((id, ts))
     }
 
-    pub fn list_assistant_messages(&self, session_id: &str, limit: i64) -> Result<Vec<AssistantMessageRow>> {
+    pub fn list_assistant_messages(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<AssistantMessageRow>> {
         let mut st = self.0.prepare(
             "SELECT id, session_id, role, content, action_json, runtime, created_at
              FROM assistant_messages WHERE session_id = ?1 ORDER BY created_at LIMIT ?2",
@@ -1330,7 +1534,10 @@ impl Db {
 
     // ---------------- Agent installations cache ----------------
 
-    pub fn save_installation(&self, i: &crate::platform::exec_resolver::AgentInstallation) -> Result<()> {
+    pub fn save_installation(
+        &self,
+        i: &crate::platform::exec_resolver::AgentInstallation,
+    ) -> Result<()> {
         self.0.execute(
             "INSERT INTO agent_installations (agent, executable_path, version, source, last_verified_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1340,7 +1547,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_installation(&self, agent: Agent) -> Result<Option<crate::platform::exec_resolver::AgentInstallation>> {
+    pub fn get_installation(
+        &self,
+        agent: Agent,
+    ) -> Result<Option<crate::platform::exec_resolver::AgentInstallation>> {
         Ok(self
             .0
             .query_row(
@@ -1364,7 +1574,11 @@ impl Db {
 
     pub fn fts_available(&self) -> bool {
         self.0
-            .query_row("SELECT 1 FROM sqlite_master WHERE name = 'search_index'", [], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE name = 'search_index'",
+                [],
+                |_| Ok(()),
+            )
             .optional()
             .unwrap_or(None)
             .is_some()
@@ -1482,7 +1696,14 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
         "INSERT INTO projects (id, name, description, archived, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET name = ?2, description = ?3, archived = ?4, updated_at = ?6",
-        params![p.id, p.name, p.description, p.archived as i64, p.created_at, p.updated_at],
+        params![
+            p.id,
+            p.name,
+            p.description,
+            p.archived as i64,
+            p.created_at,
+            p.updated_at
+        ],
     )?;
     Ok(())
 }
@@ -1574,8 +1795,18 @@ pub fn insert_events_conn(conn: &Connection, events: &[SessionEvent]) -> Result<
         );
         prev_hash = hash.clone();
         ins.execute(params![
-            e.id, e.session_id, e.sequence, e.source_event_id, e.source_generation,
-            e.source_position, hash, e.ts, e.kind, e.text, e.raw_ref, e.metadata.to_string()
+            e.id,
+            e.session_id,
+            e.sequence,
+            e.source_event_id,
+            e.source_generation,
+            e.source_position,
+            hash,
+            e.ts,
+            e.kind,
+            e.text,
+            e.raw_ref,
+            e.metadata.to_string()
         ])?;
     }
     Ok(())
@@ -1584,18 +1815,23 @@ pub fn insert_events_conn(conn: &Connection, events: &[SessionEvent]) -> Result<
 pub fn upsert_source_cursor_conn(conn: &Connection, c: &SourceCursor) -> Result<()> {
     conn.execute(
         "INSERT INTO session_cursors
-         (session_id, last_sequence, last_seen_size, source_file_identity, generation, byte_offset, mtime, prefix_hash, processed_sequence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+         (session_id, last_sequence, last_seen_size, source_file_identity, generation, byte_offset, mtime, prefix_hash, identity_tail_hash, processed_sequence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                  COALESCE((SELECT processed_sequence FROM session_cursors WHERE session_id = ?1), 0))
          ON CONFLICT(session_id) DO UPDATE SET
            last_sequence = ?2, last_seen_size = ?3, source_file_identity = ?4,
-           generation = ?5, byte_offset = ?6, mtime = ?7, prefix_hash = ?8",
-        params![c.session_id, c.last_sequence, c.last_seen_size as i64, c.source_file_identity, c.generation, c.byte_offset as i64, c.mtime, c.prefix_hash],
+           generation = ?5, byte_offset = ?6, mtime = ?7, prefix_hash = ?8, identity_tail_hash = ?9",
+        params![c.session_id, c.last_sequence, c.last_seen_size as i64, c.source_file_identity, c.generation, c.byte_offset as i64, c.mtime, c.prefix_hash, c.identity_tail_hash],
     )?;
     Ok(())
 }
 
-pub fn get_events_conn(conn: &Connection, session_id: &str, after: Option<i64>, limit: i64) -> Result<Vec<SessionEvent>> {
+pub fn get_events_conn(
+    conn: &Connection,
+    session_id: &str,
+    after: Option<i64>,
+    limit: i64,
+) -> Result<Vec<SessionEvent>> {
     let mut st = conn.prepare(
         "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata
          FROM session_events WHERE session_id = ?1 AND sequence > ?2
@@ -1607,7 +1843,11 @@ pub fn get_events_conn(conn: &Connection, session_id: &str, after: Option<i64>, 
     Ok(rows)
 }
 
-pub fn insert_item_conn(conn: &Connection, item: &ContextItem, revision: &ContextItemRevision) -> Result<()> {
+pub fn insert_item_conn(
+    conn: &Connection,
+    item: &ContextItem,
+    revision: &ContextItemRevision,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, supersedes_item_id, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -1739,7 +1979,11 @@ pub fn items_for_workstream_conn(
     workstream_id: &str,
     include_inactive: bool,
 ) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
-    let status_filter = if include_inactive { "" } else { " AND i.status = 'active'" };
+    let status_filter = if include_inactive {
+        ""
+    } else {
+        " AND i.status = 'active'"
+    };
     let sql = format!(
         "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.created_by, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
                 r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
@@ -1883,7 +2127,8 @@ fn row_revision_at(r: &Row, base: usize) -> rusqlite::Result<ContextItemRevision
         item_id: r.get(base + 1)?,
         title: r.get(base + 2).unwrap_or_default(),
         content: r.get(base + 3).unwrap_or_default(),
-        metadata: serde_json::from_str(&r.get::<_, String>(base + 4).unwrap_or_default()).unwrap_or_default(),
+        metadata: serde_json::from_str(&r.get::<_, String>(base + 4).unwrap_or_default())
+            .unwrap_or_default(),
         source_type: r.get(base + 5)?,
         source_ref: r.get(base + 6)?,
         sync_run_id: r.get(base + 7)?,
@@ -1974,7 +2219,9 @@ fn row_sync_run(r: &Row) -> rusqlite::Result<SyncRun> {
         summary: r.get(6)?,
         error: r.get(7)?,
         created_at: r.get(8)?,
-        runtime: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "heuristic".into()),
+        runtime: r
+            .get::<_, Option<String>>(9)?
+            .unwrap_or_else(|| "heuristic".into()),
         delta_fingerprint: r.get(10)?,
         source_generation: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
     })

@@ -37,10 +37,8 @@ fn candidate_dirs() -> Vec<PathBuf> {
             if let Ok(nvm_dir) = std::env::var("NVM_DIR") {
                 let nvm = PathBuf::from(nvm_dir);
                 if let Ok(rd) = std::fs::read_dir(&nvm.join("versions/node")) {
-                    let mut versions: Vec<_> = rd
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .collect();
+                    let mut versions: Vec<_> =
+                        rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
                     versions.sort();
                     if let Some(latest) = versions.pop() {
                         dirs.push(latest.join("bin"));
@@ -75,7 +73,11 @@ fn candidate_file_names(name: &str) -> Vec<String> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|_| vec![".EXE".into(), ".CMD".into(), ".BAT".into()]);
-        let mut out = vec![format!("{}.exe", name), format!("{}.cmd", name), format!("{}.bat", name)];
+        let mut out = vec![
+            format!("{}.exe", name),
+            format!("{}.cmd", name),
+            format!("{}.bat", name),
+        ];
         for e in exts {
             out.push(format!("{}{}", name, e.to_lowercase()));
         }
@@ -125,7 +127,13 @@ fn probe_version(exec: &PathBuf) -> Option<String> {
         use std::io::Read;
         let _ = pipe.read_to_string(&mut stdout);
     }
-    let text = stdout.trim().lines().next().unwrap_or("").trim().to_string();
+    let text = stdout
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if text.is_empty() {
         None
     } else {

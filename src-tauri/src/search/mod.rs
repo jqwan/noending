@@ -9,7 +9,7 @@ use crate::storage::Db;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
-    pub kind: String,      // item | workstream | project | event
+    pub kind: String, // item | workstream | project | event
     pub ref_id: String,
     pub parent_id: String,
     pub title: String,
@@ -41,9 +41,7 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
                         rank: r.get::<_, f64>(5)?,
                     })
                 })?;
-                let hits: Vec<SearchHit> = rows
-                    .filter_map(|r| r.ok())
-                    .collect();
+                let hits: Vec<SearchHit> = rows.filter_map(|r| r.ok()).collect();
                 if !hits.is_empty() || looks_indexed(db, q) {
                     return Ok(hits);
                 }
@@ -58,7 +56,9 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
 
 fn looks_indexed(db: &Db, _q: &str) -> bool {
     db.conn()
-        .query_row("SELECT COUNT(*) > 0 FROM search_index", [], |r| r.get::<_, bool>(0))
+        .query_row("SELECT COUNT(*) > 0 FROM search_index", [], |r| {
+            r.get::<_, bool>(0)
+        })
         .unwrap_or(false)
 }
 

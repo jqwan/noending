@@ -104,11 +104,19 @@ fn real_codex_extracts_mutations() {
     let inputs = noending::sync::extractor::collect_prompt_inputs(&db, &[ws.id.clone()])
         .expect("prompt inputs");
     let out = cli
-        .extract(&session, &events.iter().collect::<Vec<_>>(), &[ws.id.clone()], &inputs)
+        .extract(
+            &session,
+            &events.iter().collect::<Vec<_>>(),
+            &[ws.id.clone()],
+            &inputs,
+        )
         .expect("codex CLI extraction should succeed");
 
     println!("mutations: {:#?}", out.mutations);
-    assert!(!out.mutations.is_empty(), "expected at least one mutation from real model");
+    assert!(
+        !out.mutations.is_empty(),
+        "expected at least one mutation from real model"
+    );
 
     // every resolved ref must point at a REAL event id from the prompt map
     for m in &out.mutations {
@@ -124,17 +132,25 @@ fn real_codex_extracts_mutations() {
             let id = r.strip_prefix("session-event:").expect("session-event ref");
             assert!(
                 events.iter().any(|e| &e.id == id),
-                "ref {} must resolve to a prompt event", r
+                "ref {} must resolve to a prompt event",
+                r
             );
         }
     }
 
     let has_decision = out.mutations.iter().any(|m| match m {
-        noending::sync::ContextMutation::Add { item_kind, workstream_id, .. } =>
-            item_kind == "decision" && workstream_id == "ws-test-1",
+        noending::sync::ContextMutation::Add {
+            item_kind,
+            workstream_id,
+            ..
+        } => item_kind == "decision" && workstream_id == "ws-test-1",
         _ => false,
     });
-    assert!(has_decision, "model should extract the decision, got {:#?}", out.mutations);
+    assert!(
+        has_decision,
+        "model should extract the decision, got {:#?}",
+        out.mutations
+    );
 }
 
 #[test]
@@ -156,7 +172,10 @@ fn real_pi_local_qwen_headless() {
     let out = run_headless(&cmd, 180).expect("pi headless run");
     let text = clean_exec_stdout(&out.stdout);
     println!("pi qwen output: {}", text);
-    assert!(text.contains("方案A"), "pi+qwen should echo the fixture decision");
+    assert!(
+        text.contains("方案A"),
+        "pi+qwen should echo the fixture decision"
+    );
 }
 
 #[test]
@@ -175,13 +194,22 @@ fn real_codex_assistant_chat_roundtrip() {
     };
     db.upsert_workstream(&ws).unwrap();
 
-    let reply = noending::assistant::AssistantService::chat(&db, None, "现在有哪些 Workstream？用一句话概括。")
-        .expect("assistant chat should succeed");
+    let reply = noending::assistant::AssistantService::chat(
+        &db,
+        None,
+        "现在有哪些 Workstream？用一句话概括。",
+    )
+    .expect("assistant chat should succeed");
     println!("assistant: {} [runtime={}]", reply.content, reply.runtime);
     assert!(!reply.content.is_empty());
-    assert!(reply.content.contains("品牌") || reply.content.contains("Workstream"),
-        "answer should reference the workstream list");
-    assert!(reply.action.is_none(), "a read-only question must not propose actions");
+    assert!(
+        reply.content.contains("品牌") || reply.content.contains("Workstream"),
+        "answer should reference the workstream list"
+    );
+    assert!(
+        reply.action.is_none(),
+        "a read-only question must not propose actions"
+    );
 }
 
 #[test]
@@ -195,7 +223,10 @@ fn parse_mutations_validates_candidate_ids() {
     }];
     let text = r##" [{"op":"add","workstream_id":"nope","item_kind":"decision","title":"x","content":"y","refs":["#1"]}] "##;
     let out = parse_mutations(text, &map, &["ws1".into()], &session).unwrap();
-    assert!(out.mutations.is_empty(), "mutations outside candidates must be dropped");
+    assert!(
+        out.mutations.is_empty(),
+        "mutations outside candidates must be dropped"
+    );
 }
 
 #[test]

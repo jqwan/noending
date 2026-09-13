@@ -14,25 +14,50 @@ use rusqlite::Connection;
 
 use crate::domain::{ContextConflict, ContextItem};
 use crate::error::Result;
-use crate::sync::policy::{Actor, AuthorityPolicy, MutationDecision, Op};
-use crate::sync::{create_item_conn, ContextMutation, MergeContext};
 use crate::storage::{
     apply_status_change_conn, get_item_conn, get_revision_conn, insert_conflict_conn,
     insert_item_conn, insert_revision_conn, items_for_workstream_conn, new_id, now,
     set_item_head_conn, upsert_workstream_conn,
 };
+use crate::sync::policy::{Actor, AuthorityPolicy, MutationDecision, Op};
+use crate::sync::{create_item_conn, ContextMutation, MergeContext};
 
 pub struct MergeEngine;
 
 impl MergeEngine {
     /// Returns true when the mutation was applied, false when skipped.
     /// `conn` is always the transaction held by the sync run.
-    pub fn apply(&self, conn: &Connection, m: &ContextMutation, ctx: &MergeContext) -> Result<bool> {
+    pub fn apply(
+        &self,
+        conn: &Connection,
+        m: &ContextMutation,
+        ctx: &MergeContext,
+    ) -> Result<bool> {
         match m {
-            ContextMutation::Add { workstream_id, item_kind, title, content, source_refs, authority } => {
-                self.apply_add(conn, ctx, workstream_id, item_kind, title, content, source_refs, authority)
-            }
-            ContextMutation::Update { item_id, title, content, source_refs, .. } => {
+            ContextMutation::Add {
+                workstream_id,
+                item_kind,
+                title,
+                content,
+                source_refs,
+                authority,
+            } => self.apply_add(
+                conn,
+                ctx,
+                workstream_id,
+                item_kind,
+                title,
+                content,
+                source_refs,
+                authority,
+            ),
+            ContextMutation::Update {
+                item_id,
+                title,
+                content,
+                source_refs,
+                ..
+            } => {
                 let Some(item) = get_item_conn(conn, item_id)? else {
                     return Ok(false); // deterministic skip: nothing to update
                 };
@@ -49,7 +74,13 @@ impl MergeEngine {
                     _ => Ok(false),
                 }
             }
-            ContextMutation::Supersede { item_id, title, content, source_refs, authority } => {
+            ContextMutation::Supersede {
+                item_id,
+                title,
+                content,
+                source_refs,
+                authority,
+            } => {
                 let Some(old) = get_item_conn(conn, item_id)? else {
                     return Ok(false);
                 };
@@ -98,7 +129,10 @@ impl MergeEngine {
                     _ => Ok(false),
                 }
             }
-            ContextMutation::Resolve { item_id, source_refs } => {
+            ContextMutation::Resolve {
+                item_id,
+                source_refs,
+            } => {
                 let Some(item) = get_item_conn(conn, item_id)? else {
                     return Ok(false);
                 };
@@ -131,7 +165,11 @@ impl MergeEngine {
                     _ => Ok(false),
                 }
             }
-            ContextMutation::CreateWorkstream { project_id, title, reason } => {
+            ContextMutation::CreateWorkstream {
+                project_id,
+                title,
+                reason,
+            } => {
                 // Workstream is the core continuity unit; Project is an
                 // optional organization layer. Creating one without a
                 // project home is explicitly allowed.
@@ -148,7 +186,14 @@ impl MergeEngine {
                 upsert_workstream_conn(conn, &w)?;
                 Ok(true)
             }
-            ContextMutation::Conflict { workstream_id, item_id, title, content, source_refs, .. } => {
+            ContextMutation::Conflict {
+                workstream_id,
+                item_id,
+                title,
+                content,
+                source_refs,
+                ..
+            } => {
                 // The model flagged disagreement with an existing item:
                 // materialize both sides as a ContextConflict.
                 let existing = if item_id.is_empty() {
@@ -168,17 +213,27 @@ impl MergeEngine {
                     Some(&ctx.run_id),
                     &format!("sync:{}", ctx.runtime),
                 )?;
-                insert_conflict_conn(conn, &ContextConflict {
-                    id: new_id(),
-                    workstream_id: workstream_id.clone(),
-                    left_item_id: existing.as_ref().map(|i| i.id.clone()).unwrap_or_else(|| right.id.clone()),
-                    right_item_id: if existing.is_some() { Some(right.id.clone()) } else { None },
-                    conflict_type: "content".into(),
-                    status: "open".into(),
-                    resolution: None,
-                    created_at: now(),
-                    updated_at: now(),
-                })?;
+                insert_conflict_conn(
+                    conn,
+                    &ContextConflict {
+                        id: new_id(),
+                        workstream_id: workstream_id.clone(),
+                        left_item_id: existing
+                            .as_ref()
+                            .map(|i| i.id.clone())
+                            .unwrap_or_else(|| right.id.clone()),
+                        right_item_id: if existing.is_some() {
+                            Some(right.id.clone())
+                        } else {
+                            None
+                        },
+                        conflict_type: "content".into(),
+                        status: "open".into(),
+                        resolution: None,
+                        created_at: now(),
+                        updated_at: now(),
+                    },
+                )?;
                 Ok(true)
             }
         }
@@ -247,14 +302,15 @@ impl MergeEngine {
         source_refs: &[String],
     ) -> Result<()> {
         let rev = get_revision_conn(conn, user_item.current_revision_id.as_deref().unwrap_or(""))?;
-        let user_content = rev
-            .map(|r| r.content)
-            .unwrap_or_default();
+        let user_content = rev.map(|r| r.content).unwrap_or_default();
         let right = create_item_conn(
             conn,
             &user_item.workstream_id,
             "finding",
-            &format!("与用户上下文可能冲突：{}", crate::adapters::truncate_text(title, 60)),
+            &format!(
+                "与用户上下文可能冲突：{}",
+                crate::adapters::truncate_text(title, 60)
+            ),
             &format!(
                 "用户已确认：{}\n\nAgent 新信息：{}\n\n来源：{}",
                 user_content, title, content
@@ -265,17 +321,20 @@ impl MergeEngine {
             Some(&ctx.run_id),
             &format!("sync:{}", ctx.runtime),
         )?;
-        insert_conflict_conn(conn, &ContextConflict {
-            id: new_id(),
-            workstream_id: user_item.workstream_id.clone(),
-            left_item_id: user_item.id.clone(),
-            right_item_id: Some(right.id.clone()),
-            conflict_type: "authority".into(),
-            status: "open".into(),
-            resolution: None,
-            created_at: now(),
-            updated_at: now(),
-        })?;
+        insert_conflict_conn(
+            conn,
+            &ContextConflict {
+                id: new_id(),
+                workstream_id: user_item.workstream_id.clone(),
+                left_item_id: user_item.id.clone(),
+                right_item_id: Some(right.id.clone()),
+                conflict_type: "authority".into(),
+                status: "open".into(),
+                resolution: None,
+                created_at: now(),
+                updated_at: now(),
+            },
+        )?;
         Ok(())
     }
 }

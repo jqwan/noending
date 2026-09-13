@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use serde::Serialize;
 
-use crate::domain::{ContextConflict, CORE_ITEM_TYPES, Session};
+use crate::domain::{ContextConflict, Session, CORE_ITEM_TYPES};
 use crate::error::Result;
 use crate::storage::{new_id, Db};
 
@@ -59,10 +59,7 @@ pub struct AggregatedContext {
 }
 
 /// L1 projection: active items of core types, in canonical order.
-pub fn resolve_core_context(
-    db: &Db,
-    workstream_id: &str,
-) -> Result<Vec<ContextSection>> {
+pub fn resolve_core_context(db: &Db, workstream_id: &str) -> Result<Vec<ContextSection>> {
     let items = db.items_for_workstream(workstream_id, false)?;
     let mut out = Vec::new();
     for want in CORE_ITEM_TYPES {
@@ -93,7 +90,9 @@ pub fn aggregate_context(db: &Db, workstream_ids: &[String]) -> Result<Aggregate
     let mut conflicts = Vec::new();
 
     for (i, ws_id) in workstream_ids.iter().enumerate() {
-        let Some(ws) = db.get_workstream(ws_id)? else { continue };
+        let Some(ws) = db.get_workstream(ws_id)? else {
+            continue;
+        };
         let view = WorkstreamContextView {
             workstream: ws,
             is_primary: i == 0,
@@ -123,6 +122,13 @@ pub fn aggregate_context(db: &Db, workstream_ids: &[String]) -> Result<Aggregate
 }
 
 /// Build the markdown bundle for a set of workstreams.
+///
+/// The token budget applies at SECTION SELECTION time, before rendering:
+/// `bundle.sections` contains exactly the sections the rendered markdown
+/// delivers — never more. Delivery snapshots are derived from `sections`,
+/// so filtering after rendering (the old behavior) would record context as
+/// "delivered" that the agent never received, and the next resume would
+/// skip it as a false delta.
 pub fn build_bundle(
     db: &Db,
     mode: &str,
@@ -199,21 +205,18 @@ pub fn build_bundle(
         }
     }
 
-    let markdown = render_markdown(mode, &sections);
-    let approx_tokens = markdown.len() / 3; // rough CJK/EN mix heuristic
-    let mut bundle = SessionContextBundle {
+    // Sections fit the budget or they are not delivered — and what is not
+    // delivered must not appear in `sections` (see doc above).
+    let (markdown, delivered_sections) =
+        render_markdown_within_budget(mode, &sections, token_budget * 3);
+    Ok(SessionContextBundle {
         bundle_id: new_id(),
         mode: mode.to_string(),
         workstream_ids: workstream_ids.to_vec(),
-        sections,
-        markdown: markdown.clone(),
-        approx_tokens,
-    };
-    if approx_tokens > token_budget {
-        bundle.markdown = truncate_markdown(&markdown, token_budget * 3);
-        bundle.approx_tokens = token_budget;
-    }
-    Ok(bundle)
+        sections: delivered_sections,
+        approx_tokens: markdown.len() / 3, // rough CJK/EN mix heuristic
+        markdown,
+    })
 }
 
 /// Resume = Current − LastDelivered. Uses the recorded revision snapshot,
@@ -248,7 +251,11 @@ fn build_resume_sections(
             // This workstream was never delivered to this session: inject
             // its full core + top extended items (first delivery).
             any_change = true;
-            for s in agg.core.iter().filter(|s| s.workstream_id.as_deref() == Some(ws_id)) {
+            for s in agg
+                .core
+                .iter()
+                .filter(|s| s.workstream_id.as_deref() == Some(ws_id))
+            {
                 sections.push(s.clone());
             }
             let items = db.items_for_workstream(ws_id, false)?;
@@ -348,9 +355,11 @@ fn conflict_section(db: &Db, c: &ContextConflict) -> Result<ContextSection> {
         None => "(已删除)".into(),
     };
     let right_desc = match &right {
-        Some(i) => match i.current_revision_id.as_deref().and_then(|rid| {
-            db.get_revision(rid).ok().flatten()
-        }) {
+        Some(i) => match i
+            .current_revision_id
+            .as_deref()
+            .and_then(|rid| db.get_revision(rid).ok().flatten())
+        {
             Some(r) => format!(
                 "{}：{}",
                 r.title,
@@ -371,7 +380,11 @@ fn conflict_section(db: &Db, c: &ContextConflict) -> Result<ContextSection> {
     })
 }
 
-fn render_markdown(mode: &str, sections: &[ContextSection]) -> String {
+fn render_markdown_within_budget(
+    mode: &str,
+    sections: &[ContextSection],
+    max_chars: usize,
+) -> (String, Vec<ContextSection>) {
     let mut md = String::new();
     md.push_str("# NoEnding Context Bundle\n\n");
     md.push_str(match mode {
@@ -379,6 +392,20 @@ fn render_markdown(mode: &str, sections: &[ContextSection]) -> String {
         _ => "> 这是当前 Workstream 的有效语义状态（不是聊天记录）。请基于以下上下文继续推进。\n\n",
     });
 
+    let mut delivered = Vec::new();
+    for s in sections {
+        let block = render_section(s);
+        if md.len() + block.len() > max_chars {
+            md.push_str("\n\n… (上下文因预算被截断)\n");
+            break;
+        }
+        md.push_str(&block);
+        delivered.push(s.clone());
+    }
+    (md, delivered)
+}
+
+fn render_section(s: &ContextSection) -> String {
     let labels = [
         ("workstream_header", "Workstream"),
         ("related_workstream_header", "Related Workstream"),
@@ -393,51 +420,37 @@ fn render_markdown(mode: &str, sections: &[ContextSection]) -> String {
         ("conflict", "New Conflicts"),
     ];
 
-    for s in sections {
-        let label = labels
-            .iter()
-            .find(|(k, _)| *k == s.kind)
-            .map(|(_, l)| l.to_string())
-            .unwrap_or_else(|| format!("Item ({})", s.kind));
-        match s.kind.as_str() {
-            "workstream_header" | "related_workstream_header" => {
-                if s.kind == "related_workstream_header" {
-                    md.push_str(&format!("## {} — Related Workstream\n\n", s.title));
-                } else {
-                    md.push_str(&format!("## {}\n\n", s.title));
-                }
-                if !s.content.is_empty() {
-                    md.push_str(&s.content);
-                    md.push_str("\n\n");
-                }
+    let label = labels
+        .iter()
+        .find(|(k, _)| *k == s.kind)
+        .map(|(_, l)| l.to_string())
+        .unwrap_or_else(|| format!("Item ({})", s.kind));
+    let mut md = String::new();
+    match s.kind.as_str() {
+        "workstream_header" | "related_workstream_header" => {
+            if s.kind == "related_workstream_header" {
+                md.push_str(&format!("## {} — Related Workstream\n\n", s.title));
+            } else {
+                md.push_str(&format!("## {}\n\n", s.title));
             }
-            _ => {
-                md.push_str(&format!("### {}\n", label));
-                md.push_str(&format!("**{}**\n", s.title));
-                if !s.content.is_empty() && s.content != s.title {
-                    md.push_str(&format!("{}\n", s.content));
-                }
-                if let Some(src) = &s.source_ref {
-                    md.push_str(&format!("> 来源: {}\n", src));
-                }
-                md.push('\n');
+            if !s.content.is_empty() {
+                md.push_str(&s.content);
+                md.push_str("\n\n");
             }
+        }
+        _ => {
+            md.push_str(&format!("### {}\n", label));
+            md.push_str(&format!("**{}**\n", s.title));
+            if !s.content.is_empty() && s.content != s.title {
+                md.push_str(&format!("{}\n", s.content));
+            }
+            if let Some(src) = &s.source_ref {
+                md.push_str(&format!("> 来源: {}\n", src));
+            }
+            md.push('\n');
         }
     }
     md
-}
-
-fn truncate_markdown(md: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for block in md.split("\n\n") {
-        if out.len() + block.len() > max_chars {
-            out.push_str("\n\n… (上下文因预算被截断)");
-            break;
-        }
-        out.push_str(block);
-        out.push_str("\n\n");
-    }
-    out
 }
 
 fn normalize_title(t: &str) -> String {

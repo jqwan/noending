@@ -103,7 +103,11 @@ macro_rules! identity_suite {
             .unwrap();
             let s = session_row(&db, $agent, &file);
 
-            assert_eq!(ingest(&db, adapter, &s), 3, "initial ingest stores all events");
+            assert_eq!(
+                ingest(&db, adapter, &s),
+                3,
+                "initial ingest stores all events"
+            );
             let all = db.get_events(&s.id, None, 100).unwrap();
             assert_eq!(all.len(), 3);
             assert_eq!(
@@ -112,16 +116,25 @@ macro_rules! identity_suite {
                 "sequences are app-assigned and dense on first ingest"
             );
             assert!(all.iter().all(|e| e.source_generation == 0));
-            assert!(all.iter().all(|e| !e.id.is_empty()), "every event has a stable id");
+            assert!(
+                all.iter().all(|e| !e.id.is_empty()),
+                "every event has a stable id"
+            );
 
             let c = db.get_source_cursor(&s.id).unwrap();
             assert_eq!(c.generation, 0);
-            assert_eq!(c.byte_offset as usize, std::fs::metadata(&file).unwrap().len() as usize);
+            assert_eq!(
+                c.byte_offset as usize,
+                std::fs::metadata(&file).unwrap().len() as usize
+            );
             assert!(!c.source_file_identity.is_empty());
 
             // ---- append: only the delta is stored ----
             std::thread::sleep(std::time::Duration::from_millis(20));
-            let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
             use std::io::Write;
             writeln!(f, "{}", $asst_line("assistant", "appended assistant reply")).unwrap();
             writeln!(f, "{}", $user_line("user", "appended user message")).unwrap();
@@ -151,7 +164,11 @@ macro_rules! identity_suite {
             )
             .unwrap();
 
-            assert_eq!(ingest(&db, adapter, &s), 2, "compacted content is new events");
+            assert_eq!(
+                ingest(&db, adapter, &s),
+                2,
+                "compacted content is new events"
+            );
             let all = db.get_events(&s.id, None, 100).unwrap();
             assert_eq!(all.len(), 7, "old history is preserved, never overwritten");
             assert_eq!(
@@ -162,7 +179,11 @@ macro_rules! identity_suite {
             assert_eq!(all.iter().filter(|e| e.source_generation == 1).count(), 2);
 
             // ---- rescan of identical content dedups ----
-            assert_eq!(ingest(&db, adapter, &s), 0, "identical rescan never duplicates");
+            assert_eq!(
+                ingest(&db, adapter, &s),
+                0,
+                "identical rescan never duplicates"
+            );
 
             // ---- file replacement (new identity) ----
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -172,7 +193,11 @@ macro_rules! identity_suite {
                 format!("{}\n", $user_line("user", "brand new session file content")),
             )
             .unwrap();
-            assert_eq!(ingest(&db, adapter, &s), 1, "replaced file is ingested fresh");
+            assert_eq!(
+                ingest(&db, adapter, &s),
+                1,
+                "replaced file is ingested fresh"
+            );
             let c = db.get_source_cursor(&s.id).unwrap();
             assert_eq!(c.generation, 2, "file replacement bumps the generation");
             let all = db.get_events(&s.id, None, 100).unwrap();
@@ -181,9 +206,27 @@ macro_rules! identity_suite {
     };
 }
 
-identity_suite!(codex_truncate_rewrite_dedup, Agent::Codex, noending::adapters::codex::CodexAdapter, codex_line, codex_line);
-identity_suite!(claude_truncate_rewrite_dedup, Agent::ClaudeCode, noending::adapters::claude::ClaudeAdapter, claude_line, claude_line);
-identity_suite!(pi_truncate_rewrite_dedup, Agent::Pi, noending::adapters::pi::PiAdapter, pi_line, pi_line);
+identity_suite!(
+    codex_truncate_rewrite_dedup,
+    Agent::Codex,
+    noending::adapters::codex::CodexAdapter,
+    codex_line,
+    codex_line
+);
+identity_suite!(
+    claude_truncate_rewrite_dedup,
+    Agent::ClaudeCode,
+    noending::adapters::claude::ClaudeAdapter,
+    claude_line,
+    claude_line
+);
+identity_suite!(
+    pi_truncate_rewrite_dedup,
+    Agent::Pi,
+    noending::adapters::pi::PiAdapter,
+    pi_line,
+    pi_line
+);
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a
 /// rewrite: generation bump + rescan, old history intact, new text stored.
@@ -196,7 +239,11 @@ fn same_size_rewrite_is_detected() {
 
     let before = pi_line("user", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let after = pi_line("user", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    assert_eq!(before.len(), after.len(), "fixture lines must be byte-equal in length");
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "fixture lines must be byte-equal in length"
+    );
 
     std::fs::write(&file, format!("{}\n", before)).unwrap();
     let s = session_row(&db, Agent::Pi, &file);
@@ -205,7 +252,11 @@ fn same_size_rewrite_is_detected() {
     std::thread::sleep(std::time::Duration::from_millis(50));
     std::fs::write(&file, format!("{}\n", after)).unwrap();
 
-    assert_eq!(ingest(&db, adapter, &s), 1, "same-size rewrite adds the new text");
+    assert_eq!(
+        ingest(&db, adapter, &s),
+        1,
+        "same-size rewrite adds the new text"
+    );
     let all = db.get_events(&s.id, None, 100).unwrap();
     assert_eq!(all.len(), 2, "history preserved");
     assert_eq!(all[1].source_generation, 1);
@@ -283,17 +334,32 @@ fn identity_dedup_follows_chain_semantics() {
 
     // native agent event ids dedup regardless of chain position
     let native1 = db
-        .append_source_events(&s.id, &[mk_native("line:3", "native-1")], &append(0), "/x.jsonl")
+        .append_source_events(
+            &s.id,
+            &[mk_native("line:3", "native-1")],
+            &append(0),
+            "/x.jsonl",
+        )
         .unwrap();
     assert_eq!(native1.len(), 1);
     let native2 = db
-        .append_source_events(&s.id, &[mk_native("line:4", "native-1")], &append(0), "/x.jsonl")
+        .append_source_events(
+            &s.id,
+            &[mk_native("line:4", "native-1")],
+            &append(0),
+            "/x.jsonl",
+        )
         .unwrap();
     assert_eq!(native2.len(), 0, "native id dedups across positions");
 
     // genuinely new content still inserts
     let third = db
-        .append_source_events(&s.id, &[mk("line:5", "different text")], &append(0), "/x.jsonl")
+        .append_source_events(
+            &s.id,
+            &[mk("line:5", "different text")],
+            &append(0),
+            "/x.jsonl",
+        )
         .unwrap();
     assert_eq!(third.len(), 1);
 }
@@ -322,7 +388,10 @@ fn partial_trailing_line_is_not_ingested() {
 
     // finish the line
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
     use std::io::Write;
     let rest = format!(
         "age\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"now complete\"}}]}},\"timestamp\":\"2026-09-13T10:00:01Z\"}}\n"
@@ -365,15 +434,127 @@ fn rewrite_grow_is_detected_not_treated_as_append() {
 
     // If this were misread as an append from offset_before, the parse would
     // start mid-line and drop the rewritten head. It must be a full rescan.
-    assert_eq!(ingest(&db, adapter, &s), 3, "all rewritten lines are new events");
+    assert_eq!(
+        ingest(&db, adapter, &s),
+        3,
+        "all rewritten lines are new events"
+    );
     let all = db.get_events(&s.id, None, 100).unwrap();
-    assert_eq!(all.len(), 5, "history preserved, rewritten content appended");
-    assert_eq!(all.iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
-    assert_eq!(all[2].source_generation, 1, "rewritten content carries the new generation");
+    assert_eq!(
+        all.len(),
+        5,
+        "history preserved, rewritten content appended"
+    );
+    assert_eq!(
+        all.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5]
+    );
+    assert_eq!(
+        all[2].source_generation, 1,
+        "rewritten content carries the new generation"
+    );
     assert!(all[2].text.as_deref().unwrap().contains("rewritten first"));
     let c = db.get_source_cursor(&s.id).unwrap();
     assert_eq!(c.generation, 1, "generation bumped exactly once");
     assert!(c.byte_offset > offset_before);
+}
+
+/// After a compact + dedup re-scan, the identity chain must continue from
+/// the CURRENT source tail (tracked on the cursor), not from the event
+/// store's last row: the store keeps newer history the source no longer
+/// has (append-only), and chaining an append from the store tail would make
+/// that append invisible to the next full re-scan (duplicated as "new").
+#[test]
+fn append_after_compact_chains_from_source_tail_not_store_tail() {
+    let db = open_db("compact-tail");
+    let dir = unique_dir("compact-tail");
+    let file = dir.join("s.jsonl");
+    let adapter: &dyn AgentAdapter = &noending::adapters::pi::PiAdapter;
+
+    let text = |c: char| {
+        format!(
+            "event {c} {}{}{}{}{}{}{}{}{}{}",
+            c, c, c, c, c, c, c, c, c, c
+        )
+    };
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            pi_line("user", &text('A')),
+            pi_line("user", &text('B')),
+            pi_line("user", &text('C')),
+            pi_line("user", &text('D'))
+        ),
+    )
+    .unwrap();
+    let s = session_row(&db, Agent::Pi, &file);
+    assert_eq!(ingest(&db, adapter, &s), 4);
+    let store_tail_before = db.get_source_cursor(&s.id).unwrap().identity_tail_hash;
+    assert!(
+        !store_tail_before.is_empty(),
+        "cursor tracks the source chain tail"
+    );
+
+    // the source is compacted to A,B: the rescan dedups to zero new rows,
+    // but the cursor tail must move BACK to B's identity hash
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n{}\n",
+            pi_line("user", &text('A')),
+            pi_line("user", &text('B'))
+        ),
+    )
+    .unwrap();
+    assert_eq!(ingest(&db, adapter, &s), 0, "compacted prefix dedups");
+
+    let hash_of = |t: &str| -> String {
+        db.conn()
+            .query_row(
+                "SELECT source_identity_hash FROM session_events WHERE session_id = ?1 AND text = ?2",
+                rusqlite::params![s.id, t],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let tail = db.get_source_cursor(&s.id).unwrap().identity_tail_hash;
+    assert_ne!(
+        tail, store_tail_before,
+        "tail follows the source, not the store"
+    );
+    assert_eq!(
+        tail,
+        hash_of(&text('B')),
+        "tail == B's chain hash, though the store still ends at D"
+    );
+
+    // append E: must chain from B (the source tail), not from D
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    use std::io::Write;
+    writeln!(f, "{}", pi_line("user", &text('E'))).unwrap();
+    drop(f);
+    assert_eq!(ingest(&db, adapter, &s), 1, "E is new");
+    let e_hash = hash_of(&text('E'));
+
+    // full re-scan of A,B,E: E must dedup — it did NOT chain from the
+    // stale store tail (the bug would duplicate it here)
+    db.reset_session_source_cursor(&s.id).unwrap();
+    assert_eq!(
+        ingest(&db, adapter, &s),
+        0,
+        "E survives a full re-scan without duplication"
+    );
+    assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 5);
+    assert_eq!(
+        db.get_source_cursor(&s.id).unwrap().identity_tail_hash,
+        e_hash
+    );
 }
 
 /// Re-ingest must NEVER delete the event store: ids survive, SourceReferences
@@ -396,23 +577,143 @@ fn reingest_preserves_event_ids_and_dedups() {
     .unwrap();
     let s = session_row(&db, Agent::Pi, &file);
     assert_eq!(ingest(&db, adapter, &s), 2);
-    let ids_before: Vec<String> = db.get_events(&s.id, None, 100).unwrap().into_iter().map(|e| e.id).collect();
+    let ids_before: Vec<String> = db
+        .get_events(&s.id, None, 100)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
 
     // simulate 重新入库: rewind the read cursor, keep the event store
     db.reset_session_source_cursor(&s.id).unwrap();
-    assert_eq!(ingest(&db, adapter, &s), 0, "re-scan of unchanged source adds nothing");
+    assert_eq!(
+        ingest(&db, adapter, &s),
+        0,
+        "re-scan of unchanged source adds nothing"
+    );
 
     let all = db.get_events(&s.id, None, 100).unwrap();
     let ids_after: Vec<String> = all.iter().map(|e| e.id.clone()).collect();
-    assert_eq!(ids_after, ids_before, "event ids (and SourceReferences) survive re-ingest");
-    assert_eq!(all.iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(
+        ids_after, ids_before,
+        "event ids (and SourceReferences) survive re-ingest"
+    );
+    assert_eq!(
+        all.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 
     // new source content after the rewind still appends normally
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
     use std::io::Write;
-    writeln!(f, "{}", pi_line("user", "fresh message after reingest ccccccccccccccc")).unwrap();
+    writeln!(
+        f,
+        "{}",
+        pi_line("user", "fresh message after reingest ccccccccccccccc")
+    )
+    .unwrap();
     drop(f);
-    assert_eq!(ingest(&db, adapter, &s), 1, "new content appends after the re-scan");
+    assert_eq!(
+        ingest(&db, adapter, &s),
+        1,
+        "new content appends after the re-scan"
+    );
     assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 3);
+}
+
+/// Databases created before the chained adjacency identity (user_version 2)
+/// must be migrated on open: every session's identity hashes are recomputed
+/// in sequence order, so the first full re-scan after the upgrade dedups
+/// instead of re-inserting every pre-upgrade event as "new".
+#[test]
+fn migration_v3_recomputes_legacy_identity_hashes() {
+    let dir = unique_dir("identity-migration");
+    let path = dir.join("test.db");
+    let text_a = "legacy message one aaaaaaaaaaaaaaaaaaaaaa";
+    let text_b = "legacy message two bbbbbbbbbbbbbbbbbbbbbb";
+
+    let mk = |text: &str| noending::domain::ParsedEvent {
+        source_event_id: None,
+        source_position: "line:1".into(),
+        ts: Some("t".into()),
+        kind: "user_message".into(),
+        text: Some(text.into()),
+        metadata: serde_json::json!({}),
+    };
+    let rescan = noending::domain::SourceCursorUpdate {
+        file_identity: "unix:dev:1:ino:9".into(),
+        generation: 0,
+        byte_offset: 10,
+        last_seen_size: 10,
+        mtime: None,
+        start_byte_offset: 0,
+        prefix_hash: String::new(),
+    };
+    let append = noending::domain::SourceCursorUpdate {
+        file_identity: "unix:dev:1:ino:9".into(),
+        generation: 0,
+        byte_offset: 20,
+        last_seen_size: 20,
+        mtime: None,
+        start_byte_offset: 10,
+        prefix_hash: String::new(),
+    };
+
+    // seed a database with the CURRENT chained identity
+    let session_id = {
+        let db = Db::open(&path).unwrap();
+        let s = session_row(&db, Agent::Pi, &dir.join("x.jsonl"));
+        db.append_source_events(&s.id, &[mk(text_a)], &rescan, "/x.jsonl")
+            .unwrap();
+        db.append_source_events(&s.id, &[mk(text_b)], &append, "/x.jsonl")
+            .unwrap();
+        s.id
+    };
+
+    // regress it to a pre-v3 database: content hashes the chain cannot
+    // reproduce, empty tail, user_version 2
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE session_events SET source_identity_hash = 'legacy:' || id",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE session_cursors SET identity_tail_hash = ''", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+    }
+
+    // reopen: the v3 migration recomputes identities per session
+    let db = Db::open(&path).unwrap();
+    let user_version: i64 = db
+        .conn()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(user_version, 3, "schema version advanced");
+
+    // the recomputed hashes match a fresh chained scan: a full re-scan of
+    // A,B dedups to zero — pre-migration it would re-insert both events
+    let s = db.get_session(&session_id).unwrap().unwrap();
+    let again = db
+        .append_source_events(&s.id, &[mk(text_a), mk(text_b)], &rescan, "/x.jsonl")
+        .unwrap();
+    assert_eq!(again.len(), 0, "migrated identities dedup on re-scan");
+    assert_eq!(db.event_count(&s.id).unwrap(), 2);
+    let tail = db.get_source_cursor(&s.id).unwrap().identity_tail_hash;
+    assert_eq!(
+        tail,
+        db.conn()
+            .query_row(
+                "SELECT source_identity_hash FROM session_events WHERE session_id = ?1 AND text = ?2",
+                rusqlite::params![s.id, text_b],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+        "migration bootstrapped the cursor tail from the store"
+    );
 }

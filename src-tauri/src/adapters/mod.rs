@@ -165,7 +165,9 @@ pub fn detect_format(path: &Path) -> Option<Agent> {
         if t.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+            continue;
+        };
         parsed += 1;
         if let Some(agent) = fingerprint_line(&v) {
             return Some(agent);
@@ -191,9 +193,7 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
     // Claude event chain: sessionId plus the parentUuid/uuid pair.
     // Housekeeping lines (queue-operation etc.) carry sessionId alone and
     // are deliberately not decisive.
-    if v.get("sessionId").is_some()
-        && (v.get("parentUuid").is_some() || v.get("uuid").is_some())
-    {
+    if v.get("sessionId").is_some() && (v.get("parentUuid").is_some() || v.get("uuid").is_some()) {
         return Some(Agent::ClaudeCode);
     }
     // Pi: self-describing session header, or event lines with a parentId
@@ -339,9 +339,16 @@ pub fn read_jsonl_delta(
             Ok(v) => v,
             Err(_) => continue,
         };
-        let ts = v.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+        let ts = v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
         if let Some(p) = parse_line(idx, &v) {
-            if p.text.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true) {
+            if p.text
+                .as_deref()
+                .map(|t| t.trim().is_empty())
+                .unwrap_or(true)
+            {
                 continue;
             }
             events.push(ParsedEvent {
@@ -506,7 +513,8 @@ mod fingerprint_tests {
         assert_eq!(fingerprint_line(&queue_op), None);
 
         // Pi: self-describing session header, or provider/modelId/thinkingLevel lines
-        let pi_header = serde_json::json!({"type": "session", "id": "p1", "cwd": "/x", "version": 3});
+        let pi_header =
+            serde_json::json!({"type": "session", "id": "p1", "cwd": "/x", "version": 3});
         assert_eq!(fingerprint_line(&pi_header), Some(Agent::Pi));
         let pi_event = serde_json::json!({
             "type": "message", "id": "m1", "parentId": "p1",
@@ -546,7 +554,9 @@ mod fingerprint_tests {
     fn real_agent_files_match_fingerprints() {
         use crate::platform::paths::resolve_agent_data_dir;
         for agent in Agent::all() {
-            let Some(root) = resolve_agent_data_dir(agent) else { continue };
+            let Some(root) = resolve_agent_data_dir(agent) else {
+                continue;
+            };
             if !root.is_dir() {
                 continue;
             }
@@ -554,7 +564,9 @@ mod fingerprint_tests {
             let mut skipped = 0usize;
             let mut stack = vec![root];
             while let Some(dir) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+                let Ok(rd) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
                 for entry in rd.filter_map(|e| e.ok()) {
                     let p = entry.path();
                     if p.is_dir() {
@@ -580,7 +592,8 @@ mod fingerprint_tests {
                     // history.jsonl) legitimately fingerprint as None.
                     match detect_format(&p) {
                         Some(detected) => assert_eq!(
-                            detected, agent,
+                            detected,
+                            agent,
                             "cross-agent misattribution: {}",
                             p.display()
                         ),
