@@ -20,9 +20,12 @@ pub struct Db(pub Connection);
 /// migrate(); higher versions refuse to open.
 ///
 /// History: v2 added `prefix_hash` / `context_bundle_revisions`; v3 added
-/// `identity_tail_hash` and recomputes legacy event identity hashes for the
-/// chained adjacency identity (see [`event_identity_hash`]).
-pub const SCHEMA_VERSION: i64 = 3;
+/// `identity_tail_hash` and (unsound for stores that held superseded history
+/// from pre-upgrade rewrites) recomputed identity hashes in store order; v4
+/// replaced that with a lazy, source-driven migration — legacy events carry
+/// a claimable alias and are re-identified from the REAL source on the next
+/// full re-scan, event ids preserved.
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -74,6 +77,18 @@ pub fn event_identity_hash(
         write!(out, "{:02x}", b).ok();
     }
     out
+}
+
+/// First component of the PRE-chain (≤ v2) fallback identity. Exists only
+/// for the v4 migration alias: legacy rows are claimed onto the chained
+/// identity by reproducing this exact historical hash from their own content.
+pub const LEGACY_IDENTITY_FALLBACK: &str = "-";
+
+/// Identity a fallback event (no native Agent id) carried before the chained
+/// adjacency identity (≤ v2): content-only, position-independent. Byte-exact
+/// historical format — never used for new events.
+pub fn legacy_fallback_identity_hash(kind: &str, ts: Option<&str>, text: Option<&str>) -> String {
+    event_identity_hash(LEGACY_IDENTITY_FALLBACK, None, kind, ts, text)
 }
 
 impl Db {
@@ -165,6 +180,7 @@ impl Db {
               source_generation INTEGER NOT NULL DEFAULT 0,
               source_position TEXT NOT NULL DEFAULT '',
               source_identity_hash TEXT NOT NULL,
+              legacy_identity_hash TEXT,
               ts TEXT,
               kind TEXT NOT NULL,
               text TEXT,
@@ -358,6 +374,7 @@ impl Db {
             "ALTER TABLE session_cursors ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE session_cursors ADD COLUMN identity_tail_hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE launch_intents ADD COLUMN context_bundle_revisions TEXT",
+            "ALTER TABLE session_events ADD COLUMN legacy_identity_hash TEXT",
         ] {
             if let Err(e) = self.0.execute_batch(stmt) {
                 if !e.to_string().contains("duplicate column name") {
@@ -368,85 +385,54 @@ impl Db {
 
         register_binding_rank_fn(&self.0)?;
 
-        // v2 → v3: legacy fallback identity hashes predate the chained
-        // adjacency identity and must be recomputed once, or the first full
-        // re-scan after the upgrade would re-insert every pre-upgrade event.
-        if current_version < 3 {
-            self.recompute_event_identity_hashes()?;
+        // v2/v3 → v4: pre-chain databases keep legacy event identities. The
+        // append-only store is NOT a linear chain of the current source (a
+        // rewrite/compact leaves superseded history behind), so hashes cannot
+        // be recomputed from the store — they are re-derived LAZILY from the
+        // real source: every legacy fallback event receives a claimable
+        // alias, read cursors are rewound, and the next full re-scan claims
+        // each event onto the new chained identity (event ids — and every
+        // SourceReference to them — never change).
+        if current_version < 4 {
+            self.migrate_legacy_identity_aliases()?;
         }
 
         self.0.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
 
-    /// One-time identity migration (user_version < 3): recompute every
-    /// session's `source_identity_hash` in sequence order with the current
-    /// chained semantics — native-id events hash their id (unchanged), the
-    /// rest chain from the previous event starting at
-    /// [`IDENTITY_GENESIS`]. Event ids never change, so SourceReferences
-    /// stay resolvable; the UNIQUE index can only gain uniqueness because a
-    /// chain is strictly more discriminating than the old content hash.
-    /// Also bootstraps each session's cursor `identity_tail_hash` so appends
-    /// chain correctly even before the next full re-scan.
-    fn recompute_event_identity_hashes(&self) -> Result<()> {
-        let session_ids: Vec<String> = {
-            let mut st = self
-                .0
-                .prepare("SELECT DISTINCT session_id FROM session_events")?;
+    /// v4 migration (from v2 and from the shipped-v3 recompute): stamp every
+    /// fallback event (no native Agent id) with its pre-chain legacy identity
+    /// as a claimable alias, and rewind all read cursors so the next sync
+    /// performs a full re-scan. During that re-scan, storage claims each
+    /// legacy row onto the freshly computed chained identity — id preserved,
+    /// duplicates impossible — and the cursor receives the true source-chain
+    /// tail (v3 databases may carry a tail derived from the store, which the
+    /// source, not the store, defines). Native-id events need no migration:
+    /// their identity is identical under both schemes.
+    fn migrate_legacy_identity_aliases(&self) -> Result<()> {
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = {
+            let mut st = self.0.prepare(
+                "SELECT id, kind, ts, text FROM session_events
+                 WHERE source_event_id IS NULL AND legacy_identity_hash IS NULL",
+            )?;
             let rows = st
-                .query_map([], |r| r.get(0))?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
-        for sid in session_ids {
-            self.tx(|tx| {
-                let rows: Vec<(String, Option<String>, String, Option<String>, Option<String>)> = {
-                    let mut st = tx.prepare(
-                        "SELECT id, source_event_id, kind, ts, text FROM session_events
-                         WHERE session_id = ?1 ORDER BY sequence",
-                    )?;
-                    let rows = st
-                        .query_map(params![sid], |r| {
-                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-                        })?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    rows
-                };
-                if rows.is_empty() {
-                    return Ok(());
-                }
-                // Pass 1 parks every hash on a per-row reserved value so the
-                // pass-2 updates can never collide with a not-yet-updated row.
-                tx.execute(
-                    "UPDATE session_events SET source_identity_hash = 'migrating:' || id
-                     WHERE session_id = ?1",
-                    params![sid],
-                )?;
-                let mut prev_hash = IDENTITY_GENESIS.to_string();
-                let mut last_hash = String::new();
-                for (id, source_event_id, kind, ts, text) in &rows {
-                    let hash = event_identity_hash(
-                        &prev_hash,
-                        source_event_id.as_deref(),
-                        kind,
-                        ts.as_deref(),
-                        text.as_deref(),
-                    );
-                    tx.execute(
-                        "UPDATE session_events SET source_identity_hash = ?2 WHERE id = ?1",
-                        params![id, hash],
-                    )?;
-                    prev_hash = hash.clone();
-                    last_hash = hash;
-                }
-                tx.execute(
-                    "UPDATE session_cursors SET identity_tail_hash = ?2
-                     WHERE session_id = ?1 AND (identity_tail_hash IS NULL OR identity_tail_hash = '')",
-                    params![sid, last_hash],
-                )?;
-                Ok(())
-            })?;
+        for (id, kind, ts, text) in rows {
+            let legacy = legacy_fallback_identity_hash(&kind, ts.as_deref(), text.as_deref());
+            self.0.execute(
+                "UPDATE session_events SET legacy_identity_hash = ?2 WHERE id = ?1",
+                params![id, legacy],
+            )?;
         }
+        self.0.execute(
+            "UPDATE session_cursors
+             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = ''",
+            [],
+        )?;
         Ok(())
     }
 
@@ -722,6 +708,12 @@ impl Db {
     /// [`event_identity_hash`]. The tail advances with every batch whether
     /// or not rows were new (dedup reproduces the same hash), so the cursor
     /// always describes the source, not the store.
+    ///
+    /// During full re-scans, fallback events (no native id) additionally try
+    /// to CLAIM a pre-chain legacy row of identical content onto the computed
+    /// chain position (v4 migration alias): the row keeps its id and gains
+    /// the chained identity, so stores with superseded rewrite history
+    /// migrate onto the current source chain without duplication.
     pub fn append_source_events(
         &self,
         session_id: &str,
@@ -783,20 +775,80 @@ impl Db {
                     );
                     prev_hash = hash.clone();
                     let id = new_id();
-                    let n = ins.execute(params![
-                        id,
-                        session_id,
-                        next_seq,
-                        p.source_event_id,
-                        source.generation,
-                        p.source_position,
-                        hash,
-                        p.ts,
-                        p.kind,
-                        p.text,
-                        format!("{}#{}", raw_path, p.source_position),
-                        p.metadata.to_string(),
-                    ])?;
+                    let n = if p.source_event_id.is_some() {
+                        // Native Agent id: identity is position-independent,
+                        // plain insert-or-dedup.
+                        ins.execute(params![
+                            id,
+                            session_id,
+                            next_seq,
+                            p.source_event_id,
+                            source.generation,
+                            p.source_position,
+                            hash,
+                            p.ts,
+                            p.kind,
+                            p.text,
+                            format!("{}#{}", raw_path, p.source_position),
+                            p.metadata.to_string(),
+                        ])?
+                    } else {
+                        // Fallback event on a full re-scan: before inserting,
+                        // try to CLAIM a pre-chain (legacy) row of the exact
+                        // same content onto this chain position. Legacy rows
+                        // carry the v4 migration's alias; claiming upgrades
+                        // their identity while PRESERVING the event id — and
+                        // therefore every SourceReference to it — so a store
+                        // with superseded rewrite history never duplicates.
+                        let dedup = tx
+                            .query_row(
+                                "SELECT 1 FROM session_events
+                                 WHERE session_id = ?1 AND source_identity_hash = ?2",
+                                params![session_id, hash],
+                                |_| Ok(()),
+                            )
+                            .optional()?
+                            .is_some();
+                        if dedup {
+                            0
+                        } else {
+                            let claimed = tx.execute(
+                                "UPDATE session_events
+                                 SET source_identity_hash = ?3, legacy_identity_hash = NULL
+                                 WHERE session_id = ?1 AND id = (
+                                   SELECT id FROM session_events
+                                   WHERE session_id = ?1 AND legacy_identity_hash = ?2
+                                   ORDER BY sequence LIMIT 1)",
+                                params![
+                                    session_id,
+                                    legacy_fallback_identity_hash(
+                                        &p.kind,
+                                        p.ts.as_deref(),
+                                        p.text.as_deref()
+                                    ),
+                                    hash,
+                                ],
+                            )?;
+                            if claimed == 0 {
+                                ins.execute(params![
+                                    id,
+                                    session_id,
+                                    next_seq,
+                                    p.source_event_id,
+                                    source.generation,
+                                    p.source_position,
+                                    hash,
+                                    p.ts,
+                                    p.kind,
+                                    p.text,
+                                    format!("{}#{}", raw_path, p.source_position),
+                                    p.metadata.to_string(),
+                                ])?
+                            } else {
+                                0
+                            }
+                        }
+                    };
                     if n > 0 {
                         stored.push(SessionEvent {
                             id: id.clone(),
@@ -872,13 +924,16 @@ impl Db {
         // accepted forms: "session-event:<event-id>" (stable) and the legacy
         // "session:<session-id>#<sequence>" (display-era reference).
         if let Some(id) = source_ref.strip_prefix("session-event:") {
-            return self.query_event("SELECT * FROM session_events WHERE id = ?1", params![id]);
+            return self.query_event(
+            "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata FROM session_events WHERE id = ?1",
+            params![id],
+        );
         }
         if let Some(rest) = source_ref.strip_prefix("session:") {
             if let Some((sid, seq)) = rest.rsplit_once('#') {
                 if let Ok(seq) = seq.parse::<i64>() {
                     return self.query_event(
-                        "SELECT * FROM session_events WHERE session_id = ?1 AND sequence = ?2",
+                        "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata FROM session_events WHERE session_id = ?1 AND sequence = ?2",
                         params![sid, seq],
                     );
                 }

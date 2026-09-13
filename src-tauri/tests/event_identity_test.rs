@@ -625,23 +625,29 @@ fn reingest_preserves_event_ids_and_dedups() {
     assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 3);
 }
 
-/// Databases created before the chained adjacency identity (user_version 2)
-/// must be migrated on open: every session's identity hashes are recomputed
-/// in sequence order, so the first full re-scan after the upgrade dedups
-/// instead of re-inserting every pre-upgrade event as "new".
+/// The append-only Event Store is NOT a linear chain of the current source:
+/// a pre-chain database that went through rewrite/compact keeps superseded
+/// history (store A B C D for a source that is now A B D). Recomputing hashes
+/// in store order would give D the wrong chain position (H(C,D) instead of
+/// H(B,D)) and the next re-scan would duplicate it. The v4 migration instead
+/// stamps legacy rows with a claimable alias and re-identifies them from the
+/// REAL source on the next full re-scan: count, event ids and uniqueness all
+/// survive. Covers BOTH upgrade sources: a v2 store (content hashes) and a
+/// store already rewritten by the shipped-v3 store-order recompute.
 #[test]
-fn migration_v3_recomputes_legacy_identity_hashes() {
-    let dir = unique_dir("identity-migration");
-    let path = dir.join("test.db");
-    let text_a = "legacy message one aaaaaaaaaaaaaaaaaaaaaa";
-    let text_b = "legacy message two bbbbbbbbbbbbbbbbbbbbbb";
-
-    let mk = |text: &str| noending::domain::ParsedEvent {
+fn migration_v4_claims_diverged_legacy_store_from_real_source() {
+    let text = |c: char| {
+        format!(
+            "legacy event {c} {}{}{}{}{}{}{}{}{}{}",
+            c, c, c, c, c, c, c, c, c, c
+        )
+    };
+    let mk = |t: &str| noending::domain::ParsedEvent {
         source_event_id: None,
         source_position: "line:1".into(),
         ts: Some("t".into()),
         kind: "user_message".into(),
-        text: Some(text.into()),
+        text: Some(t.into()),
         metadata: serde_json::json!({}),
     };
     let rescan = noending::domain::SourceCursorUpdate {
@@ -653,67 +659,158 @@ fn migration_v3_recomputes_legacy_identity_hashes() {
         start_byte_offset: 0,
         prefix_hash: String::new(),
     };
-    let append = noending::domain::SourceCursorUpdate {
-        file_identity: "unix:dev:1:ino:9".into(),
-        generation: 0,
-        byte_offset: 20,
-        last_seen_size: 20,
-        mtime: None,
-        start_byte_offset: 10,
-        prefix_hash: String::new(),
+    // chained identity the CURRENT source A,B,D would produce
+    let h = |prev: &str, t: &str| {
+        noending::storage::event_identity_hash(prev, None, "user_message", Some("t"), Some(t))
     };
+    let h_a = h(noending::storage::IDENTITY_GENESIS, &text('A'));
+    let h_b = h(&h_a, &text('B'));
+    let h_d = h(&h_b, &text('D'));
 
-    // seed a database with the CURRENT chained identity
-    let session_id = {
+    for (regress_to, label) in [(2i64, "v2 content hashes"), (3, "v3 store-order recompute")] {
+        let dir = unique_dir(&format!("identity-migration-{}", regress_to));
+        let path = dir.join("test.db");
+
+        // build the diverged store A B C D plus a cursor that believes the
+        // store tail is the source tail — what a v2 app / the shipped v3
+        // migration leaves behind
+        let (session_id, ids_before, d_id) = {
+            let db = Db::open(&path).unwrap();
+            let s = session_row(&db, Agent::Pi, &dir.join("x.jsonl"));
+            let events: Vec<noending::domain::SessionEvent> = ['A', 'B', 'C', 'D']
+                .iter()
+                .enumerate()
+                .map(|(i, c)| noending::domain::SessionEvent {
+                    id: new_id(),
+                    session_id: s.id.clone(),
+                    sequence: i as i64 + 1,
+                    source_event_id: None,
+                    source_generation: 0,
+                    source_position: format!("line:{}", i + 1),
+                    ts: Some("t".into()),
+                    kind: "user_message".into(),
+                    text: Some(text(*c)),
+                    raw_ref: format!("/x.jsonl#line:{}", i + 1),
+                    metadata: serde_json::json!({}),
+                })
+                .collect();
+            let d_id = events[3].id.clone();
+            let ids_before: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
+            db.append_events(&events).unwrap();
+            db.set_source_cursor(&noending::domain::SourceCursor {
+                session_id: s.id.clone(),
+                source_file_identity: "unix:dev:1:ino:9".into(),
+                generation: 0,
+                byte_offset: 999,
+                last_seen_size: 999,
+                mtime: None,
+                prefix_hash: "stale-prefix".into(),
+                identity_tail_hash: "store-tail-not-source-tail".into(),
+                last_sequence: 4,
+            })
+            .unwrap();
+            (s.id, ids_before, d_id)
+        };
+
+        // regress the database the way the pre-v4 world left it
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            if regress_to == 2 {
+                // real ≤ v2 fallback identities: content-only hashes
+                let rows: Vec<(String, String, Option<String>, Option<String>)> = {
+                    let mut st = conn
+                        .prepare("SELECT id, kind, ts, text FROM session_events")
+                        .unwrap();
+                    let rows = st
+                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                        .unwrap()
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .unwrap();
+                    rows
+                };
+                for (id, kind, ts, t) in rows {
+                    conn.execute(
+                        "UPDATE session_events SET source_identity_hash = ?2 WHERE id = ?1",
+                        rusqlite::params![
+                            id,
+                            noending::storage::legacy_fallback_identity_hash(
+                                &kind,
+                                ts.as_deref(),
+                                t.as_deref()
+                            )
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            // regress_to == 3: keep the chained store-order hashes the
+            // shipped v3 recompute produced (append_events chains exactly
+            // like it did)
+            conn.pragma_update(None, "user_version", regress_to)
+                .unwrap();
+        }
+
+        // reopen: v4 stamps the alias column and rewinds cursors
         let db = Db::open(&path).unwrap();
-        let s = session_row(&db, Agent::Pi, &dir.join("x.jsonl"));
-        db.append_source_events(&s.id, &[mk(text_a)], &rescan, "/x.jsonl")
+        let version: i64 = db
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        db.append_source_events(&s.id, &[mk(text_b)], &append, "/x.jsonl")
-            .unwrap();
-        s.id
-    };
+        assert_eq!(version, 4, "{}: schema advanced", label);
+        let cursor = db.get_source_cursor(&session_id).unwrap();
+        assert_eq!(
+            cursor.identity_tail_hash, "",
+            "{}: cursor rewound for a source-driven re-scan",
+            label
+        );
 
-    // regress it to a pre-v3 database: content hashes the chain cannot
-    // reproduce, empty tail, user_version 2
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute(
-            "UPDATE session_events SET source_identity_hash = 'legacy:' || id",
-            [],
-        )
-        .unwrap();
-        conn.execute("UPDATE session_cursors SET identity_tail_hash = ''", [])
-            .unwrap();
-        conn.pragma_update(None, "user_version", 2).unwrap();
-    }
-
-    // reopen: the v3 migration recomputes identities per session
-    let db = Db::open(&path).unwrap();
-    let user_version: i64 = db
-        .conn()
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(user_version, 3, "schema version advanced");
-
-    // the recomputed hashes match a fresh chained scan: a full re-scan of
-    // A,B dedups to zero — pre-migration it would re-insert both events
-    let s = db.get_session(&session_id).unwrap().unwrap();
-    let again = db
-        .append_source_events(&s.id, &[mk(text_a), mk(text_b)], &rescan, "/x.jsonl")
-        .unwrap();
-    assert_eq!(again.len(), 0, "migrated identities dedup on re-scan");
-    assert_eq!(db.event_count(&s.id).unwrap(), 2);
-    let tail = db.get_source_cursor(&s.id).unwrap().identity_tail_hash;
-    assert_eq!(
-        tail,
-        db.conn()
-            .query_row(
-                "SELECT source_identity_hash FROM session_events WHERE session_id = ?1 AND text = ?2",
-                rusqlite::params![s.id, text_b],
-                |r| r.get::<_, String>(0),
+        // the real source is A B D (C was compacted away): the re-scan must
+        // claim D onto H(B,D) instead of duplicating it
+        let s = db.get_session(&session_id).unwrap().unwrap();
+        let stored = db
+            .append_source_events(
+                &s.id,
+                &[mk(&text('A')), mk(&text('B')), mk(&text('D'))],
+                &rescan,
+                "/x.jsonl",
             )
-            .unwrap(),
-        "migration bootstrapped the cursor tail from the store"
-    );
+            .unwrap();
+        assert_eq!(
+            stored.len(),
+            0,
+            "{}: A,B dedup and D is claimed — nothing new",
+            label
+        );
+        assert_eq!(
+            db.event_count(&s.id).unwrap(),
+            4,
+            "{}: count unchanged",
+            label
+        );
+
+        let ids_after: Vec<String> = db
+            .get_events(&s.id, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids_after.len(), 4, "{}: no duplicate D", label);
+        assert_eq!(
+            ids_after.iter().filter(|id| **id == d_id).count(),
+            1,
+            "{}: D keeps its original event id (SourceReferences stay valid)",
+            label
+        );
+        for id in &ids_before {
+            assert!(ids_after.contains(id), "{}: id {} preserved", label, id);
+        }
+
+        // the cursor now carries the REAL source-chain tail H(A,B,D)
+        let tail = db.get_source_cursor(&s.id).unwrap().identity_tail_hash;
+        assert_eq!(
+            tail, h_d,
+            "{}: tail follows the source chain, not the store",
+            label
+        );
+    }
 }

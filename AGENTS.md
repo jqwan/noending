@@ -26,7 +26,7 @@ When changing the system, preserve these rules:
 * Ingested Session Events are **append-only history**. Never overwrite historical events.
 * Event identity is app-owned and stable. Source file position is metadata, not identity.
 * The fallback event-identity chain continues from the **SourceCursor's tail hash** (the current source chain), never from "the last event in the store" — after a compact the store is ahead of the source.
-* A schema change to identity semantics requires a **data migration**, not just a column addition.
+* A schema change to identity semantics requires a **data migration**, not just a column addition. That migration is **lazy and source-driven**: the append-only Event Store is never treated as the source's chain — identities are re-derived from the real source on the next full re-scan, with event ids preserved.
 * `SourceReference` must remain resolvable after truncate, compact, rewrite, retry, or re-ingest.
 * `processed_cursor` must only move forward after a successful atomic Sync commit.
 * A Sync run must be **all-or-nothing**: Context mutations, audit records, conflicts, SyncRun and cursor advancement commit together.

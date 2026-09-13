@@ -1091,3 +1091,80 @@ fn strong_binding_freezes_candidates_against_reclassification() {
         "keyword match against another workstream must not add candidates"
     );
 }
+
+/// prepare classified automatically only because NO strong binding existed.
+/// If the user assigns an explicit binding while extraction runs (minutes,
+/// no lock held), the extraction targeted workstreams the user has since
+/// overridden — commit must discard the run WITHOUT advancing the processed
+/// cursor, so the next sync prepares against the user's decision.
+#[test]
+fn stale_commit_when_strong_binding_appears_during_extraction() {
+    let db = open_db("stale-binding");
+    let s = session_row(&db);
+    let ws_auto = ws_row(&db, "量化回测引擎");
+    let ws_user = ws_row(&db, "前端界面重构");
+
+    let e1 = noending::domain::SessionEvent {
+        id: new_id(),
+        session_id: s.id.clone(),
+        sequence: 1,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: "line:1".into(),
+        ts: Some(now()),
+        kind: "user_message".into(),
+        text: Some(
+            "我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度".into(),
+        ),
+        raw_ref: "/tmp/x.jsonl#line:1".into(),
+        metadata: serde_json::json!({}),
+    };
+    db.append_events(std::slice::from_ref(&e1)).unwrap();
+
+    let engine = noending::sync::SyncEngine::default();
+    let pre = engine
+        .prepare(&db, &s, std::slice::from_ref(&e1), 0, 1)
+        .unwrap()
+        .expect("prepared");
+    assert!(pre.candidates_are_automatic);
+    assert_eq!(
+        pre.candidates,
+        vec![ws_auto.id.clone()],
+        "auto-classified to A while preparing"
+    );
+
+    // the user assigns an explicit binding while "extraction" is running
+    db.bind(&SessionWorkstreamBinding {
+        session_id: s.id.clone(),
+        workstream_id: ws_user.id.clone(),
+        role: "primary".into(),
+        source: binding_source::USER_ASSIGNED.into(),
+        confidence: 1.0,
+        last_seen_revision: None,
+        last_sync_cursor: 0,
+        created_at: now(),
+        last_used_at: now(),
+    })
+    .unwrap();
+
+    let out = engine
+        .commit(&db, &s, &pre, vec![], "heuristic", vec![])
+        .unwrap();
+    assert_eq!(
+        out.status, "stale",
+        "the user's mid-extract decision must win"
+    );
+    assert_eq!(out.applied, 0);
+    assert_eq!(
+        db.get_processed_sequence(&s.id).unwrap(),
+        0,
+        "processed cursor must not advance for a stale run"
+    );
+    assert!(
+        !db.bindings_for_session(&s.id)
+            .unwrap()
+            .iter()
+            .any(|b| b.source == binding_source::AUTO),
+        "a stale run must not persist its automatic classification"
+    );
+}

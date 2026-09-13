@@ -360,6 +360,41 @@ impl SyncEngine {
                 });
             }
 
+            // Revalidate the classification snapshot too (AGENTS.md: revalidate
+            // state before committing work prepared while the lock was
+            // released). prepare classified automatically only because NO
+            // strong binding existed; if the user assigned an explicit binding
+            // while extraction ran (minutes, no lock held), the extraction
+            // targeted workstreams the user has since overridden — discard the
+            // run WITHOUT advancing the processed cursor, so the next sync
+            // prepares against the user's decision.
+            if pre.candidates_are_automatic {
+                let strong_count: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM session_workstream_bindings
+                     WHERE session_id = ?1 AND source IN (?2, ?3)",
+                    rusqlite::params![
+                        session.id,
+                        binding_source::EXPLICIT_LAUNCH,
+                        binding_source::USER_ASSIGNED
+                    ],
+                    |r| r.get(0),
+                )?;
+                if strong_count > 0 {
+                    eprintln!(
+                        "[sync] run {} stale: strong binding appeared during extraction, discarding",
+                        pre.run_id
+                    );
+                    return Ok(SyncJobOutput {
+                        run_id: pre.run_id.clone(),
+                        status: "stale".into(),
+                        applied: 0,
+                        skipped: 0,
+                        unclassified: 0,
+                        summary: "提取期间用户为该 Session 建立了显式/手工 Workstream 绑定，本次自动分类结果作废，待下次同步按新绑定重新提取。".into(),
+                    });
+                }
+            }
+
             let mut applied = 0usize;
             let mut skipped = 0usize;
             for m in &mutations {
