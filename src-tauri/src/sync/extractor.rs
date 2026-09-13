@@ -6,6 +6,12 @@
 //!   Any failure (missing CLI, timeout, invalid JSON) returns Err so the
 //!   SyncEngine can fall back to the heuristic — sync never breaks because
 //!   the model had a bad day.
+//!
+//! SourceReference integrity (Issue #2): the prompt numbers events #1..#N
+//! but those numbers are *prompt-local*. A `PromptEventRef` map is built
+//! while composing the prompt and is the ONLY way a short ref resolves to a
+//! real event; unknown refs are dropped with a diagnostic instead of being
+//! misinterpreted as event sequences.
 
 use serde::Deserialize;
 
@@ -14,7 +20,37 @@ use crate::domain::{Agent, Session, SessionEvent};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-use super::{ContextExtractor, ContextMutation};
+use super::{ContextExtractor, ContextMutation, ExtractOutput};
+
+/// Prompt-building reads (workstream lines, existing item lines),
+/// snapshotted while the DB lock is held so extraction can run lock-free.
+#[derive(Debug, Clone, Default)]
+pub struct PromptInputs {
+    pub ws_lines: Vec<String>,
+    pub item_lines: Vec<String>,
+}
+
+/// Snapshot the workstream / item context an extraction prompt needs.
+pub fn collect_prompt_inputs(db: &Db, candidates: &[String]) -> Result<PromptInputs> {
+    let mut ws_lines = Vec::new();
+    for id in candidates {
+        if let Some(w) = db.get_workstream(id)? {
+            ws_lines.push(format!(
+                "- id={} | {} | goal: {}",
+                w.id,
+                w.title,
+                if w.description.is_empty() { "(none)" } else { &w.description }
+            ));
+        }
+    }
+    let mut item_lines = Vec::new();
+    for id in candidates {
+        for (item, rev) in db.items_for_workstream(id, false)? {
+            item_lines.push(format!("- item_id={} | {} | {}", item.id, item.kind, rev.title));
+        }
+    }
+    Ok(PromptInputs { ws_lines, item_lines })
+}
 
 const DECISION_HINTS: [&str; 8] = ["决定", "确定采用", "就用", "decided", "decision:", "we'll use", "选择", "定为"];
 const CONSTRAINT_HINTS: [&str; 8] = ["不能", "禁止", "不允许", "must not", "don't change", "不要动", "保持兼容", "constraint"];
@@ -30,27 +66,32 @@ impl ContextExtractor for HeuristicExtractor {
 
     fn extract(
         &self,
-        _db: &Db,
-        session: &Session,
+        _session: &Session,
         events: &[&SessionEvent],
         candidate_workstream_ids: &[String],
-    ) -> Result<Vec<ContextMutation>> {
+        _inputs: &PromptInputs,
+    ) -> Result<ExtractOutput> {
         let mut out = Vec::new();
-        let primary = candidate_workstream_ids.first().cloned().unwrap_or_default();
-        if primary.is_empty() {
-            return Ok(out);
-        }
+        let primary = match candidate_workstream_ids.first().cloned() {
+            Some(p) if !p.is_empty() => p,
+            _ => return Ok(ExtractOutput::default()),
+        };
 
         for e in events {
             let text = match &e.text {
                 Some(t) => t,
                 None => continue,
             };
-            let source_ref = format!("session:{}#{}", session.id, e.sequence);
+            // Stable source reference: the event's app-owned identity, not a
+            // positional number.
+            let source_refs = vec![format!("session-event:{}", e.id)];
+            // Authority = whose word the content is. Text extracted from a
+            // user message is the USER's statement, whoever wrote the row.
+            // `created_by` (the extractor) is recorded separately.
             let authority = if e.kind == "user_message" {
-                "agent_statement"
+                "user_explicit"
             } else {
-                "agent_inferred"
+                "agent_statement"
             };
 
             if e.kind == "user_message" && text.len() > 20 && !looks_like_command(text) {
@@ -60,7 +101,7 @@ impl ContextExtractor for HeuristicExtractor {
                         item_kind: "current_state".into(),
                         title: crate::adapters::truncate_text(text.trim(), 80),
                         content: text.trim().to_string(),
-                        source_ref: source_ref.clone(),
+                        source_refs: source_refs.clone(),
                         authority: authority.into(),
                     });
                 }
@@ -82,7 +123,7 @@ impl ContextExtractor for HeuristicExtractor {
                         item_kind: kind.into(),
                         title,
                         content: line.trim().to_string(),
-                        source_ref: source_ref.clone(),
+                        source_refs: source_refs.clone(),
                         authority: authority.into(),
                     });
                 }
@@ -90,7 +131,7 @@ impl ContextExtractor for HeuristicExtractor {
         }
 
         out.truncate(8);
-        Ok(out)
+        Ok(ExtractOutput::mutations(out))
     }
 }
 
@@ -190,19 +231,28 @@ impl ContextExtractor for CliExtractor {
 
     fn extract(
         &self,
-        db: &Db,
         session: &Session,
         events: &[&SessionEvent],
         candidate_workstream_ids: &[String],
-    ) -> Result<Vec<ContextMutation>> {
+        inputs: &PromptInputs,
+    ) -> Result<ExtractOutput> {
         let install = crate::platform::exec_resolver::resolve(self.agent)?;
         let adapter = crate::adapters::adapter_for(self.agent);
-        let prompt = build_extraction_prompt(db, session, events, candidate_workstream_ids)?;
+        let (prompt, ref_map) = build_extraction_prompt(session, events, candidate_workstream_ids, inputs)?;
         let cmd = adapter.build_exec_command(&install, &self.opts, &prompt)?;
         let out = crate::platform::exec_runner::run_headless(&cmd, self.timeout_secs)?;
         let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
-        parse_mutations(&text, candidate_workstream_ids, session)
+        parse_mutations(&text, &ref_map, candidate_workstream_ids, session)
     }
+}
+
+/// One entry of the prompt-local reference map: "#N" as shown to the model
+/// → the real, stable event identity behind it.
+#[derive(Debug, Clone)]
+pub struct PromptEventRef {
+    pub short_ref: String,
+    pub event_id: String,
+    pub sequence: i64,
 }
 
 /// Raw mutation shape we ask the model for. Short refs ("#1") map back to
@@ -231,40 +281,32 @@ const ALLOWED_KINDS: [&str; 15] = [
 ];
 
 fn build_extraction_prompt(
-    db: &Db,
     session: &Session,
     events: &[&SessionEvent],
-    candidates: &[String],
-) -> Result<String> {
-    let mut ws_lines = Vec::new();
-    for id in candidates {
-        if let Some(w) = db.get_workstream(id)? {
-            ws_lines.push(format!(
-                "- id={} | {} | goal: {}",
-                w.id,
-                w.title,
-                if w.description.is_empty() { "(none)" } else { &w.description }
-            ));
-        }
-    }
-    let mut item_lines = Vec::new();
-    for id in candidates {
-        for (item, rev) in db.items_for_workstream(id, false)? {
-            item_lines.push(format!("- item_id={} | {} | {}", item.id, item.kind, rev.title));
-        }
-    }
+    _candidates: &[String],
+    inputs: &PromptInputs,
+) -> Result<(String, Vec<PromptEventRef>)> {
+    let ws_lines = &inputs.ws_lines;
+    let item_lines = &inputs.item_lines;
 
     let mut ev_lines = Vec::new();
+    let mut ref_map = Vec::new();
     for (i, e) in events.iter().enumerate() {
+        let short_ref = format!("#{}", i + 1);
         ev_lines.push(format!(
-            "#{} [{}] {}",
-            i + 1,
+            "{} [{}] {}",
+            short_ref,
             if e.kind == "user_message" { "user" } else { "agent" },
             crate::adapters::truncate_text(e.text.as_deref().unwrap_or(""), 600)
         ));
+        ref_map.push(PromptEventRef {
+            short_ref,
+            event_id: e.id.clone(),
+            sequence: e.sequence,
+        });
     }
 
-    Ok(format!(
+    let prompt = format!(
         r##"你是 NoEnding 的上下文提取器。任务：从 Agent 会话的新增消息中提取少量高价值的长期上下文变更。这不是对话，禁止自由发挥，只输出 JSON。
 
 候选 Workstream（只允许使用这些 id）：
@@ -292,7 +334,8 @@ Session: {agent} / {sid}"##,
         events = ev_lines.join("\n"),
         agent = session.agent.display_name(),
         sid = session.agent_session_id,
-    ))
+    );
+    Ok((prompt, ref_map))
 }
 
 /// Extract the first JSON array from model output (models sometimes wrap
@@ -324,25 +367,46 @@ pub fn extract_json_array(text: &str) -> Option<String> {
     None
 }
 
+/// Resolve short refs through the prompt's reference map. The map is the
+/// only bridge between "#N" and a real event: an unknown ref is dropped
+/// with a diagnostic, never misread as an event sequence.
+fn resolve_refs(
+    refs: &[String],
+    ref_map: &[PromptEventRef],
+    diagnostics: &mut Vec<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in refs {
+        let key = r.trim().trim_start_matches('#');
+        let short = format!("#{}", key);
+        if let Some(m) = ref_map.iter().find(|m| m.short_ref == short) {
+            let reference = format!("session-event:{}", m.event_id);
+            if !out.contains(&reference) {
+                out.push(reference);
+            }
+        } else {
+            diagnostics.push(format!("模型引用了 prompt 中不存在的 {}，已忽略", r.trim()));
+        }
+    }
+    out
+}
+
 /// Parse + validate model output into real mutations. Invalid entries are
-/// dropped individually; the rest still merges.
+/// dropped individually (with diagnostics); the rest still merges.
 pub fn parse_mutations(
     text: &str,
+    ref_map: &[PromptEventRef],
     candidates: &[String],
-    session: &Session,
-) -> Result<Vec<ContextMutation>> {
+    _session: &Session,
+) -> Result<ExtractOutput> {
     let arr = extract_json_array(text).ok_or_else(|| other("模型输出中未找到 JSON 数组"))?;
     let raw: Vec<RawMutation> =
         serde_json::from_str(&arr).map_err(|e| other(format!("JSON 解析失败: {}", e)))?;
 
     let mut out = Vec::new();
+    let mut diagnostics: Vec<String> = Vec::new();
     for r in raw.into_iter().take(12) {
-        let source_ref = r
-            .refs
-            .first()
-            .and_then(|s| parse_short_ref(s))
-            .map(|seq| format!("session:{}#{}", session.id, seq))
-            .unwrap_or_else(|| format!("session:{}#llm", session.id));
+        let source_refs = resolve_refs(&r.refs, ref_map, &mut diagnostics);
 
         match r.op.as_str() {
             "add" => {
@@ -350,6 +414,7 @@ pub fn parse_mutations(
                     || !ALLOWED_KINDS.contains(&r.item_kind.as_str())
                     || r.title.trim().is_empty()
                 {
+                    diagnostics.push("模型输出 add 条目缺少合法 workstream/kind/title，已忽略".into());
                     continue;
                 }
                 out.push(ContextMutation::Add {
@@ -357,12 +422,13 @@ pub fn parse_mutations(
                     item_kind: r.item_kind,
                     title: crate::adapters::truncate_text(r.title.trim(), 80),
                     content: r.content.trim().to_string(),
-                    source_ref,
+                    source_refs,
                     authority: "agent_inferred".into(),
                 });
             }
             "update" | "supersede" => {
                 if r.item_id.is_empty() || r.title.trim().is_empty() {
+                    diagnostics.push("模型输出 update/supersede 缺少 item_id/title，已忽略".into());
                     continue;
                 }
                 let content = r.content.trim().to_string();
@@ -371,7 +437,7 @@ pub fn parse_mutations(
                         item_id: r.item_id,
                         title: r.title.trim().to_string(),
                         content,
-                        source_ref,
+                        source_refs,
                         authority: "agent_inferred".into(),
                     }
                 } else {
@@ -379,18 +445,31 @@ pub fn parse_mutations(
                         item_id: r.item_id,
                         title: r.title.trim().to_string(),
                         content,
-                        source_ref,
+                        source_refs,
                         authority: "agent_inferred".into(),
                     }
                 });
             }
             "resolve" => {
                 if r.item_id.is_empty() {
+                    diagnostics.push("模型输出 resolve 缺少 item_id，已忽略".into());
                     continue;
                 }
                 out.push(ContextMutation::Resolve {
                     item_id: r.item_id,
-                    source_ref,
+                    source_refs,
+                });
+            }
+            "create_workstream" => {
+                if r.title.trim().is_empty() {
+                    continue;
+                }
+                // Workstreams may be discovered without a Project; project_id
+                // stays None unless a candidate mapping exists later.
+                out.push(ContextMutation::CreateWorkstream {
+                    project_id: None,
+                    title: r.title.trim().to_string(),
+                    reason: r.content.trim().to_string(),
                 });
             }
             "conflict" => {
@@ -402,7 +481,7 @@ pub fn parse_mutations(
                     item_id: r.item_id,
                     title: r.title.trim().to_string(),
                     content: r.content.trim().to_string(),
-                    source_ref,
+                    source_refs,
                     reason: "模型判定与用户约束可能冲突".into(),
                 });
             }
@@ -410,11 +489,7 @@ pub fn parse_mutations(
         }
     }
     out.truncate(8);
-    Ok(out)
-}
-
-fn parse_short_ref(s: &str) -> Option<i64> {
-    s.trim().trim_start_matches('#').parse().ok()
+    Ok(ExtractOutput { mutations: out, diagnostics })
 }
 
 fn contains_any(text: &str, hints: &[&str]) -> bool {
@@ -457,11 +532,10 @@ fn find_hint_line<'a>(text: &'a str, hints: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::SessionEvent;
 
-    #[test]
-    fn parses_model_output_with_fences_and_prose() {
-        let text = "好的，以下是提取结果：\n```json\n[{\"op\":\"add\",\"workstream_id\":\"ws1\",\"item_kind\":\"decision\",\"title\":\"采用 FTS5\",\"content\":\"决定使用 FTS5\",\"refs\":[\"#2\"]},\n{\"op\":\"add\",\"workstream_id\":\"bad\",\"item_kind\":\"decision\",\"title\":\"x\",\"content\":\"y\",\"refs\":[]}]\n```";
-        let session = Session {
+    fn session() -> Session {
+        Session {
             id: "s1".into(),
             agent: Agent::Codex,
             agent_session_id: "a1".into(),
@@ -472,16 +546,115 @@ mod tests {
             parent_agent_session_id: None,
             started_at: None,
             last_activity_at: None,
-        };
-        let m = parse_mutations(text, &["ws1".to_string()], &session).unwrap();
-        assert_eq!(m.len(), 1, "invalid workstream filtered out");
-        match &m[0] {
-            ContextMutation::Add { workstream_id, source_ref, authority, .. } => {
+        }
+    }
+
+    /// Events with non-1-starting, non-contiguous sequences — the map must
+    /// translate "#1" to the FIRST prompt event (sequence 101), never to
+    /// "sequence 1".
+    fn ref_map() -> Vec<PromptEventRef> {
+        vec![
+            PromptEventRef { short_ref: "#1".into(), event_id: "e-aaa".into(), sequence: 101 },
+            PromptEventRef { short_ref: "#2".into(), event_id: "e-bbb".into(), sequence: 105 },
+        ]
+    }
+
+    fn parse(text: &str) -> ExtractOutput {
+        parse_mutations(text, &ref_map(), &["ws1".to_string()], &session()).unwrap()
+    }
+
+    #[test]
+    fn parses_model_output_with_fences_and_prose() {
+        let text = "好的，以下是提取结果：\n```json\n[{\"op\":\"add\",\"workstream_id\":\"ws1\",\"item_kind\":\"decision\",\"title\":\"采用 FTS5\",\"content\":\"决定使用 FTS5\",\"refs\":[\"#2\"]},\n{\"op\":\"add\",\"workstream_id\":\"bad\",\"item_kind\":\"decision\",\"title\":\"x\",\"content\":\"y\",\"refs\":[]}]\n```";
+        let out = parse(text);
+        assert_eq!(out.mutations.len(), 1, "invalid workstream filtered out");
+        match &out.mutations[0] {
+            ContextMutation::Add { workstream_id, source_refs, authority, .. } => {
                 assert_eq!(workstream_id, "ws1");
-                assert_eq!(source_ref, "session:s1#2");
+                assert_eq!(source_refs, &vec!["session-event:e-bbb".to_string()]);
                 assert_eq!(authority, "agent_inferred");
             }
             other => panic!("unexpected mutation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn short_ref_maps_to_real_event_not_prompt_position() {
+        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"第一条","content":"c","refs":["#1"]}]"##;
+        let out = parse(text);
+        match &out.mutations[0] {
+            ContextMutation::Add { source_refs, .. } => {
+                // "#1" is the first PROMPT event: id e-aaa / sequence 101 —
+                // it must NOT become "session:s1#1".
+                assert_eq!(source_refs, &vec!["session-event:e-aaa".to_string()]);
+            }
+            other => panic!("unexpected mutation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unknown_ref_is_dropped_with_diagnostic() {
+        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":["#999"]},
+                       {"op":"add","workstream_id":"ws1","item_kind":"note","title":"u","content":"c","refs":["#2","#999"]}]"##;
+        let out = parse(text);
+        assert_eq!(out.mutations.len(), 2);
+        match &out.mutations[0] {
+            ContextMutation::Add { source_refs, .. } => assert!(source_refs.is_empty()),
+            other => panic!("unexpected: {:?}", other),
+        }
+        match &out.mutations[1] {
+            ContextMutation::Add { source_refs, .. } => {
+                assert_eq!(source_refs.len(), 1);
+                assert_eq!(source_refs[0], "session-event:e-bbb");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert!(out.diagnostics.iter().any(|d| d.contains("#999")), "diagnostics mention the bad ref");
+    }
+
+    #[test]
+    fn multi_and_duplicate_refs_are_deduped() {
+        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":["#1","#2","#1"]}]"##;
+        let out = parse(text);
+        match &out.mutations[0] {
+            ContextMutation::Add { source_refs, .. } => {
+                assert_eq!(source_refs.len(), 2, "duplicates removed, both events kept");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn heuristic_uses_user_authority_for_user_messages() {
+        let db_dir = std::env::temp_dir().join(format!("noending-ext-{}", uuid::Uuid::new_v4()));
+        let db = Db::open(&db_dir.join("t.db")).unwrap();
+        let s = session();
+        let ev = SessionEvent {
+            id: "e-1".into(),
+            session_id: s.id.clone(),
+            sequence: 42,
+            source_event_id: None,
+            source_generation: 0,
+            source_position: "line:42".into(),
+            ts: None,
+            kind: "user_message".into(),
+            text: Some("我们决定采用 SQLite，不再引入向量数据库，这个方案就这么定了。".into()),
+            raw_ref: "x#line:42".into(),
+            metadata: serde_json::json!({}),
+        };
+        let inputs = collect_prompt_inputs(&db, &["ws1".to_string()]).unwrap();
+        let out = HeuristicExtractor
+            .extract(&s, &[&ev], &["ws1".to_string()], &inputs)
+            .unwrap();
+        assert!(!out.mutations.is_empty());
+        for m in &out.mutations {
+            match m {
+                ContextMutation::Add { authority, source_refs, .. } => {
+                    assert_eq!(authority, "user_explicit", "user words keep user authority");
+                    assert_eq!(source_refs[0], "session-event:e-1");
+                }
+                other => panic!("unexpected: {:?}", other),
+            }
         }
     }
 }

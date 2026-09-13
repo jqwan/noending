@@ -5,16 +5,15 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::adapters::{title_from_text, AgentCommand, DiscoveredSession, ReadDelta};
-use crate::domain::{Agent, Session, SessionEvent};
+use crate::adapters::{
+    detect_format, read_jsonl_delta, title_from_text, AgentCommand, DiscoveredSession, ParsedLine,
+    ReadDelta,
+};
+use crate::domain::{Agent, Session, SourceCursor};
 use crate::error::Result;
 use crate::platform::exec_resolver::{self, AgentInstallation};
 
 pub struct ClaudeAdapter;
-
-fn projects_root() -> Option<PathBuf> {
-    crate::platform::paths::resolve_agent_data_dir(Agent::ClaudeCode).map(|root| root.join("projects"))
-}
 
 fn content_text(content: &Value) -> String {
     match content {
@@ -55,11 +54,6 @@ impl ClaudeAdapter {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .ok_or_else(|| crate::error::other("无效的 session 文件名"))?;
-        let cwd = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .and_then(|s| crate::platform::paths::decode_cwd_dir_name(&s));
 
         let lines = crate::adapters::read_jsonl_lines(path)?;
         let mut session_id: Option<String> = None;
@@ -67,11 +61,21 @@ impl ClaudeAdapter {
         let mut started_at = None;
         let mut last_ts = None;
 
+        // The transcript carries the real cwd on its lines — authoritative
+        // and lossless, unlike the encoded (and ambiguous) directory name.
+        let mut cwd: Option<String> = None;
         for (_, line) in &lines {
             let v: Value = match serde_json::from_str(line) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            if cwd.is_none() {
+                cwd = v
+                    .get("cwd")
+                    .and_then(|c| c.as_str())
+                    .filter(|c| !c.is_empty())
+                    .map(|c| c.to_string());
+            }
             if session_id.is_none() {
                 session_id = v.get("sessionId").and_then(|s| s.as_str()).map(|s| s.to_string());
             }
@@ -121,17 +125,9 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         exec_resolver::resolve_quiet(Agent::ClaudeCode)
     }
 
-    fn session_root(&self) -> Option<PathBuf> {
-        projects_root()
-    }
-
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>> {
-        let root = match projects_root() {
-            Some(r) if r.is_dir() => r,
-            _ => return Ok(vec![]),
-        };
+    fn discover_sessions_in(&self, roots: &[PathBuf]) -> Result<Vec<DiscoveredSession>> {
         let mut out = Vec::new();
-        let mut stack = vec![root];
+        let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
             let rd = match std::fs::read_dir(&dir) {
                 Ok(rd) => rd,
@@ -141,34 +137,39 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
                 let p = entry.path();
                 if p.is_dir() {
                     stack.push(p);
-                } else if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    if let Some(s) = Self::parse_session_file(&p)? {
-                        out.push(s);
-                    }
+                    continue;
+                }
+                if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                // Any .jsonl is a candidate; only the content fingerprint
+                // accepts it. One bad file never aborts the whole scan.
+                if detect_format(&p) != Some(Agent::ClaudeCode) {
+                    eprintln!(
+                        "[discover] skip {} (content fingerprint is not claude_code)",
+                        p.display()
+                    );
+                    continue;
+                }
+                match Self::parse_session_file(&p) {
+                    Ok(Some(s)) => out.push(s),
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
             }
         }
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, from_sequence: i64) -> Result<ReadDelta> {
+    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
         let path = PathBuf::from(&session.raw_path);
-        let file_size = std::fs::metadata(&path)?.len() as i64;
-        let lines = crate::adapters::read_jsonl_lines(&path)?;
-        let mut events = Vec::new();
-
-        for (idx, line) in &lines {
-            let seq = *idx as i64 + 1;
-            if seq <= from_sequence {
-                continue;
-            }
-            let v: Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let ts = v.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+        read_jsonl_delta(&path, cursor, &|_idx, v| {
             let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let sidechain = v.get("isSidechain").and_then(|s| s.as_bool()).unwrap_or(false);
+            let source_event_id = v
+                .get("uuid")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
 
             let (kind, text, extra) = match vtype {
                 "user" | "assistant" => {
@@ -183,7 +184,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
                         let msg = v.get("message").unwrap_or(&Value::Null);
                         let text = content_text(msg.get("content").unwrap_or(&Value::Null));
                         if text.is_empty() {
-                            continue;
+                            return None;
                         }
                         let kind = if vtype == "user" {
                             "user_message"
@@ -193,13 +194,13 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
                         (kind, text, serde_json::json!({}))
                     }
                 }
-                "summary" => ("compact", v.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string(), serde_json::json!({})),
-                _ => continue,
+                "summary" => (
+                    "compact",
+                    v.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                    serde_json::json!({}),
+                ),
+                _ => return None,
             };
-
-            if text.trim().is_empty() {
-                continue;
-            }
 
             let mut meta = serde_json::Map::new();
             meta.insert("agent".into(), serde_json::Value::String("claude_code".into()));
@@ -210,23 +211,12 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
                 }
             }
 
-            events.push(
-                SessionEvent {
-                    session_id: session.id.clone(),
-                    sequence: seq,
-                    ts,
-                    kind: kind.into(),
-                    text: Some(text),
-                    raw_ref: format!("{}#line:{}", path.display(), idx + 1),
-                    metadata: serde_json::Value::Object(meta),
-                },
-            );
-        }
-
-        Ok(ReadDelta {
-            events,
-            last_sequence: lines.len() as i64,
-            file_size,
+            Some(ParsedLine {
+                kind: kind.into(),
+                text: Some(text),
+                source_event_id,
+                metadata: serde_json::Value::Object(meta),
+            })
         })
     }
 
@@ -238,10 +228,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
     ) -> Result<AgentCommand> {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::prompt_from_context_file(context_file)
-                .into_iter()
-                .collect(),
-            prompt: None,
+            args: crate::adapters::context_prompt(context_file)?.into_iter().collect(),
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -254,11 +241,10 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         let mut args = vec!["--resume".into(), agent_session_id.into()];
-        args.extend(crate::adapters::prompt_from_context_file(context_file));
+        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
-            prompt: None,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -277,7 +263,6 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
-            prompt: None,
             cwd: None,
         })
     }

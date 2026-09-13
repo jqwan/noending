@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { AGENT_LABELS, type Agent, type Project, type Workstream } from "./types";
 import SidebarLogo from "./components/SidebarLogo";
@@ -12,7 +13,8 @@ export type Route =
   | { view: "project"; projectId: string }
   | { view: "workstream"; workstreamId: string }
   | { view: "session"; sessionId: string }
-  | { view: "sessions" };
+  | { view: "sessions" }
+  | { view: "sources" };
 
 function AgentBadge({ agent }: { agent: Agent }) {
   return <span className="badge">{AGENT_LABELS[agent]}</span>;
@@ -22,7 +24,6 @@ export default function App() {
   const [route, setRoute] = useState<Route>({ view: "home" });
   const [projects, setProjects] = useState<Project[]>([]);
   const [recent, setRecent] = useState<Workstream[]>([]);
-  const [syncing, setSyncing] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const refreshSidebar = () => {
@@ -31,6 +32,16 @@ export default function App() {
   };
 
   useEffect(refreshSidebar, []);
+
+  // 入库在「会话数据源」页发起（后台执行）；完成后刷新全局数据。
+  useEffect(() => {
+    const un = listen("sync-completed", () => {
+      refreshSidebar();
+      window.dispatchEvent(new CustomEvent("noending:sync"));
+    });
+    return () => { un.then((f) => f()); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ⌘K / Ctrl+K opens the command palette
   useEffect(() => {
@@ -44,18 +55,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  const doSync = async () => {
-    setSyncing(true);
-    try {
-      await api.syncAll();
-      refreshSidebar();
-      setRoute((cur) => ({ ...cur })); // nudge refresh
-      window.dispatchEvent(new CustomEvent("noending:sync"));
-    } finally {
-      setSyncing(false);
-    }
-  };
-
   return (
     <div className="app">
       <Sidebar
@@ -63,8 +62,6 @@ export default function App() {
         navigate={setRoute}
         projects={projects}
         recent={recent}
-        onSync={doSync}
-        syncing={syncing}
         onSearch={() => setPaletteOpen(true)}
       />
       <LazyMain route={route} navigate={setRoute} refreshSidebar={refreshSidebar} />
@@ -78,11 +75,9 @@ function Sidebar(props: {
   navigate: (r: Route) => void;
   projects: Project[];
   recent: Workstream[];
-  onSync: () => void;
-  syncing: boolean;
   onSearch: () => void;
 }) {
-  const { route, navigate, projects, recent, onSync, syncing, onSearch } = props;
+  const { route, navigate, projects, recent, onSearch } = props;
   const isActive = (v: string) =>
     route.view === v || (v === "project" && route.view === "workstream");
   return (
@@ -105,6 +100,10 @@ function Sidebar(props: {
       <button className={`nav-item ${isActive("sessions") ? "active" : ""}`}
         onClick={() => navigate({ view: "sessions" })}>
         All Sessions
+      </button>
+      <button className={`nav-item ${isActive("sources") ? "active" : ""}`}
+        onClick={() => navigate({ view: "sources" })}>
+        会话数据源
       </button>
 
       <div className="nav-section">Projects</div>
@@ -131,11 +130,6 @@ function Sidebar(props: {
       ))}
 
       <div className="spacer" />
-      <div className="sync-row">
-        <button className="btn small ghost" style={{ width: "100%" }} onClick={onSync} disabled={syncing}>
-          {syncing ? "同步中…" : "同步 Agent Sessions"}
-        </button>
-      </div>
     </div>
   );
 }

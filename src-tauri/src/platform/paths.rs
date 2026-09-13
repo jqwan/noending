@@ -55,38 +55,19 @@ pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
     resolve_home().map(|home| home.join(agent_default_dir(agent)))
 }
 
-/// Normalize a directory name like `-Users-jqk-projects-noending`
-/// (Claude Code / Pi encode cwd with `-` separators) back into
-/// `/Users/jqk/projects/noending`. Returns None when the name does not
-/// look like an encoded absolute path on this platform.
-pub fn decode_cwd_dir_name(name: &str) -> Option<String> {
-    let name = name.trim_matches('-');
-    if name.is_empty() {
-        return None;
+/// Expand a leading `~` / `~/…` to the user's home directory (UI input is
+/// plain text; no shell is involved anywhere else).
+pub fn expand_tilde(path: &str) -> PathBuf {
+    let p = path.trim();
+    if p == "~" {
+        return resolve_home().unwrap_or_else(|| PathBuf::from(p));
     }
-    let decoded = if cfg!(target_os = "windows") {
-        // `-C--Users-jqk-...` style: drive letter survives as `C-`
-        let mut out = String::new();
-        for (i, part) in name.split('-').enumerate() {
-            if i == 0 {
-                out.push_str(part);
-                out.push_str(":\\");
-            } else {
-                out.push_str(part);
-                if i > 0 {
-                    out.push('\\');
-                }
-            }
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = resolve_home() {
+            return home.join(rest);
         }
-        out.trim_end_matches('\\').to_string()
-    } else {
-        format!("/{}", name.replace('-', "/"))
-    };
-    if decoded.is_empty() {
-        None
-    } else {
-        Some(decoded)
     }
+    PathBuf::from(p)
 }
 
 #[cfg(test)]
@@ -97,13 +78,5 @@ mod tests {
     fn agent_override_env() {
         assert_eq!(agent_env_override(Agent::Codex), "CODEX_HOME");
         assert_eq!(agent_env_override(Agent::ClaudeCode), "CLAUDE_CONFIG_DIR");
-    }
-
-    #[test]
-    fn decode_cwd() {
-        assert_eq!(
-            decode_cwd_dir_name("-Users-jqk-projects-noending"),
-            Some("/Users/jqk/projects/noending".to_string())
-        );
     }
 }

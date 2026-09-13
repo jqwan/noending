@@ -5,17 +5,15 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::adapters::{title_from_text, AgentCommand, DiscoveredSession, ReadDelta};
-use crate::domain::{Agent, Session, SessionEvent};
+use crate::adapters::{
+    detect_format, read_jsonl_delta, title_from_text, AgentCommand, DiscoveredSession, ParsedLine,
+    ReadDelta,
+};
+use crate::domain::{Agent, Session, SourceCursor};
 use crate::error::Result;
 use crate::platform::exec_resolver::{self, AgentInstallation};
 
 pub struct PiAdapter;
-
-fn sessions_root() -> Option<PathBuf> {
-    crate::platform::paths::resolve_agent_data_dir(Agent::Pi)
-        .map(|root| root.join("agent").join("sessions"))
-}
 
 fn content_text(content: &Value) -> (String, Vec<String>) {
     // returns (text parts, tool call summaries)
@@ -133,17 +131,9 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         exec_resolver::resolve_quiet(Agent::Pi)
     }
 
-    fn session_root(&self) -> Option<PathBuf> {
-        sessions_root()
-    }
-
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>> {
-        let root = match sessions_root() {
-            Some(r) if r.is_dir() => r,
-            _ => return Ok(vec![]),
-        };
+    fn discover_sessions_in(&self, roots: &[PathBuf]) -> Result<Vec<DiscoveredSession>> {
         let mut out = Vec::new();
-        let mut stack = vec![root];
+        let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
             let rd = match std::fs::read_dir(&dir) {
                 Ok(rd) => rd,
@@ -153,35 +143,37 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                 let p = entry.path();
                 if p.is_dir() {
                     stack.push(p);
-                } else if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    if let Some(s) = Self::parse_session_file(&p)? {
-                        out.push(s);
-                    }
+                    continue;
+                }
+                if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                // Any .jsonl is a candidate; only the content fingerprint
+                // accepts it. One bad file never aborts the whole scan.
+                if detect_format(&p) != Some(Agent::Pi) {
+                    eprintln!("[discover] skip {} (content fingerprint is not pi)", p.display());
+                    continue;
+                }
+                match Self::parse_session_file(&p) {
+                    Ok(Some(s)) => out.push(s),
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
             }
         }
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, from_sequence: i64) -> Result<ReadDelta> {
+    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
         let path = PathBuf::from(&session.raw_path);
-        let file_size = std::fs::metadata(&path)?.len() as i64;
-        let lines = crate::adapters::read_jsonl_lines(&path)?;
-        let mut events = Vec::new();
+        read_jsonl_delta(&path, cursor, &|_idx, v| {
+            let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let source_event_id = v
+                .get("id")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
 
-        for (idx, line) in &lines {
-            let seq = *idx as i64 + 1;
-            if seq <= from_sequence {
-                continue;
-            }
-            let v: Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let ts = v.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
-            let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
-
-            let (kind, text) = match vtype.as_str() {
+            let (kind, text) = match vtype {
                 "message" => {
                     let msg = v.get("message").unwrap_or(&Value::Null);
                     let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
@@ -192,7 +184,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                         text.push_str(&tools.join("\n"));
                     }
                     if text.trim().is_empty() {
-                        continue;
+                        return None;
                     }
                     match role {
                         "user" => ("user_message", text),
@@ -202,26 +194,15 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                 }
                 "compaction" | "compact" => ("compact", "conversation compacted".into()),
                 "session" => ("system", "session header".into()),
-                _ => continue,
+                _ => return None,
             };
 
-            events.push(
-                SessionEvent {
-                    session_id: session.id.clone(),
-                    sequence: seq,
-                    ts,
-                    kind: kind.into(),
-                    text: Some(text),
-                    raw_ref: format!("{}#line:{}", path.display(), idx + 1),
-                    metadata: serde_json::json!({ "agent": "pi", "type": vtype }),
-                },
-            );
-        }
-
-        Ok(ReadDelta {
-            events,
-            last_sequence: lines.len() as i64,
-            file_size,
+            Some(ParsedLine {
+                kind: kind.into(),
+                text: Some(text),
+                source_event_id,
+                metadata: serde_json::json!({ "agent": "pi", "type": vtype }),
+            })
         })
     }
 
@@ -233,10 +214,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
     ) -> Result<AgentCommand> {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::prompt_from_context_file(context_file)
-                .into_iter()
-                .collect(),
-            prompt: None,
+            args: crate::adapters::context_prompt(context_file)?.into_iter().collect(),
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -249,11 +227,10 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         let mut args = vec!["--session".into(), agent_session_id.into()];
-        args.extend(crate::adapters::prompt_from_context_file(context_file));
+        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
-            prompt: None,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -284,7 +261,6 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
-            prompt: None,
             cwd: None,
         })
     }

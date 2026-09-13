@@ -78,6 +78,16 @@ export interface ContextItemRevision {
   created_at: string;
 }
 
+export interface IngestSource {
+  id: string;
+  agent: Agent;
+  path: string;
+  enabled: boolean;
+  origin: "default" | "user";
+  created_at: string;
+  exists: boolean;
+}
+
 export interface SessionWorkstreamBinding {
   session_id: string;
   workstream_id: string;

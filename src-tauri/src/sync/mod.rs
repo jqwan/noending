@@ -1,26 +1,40 @@
-//! Workspace Assistant Core — Background Sync (heuristic v0).
+//! Workspace Assistant Core — Background Sync.
 //!
-//! A SyncJob reads the delta after the last cursor, pre-filters, extracts
-//! candidate context mutations, classifies to workstreams, and merges.
-//! The merge engine is deterministic; the extractor behind
-//! `ContextExtractor` is a trait so an LLM runtime can replace the
-//! heuristic without touching domain code.
+//! A SyncJob reads the event delta after the *processed* cursor, extracts
+//! candidate context mutations, classifies to workstreams, and merges —
+//! all database writes of one run commit in a single SQLite transaction
+//! together with the SyncRun row and the processed-cursor advance. Any
+//! failure rolls the whole run back; retries are idempotent via the delta
+//! fingerprint.
 //!
-//! Policy (docs §13/§26):
-//! - merge automatically, never silently overwrite user-authority items;
-//! - conflicts are kept, not resolved;
+//! Locking model (non-blocking UI): a run is split into three phases.
+//! `prepare` and `commit` each take the DB lock briefly; `extract` — which
+//! may run the user's agent CLI for minutes — holds NO lock, so concurrent
+//! UI commands interleave freely. `prepare` snapshots everything extraction
+//! needs.
+//!
+//! Policy (docs §13/§26, Issue #3/#4):
+//! - read_cursor (events durably ingested) and processed_cursor (events
+//!   consumed by a committed SyncRun) are separate;
+//! - every mutation passes the unified AuthorityPolicy; user authority is
+//!   never silently overridden — disagreement becomes a ContextConflict;
 //! - every mutation leaves a full source trail.
 
 pub mod extractor;
 pub mod merge;
+pub mod policy;
 
+use sha2::{Digest, Sha256};
 use serde::Serialize;
+use std::sync::{Mutex, MutexGuard};
 
-use crate::domain::{Agent, ContextItem, ContextItemRevision, Session, SessionEvent, SyncRun};
-use crate::error::Result;
+use crate::domain::{ContextItem, ContextItemRevision, Session, SessionEvent, SyncRun};
+use crate::error::{other, Result};
 use crate::storage::{now, new_id, Db};
 
 /// A proposed change to a workstream's context, produced by the Assistant.
+/// `source_refs` are stable event references ("session-event:<id>"); a
+/// mutation may cite several events. Empty = no resolvable source.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ContextMutation {
@@ -29,29 +43,30 @@ pub enum ContextMutation {
         item_kind: String,
         title: String,
         content: String,
-        source_ref: String,
+        source_refs: Vec<String>,
         authority: String,
     },
     Update {
         item_id: String,
         title: String,
         content: String,
-        source_ref: String,
+        source_refs: Vec<String>,
         authority: String,
     },
     Supersede {
         item_id: String,
         title: String,
         content: String,
-        source_ref: String,
+        source_refs: Vec<String>,
         authority: String,
     },
     Resolve {
         item_id: String,
-        source_ref: String,
+        source_refs: Vec<String>,
     },
     CreateWorkstream {
-        project_id: String,
+        /// Workstreams may be discovered without a Project home; None is valid.
+        project_id: Option<String>,
         title: String,
         reason: String,
     },
@@ -60,18 +75,23 @@ pub enum ContextMutation {
         item_id: String,
         title: String,
         content: String,
-        source_ref: String,
+        source_refs: Vec<String>,
         reason: String,
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SyncJobInput {
-    pub session_id: String,
-    pub from_cursor: i64,
-    pub to_cursor: i64,
-    pub new_events: Vec<SessionEvent>,
-    pub candidate_workstream_ids: Vec<String>,
+/// Result of one extraction run: mutations plus diagnostics about dropped
+/// refs / invalid entries (surfaced in the SyncRun summary).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ExtractOutput {
+    pub mutations: Vec<ContextMutation>,
+    pub diagnostics: Vec<String>,
+}
+
+impl ExtractOutput {
+    pub fn mutations(mutations: Vec<ContextMutation>) -> Self {
+        Self { mutations, diagnostics: vec![] }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,18 +105,42 @@ pub struct SyncJobOutput {
 }
 
 /// The extraction seam between raw session deltas and the deterministic
-/// merge engine. Implementations: HeuristicExtractor (rule-based fallback,
-/// always available) and CliExtractor (runs the user's agent CLI headlessly).
+/// merge engine. `inputs` are the prompt-building reads snapshotted while
+/// the DB lock was held — extraction itself must not touch the database.
 pub trait ContextExtractor: Send + Sync {
     fn name(&self) -> String;
 
     fn extract(
         &self,
-        db: &Db,
         session: &Session,
         events: &[&SessionEvent],
         candidate_workstream_ids: &[String],
-    ) -> Result<Vec<ContextMutation>>;
+        inputs: &extractor::PromptInputs,
+    ) -> Result<ExtractOutput>;
+}
+
+/// Everything needed to run one sync run. Produced by `prepare` while the
+/// DB lock is held; consumed by `extract` (lock-free) and `commit` (locked).
+#[derive(Debug, Clone)]
+pub struct PreparedSync {
+    pub run_id: String,
+    pub fingerprint: String,
+    pub source_generation: i64,
+    pub from_sequence: i64,
+    pub to_sequence: i64,
+    pub candidates: Vec<String>,
+    pub meaningful: Vec<SessionEvent>,
+    pub meaningful_count: usize,
+    pub unclassified: usize,
+    pub inputs: extractor::PromptInputs,
+}
+
+/// Everything the merge engine needs to know about the run it writes for.
+#[derive(Debug, Clone)]
+pub struct MergeContext {
+    pub run_id: String,
+    /// extractor runtime name; recorded as `created_by = sync:<runtime>`.
+    pub runtime: String,
 }
 
 pub struct SyncEngine {
@@ -117,6 +161,12 @@ impl Default for SyncEngine {
     }
 }
 
+/// Lock a shared Db handle, tolerating poisoning (a panicked command must
+/// not take the whole app down with it).
+pub fn lock_db(db_lock: &Mutex<Db>) -> Result<MutexGuard<'_, Db>> {
+    db_lock.lock().map_err(|_| other("db lock poisoned"))
+}
+
 impl SyncEngine {
     /// Build an engine using the assistant configuration stored in settings.
     /// Falls back to heuristic-only when the configured agent CLI is missing.
@@ -134,16 +184,29 @@ impl SyncEngine {
         }
     }
 
-    /// Run a full sync job for one session delta.
-    pub fn run_session_sync(
+    /// Phase A (DB lock held): idempotency check, candidate classification,
+    /// pre-filter, prompt-input snapshot. Returns None when this delta was
+    /// already processed by a committed run.
+    pub fn prepare(
         &self,
         db: &Db,
         session: &Session,
         events: &[SessionEvent],
-        from_cursor: i64,
-        to_cursor: i64,
-    ) -> Result<SyncJobOutput> {
+        from_sequence: i64,
+        to_sequence: i64,
+    ) -> Result<Option<PreparedSync>> {
         let run_id = new_id();
+        let fingerprint = delta_fingerprint(&session.id, events);
+        let source_generation = events
+            .iter()
+            .map(|e| e.source_generation)
+            .max()
+            .unwrap_or(0);
+
+        // Idempotent retries: this exact delta already committed once.
+        if !events.is_empty() && db.has_completed_run(&session.id, &fingerprint)? {
+            return Ok(None);
+        }
 
         // 1. candidate workstreams: bound ones, plus keyword-matched ones
         let mut candidates: Vec<String> = db
@@ -156,87 +219,195 @@ impl SyncEngine {
         }
 
         // 2. pre-filter: only meaningful message kinds
-        let meaningful: Vec<&SessionEvent> = events
+        let meaningful: Vec<SessionEvent> = events
             .iter()
             .filter(|e| matches!(e.kind.as_str(), "user_message" | "assistant_message"))
             .filter(|e| e.text.as_deref().map(|t| t.len() > 30).unwrap_or(false))
+            .cloned()
             .collect();
 
-        // 3. extract mutations — LLM first, heuristic fallback
-        let (mut mutations, runtime) = if meaningful.is_empty() || candidates.is_empty() {
-            (Vec::new(), "none".to_string())
-        } else if let Some(cli) = &self.llm {
-            match cli.extract(db, session, &meaningful, &candidates) {
-                Ok(m) => (m, cli.name()),
-                Err(e) => {
-                    eprintln!("[sync] cli extractor failed, falling back: {}", e);
-                    (
-                        self.heuristic.extract(db, session, &meaningful, &candidates)?,
-                        format!("{}->heuristic", cli.name()),
-                    )
-                }
-            }
-        } else {
-            (
-                self.heuristic.extract(db, session, &meaningful, &candidates)?,
-                "heuristic".to_string(),
-            )
-        };
-
-        // 4. deterministic merge
-        let mut applied = 0usize;
-        let mut skipped = 0usize;
-        for m in &mutations {
-            let r = self.merger.apply(db, m, &run_id)?;
-            if r {
-                applied += 1;
-            } else {
-                skipped += 1;
-            }
-        }
         let unclassified = if candidates.is_empty() && !meaningful.is_empty() {
             meaningful.len()
         } else {
             0
         };
 
-        let summary = format!(
-            "同步 {} 条新增消息：新增/更新 {} 项，跳过 {} 项{}",
-            meaningful.len(),
-            applied,
-            skipped,
-            if unclassified > 0 {
-                format!("；{} 条消息暂未能归类到 Workstream", unclassified)
-            } else {
-                String::new()
-            }
-        );
-
-        // 5. record run, then advance session cursor — only on success
-        let run = SyncRun {
-            id: run_id.clone(),
-            session_id: session.id.clone(),
-            from_sequence: from_cursor,
-            to_sequence: to_cursor,
-            status: "ok".into(),
-            mutations: serde_json::to_value(&mutations)?,
-            summary: summary.clone(),
-            error: None,
-            created_at: now(),
-            runtime,
+        // 3. snapshot everything extraction needs while the lock is held
+        let inputs = if self.llm.is_some() {
+            extractor::collect_prompt_inputs(db, &candidates)?
+        } else {
+            extractor::PromptInputs::default()
         };
-        db.insert_sync_run(&run)?;
-        db.set_cursor(&session.id, to_cursor, 0)?;
 
-        mutations.clear();
-        Ok(SyncJobOutput {
+        Ok(Some(PreparedSync {
             run_id,
+            fingerprint,
+            source_generation,
+            from_sequence,
+            to_sequence,
+            candidates,
+            meaningful_count: meaningful.len(),
+            meaningful,
+            unclassified,
+            inputs,
+        }))
+    }
+
+    /// Phase B (NO DB lock): extraction. The heuristic is instant; the CLI
+    /// extractor may run the user's agent CLI for minutes. An extractor
+    /// failure falls back to the heuristic; a heuristic failure surfaces so
+    /// the commit phase (and processed cursor) is skipped for retry.
+    pub fn extract(
+        &self,
+        session: &Session,
+        pre: &PreparedSync,
+    ) -> Result<(Vec<ContextMutation>, String, Vec<String>)> {
+        if pre.meaningful.is_empty() || pre.candidates.is_empty() {
+            return Ok((Vec::new(), "none".to_string(), Vec::new()));
+        }
+        let refs: Vec<&SessionEvent> = pre.meaningful.iter().collect();
+        if let Some(cli) = &self.llm {
+            match cli.extract(session, &refs, &pre.candidates, &pre.inputs) {
+                Ok(o) => Ok((o.mutations, cli.name(), o.diagnostics)),
+                Err(e) => {
+                    eprintln!("[sync] cli extractor failed, falling back: {}", e);
+                    let o = self.heuristic.extract(session, &refs, &pre.candidates, &pre.inputs)?;
+                    Ok((o.mutations, format!("{}->heuristic", cli.name()), o.diagnostics))
+                }
+            }
+        } else {
+            let o = self.heuristic.extract(session, &refs, &pre.candidates, &pre.inputs)?;
+            Ok((o.mutations, "heuristic".to_string(), o.diagnostics))
+        }
+    }
+
+    /// Phase C (DB lock held): apply mutations, record the SyncRun and
+    /// advance the processed cursor — all inside ONE transaction. Any error
+    /// rolls the entire run back and the batch is retried later.
+    pub fn commit(
+        &self,
+        db: &Db,
+        session: &Session,
+        pre: &PreparedSync,
+        mutations: Vec<ContextMutation>,
+        runtime: &str,
+        diagnostics: Vec<String>,
+    ) -> Result<SyncJobOutput> {
+        let ctx = MergeContext {
+            run_id: pre.run_id.clone(),
+            runtime: runtime.to_string(),
+        };
+        let (applied, skipped, summary) = db.tx(|tx| {
+            let mut applied = 0usize;
+            let mut skipped = 0usize;
+            for m in &mutations {
+                if self.merger.apply(tx, m, &ctx)? {
+                    applied += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+
+            let mut summary = format!(
+                "同步 {} 条新增消息：新增/更新 {} 项，跳过 {} 项{}",
+                pre.meaningful_count,
+                applied,
+                skipped,
+                if pre.unclassified > 0 {
+                    format!("；{} 条消息暂未能归类到 Workstream", pre.unclassified)
+                } else {
+                    String::new()
+                }
+            );
+            if !diagnostics.is_empty() {
+                summary.push_str(&format!("；诊断: {}", diagnostics.join("；")));
+            }
+
+            let run = SyncRun {
+                id: pre.run_id.clone(),
+                session_id: session.id.clone(),
+                from_sequence: pre.from_sequence,
+                to_sequence: pre.to_sequence,
+                status: "ok".into(),
+                mutations: serde_json::to_value(&mutations)?,
+                summary: summary.clone(),
+                error: None,
+                created_at: now(),
+                runtime: runtime.to_string(),
+                delta_fingerprint: Some(pre.fingerprint.clone()),
+                source_generation: pre.source_generation,
+            };
+            crate::storage::insert_sync_run_conn(tx, &run)?;
+            crate::storage::set_processed_sequence_conn(tx, &session.id, pre.to_sequence)?;
+            Ok((applied, skipped, summary))
+        })
+        .map_err(|e| {
+            eprintln!("[sync] run {} rolled back, processed cursor unchanged: {}", pre.run_id, e);
+            e
+        })?;
+
+        Ok(SyncJobOutput {
+            run_id: pre.run_id.clone(),
             status: "ok".into(),
             applied,
             skipped,
-            unclassified,
+            unclassified: pre.unclassified,
             summary,
         })
+    }
+
+    /// Convenience for callers that already hold the DB lock (tests and
+    /// interactive single-session flows, which are heuristic-speed).
+    pub fn run_session_sync(
+        &self,
+        db: &Db,
+        session: &Session,
+        events: &[SessionEvent],
+        from_sequence: i64,
+        to_sequence: i64,
+    ) -> Result<SyncJobOutput> {
+        let Some(pre) = self.prepare(db, session, events, from_sequence, to_sequence)? else {
+            return Ok(SyncJobOutput {
+                run_id: new_id(),
+                status: "ok".into(),
+                applied: 0,
+                skipped: 0,
+                unclassified: 0,
+                summary: "该批次事件已由先前的 SyncRun 处理（幂等跳过）。".into(),
+            });
+        };
+        let (mutations, runtime, diagnostics) = self.extract(session, &pre)?;
+        self.commit(db, session, &pre, mutations, &runtime, diagnostics)
+    }
+
+    /// Non-blocking path used by background reconcile: takes the DB lock
+    /// per phase, so concurrent UI commands interleave. Processes every
+    /// pending event (sequence > processed cursor) of this session.
+    pub fn run_pending_sync_nonblocking(
+        &self,
+        db_lock: &Mutex<Db>,
+        session: &Session,
+    ) -> Result<usize> {
+        let pre = {
+            let guard = lock_db(db_lock)?;
+            let processed = guard.get_processed_sequence(&session.id)?;
+            let pending = guard.get_events(&session.id, Some(processed), 10_000)?;
+            if pending.is_empty() {
+                return Ok(0);
+            }
+            let to = pending.last().map(|e| e.sequence).unwrap_or(processed);
+            self.prepare(&guard, session, &pending, processed, to)?
+        };
+        let Some(pre) = pre else { return Ok(0) };
+
+        // extraction runs WITHOUT the lock (may take minutes)
+        let (mutations, runtime, diagnostics) = self.extract(session, &pre)?;
+
+        let out = {
+            let guard = lock_db(db_lock)?;
+            self.commit(&guard, session, &pre, mutations, &runtime, diagnostics)?
+        };
+        Ok(out.applied)
     }
 
     /// Keyword-based workstream classification.
@@ -272,6 +443,19 @@ impl SyncEngine {
     }
 }
 
+/// Stable fingerprint of a processed delta: ordered event ids. A completed
+/// SyncRun with the same fingerprint means "this batch is already merged".
+pub fn delta_fingerprint(session_id: &str, events: &[SessionEvent]) -> String {
+    let mut h = Sha256::new();
+    h.update(session_id);
+    for e in events {
+        h.update([0x1f]);
+        h.update(e.id.as_bytes());
+    }
+    let d = h.finalize();
+    d.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+}
+
 fn tokenize(s: &str) -> Vec<String> {
     // split on whitespace/punct; keep CJK bigrams for Chinese titles
     let mut out = Vec::new();
@@ -295,6 +479,7 @@ fn tokenize(s: &str) -> Vec<String> {
 }
 
 /// Create a new item with its first revision (shared by merge + manual UI).
+#[allow(clippy::too_many_arguments)]
 pub fn create_item(
     db: &Db,
     workstream_id: &str,
@@ -303,8 +488,39 @@ pub fn create_item(
     content: &str,
     authority: &str,
     source_type: &str,
-    source_ref: Option<&str>,
+    source_refs: &[String],
     sync_run_id: Option<&str>,
+    created_by: &str,
+) -> Result<ContextItem> {
+    db.tx(|tx| {
+        create_item_conn(
+            tx,
+            workstream_id,
+            kind,
+            title,
+            content,
+            authority,
+            source_type,
+            source_refs,
+            sync_run_id,
+            created_by,
+        )
+    })
+}
+
+/// Connection-level twin used inside transactions.
+#[allow(clippy::too_many_arguments)]
+pub fn create_item_conn(
+    conn: &rusqlite::Connection,
+    workstream_id: &str,
+    kind: &str,
+    title: &str,
+    content: &str,
+    authority: &str,
+    source_type: &str,
+    source_refs: &[String],
+    sync_run_id: Option<&str>,
+    created_by: &str,
 ) -> Result<ContextItem> {
     let item = ContextItem {
         id: new_id(),
@@ -312,6 +528,7 @@ pub fn create_item(
         kind: kind.to_string(),
         status: "active".into(),
         authority: authority.to_string(),
+        created_by: created_by.to_string(),
         current_revision_id: None,
         supersedes_item_id: None,
         created_at: now(),
@@ -322,12 +539,16 @@ pub fn create_item(
         item_id: item.id.clone(),
         title: title.to_string(),
         content: content.to_string(),
-        metadata: serde_json::json!({}),
+        metadata: if source_refs.len() > 1 {
+            serde_json::json!({ "source_refs": source_refs })
+        } else {
+            serde_json::json!({})
+        },
         source_type: Some(source_type.to_string()),
-        source_ref: source_ref.map(|s| s.to_string()),
+        source_ref: source_refs.first().cloned(),
         sync_run_id: sync_run_id.map(|s| s.to_string()),
         created_at: now(),
     };
-    db.insert_item(&item, &rev)?;
+    crate::storage::insert_item_conn(conn, &item, &rev)?;
     Ok(item)
 }

@@ -1,7 +1,14 @@
 //! SQLite storage: schema, migrations and repository helpers.
 //! Owns: domain data, session index, cursors, context items, FTS search.
+//!
+//! History integrity rules:
+//! - `session_events` is append-only: the row identity is an app-owned `id`,
+//!   and a stable `(session_id, source_identity_hash)` unique index makes
+//!   re-scans idempotent. Rows are never replaced or overwritten.
+//! - Cursors distinguish the *read* position (events durably ingested) from
+//!   the *processed* position (events consumed by a committed SyncRun).
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use crate::domain::*;
 use crate::error::{other, Result};
@@ -14,6 +21,36 @@ pub fn now() -> String {
 
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Stable content identity of a source event, used to make re-scans of the
+/// same Agent transcript idempotent. Prefers the Agent's own event id; falls
+/// back to a normalized-content hash. Generation / file position are
+/// deliberately excluded: the same logical event keeps its identity across
+/// truncate/rescan, while genuinely new content always hashes differently.
+pub fn source_identity_hash(
+    source_event_id: Option<&str>,
+    kind: &str,
+    ts: Option<&str>,
+    text: Option<&str>,
+) -> String {
+    use sha2::Digest;
+    use std::fmt::Write;
+    let normalized = text.unwrap_or("").trim();
+    let mut h = sha2::Sha256::new();
+    h.update(source_event_id.unwrap_or("-"));
+    h.update([0x1f]);
+    h.update(kind);
+    h.update([0x1f]);
+    h.update(ts.unwrap_or("-"));
+    h.update([0x1f]);
+    h.update(normalized);
+    let digest = h.finalize();
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        write!(out, "{:02x}", b).ok();
+    }
+    out
 }
 
 impl Db {
@@ -32,6 +69,16 @@ impl Db {
 
     pub fn conn(&self) -> &Connection {
         &self.0
+    }
+
+    /// Run `f` inside a single SQLite transaction: all writes commit together
+    /// or not at all. This is the only sanctioned way to persist multi-step
+    /// domain changes (sync mutations, ingest batches, …).
+    pub fn tx<T>(&self, f: impl FnOnce(&Transaction) -> Result<T>) -> Result<T> {
+        let tx = self.0.unchecked_transaction()?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -54,7 +101,7 @@ impl Db {
             );
             CREATE TABLE IF NOT EXISTS workstreams (
               id TEXT PRIMARY KEY,
-              project_id TEXT NOT NULL REFERENCES projects(id),
+              project_id TEXT REFERENCES projects(id),
               title TEXT NOT NULL,
               description TEXT NOT NULL DEFAULT '',
               lifecycle TEXT NOT NULL DEFAULT 'open',
@@ -76,24 +123,36 @@ impl Db {
               UNIQUE(agent, agent_session_id)
             );
             CREATE TABLE IF NOT EXISTS session_events (
+              id TEXT PRIMARY KEY,
               session_id TEXT NOT NULL REFERENCES sessions(id),
               sequence INTEGER NOT NULL,
+              source_event_id TEXT,
+              source_generation INTEGER NOT NULL DEFAULT 0,
+              source_position TEXT NOT NULL DEFAULT '',
+              source_identity_hash TEXT NOT NULL,
               ts TEXT,
               kind TEXT NOT NULL,
               text TEXT,
               raw_ref TEXT NOT NULL,
               metadata TEXT NOT NULL DEFAULT '{}',
-              PRIMARY KEY (session_id, sequence)
+              UNIQUE (session_id, source_identity_hash)
             );
             CREATE TABLE IF NOT EXISTS session_cursors (
               session_id TEXT PRIMARY KEY REFERENCES sessions(id),
               last_sequence INTEGER NOT NULL DEFAULT 0,
-              last_seen_size INTEGER NOT NULL DEFAULT 0
+              last_seen_size INTEGER NOT NULL DEFAULT 0,
+              source_file_identity TEXT NOT NULL DEFAULT '',
+              generation INTEGER NOT NULL DEFAULT 0,
+              byte_offset INTEGER NOT NULL DEFAULT 0,
+              mtime REAL,
+              processed_sequence INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS session_workstream_bindings (
               session_id TEXT NOT NULL REFERENCES sessions(id),
               workstream_id TEXT NOT NULL REFERENCES workstreams(id),
               role TEXT NOT NULL DEFAULT 'related',
+              source TEXT NOT NULL DEFAULT 'automatic_classification',
+              confidence REAL NOT NULL DEFAULT 0.5,
               last_seen_revision TEXT,
               last_sync_cursor INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
@@ -106,6 +165,7 @@ impl Db {
               kind TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'active',
               authority TEXT NOT NULL DEFAULT 'system_observed',
+              created_by TEXT NOT NULL DEFAULT 'unknown',
               current_revision_id TEXT,
               supersedes_item_id TEXT,
               created_at TEXT NOT NULL,
@@ -131,7 +191,10 @@ impl Db {
               mutations TEXT NOT NULL DEFAULT '[]',
               summary TEXT NOT NULL DEFAULT '',
               error TEXT,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              runtime TEXT NOT NULL DEFAULT 'heuristic',
+              delta_fingerprint TEXT,
+              source_generation INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS agent_installations (
               agent TEXT PRIMARY KEY,
@@ -144,10 +207,65 @@ impl Db {
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS launch_intents (
+              id TEXT PRIMARY KEY,
+              launch_type TEXT NOT NULL DEFAULT 'new',
+              agent TEXT NOT NULL,
+              selected_workstream_ids TEXT NOT NULL DEFAULT '[]',
+              cwd TEXT,
+              context_bundle_markdown TEXT,
+              process_id INTEGER,
+              launched_at TEXT NOT NULL,
+              matched_session_id TEXT,
+              status TEXT NOT NULL DEFAULT 'pending',
+              note TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS context_conflicts (
+              id TEXT PRIMARY KEY,
+              workstream_id TEXT NOT NULL REFERENCES workstreams(id),
+              left_item_id TEXT NOT NULL REFERENCES context_items(id),
+              right_item_id TEXT,
+              conflict_type TEXT NOT NULL DEFAULT 'authority',
+              status TEXT NOT NULL DEFAULT 'open',
+              resolution TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS project_affinity_evidence (
+              id TEXT PRIMARY KEY,
+              session_id TEXT REFERENCES sessions(id),
+              workstream_id TEXT REFERENCES workstreams(id),
+              project_id TEXT NOT NULL REFERENCES projects(id),
+              evidence_type TEXT NOT NULL,
+              source TEXT NOT NULL DEFAULT '',
+              score REAL NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS context_deliveries (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id),
+              workstream_id TEXT NOT NULL REFERENCES workstreams(id),
+              bundle_id TEXT NOT NULL,
+              delivered_revisions TEXT NOT NULL DEFAULT '[]',
+              delivered_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ingest_sources (
+              id TEXT PRIMARY KEY,
+              agent TEXT NOT NULL,
+              path TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 0,
+              origin TEXT NOT NULL DEFAULT 'user',   -- default | user
+              created_at TEXT NOT NULL,
+              UNIQUE(agent, path)
+            );
             CREATE INDEX IF NOT EXISTS idx_workstreams_project ON workstreams(project_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
             CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
             CREATE INDEX IF NOT EXISTS idx_bindings_ws ON session_workstream_bindings(workstream_id);
+            CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, sequence);
+            CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
             "#,
         )?;
 
@@ -170,17 +288,6 @@ impl Db {
             "#,
         )?;
 
-        // v2.1: sync_runs.runtime records which extractor ran.
-        let has_runtime: i64 = self.0.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sync_runs') WHERE name = 'runtime'",
-            [],
-            |r| r.get(0),
-        )?;
-        if has_runtime == 0 {
-            self.0
-                .execute_batch("ALTER TABLE sync_runs ADD COLUMN runtime TEXT NOT NULL DEFAULT 'heuristic';")?;
-        }
-
         // FTS5 search index (external-content style: we manage rows manually).
         // If the bundled build lacks FTS5, search falls back to LIKE at query time.
         let fts_ok = self
@@ -197,37 +304,23 @@ impl Db {
             eprintln!("[storage] FTS5 unavailable, search will use LIKE fallback");
         }
 
-        // v2 migration: workstreams.project_id becomes nullable — Workstream
-        // may exist standalone (UX rule: New Workstream is a primary action).
-        let notnull: i64 = self.0.query_row(
-            "SELECT \"notnull\" FROM pragma_table_info('workstreams') WHERE name = 'project_id'",
-            [],
-            |r| r.get(0),
-        )?;
-        if notnull != 0 {
-            self.0.pragma_update(None, "foreign_keys", "OFF")?;
-            self.0.execute_batch(
-                r#"
-                BEGIN;
-                CREATE TABLE workstreams_v2 (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT REFERENCES projects(id),
-                  title TEXT NOT NULL,
-                  description TEXT NOT NULL DEFAULT '',
-                  lifecycle TEXT NOT NULL DEFAULT 'open',
-                  visibility TEXT NOT NULL DEFAULT 'normal',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                INSERT INTO workstreams_v2 SELECT id, project_id, title, description, lifecycle, visibility, created_at, updated_at FROM workstreams;
-                DROP TABLE workstreams;
-                ALTER TABLE workstreams_v2 RENAME TO workstreams;
-                CREATE INDEX idx_workstreams_project ON workstreams(project_id);
-                COMMIT;
-                "#,
-            )?;
-            self.0.pragma_update(None, "foreign_keys", "ON")?;
-            eprintln!("[storage] migrated workstreams.project_id to nullable");
+        // Seed the per-agent default source roots (~/.codex etc., honoring
+        // env overrides). They start DISABLED: whether a source is ingested
+        // is always the user's decision.
+        self.ensure_default_ingest_sources()?;
+        Ok(())
+    }
+
+    /// Insert the standard agent data roots as disabled defaults. Idempotent.
+    fn ensure_default_ingest_sources(&self) -> Result<()> {
+        for agent in crate::domain::Agent::all() {
+            if let Some(root) = crate::platform::paths::resolve_agent_data_dir(agent) {
+                self.0.execute(
+                    "INSERT OR IGNORE INTO ingest_sources (id, agent, path, enabled, origin, created_at)
+                     VALUES (?1, ?2, ?3, 0, 'default', ?4)",
+                    params![new_id(), agent.as_str(), root.to_string_lossy().to_string(), now()],
+                )?;
+            }
         }
         Ok(())
     }
@@ -258,18 +351,25 @@ impl Db {
     }
 
     pub fn upsert_project(&self, p: &Project) -> Result<()> {
-        self.0.execute(
-            "INSERT INTO projects (id, name, description, archived, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET name = ?2, description = ?3, archived = ?4, updated_at = ?6",
-            params![p.id, p.name, p.description, p.archived as i64, p.created_at, p.updated_at],
-        )?;
+        upsert_project_conn(&self.0, p)?;
         self.index_project(p)?;
         Ok(())
     }
 
+    /// Deleting a Project only detaches: Workstreams and Sessions survive
+    /// with `project_id = NULL`. A Project is an optional organization layer,
+    /// never the lifecycle owner of a Workstream.
     pub fn delete_project(&self, id: &str) -> Result<()> {
-        self.0.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        self.tx(|tx| {
+            tx.execute(
+                "UPDATE workstreams SET project_id = NULL, updated_at = ?2 WHERE project_id = ?1",
+                params![id, now()],
+            )?;
+            tx.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?1", params![id])?;
+            tx.execute("DELETE FROM project_resources WHERE project_id = ?1", params![id])?;
+            tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+            Ok(())
+        })?;
         self.unindex("project", id);
         Ok(())
     }
@@ -343,12 +443,7 @@ impl Db {
     }
 
     pub fn upsert_workstream(&self, w: &Workstream) -> Result<()> {
-        self.0.execute(
-            "INSERT INTO workstreams (id, project_id, title, description, lifecycle, visibility, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(id) DO UPDATE SET title = ?3, description = ?4, lifecycle = ?5, visibility = ?6, updated_at = ?8",
-            params![w.id, w.project_id, w.title, w.description, w.lifecycle, w.visibility, w.created_at, w.updated_at],
-        )?;
+        upsert_workstream_conn(&self.0, w)?;
         self.index_workstream(w)?;
         Ok(())
     }
@@ -402,79 +497,241 @@ impl Db {
             .optional()?)
     }
 
+    /// Sessions discovered but not yet seen by us. Used by LaunchIntent
+    /// matching: only genuinely new sessions may claim a pending intent.
+    /// The SQL has no created_at column, so the since-filter runs in Rust.
+    pub fn recently_created_sessions(&self, agent: Agent, since: &str) -> Result<Vec<Session>> {
+        let mut st = self.0.prepare(
+            "SELECT * FROM sessions WHERE agent = ?1 ORDER BY COALESCE(started_at, last_activity_at) DESC LIMIT 200",
+        )?;
+        let rows = st
+            .query_map(params![agent.as_str()], row_session)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|s| {
+                s.started_at
+                    .as_deref()
+                    .or(s.last_activity_at.as_deref())
+                    .map(|t| t >= since)
+                    .unwrap_or(false)
+            })
+            .collect())
+    }
+
     pub fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<Session>> {
+        // Dynamic SQL: placeholders are appended together with the bind
+        // values, so the numbering can never drift out of sync.
         let mut sql = "SELECT * FROM sessions WHERE 1=1".to_string();
-        if filter.project_id.is_some() {
-            sql.push_str(" AND project_id = ?1");
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(p) = &filter.project_id {
+            values.push(Box::new(p.clone()));
+            sql.push_str(&format!(" AND project_id = ?{}", values.len()));
         }
-        if filter.agent.is_some() {
-            sql.push_str(" AND agent = ?2");
+        if let Some(a) = &filter.agent {
+            values.push(Box::new(a.as_str().to_string()));
+            sql.push_str(&format!(" AND agent = ?{}", values.len()));
         }
         sql.push_str(" ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 500");
         let mut st = self.0.prepare(&sql)?;
-        let map = |r: &Row| row_session(r);
-        let rows = match (filter.project_id, filter.agent) {
-            (Some(p), Some(a)) => st.query_map(params![p, a.as_str()], map)?.collect::<std::result::Result<Vec<_>, _>>()?,
-            (Some(p), None) => st.query_map(params![p], map)?.collect::<std::result::Result<Vec<_>, _>>()?,
-            (None, Some(a)) => st.query_map(params![a.as_str()], map)?.collect::<std::result::Result<Vec<_>, _>>()?,
-            (None, None) => st.query_map([], map)?.collect::<std::result::Result<Vec<_>, _>>()?,
-        };
-        Ok(rows)
-    }
-
-    pub fn append_events(&self, events: &[SessionEvent]) -> Result<()> {
-        let mut st = self.0.prepare(
-            "INSERT OR REPLACE INTO session_events (session_id, sequence, ts, kind, text, raw_ref, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
-        for e in events {
-            st.execute(params![
-                e.session_id, e.sequence, e.ts, e.kind, e.text, e.raw_ref, e.metadata.to_string()
-            ])?;
-        }
-        Ok(())
-    }
-
-    pub fn get_events(&self, session_id: &str, after: Option<i64>, limit: i64) -> Result<Vec<SessionEvent>> {
-        let mut st = self.0.prepare(
-            "SELECT session_id, sequence, ts, kind, text, raw_ref, metadata
-             FROM session_events WHERE session_id = ?1 AND sequence > ?2
-             ORDER BY sequence LIMIT ?3",
-        )?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         let rows = st
-            .query_map(params![session_id, after.unwrap_or(0), limit], |r| {
-                Ok(SessionEvent {
-                    session_id: r.get(0)?,
-                    sequence: r.get(1)?,
-                    ts: r.get(2)?,
-                    kind: r.get(3)?,
-                    text: r.get(4)?,
-                    raw_ref: r.get(5)?,
-                    metadata: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
-                })
-            })?
+            .query_map(refs.as_slice(), row_session)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    pub fn get_cursor(&self, session_id: &str) -> Result<i64> {
+    // ---------------- Events (append-only, identity-based) ----------------
+
+    /// Persist a batch of parsed source events inside one transaction:
+    /// content-identity dedup (INSERT-or-SKIP, never REPLACE), app-owned
+    /// monotonic sequence allocation, and the read-cursor advance commit
+    /// together. Returns the events that were actually newly stored.
+    pub fn append_source_events(
+        &self,
+        session_id: &str,
+        parsed: &[ParsedEvent],
+        source: &SourceCursorUpdate,
+        raw_path: &str,
+    ) -> Result<Vec<SessionEvent>> {
+        self.tx(|tx| {
+            let max_seq: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get::<_, i64>(0),
+            )?;
+            let mut next_seq: i64 = max_seq + 1;
+            let mut stored = Vec::with_capacity(parsed.len());
+            {
+                let mut ins = tx.prepare(
+                    "INSERT INTO session_events
+                     (id, session_id, sequence, source_event_id, source_generation, source_position, source_identity_hash, ts, kind, text, raw_ref, metadata)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
+                )?;
+                for p in parsed {
+                    let hash = source_identity_hash(
+                        p.source_event_id.as_deref(),
+                        &p.kind,
+                        p.ts.as_deref(),
+                        p.text.as_deref(),
+                    );
+                    let id = new_id();
+                    let n = ins.execute(params![
+                        id,
+                        session_id,
+                        next_seq,
+                        p.source_event_id,
+                        source.generation,
+                        p.source_position,
+                        hash,
+                        p.ts,
+                        p.kind,
+                        p.text,
+                        format!("{}#{}", raw_path, p.source_position),
+                        p.metadata.to_string(),
+                    ])?;
+                    if n > 0 {
+                        stored.push(SessionEvent {
+                            id: id.clone(),
+                            session_id: session_id.to_string(),
+                            sequence: next_seq,
+                            source_event_id: p.source_event_id.clone(),
+                            source_generation: source.generation,
+                            source_position: p.source_position.clone(),
+                            ts: p.ts.clone(),
+                            kind: p.kind.clone(),
+                            text: p.text.clone(),
+                            raw_ref: format!("{}#{}", raw_path, p.source_position),
+                            metadata: p.metadata.clone(),
+                        });
+                        next_seq += 1;
+                    }
+                }
+            }
+            upsert_source_cursor_conn(
+                tx,
+                &SourceCursor {
+                    session_id: session_id.to_string(),
+                    source_file_identity: source.file_identity.clone(),
+                    generation: source.generation,
+                    byte_offset: source.byte_offset,
+                    last_seen_size: source.last_seen_size,
+                    mtime: source.mtime,
+                    last_sequence: if stored.is_empty() {
+                        // keep previous max; nothing new was appended
+                        tx.query_row(
+                            "SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE session_id = ?1",
+                            params![session_id],
+                            |r| r.get::<_, i64>(0),
+                        )?
+                    } else {
+                        next_seq - 1
+                    },
+                },
+            )?;
+            Ok(stored)
+        })
+    }
+
+    /// Insert fully-formed events as-is (backfill / test seeding only).
+    /// The identity unique index still guards against duplicates.
+    pub fn append_events(&self, events: &[SessionEvent]) -> Result<()> {
+        self.tx(|tx| {
+            insert_events_conn(tx, events)?;
+            Ok(())
+        })
+    }
+
+    pub fn get_events(&self, session_id: &str, after: Option<i64>, limit: i64) -> Result<Vec<SessionEvent>> {
+        get_events_conn(&self.0, session_id, after, limit)
+    }
+
+    pub fn get_event_by_ref(&self, source_ref: &str) -> Result<Option<SessionEvent>> {
+        // accepted forms: "session-event:<event-id>" (stable) and the legacy
+        // "session:<session-id>#<sequence>" (display-era reference).
+        if let Some(id) = source_ref.strip_prefix("session-event:") {
+            return self.query_event("SELECT * FROM session_events WHERE id = ?1", params![id]);
+        }
+        if let Some(rest) = source_ref.strip_prefix("session:") {
+            if let Some((sid, seq)) = rest.rsplit_once('#') {
+                if let Ok(seq) = seq.parse::<i64>() {
+                    return self.query_event(
+                        "SELECT * FROM session_events WHERE session_id = ?1 AND sequence = ?2",
+                        params![sid, seq],
+                    );
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn query_event(&self, sql: &str, p: impl rusqlite::Params) -> Result<Option<SessionEvent>> {
+        Ok(self
+            .0
+            .query_row(sql, p, row_event)
+            .optional()?)
+    }
+
+    pub fn event_count(&self, session_id: &str) -> Result<i64> {
+        Ok(self.0.query_row(
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    // ---------------- Cursors ----------------
+
+    pub fn get_source_cursor(&self, session_id: &str) -> Result<SourceCursor> {
         Ok(self
             .0
             .query_row(
-                "SELECT last_sequence FROM session_cursors WHERE session_id = ?1",
+                "SELECT session_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, last_sequence
+                 FROM session_cursors WHERE session_id = ?1",
                 params![session_id],
-                |r| r.get::<_, i64>(0),
+                |r| {
+                    Ok(SourceCursor {
+                        session_id: r.get(0)?,
+                        source_file_identity: r.get(1)?,
+                        generation: r.get(2)?,
+                        byte_offset: r.get::<_, i64>(3)?.max(0) as u64,
+                        last_seen_size: r.get::<_, i64>(4)?.max(0) as u64,
+                        mtime: r.get(5)?,
+                        last_sequence: r.get(6)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    pub fn set_source_cursor(&self, c: &SourceCursor) -> Result<()> {
+        self.tx(|tx| upsert_source_cursor_conn(tx, c))
+    }
+
+    /// Legacy read accessor used by the UI: max ingested sequence.
+    pub fn get_cursor(&self, session_id: &str) -> Result<i64> {
+        Ok(self.get_source_cursor(session_id)?.last_sequence)
+    }
+
+    pub fn get_processed_sequence(&self, session_id: &str) -> Result<i64> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT processed_sequence FROM session_cursors WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
             )
             .optional()?
             .unwrap_or(0))
     }
 
-    pub fn set_cursor(&self, session_id: &str, seq: i64, size: i64) -> Result<()> {
+    pub fn set_processed_sequence(&self, session_id: &str, seq: i64) -> Result<()> {
         self.0.execute(
-            "INSERT INTO session_cursors (session_id, last_sequence, last_seen_size)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(session_id) DO UPDATE SET last_sequence = ?2, last_seen_size = ?3",
-            params![session_id, seq, size],
+            "INSERT INTO session_cursors (session_id, processed_sequence) VALUES (?1, ?2)
+             ON CONFLICT(session_id) DO UPDATE SET processed_sequence = ?2",
+            params![session_id, seq],
         )?;
         Ok(())
     }
@@ -482,15 +739,7 @@ impl Db {
     // ---------------- Bindings ----------------
 
     pub fn bind(&self, b: &SessionWorkstreamBinding) -> Result<()> {
-        self.0.execute(
-            "INSERT INTO session_workstream_bindings
-             (session_id, workstream_id, role, last_seen_revision, last_sync_cursor, created_at, last_used_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(session_id, workstream_id) DO UPDATE SET
-               role = ?3, last_used_at = ?7",
-            params![b.session_id, b.workstream_id, b.role, b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at],
-        )?;
-        Ok(())
+        bind_conn(&self.0, b)
     }
 
     pub fn unbind(&self, session_id: &str, workstream_id: &str) -> Result<()> {
@@ -503,7 +752,7 @@ impl Db {
 
     pub fn bindings_for_session(&self, session_id: &str) -> Result<Vec<SessionWorkstreamBinding>> {
         let mut st = self.0.prepare(
-            "SELECT session_id, workstream_id, role, last_seen_revision, last_sync_cursor, created_at, last_used_at
+            "SELECT session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at
              FROM session_workstream_bindings WHERE session_id = ?1",
         )?;
         let rows = st
@@ -514,7 +763,7 @@ impl Db {
 
     pub fn bindings_for_workstream(&self, workstream_id: &str) -> Result<Vec<SessionWorkstreamBinding>> {
         let mut st = self.0.prepare(
-            "SELECT session_id, workstream_id, role, last_seen_revision, last_sync_cursor, created_at, last_used_at
+            "SELECT session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at
              FROM session_workstream_bindings WHERE workstream_id = ?1",
         )?;
         let rows = st
@@ -536,27 +785,12 @@ impl Db {
     // ---------------- Context Items ----------------
 
     pub fn insert_item(&self, item: &ContextItem, revision: &ContextItemRevision) -> Result<()> {
-        self.0.execute(
-            "INSERT INTO context_items (id, workstream_id, kind, status, authority, current_revision_id, supersedes_item_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![item.id, item.workstream_id, item.kind, item.status, item.authority,
-                    item.current_revision_id, item.supersedes_item_id, item.created_at, item.updated_at],
-        )?;
-        self.insert_revision(revision)?;
-        self.0.execute(
-            "UPDATE context_items SET current_revision_id = ?2 WHERE id = ?1",
-            params![item.id, revision.id],
-        )?;
+        insert_item_conn(&self.0, item, revision)?;
         self.index_item(item, revision)
     }
 
     pub fn insert_revision(&self, r: &ContextItemRevision) -> Result<()> {
-        self.0.execute(
-            "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![r.id, r.item_id, r.title, r.content, r.metadata.to_string(), r.source_type, r.source_ref, r.sync_run_id, r.created_at],
-        )?;
-        Ok(())
+        insert_revision_conn(&self.0, r)
     }
 
     pub fn set_item_head(&self, item_id: &str, revision_id: &str, status: Option<&str>) -> Result<()> {
@@ -582,6 +816,21 @@ impl Db {
         Ok(())
     }
 
+    /// Status transitions always leave an audit trail: a status-change
+    /// revision records previous/new status, actor and reason, and becomes
+    /// the item head. Metadata-only; content is preserved.
+    pub fn apply_status_change(
+        &self,
+        item_id: &str,
+        new_status: &str,
+        actor: &str,
+        reason: &str,
+        run_id: Option<&str>,
+        source_refs: &[String],
+    ) -> Result<()> {
+        self.tx(|tx| apply_status_change_conn(tx, item_id, new_status, actor, reason, run_id, source_refs))
+    }
+
     pub fn set_item_authority(&self, item_id: &str, authority: &str) -> Result<()> {
         self.0.execute(
             "UPDATE context_items SET authority = ?2, updated_at = ?3 WHERE id = ?1",
@@ -591,47 +840,15 @@ impl Db {
     }
 
     pub fn get_item(&self, id: &str) -> Result<Option<ContextItem>> {
-        Ok(self
-            .0
-            .query_row(
-                "SELECT id, workstream_id, kind, status, authority, current_revision_id, supersedes_item_id, created_at, updated_at
-                 FROM context_items WHERE id = ?1",
-                params![id],
-                row_item,
-            )
-            .optional()?)
+        get_item_conn(&self.0, id)
     }
 
     pub fn get_revision(&self, id: &str) -> Result<Option<ContextItemRevision>> {
-        Ok(self
-            .0
-            .query_row(
-                "SELECT id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at
-                 FROM context_item_revisions WHERE id = ?1",
-                params![id],
-                row_revision,
-            )
-            .optional()?)
+        get_revision_conn(&self.0, id)
     }
 
     pub fn items_for_workstream(&self, workstream_id: &str, include_inactive: bool) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
-        let status_filter = if include_inactive { "" } else { " AND i.status = 'active'" };
-        let sql = format!(
-            "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
-                    r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
-             FROM context_items i LEFT JOIN context_item_revisions r ON r.id = i.current_revision_id
-             WHERE i.workstream_id = ?1{} ORDER BY i.updated_at DESC",
-            status_filter
-        );
-        let mut st = self.0.prepare(&sql)?;
-        let rows = st
-            .query_map(params![workstream_id], |r| {
-                let item = row_item_at(r, 0)?;
-                let rev = row_revision_at(r, 9)?;
-                Ok((item, rev))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        items_for_workstream_conn(&self.0, workstream_id, include_inactive)
     }
 
     pub fn item_history(&self, item_id: &str) -> Result<Vec<ContextItemRevision>> {
@@ -647,7 +864,7 @@ impl Db {
 
     pub fn active_items_since(&self, workstream_id: &str, since: &str) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
         let mut st = self.0.prepare(
-            "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
+            "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.created_by, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
                     r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
              FROM context_items i JOIN context_item_revisions r ON r.id = i.current_revision_id
              WHERE i.workstream_id = ?1 AND i.status = 'active' AND i.updated_at > ?2
@@ -656,32 +873,306 @@ impl Db {
         let rows = st
             .query_map(params![workstream_id, since], |r| {
                 let item = row_item_at(r, 0)?;
-                let rev = row_revision_at(r, 9)?;
+                let rev = row_revision_at(r, 10)?;
                 Ok((item, rev))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    // ---------------- Sync runs ----------------
+    // ---------------- Conflicts ----------------
 
-    pub fn insert_sync_run(&self, run: &SyncRun) -> Result<()> {
+    pub fn insert_conflict(&self, c: &ContextConflict) -> Result<()> {
+        insert_conflict_conn(&self.0, c)
+    }
+
+    pub fn conflicts_for_workstream(&self, workstream_id: &str, include_closed: bool) -> Result<Vec<ContextConflict>> {
+        let filter = if include_closed { "" } else { " AND status = 'open'" };
+        let sql = format!(
+            "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at
+             FROM context_conflicts WHERE workstream_id = ?1{} ORDER BY created_at DESC",
+            filter
+        );
+        let mut st = self.0.prepare(&sql)?;
+        let rows = st
+            .query_map(params![workstream_id], row_conflict)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn open_conflicts_for_item(&self, item_id: &str) -> Result<Vec<ContextConflict>> {
+        let mut st = self.0.prepare(
+            "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at
+             FROM context_conflicts WHERE (left_item_id = ?1 OR right_item_id = ?1) AND status = 'open'",
+        )?;
+        let rows = st
+            .query_map(params![item_id], row_conflict)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn update_conflict_status(&self, conflict_id: &str, status: &str, resolution: Option<&str>) -> Result<()> {
         self.0.execute(
-            "INSERT INTO sync_runs (id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![run.id, run.session_id, run.from_sequence, run.to_sequence, run.status,
-                    run.mutations.to_string(), run.summary, run.error, run.created_at, run.runtime],
+            "UPDATE context_conflicts SET status = ?2, resolution = COALESCE(?3, resolution), updated_at = ?4 WHERE id = ?1",
+            params![conflict_id, status, resolution, now()],
         )?;
         Ok(())
     }
 
+    // ---------------- Sync runs ----------------
+
+    pub fn insert_sync_run(&self, run: &SyncRun) -> Result<()> {
+        insert_sync_run_conn(&self.0, run)
+    }
+
+    /// True when an already-committed run processed exactly this delta —
+    /// retries after a crash must not re-apply the same mutations.
+    pub fn has_completed_run(&self, session_id: &str, delta_fingerprint: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT 1 FROM sync_runs WHERE session_id = ?1 AND delta_fingerprint = ?2 AND status = 'ok' LIMIT 1",
+                params![session_id, delta_fingerprint],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn list_sync_runs(&self, limit: i64) -> Result<Vec<SyncRun>> {
         let mut st = self.0.prepare(
-            "SELECT id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime
+            "SELECT id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint, source_generation
              FROM sync_runs ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = st
             .query_map(params![limit], row_sync_run)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // ---------------- Launch intents ----------------
+
+    pub fn insert_launch_intent(&self, i: &LaunchIntent) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO launch_intents
+             (id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                i.id, i.launch_type, i.agent.as_str(),
+                serde_json::to_string(&i.selected_workstream_ids)?,
+                i.cwd, i.context_bundle_markdown, i.process_id.map(|p| p as i64),
+                i.launched_at, i.matched_session_id, i.status, i.note, i.created_at, i.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_launch_intent(
+        &self,
+        id: &str,
+        status: &str,
+        matched_session_id: Option<&str>,
+        note: &str,
+    ) -> Result<()> {
+        self.0.execute(
+            "UPDATE launch_intents SET status = ?2, matched_session_id = COALESCE(?3, matched_session_id), note = ?4, updated_at = ?5 WHERE id = ?1",
+            params![id, status, matched_session_id, note, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_launch_intent(&self, id: &str) -> Result<Option<LaunchIntent>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
+                 FROM launch_intents WHERE id = ?1",
+                params![id],
+                row_launch_intent,
+            )
+            .optional()?)
+    }
+
+    pub fn list_launch_intents(&self, statuses: &[&str], limit: i64) -> Result<Vec<LaunchIntent>> {
+        let filter = if statuses.is_empty() {
+            String::new()
+        } else {
+            let placeholders = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            format!(" WHERE status IN ({})", placeholders)
+        };
+        let sql = format!(
+            "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
+             FROM launch_intents{} ORDER BY created_at DESC LIMIT {}",
+            filter, limit
+        );
+        let mut st = self.0.prepare(&sql)?;
+        let statuses: Vec<String> = statuses.iter().map(|s| s.to_string()).collect();
+        let rows = st
+            .query_map(rusqlite::params_from_iter(statuses.iter()), row_launch_intent)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // ---------------- Project affinity ----------------
+
+    pub fn insert_evidence(&self, e: &ProjectAffinityEvidence) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO project_affinity_evidence (id, session_id, workstream_id, project_id, evidence_type, source, score, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![e.id, e.session_id, e.workstream_id, e.project_id, e.evidence_type, e.source, e.score, e.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn evidence_for_session(&self, session_id: &str) -> Result<Vec<ProjectAffinityEvidence>> {
+        let mut st = self.0.prepare(
+            "SELECT id, session_id, workstream_id, project_id, evidence_type, source, score, created_at
+             FROM project_affinity_evidence WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 100",
+        )?;
+        let rows = st
+            .query_map(params![session_id], row_evidence)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Score the recorded evidence and return the suggested project, if any
+    /// evidence exists. Suggestions never auto-assign anything.
+    pub fn resolve_project_affinity(&self, session_id: &str) -> Result<Option<(Id, f32)>> {
+        let evidence = self.evidence_for_session(session_id)?;
+        if evidence.is_empty() {
+            return Ok(None);
+        }
+        let mut scores: std::collections::HashMap<Id, f32> = Default::default();
+        for e in evidence {
+            *scores.entry(e.project_id).or_default() += e.score;
+        }
+        let mut ranked: Vec<(Id, f32)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(ranked.into_iter().next())
+    }
+
+    // ---------------- Context deliveries ----------------
+
+    pub fn record_delivery(&self, d: &ContextDelivery) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO context_deliveries (id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![d.id, d.session_id, d.workstream_id, d.bundle_id, serde_json::to_string(&d.delivered_revisions)?, d.delivered_at],
+        )?;
+        Ok(())
+    }
+
+    /// Latest successful delivery per workstream for a session.
+    pub fn latest_deliveries(&self, session_id: &str) -> Result<Vec<ContextDelivery>> {
+        let mut st = self.0.prepare(
+            "SELECT id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_at
+             FROM context_deliveries WHERE session_id = ?1 ORDER BY delivered_at",
+        )?;
+        let all = st
+            .query_map(params![session_id], row_delivery)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut latest: std::collections::HashMap<Id, ContextDelivery> = Default::default();
+        for d in all {
+            latest.insert(d.workstream_id.clone(), d);
+        }
+        Ok(latest.into_values().collect())
+    }
+
+    // ---------------- Ingest sources ----------------
+
+    pub fn list_ingest_sources(&self) -> Result<Vec<IngestSource>> {
+        let mut st = self.0.prepare(
+            "SELECT id, agent, path, enabled, origin, created_at FROM ingest_sources ORDER BY agent, path",
+        )?;
+        let rows = st
+            .query_map([], row_ingest_source)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn add_ingest_source(&self, agent: Agent, path: &str, enabled: bool) -> Result<IngestSource> {
+        let src = IngestSource {
+            id: new_id(),
+            agent,
+            path: path.to_string(),
+            enabled,
+            origin: "user".into(),
+            created_at: now(),
+        };
+        self.0.execute(
+            "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![src.id, src.agent.as_str(), src.path, src.enabled as i64, src.origin, src.created_at],
+        )
+        .map_err(|e| {
+            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+                crate::error::other("该数据源已存在")
+            } else {
+                crate::error::AppError::from(e)
+            }
+        })?;
+        Ok(src)
+    }
+
+    pub fn get_ingest_source(&self, id: &str) -> Result<Option<IngestSource>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT id, agent, path, enabled, origin, created_at FROM ingest_sources WHERE id = ?1",
+                params![id],
+                row_ingest_source,
+            )
+            .optional()?)
+    }
+
+    /// Clear everything ingested for a session so a re-ingest starts clean:
+    /// events, source cursors (read + processed) and their search rows.
+    /// Bindings, context items and audit history are preserved.
+    pub fn reset_session_ingest(&self, session_id: &str) -> Result<()> {
+        self.tx(|tx| {
+            tx.execute(
+                "DELETE FROM session_events WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            tx.execute(
+                "DELETE FROM session_cursors WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            Ok(())
+        })?;
+        if self.fts_available() {
+            self.0.execute(
+                "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
+                params![session_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn set_ingest_source_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.0.execute(
+            "UPDATE ingest_sources SET enabled = ?2 WHERE id = ?1",
+            params![id, enabled as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Only user-added sources may be removed; defaults are toggled instead.
+    pub fn remove_ingest_source(&self, id: &str) -> Result<()> {
+        self.0.execute(
+            "DELETE FROM ingest_sources WHERE id = ?1 AND origin = 'user'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// The directories reconcile is allowed to scan for this agent.
+    pub fn enabled_roots(&self, agent: Agent) -> Result<Vec<String>> {
+        let mut st = self.0.prepare(
+            "SELECT path FROM ingest_sources WHERE agent = ?1 AND enabled = 1 ORDER BY created_at",
+        )?;
+        let rows = st
+            .query_map(params![agent.as_str()], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -840,14 +1331,12 @@ impl Db {
         Ok(())
     }
 
-    pub fn index_events(&self, events: &[SessionEvent]) -> Result<()> {
-        // re-reads (e.g. after a cursor reset) must not duplicate rows
-        let mut del = self.0.prepare("DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1")?;
-        let mut seen_sessions: std::collections::HashSet<String> = Default::default();
+    /// Index newly stored events. Insert-only per event ref: because event
+    /// identity dedup happens at the event layer, incremental batches never
+    /// need to wipe the session's earlier index rows.
+    pub fn index_new_events(&self, events: &[SessionEvent]) -> Result<()> {
         for e in events {
-            if seen_sessions.insert(e.session_id.clone()) {
-                let _ = del.execute(params![e.session_id]);
-            }
+            self.unindex("event", &format!("{}:{}", e.session_id, e.sequence));
         }
         let mut st = self.0.prepare(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('event', ?1, ?2, ?3, ?4)",
@@ -905,8 +1394,287 @@ impl Db {
             "events": one("SELECT COUNT(*) FROM session_events"),
             "context_items": one("SELECT COUNT(*) FROM context_items WHERE status = 'active'"),
             "sync_runs": one("SELECT COUNT(*) FROM sync_runs"),
+            "open_conflicts": one("SELECT COUNT(*) FROM context_conflicts WHERE status = 'open'"),
+            "pending_launch_intents": one("SELECT COUNT(*) FROM launch_intents WHERE status = 'pending'"),
         }))
     }
+}
+
+// connection-level helpers --------------------------------------------------
+// Free functions over &Connection so Db methods and `Db::tx` closures share
+// exactly the same SQL paths.
+
+pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
+    conn.execute(
+        "INSERT INTO projects (id, name, description, archived, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET name = ?2, description = ?3, archived = ?4, updated_at = ?6",
+        params![p.id, p.name, p.description, p.archived as i64, p.created_at, p.updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
+    conn.execute(
+        "INSERT INTO workstreams (id, project_id, title, description, lifecycle, visibility, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+           project_id = ?2,
+           title = ?3, description = ?4, lifecycle = ?5, visibility = ?6, updated_at = ?8",
+        params![w.id, w.project_id, w.title, w.description, w.lifecycle, w.visibility, w.created_at, w.updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn bind_conn(conn: &Connection, b: &SessionWorkstreamBinding) -> Result<()> {
+    // Explicit sources always win; a weak (automatic) binding may be
+    // strengthened, never silently downgraded.
+    conn.execute(
+        "INSERT INTO session_workstream_bindings
+         (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(session_id, workstream_id) DO UPDATE SET
+           role = ?3,
+           source = CASE WHEN ?5 >= session_workstream_bindings.confidence
+                         THEN ?4 ELSE session_workstream_bindings.source END,
+           confidence = CASE WHEN ?5 >= session_workstream_bindings.confidence
+                             THEN ?5 ELSE session_workstream_bindings.confidence END,
+           last_seen_revision = COALESCE(?6, last_seen_revision),
+           last_used_at = ?9",
+        params![
+            b.session_id, b.workstream_id, b.role, b.source, b.confidence,
+            b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn insert_events_conn(conn: &Connection, events: &[SessionEvent]) -> Result<()> {
+    let mut ins = conn.prepare(
+        "INSERT INTO session_events
+         (id, session_id, sequence, source_event_id, source_generation, source_position, source_identity_hash, ts, kind, text, raw_ref, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
+    )?;
+    for e in events {
+        let hash = source_identity_hash(
+            e.source_event_id.as_deref(),
+            &e.kind,
+            e.ts.as_deref(),
+            e.text.as_deref(),
+        );
+        ins.execute(params![
+            e.id, e.session_id, e.sequence, e.source_event_id, e.source_generation,
+            e.source_position, hash, e.ts, e.kind, e.text, e.raw_ref, e.metadata.to_string()
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn upsert_source_cursor_conn(conn: &Connection, c: &SourceCursor) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_cursors
+         (session_id, last_sequence, last_seen_size, source_file_identity, generation, byte_offset, mtime, processed_sequence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                 COALESCE((SELECT processed_sequence FROM session_cursors WHERE session_id = ?1), 0))
+         ON CONFLICT(session_id) DO UPDATE SET
+           last_sequence = ?2, last_seen_size = ?3, source_file_identity = ?4,
+           generation = ?5, byte_offset = ?6, mtime = ?7",
+        params![c.session_id, c.last_sequence, c.last_seen_size as i64, c.source_file_identity, c.generation, c.byte_offset as i64, c.mtime],
+    )?;
+    Ok(())
+}
+
+pub fn get_events_conn(conn: &Connection, session_id: &str, after: Option<i64>, limit: i64) -> Result<Vec<SessionEvent>> {
+    let mut st = conn.prepare(
+        "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata
+         FROM session_events WHERE session_id = ?1 AND sequence > ?2
+         ORDER BY sequence LIMIT ?3",
+    )?;
+    let rows = st
+        .query_map(params![session_id, after.unwrap_or(0), limit], row_event)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn insert_item_conn(conn: &Connection, item: &ContextItem, revision: &ContextItemRevision) -> Result<()> {
+    conn.execute(
+        "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, supersedes_item_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![item.id, item.workstream_id, item.kind, item.status, item.authority, item.created_by,
+                item.current_revision_id, item.supersedes_item_id, item.created_at, item.updated_at],
+    )?;
+    insert_revision_conn(conn, revision)?;
+    conn.execute(
+        "UPDATE context_items SET current_revision_id = ?2 WHERE id = ?1",
+        params![item.id, revision.id],
+    )?;
+    Ok(())
+}
+
+pub fn insert_revision_conn(conn: &Connection, r: &ContextItemRevision) -> Result<()> {
+    conn.execute(
+        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![r.id, r.item_id, r.title, r.content, r.metadata.to_string(), r.source_type, r.source_ref, r.sync_run_id, r.created_at],
+    )?;
+    Ok(())
+}
+
+pub fn insert_sync_run_conn(conn: &Connection, run: &SyncRun) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_runs (id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint, source_generation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![run.id, run.session_id, run.from_sequence, run.to_sequence, run.status,
+                run.mutations.to_string(), run.summary, run.error, run.created_at, run.runtime,
+                run.delta_fingerprint, run.source_generation],
+    )?;
+    Ok(())
+}
+
+pub fn set_processed_sequence_conn(conn: &Connection, session_id: &str, seq: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_cursors (session_id, processed_sequence) VALUES (?1, ?2)
+         ON CONFLICT(session_id) DO UPDATE SET processed_sequence = ?2",
+        params![session_id, seq],
+    )?;
+    Ok(())
+}
+
+/// Status change with a full audit revision: previous status, new status,
+/// actor, reason and source refs all land in the revision metadata, and the
+/// revision becomes the item head (content preserved).
+pub fn apply_status_change_conn(
+    conn: &Connection,
+    item_id: &str,
+    new_status: &str,
+    actor: &str,
+    reason: &str,
+    run_id: Option<&str>,
+    source_refs: &[String],
+) -> Result<()> {
+    let (item, rev) = {
+        let cur: Option<(String, String)> = conn
+            .query_row(
+                "SELECT status, COALESCE(current_revision_id, '') FROM context_items WHERE id = ?1",
+                params![item_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (status, head) = cur.ok_or_else(|| other(format!("条目不存在: {}", item_id)))?;
+        let content: Option<(String, String)> = if head.is_empty() {
+            None
+        } else {
+            conn.query_row(
+                "SELECT title, content FROM context_item_revisions WHERE id = ?1",
+                params![head],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        };
+        let (title, content) = content.unwrap_or_else(|| ("(无标题)".into(), String::new()));
+        (status, (title, content))
+    };
+    let audit = ContextItemRevision {
+        id: new_id(),
+        item_id: item_id.to_string(),
+        title: rev.0,
+        content: rev.1,
+        metadata: serde_json::json!({
+            "audit": {
+                "previous_status": item,
+                "new_status": new_status,
+                "actor": actor,
+                "reason": reason,
+                "source_refs": source_refs,
+            }
+        }),
+        source_type: Some("status_change".into()),
+        source_ref: source_refs.first().cloned(),
+        sync_run_id: run_id.map(|s| s.to_string()),
+        created_at: now(),
+    };
+    insert_revision_conn(conn, &audit)?;
+    conn.execute(
+        "UPDATE context_items SET status = ?2, current_revision_id = ?3, updated_at = ?4 WHERE id = ?1",
+        params![item_id, new_status, audit.id, now()],
+    )?;
+    Ok(())
+}
+
+pub fn get_item_conn(conn: &Connection, id: &str) -> Result<Option<ContextItem>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, workstream_id, kind, status, authority, created_by, current_revision_id, supersedes_item_id, created_at, updated_at
+             FROM context_items WHERE id = ?1",
+            params![id],
+            row_item,
+        )
+        .optional()?)
+}
+
+pub fn get_revision_conn(conn: &Connection, id: &str) -> Result<Option<ContextItemRevision>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at
+             FROM context_item_revisions WHERE id = ?1",
+            params![id],
+            row_revision,
+        )
+        .optional()?)
+}
+
+pub fn items_for_workstream_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    include_inactive: bool,
+) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
+    let status_filter = if include_inactive { "" } else { " AND i.status = 'active'" };
+    let sql = format!(
+        "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.created_by, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
+                r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
+         FROM context_items i LEFT JOIN context_item_revisions r ON r.id = i.current_revision_id
+         WHERE i.workstream_id = ?1{} ORDER BY i.updated_at DESC",
+        status_filter
+    );
+    let mut st = conn.prepare(&sql)?;
+    let rows = st
+        .query_map(params![workstream_id], |r| {
+            let item = row_item_at(r, 0)?;
+            let rev = row_revision_at(r, 10)?;
+            Ok((item, rev))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn set_item_head_conn(
+    conn: &Connection,
+    item_id: &str,
+    revision_id: &str,
+    status: Option<&str>,
+) -> Result<()> {
+    if let Some(s) = status {
+        conn.execute(
+            "UPDATE context_items SET current_revision_id = ?2, status = ?3, updated_at = ?4 WHERE id = ?1",
+            params![item_id, revision_id, s, now()],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE context_items SET current_revision_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![item_id, revision_id, now()],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn insert_conflict_conn(conn: &Connection, c: &ContextConflict) -> Result<()> {
+    conn.execute(
+        "INSERT INTO context_conflicts (id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![c.id, c.workstream_id, c.left_item_id, c.right_item_id, c.conflict_type, c.status, c.resolution, c.created_at, c.updated_at],
+    )?;
+    Ok(())
 }
 
 // row mappers -------------------------------------------------------------
@@ -950,15 +1718,33 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
     })
 }
 
+fn row_event(r: &Row) -> rusqlite::Result<SessionEvent> {
+    Ok(SessionEvent {
+        id: r.get(0)?,
+        session_id: r.get(1)?,
+        sequence: r.get(2)?,
+        source_event_id: r.get(3)?,
+        source_generation: r.get(4)?,
+        source_position: r.get(5)?,
+        ts: r.get(6)?,
+        kind: r.get(7)?,
+        text: r.get(8)?,
+        raw_ref: r.get(9)?,
+        metadata: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
+    })
+}
+
 fn row_binding(r: &Row) -> rusqlite::Result<SessionWorkstreamBinding> {
     Ok(SessionWorkstreamBinding {
         session_id: r.get(0)?,
         workstream_id: r.get(1)?,
         role: r.get(2)?,
-        last_seen_revision: r.get(3)?,
-        last_sync_cursor: r.get(4)?,
-        created_at: r.get(5)?,
-        last_used_at: r.get(6)?,
+        source: r.get(3)?,
+        confidence: r.get(4)?,
+        last_seen_revision: r.get(5)?,
+        last_sync_cursor: r.get(6)?,
+        created_at: r.get(7)?,
+        last_used_at: r.get(8)?,
     })
 }
 
@@ -969,10 +1755,11 @@ fn row_item_at(r: &Row, base: usize) -> rusqlite::Result<ContextItem> {
         kind: r.get(base + 2)?,
         status: r.get(base + 3)?,
         authority: r.get(base + 4)?,
-        current_revision_id: r.get(base + 5)?,
-        supersedes_item_id: r.get(base + 6)?,
-        created_at: r.get(base + 7)?,
-        updated_at: r.get(base + 8)?,
+        created_by: r.get(base + 5)?,
+        current_revision_id: r.get(base + 6)?,
+        supersedes_item_id: r.get(base + 7)?,
+        created_at: r.get(base + 8)?,
+        updated_at: r.get(base + 9)?,
     })
 }
 
@@ -998,6 +1785,73 @@ fn row_revision(r: &Row) -> rusqlite::Result<ContextItemRevision> {
     row_revision_at(r, 0)
 }
 
+fn row_conflict(r: &Row) -> rusqlite::Result<ContextConflict> {
+    Ok(ContextConflict {
+        id: r.get(0)?,
+        workstream_id: r.get(1)?,
+        left_item_id: r.get(2)?,
+        right_item_id: r.get(3)?,
+        conflict_type: r.get(4)?,
+        status: r.get(5)?,
+        resolution: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+    })
+}
+
+fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
+    Ok(IngestSource {
+        id: r.get(0)?,
+        agent: Agent::parse(&r.get::<_, String>(1)?).unwrap_or(Agent::Codex),
+        path: r.get(2)?,
+        enabled: r.get::<_, i64>(3)? != 0,
+        origin: r.get(4)?,
+        created_at: r.get(5)?,
+    })
+}
+
+fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
+    Ok(LaunchIntent {
+        id: r.get(0)?,
+        launch_type: r.get(1)?,
+        agent: Agent::parse(&r.get::<_, String>(2)?).unwrap_or(Agent::Codex),
+        selected_workstream_ids: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+        cwd: r.get(4)?,
+        context_bundle_markdown: r.get(5)?,
+        process_id: r.get::<_, Option<i64>>(6)?.map(|p| p as u32),
+        launched_at: r.get(7)?,
+        matched_session_id: r.get(8)?,
+        status: r.get(9)?,
+        note: r.get(10)?,
+        created_at: r.get(11)?,
+        updated_at: r.get(12)?,
+    })
+}
+
+fn row_evidence(r: &Row) -> rusqlite::Result<ProjectAffinityEvidence> {
+    Ok(ProjectAffinityEvidence {
+        id: r.get(0)?,
+        session_id: r.get(1)?,
+        workstream_id: r.get(2)?,
+        project_id: r.get(3)?,
+        evidence_type: r.get(4)?,
+        source: r.get(5)?,
+        score: r.get(6)?,
+        created_at: r.get(7)?,
+    })
+}
+
+fn row_delivery(r: &Row) -> rusqlite::Result<ContextDelivery> {
+    Ok(ContextDelivery {
+        id: r.get(0)?,
+        session_id: r.get(1)?,
+        workstream_id: r.get(2)?,
+        bundle_id: r.get(3)?,
+        delivered_revisions: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+        delivered_at: r.get(5)?,
+    })
+}
+
 fn row_sync_run(r: &Row) -> rusqlite::Result<SyncRun> {
     Ok(SyncRun {
         id: r.get(0)?,
@@ -1010,6 +1864,8 @@ fn row_sync_run(r: &Row) -> rusqlite::Result<SyncRun> {
         error: r.get(7)?,
         created_at: r.get(8)?,
         runtime: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "heuristic".into()),
+        delta_fingerprint: r.get(10)?,
+        source_generation: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
     })
 }
 

@@ -6,7 +6,7 @@
 //! `agent_installations`, and re-verify on every app start.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -87,16 +87,45 @@ fn candidate_file_names(name: &str) -> Vec<String> {
     }
 }
 
-/// Probe the CLI version. Best effort — an agent without `--version`
-/// support still resolves, just without a version string.
+/// Probe the CLI version with a HARD timeout. Best effort — an agent
+/// without `--version` support still resolves, just without a version
+/// string, and a hanging probe can never stall app startup.
 fn probe_version(exec: &PathBuf) -> Option<String> {
-    let out = std::process::Command::new(exec)
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+    let mut child = std::process::Command::new(exec)
         .arg("--version")
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let text = text.trim().lines().next().unwrap_or("").trim().to_string();
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break None,
+        }
+    };
+    let status = status?;
+    if !status.success() {
+        return None;
+    }
+    // The child exited within the deadline; the pipe is complete, read it
+    // (take() avoids blocking forever on a pathological descriptor).
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    let text = stdout.trim().lines().next().unwrap_or("").trim().to_string();
     if text.is_empty() {
         None
     } else {

@@ -2,6 +2,7 @@
 //! The Assistant (LLM runtime, later phase) consumes the same functions.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::*;
@@ -10,6 +11,45 @@ use crate::storage::{now, new_id, Db};
 
 pub struct AppState {
     pub db: std::sync::Mutex<Db>,
+    /// Guards against concurrent background sync jobs.
+    pub sync_in_progress: std::sync::atomic::AtomicBool,
+}
+
+/// Spawn a background sync job: returns immediately, emits `sync-started`,
+/// `sync-progress` (per session), `sync-completed` / `sync-failed`. A job
+/// must never hold the DB lock across long operations — ingestion locks per
+/// session and extraction runs lock-free.
+fn spawn_sync_job<F>(app: &AppHandle, state: &State<AppState>, job: F) -> Result<()>
+where
+    F: FnOnce(&std::sync::Mutex<Db>, &dyn Fn(serde_json::Value)) -> Result<(usize, i64)>
+        + Send
+        + 'static,
+{
+    if state.sync_in_progress.swap(true, Ordering::SeqCst) {
+        return Err(other("已有同步任务在进行中，请等待完成"));
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let _ = handle.emit("sync-started", serde_json::json!({}));
+        let state = handle.state::<AppState>();
+        let notify = |payload: serde_json::Value| {
+            let _ = handle.emit("sync-progress", payload);
+        };
+        let result = job(&state.db, &notify);
+        state.sync_in_progress.store(false, Ordering::SeqCst);
+        match result {
+            Ok((discovered, events)) => {
+                let _ = handle.emit(
+                    "sync-completed",
+                    serde_json::json!({ "discovered": discovered, "events": events }),
+                );
+            }
+            Err(e) => {
+                let _ = handle.emit("sync-failed", serde_json::json!({ "error": e.to_string() }));
+            }
+        }
+    });
+    Ok(())
 }
 
 fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
@@ -48,19 +88,12 @@ pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>> {
     with_db(&state, |db| db.list_projects())
 }
 
+/// Deleting a Project only detaches: Workstreams and Sessions survive with
+/// `project_id = NULL`. A Project is an optional organization layer, never
+/// the lifecycle owner of a Workstream — nothing is archived or deleted.
 #[tauri::command]
 pub fn delete_project(state: State<AppState>, project_id: String) -> Result<()> {
-    with_db(&state, |db| {
-        db.delete_project(&project_id)?;
-        // keep workstreams orphan-free: move to archived visibility instead of cascade delete
-        let wss = db.list_workstreams(Some(&project_id))?;
-        for mut w in wss {
-            w.visibility = "archived".into();
-            w.updated_at = now();
-            db.upsert_workstream(&w)?;
-        }
-        Ok(())
-    })
+    with_db(&state, |db| db.delete_project(&project_id))
 }
 
 #[tauri::command]
@@ -172,9 +205,9 @@ pub fn merge_workstreams(state: State<AppState>, source_id: String, target_id: S
         for b in bindings {
             db.0.execute(
                 "INSERT OR IGNORE INTO session_workstream_bindings
-                 (session_id, workstream_id, role, last_seen_revision, last_sync_cursor, created_at, last_used_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![b.session_id, target_id, b.role, b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at],
+                 (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![b.session_id, target_id, b.role, b.source, b.confidence, b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at],
             )?;
         }
         let mut src = source;
@@ -206,10 +239,11 @@ pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<Con
             &args.kind,
             args.title.trim(),
             &args.content,
+            "user_explicit",
             "user_edit",
-            "user_edit",
+            &[],
             None,
-            None,
+            "user",
         )?;
         if let Some(ws) = db.get_workstream(&args.workstream_id)? {
             if let Some(pid) = &ws.project_id {
@@ -253,9 +287,13 @@ pub fn edit_context_item(state: State<AppState>, args: EditItemArgs) -> Result<(
     })
 }
 
+/// User-driven status change. Like every status transition this produces an
+/// audit revision (previous/new status, actor, reason).
 #[tauri::command]
 pub fn set_item_status(state: State<AppState>, item_id: String, status: String) -> Result<()> {
-    with_db(&state, |db| db.set_item_status(&item_id, &status))
+    with_db(&state, |db| {
+        db.apply_status_change(&item_id, &status, "user", "用户手动修改状态", None, &[])
+    })
 }
 
 #[tauri::command]
@@ -266,7 +304,7 @@ pub fn get_item_history(state: State<AppState>, item_id: String) -> Result<Vec<C
 #[tauri::command]
 pub fn delete_context_item(state: State<AppState>, item_id: String) -> Result<()> {
     with_db(&state, |db| {
-        db.set_item_status(&item_id, "deleted")?;
+        db.apply_status_change(&item_id, "deleted", "user", "用户删除", None, &[])?;
         db.unindex("item", &item_id);
         Ok(())
     })
@@ -278,6 +316,7 @@ pub struct WorkstreamContext {
     pub core: Vec<crate::context::ContextSection>,
     pub items: Vec<(ContextItem, ContextItemRevision)>,
     pub related_sessions: Vec<Session>,
+    pub conflicts: Vec<ContextConflict>,
 }
 
 #[tauri::command]
@@ -293,12 +332,39 @@ pub fn get_workstream_context(state: State<AppState>, workstream_id: String) -> 
             .into_iter()
             .filter_map(|b| db.get_session(&b.session_id).ok().flatten())
             .collect();
+        let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
         Ok(WorkstreamContext {
             workstream,
             core,
             items,
             related_sessions: sessions,
+            conflicts,
         })
+    })
+}
+
+// ---------------- Conflicts ----------------
+
+#[tauri::command]
+pub fn list_conflicts(
+    state: State<AppState>,
+    workstream_id: String,
+    include_closed: Option<bool>,
+) -> Result<Vec<ContextConflict>> {
+    with_db(&state, |db| {
+        db.conflicts_for_workstream(&workstream_id, include_closed.unwrap_or(false))
+    })
+}
+
+#[tauri::command]
+pub fn resolve_conflict(
+    state: State<AppState>,
+    conflict_id: String,
+    status: String,
+    resolution: Option<String>,
+) -> Result<()> {
+    with_db(&state, |db| {
+        db.update_conflict_status(&conflict_id, &status, resolution.as_deref())
     })
 }
 
@@ -310,6 +376,8 @@ pub struct SessionDetail {
     pub events: Vec<SessionEvent>,
     pub bindings: Vec<(SessionWorkstreamBinding, Option<WorkstreamTitle>)>,
     pub cursor: i64,
+    pub processed_cursor: i64,
+    pub classification: String,
 }
 
 pub type WorkstreamTitle = String;
@@ -335,6 +403,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let session = db.get_session(&session_id)?.ok_or_else(|| other("Session 不存在"))?;
         let events = db.get_events(&session_id, None, 500)?;
         let cursor = db.get_cursor(&session_id)?;
+        let processed_cursor = db.get_processed_sequence(&session_id)?;
         let bindings = db
             .bindings_for_session(&session_id)?
             .into_iter()
@@ -345,11 +414,16 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
                 Ok((b, title))
             })
             .collect::<Result<Vec<_>>>()?;
+        let classification = SessionClassificationState::derive(&{
+            bindings.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>()
+        });
         Ok(SessionDetail {
             session,
             events,
             bindings,
             cursor,
+            processed_cursor,
+            classification: classification.as_str().to_string(),
         })
     })
 }
@@ -361,7 +435,41 @@ pub fn assign_session_project(state: State<AppState>, session_id: String, projec
             "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
             rusqlite::params![session_id, project_id],
         )?;
+        // a user correction is itself the strongest kind of evidence
+        if let Some(pid) = project_id {
+            db.insert_evidence(&ProjectAffinityEvidence {
+                id: new_id(),
+                session_id: Some(session_id),
+                workstream_id: None,
+                project_id: pid,
+                evidence_type: "user_correction".into(),
+                source: "manual assignment".into(),
+                score: 10.0,
+                created_at: now(),
+            })?;
+        }
         Ok(())
+    })
+}
+
+/// cwd/repo only ever *suggest*: return the scored suggestion from recorded
+/// evidence, never assign anything.
+#[tauri::command]
+pub fn suggest_session_project(state: State<AppState>, session_id: String) -> Result<serde_json::Value> {
+    with_db(&state, |db| {
+        let session = db.get_session(&session_id)?.ok_or_else(|| other("Session 不存在"))?;
+        // record fresh evidence for the current cwd, then resolve
+        crate::ingestion::record_session_project_evidence(db, &session);
+        match db.resolve_project_affinity(&session_id)? {
+            Some((project_id, score)) => {
+                let name = db
+                    .get_project(&project_id)?
+                    .map(|p| p.name)
+                    .unwrap_or_default();
+                Ok(serde_json::json!({ "project_id": project_id, "project_name": name, "score": score }))
+            }
+            None => Ok(serde_json::json!({ "project_id": null, "score": 0.0 })),
+        }
     })
 }
 
@@ -373,26 +481,85 @@ pub fn bind_session_workstream(
     role: String,
 ) -> Result<()> {
     with_db(&state, |db| {
-        let launcher = crate::launcher::SessionLauncher {
-            app_data_dir: std::env::temp_dir(),
-        };
-        launcher.record_binding(db, &session_id, &workstream_id, &role)
+        crate::launcher::record_binding(db, &session_id, &workstream_id, &role, binding_source::USER_ASSIGNED, 1.0)
     })
 }
 
 // ---------------- Sync ----------------
 
+/// 同步全部启用的数据源（后台执行，不阻塞前端）。
 #[tauri::command]
 pub fn sync_all(app: AppHandle, state: State<AppState>) -> Result<serde_json::Value> {
-    let result = with_db(&state, |db| {
-        let engine = crate::sync::SyncEngine::from_settings(db);
-        crate::ingestion::reconcile_with_engine(db, &engine)
+    spawn_sync_job(&app, &state, |db_lock, notify| {
+        let engine = {
+            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
+            crate::sync::SyncEngine::from_settings(&guard)
+        };
+        crate::ingestion::reconcile_with_engine(db_lock, &engine, &|s| {
+            notify(serde_json::json!({
+                "agent": s.agent.as_str(),
+                "title": s.title,
+            }));
+        })
     })?;
-    let _ = app.emit("sync-completed", &result);
-    Ok(serde_json::json!({
-        "discovered": result.0,
-        "events": result.1,
-    }))
+    Ok(serde_json::json!({ "started": true }))
+}
+
+/// 只同步某一个数据源（后台执行）。
+#[tauri::command]
+pub fn sync_source(
+    app: AppHandle,
+    state: State<AppState>,
+    source_id: String,
+) -> Result<serde_json::Value> {
+    spawn_sync_job(&app, &state, move |db_lock, notify| {
+        let source = {
+            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
+            guard
+                .get_ingest_source(&source_id)?
+                .ok_or_else(|| other("数据源不存在"))?
+        };
+        let engine = {
+            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
+            crate::sync::SyncEngine::from_settings(&guard)
+        };
+        crate::ingestion::reconcile_source(db_lock, &engine, &source, &|s| {
+            notify(serde_json::json!({
+                "agent": s.agent.as_str(),
+                "title": s.title,
+            }));
+        })
+    })?;
+    Ok(serde_json::json!({ "started": true }))
+}
+
+/// 重新入库某一个数据源：清除该源会话已入库的事件与游标后重新抓取，
+/// 绑定、上下文条目和审计历史保留（后台执行）。
+#[tauri::command]
+pub fn reingest_source(
+    app: AppHandle,
+    state: State<AppState>,
+    source_id: String,
+) -> Result<serde_json::Value> {
+    spawn_sync_job(&app, &state, move |db_lock, notify| {
+        let source = {
+            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
+            guard
+                .get_ingest_source(&source_id)?
+                .ok_or_else(|| other("数据源不存在"))?
+        };
+        let engine = {
+            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
+            crate::sync::SyncEngine::from_settings(&guard)
+        };
+        crate::ingestion::reingest_source(db_lock, &engine, &source, &|s| {
+            notify(serde_json::json!({
+                "agent": s.agent.as_str(),
+                "title": s.title,
+            }));
+        })
+    })?;
+    Ok(serde_json::json!({ "started": true }))
 }
 
 #[tauri::command]
@@ -408,6 +575,44 @@ pub fn sync_session(state: State<AppState>, session_id: String) -> Result<serde_
 #[tauri::command]
 pub fn list_sync_runs(state: State<AppState>, limit: Option<i64>) -> Result<Vec<SyncRun>> {
     with_db(&state, |db| db.list_sync_runs(limit.unwrap_or(50)))
+}
+
+// ---------------- Launch intents ----------------
+
+#[tauri::command]
+pub fn list_launch_intents(
+    state: State<AppState>,
+    statuses: Option<Vec<String>>,
+    limit: Option<i64>,
+) -> Result<Vec<LaunchIntent>> {
+    with_db(&state, |db| {
+        let default = vec![
+            launch_status::PENDING.to_string(),
+            launch_status::AMBIGUOUS.to_string(),
+        ];
+        let statuses = statuses.unwrap_or(default);
+        let refs: Vec<&str> = statuses.iter().map(|s| s.as_str()).collect();
+        db.list_launch_intents(&refs, limit.unwrap_or(50))
+    })
+}
+
+/// Manual resolution of an ambiguous LaunchIntent: the user picks which
+/// discovered session the launch actually produced.
+#[tauri::command]
+pub fn resolve_launch_intent(
+    state: State<AppState>,
+    intent_id: String,
+    session_id: String,
+) -> Result<()> {
+    with_db(&state, |db| {
+        let intent = db
+            .get_launch_intent(&intent_id)?
+            .ok_or_else(|| other("LaunchIntent 不存在"))?;
+        let session = db
+            .get_session(&session_id)?
+            .ok_or_else(|| other("Session 不存在"))?;
+        crate::launcher::apply_match(db, &intent, &session)
+    })
 }
 
 // ---------------- Launcher ----------------
@@ -438,15 +643,89 @@ pub fn launch_resume_session(
     with_db(&state, |db| launcher.resume_session(db, &session_id, &extra_workstream_ids))
 }
 
+/// Preview a context bundle. Resume mode MUST carry the session id — the
+/// delta is computed against what that specific session last received.
 #[tauri::command]
 pub fn preview_context_bundle(
     state: State<AppState>,
     workstream_ids: Vec<String>,
     mode: Option<String>,
+    session_id: Option<String>,
 ) -> Result<crate::context::SessionContextBundle> {
     with_db(&state, |db| {
-        crate::context::build_bundle(db, mode.as_deref().unwrap_or("new"), None, &workstream_ids, 4000)
+        let mode = mode.as_deref().unwrap_or("new");
+        match mode {
+            "resume" => {
+                let sid = session_id
+                    .as_deref()
+                    .ok_or_else(|| other("Resume 预览必须提供 session_id"))?;
+                let session = db.get_session(sid)?.ok_or_else(|| other("Session 不存在"))?;
+                crate::context::build_bundle(db, "resume", Some(&session), &workstream_ids, 4000)
+            }
+            _ => crate::context::build_bundle(db, "new", None, &workstream_ids, 4000),
+        }
     })
+}
+
+// ---------------- Ingest sources ----------------
+
+#[derive(Serialize)]
+pub struct IngestSourceView {
+    #[serde(flatten)]
+    pub source: IngestSource,
+    /// Whether the directory currently exists on disk (UI hint only).
+    pub exists: bool,
+}
+
+fn source_view(src: IngestSource) -> IngestSourceView {
+    let exists = std::path::Path::new(&src.path).is_dir();
+    IngestSourceView { source: src, exists }
+}
+
+#[tauri::command]
+pub fn list_ingest_sources(state: State<AppState>) -> Result<Vec<IngestSourceView>> {
+    with_db(&state, |db| {
+        Ok(db
+            .list_ingest_sources()?
+            .into_iter()
+            .map(|src| IngestSourceView {
+                exists: std::path::Path::new(&src.path).is_dir(),
+                source: src,
+            })
+            .collect())
+    })
+}
+
+/// Add a custom scan root for an agent. The path is scanned recursively
+/// with that agent's session-file rules and is enabled immediately —
+/// adding it IS the user's opt-in.
+#[tauri::command]
+pub fn add_ingest_source(
+    state: State<AppState>,
+    agent: String,
+    path: String,
+) -> Result<IngestSourceView> {
+    let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
+    crate::storage::ensure_not_empty("数据源路径", &path)?;
+    let expanded = crate::platform::paths::expand_tilde(&path);
+    let canonical = expanded.to_string_lossy().to_string();
+    if !expanded.is_dir() {
+        return Err(other(format!("目录不存在: {}", canonical)));
+    }
+    with_db(&state, |db| {
+        let src = db.add_ingest_source(agent, &canonical, true)?;
+        Ok(source_view(src))
+    })
+}
+
+#[tauri::command]
+pub fn set_ingest_source_enabled(state: State<AppState>, source_id: String, enabled: bool) -> Result<()> {
+    with_db(&state, |db| db.set_ingest_source_enabled(&source_id, enabled))
+}
+
+#[tauri::command]
+pub fn remove_ingest_source(state: State<AppState>, source_id: String) -> Result<()> {
+    with_db(&state, |db| db.remove_ingest_source(&source_id))
 }
 
 // ---------------- Search / misc ----------------

@@ -5,16 +5,15 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::adapters::{title_from_text, truncate_text, AgentCommand, DiscoveredSession, ReadDelta};
-use crate::domain::{Agent, Session, SessionEvent};
-use crate::error::{other, Result};
+use crate::adapters::{
+    detect_format, json_str_field, read_jsonl_delta, title_from_text, truncate_text, AgentCommand,
+    DiscoveredSession, ParsedLine, ReadDelta,
+};
+use crate::domain::{Agent, Session, SourceCursor};
+use crate::error::Result;
 use crate::platform::exec_resolver::{self, AgentInstallation};
 
 pub struct CodexAdapter;
-
-fn sessions_root() -> Option<PathBuf> {
-    crate::platform::paths::resolve_agent_data_dir(Agent::Codex).map(|root| root.join("sessions"))
-}
 
 fn extract_text(content: &Value) -> String {
     let mut parts = Vec::new();
@@ -89,7 +88,7 @@ impl CodexAdapter {
                     .ok_or_else(|| crate::error::other("无效的 rollout 文件名"))?;
                 let id = stem.rsplit('-').take(5).collect::<Vec<_>>();
                 if id.len() < 5 {
-                    return Err(other(format!("无法解析 Codex session id: {}", stem)));
+                    return Err(crate::error::other(format!("无法解析 Codex session id: {}", stem)));
                 }
                 id.into_iter().rev().collect::<Vec<_>>().join("-")
             }
@@ -123,17 +122,9 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         exec_resolver::resolve_quiet(Agent::Codex)
     }
 
-    fn session_root(&self) -> Option<PathBuf> {
-        sessions_root()
-    }
-
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>> {
-        let root = match sessions_root() {
-            Some(r) if r.is_dir() => r,
-            _ => return Ok(vec![]),
-        };
+    fn discover_sessions_in(&self, roots: &[PathBuf]) -> Result<Vec<DiscoveredSession>> {
         let mut out = Vec::new();
-        let mut stack = vec![root];
+        let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
             let rd = match std::fs::read_dir(&dir) {
                 Ok(rd) => rd,
@@ -143,39 +134,40 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                 let p = entry.path();
                 if p.is_dir() {
                     stack.push(p);
-                } else if p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    continue;
+                }
+                let is_rollout_jsonl = p.extension().and_then(|e| e.to_str()) == Some("jsonl")
                     && p.file_name()
                         .and_then(|n| n.to_str())
                         .map(|n| n.starts_with("rollout-"))
-                        .unwrap_or(false)
-                {
-                    if let Some(s) = Self::parse_rollout(&p)? {
-                        out.push(s);
-                    }
+                        .unwrap_or(false);
+                if !is_rollout_jsonl {
+                    continue;
+                }
+                // The filename only pre-filters; the content decides. One
+                // bad file never aborts the whole scan.
+                if detect_format(&p) != Some(Agent::Codex) {
+                    eprintln!("[discover] skip {} (content fingerprint is not codex)", p.display());
+                    continue;
+                }
+                match Self::parse_rollout(&p) {
+                    Ok(Some(s)) => out.push(s),
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
             }
         }
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, from_sequence: i64) -> Result<ReadDelta> {
+    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
         let path = PathBuf::from(&session.raw_path);
-        let file_size = std::fs::metadata(&path)?.len() as i64;
-        let lines = crate::adapters::read_jsonl_lines(&path)?;
-        let mut events = Vec::new();
-
-        for (idx, line) in &lines {
-            let seq = *idx as i64 + 1;
-            if seq <= from_sequence {
-                continue;
-            }
-            let v: Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let ts = v.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+        read_jsonl_delta(&path, cursor, &|_idx, v| {
             let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let payload = v.get("payload").cloned().unwrap_or(Value::Null);
+            let source_event_id = json_str_field(v, "id")
+                .or_else(|| json_str_field(&payload, "id"))
+                .map(|s| s.to_string());
 
             let (kind, text) = match vtype {
                 "response_item" => {
@@ -185,7 +177,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                             let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
                             let text = extract_text(payload.get("content").unwrap_or(&Value::Null));
                             if text.is_empty() {
-                                continue;
+                                return None;
                             }
                             match role {
                                 "user" => ("user_message", text),
@@ -201,15 +193,18 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                                 payload
                                     .get("arguments")
                                     .and_then(|a| a.as_str())
-                                    .map(truncate_text_arg)
+                                    .map(|s| truncate_text(s, 200))
                                     .unwrap_or_default()
                             ),
                         ),
                         "function_call_output" => (
                             "tool_result",
-                            truncate_text_arg(payload.get("output").and_then(|o| o.as_str()).unwrap_or("")),
+                            truncate_text(
+                                payload.get("output").and_then(|o| o.as_str()).unwrap_or(""),
+                                200,
+                            ),
                         ),
-                        "reasoning" => continue, // internal model reasoning: not meaningful context
+                        "reasoning" => return None, // internal model reasoning: not meaningful context
                         _ => ("unknown", String::new()),
                     }
                 }
@@ -218,35 +213,19 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                     if ptype == "compact" || ptype.contains("compact") {
                         ("compact", "conversation compacted".into())
                     } else {
-                        continue;
+                        return None;
                     }
                 }
                 "session_meta" => ("system", "session meta".into()),
-                _ => continue, // unrecognized payload types carry no meaningful text
+                _ => return None, // unrecognized payload types carry no meaningful text
             };
 
-            if text.trim().is_empty() {
-                continue;
-            }
-
-            events.push(
-                SessionEvent {
-                    session_id: session.id.clone(),
-                    sequence: seq,
-                    ts: ts.clone(),
-                    kind: kind.into(),
-                    text: if text.is_empty() { None } else { Some(text) },
-                    raw_ref: format!("{}#line:{}", path.display(), idx + 1),
-                    metadata: serde_json::json!({ "agent": "codex", "type": vtype }),
-                },
-            );
-        }
-
-        let last_sequence = lines.len() as i64;
-        Ok(ReadDelta {
-            events,
-            last_sequence,
-            file_size,
+            Some(ParsedLine {
+                kind: kind.into(),
+                text: Some(text),
+                source_event_id,
+                metadata: serde_json::json!({ "agent": "codex", "type": vtype }),
+            })
         })
     }
 
@@ -258,10 +237,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     ) -> Result<AgentCommand> {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::prompt_from_context_file(context_file)
-                .into_iter()
-                .collect(),
-            prompt: None,
+            args: crate::adapters::context_prompt(context_file)?.into_iter().collect(),
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -274,11 +250,10 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         let mut args = vec!["resume".into(), agent_session_id.into()];
-        args.extend(crate::adapters::prompt_from_context_file(context_file));
+        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
-            prompt: None,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -305,14 +280,9 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
-            prompt: None,
             cwd: None, // headless analysis never touches user repos
         })
     }
-}
-
-fn truncate_text_arg(s: &str) -> String {
-    truncate_text(s, 200)
 }
 
 pub fn extract_title(d: &DiscoveredSession) -> Option<String> {

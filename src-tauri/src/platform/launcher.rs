@@ -1,8 +1,15 @@
 //! PlatformLauncher: how an `AgentCommand` actually reaches the user.
 //!
-//! Agent Adapters only produce a declarative command (program, args, cwd,
-//! context file). Whether that becomes a macOS Terminal tab, a Windows
-//! Terminal window, or a direct child process is decided here, per platform.
+//! Agent Adapters only produce a declarative command (program, args, cwd)
+//! with literal strings; whether that becomes a macOS Terminal tab, a
+//! Windows PowerShell window, or a direct child process is decided here,
+//! per platform.
+//!
+//! Implementation strategy: each platform renders the argv into a temporary
+//! script (bash / PowerShell) with strict argument quoting, then opens that
+//! script in the user's terminal. This keeps every character of every
+//! argument intact — including quotes, `$`, `&`, backticks, newlines and
+//! unicode — without adapters ever generating shell expressions.
 
 use serde::Serialize;
 
@@ -16,31 +23,62 @@ pub struct LaunchOutcome {
     pub pid: Option<u32>,
 }
 
+/// POSIX shell quoting: wrap in single quotes, escape embedded quotes.
+/// Inside single quotes every other character (space, `$`, backtick, `&`,
+/// newline, unicode) is literal.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// PowerShell single-quoted string literal: embedded quotes become `''`;
+/// every other character (`$`, backtick, `&`, `;`, newline, unicode) is
+/// literal inside single quotes.
+pub fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn script_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("noending-launch");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn script_name(kind: &str) -> String {
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S%3f");
+    format!("launch-{}-{}.{}", kind, ts, if cfg!(windows) { "ps1" } else { "sh" })
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
 
-    fn shell_quote(s: &str) -> String {
-        format!("'{}'", s.replace('\'', "'\\''"))
+    pub fn render_bash(cmd: &AgentCommand) -> String {
+        let mut script = String::from("#!/bin/bash\n");
+        if let Some(cwd) = &cmd.cwd {
+            script.push_str(&format!("cd {} || exit 1\n", shell_quote(&cwd.to_string_lossy())));
+        }
+        let mut parts: Vec<String> = vec![shell_quote(&cmd.program)];
+        parts.extend(cmd.args.iter().map(|a| shell_quote(a)));
+        script.push_str(&parts.join(" "));
+        script.push_str("\nexec $SHELL\n");
+        script
     }
 
     pub fn launch(cmd: &AgentCommand) -> Result<LaunchOutcome> {
-        let mut parts: Vec<String> = vec![shell_quote(&cmd.program)];
-        for a in &cmd.args {
-            parts.push(shell_quote(a));
+        let path = script_dir().join(script_name("macos"));
+        std::fs::write(&path, render_bash(cmd))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
         }
-        let mut script = String::new();
-        if let Some(cwd) = &cmd.cwd {
-            script.push_str(&format!("cd {} && ", shell_quote(&cwd.to_string_lossy())));
-        }
-        script.push_str(&parts.join(" "));
-        script.push_str("; exec $SHELL");
 
-        // AppleScript string escaping
-        let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+        // Terminal executes the script file; no command text is embedded in
+        // the AppleScript beyond the (space-free-safe) quoted script path.
+        let script_path = shell_quote(&path.to_string_lossy());
         let osascript = format!(
-            "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-            escaped
+            "tell application \"Terminal\"\nactivate\ndo script {}\nend tell",
+            format!("\"{}\"", script_path.replace('"', "\\\""))
         );
 
         let child = std::process::Command::new("osascript")
@@ -61,7 +99,7 @@ mod imp {
         }
         Ok(LaunchOutcome {
             launched_via: "macOS Terminal".into(),
-            command_line: script,
+            command_line: cmd.display(),
             pid: Some(pid),
         })
     }
@@ -79,45 +117,32 @@ mod imp {
 mod imp {
     use super::*;
 
-    fn ps_quote(s: &str) -> String {
-        // single-quoted PowerShell string literal
-        format!("'{}'", s.replace('\'', "''"))
+    pub fn render_ps(cmd: &AgentCommand) -> String {
+        let mut script = String::new();
+        if let Some(cwd) = &cmd.cwd {
+            script.push_str(&format!(
+                "Set-Location -LiteralPath {}\n",
+                ps_quote(&cwd.to_string_lossy())
+            ));
+        }
+        script.push_str(&format!("& {}\n", ps_quote(&cmd.program)));
+        for a in &cmd.args {
+            script.push_str(&format!("  {}\n", ps_quote(a)));
+        }
+        script
     }
 
     pub fn launch(cmd: &AgentCommand) -> Result<LaunchOutcome> {
-        let mut parts: Vec<String> = vec![&cmd.program];
-        parts.extend(cmd.args.iter().map(|a| a.to_string()));
-        let mut inner = String::new();
-        if let Some(cwd) = &cmd.cwd {
-            inner.push_str(&format!("Set-Location {}; ", ps_quote(&cwd.to_string_lossy())));
-        }
-        inner.push_str(&parts.join(" "));
+        let path = script_dir().join(script_name("windows"));
+        std::fs::write(&path, render_ps(cmd))?;
 
-        // Prefer Windows Terminal when present; fall back to PowerShell.
-        let has_wt = std::process::Command::new("where")
-            .arg("wt.exe")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        let (via, script) = if has_wt {
-            (
-                "Windows Terminal",
-                format!(
-                    "wt.exe -d {} powershell -NoExit -Command {}",
-                    cmd.cwd
-                        .as_ref()
-                        .map(|c| ps_quote(&c.to_string_lossy()))
-                        .unwrap_or_else(|| "'.'".into()),
-                    ps_quote(&inner)
-                ),
-            )
-        } else {
-            (
-                "PowerShell",
-                format!("Start-Process powershell -ArgumentList '-NoExit','-Command',{}", ps_quote(&inner)),
-            )
-        };
+        // -File keeps the script path out of any command-line string
+        // interpretation; the script itself carries strictly quoted argv.
+        let script_arg = ps_quote(&path.to_string_lossy());
+        let script = format!(
+            "Start-Process powershell -ArgumentList '-NoProfile','-NoExit','-ExecutionPolicy','Bypass','-File',{}",
+            script_arg
+        );
 
         let child = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &script])
@@ -125,8 +150,8 @@ mod imp {
             .spawn()?;
         let pid = child.id();
         Ok(LaunchOutcome {
-            launched_via: via.into(),
-            command_line: inner,
+            launched_via: "PowerShell".into(),
+            command_line: cmd.display(),
             pid: Some(pid),
         })
     }
@@ -152,7 +177,7 @@ mod imp {
         let pid = child.id();
         Ok(LaunchOutcome {
             launched_via: "direct process (linux)".into(),
-            command_line: cmd.program.clone(),
+            command_line: cmd.display(),
             pid: Some(pid),
         })
     }
@@ -169,3 +194,56 @@ mod imp {
 pub use imp::{launch, open_uri};
 #[allow(unused_imports)]
 pub use imp::launch as launch_command;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_quote_keeps_every_character_literal() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("path with spaces"), "'path with spaces'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+        assert_eq!(shell_quote("a\nb"), "'a\nb'");
+        assert_eq!(shell_quote("中文✅"), "'中文✅'");
+    }
+
+    #[test]
+    fn ps_quote_keeps_every_character_literal() {
+        assert_eq!(ps_quote("plain"), "'plain'");
+        assert_eq!(ps_quote("C:\\Program Files\\x.exe"), "'C:\\Program Files\\x.exe'");
+        assert_eq!(ps_quote("it''s"), "'it''''s'");
+        assert_eq!(ps_quote("$var & `b"), "'$var & `b'");
+        assert_eq!(ps_quote("a\nb"), "'a\nb'");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bash_render_quotes_argv() {
+        use super::imp::render_bash;
+        let cmd = AgentCommand {
+            program: "/usr/local/bin/My Agent".into(),
+            args: vec!["resume".into(), "sess-1".into(), "line1\nline2 'q' $X".into()],
+            cwd: Some("/tmp/some dir".into()),
+        };
+        let s = render_bash(&cmd);
+        assert!(s.contains("cd '/tmp/some dir' || exit 1"));
+        assert!(s.contains("'/usr/local/bin/My Agent' 'resume' 'sess-1' 'line1\nline2 '\\''q'\\'' $X'"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ps_render_quotes_argv() {
+        use super::imp::render_ps;
+        let cmd = AgentCommand {
+            program: "C:\\Program Files\\claude.exe".into(),
+            args: vec!["--resume".into(), "s1".into(), "a `b $c & d".into()],
+            cwd: Some("C:\\Users\\me docs".into()),
+        };
+        let s = render_ps(&cmd);
+        assert!(s.contains("Set-Location -LiteralPath 'C:\\Users\\me docs'"));
+        assert!(s.contains("& 'C:\\Program Files\\claude.exe'"));
+        assert!(s.contains("'a `b $c & d'"));
+    }
+}

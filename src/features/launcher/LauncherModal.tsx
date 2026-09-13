@@ -32,9 +32,11 @@ export default function LauncherModal({
   const ids = Array.from(selected);
   useEffect(() => {
     if (ids.length === 0) { setPreview(null); return; }
-    api.previewBundle(ids, mode).then(setPreview).catch((e) => setError(String(e)));
+    // Resume 预览必须携带 session_id：增量是针对该 Session 上次实际
+    // 收到的上下文计算的。
+    api.previewBundle(ids, mode, sessionId).then(setPreview).catch((e) => setError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(ids), mode]);
+  }, [JSON.stringify(ids), mode, sessionId]);
 
   const launch = async () => {
     setBusy(true); setError("");

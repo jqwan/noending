@@ -1,149 +1,313 @@
 //! Context Merge Engine — deterministic verification of mutations.
 //!
+//! Every mutation passes through the unified AuthorityPolicy before it
+//! touches anything. All writes happen on the caller's connection, which is
+//! always a transaction owned by the SyncEngine — the whole run commits or
+//! rolls back together.
+//!
 //! Rules: dedup (skip near-identical items), supersede (build evolution
-//! chains), resolve, conflict (keep both sides when user authority would be
-//! silently overridden). Every applied mutation produces a new revision with
-//! full source trail; nothing is written without history.
+//! chains), resolve, conflict (persisted ContextConflict rows; the user's
+//! item is never silently overwritten). Every applied mutation produces a
+//! new revision with full source trail.
 
+use rusqlite::Connection;
+
+use crate::domain::{ContextConflict, ContextItem};
 use crate::error::Result;
-use crate::sync::{create_item, ContextMutation};
-use crate::storage::Db;
+use crate::sync::policy::{Actor, AuthorityPolicy, MutationDecision, Op};
+use crate::sync::{create_item_conn, ContextMutation, MergeContext};
+use crate::storage::{
+    apply_status_change_conn, get_item_conn, get_revision_conn, insert_conflict_conn,
+    insert_item_conn, insert_revision_conn, items_for_workstream_conn, new_id, now,
+    set_item_head_conn, upsert_workstream_conn,
+};
 
 pub struct MergeEngine;
 
 impl MergeEngine {
     /// Returns true when the mutation was applied, false when skipped.
-    pub fn apply(&self, db: &Db, m: &ContextMutation, run_id: &str) -> Result<bool> {
+    /// `conn` is always the transaction held by the sync run.
+    pub fn apply(&self, conn: &Connection, m: &ContextMutation, ctx: &MergeContext) -> Result<bool> {
         match m {
-            ContextMutation::Add { workstream_id, item_kind, title, content, source_ref, authority } => {
-                // Dedup: same workstream+kind with a very similar active title → skip.
-                let existing = db.items_for_workstream(workstream_id, false)?;
-                let norm = normalize_title(title);
-                for (item, rev) in &existing {
-                    if &item.kind == item_kind && normalize_title(&rev.title) == norm {
-                        // Same subject but materially different content → update revision.
-                        if rev.content.trim() == content.trim() {
-                            return Ok(false);
-                        }
-                        // Never silently overwrite user authority.
-                        if item.authority == "user_explicit" || item.authority == "user_edit" {
-                            return self.conflict_or_update(db, item, title, content, source_ref, run_id);
-                        }
-                        let new_rev = crate::domain::ContextItemRevision {
-                            id: crate::storage::new_id(),
-                            item_id: item.id.clone(),
+            ContextMutation::Add { workstream_id, item_kind, title, content, source_refs, authority } => {
+                self.apply_add(conn, ctx, workstream_id, item_kind, title, content, source_refs, authority)
+            }
+            ContextMutation::Update { item_id, title, content, source_refs, .. } => {
+                let Some(item) = get_item_conn(conn, item_id)? else {
+                    return Ok(false); // deterministic skip: nothing to update
+                };
+                match AuthorityPolicy::decide(&item.authority, Actor::Agent, Op::Update) {
+                    MutationDecision::Allow => {
+                        let rev = agent_revision(conn, &item, title, content, source_refs, ctx)?;
+                        set_item_head_conn(conn, &item.id, &rev.id, None)?;
+                        Ok(true)
+                    }
+                    MutationDecision::CreateConflict => {
+                        self.record_conflict(conn, ctx, &item, title, content, source_refs)?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            }
+            ContextMutation::Supersede { item_id, title, content, source_refs, authority } => {
+                let Some(old) = get_item_conn(conn, item_id)? else {
+                    return Ok(false);
+                };
+                match AuthorityPolicy::decide(&old.authority, Actor::Agent, Op::Supersede) {
+                    MutationDecision::Allow => {
+                        let new_item = ContextItem {
+                            id: new_id(),
+                            workstream_id: old.workstream_id.clone(),
+                            kind: old.kind.clone(),
+                            status: "active".into(),
+                            authority: authority.clone(),
+                            created_by: format!("sync:{}", ctx.runtime),
+                            current_revision_id: None,
+                            supersedes_item_id: Some(old.id.clone()),
+                            created_at: now(),
+                            updated_at: now(),
+                        };
+                        let rev = crate::domain::ContextItemRevision {
+                            id: new_id(),
+                            item_id: new_item.id.clone(),
                             title: title.clone(),
                             content: content.clone(),
                             metadata: serde_json::json!({}),
                             source_type: Some("session_event".into()),
-                            source_ref: Some(source_ref.clone()),
-                            sync_run_id: Some(run_id.into()),
-                            created_at: crate::storage::now(),
+                            source_ref: source_refs.first().cloned(),
+                            sync_run_id: Some(ctx.run_id.clone()),
+                            created_at: now(),
                         };
-                        db.insert_revision(&new_rev)?;
-                        db.set_item_head(&item.id, &new_rev.id, None)?;
-                        db.index_item(item, &new_rev)?;
-                        return Ok(true);
+                        insert_item_conn(conn, &new_item, &rev)?;
+                        // status change leaves its own audit revision
+                        apply_status_change_conn(
+                            conn,
+                            &old.id,
+                            "superseded",
+                            &format!("sync:{}", ctx.runtime),
+                            "被更新版本取代（supersede）",
+                            Some(&ctx.run_id),
+                            source_refs,
+                        )?;
+                        Ok(true)
                     }
+                    MutationDecision::CreateConflict => {
+                        self.record_conflict(conn, ctx, &old, title, content, source_refs)?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
                 }
-                create_item(
-                    db,
-                    workstream_id,
-                    item_kind,
-                    title,
-                    content,
-                    authority,
-                    "session_event",
-                    Some(source_ref),
-                    Some(run_id),
-                )?;
-                Ok(true)
             }
-            ContextMutation::Supersede { item_id, title, content, source_ref, .. } => {
-                let old = db.get_item(item_id)?.ok_or_else(|| crate::error::other("item missing"))?;
-                let item = crate::domain::ContextItem {
-                    id: crate::storage::new_id(),
-                    workstream_id: old.workstream_id.clone(),
-                    kind: old.kind.clone(),
-                    status: "active".into(),
-                    authority: "agent_inferred".into(),
-                    current_revision_id: None,
-                    supersedes_item_id: Some(old.id.clone()),
-                    created_at: crate::storage::now(),
-                    updated_at: crate::storage::now(),
+            ContextMutation::Resolve { item_id, source_refs } => {
+                let Some(item) = get_item_conn(conn, item_id)? else {
+                    return Ok(false);
                 };
-                let rev = crate::domain::ContextItemRevision {
-                    id: crate::storage::new_id(),
-                    item_id: item.id.clone(),
+                match AuthorityPolicy::decide(&item.authority, Actor::Agent, Op::Resolve) {
+                    MutationDecision::Allow => {
+                        apply_status_change_conn(
+                            conn,
+                            &item.id,
+                            "resolved",
+                            &format!("sync:{}", ctx.runtime),
+                            "会话证据表明该条目已完成",
+                            Some(&ctx.run_id),
+                            source_refs,
+                        )?;
+                        Ok(true)
+                    }
+                    MutationDecision::CreateConflict => {
+                        // The user's item must not be resolved by an agent:
+                        // persist the disagreement instead.
+                        self.record_conflict(
+                            conn,
+                            ctx,
+                            &item,
+                            "完成状态争议",
+                            "Agent 依据会话内容认为该条目已完成，但这是用户确认过的信息，已保留原状态。",
+                            source_refs,
+                        )?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            }
+            ContextMutation::CreateWorkstream { project_id, title, reason } => {
+                // Workstream is the core continuity unit; Project is an
+                // optional organization layer. Creating one without a
+                // project home is explicitly allowed.
+                let w = crate::domain::Workstream {
+                    id: new_id(),
+                    project_id: project_id.clone(),
                     title: title.clone(),
-                    content: content.clone(),
-                    metadata: serde_json::json!({}),
-                    source_type: Some("session_event".into()),
-                    source_ref: Some(source_ref.clone()),
-                    sync_run_id: Some(run_id.into()),
-                    created_at: crate::storage::now(),
+                    description: format!("由同步自动识别：{}", reason),
+                    lifecycle: "open".into(),
+                    visibility: "normal".into(),
+                    created_at: now(),
+                    updated_at: now(),
                 };
-                db.insert_item(&item, &rev)?;
-                db.set_item_status(item_id, "superseded")?;
+                upsert_workstream_conn(conn, &w)?;
                 Ok(true)
             }
-            ContextMutation::Resolve { item_id, .. } => {
-                db.set_item_status(item_id, "resolved")?;
-                Ok(true)
-            }
-            ContextMutation::CreateWorkstream { .. } => {
-                // Auto workstream creation needs a confirmed project home;
-                // heuristic v0 leaves it to the user / assistant UI.
-                Ok(false)
-            }
-            ContextMutation::Conflict { workstream_id, title, content, source_ref, .. } => {
-                create_item(
-                    db,
+            ContextMutation::Conflict { workstream_id, item_id, title, content, source_refs, .. } => {
+                // The model flagged disagreement with an existing item:
+                // materialize both sides as a ContextConflict.
+                let existing = if item_id.is_empty() {
+                    None
+                } else {
+                    get_item_conn(conn, item_id)?
+                };
+                let right = create_item_conn(
+                    conn,
                     workstream_id,
-                    "risk",
+                    "finding",
                     title,
                     content,
                     "agent_inferred",
                     "conflict",
-                    Some(source_ref),
-                    Some(run_id),
+                    source_refs,
+                    Some(&ctx.run_id),
+                    &format!("sync:{}", ctx.runtime),
                 )?;
+                insert_conflict_conn(conn, &ContextConflict {
+                    id: new_id(),
+                    workstream_id: workstream_id.clone(),
+                    left_item_id: existing.as_ref().map(|i| i.id.clone()).unwrap_or_else(|| right.id.clone()),
+                    right_item_id: if existing.is_some() { Some(right.id.clone()) } else { None },
+                    conflict_type: "content".into(),
+                    status: "open".into(),
+                    resolution: None,
+                    created_at: now(),
+                    updated_at: now(),
+                })?;
                 Ok(true)
             }
-            ContextMutation::Update { .. } => Ok(false), // used by LLM runtime later
         }
     }
 
-    /// User authority present: add an evidence item instead of touching the
-    /// user's content. Conflict is preserved, never auto-resolved.
-    fn conflict_or_update(
+    fn apply_add(
         &self,
-        db: &Db,
-        user_item: &crate::domain::ContextItem,
+        conn: &Connection,
+        ctx: &MergeContext,
+        workstream_id: &str,
+        item_kind: &str,
         title: &str,
         content: &str,
-        source_ref: &str,
-        run_id: &str,
+        source_refs: &[String],
+        authority: &str,
     ) -> Result<bool> {
-        let rev = db
-            .get_revision(user_item.current_revision_id.as_deref().unwrap_or(""))?
-            .ok_or_else(|| crate::error::other("revision missing"))?;
-        create_item(
-            db,
-            &user_item.workstream_id,
-            "finding",
-            &format!("与用户约束可能冲突：{}", crate::adapters::truncate_text(&rev.title, 60)),
-            &format!(
-                "用户已确认：{}\n\nAgent 新信息：{} — {}\n\n来源：{}",
-                rev.content, title, content, source_ref
-            ),
-            "agent_inferred",
-            "conflict",
-            Some(source_ref),
-            Some(run_id),
+        // Dedup: same workstream+kind with a very similar active title → skip.
+        let existing = items_for_workstream_conn(conn, workstream_id, false)?;
+        let norm = normalize_title(title);
+        for (item, rev) in &existing {
+            if item.kind == item_kind && normalize_title(&rev.title) == norm {
+                // Same subject but materially different content.
+                if rev.content.trim() == content.trim() {
+                    return Ok(false);
+                }
+                // Authority policy decides: agents may evolve agent-owned
+                // items; user-owned items get a persisted conflict.
+                match AuthorityPolicy::decide(&item.authority, Actor::Agent, Op::Update) {
+                    MutationDecision::Allow => {
+                        let new_rev = agent_revision(conn, item, title, content, source_refs, ctx)?;
+                        set_item_head_conn(conn, &item.id, &new_rev.id, None)?;
+                        return Ok(true);
+                    }
+                    _ => {
+                        self.record_conflict(conn, ctx, item, title, content, source_refs)?;
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        create_item_conn(
+            conn,
+            workstream_id,
+            item_kind,
+            title,
+            content,
+            authority,
+            "session_event",
+            source_refs,
+            Some(&ctx.run_id),
+            &format!("sync:{}", ctx.runtime),
         )?;
         Ok(true)
     }
+
+    /// Persist a disagreement: the user's item stays untouched, the agent's
+    /// version becomes its own evidence item, and a ContextConflict row
+    /// links both. Conflicts are kept, never auto-resolved.
+    fn record_conflict(
+        &self,
+        conn: &Connection,
+        ctx: &MergeContext,
+        user_item: &ContextItem,
+        title: &str,
+        content: &str,
+        source_refs: &[String],
+    ) -> Result<()> {
+        let rev = get_revision_conn(conn, user_item.current_revision_id.as_deref().unwrap_or(""))?;
+        let user_content = rev
+            .map(|r| r.content)
+            .unwrap_or_default();
+        let right = create_item_conn(
+            conn,
+            &user_item.workstream_id,
+            "finding",
+            &format!("与用户上下文可能冲突：{}", crate::adapters::truncate_text(title, 60)),
+            &format!(
+                "用户已确认：{}\n\nAgent 新信息：{}\n\n来源：{}",
+                user_content, title, content
+            ),
+            "agent_inferred",
+            "conflict",
+            source_refs,
+            Some(&ctx.run_id),
+            &format!("sync:{}", ctx.runtime),
+        )?;
+        insert_conflict_conn(conn, &ContextConflict {
+            id: new_id(),
+            workstream_id: user_item.workstream_id.clone(),
+            left_item_id: user_item.id.clone(),
+            right_item_id: Some(right.id.clone()),
+            conflict_type: "authority".into(),
+            status: "open".into(),
+            resolution: None,
+            created_at: now(),
+            updated_at: now(),
+        })?;
+        Ok(())
+    }
+}
+
+/// Build AND persist the agent-side revision for an allowed update. The
+/// caller may then point the item head at the returned revision — it is
+/// already durable, so the head can never dangle.
+fn agent_revision(
+    conn: &Connection,
+    item: &ContextItem,
+    title: &str,
+    content: &str,
+    source_refs: &[String],
+    ctx: &MergeContext,
+) -> Result<crate::domain::ContextItemRevision> {
+    let rev = crate::domain::ContextItemRevision {
+        id: new_id(),
+        item_id: item.id.clone(),
+        title: title.to_string(),
+        content: content.to_string(),
+        metadata: if source_refs.len() > 1 {
+            serde_json::json!({ "source_refs": source_refs })
+        } else {
+            serde_json::json!({})
+        },
+        source_type: Some("session_event".into()),
+        source_ref: source_refs.first().cloned(),
+        sync_run_id: Some(ctx.run_id.clone()),
+        created_at: now(),
+    };
+    insert_revision_conn(conn, &rev)?;
+    Ok(rev)
 }
 
 fn normalize_title(t: &str) -> String {

@@ -1,7 +1,9 @@
 //! End-to-end domain test: ingest a fake session, run the sync engine,
 //! and verify context items, dedup and cursor advancement.
 
-use noending::domain::{Agent, Session, SessionEvent};
+use noending::domain::{
+    binding_source, Agent, Session, SessionEvent, SessionWorkstreamBinding, SourceCursor,
+};
 use noending::storage::{now, new_id, Db};
 use noending::{context, sync};
 
@@ -56,10 +58,12 @@ fn make_session(db: &Db, agent: Agent, agent_session_id: &str) -> Session {
 }
 
 fn bind(db: &Db, session_id: &str, workstream_id: &str) {
-    db.bind(&noending::domain::SessionWorkstreamBinding {
+    db.bind(&SessionWorkstreamBinding {
         session_id: session_id.into(),
         workstream_id: workstream_id.into(),
         role: "primary".into(),
+        source: binding_source::USER_ASSIGNED.into(),
+        confidence: 1.0,
         last_seen_revision: None,
         last_sync_cursor: 0,
         created_at: now(),
@@ -70,12 +74,16 @@ fn bind(db: &Db, session_id: &str, workstream_id: &str) {
 
 fn event(session: &Session, sequence: i64, kind: &str, text: &str) -> SessionEvent {
     SessionEvent {
+        id: new_id(),
         session_id: session.id.clone(),
         sequence,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: format!("line:{}", sequence),
         ts: Some(now()),
         kind: kind.into(),
         text: Some(text.into()),
-        raw_ref: format!("test#{}", sequence),
+        raw_ref: format!("test#line:{}", sequence),
         metadata: serde_json::json!({}),
     }
 }
@@ -96,6 +104,7 @@ fn sync_engine_extracts_and_merges() {
         event(&session, 2, "assistant_message", "好的。注意约束：不能修改现有 API，保持向后兼容。"),
         event(&session, 3, "user_message", "接下来要实现 SessionCursor 增量读取。"),
     ];
+    db.append_events(&events).unwrap();
 
     let out = engine
         .run_session_sync(&db, &session, &events, 0, 3)
@@ -108,17 +117,36 @@ fn sync_engine_extracts_and_merges() {
     assert!(kinds.contains(&"decision"), "decision extracted, got {:?}", kinds);
     assert!(kinds.contains(&"constraint"), "constraint extracted, got {:?}", kinds);
 
-    // cursor advanced
-    assert_eq!(db.get_cursor(&session.id).unwrap(), 3);
+    // processed cursor advanced
+    assert_eq!(db.get_processed_sequence(&session.id).unwrap(), 3);
+
+    // user words keep user authority even though the extractor wrote the row
+    let decision = items
+        .iter()
+        .find(|(i, _)| i.kind == "decision")
+        .expect("decision item");
+    assert_eq!(decision.0.authority, "user_explicit", "user message keeps user authority");
+    assert!(
+        decision.0.created_by.starts_with("sync:"),
+        "created_by records the extractor, got {}",
+        decision.0.created_by
+    );
 
     // identical re-sync must not duplicate items (dedup rule)
     let before = items.len();
     let out2 = engine
         .run_session_sync(&db, &session, &events, 3, 3)
         .expect("second sync");
-    assert_eq!(out2.applied, 0);
     let after = db.items_for_workstream(&ws.id, true).unwrap().len();
     assert_eq!(before, after, "dedup: no new items on identical re-sync");
+    assert_eq!(out2.applied, 0);
+
+    // a retried delta with the SAME fingerprint is recognized as done
+    let out3 = engine
+        .run_session_sync(&db, &session, &events, 0, 3)
+        .expect("fingerprint retry");
+    assert_eq!(out3.applied, 0, "completed run must be skipped");
+    assert!(out3.summary.contains("幂等"), "retry summary explains the skip");
 }
 
 #[test]
@@ -127,8 +155,8 @@ fn context_bundle_contains_core_sections() {
     let project = create_project(&db, "Trip");
     let ws = create_workstream(&db, &project.id, "行程设计", "");
 
-    sync::create_item(&db, &ws.id, "goal", "规划关西七日行程", "覆盖京都大阪奈良", "user_explicit", "user_edit", None, None).unwrap();
-    sync::create_item(&db, &ws.id, "constraint", "预算不超过 3 万", "", "user_edit", "user_edit", None, None).unwrap();
+    sync::create_item(&db, &ws.id, "goal", "规划关西七日行程", "覆盖京都大阪奈良", "user_explicit", "user_edit", &[], None, "user").unwrap();
+    sync::create_item(&db, &ws.id, "constraint", "预算不超过 3 万", "", "user_edit", "user_edit", &[], None, "user").unwrap();
 
     let bundle = context::build_bundle(&db, "new", None, &[ws.id.clone()], 4000).unwrap();
     assert!(bundle.markdown.contains("Goal"));
@@ -153,9 +181,22 @@ fn search_finds_ingested_events() {
         "我们需要为搜索功能选择 SQLite FTS5 还是外部向量数据库，这影响索引设计。",
     )];
     db.append_events(&events).unwrap();
-    db.index_events(&events).unwrap();
+    db.index_new_events(&events).unwrap();
 
     let hits = noending::search::search(&db, "FTS5", 10).unwrap();
     assert!(!hits.is_empty(), "FTS should find the indexed event");
     assert_eq!(hits[0].kind, "event");
+}
+
+/// The default source cursor for a fresh session is the zero state; the
+/// adapter layer treats it as "first ingest".
+#[test]
+fn source_cursor_defaults_are_empties() {
+    let db = open_temp_db();
+    let session = make_session(&db, Agent::Pi, "cursor-defaults");
+    let c = db.get_source_cursor(&session.id).unwrap();
+    let d = SourceCursor::default();
+    assert_eq!(c.source_file_identity, d.source_file_identity);
+    assert_eq!(c.last_sequence, 0);
+    assert_eq!(c.generation, 0);
 }

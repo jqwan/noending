@@ -47,7 +47,9 @@ export const api = {
   bindSessionWorkstream: (sessionId: string, workstreamId: string, role: string) =>
     invoke<void>("bind_session_workstream", { sessionId, workstreamId, role }),
 
-  syncAll: () => invoke<{ discovered: number; events: number }>("sync_all"),
+  syncAll: () => invoke<{ started: boolean }>("sync_all"),
+  syncSource: (sourceId: string) => invoke<{ started: boolean }>("sync_source", { sourceId }),
+  reingestSource: (sourceId: string) => invoke<{ started: boolean }>("reingest_source", { sourceId }),
   syncSession: (sessionId: string) => invoke<{ applied: number }>("sync_session", { sessionId }),
   listSyncRuns: (limit?: number) => invoke<SyncRun[]>("list_sync_runs", { limit: limit ?? 50 }),
 
@@ -55,8 +57,21 @@ export const api = {
     invoke<LaunchResult>("launch_new_session", { agent, workstreamIds, cwd: cwd ?? null }),
   launchResumeSession: (sessionId: string, extraWorkstreamIds: string[]) =>
     invoke<LaunchResult>("launch_resume_session", { sessionId, extraWorkstreamIds }),
-  previewBundle: (workstreamIds: string[], mode?: string) =>
-    invoke<SessionContextBundle>("preview_context_bundle", { workstreamIds, mode: mode ?? null }),
+  previewBundle: (workstreamIds: string[], mode?: string, sessionId?: string) =>
+    invoke<SessionContextBundle>("preview_context_bundle", {
+      workstreamIds,
+      mode: mode ?? null,
+      sessionId: sessionId ?? null,
+    }),
+
+  listIngestSources: () =>
+    invoke<import("./types").IngestSource[]>("list_ingest_sources"),
+  addIngestSource: (agent: Agent, path: string) =>
+    invoke<import("./types").IngestSource>("add_ingest_source", { agent, path }),
+  setIngestSourceEnabled: (sourceId: string, enabled: boolean) =>
+    invoke<void>("set_ingest_source_enabled", { sourceId, enabled }),
+  removeIngestSource: (sourceId: string) =>
+    invoke<void>("remove_ingest_source", { sourceId }),
 
   search: (query: string, limit?: number) => invoke<SearchHit[]>("search", { query, limit: limit ?? 30 }),
   getStats: () => invoke<Record<string, number>>("get_stats"),
