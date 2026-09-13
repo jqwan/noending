@@ -125,10 +125,21 @@ mod imp {
                 ps_quote(&cwd.to_string_lossy())
             ));
         }
-        script.push_str(&format!("& {}\n", ps_quote(&cmd.program)));
-        for a in &cmd.args {
-            script.push_str(&format!("  {}\n", ps_quote(a)));
+        // PowerShell parses per LINE: `& 'prog'` alone is a complete command
+        // and the following quoted strings would be inert expressions, not
+        // arguments. Collect argv into an array and splat it on one line.
+        if !cmd.args.is_empty() {
+            script.push_str("$argv = @(\n");
+            for a in &cmd.args {
+                script.push_str(&format!("  {},\n", ps_quote(a)));
+            }
+            script.push_str(")\n");
         }
+        script.push_str(&format!("& {}", ps_quote(&cmd.program)));
+        if !cmd.args.is_empty() {
+            script.push_str(" @argv");
+        }
+        script.push('\n');
         script
     }
 
@@ -243,7 +254,46 @@ mod tests {
         };
         let s = render_ps(&cmd);
         assert!(s.contains("Set-Location -LiteralPath 'C:\\Users\\me docs'"));
-        assert!(s.contains("& 'C:\\Program Files\\claude.exe'"));
-        assert!(s.contains("'a `b $c & d'"));
+        assert!(s.contains("& 'C:\\Program Files\\claude.exe' @argv"));
+        assert!(s.contains("'--resume',"));
+        assert!(s.contains("'a `b $c & d',"));
+    }
+
+    /// True argv round-trip: the rendered script must pass EVERY argument
+    /// to the program, in order. Without the $argv splat, PowerShell parses
+    /// `& 'prog'\n'arg1'\n'arg2'` as one command plus inert string
+    /// expressions — the program receives NO arguments.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ps_rendered_script_delivers_argv_round_trip() {
+        use super::imp::render_ps;
+        let dir = std::env::temp_dir().join(format!("noending-ps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("argv-roundtrip.ps1");
+        let cmd = AgentCommand {
+            program: "cmd.exe".into(),
+            args: vec![
+                "/c".into(),
+                "echo".into(),
+                "NOENDING-ARG-1".into(),
+                "arg with spaces".into(),
+                "NOENDING-ARG-3".into(),
+            ],
+            cwd: None,
+        };
+        std::fs::write(&script_path, render_ps(&cmd)).unwrap();
+
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script_path)
+            .output()
+            .expect("run powershell");
+        assert!(out.status.success(), "script failed: {:?}", out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("NOENDING-ARG-1"), "argv lost: {}", stdout);
+        assert!(stdout.contains("arg with spaces"), "quoted argv lost: {}", stdout);
+        assert!(stdout.contains("NOENDING-ARG-3"), "argv truncated: {}", stdout);
+        let _ = std::fs::remove_file(&script_path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

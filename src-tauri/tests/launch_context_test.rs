@@ -66,6 +66,7 @@ fn pending_intent(db: &Db, agent: Agent, ws_ids: Vec<String>, cwd: Option<String
         selected_workstream_ids: ws_ids,
         cwd,
         context_bundle_markdown: None,
+        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -600,6 +601,8 @@ fn event_ref_roundtrip() {
         byte_offset: 10,
         last_seen_size: 10,
         mtime: None,
+        start_byte_offset: 10,
+        prefix_hash: String::new(),
     };
     let stored = db
         .append_source_events(
@@ -643,6 +646,7 @@ fn source_cursor_roundtrip() {
         byte_offset: 900,
         last_seen_size: 1000,
         mtime: Some(1234.5),
+        prefix_hash: "abc123".into(),
         last_sequence: 7,
     };
     db.set_source_cursor(&c).unwrap();
@@ -650,6 +654,112 @@ fn source_cursor_roundtrip() {
     assert_eq!(back.source_file_identity, c.source_file_identity);
     assert_eq!(back.generation, 3);
     assert_eq!(back.byte_offset, 900);
+    assert_eq!(back.prefix_hash, "abc123");
     assert_eq!(back.last_sequence, 7);
     assert_eq!(db.get_cursor(&s.id).unwrap(), 7);
+}
+
+/// A New Session launched with injected context RECEIVED that context:
+/// apply_match must record the intent's delivery snapshot, so the first
+/// resume computes a true delta instead of re-sending the full context.
+#[test]
+fn launch_intent_match_records_delivery_snapshot() {
+    let db = open_db("intent-delivery");
+    let ws = ws_row(&db, "delivery ws", None);
+    let items = seed_context(&db, &ws.id, &["已交付约束"]);
+    assert!(!items.is_empty());
+    // create_item returns the in-memory item; the head revision lives in DB
+    let head_rev = |item_id: &str| db.get_item(item_id).unwrap().unwrap().current_revision_id.unwrap();
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    // intent snapshot: what the launched session actually received
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        selected_workstream_ids: vec![ws.id.clone()],
+        cwd: None,
+        context_bundle_markdown: Some("full bundle".into()),
+        context_bundle_revisions: Some(
+            serde_json::json!({
+                "bundle_id": "bundle-1",
+                "by_workstream": { ws.id.clone(): [head_rev(&items[0].id)] }
+            })
+            .to_string(),
+        ),
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    assert!(launcher::apply_match(&db, &intent, &s).is_ok());
+
+    // binding established explicitly…
+    let bound = db.bindings_for_session(&s.id).unwrap();
+    assert!(bound
+        .iter()
+        .any(|b| b.workstream_id == ws.id && b.source == binding_source::EXPLICIT_LAUNCH));
+
+    // …and the delivery recorded per workstream from the snapshot
+    let deliveries = db.latest_deliveries(&s.id).unwrap();
+    let d = deliveries.iter().find(|d| d.workstream_id == ws.id).expect("delivery recorded");
+    assert_eq!(d.bundle_id, "bundle-1");
+    assert_eq!(
+        d.delivered_revisions,
+        vec![head_rev(&items[0].id)],
+        "only this workstream's revisions are attributed to it"
+    );
+
+    // first resume: the delivered item is NOT re-sent in full
+    let bundle = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
+    assert!(
+        !bundle.markdown.contains("已交付约束"),
+        "already-delivered content must not be re-sent, got: {}",
+        bundle.markdown
+    );
+}
+
+/// Deliveries are attributed per workstream: a multi-workstream resume
+/// records each workstream's OWN revisions, never the union.
+#[test]
+fn multi_workstream_delivery_groups_revisions_by_workstream() {
+    let db = open_db("delivery-grouping");
+    let ws_a = ws_row(&db, "ws a", None);
+    let ws_b = ws_row(&db, "ws b", None);
+    let a = &seed_context(&db, &ws_a.id, &["约束A"])[0];
+    let b = &seed_context(&db, &ws_b.id, &["约束B"])[0];
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    // simulate what resume_session now records: grouped by section owner
+    let head_rev = |item_id: &str| db.get_item(item_id).unwrap().unwrap().current_revision_id.unwrap();
+    let by_ws = std::collections::BTreeMap::from([
+        (ws_a.id.clone(), vec![head_rev(&a.id)]),
+        (ws_b.id.clone(), vec![head_rev(&b.id)]),
+    ]);
+    for (ws_id, revs) in &by_ws {
+        db.record_delivery(&ContextDelivery {
+            id: new_id(),
+            session_id: s.id.clone(),
+            workstream_id: ws_id.clone(),
+            bundle_id: "bundle-2".into(),
+            delivered_revisions: revs.clone(),
+            delivered_at: now(),
+        })
+        .unwrap();
+    }
+
+    for (ws, expected_rev) in [(&ws_a, a), (&ws_b, b)] {
+        let d = db
+            .latest_deliveries(&s.id)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.workstream_id == ws.id)
+            .unwrap();
+        assert_eq!(d.delivered_revisions, vec![head_rev(&expected_rev.id)]);
+    }
 }

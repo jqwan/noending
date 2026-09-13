@@ -15,6 +15,11 @@ use crate::error::{other, Result};
 
 pub struct Db(pub Connection);
 
+/// Bump on any schema change. Fresh databases are stamped directly; older
+/// (lower-version) databases are brought up by the idempotent ALTERs in
+/// migrate(); higher versions refuse to open.
+pub const SCHEMA_VERSION: i64 = 2;
+
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -23,12 +28,23 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Stable content identity of a source event, used to make re-scans of the
-/// same Agent transcript idempotent. Prefers the Agent's own event id; falls
-/// back to a normalized-content hash. Generation / file position are
-/// deliberately excluded: the same logical event keeps its identity across
-/// truncate/rescan, while genuinely new content always hashes differently.
-pub fn source_identity_hash(
+/// Identity of the first event in a chain (no known predecessor).
+pub const IDENTITY_GENESIS: &str = "genesis";
+
+/// Stable identity of a source event, used to make re-scans of the same
+/// Agent transcript idempotent.
+///
+/// - Events WITH a native Agent event id: content hash of
+///   `(native_id | kind | ts | text)` — the Agent guarantees the id is
+///   unique per logical event, so identity is position-independent.
+/// - Events WITHOUT one: chained hash `H(prev_event_hash | kind | ts | text)`.
+///   The chain encodes *adjacency*: re-scanning an unchanged file prefix
+///   reproduces the same chain (same logical event → dedup), while two
+///   genuinely identical messages ("继续" sent twice) link to different
+///   predecessors and stay distinct. A mid-file rewrite diverges the chain
+///   exactly where content changed — everything after it is new evidence.
+pub fn event_identity_hash(
+    prev_hash: &str,
     source_event_id: Option<&str>,
     kind: &str,
     ts: Option<&str>,
@@ -38,7 +54,10 @@ pub fn source_identity_hash(
     use std::fmt::Write;
     let normalized = text.unwrap_or("").trim();
     let mut h = sha2::Sha256::new();
-    h.update(source_event_id.unwrap_or("-"));
+    match source_event_id {
+        Some(id) => h.update(id.as_bytes()),
+        None => h.update(prev_hash.as_bytes()),
+    }
     h.update([0x1f]);
     h.update(kind);
     h.update([0x1f]);
@@ -82,6 +101,20 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
+        // Schema version guard: an unknown NEWER database is refused with a
+        // clear message instead of failing later with "no such column".
+        // (v0 = pre-versioning dev database: current-shape tables, so the
+        // idempotent column additions below bring it up to date.)
+        let current_version: i64 = self
+            .0
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if current_version > SCHEMA_VERSION {
+            return Err(other(format!(
+                "数据库 schema 版本 (v{}) 高于当前应用支持的 v{}，请先备份数据库文件后重建或降级应用。",
+                current_version, SCHEMA_VERSION
+            )));
+        }
+
         self.0.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS projects (
@@ -144,6 +177,7 @@ impl Db {
               source_file_identity TEXT NOT NULL DEFAULT '',
               generation INTEGER NOT NULL DEFAULT 0,
               byte_offset INTEGER NOT NULL DEFAULT 0,
+              prefix_hash TEXT NOT NULL DEFAULT '',
               mtime REAL,
               processed_sequence INTEGER NOT NULL DEFAULT 0
             );
@@ -214,6 +248,7 @@ impl Db {
               selected_workstream_ids TEXT NOT NULL DEFAULT '[]',
               cwd TEXT,
               context_bundle_markdown TEXT,
+              context_bundle_revisions TEXT,
               process_id INTEGER,
               launched_at TEXT NOT NULL,
               matched_session_id TEXT,
@@ -266,6 +301,9 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_bindings_ws ON session_workstream_bindings(workstream_id);
             CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, sequence);
             CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_fingerprint
+              ON sync_runs(session_id, delta_fingerprint)
+              WHERE status = 'ok' AND delta_fingerprint IS NOT NULL;
             "#,
         )?;
 
@@ -308,6 +346,26 @@ impl Db {
         // env overrides). They start DISABLED: whether a source is ingested
         // is always the user's decision.
         self.ensure_default_ingest_sources()?;
+
+        // Columns added after the first v0 dev databases were created:
+        // CREATE TABLE IF NOT EXISTS cannot extend an existing table, so
+        // add them idempotently (duplicate-column errors are expected and
+        // ignored on already-current databases).
+        for stmt in [
+            "ALTER TABLE session_cursors ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE launch_intents ADD COLUMN context_bundle_revisions TEXT",
+        ] {
+            if let Err(e) = self.0.execute_batch(stmt) {
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(e.into());
+                }
+            }
+        }
+
+        register_binding_rank_fn(&self.0)?;
+
+        self.0
+            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -544,9 +602,13 @@ impl Db {
     // ---------------- Events (append-only, identity-based) ----------------
 
     /// Persist a batch of parsed source events inside one transaction:
-    /// content-identity dedup (INSERT-or-SKIP, never REPLACE), app-owned
-    /// monotonic sequence allocation, and the read-cursor advance commit
-    /// together. Returns the events that were actually newly stored.
+    /// identity dedup (INSERT-or-SKIP, never REPLACE), app-owned monotonic
+    /// sequence allocation, and the read-cursor advance commit together.
+    /// Returns the events that were actually newly stored.
+    ///
+    /// The identity chain starts from genesis when the batch is a full
+    /// re-scan (start_byte_offset == 0) and from the last stored event
+    /// otherwise — see [`event_identity_hash`].
     pub fn append_source_events(
         &self,
         session_id: &str,
@@ -561,6 +623,18 @@ impl Db {
                 |r| r.get::<_, i64>(0),
             )?;
             let mut next_seq: i64 = max_seq + 1;
+            let mut prev_hash: String = if source.start_byte_offset == 0 {
+                IDENTITY_GENESIS.to_string()
+            } else {
+                tx.query_row(
+                    "SELECT source_identity_hash FROM session_events
+                     WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                    params![session_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| IDENTITY_GENESIS.to_string())
+            };
             let mut stored = Vec::with_capacity(parsed.len());
             {
                 let mut ins = tx.prepare(
@@ -570,12 +644,17 @@ impl Db {
                      ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
                 )?;
                 for p in parsed {
-                    let hash = source_identity_hash(
+                    // On conflict the computed hash IS the stored one (the
+                    // unique index matches on it), so the chain stays
+                    // continuous whether or not the row is new.
+                    let hash = event_identity_hash(
+                        &prev_hash,
                         p.source_event_id.as_deref(),
                         &p.kind,
                         p.ts.as_deref(),
                         p.text.as_deref(),
                     );
+                    prev_hash = hash.clone();
                     let id = new_id();
                     let n = ins.execute(params![
                         id,
@@ -618,6 +697,7 @@ impl Db {
                     byte_offset: source.byte_offset,
                     last_seen_size: source.last_seen_size,
                     mtime: source.mtime,
+                    prefix_hash: source.prefix_hash.clone(),
                     last_sequence: if stored.is_empty() {
                         // keep previous max; nothing new was appended
                         tx.query_row(
@@ -687,7 +767,7 @@ impl Db {
         Ok(self
             .0
             .query_row(
-                "SELECT session_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, last_sequence
+                "SELECT session_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, last_sequence
                  FROM session_cursors WHERE session_id = ?1",
                 params![session_id],
                 |r| {
@@ -698,7 +778,8 @@ impl Db {
                         byte_offset: r.get::<_, i64>(3)?.max(0) as u64,
                         last_seen_size: r.get::<_, i64>(4)?.max(0) as u64,
                         mtime: r.get(5)?,
-                        last_sequence: r.get(6)?,
+                        prefix_hash: r.get(6)?,
+                        last_sequence: r.get(7)?,
                     })
                 },
             )
@@ -955,12 +1036,12 @@ impl Db {
     pub fn insert_launch_intent(&self, i: &LaunchIntent) -> Result<()> {
         self.0.execute(
             "INSERT INTO launch_intents
-             (id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             (id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, context_bundle_revisions, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 i.id, i.launch_type, i.agent.as_str(),
                 serde_json::to_string(&i.selected_workstream_ids)?,
-                i.cwd, i.context_bundle_markdown, i.process_id.map(|p| p as i64),
+                i.cwd, i.context_bundle_markdown, i.context_bundle_revisions, i.process_id.map(|p| p as i64),
                 i.launched_at, i.matched_session_id, i.status, i.note, i.created_at, i.updated_at
             ],
         )?;
@@ -985,7 +1066,7 @@ impl Db {
         Ok(self
             .0
             .query_row(
-                "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
+                "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
                  FROM launch_intents WHERE id = ?1",
                 params![id],
                 row_launch_intent,
@@ -1001,7 +1082,7 @@ impl Db {
             format!(" WHERE status IN ({})", placeholders)
         };
         let sql = format!(
-            "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
+            "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
              FROM launch_intents{} ORDER BY created_at DESC LIMIT {}",
             filter, limit
         );
@@ -1125,27 +1206,19 @@ impl Db {
             .optional()?)
     }
 
-    /// Clear everything ingested for a session so a re-ingest starts clean:
-    /// events, source cursors (read + processed) and their search rows.
-    /// Bindings, context items and audit history are preserved.
-    pub fn reset_session_ingest(&self, session_id: &str) -> Result<()> {
-        self.tx(|tx| {
-            tx.execute(
-                "DELETE FROM session_events WHERE session_id = ?1",
-                params![session_id],
-            )?;
-            tx.execute(
-                "DELETE FROM session_cursors WHERE session_id = ?1",
-                params![session_id],
-            )?;
-            Ok(())
-        })?;
-        if self.fts_available() {
-            self.0.execute(
-                "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
-                params![session_id],
-            )?;
-        }
+    /// Rewind a session's read cursor so the next ingest re-scans the whole
+    /// source from the start. The EVENT STORE IS NOT TOUCHED: event rows,
+    /// their app-owned ids and every SourceReference pointing at them stay
+    /// intact (append-only history). Unchanged content dedups by identity on
+    /// the re-scan; only genuinely new/changed source content appends.
+    /// The processed (sync) cursor is preserved for the same reason.
+    pub fn reset_session_source_cursor(&self, session_id: &str) -> Result<()> {
+        self.0.execute(
+            "UPDATE session_cursors
+             SET byte_offset = 0, last_seen_size = 0, prefix_hash = ''
+             WHERE session_id = ?1",
+            params![session_id],
+        )?;
         Ok(())
     }
 
@@ -1427,24 +1500,56 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
 }
 
 pub fn bind_conn(conn: &Connection, b: &SessionWorkstreamBinding) -> Result<()> {
-    // Explicit sources always win; a weak (automatic) binding may be
-    // strengthened, never silently downgraded.
+    // Binding sources have an explicit PRECEDENCE, not just confidence:
+    // explicit launch selection (3) > user_assigned (2) > automatic (1).
+    // A later binding replaces the stored provenance only when it outranks
+    // it, or matches it in rank with >= confidence — so a user_assigned
+    // resume can never rewrite an explicit_launch_selection into a weaker
+    // provenance even at equal confidence, and role changes only when the
+    // binding itself is replaced.
     conn.execute(
         "INSERT INTO session_workstream_bindings
          (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(session_id, workstream_id) DO UPDATE SET
-           role = ?3,
-           source = CASE WHEN ?5 >= session_workstream_bindings.confidence
+           source = CASE WHEN binding_wins(?4, ?5, session_workstream_bindings.source, session_workstream_bindings.confidence)
                          THEN ?4 ELSE session_workstream_bindings.source END,
-           confidence = CASE WHEN ?5 >= session_workstream_bindings.confidence
+           confidence = CASE WHEN binding_wins(?4, ?5, session_workstream_bindings.source, session_workstream_bindings.confidence)
                              THEN ?5 ELSE session_workstream_bindings.confidence END,
+           role = CASE WHEN binding_wins(?4, ?5, session_workstream_bindings.source, session_workstream_bindings.confidence)
+                       THEN ?3 ELSE session_workstream_bindings.role END,
            last_seen_revision = COALESCE(?6, last_seen_revision),
            last_used_at = ?9",
         params![
             b.session_id, b.workstream_id, b.role, b.source, b.confidence,
             b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at
         ],
+    )?;
+    Ok(())
+}
+
+/// Register the precedence helper used by bind_conn (deterministic SQL
+/// expression of the binding-source ranking).
+fn register_binding_rank_fn(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "binding_wins",
+        4,
+        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            fn rank(source: &str) -> i64 {
+                match source {
+                    "explicit_launch_selection" => 3,
+                    "user_assigned" => 2,
+                    _ => 1,
+                }
+            }
+            let new_source = ctx.get_raw(0).as_str().unwrap_or("").to_string();
+            let new_conf: f64 = ctx.get(1)?;
+            let old_source = ctx.get_raw(2).as_str().unwrap_or("").to_string();
+            let old_conf: f64 = ctx.get(3)?;
+            let (rn, ro) = (rank(&new_source), rank(&old_source));
+            Ok(rn > ro || (rn == ro && new_conf >= old_conf))
+        },
     )?;
     Ok(())
 }
@@ -1456,13 +1561,18 @@ pub fn insert_events_conn(conn: &Connection, events: &[SessionEvent]) -> Result<
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
     )?;
+    // Test-seeding twin of append_source_events' chain: events are seeded in
+    // file order, so the chain restarts from genesis.
+    let mut prev_hash = IDENTITY_GENESIS.to_string();
     for e in events {
-        let hash = source_identity_hash(
+        let hash = event_identity_hash(
+            &prev_hash,
             e.source_event_id.as_deref(),
             &e.kind,
             e.ts.as_deref(),
             e.text.as_deref(),
         );
+        prev_hash = hash.clone();
         ins.execute(params![
             e.id, e.session_id, e.sequence, e.source_event_id, e.source_generation,
             e.source_position, hash, e.ts, e.kind, e.text, e.raw_ref, e.metadata.to_string()
@@ -1474,13 +1584,13 @@ pub fn insert_events_conn(conn: &Connection, events: &[SessionEvent]) -> Result<
 pub fn upsert_source_cursor_conn(conn: &Connection, c: &SourceCursor) -> Result<()> {
     conn.execute(
         "INSERT INTO session_cursors
-         (session_id, last_sequence, last_seen_size, source_file_identity, generation, byte_offset, mtime, processed_sequence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+         (session_id, last_sequence, last_seen_size, source_file_identity, generation, byte_offset, mtime, prefix_hash, processed_sequence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                  COALESCE((SELECT processed_sequence FROM session_cursors WHERE session_id = ?1), 0))
          ON CONFLICT(session_id) DO UPDATE SET
            last_sequence = ?2, last_seen_size = ?3, source_file_identity = ?4,
-           generation = ?5, byte_offset = ?6, mtime = ?7",
-        params![c.session_id, c.last_sequence, c.last_seen_size as i64, c.source_file_identity, c.generation, c.byte_offset as i64, c.mtime],
+           generation = ?5, byte_offset = ?6, mtime = ?7, prefix_hash = ?8",
+        params![c.session_id, c.last_sequence, c.last_seen_size as i64, c.source_file_identity, c.generation, c.byte_offset as i64, c.mtime, c.prefix_hash],
     )?;
     Ok(())
 }
@@ -1825,6 +1935,7 @@ fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
         note: r.get(10)?,
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
+        context_bundle_revisions: r.get(13)?,
     })
 }
 

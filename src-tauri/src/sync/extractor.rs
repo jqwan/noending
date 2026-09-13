@@ -253,6 +253,9 @@ pub struct PromptEventRef {
     pub short_ref: String,
     pub event_id: String,
     pub sequence: i64,
+    /// The event's kind ("user_message" | "assistant_message" | …): the raw
+    /// material for deterministic authority derivation after parsing.
+    pub kind: String,
 }
 
 /// Raw mutation shape we ask the model for. Short refs ("#1") map back to
@@ -303,6 +306,7 @@ fn build_extraction_prompt(
             short_ref,
             event_id: e.id.clone(),
             sequence: e.sequence,
+            kind: e.kind.clone(),
         });
     }
 
@@ -391,6 +395,39 @@ fn resolve_refs(
     out
 }
 
+/// Deterministic authority derivation (Issue: authority is NEVER the
+/// model's call). The LLM decides WHAT to extract; NoEnding decides whose
+/// word it is, from the events the mutation actually cites:
+/// - all cited events are user messages        → `user_explicit`
+/// - all cited events are assistant messages   → `agent_statement`
+/// - mixed citations (user participated)       → `user_explicit` (conservative:
+///   the item is protected from silent agent modification)
+/// - no resolvable citation                    → `agent_inferred`
+pub fn derive_authority(source_refs: &[String], ref_map: &[PromptEventRef]) -> String {
+    if source_refs.is_empty() {
+        return "agent_inferred".into();
+    }
+    let kinds: Vec<&str> = source_refs
+        .iter()
+        .filter_map(|r| {
+            let id = r.strip_prefix("session-event:")?;
+            ref_map
+                .iter()
+                .find(|m| m.event_id == id)
+                .map(|m| m.kind.as_str())
+        })
+        .collect();
+    if kinds.is_empty() {
+        return "agent_inferred".into();
+    }
+    if kinds.iter().all(|k| *k == "assistant_message") {
+        "agent_statement".into()
+    } else {
+        // all user, or mixed → user participates in the claim
+        "user_explicit".into()
+    }
+}
+
 /// Parse + validate model output into real mutations. Invalid entries are
 /// dropped individually (with diagnostics); the rest still merges.
 pub fn parse_mutations(
@@ -422,8 +459,8 @@ pub fn parse_mutations(
                     item_kind: r.item_kind,
                     title: crate::adapters::truncate_text(r.title.trim(), 80),
                     content: r.content.trim().to_string(),
+                    authority: derive_authority(&source_refs, ref_map),
                     source_refs,
-                    authority: "agent_inferred".into(),
                 });
             }
             "update" | "supersede" => {
@@ -432,13 +469,14 @@ pub fn parse_mutations(
                     continue;
                 }
                 let content = r.content.trim().to_string();
+                let authority = derive_authority(&source_refs, ref_map);
                 out.push(if r.op == "update" {
                     ContextMutation::Update {
                         item_id: r.item_id,
                         title: r.title.trim().to_string(),
                         content,
                         source_refs,
-                        authority: "agent_inferred".into(),
+                        authority,
                     }
                 } else {
                     ContextMutation::Supersede {
@@ -446,7 +484,7 @@ pub fn parse_mutations(
                         title: r.title.trim().to_string(),
                         content,
                         source_refs,
-                        authority: "agent_inferred".into(),
+                        authority,
                     }
                 });
             }
@@ -554,8 +592,18 @@ mod tests {
     /// "sequence 1".
     fn ref_map() -> Vec<PromptEventRef> {
         vec![
-            PromptEventRef { short_ref: "#1".into(), event_id: "e-aaa".into(), sequence: 101 },
-            PromptEventRef { short_ref: "#2".into(), event_id: "e-bbb".into(), sequence: 105 },
+            PromptEventRef {
+                short_ref: "#1".into(),
+                event_id: "e-aaa".into(),
+                sequence: 101,
+                kind: "user_message".into(),
+            },
+            PromptEventRef {
+                short_ref: "#2".into(),
+                event_id: "e-bbb".into(),
+                sequence: 105,
+                kind: "assistant_message".into(),
+            },
         ]
     }
 
@@ -572,9 +620,44 @@ mod tests {
             ContextMutation::Add { workstream_id, source_refs, authority, .. } => {
                 assert_eq!(workstream_id, "ws1");
                 assert_eq!(source_refs, &vec!["session-event:e-bbb".to_string()]);
-                assert_eq!(authority, "agent_inferred");
+                // #2 is an assistant message: agent's own statement.
+                assert_eq!(authority, "agent_statement");
             }
             other => panic!("unexpected mutation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn user_cited_extraction_keeps_user_authority() {
+        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"constraint","title":"双平台一等公民","content":"Windows 和 macOS 都必须作为一等平台。","refs":["#1"]}]"##;
+        let out = parse(text);
+        match &out.mutations[0] {
+            ContextMutation::Add { authority, .. } => {
+                assert_eq!(authority, "user_explicit", "user words keep user authority");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mixed_citation_is_conservatively_user_owned() {
+        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":["#1","#2"]}]"##;
+        let out = parse(text);
+        match &out.mutations[0] {
+            ContextMutation::Add { authority, .. } => {
+                assert_eq!(authority, "user_explicit", "mixed refs protect the user's voice");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn uncited_extraction_is_agent_inferred() {
+        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":[]}]"##;
+        let out = parse(text);
+        match &out.mutations[0] {
+            ContextMutation::Add { authority, .. } => assert_eq!(authority, "agent_inferred"),
+            other => panic!("unexpected: {:?}", other),
         }
     }
 

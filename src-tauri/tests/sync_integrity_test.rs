@@ -235,6 +235,8 @@ fn read_cursor_and_processed_cursor_are_separate() {
         byte_offset: offset,
         last_seen_size: offset,
         mtime: None,
+        start_byte_offset: offset,
+        prefix_hash: String::new(),
     };
 
     // ingest batch 1 (real user message so the extractor produces mutations)
@@ -298,6 +300,8 @@ fn nonblocking_sync_path_processes_pending_events() {
         byte_offset: 88,
         last_seen_size: 88,
         mtime: None,
+        start_byte_offset: 88,
+        prefix_hash: String::new(),
     };
     let stored = db
         .append_source_events(
@@ -664,4 +668,170 @@ fn dedup_update_path_also_persists_revision() {
     assert_eq!(history.len(), 2);
     assert_eq!(db.get_item(&item_id).unwrap().unwrap().current_revision_id.unwrap(), history[1].id);
     head_is_resolvable(&db, &ws.id, &item_id);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: commit must re-verify the processed cursor inside its
+// transaction (extraction runs without the lock and may take minutes).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stale_commit_is_discarded_when_processed_cursor_moved() {
+    let db = open_db("stale-commit");
+    let s = session_row(&db);
+    let ws = ws_row(&db, "stale ws");
+    db.bind(&SessionWorkstreamBinding {
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        role: "primary".into(),
+        source: binding_source::USER_ASSIGNED.into(),
+        confidence: 1.0,
+        last_seen_revision: None,
+        last_sync_cursor: 0,
+        created_at: now(),
+        last_used_at: now(),
+    })
+    .unwrap();
+
+    let mk = |seq: i64, text: &str| noending::domain::SessionEvent {
+        id: new_id(),
+        session_id: s.id.clone(),
+        sequence: seq,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: format!("line:{}", seq),
+        ts: Some(now()),
+        kind: "user_message".into(),
+        text: Some(text.into()),
+        raw_ref: format!("/tmp/x.jsonl#line:{}", seq),
+        metadata: serde_json::json!({}),
+    };
+    let events = vec![
+        mk(1, "决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据"),
+        mk(2, "补充约束：不能把密钥提交到代码仓库，必须使用环境变量管理"),
+    ];
+    db.append_events(&events).unwrap();
+
+    let engine = noending::sync::SyncEngine::default();
+    let pre = engine
+        .prepare(&db, &s, &events, 0, 2)
+        .unwrap()
+        .expect("prepared");
+
+    // a concurrent run commits the same delta while "our" extraction runs
+    db.set_processed_sequence(&s.id, 2).unwrap();
+
+    let out = engine
+        .commit(&db, &s, &pre, vec![], "heuristic", vec![])
+        .unwrap();
+    assert_eq!(out.status, "stale", "stale run must be discarded, not applied");
+    assert_eq!(out.applied, 0);
+    assert_eq!(
+        db.get_processed_sequence(&s.id).unwrap(),
+        2,
+        "processed cursor must never move backwards"
+    );
+    assert_eq!(
+        db.items_for_workstream(&ws.id, true).unwrap().len(),
+        0,
+        "no stale mutation may touch the workstream"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Auto-classification becomes a real binding inside the commit transaction.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn auto_classification_persists_as_binding_on_commit() {
+    let db = open_db("auto-bind");
+    let s = session_row(&db);
+    // no bindings at all: sync must classify by keyword
+    let ws = ws_row(&db, "量化系统架构");
+
+    let event = noending::domain::SessionEvent {
+        id: new_id(),
+        session_id: s.id.clone(),
+        sequence: 1,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: "line:1".into(),
+        ts: Some(now()),
+        kind: "user_message".into(),
+        text: Some("我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度".into()),
+        raw_ref: "/tmp/x.jsonl#line:1".into(),
+        metadata: serde_json::json!({}),
+    };
+    db.append_events(std::slice::from_ref(&event)).unwrap();
+
+    let engine = noending::sync::SyncEngine::default();
+    let out = engine
+        .run_session_sync(&db, &s, std::slice::from_ref(&event), 0, 1)
+        .unwrap();
+    assert_eq!(out.status, "ok");
+
+    let bound = db.bindings_for_session(&s.id).unwrap();
+    assert!(
+        bound.iter().any(|b| b.workstream_id == ws.id && b.source == binding_source::AUTO),
+        "auto classification must persist as a binding, got {:?}",
+        bound
+    );
+    use noending::domain::SessionClassificationState;
+    assert_eq!(
+        SessionClassificationState::derive(&bound),
+        SessionClassificationState::PartiallyAssigned,
+        "auto-only bindings read back as partially assigned"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Binding source precedence: equal-confidence later flows must not rewrite
+// stronger provenance, and role changes only when the binding is replaced.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn binding_source_precedence_beats_equal_confidence() {
+    let db = open_db("bind-precedence");
+    let s = session_row(&db);
+    let ws = ws_row(&db, "precedence ws");
+    let mk = |source: &str, role: &str| SessionWorkstreamBinding {
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        role: role.into(),
+        source: source.into(),
+        confidence: 1.0,
+        last_seen_revision: None,
+        last_sync_cursor: 0,
+        created_at: now(),
+        last_used_at: now(),
+    };
+
+    db.bind(&mk(binding_source::EXPLICIT_LAUNCH, "primary")).unwrap();
+    // a later user_assigned resume at the SAME confidence must not rewrite
+    // the explicit provenance (nor steal the primary role)
+    db.bind(&mk(binding_source::USER_ASSIGNED, "related")).unwrap();
+    let b = &db.bindings_for_session(&s.id).unwrap()[0];
+    assert_eq!(b.source, binding_source::EXPLICIT_LAUNCH);
+    assert_eq!(b.role, "primary");
+
+    // automatic classification never downgrades anything explicit/user
+    db.bind(&mk(binding_source::AUTO, "related")).unwrap();
+    let b = &db.bindings_for_session(&s.id).unwrap()[0];
+    assert_eq!(b.source, binding_source::EXPLICIT_LAUNCH);
+
+    // equal-rank replacement still works (user_assigned over user_assigned)
+    db.bind(&mk(binding_source::USER_ASSIGNED, "related")).unwrap();
+    let fresh_ws = ws_row(&db, "precedence ws 2");
+    db.bind(&SessionWorkstreamBinding {
+        workstream_id: fresh_ws.id.clone(),
+        ..mk(binding_source::USER_ASSIGNED, "related")
+    })
+    .unwrap();
+    let b2 = db
+        .bindings_for_session(&s.id)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.workstream_id == fresh_ws.id)
+        .unwrap();
+    assert_eq!(b2.source, binding_source::USER_ASSIGNED);
 }

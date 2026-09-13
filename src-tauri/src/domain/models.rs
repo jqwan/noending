@@ -137,6 +137,11 @@ pub struct SourceCursor {
     pub byte_offset: u64,
     pub last_seen_size: u64,
     pub mtime: Option<f64>,
+    /// SHA-256 of the file bytes [0..byte_offset] at the time the offset was
+    /// recorded. An append is only accepted when the stored prefix is still
+    /// the file's prefix — a same-size-or-larger rewrite is caught here.
+    /// Empty on legacy cursors (forces one full re-scan to backfill).
+    pub prefix_hash: String,
     /// Max app-assigned event sequence ingested so far (read cursor).
     pub last_sequence: i64,
 }
@@ -168,6 +173,12 @@ pub struct SourceCursorUpdate {
     pub byte_offset: u64,
     pub last_seen_size: u64,
     pub mtime: Option<f64>,
+    /// Where this read BATCH started in the file: 0 means a full re-scan
+    /// (identity chain restarts from genesis), >0 an append (chain continues
+    /// from the last stored event).
+    pub start_byte_offset: u64,
+    /// SHA-256 of file bytes [0..byte_offset] after this read.
+    pub prefix_hash: String,
 }
 
 /// Multi-to-multi binding between sessions and workstreams.
@@ -260,6 +271,12 @@ pub struct LaunchIntent {
     pub selected_workstream_ids: Vec<Id>,
     pub cwd: Option<String>,
     pub context_bundle_markdown: Option<String>,
+    /// JSON snapshot of what the launched session actually received:
+    /// `{"bundle_id": "...", "by_workstream": {ws_id: [revision_id, ...]}}`.
+    /// Recorded as ContextDelivery rows when the intent matches a session,
+    /// so the first resume computes a true delta instead of re-sending
+    /// the full context.
+    pub context_bundle_revisions: Option<String>,
     pub process_id: Option<u32>,
     pub launched_at: String,
     pub matched_session_id: Option<Id>,

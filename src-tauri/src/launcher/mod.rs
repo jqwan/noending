@@ -98,7 +98,18 @@ impl SessionLauncher {
 
         // 3. durable LaunchIntent BEFORE launching: the user's explicit
         //    Workstream selection must survive discovery latency and even a
-        //    NoEnding crash right after spawn.
+        //    NoEnding crash right after spawn. The bundle's delivered
+        //    revision snapshot travels with the intent: when a session
+        //    matches, apply_match records it as ContextDelivery so the
+        //    session's FIRST resume is a true delta, not a full re-send.
+        let delivered_by_ws = if ctx_file.is_some() {
+            delivered_revisions_by_workstream(
+                &bundle,
+                workstream_ids.first().map(|s| s.as_str()).unwrap_or(""),
+            )
+        } else {
+            Default::default()
+        };
         let intent = LaunchIntent {
             id: new_id(),
             launch_type: "new".into(),
@@ -107,6 +118,17 @@ impl SessionLauncher {
             cwd: cwd.map(|s| s.to_string()),
             context_bundle_markdown: if ctx_file.is_some() {
                 Some(bundle.markdown.clone())
+            } else {
+                None
+            },
+            context_bundle_revisions: if ctx_file.is_some() {
+                Some(
+                    serde_json::json!({
+                        "bundle_id": bundle.bundle_id,
+                        "by_workstream": delivered_by_ws,
+                    })
+                    .to_string(),
+                )
             } else {
                 None
             },
@@ -205,12 +227,15 @@ impl SessionLauncher {
         let outcome = crate::platform::launcher::launch(&cmd)?;
 
         // 5. successful launch → record what was actually delivered, so the
-        //    NEXT resume computes a true delta. Also touch binding usage.
-        let delivered: Vec<String> = bundle
-            .sections
-            .iter()
-            .filter_map(|s| s.revision_id.clone())
-            .collect();
+        //    NEXT resume computes a true delta. Revisions are attributed to
+        //    the workstream that OWNS each section — stamping every
+        //    workstream with the full list would corrupt cross-workstream
+        //    delta computation (wrong `gone` sections, double deliveries).
+        //    Also touch binding usage.
+        let delivered_by_ws = delivered_revisions_by_workstream(
+            &bundle,
+            ws_ids.first().map(|s| s.as_str()).unwrap_or(""),
+        );
         for ws_id in &ws_ids {
             record_binding(db, session_id, ws_id, "related", binding_source::USER_ASSIGNED, 1.0)?;
             db.record_delivery(&ContextDelivery {
@@ -218,7 +243,7 @@ impl SessionLauncher {
                 session_id: session_id.to_string(),
                 workstream_id: ws_id.clone(),
                 bundle_id: bundle.bundle_id.clone(),
-                delivered_revisions: delivered.clone(),
+                delivered_revisions: delivered_by_ws.get(ws_id).cloned().unwrap_or_default(),
                 delivered_at: now(),
             })?;
         }
@@ -241,8 +266,30 @@ impl SessionLauncher {
     }
 }
 
-fn resolve_install(db: &Db, agent: Agent) -> Result<crate::platform::exec_resolver::AgentInstallation> {
-    match db.get_installation(agent)? {
+/// Group the bundle's delivered revision ids by the workstream that owns
+/// each section. Sections without a workstream attribution (rare) fall back
+/// to `fallback_ws`.
+fn delivered_revisions_by_workstream(
+    bundle: &crate::context::SessionContextBundle,
+    fallback_ws: &str,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut by_ws: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for s in &bundle.sections {
+        if let Some(rev) = &s.revision_id {
+            let ws = s
+                .workstream_id
+                .clone()
+                .unwrap_or_else(|| fallback_ws.to_string());
+            let entry = by_ws.entry(ws).or_default();
+            if !entry.contains(rev) {
+                entry.push(rev.clone());
+            }
+        }
+    }
+    by_ws
+}
+
+fn resolve_install(db: &Db, agent: Agent) -> Result<crate::platform::exec_resolver::AgentInstallation> {    match db.get_installation(agent)? {
         Some(i) if std::path::Path::new(&i.executable_path).exists() => Ok(i),
         _ => {
             let i = crate::platform::exec_resolver::resolve(agent)?;
@@ -391,6 +438,38 @@ pub fn apply_match(db: &Db, intent: &LaunchIntent, session: &Session) -> Result<
             binding_source::EXPLICIT_LAUNCH,
             1.0,
         )?;
+    }
+    // The matched session already RECEIVED the context bundle at launch:
+    // record the delivery snapshot now, so its first resume computes a true
+    // delta instead of re-sending the full context.
+    if let Some(snap) = &intent.context_bundle_revisions {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(snap) {
+            let bundle_id = v
+                .get("bundle_id")
+                .and_then(|b| b.as_str())
+                .unwrap_or(&intent.id)
+                .to_string();
+            if let Some(by_ws) = v.get("by_workstream").and_then(|m| m.as_object()) {
+                for (ws_id, revs) in by_ws {
+                    let revisions: Vec<String> = revs
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    db.record_delivery(&ContextDelivery {
+                        id: new_id(),
+                        session_id: session.id.clone(),
+                        workstream_id: ws_id.clone(),
+                        bundle_id: bundle_id.clone(),
+                        delivered_revisions: revisions,
+                        delivered_at: now(),
+                    })?;
+                }
+            }
+        }
     }
     db.update_launch_intent(
         &intent.id,

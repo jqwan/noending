@@ -230,24 +230,48 @@ fn observe(path: &Path) -> Result<(FileObservation, String)> {
     ))
 }
 
+/// Hex SHA-256 of a byte slice — the prefix fingerprint stored on cursors.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    use std::fmt::Write;
+    let mut h = sha2::Sha256::new();
+    h.update(data);
+    h.finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut out, b| {
+            write!(out, "{:02x}", b).ok();
+            out
+        })
+}
+
 /// Shared incremental JSONL reader used by every adapter.
 ///
 /// Classification of the read (compared against the stored cursor):
-/// - append:      same file, size grew          → parse only new complete lines
+/// - append:      same file, size grew AND the stored prefix fingerprint
+///                still matches the file's prefix → parse only new complete
+///                lines. A rewrite that GREW the file diverges here and is
+///                correctly treated as a rewrite.
 /// - no change:   same file, size identical, mtime unchanged → nothing
 /// - truncate:    same file, size shrank        → new generation, full rescan
 /// - rewrite:     same file, same size, mtime changed → new generation, full rescan
 /// - replacement: different file identity       → new generation, full rescan
 ///
-/// Rescans are safe because storage dedups by content identity: unchanged
+/// Rescans are safe because storage dedups by event identity: unchanged
 /// events are skipped, changed/new ones are added as new events, and
-/// previously ingested history is never touched.
+/// previously ingested history is never touched. Legacy cursors without a
+/// stored prefix fingerprint take one full rescan to backfill it.
 pub fn read_jsonl_delta(
     path: &Path,
     cursor: &SourceCursor,
     parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
 ) -> Result<ReadDelta> {
     let (obs, text) = observe(path)?;
+    // Prefix fingerprint over the (deterministic) lossy-decoded bytes; the
+    // reader's offsets live in these coordinates too.
+    let prefix_hash_of = |upto: usize| -> String {
+        let upto = upto.min(text.len());
+        sha256_hex(&text.as_bytes()[..upto])
+    };
 
     let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
     let (generation, start_offset): (i64, u64) = if first_ever {
@@ -272,12 +296,24 @@ pub fn read_jsonl_delta(
                     byte_offset: cursor.byte_offset,
                     last_seen_size: obs.size,
                     mtime: obs.mtime,
+                    start_byte_offset: cursor.byte_offset,
+                    prefix_hash: cursor.prefix_hash.clone(),
                 }),
             });
         }
         (cursor.generation + 1, 0) // same-size rewrite / touch
     } else {
-        (cursor.generation, cursor.byte_offset.min(obs.size)) // append
+        // size grew: accept as append ONLY if the previously consumed prefix
+        // is still the file's prefix; otherwise the old head was rewritten.
+        let prefix_end = (cursor.byte_offset as usize).min(text.len());
+        let prefix_ok = !cursor.prefix_hash.is_empty()
+            && (cursor.byte_offset as u64) <= obs.size
+            && prefix_hash_of(prefix_end) == cursor.prefix_hash;
+        if prefix_ok {
+            (cursor.generation, cursor.byte_offset.min(obs.size)) // append
+        } else {
+            (cursor.generation + 1, 0) // rewrite-grow (or legacy cursor: backfill rescan)
+        }
     };
 
     // Byte offset of the end of the last complete (newline-terminated) line.
@@ -327,6 +363,8 @@ pub fn read_jsonl_delta(
             byte_offset: complete_end as u64,
             last_seen_size: obs.size,
             mtime: obs.mtime,
+            start_byte_offset: start_offset as u64,
+            prefix_hash: prefix_hash_of(complete_end),
         }),
     })
 }

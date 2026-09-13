@@ -270,9 +270,12 @@ where
     Ok((discovered_count, total_events))
 }
 
-/// Re-ingest one source: wipe everything ingested for the sessions found
-/// under its path (events, cursors, search index — bindings, context items
-/// and audit history are preserved), then ingest + sync from scratch.
+/// Re-ingest one source: rewind the read cursor of every session found
+/// under its path (generation bump, offset 0) and re-scan from scratch.
+/// The EVENT STORE IS NEVER DELETED — event ids and every SourceReference
+/// in context revisions stay valid, because unchanged content dedups by
+/// identity and only genuinely new/changed source content appends.
+/// Bindings, context items and audit history are untouched.
 pub fn reingest_source<F>(
     db_lock: &Mutex<Db>,
     engine: &SyncEngine,
@@ -291,8 +294,8 @@ where
         let s = {
             let guard = crate::sync::lock_db(db_lock)?;
             let (s, _is_new) = ensure_session_row(&guard, d)?;
-            // overwrite/refresh: clear this session's ingested state
-            guard.reset_session_ingest(&s.id)?;
+            // overwrite/refresh: re-read the source from position 0
+            guard.reset_session_source_cursor(&s.id)?;
             s
         };
         on_session(&s);

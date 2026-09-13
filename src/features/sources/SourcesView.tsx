@@ -6,7 +6,7 @@ import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
 /**
  * 会话数据源管理 + 入库入口。
  * - 默认 agent 根目录（~/.codex 等）以"未启用"状态预置，是否入库由用户决定；
- * - 每个数据源可以单独「同步」（增量）或「重新入库」（清除已入库事件后
+ * - 每个数据源可以单独「同步」（增量）或「重新入库」（从头重扫源文件，
  *   重新抓取，绑定与上下文条目保留）；
  * - 入库在后台执行（不阻塞界面），进度通过 sync-* 事件推送。
  */
@@ -97,7 +97,7 @@ export default function SourcesView({ onSync }: { onSync?: () => void }) {
 
   const reingest = async (src: IngestSource) => {
     if (!window.confirm(
-      `重新入库「${src.path}」？\n\n将清除该源会话已入库的事件与游标并重新抓取（会话绑定、Workstream 上下文条目和审计历史保留）。`
+      `重新入库「${src.path}」？\n\n将从头重扫该源的全部会话文件：已入库的事件及其引用保持不变，仅真正新增/变化的内容会被追加（绑定、上下文条目与审计历史保留）。`
     )) {
       return;
     }
@@ -204,7 +204,7 @@ export default function SourcesView({ onSync }: { onSync?: () => void }) {
       </div>
 
       <p className="muted small" style={{ marginTop: 10 }}>
-        「同步」按增量抓取新会话内容；「重新入库」先清除该源已入库的事件与游标再重新抓取（覆盖刷新会话数据，Workstream 上下文与绑定保留）。
+        「同步」按增量抓取新会话内容；「重新入库」从头重扫该源全部会话文件（事件 ID 与引用保持不变，用于修复游标异常或漏抓内容，Workstream 上下文与绑定保留）。
       </p>
     </div>
   );

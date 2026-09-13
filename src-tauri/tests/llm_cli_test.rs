@@ -62,6 +62,7 @@ fn ref_map(events: &[SessionEvent]) -> Vec<PromptEventRef> {
             short_ref: format!("#{}", i + 1),
             event_id: e.id.clone(),
             sequence: e.sequence,
+            kind: e.kind.clone(),
         })
         .collect()
 }
@@ -190,6 +191,7 @@ fn parse_mutations_validates_candidate_ids() {
         short_ref: "#1".into(),
         event_id: "e-real-1".into(),
         sequence: 101,
+        kind: "user_message".into(),
     }];
     let text = r##" [{"op":"add","workstream_id":"nope","item_kind":"decision","title":"x","content":"y","refs":["#1"]}] "##;
     let out = parse_mutations(text, &map, &["ws1".into()], &session).unwrap();
@@ -202,8 +204,18 @@ fn parse_mutations_maps_short_refs_through_prompt_map() {
     // prompt events carry sequences 101 / 105 — "#2" must map to the event
     // with id e-real-2 (sequence 105), never to "sequence 2".
     let map = vec![
-        PromptEventRef { short_ref: "#1".into(), event_id: "e-real-1".into(), sequence: 101 },
-        PromptEventRef { short_ref: "#2".into(), event_id: "e-real-2".into(), sequence: 105 },
+        PromptEventRef {
+            short_ref: "#1".into(),
+            event_id: "e-real-1".into(),
+            sequence: 101,
+            kind: "user_message".into(),
+        },
+        PromptEventRef {
+            short_ref: "#2".into(),
+            event_id: "e-real-2".into(),
+            sequence: 105,
+            kind: "assistant_message".into(),
+        },
     ];
     let text = r##"[
         {"op":"add","workstream_id":"ws1","item_kind":"decision","title":"t1","content":"c","refs":["#2"]},

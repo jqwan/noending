@@ -129,6 +129,11 @@ pub struct PreparedSync {
     pub from_sequence: i64,
     pub to_sequence: i64,
     pub candidates: Vec<String>,
+    /// True when `candidates` came from keyword auto-classification rather
+    /// than existing bindings; commit then persists them as
+    /// `automatic_classification` bindings inside the run transaction, so
+    /// the UI's session state matches what sync actually used.
+    pub candidates_are_automatic: bool,
     pub meaningful: Vec<SessionEvent>,
     pub meaningful_count: usize,
     pub unclassified: usize,
@@ -208,15 +213,19 @@ impl SyncEngine {
             return Ok(None);
         }
 
-        // 1. candidate workstreams: bound ones, plus keyword-matched ones
-        let mut candidates: Vec<String> = db
+        // 1. candidate workstreams: bound ones, plus keyword-matched ones.
+        //     Auto-classified candidates are remembered as such so commit
+        //     can persist the classification as a real binding.
+        let bound: Vec<String> = db
             .bindings_for_session(&session.id)?
             .into_iter()
             .map(|b| b.workstream_id)
             .collect();
-        if candidates.is_empty() {
-            candidates = self.auto_classify(db, session, events);
-        }
+        let (candidates, candidates_are_automatic) = if bound.is_empty() {
+            (self.auto_classify(db, session, events), true)
+        } else {
+            (bound, false)
+        };
 
         // 2. pre-filter: only meaningful message kinds
         let meaningful: Vec<SessionEvent> = events
@@ -246,6 +255,7 @@ impl SyncEngine {
             from_sequence,
             to_sequence,
             candidates,
+            candidates_are_automatic,
             meaningful_count: meaningful.len(),
             meaningful,
             unclassified,
@@ -284,6 +294,13 @@ impl SyncEngine {
     /// Phase C (DB lock held): apply mutations, record the SyncRun and
     /// advance the processed cursor — all inside ONE transaction. Any error
     /// rolls the entire run back and the batch is retried later.
+    ///
+    /// CAS inside the transaction: `prepare` snapshotted `from_sequence`
+    /// while holding the lock, but extraction runs WITHOUT it and may take
+    /// minutes. If another run committed a newer delta for this session in
+    /// the meantime, our mutations are stale — applying them would duplicate
+    /// context and move the processed cursor BACKWARDS. The run is discarded
+    /// (status "stale"); the next sync re-prepares from the current state.
     pub fn commit(
         &self,
         db: &Db,
@@ -293,11 +310,36 @@ impl SyncEngine {
         runtime: &str,
         diagnostics: Vec<String>,
     ) -> Result<SyncJobOutput> {
+        use crate::domain::{binding_source, SessionWorkstreamBinding};
+
         let ctx = MergeContext {
             run_id: pre.run_id.clone(),
             runtime: runtime.to_string(),
         };
-        let (applied, skipped, summary) = db.tx(|tx| {
+        db.tx(|tx| {
+            let current_processed: i64 = tx.query_row(
+                "SELECT COALESCE((SELECT processed_sequence FROM session_cursors WHERE session_id = ?1), 0)",
+                rusqlite::params![session.id],
+                |r| r.get(0),
+            )?;
+            if current_processed != pre.from_sequence {
+                eprintln!(
+                    "[sync] run {} stale: processed moved {} → {} during extraction, discarding",
+                    pre.run_id, pre.from_sequence, current_processed
+                );
+                return Ok(SyncJobOutput {
+                    run_id: pre.run_id.clone(),
+                    status: "stale".into(),
+                    applied: 0,
+                    skipped: 0,
+                    unclassified: 0,
+                    summary: format!(
+                        "提取期间该 Session 已被其他同步推进（processed {} → {}），本次结果作废，待下次同步重新提取。",
+                        pre.from_sequence, current_processed
+                    ),
+                });
+            }
+
             let mut applied = 0usize;
             let mut skipped = 0usize;
             for m in &mutations {
@@ -305,6 +347,28 @@ impl SyncEngine {
                     applied += 1;
                 } else {
                     skipped += 1;
+                }
+            }
+
+            // Persist auto-classification so the session's UI state matches
+            // what sync actually used. Binding precedence keeps any explicit
+            // or user binding strictly stronger than this one.
+            if pre.candidates_are_automatic {
+                for ws_id in &pre.candidates {
+                    crate::storage::bind_conn(
+                        tx,
+                        &SessionWorkstreamBinding {
+                            session_id: session.id.clone(),
+                            workstream_id: ws_id.clone(),
+                            role: "related".into(),
+                            source: binding_source::AUTO.into(),
+                            confidence: 0.6,
+                            last_seen_revision: None,
+                            last_sync_cursor: 0,
+                            created_at: now(),
+                            last_used_at: now(),
+                        },
+                    )?;
                 }
             }
 
@@ -339,20 +403,18 @@ impl SyncEngine {
             };
             crate::storage::insert_sync_run_conn(tx, &run)?;
             crate::storage::set_processed_sequence_conn(tx, &session.id, pre.to_sequence)?;
-            Ok((applied, skipped, summary))
+            Ok(SyncJobOutput {
+                run_id: pre.run_id.clone(),
+                status: "ok".into(),
+                applied,
+                skipped,
+                unclassified: pre.unclassified,
+                summary,
+            })
         })
         .map_err(|e| {
             eprintln!("[sync] run {} rolled back, processed cursor unchanged: {}", pre.run_id, e);
             e
-        })?;
-
-        Ok(SyncJobOutput {
-            run_id: pre.run_id.clone(),
-            status: "ok".into(),
-            applied,
-            skipped,
-            unclassified: pre.unclassified,
-            summary,
         })
     }
 

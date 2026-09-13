@@ -213,63 +213,87 @@ fn same_size_rewrite_is_detected() {
     assert_eq!(c.generation, 1);
 }
 
-/// The unique content-identity index is the hard guarantee: inserting the
-/// same content twice can never produce two rows.
+/// Event identity semantics (chained adjacency for fallback events):
+/// - identical re-scan from the same chain position → dedup;
+/// - the same content at a DIFFERENT chain position (a genuinely repeated
+///   user message like "继续") stays distinct;
+/// - native agent event ids dedup regardless of position;
+/// - genuinely new content always inserts.
 #[test]
-fn duplicate_content_cannot_be_inserted_twice() {
-    let db = open_db("dup-insert");
-    let dir = unique_dir("dup-insert");
+fn identity_dedup_follows_chain_semantics() {
+    let db = open_db("chain-identity");
+    let dir = unique_dir("chain-identity");
     let s = session_row(&db, Agent::Codex, &dir.join("x.jsonl"));
 
-    let mk = |pos: &str| noending::domain::ParsedEvent {
+    let mk = |pos: &str, text: &str| noending::domain::ParsedEvent {
         source_event_id: None,
+        source_position: pos.into(),
+        ts: Some("t".into()),
+        kind: "user_message".into(),
+        text: Some(text.into()),
+        metadata: serde_json::json!({}),
+    };
+    let mk_native = |pos: &str, id: &str| noending::domain::ParsedEvent {
+        source_event_id: Some(id.into()),
         source_position: pos.into(),
         ts: Some("t".into()),
         kind: "user_message".into(),
         text: Some("same text".into()),
         metadata: serde_json::json!({}),
     };
-
-    let source = noending::domain::SourceCursorUpdate {
+    // start_byte_offset == 0 → full re-scan → chain restarts at genesis.
+    let rescan = |gen: i64| noending::domain::SourceCursorUpdate {
         file_identity: "unix:dev:1:ino:2".into(),
-        generation: 0,
+        generation: gen,
         byte_offset: 10,
         last_seen_size: 10,
         mtime: None,
+        start_byte_offset: 0,
+        prefix_hash: String::new(),
     };
+    // start_byte_offset > 0 → append → chain continues from the last event.
+    let append = |gen: i64| noending::domain::SourceCursorUpdate {
+        file_identity: "unix:dev:1:ino:2".into(),
+        generation: gen,
+        byte_offset: 20,
+        last_seen_size: 20,
+        mtime: None,
+        start_byte_offset: 10,
+        prefix_hash: String::new(),
+    };
+
+    // first sight of the content
     let first = db
-        .append_source_events(&s.id, &[mk("line:1")], &source, "/x.jsonl")
+        .append_source_events(&s.id, &[mk("line:1", "same text")], &rescan(0), "/x.jsonl")
         .unwrap();
     assert_eq!(first.len(), 1);
 
-    // same content at a DIFFERENT position / generation (e.g. after compaction)
-    let source2 = noending::domain::SourceCursorUpdate {
-        file_identity: source.file_identity.clone(),
-        generation: 1,
-        byte_offset: 10,
-        last_seen_size: 10,
-        mtime: None,
-    };
-    let second = db
-        .append_source_events(&s.id, &[mk("line:9")], &source2, "/x.jsonl")
+    // identical re-scan (same chain position, later generation) → dedup
+    let again = db
+        .append_source_events(&s.id, &[mk("line:9", "same text")], &rescan(1), "/x.jsonl")
         .unwrap();
-    assert_eq!(second.len(), 0, "same content in a later generation dedups");
+    assert_eq!(again.len(), 0, "identical rescan never duplicates");
+
+    // the SAME content appended after another event is a DIFFERENT logical
+    // event ("继续" sent twice must not collapse)
+    let second_msg = db
+        .append_source_events(&s.id, &[mk("line:2", "same text")], &append(0), "/x.jsonl")
+        .unwrap();
+    assert_eq!(second_msg.len(), 1, "repeated user message stays distinct");
+
+    // native agent event ids dedup regardless of chain position
+    let native1 = db
+        .append_source_events(&s.id, &[mk_native("line:3", "native-1")], &append(0), "/x.jsonl")
+        .unwrap();
+    assert_eq!(native1.len(), 1);
+    let native2 = db
+        .append_source_events(&s.id, &[mk_native("line:4", "native-1")], &append(0), "/x.jsonl")
+        .unwrap();
+    assert_eq!(native2.len(), 0, "native id dedups across positions");
 
     // genuinely new content still inserts
     let third = db
-        .append_source_events(
-            &s.id,
-            &[noending::domain::ParsedEvent {
-                source_event_id: None,
-                source_position: "line:9".into(),
-                ts: Some("t2".into()),
-                kind: "user_message".into(),
-                text: Some("different text".into()),
-                metadata: serde_json::json!({}),
-            }],
-            &source2,
-            "/x.jsonl",
-        )
+        .append_source_events(&s.id, &[mk("line:5", "different text")], &append(0), "/x.jsonl")
         .unwrap();
     assert_eq!(third.len(), 1);
 }
@@ -306,4 +330,89 @@ fn partial_trailing_line_is_not_ingested() {
     write!(f, "{}", rest).unwrap();
     drop(f);
     assert_eq!(ingest(&db, adapter, &s), 1, "completed line is picked up");
+}
+
+/// A rewrite that GROWS the file must not be mistaken for an append: the
+/// stored prefix fingerprint no longer matches, so the read is a rewrite
+/// (generation bump + full rescan), never a mid-file partial read.
+#[test]
+fn rewrite_grow_is_detected_not_treated_as_append() {
+    let db = open_db("rewrite-grow");
+    let dir = unique_dir("rewrite-grow");
+    let file = dir.join("s.jsonl");
+    let adapter: &dyn AgentAdapter = &noending::adapters::pi::PiAdapter;
+
+    let old = format!(
+        "{}\n{}\n",
+        pi_line("user", "old first message aaaaaaaaaaaaaaaaaaaaaa"),
+        pi_line("assistant", "old second message bbbbbbbbbbbbbbbbbbbbb")
+    );
+    std::fs::write(&file, &old).unwrap();
+    let s = session_row(&db, Agent::Pi, &file);
+    assert_eq!(ingest(&db, adapter, &s), 2);
+    let offset_before = db.get_source_cursor(&s.id).unwrap().byte_offset;
+
+    // rewrite with MORE content than before: size grew, prefix changed
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let new = format!(
+        "{}\n{}\n{}\n",
+        pi_line("user", "rewritten first message xxxxxxxxxxxxxxxxxxxx"),
+        pi_line("assistant", "rewritten second message yyyyyyyyyyyyyyyy"),
+        pi_line("user", "rewritten third message zzzzzzzzzzzzzzzzzzzzz")
+    );
+    assert!(new.len() > old.len(), "fixture must grow");
+    std::fs::write(&file, &new).unwrap();
+
+    // If this were misread as an append from offset_before, the parse would
+    // start mid-line and drop the rewritten head. It must be a full rescan.
+    assert_eq!(ingest(&db, adapter, &s), 3, "all rewritten lines are new events");
+    let all = db.get_events(&s.id, None, 100).unwrap();
+    assert_eq!(all.len(), 5, "history preserved, rewritten content appended");
+    assert_eq!(all.iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(all[2].source_generation, 1, "rewritten content carries the new generation");
+    assert!(all[2].text.as_deref().unwrap().contains("rewritten first"));
+    let c = db.get_source_cursor(&s.id).unwrap();
+    assert_eq!(c.generation, 1, "generation bumped exactly once");
+    assert!(c.byte_offset > offset_before);
+}
+
+/// Re-ingest must NEVER delete the event store: ids survive, SourceReferences
+/// in context revisions stay valid, and a full re-scan dedups to zero new rows.
+#[test]
+fn reingest_preserves_event_ids_and_dedups() {
+    let db = open_db("reingest-keep");
+    let dir = unique_dir("reingest-keep");
+    let file = dir.join("s.jsonl");
+    let adapter: &dyn AgentAdapter = &noending::adapters::pi::PiAdapter;
+
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n{}\n",
+            pi_line("user", "persisted message one aaaaaaaaaaaaaaaaaaaa"),
+            pi_line("assistant", "persisted message two bbbbbbbbbbbbbbbbbbb")
+        ),
+    )
+    .unwrap();
+    let s = session_row(&db, Agent::Pi, &file);
+    assert_eq!(ingest(&db, adapter, &s), 2);
+    let ids_before: Vec<String> = db.get_events(&s.id, None, 100).unwrap().into_iter().map(|e| e.id).collect();
+
+    // simulate 重新入库: rewind the read cursor, keep the event store
+    db.reset_session_source_cursor(&s.id).unwrap();
+    assert_eq!(ingest(&db, adapter, &s), 0, "re-scan of unchanged source adds nothing");
+
+    let all = db.get_events(&s.id, None, 100).unwrap();
+    let ids_after: Vec<String> = all.iter().map(|e| e.id.clone()).collect();
+    assert_eq!(ids_after, ids_before, "event ids (and SourceReferences) survive re-ingest");
+    assert_eq!(all.iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![1, 2]);
+
+    // new source content after the rewind still appends normally
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+    use std::io::Write;
+    writeln!(f, "{}", pi_line("user", "fresh message after reingest ccccccccccccccc")).unwrap();
+    drop(f);
+    assert_eq!(ingest(&db, adapter, &s), 1, "new content appends after the re-scan");
+    assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 3);
 }
