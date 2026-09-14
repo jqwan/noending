@@ -22,6 +22,7 @@ When changing the system, preserve these rules:
 * **Workstream is the continuity unit.** Project is only an optional organization layer.
 * A Session may have **zero, one, or multiple Workstreams**.
 * Never equate Project with repository, cwd, workspace, or filesystem path.
+* A Workstream may carry an optional **default working directory** (`default_cwd`) as a launch convenience: it suggests where New Sessions start. It is never identity — a Workstream is not a path, Sessions keep their own authoritative cwd, and a Workstream without one stays fully valid.
 * Raw Agent session files are **read-only**. Never modify or delete them.
 * Ingested Session Events are **append-only history**. Never overwrite historical events.
 * Event identity is app-owned and stable. Source file position is metadata, not identity.

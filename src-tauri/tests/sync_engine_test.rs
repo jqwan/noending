@@ -38,6 +38,7 @@ fn create_workstream(
         description: description.into(),
         lifecycle: "open".into(),
         visibility: "normal".into(),
+        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };

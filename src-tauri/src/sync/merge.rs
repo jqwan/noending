@@ -180,6 +180,9 @@ impl MergeEngine {
                     description: format!("由同步自动识别：{}", reason),
                     lifecycle: "open".into(),
                     visibility: "normal".into(),
+                    // sync-created workstreams carry no launch directory;
+                    // the launcher falls back to the latest session cwd
+                    default_cwd: None,
                     created_at: now(),
                     updated_at: now(),
                 };

@@ -3,7 +3,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { timeAgo } from "../../components/common";
-import { useRefreshSignal } from "../../components/common";
+import { useRefreshSignal, Modal } from "../../components/common";
 import { AGENT_LABELS, type Agent, type WorkstreamContext as WorkstreamContextData } from "../../types";
 import type { Route } from "../../app/routes";
 import WorkstreamContext from "./WorkstreamContext";
@@ -25,6 +25,8 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [cwdOpen, setCwdOpen] = useState(false);
+  const [cwdInput, setCwdInput] = useState("");
 
   const refresh = useCallback(() => {
     api.getWorkstreamContext(workstreamId).then(setCtx).catch(console.error);
@@ -75,6 +77,19 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
     navigate({ view: "workstreams" });
   };
 
+  const openCwdEditor = () => {
+    setMenuOpen(false);
+    setCwdInput(workstream.default_cwd ?? "");
+    setCwdOpen(true);
+  };
+
+  const saveCwd = async () => {
+    setCwdOpen(false);
+    const trimmed = cwdInput.trim();
+    await api.updateWorkstream({ ...workstream, default_cwd: trimmed || null });
+    refresh();
+  };
+
   return (
     <div className="main narrow">
       <PageHeader
@@ -91,6 +106,9 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
               <button className="btn ghost" onClick={() => setMenuOpen((v) => !v)} title="更多操作">•••</button>
               {menuOpen && (
                 <div className="menu-pop">
+                  <button className="menu-item" onClick={openCwdEditor}>
+                    工作目录…
+                  </button>
                   <button className="menu-item" onClick={toggleArchive}>
                     {workstream.visibility === "archived" ? "取消归档" : "归档"}
                   </button>
@@ -133,6 +151,14 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
           <span className={`badge ${workstream.lifecycle === "open" && workstream.visibility === "normal" ? "success" : ""}`}>
             {lifecycleLabel(workstream)}
           </span>
+          {workstream.default_cwd && (
+            <>
+              <span className="dot-sep" />
+              <span className="mono small" title="New Session 默认启动目录（点击 ••• 可修改）">
+                {workstream.default_cwd}
+              </span>
+            </>
+          )}
           <span className="dot-sep" />
           <span>Edited {timeAgo(workstream.updated_at)}</span>
           {error && <span style={{ color: "var(--warning)" }}>启动失败</span>}
@@ -148,6 +174,24 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
           <WorkstreamActivity items={ctx.items} />
         </div>
       </div>
+
+      {cwdOpen && (
+        <Modal title="工作目录" onClose={() => setCwdOpen(false)}>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            该 Workstream 的 New Session 默认在此目录启动。这只是启动建议，不改变 Workstream 的身份；
+            留空则按「最近活动的 Session 目录」推断。
+          </p>
+          <label className="field"><span>路径</span>
+            <input type="text" className="mono" value={cwdInput} autoFocus
+              onChange={(e) => setCwdInput(e.target.value)}
+              placeholder="/path/to/project"
+              onKeyDown={(e) => e.key === "Enter" && saveCwd()} /></label>
+          <div className="row" style={{ justifyContent: "flex-end" }}>
+            <button className="btn" onClick={() => setCwdOpen(false)}>取消</button>
+            <button className="btn primary" onClick={saveCwd}>保存</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

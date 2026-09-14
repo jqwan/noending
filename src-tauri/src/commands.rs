@@ -140,8 +140,12 @@ pub fn create_workstream(
     project_id: Option<String>,
     title: String,
     description: String,
+    default_cwd: Option<String>,
 ) -> Result<Workstream> {
     crate::storage::ensure_not_empty("Workstream 标题", &title)?;
+    let default_cwd = default_cwd
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let w = Workstream {
         id: new_id(),
         project_id,
@@ -149,6 +153,7 @@ pub fn create_workstream(
         description: description.trim().to_string(),
         lifecycle: "open".into(),
         visibility: "normal".into(),
+        default_cwd,
         created_at: now(),
         updated_at: now(),
     };

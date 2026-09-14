@@ -43,6 +43,7 @@ fn ws_row(db: &Db, title: &str) -> noending::domain::Workstream {
         description: String::new(),
         lifecycle: "open".into(),
         visibility: "normal".into(),
+        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };

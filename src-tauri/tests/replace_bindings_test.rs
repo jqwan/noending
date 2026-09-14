@@ -48,6 +48,7 @@ fn workstream(database: &Db, title: &str) -> String {
         description: String::new(),
         lifecycle: "open".into(),
         visibility: "normal".into(),
+        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };

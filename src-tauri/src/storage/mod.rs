@@ -26,8 +26,9 @@ pub struct Db(pub Connection);
 /// a claimable alias and are re-identified from the REAL source on the next
 /// full re-scan, event ids preserved; v5 added `session_binding_removals`
 /// (durable negative overrides: a user-rejected workstream is never
-/// re-proposed by auto-classification).
-pub const SCHEMA_VERSION: i64 = 5;
+/// re-proposed by auto-classification); v6 added `workstreams.default_cwd`
+/// (optional launch-directory suggestion, convenience not identity).
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -158,6 +159,7 @@ impl Db {
               description TEXT NOT NULL DEFAULT '',
               lifecycle TEXT NOT NULL DEFAULT 'open',
               visibility TEXT NOT NULL DEFAULT 'normal',
+              default_cwd TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -386,6 +388,7 @@ impl Db {
             "ALTER TABLE session_cursors ADD COLUMN identity_tail_hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE launch_intents ADD COLUMN context_bundle_revisions TEXT",
             "ALTER TABLE session_events ADD COLUMN legacy_identity_hash TEXT",
+            "ALTER TABLE workstreams ADD COLUMN default_cwd TEXT",
         ] {
             if let Err(e) = self.0.execute_batch(stmt) {
                 if !e.to_string().contains("duplicate column name") {
@@ -562,10 +565,10 @@ impl Db {
 
     pub fn list_workstreams(&self, project_id: Option<&str>) -> Result<Vec<Workstream>> {
         let (sql, has_filter): (&str, bool) = if project_id.is_some() {
-            ("SELECT id, project_id, title, description, lifecycle, visibility, created_at, updated_at
+            ("SELECT id, project_id, title, description, lifecycle, visibility, default_cwd, created_at, updated_at
               FROM workstreams WHERE project_id = ?1 ORDER BY updated_at DESC", true)
         } else {
-            ("SELECT id, project_id, title, description, lifecycle, visibility, created_at, updated_at
+            ("SELECT id, project_id, title, description, lifecycle, visibility, default_cwd, created_at, updated_at
               FROM workstreams ORDER BY updated_at DESC", false)
         };
         let mut st = self.0.prepare(sql)?;
@@ -698,7 +701,7 @@ impl Db {
         Ok(self
             .0
             .query_row(
-                "SELECT id, project_id, title, description, lifecycle, visibility, created_at, updated_at
+                "SELECT id, project_id, title, description, lifecycle, visibility, default_cwd, created_at, updated_at
                  FROM workstreams WHERE id = ?1",
                 params![id],
                 row_workstream,
@@ -1909,12 +1912,12 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
     conn.execute(
-        "INSERT INTO workstreams (id, project_id, title, description, lifecycle, visibility, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO workstreams (id, project_id, title, description, lifecycle, visibility, default_cwd, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
            project_id = ?2,
-           title = ?3, description = ?4, lifecycle = ?5, visibility = ?6, updated_at = ?8",
-        params![w.id, w.project_id, w.title, w.description, w.lifecycle, w.visibility, w.created_at, w.updated_at],
+           title = ?3, description = ?4, lifecycle = ?5, visibility = ?6, default_cwd = ?7, updated_at = ?9",
+        params![w.id, w.project_id, w.title, w.description, w.lifecycle, w.visibility, w.default_cwd, w.created_at, w.updated_at],
     )?;
     Ok(())
 }
@@ -2294,8 +2297,9 @@ fn row_workstream(r: &Row) -> rusqlite::Result<Workstream> {
         description: r.get(3)?,
         lifecycle: r.get(4)?,
         visibility: r.get(5)?,
-        created_at: r.get(6)?,
-        updated_at: r.get(7)?,
+        default_cwd: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
     })
 }
 

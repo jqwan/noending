@@ -82,15 +82,10 @@ impl SessionLauncher {
         // 1. sync stale sessions that share these workstreams (no-op when empty)
         self.sync_stale_for_workstreams(db, workstream_ids)?;
 
-        // 1b. effective cwd: the explicit caller value wins; otherwise
-        //     "continue where you left off" — the most recent session cwd
-        //     across the selected Workstreams. Launching WITHOUT a directory
-        //     drops the agent into the terminal's default ($HOME), where an
-        //     untrusted-directory prompt stops the session from ever starting.
-        let effective_cwd: Option<String> = match cwd {
-            Some(c) => Some(c.to_string()),
-            None => db.latest_session_cwd_for_workstreams(workstream_ids)?,
-        };
+        // 1b. effective cwd. Launching WITHOUT a directory drops the agent
+        //     into the terminal's default ($HOME), where an untrusted-
+        //     directory prompt stops the session from ever starting.
+        let effective_cwd: Option<String> = resolve_new_session_cwd(db, workstream_ids, cwd)?;
 
         // 2. build context bundle; zero contexts → plain launch, no injection.
         //    (UX rule: 关联 Workstream 永远是可选项。)
@@ -366,6 +361,32 @@ pub fn record_binding(
     };
     db.bind(&b)?;
     Ok(())
+}
+
+/// Launch directory for a New Session, in priority order:
+/// 1. the caller's explicit value (kept for API completeness);
+/// 2. a selected Workstream's `default_cwd` — the first set one in the
+///    user's selection order;
+/// 3. the most recent session cwd across the selected Workstreams
+///    ("continue where you left off").
+/// A Workstream's default_cwd is a launch convenience, never identity:
+/// the Workstream is not a path, and Sessions keep their own cwd.
+pub fn resolve_new_session_cwd(
+    db: &Db,
+    workstream_ids: &[String],
+    explicit: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(c) = explicit {
+        return Ok(Some(c.to_string()));
+    }
+    for ws_id in workstream_ids {
+        if let Some(w) = db.get_workstream(ws_id)? {
+            if let Some(cwd) = w.default_cwd {
+                return Ok(Some(cwd));
+            }
+        }
+    }
+    db.latest_session_cwd_for_workstreams(workstream_ids)
 }
 
 /// Apply the user's edited binding set for a Session as ONE atomic diff.

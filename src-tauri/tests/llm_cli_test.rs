@@ -79,6 +79,7 @@ fn real_codex_extracts_mutations() {
         description: "设计 Session 到 Workstream 的上下文同步机制".into(),
         lifecycle: "open".into(),
         visibility: "normal".into(),
+        default_cwd: None,
         created_at: String::new(),
         updated_at: String::new(),
     };
@@ -189,6 +190,7 @@ fn real_codex_assistant_chat_roundtrip() {
         description: "整理品牌视觉与文案".into(),
         lifecycle: "open".into(),
         visibility: "normal".into(),
+        default_cwd: None,
         created_at: String::new(),
         updated_at: String::new(),
     };

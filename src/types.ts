@@ -27,6 +27,8 @@ export interface Workstream {
   description: string;
   lifecycle: "open" | "completed" | "abandoned";
   visibility: "normal" | "archived";
+  /** 该 Workstream 的 New Session 默认启动目录（启动建议，非身份）。 */
+  default_cwd: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -58,6 +60,7 @@ export interface WorkstreamCardData {
   description: string;
   lifecycle: "open" | "completed" | "abandoned";
   visibility: "normal" | "archived";
+  default_cwd: string | null;
   created_at: string;
   updated_at: string;
   project_name: string | null;

@@ -41,6 +41,12 @@ pub struct Workstream {
     pub description: String,
     pub lifecycle: String,  // open | completed | abandoned
     pub visibility: String, // normal | archived
+    /// Optional launch-directory suggestion for New Sessions on this
+    /// Workstream ("continue where you left off", made explicit by the
+    /// user). Same class as ProjectResource.uri: convenience, not identity —
+    /// a Workstream is not a path, and Sessions keep their own cwd.
+    #[serde(default)]
+    pub default_cwd: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

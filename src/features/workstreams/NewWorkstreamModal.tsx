@@ -19,6 +19,7 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
   const [project, setProject] = useState(initialProjectId ?? "none");
+  const [defaultCwd, setDefaultCwd] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -29,7 +30,12 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
     if (!title.trim() || busy) return;
     setBusy(true);
     try {
-      const w = await api.createWorkstream(project === "none" ? null : project, title, desc);
+      const w = await api.createWorkstream(
+        project === "none" ? null : project,
+        title,
+        desc,
+        defaultCwd,
+      );
       onCreated?.(w);
       onClose();
     } catch (e) {
@@ -46,6 +52,10 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
           placeholder="例如：Context Sync / 行程设计 / 预算"
           onKeyDown={(e) => e.key === "Enter" && create()} /></label>
       <label className="field"><span>描述（可选）</span><textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
+      <label className="field"><span>工作目录（可选）</span>
+        <input type="text" value={defaultCwd} onChange={(e) => setDefaultCwd(e.target.value)}
+          className="mono"
+          placeholder="/path/to/project — 该 Workstream 的 New Session 默认在此目录启动" /></label>
       <label className="field"><span>Project（可选）</span>
         <select value={project} onChange={(e) => setProject(e.target.value)}>
           <option value="none">不归属（Workstream 可以独立存在）</option>

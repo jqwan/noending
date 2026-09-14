@@ -19,8 +19,13 @@ export const api = {
   listWorkstreams: (projectId?: string) =>
     invoke<Workstream[]>("list_workstreams", { projectId: projectId ?? null }),
   listWorkstreamCards: () => invoke<WorkstreamCardData[]>("list_workstream_cards"),
-  createWorkstream: (projectId: string | null, title: string, description: string) =>
-    invoke<Workstream>("create_workstream", { projectId, title, description }),
+  createWorkstream: (projectId: string | null, title: string, description: string, defaultCwd?: string) =>
+    invoke<Workstream>("create_workstream", {
+      projectId,
+      title,
+      description,
+      defaultCwd: defaultCwd?.trim() ? defaultCwd : null,
+    }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
   archiveWorkstream: (workstreamId: string) =>
     invoke<void>("archive_workstream", { workstreamId }),
