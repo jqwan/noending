@@ -583,6 +583,40 @@ impl Db {
     /// Card stats for one Workstream: (session_count, latest session as
     /// (id, agent), that session's activity timestamp). "Latest" follows the
     /// transcript, not the binding: most recent activity wins.
+    /// The most recent session cwd across the given workstreams — the
+    /// launcher's "continue where you left off" default directory for a New
+    /// Session. A Workstream does not OWN a path (cwd is never domain
+    /// identity); this only suggests where its work last happened, so the
+    /// agent opens in a real project directory instead of the terminal's
+    /// default ($HOME), where an untrusted-directory prompt blocks the
+    /// session from starting.
+    pub fn latest_session_cwd_for_workstreams(
+        &self,
+        workstream_ids: &[String],
+    ) -> Result<Option<String>> {
+        if workstream_ids.is_empty() {
+            return Ok(None);
+        }
+        let placeholders = workstream_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT s.cwd FROM session_workstream_bindings b
+             JOIN sessions s ON s.id = b.session_id
+             WHERE b.workstream_id IN ({placeholders}) AND s.cwd IS NOT NULL
+             ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC
+             LIMIT 1"
+        );
+        let mut st = self.0.prepare(&sql)?;
+        let ids: Vec<&str> = workstream_ids.iter().map(|s| s.as_str()).collect();
+        let cwd: Option<Option<String>> = st
+            .query_row(rusqlite::params_from_iter(ids), |r| r.get(0))
+            .optional()?;
+        Ok(cwd.flatten())
+    }
+
     pub fn workstream_session_stats(
         &self,
         workstream_id: &str,

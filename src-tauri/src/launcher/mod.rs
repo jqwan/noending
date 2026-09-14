@@ -82,6 +82,16 @@ impl SessionLauncher {
         // 1. sync stale sessions that share these workstreams (no-op when empty)
         self.sync_stale_for_workstreams(db, workstream_ids)?;
 
+        // 1b. effective cwd: the explicit caller value wins; otherwise
+        //     "continue where you left off" — the most recent session cwd
+        //     across the selected Workstreams. Launching WITHOUT a directory
+        //     drops the agent into the terminal's default ($HOME), where an
+        //     untrusted-directory prompt stops the session from ever starting.
+        let effective_cwd: Option<String> = match cwd {
+            Some(c) => Some(c.to_string()),
+            None => db.latest_session_cwd_for_workstreams(workstream_ids)?,
+        };
+
         // 2. build context bundle; zero contexts → plain launch, no injection.
         //    (UX rule: 关联 Workstream 永远是可选项。)
         let bundle = crate::context::build_bundle(db, "new", None, workstream_ids, 4000)?;
@@ -115,7 +125,7 @@ impl SessionLauncher {
             launch_type: "new".into(),
             agent,
             selected_workstream_ids: workstream_ids.to_vec(),
-            cwd: cwd.map(|s| s.to_string()),
+            cwd: effective_cwd.clone(),
             context_bundle_markdown: if ctx_file.is_some() {
                 Some(bundle.markdown.clone())
             } else {
@@ -145,7 +155,7 @@ impl SessionLauncher {
         // 4. resolve agent CLI
         let install = resolve_install(db, agent)?;
         let adapter = crate::adapters::adapter_for(agent);
-        let cwd_path = cwd.map(PathBuf::from);
+        let cwd_path = effective_cwd.map(PathBuf::from);
 
         // 5. adapter builds command, platform launches it
         let cmd: AgentCommand =

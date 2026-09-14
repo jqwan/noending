@@ -42,8 +42,10 @@ pub fn ps_quote(s: &str) -> String {
 pub fn render_bash(cmd: &AgentCommand) -> String {
     let mut script = String::from("#!/bin/bash\n");
     if let Some(cwd) = &cmd.cwd {
+        // A stale recorded cwd must not abort the launch (exit 1 would leave
+        // the user with a dead window and no agent); fall back to $HOME.
         script.push_str(&format!(
-            "cd {} || exit 1\n",
+            "cd {} 2>/dev/null || cd \"$HOME\" || true\n",
             shell_quote(&cwd.to_string_lossy())
         ));
     }
@@ -66,8 +68,9 @@ pub fn render_bash(cmd: &AgentCommand) -> String {
 pub fn render_ps(cmd: &AgentCommand) -> String {
     let mut script = String::new();
     if let Some(cwd) = &cmd.cwd {
+        // stale cwd must not abort the launch — continue in the default dir
         script.push_str(&format!(
-            "Set-Location -LiteralPath {}\n",
+            "Set-Location -LiteralPath {} -ErrorAction SilentlyContinue\n",
             ps_quote(&cwd.to_string_lossy())
         ));
     }
@@ -269,7 +272,7 @@ mod tests {
             cwd: Some("/tmp/some dir".into()),
         };
         let s = render_bash(&cmd);
-        assert!(s.contains("cd '/tmp/some dir' || exit 1"));
+        assert!(s.contains("cd '/tmp/some dir' 2>/dev/null || cd \"$HOME\" || true"));
         assert!(
             s.contains("'/usr/local/bin/My Agent' 'resume' 'sess-1' 'line1\nline2 '\\''q'\\'' $X'")
         );
