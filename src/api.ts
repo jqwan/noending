@@ -49,6 +49,8 @@ export const api = {
     invoke<void>("bind_session_workstream", { sessionId, workstreamId, role }),
   unbindSessionWorkstream: (sessionId: string, workstreamId: string) =>
     invoke<void>("unbind_session_workstream", { sessionId, workstreamId }),
+  replaceSessionBindings: (sessionId: string, bindings: { workstream_id: string; role: string }[]) =>
+    invoke<void>("replace_session_bindings", { sessionId, bindings }),
   listSessionBindings: () => invoke<SessionBindingRow[]>("list_session_bindings"),
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
 
@@ -83,7 +85,7 @@ export const api = {
   getAgentStatus: () =>
     invoke<Record<string, { name: string; detected: boolean; executable: string | null; version: string | null }>>("get_agent_status"),
 
-  getDefaultAgent: () => invoke<Agent>("get_default_agent"),
+  getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
   setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),
 
   assistantSend: (sessionId: string | null, text: string) =>

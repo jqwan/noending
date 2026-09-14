@@ -54,15 +54,20 @@ export default function SettingsView({ section, navigate }: {
 /** General：Default Agent 是最重要设置（§57）；Startup Page 第一版固定 Home。 */
 function GeneralSettings() {
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
+  const [agents, setAgents] = useState<Record<string, { detected: boolean }>>({});
 
   useEffect(() => {
     api.getDefaultAgent().then(setDefaultAgent).catch(console.error);
+    api.getAgentStatus().then(setAgents).catch(console.error);
   }, []);
 
   const choose = async (agent: Agent) => {
     await api.setDefaultAgent(agent).catch(console.error);
     setDefaultAgent(agent);
   };
+
+  const selectedUndetected =
+    defaultAgent !== null && agents[defaultAgent]?.detected === false;
 
   return (
     <>
@@ -78,10 +83,23 @@ function GeneralSettings() {
               onClick={() => choose(a)}>
               <AgentIcon agent={a} size={16} />
               <span className="grow">{AGENT_LABELS[a]}</span>
+              {agents[a] && !agents[a].detected && (
+                <span className="muted small">未检测到</span>
+              )}
               {defaultAgent === a && <span className="muted small">默认</span>}
             </button>
           ))}
         </div>
+        {selectedUndetected && (
+          <p className="muted small" style={{ color: "var(--warning)", marginBottom: 0 }}>
+            当前默认 Agent 未在本机检测到，New / Start 会失败。请安装它，或改选其他已检测的 Agent。
+          </p>
+        )}
+        {defaultAgent === null && (
+          <p className="muted small" style={{ marginBottom: 0 }}>
+            未检测到任何 Agent CLI，New / Start 已停用。安装任意 Agent CLI 后重启应用即可启用。
+          </p>
+        )}
       </section>
       <section>
         <h3>Startup</h3>

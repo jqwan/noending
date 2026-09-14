@@ -3,8 +3,8 @@ import { api } from "../../api";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import type { Route } from "../../app/routes";
-import { AGENT_LABELS, type Agent, type LaunchResult, type WorkstreamCardData } from "../../types";
-import LaunchResultModal from "../launcher/LaunchResultModal";
+import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
+import { announceLaunch } from "../launcher/LaunchResultModal";
 
 const LIFECYCLE_LABELS: Record<string, string> = {
   completed: "已完成",
@@ -26,7 +26,6 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
   defaultAgent: Agent | null;
 }) {
   const [busy, setBusy] = useState<"new" | "resume" | null>(null);
-  const [result, setResult] = useState<LaunchResult | null>(null);
   const [error, setError] = useState("");
 
   const openDetail = () => navigate({ view: "workstream", workstreamId: card.id });
@@ -36,7 +35,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
     setBusy("new");
     setError("");
     try {
-      setResult(await api.launchNewSession(defaultAgent, [card.id]));
+      announceLaunch("启动", await api.launchNewSession(defaultAgent, [card.id]));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -49,7 +48,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
     setBusy("resume");
     setError("");
     try {
-      setResult(await api.launchResumeSession(card.latest_session.id, []));
+      announceLaunch("恢复", await api.launchResumeSession(card.latest_session.id, []));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -88,7 +87,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
         </span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
           {error && <span className="ws-card-error" title={error}>启动失败</span>}
-          {defaultAgent && (
+          {defaultAgent ? (
             <button
               className="btn small ws-btn"
               disabled={busy !== null}
@@ -97,6 +96,22 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
             >
               <AgentIcon agent={defaultAgent} />
               {busy === "new" ? "启动中…" : newLabel}
+            </button>
+          ) : (
+            <button
+              className="btn small ws-btn"
+              disabled
+              title="未检测到可用的 Agent CLI"
+            >
+              {newLabel}
+            </button>
+          )}
+          {!defaultAgent && (
+            <button
+              className="link small"
+              onClick={() => navigate({ view: "settings", section: "agents" })}
+            >
+              Configure
             </button>
           )}
           {card.latest_session && (
@@ -112,8 +127,6 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
           )}
         </div>
       </footer>
-
-      {result && <LaunchResultModal result={result} onClose={() => setResult(null)} />}
     </article>
   );
 }

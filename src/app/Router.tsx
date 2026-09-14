@@ -11,19 +11,32 @@ import SettingsView from "../features/settings/SettingsView";
 import SearchView from "../features/search/SearchView";
 import type { Route } from "./routes";
 
-export default function Router({ route, navigate }: {
+export default function Router({ route, navigate, actionSeq }: {
   route: Route;
   navigate: (r: Route) => void;
+  actionSeq: number;
 }) {
   switch (route.view) {
     case "home":
       return <HomeView navigate={navigate} />;
     case "workstreams":
-      return <WorkstreamsView navigate={navigate} />;
+      return (
+        <WorkstreamsView
+          navigate={navigate}
+          action={route.action}
+          actionSeq={actionSeq}
+        />
+      );
     case "workstream":
       return <WorkstreamDetailView workstreamId={route.workstreamId} navigate={navigate} />;
     case "sessions":
-      return <SessionsView navigate={navigate} />;
+      return (
+        <SessionsView
+          navigate={navigate}
+          action={route.action}
+          actionSeq={actionSeq}
+        />
+      );
     case "session":
       return <SessionDetailView sessionId={route.sessionId} navigate={navigate} />;
     case "assistant":

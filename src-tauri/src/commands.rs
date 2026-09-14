@@ -289,16 +289,26 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
 const DEFAULT_AGENT_KEY: &str = "launcher.default_agent";
 
 #[tauri::command]
-pub fn get_default_agent(state: State<AppState>) -> Result<String> {
-    with_db(&state, |db| Ok(default_agent_of(db)?.as_str().to_string()))
+pub fn get_default_agent(state: State<AppState>) -> Result<Option<String>> {
+    with_db(&state, |db| {
+        Ok(default_agent_of(db).map(|a| a.as_str().to_string()))
+    })
 }
 
-/// Settings → Default Agent; Claude Code until the user says otherwise.
-pub fn default_agent_of(db: &Db) -> Result<Agent> {
-    Ok(db
-        .get_setting(DEFAULT_AGENT_KEY)?
-        .and_then(|v| Agent::parse(&v))
-        .unwrap_or(Agent::ClaudeCode))
+/// Settings → Default Agent. Resolution order: the user's explicit choice
+/// stays authoritative even when currently undetected (the UI warns instead
+/// of silently substituting); without an explicit choice we fall back to the
+/// first detected agent; with no detected agent at all the default is None
+/// and New actions render disabled instead of failing at launch.
+pub fn default_agent_of(db: &Db) -> Option<Agent> {
+    if let Ok(Some(v)) = db.get_setting(DEFAULT_AGENT_KEY) {
+        if let Some(a) = Agent::parse(&v) {
+            return Some(a);
+        }
+    }
+    Agent::all()
+        .into_iter()
+        .find(|a| matches!(db.get_installation(*a), Ok(Some(_))))
 }
 
 #[tauri::command]
@@ -670,6 +680,32 @@ pub fn unbind_session_workstream(
     workstream_id: String,
 ) -> Result<()> {
     with_db(&state, |db| db.unbind(&session_id, &workstream_id))
+}
+
+#[derive(Deserialize)]
+pub struct DesiredBinding {
+    pub workstream_id: String,
+    pub role: String,
+}
+
+/// Atomic replace of a Session's Workstream bindings (Binding Modal save):
+/// the backend diffs desired vs. current inside one transaction — unchanged
+/// rows keep their provenance/created_at/cursors, role edits update only the
+/// role, removed rows are deleted, and only newly added rows become
+/// user_assigned. The frontend never orchestrates unbind+bind itself.
+#[tauri::command]
+pub fn replace_session_bindings(
+    state: State<AppState>,
+    session_id: String,
+    bindings: Vec<DesiredBinding>,
+) -> Result<()> {
+    let desired = bindings
+        .into_iter()
+        .map(|b| (b.workstream_id, b.role))
+        .collect::<Vec<_>>();
+    with_db(&state, |db| {
+        crate::launcher::replace_session_bindings(db, &session_id, &desired)
+    })
 }
 
 /// Binding rows with workstream titles — lets the Sessions table show a

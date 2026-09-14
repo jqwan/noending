@@ -14,11 +14,18 @@ export type SettingsSection =
   | "appearance"
   | "advanced";
 
+/**
+ * 页面动作直接携带在 Route 上（palette → 页面 Modal）：
+ * 目标页已挂载时也能收到（AppShell 每次带 action 的导航都会递增
+ * actionSeq，页面以它为 effect 依赖）。不引入第二套 pending/event 桥。
+ */
+export type ViewAction = "new";
+
 export type Route =
   | { view: "home" }
-  | { view: "workstreams" }
+  | { view: "workstreams"; action?: ViewAction }
   | { view: "workstream"; workstreamId: string }
-  | { view: "sessions" }
+  | { view: "sessions"; action?: ViewAction }
   | { view: "session"; sessionId: string }
   | { view: "assistant"; scope?: AssistantScope }
   | { view: "projects" }
@@ -26,35 +33,11 @@ export type Route =
   | { view: "settings"; section?: SettingsSection }
   | { view: "search"; query: string };
 
-/** UI 事件总线：palette / 跨页命令触发页面内 Modal（UI state，不进 domain）。 */
-export const EVT_NEW_WORKSTREAM = "noending:new-workstream";
-export const EVT_NEW_SESSION = "noending:new-session";
+/** 后台同步 / reconcile 完成的全局刷新信号（UI state，不进 domain）。 */
 export const EVT_SYNCED = "noending:sync";
-
-export function emit(evt: string) {
-  window.dispatchEvent(new CustomEvent(evt));
-}
 
 export function onEvent(evt: string, cb: () => void) {
   const h = () => cb();
   window.addEventListener(evt, h);
   return () => window.removeEventListener(evt, h);
-}
-
-/**
- * 跨页命令（palette → 页面 Modal）：目标页可能尚未挂载，先登记，
- * 页面挂载时 consume；已挂载的页面走 onEvent 即时通道。
- */
-let pendingCommand: string | null = null;
-
-export function requestCommand(evt: string) {
-  pendingCommand = evt;
-}
-
-export function consumeCommand(evt: string): boolean {
-  if (pendingCommand === evt) {
-    pendingCommand = null;
-    return true;
-  }
-  return false;
 }

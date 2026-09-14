@@ -1,14 +1,12 @@
-import React, { useCallback, useState } from "react";
+import React, { useState } from "react";
 import { api } from "../../api";
 import AgentIcon from "../../components/AgentIcon";
 import SidebarLogo from "../../components/SidebarLogo";
-import type { LaunchResult } from "../../types";
 import type { Route } from "../../app/routes";
-import { onEvent, EVT_NEW_WORKSTREAM } from "../../app/routes";
 import { ContinueSection, RecentSessions } from "./ContinueSection";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
 import NewWorkstreamModal from "../workstreams/NewWorkstreamModal";
-import LaunchResultModal from "../launcher/LaunchResultModal";
+import { announceLaunch } from "../launcher/LaunchResultModal";
 
 /**
  * Home = Continue where you left off（整体设计方案 §12）。
@@ -17,10 +15,6 @@ import LaunchResultModal from "../launcher/LaunchResultModal";
 export default function HomeView({ navigate }: { navigate: (r: Route) => void }) {
   const { cards, defaultAgent, refresh } = useWorkstreamCards();
   const [creatingWs, setCreatingWs] = useState(false);
-  const [launchResult, setLaunchResult] = useState<LaunchResult | null>(null);
-
-  const openNewWorkstream = useCallback(() => setCreatingWs(true), []);
-  useNewWorkstreamEvent(openNewWorkstream);
 
   if (cards === null) return <div className="main narrow">加载中…</div>;
 
@@ -32,7 +26,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   const plainNewSession = async () => {
     if (!defaultAgent) return;
     try {
-      setLaunchResult(await api.launchNewSession(defaultAgent, []));
+      announceLaunch("启动", await api.launchNewSession(defaultAgent, []));
     } catch (e) {
       console.error(e);
     }
@@ -51,18 +45,29 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
             <button className="btn primary" onClick={() => setCreatingWs(true)}>+ New Workstream</button>
           </div>
           <div className="muted small" style={{ margin: "10px 0" }}>or</div>
-          {defaultAgent && (
-            <div className="actions-row">
-              <button className="btn ws-btn" onClick={plainNewSession}>
-                <AgentIcon agent={defaultAgent} />
-                New Session
+          <div className="actions-row">
+            <button className="btn ws-btn" disabled={!defaultAgent}
+              title={defaultAgent ? undefined : "未检测到可用的 Agent CLI"}
+              onClick={plainNewSession}>
+              {defaultAgent ? (
+                <>
+                  <AgentIcon agent={defaultAgent} />
+                  New Session
+                </>
+              ) : (
+                "New Session"
+              )}
+            </button>
+            {!defaultAgent && (
+              <button className="link small"
+                onClick={() => navigate({ view: "settings", section: "agents" })}>
+                Configure Agents
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {creatingWs && <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={refresh} />}
-        {launchResult && <LaunchResultModal result={launchResult} onClose={() => setLaunchResult(null)} />}
       </div>
     );
   }
@@ -82,11 +87,6 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
       </div>
 
       {creatingWs && <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={refresh} />}
-      {launchResult && <LaunchResultModal result={launchResult} onClose={() => setLaunchResult(null)} />}
     </div>
   );
-}
-
-function useNewWorkstreamEvent(onOpen: () => void) {
-  React.useEffect(() => onEvent(EVT_NEW_WORKSTREAM, onOpen), [onOpen]);
 }

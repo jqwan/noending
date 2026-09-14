@@ -2,8 +2,8 @@ import React, { useState } from "react";
 import { api } from "../../api";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import LaunchResultModal from "../launcher/LaunchResultModal";
-import { AGENT_LABELS, type LaunchResult, type Session } from "../../types";
+import { announceLaunch } from "../launcher/LaunchResultModal";
+import { AGENT_LABELS, type Session } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
@@ -14,7 +14,6 @@ export default function WorkstreamSessions({ sessions, navigate }: {
   sessions: Session[];
   navigate: (r: Route) => void;
 }) {
-  const [result, setResult] = useState<LaunchResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -28,7 +27,7 @@ export default function WorkstreamSessions({ sessions, navigate }: {
     setBusy(sessionId);
     setError("");
     try {
-      setResult(await api.launchResumeSession(sessionId, []));
+      announceLaunch("恢复", await api.launchResumeSession(sessionId, []));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -59,7 +58,6 @@ export default function WorkstreamSessions({ sessions, navigate }: {
         </div>
       ))}
       {error && <div className="muted small" style={{ color: "var(--warning)" }}>{error}</div>}
-      {result && <LaunchResultModal result={result} onClose={() => setResult(null)} />}
     </div>
   );
 }

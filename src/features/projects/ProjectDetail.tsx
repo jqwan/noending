@@ -103,7 +103,11 @@ export default function ProjectDetail({ projectId, navigate }: {
       ))}
 
       {creatingWs && (
-        <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={() => refresh()} />
+        <NewWorkstreamModal
+          initialProjectId={projectId}
+          onClose={() => setCreatingWs(false)}
+          onCreated={() => refresh()}
+        />
       )}
 
       {addingRes && (

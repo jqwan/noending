@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { timeAgo } from "../../components/common";
 import type { AssistantScope, Route } from "../../app/routes";
-import type { SyncRun, WorkstreamCardData } from "../../types";
+import type { Project, SyncRun, WorkstreamCardData } from "../../types";
 
 interface AssistantMessage {
   id: string;
@@ -44,6 +44,20 @@ const SUGGESTIONS = [
   "把这个决定加入 Context。",
 ];
 
+/** Selector 值编码：四种 scope 都能表示，不再是 workstream / workspace 二选一。 */
+const scopeValue = (s: AssistantScope): string =>
+  s.type === "workspace" ? "workspace" : `${s.type}:${s.id}`;
+
+const scopeFromValue = (v: string): AssistantScope => {
+  if (v === "workspace") return { type: "workspace" };
+  const i = v.indexOf(":");
+  const type = v.slice(0, i);
+  const id = v.slice(i + 1);
+  if (type === "project") return { type: "project", id };
+  if (type === "session") return { type: "session", id };
+  return { type: "workstream", id };
+};
+
 /**
  * Assistant = Workspace Interface（整体设计方案 §46-§50），不是第四个 Agent。
  * Scope 只做 prompt 侧注入（§38），不引入新协议。
@@ -60,8 +74,15 @@ export default function AssistantView({ scope, navigate }: {
   const [cfgOpen, setCfgOpen] = useState(false);
   const [runs, setRuns] = useState<SyncRun[]>([]);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [currentScope, setCurrentScope] = useState<AssistantScope>(scope ?? { type: "workspace" });
   const logRef = useRef<HTMLDivElement>(null);
+
+  // Scope 跟随 Route：从 Project Detail 进入带 scope，回 Sidebar 再进
+  // Assistant 时恢复 Workspace —— 不能只在首次 mount 读取。
+  useEffect(() => {
+    setCurrentScope(scope ?? { type: "workspace" });
+  }, [scope]);
 
   const refresh = useCallback(() => {
     api.listSyncRuns(12).then(setRuns).catch(console.error);
@@ -73,6 +94,7 @@ export default function AssistantView({ scope, navigate }: {
     api.assistantConfigGet().then(setCfg).catch(console.error);
     api.listSyncRuns(12).then(setRuns).catch(console.error);
     api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "open" && c.visibility === "normal"))).catch(console.error);
+    api.listProjects().then(setProjects).catch(console.error);
   }, []);
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -81,7 +103,10 @@ export default function AssistantView({ scope, navigate }: {
   const scopeLabel = (s: AssistantScope): string => {
     switch (s.type) {
       case "workspace": return "Workspace";
-      case "project": return `Project ${s.id.slice(0, 8)}`;
+      case "project": {
+        const p = projects.find((x) => x.id === s.id);
+        return p ? `Project · ${p.name}` : `Project ${s.id.slice(0, 8)}`;
+      }
       case "workstream": {
         const t = workstreams.find((w) => w.id === s.id)?.title;
         return t ? `Workstream · ${t}` : `Workstream ${s.id.slice(0, 8)}`;
@@ -162,15 +187,26 @@ export default function AssistantView({ scope, navigate }: {
 
       <div className="scope-row">
         <span className="muted small">Scope:</span>
-        <select value={currentScope.type === "workstream" ? currentScope.id : "workspace"}
-          onChange={(e) => {
-            const v = e.target.value;
-            setCurrentScope(v === "workspace" ? { type: "workspace" } : { type: "workstream", id: v });
-          }}>
+        <select value={scopeValue(currentScope)}
+          onChange={(e) => setCurrentScope(scopeFromValue(e.target.value))}>
           <option value="workspace">Workspace</option>
-          {workstreams.map((w) => (
-            <option key={w.id} value={w.id}>Workstream · {w.title}</option>
+          {projects.map((p) => (
+            <option key={p.id} value={`project:${p.id}`}>Project · {p.name}</option>
           ))}
+          {workstreams.map((w) => (
+            <option key={w.id} value={`workstream:${w.id}`}>Workstream · {w.title}</option>
+          ))}
+          {currentScope.type === "workstream" &&
+            !workstreams.some((w) => w.id === currentScope.id) && (
+              <option value={`workstream:${currentScope.id}`}>
+                Workstream {currentScope.id.slice(0, 8)}
+              </option>
+            )}
+          {currentScope.type === "session" && (
+            <option value={`session:${currentScope.id}`}>
+              Session {currentScope.id.slice(0, 8)}
+            </option>
+          )}
         </select>
       </div>
 

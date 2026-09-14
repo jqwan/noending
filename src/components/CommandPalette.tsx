@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { emit, requestCommand, EVT_NEW_SESSION, EVT_NEW_WORKSTREAM, type Route } from "../app/routes";
+import type { Route } from "../app/routes";
 import type { SearchHit, Session, Workstream } from "../types";
 
 interface PaletteItem {
@@ -11,7 +11,8 @@ interface PaletteItem {
   route: Route;
 }
 
-/** 固定命令（实施方案 §53）：导航 + New 动作，不与实体搜索混淆。 */
+/** 固定命令（实施方案 §53）：导航 + New 动作，不与实体搜索混淆。
+ *  New 动作以 route.action 携带意图，目标页已挂载时同样会打开 Modal。 */
 const FIXED_COMMANDS: PaletteItem[] = [
   { key: "cmd-home", kind: "命令", label: "Go to Home", hint: "继续最近的工作", route: { view: "home" } },
   { key: "cmd-workstreams", kind: "命令", label: "Go to Workstreams", route: { view: "workstreams" } },
@@ -19,8 +20,8 @@ const FIXED_COMMANDS: PaletteItem[] = [
   { key: "cmd-assistant", kind: "命令", label: "Go to Assistant", route: { view: "assistant" } },
   { key: "cmd-projects", kind: "命令", label: "Go to Projects", route: { view: "projects" } },
   { key: "cmd-settings", kind: "命令", label: "Go to Settings", route: { view: "settings", section: "general" } },
-  { key: "cmd-new-ws", kind: "命令", label: "New Workstream", route: { view: "workstreams" }, hint: "创建" },
-  { key: "cmd-new-session", kind: "命令", label: "New Session", route: { view: "sessions" }, hint: "默认 Agent" },
+  { key: "cmd-new-ws", kind: "命令", label: "New Workstream", route: { view: "workstreams", action: "new" }, hint: "创建" },
+  { key: "cmd-new-session", kind: "命令", label: "New Session", route: { view: "sessions", action: "new" }, hint: "默认 Agent" },
 ];
 
 export default function CommandPalette({ onClose, navigate }: {
@@ -86,9 +87,8 @@ export default function CommandPalette({ onClose, navigate }: {
 
   const go = (item: PaletteItem | undefined) => {
     if (!item) return;
-    // New 命令：跳转到对应页面并由页面打开 Modal（保持可取消、可选项）
-    if (item.key === "cmd-new-ws") requestCommand(EVT_NEW_WORKSTREAM);
-    if (item.key === "cmd-new-session") requestCommand(EVT_NEW_SESSION);
+    // New 命令：意图随 route.action 到达页面，由页面打开 Modal
+    // （保持可取消、可选项；已在目标页时同样生效）
     navigate(item.route);
     onClose();
   };

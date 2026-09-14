@@ -4,12 +4,12 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { timeAgo } from "../../components/common";
 import { useRefreshSignal } from "../../components/common";
-import { AGENT_LABELS, type Agent, type LaunchResult, type WorkstreamContext as WorkstreamContextData } from "../../types";
+import { AGENT_LABELS, type Agent, type WorkstreamContext as WorkstreamContextData } from "../../types";
 import type { Route } from "../../app/routes";
 import WorkstreamContext from "./WorkstreamContext";
 import WorkstreamSessions from "./WorkstreamSessions";
 import WorkstreamActivity from "./WorkstreamActivity";
-import LaunchResultModal from "../launcher/LaunchResultModal";
+import { announceLaunch } from "../launcher/LaunchResultModal";
 
 /**
  * Workstream Detail = Understand（整体设计方案 §29-§37）。
@@ -23,7 +23,6 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(null);
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<LaunchResult | null>(null);
   const [error, setError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -50,7 +49,7 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
     if (!defaultAgent || busy) return;
     setBusy(true); setError("");
     try {
-      setResult(await api.launchNewSession(defaultAgent, [workstream.id]));
+      announceLaunch("启动", await api.launchNewSession(defaultAgent, [workstream.id]));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -62,7 +61,7 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
     if (!latest || busy) return;
     setBusy(true); setError("");
     try {
-      setResult(await api.launchResumeSession(latest.id, []));
+      announceLaunch("恢复", await api.launchResumeSession(latest.id, []));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -98,11 +97,16 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
                 </div>
               )}
             </div>
-            {defaultAgent && (
+            {defaultAgent ? (
               <button className="btn ws-btn" disabled={busy}
                 title={`New session with ${AGENT_LABELS[defaultAgent]}`}
                 onClick={launchNew}>
                 <AgentIcon agent={defaultAgent} />
+                {related_sessions.length === 0 ? "Start" : "New"}
+              </button>
+            ) : (
+              <button className="btn ws-btn" disabled
+                title="未检测到可用的 Agent CLI — 到 Settings → Agents 配置">
                 {related_sessions.length === 0 ? "Start" : "New"}
               </button>
             )}
@@ -144,8 +148,6 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
           <WorkstreamActivity items={ctx.items} />
         </div>
       </div>
-
-      {result && <LaunchResultModal result={result} onClose={() => setResult(null)} />}
     </div>
   );
 }

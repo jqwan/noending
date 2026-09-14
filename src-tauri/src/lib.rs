@@ -129,6 +129,7 @@ pub fn run() {
             commands::suggest_session_project,
             commands::bind_session_workstream,
             commands::unbind_session_workstream,
+            commands::replace_session_bindings,
             commands::list_session_bindings,
             commands::get_app_info,
             commands::sync_all,

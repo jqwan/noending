@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
 import WorkstreamCard from "../workstreams/WorkstreamCard";
-import { timeAgo } from "../../components/common";
+import { timeAgo, useRefreshSignal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Session } from "../../types";
 import type { Route } from "../../app/routes";
@@ -56,6 +56,9 @@ export function RecentSessions({ navigate }: { navigate: (r: Route) => void }) {
     [],
   );
   useEffect(refresh, [refresh]);
+  // Home 常驻：后台 sync / reconcile 完成后 Recent Sessions 要跟上，
+  // 否则会和已刷新的 Workstream 卡片显示不一致的「最新」状态。
+  useRefreshSignal(refresh);
 
   if (!sessions || sessions.length === 0) return null;
 

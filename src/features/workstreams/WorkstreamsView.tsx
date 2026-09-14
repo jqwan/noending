@@ -1,12 +1,11 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import WorkstreamCard from "./WorkstreamCard";
 import NewWorkstreamModal from "./NewWorkstreamModal";
 import { useWorkstreamCards } from "./useWorkstreamCards";
 import type { WorkstreamCardData } from "../../types";
-import type { Route } from "../../app/routes";
-import { consumeCommand, onEvent, EVT_NEW_WORKSTREAM } from "../../app/routes";
+import type { Route, ViewAction } from "../../app/routes";
 
 type SortKey = "recent" | "created" | "name";
 type FilterKey = "all" | "active" | "archived";
@@ -19,17 +18,22 @@ const SORTERS: Record<SortKey, (a: WorkstreamCardData, b: WorkstreamCardData) =>
 };
 
 /** Workstreams = Organize：浏览、搜索、排序、整理（整体设计方案 §22-§27）。 */
-export default function WorkstreamsView({ navigate }: { navigate: (r: Route) => void }) {
+export default function WorkstreamsView({ navigate, action, actionSeq }: {
+  navigate: (r: Route) => void;
+  action?: ViewAction;
+  actionSeq: number;
+}) {
   const { cards, defaultAgent, refresh } = useWorkstreamCards();
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("recent");
   const [filter, setFilter] = useState<FilterKey>("active");
   const [creatingWs, setCreatingWs] = useState(false);
 
-  React.useEffect(() => {
-    if (consumeCommand(EVT_NEW_WORKSTREAM)) setCreatingWs(true);
-    return onEvent(EVT_NEW_WORKSTREAM, () => setCreatingWs(true));
-  }, []);
+  // 页面动作随 Route 到达（palette → New Workstream）：
+  // actionSeq 让「已在 Workstreams 页」的重复命令同样触发。
+  useEffect(() => {
+    if (action === "new") setCreatingWs(true);
+  }, [action, actionSeq]);
 
   const list = useMemo(() => {
     if (!cards) return null;

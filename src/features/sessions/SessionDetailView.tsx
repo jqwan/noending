@@ -4,9 +4,9 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import SessionMessage, { type SessionMessageData } from "./SessionMessage";
-import LaunchResultModal from "../launcher/LaunchResultModal";
+import { announceLaunch } from "../launcher/LaunchResultModal";
 import { Modal } from "../../components/common";
-import { AGENT_LABELS, type LaunchResult, type SessionDetail, type Workstream } from "../../types";
+import { AGENT_LABELS, type SessionDetail, type Workstream } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
@@ -19,7 +19,6 @@ export default function SessionDetailView({ sessionId, navigate }: {
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [syncMsg, setSyncMsg] = useState("");
-  const [result, setResult] = useState<LaunchResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [bindingOpen, setBindingOpen] = useState(false);
 
@@ -44,7 +43,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
     if (busy) return;
     setBusy(true);
     try {
-      setResult(await api.launchResumeSession(sessionId, []));
+      announceLaunch("恢复", await api.launchResumeSession(sessionId, []));
     } catch (e) {
       setSyncMsg(`Resume 失败：${e}`);
       setTimeout(() => setSyncMsg(""), 5000);
@@ -132,7 +131,6 @@ export default function SessionDetailView({ sessionId, navigate }: {
           onChanged={refresh}
         />
       )}
-      {result && <LaunchResultModal result={result} onClose={() => setResult(null)} />}
     </div>
   );
 }
@@ -149,23 +147,27 @@ function BindingModal({ sessionId, bindings, onClose, onChanged }: {
   const [addId, setAddId] = useState("none");
   const [addRole, setAddRole] = useState("related");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     api.listWorkstreams().then(setWorkstreams).catch(console.error);
   }, []);
 
   const apply = async () => {
+    if (busy) return;
     setBusy(true);
+    setError("");
     try {
-      // 以 Modal 内的最终状态为准：先清后写，语义是「用户编辑后的绑定集合」
-      for (const b of bindings) {
-        await api.unbindSessionWorkstream(sessionId, b.workstream_id);
-      }
-      for (const r of rows) {
-        await api.bindSessionWorkstream(sessionId, r.workstream_id, r.role);
-      }
+      // 后端在单个事务里做 diff：未改动的 Binding 原 row 保留
+      // （provenance / created_at / cursor 不动），只有新增的才是 user_assigned。
+      await api.replaceSessionBindings(
+        sessionId,
+        rows.map((r) => ({ workstream_id: r.workstream_id, role: r.role })),
+      );
       onChanged();
       onClose();
+    } catch (e) {
+      setError(String(e));
     } finally {
       setBusy(false);
     }
@@ -215,6 +217,7 @@ function BindingModal({ sessionId, bindings, onClose, onChanged }: {
         </div>
       </div>
 
+      {error && <div className="badge warn" style={{ marginTop: 8 }}>{error}</div>}
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
         <button className="btn" onClick={onClose}>取消</button>
         <button className="btn primary" disabled={busy} onClick={apply}>{busy ? "保存中…" : "保存"}</button>

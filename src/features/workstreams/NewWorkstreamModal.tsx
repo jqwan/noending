@@ -7,15 +7,18 @@ import type { Project, Workstream } from "../../types";
  * New Workstream 的简单 Modal（Title / Description / Project 可选）。
  * Home 与 Workstreams 页共用；创建成功后进入 Workstream Detail（§28），
  * 让用户自然补充 Context 或直接 Start Session。
+ * 从 Project Detail 打开时传入 initialProjectId 继承当前 Project
+ * （上下文操作语义）；用户仍可手动切换为「不归属」。
  */
-export default function NewWorkstreamModal({ onClose, onCreated }: {
+export default function NewWorkstreamModal({ onClose, onCreated, initialProjectId }: {
   onClose: () => void;
   onCreated?: (w: Workstream) => void;
+  initialProjectId?: string;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
-  const [project, setProject] = useState("none");
+  const [project, setProject] = useState(initialProjectId ?? "none");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {

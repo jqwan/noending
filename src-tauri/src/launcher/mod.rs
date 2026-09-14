@@ -358,6 +358,81 @@ pub fn record_binding(
     Ok(())
 }
 
+/// Apply the user's edited binding set for a Session as ONE atomic diff:
+/// unchanged rows are kept verbatim (provenance, created_at and sync
+/// cursors survive), a role change updates only the role, removed rows are
+/// deleted, and only genuinely new rows are inserted as user_assigned.
+/// This replaces the old unbind-all → rebind-all edit flow, which reset
+/// provenance and cursors and could leave partial state on failure.
+pub fn replace_session_bindings(
+    db: &Db,
+    session_id: &str,
+    desired: &[(String, String)], // (workstream_id, role)
+) -> Result<()> {
+    // Validate before touching anything so a bad row cannot produce a
+    // half-applied edit.
+    for (_, role) in desired {
+        if role != "primary" && role != "related" {
+            return Err(other(&format!("未知绑定角色: {role}")));
+        }
+    }
+    // De-duplicate repeated workstreams (last entry wins, order preserved).
+    let mut desired: Vec<(String, String)> =
+        desired
+            .iter()
+            .rev()
+            .fold(Vec::new(), |mut acc, (ws, role)| {
+                if !acc.iter().any(|(w, _)| w == ws) {
+                    acc.push((ws.clone(), role.clone()));
+                }
+                acc
+            });
+    desired.reverse();
+
+    let existing = db.bindings_for_session(session_id)?;
+    db.tx(|tx| {
+        use rusqlite::params;
+        for b in &existing {
+            if !desired.iter().any(|(ws, _)| *ws == b.workstream_id) {
+                tx.execute(
+                    "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND workstream_id = ?2",
+                    params![session_id, b.workstream_id],
+                )?;
+            }
+        }
+        for (workstream_id, role) in &desired {
+            match existing.iter().find(|b| b.workstream_id == *workstream_id) {
+                Some(b) if b.role != *role => {
+                    // role-only edit: provenance, created_at and cursors stay
+                    tx.execute(
+                        "UPDATE session_workstream_bindings
+                         SET role = ?3, last_used_at = ?4
+                         WHERE session_id = ?1 AND workstream_id = ?2",
+                        params![session_id, workstream_id, role, now()],
+                    )?;
+                }
+                Some(_) => {} // unchanged: the row is kept exactly as-is
+                None => {
+                    // only a binding the user just added is user_assigned
+                    let b = SessionWorkstreamBinding {
+                        session_id: session_id.to_string(),
+                        workstream_id: workstream_id.clone(),
+                        role: role.clone(),
+                        source: binding_source::USER_ASSIGNED.into(),
+                        confidence: 1.0,
+                        last_seen_revision: None,
+                        last_sync_cursor: 0,
+                        created_at: now(),
+                        last_used_at: now(),
+                    };
+                    crate::storage::bind_conn(tx, &b)?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // LaunchIntent matching
 // ---------------------------------------------------------------------------

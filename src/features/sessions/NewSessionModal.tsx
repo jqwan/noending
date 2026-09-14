@@ -2,19 +2,19 @@ import React, { useEffect, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type LaunchResult, type Workstream } from "../../types";
-import LaunchResultModal from "../launcher/LaunchResultModal";
+import { announceLaunch } from "../launcher/LaunchResultModal";
+import { AGENT_LABELS, type Agent, type Workstream } from "../../types";
 
 /**
  * 全局 New Session（实施方案 §33/§41）：无 Workstream 前置。
  * 默认 Workstream = None、Agent = Default Agent，用户可直接 Start。
+ * 启动成功后只弹 toast，「查看详情」是可选入口；Modal 直接关闭。
  */
 export default function NewSessionModal({ onClose }: { onClose: () => void }) {
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
   const [wsId, setWsId] = useState("none");
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<LaunchResult | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -26,15 +26,14 @@ export default function NewSessionModal({ onClose }: { onClose: () => void }) {
     if (!defaultAgent || busy) return;
     setBusy(true); setError("");
     try {
-      setResult(await api.launchNewSession(defaultAgent, wsId === "none" ? [] : [wsId]));
+      const r = await api.launchNewSession(defaultAgent, wsId === "none" ? [] : [wsId]);
+      announceLaunch("启动", r);
+      onClose();
     } catch (e) {
       setError(String(e));
-    } finally {
       setBusy(false);
     }
   };
-
-  if (result) return <LaunchResultModal result={result} onClose={onClose} />;
 
   return (
     <Modal title="New Session" onClose={onClose}>
@@ -46,7 +45,11 @@ export default function NewSessionModal({ onClose }: { onClose: () => void }) {
       <div className="row-line" style={{ borderTop: 0 }}>
         <div>
           <div className="settings-row-label">Agent</div>
-          <div className="settings-row-hint">使用 Settings 中的 Default Agent</div>
+          <div className="settings-row-hint">
+            {defaultAgent
+              ? "使用 Settings 中的 Default Agent"
+              : "未检测到可用的 Agent CLI — 请先在 Settings → Agents 配置"}
+          </div>
         </div>
         {defaultAgent && (
           <span className="badge accent ws-btn" style={{ gap: 6 }}>

@@ -5,10 +5,9 @@ import EmptyState from "../../components/EmptyState";
 import { useRefreshSignal } from "../../components/common";
 import SessionTable from "./SessionTable";
 import NewSessionModal from "./NewSessionModal";
-import LaunchResultModal from "../launcher/LaunchResultModal";
-import { AGENT_LABELS, type Agent, type LaunchResult, type Project, type Session, type SessionBindingRow } from "../../types";
-import type { Route } from "../../app/routes";
-import { consumeCommand, onEvent, EVT_NEW_SESSION } from "../../app/routes";
+import { announceLaunch } from "../launcher/LaunchResultModal";
+import { AGENT_LABELS, type Agent, type Project, type Session, type SessionBindingRow } from "../../types";
+import type { Route, ViewAction } from "../../app/routes";
 
 type AssignedFilter = "all" | "assigned" | "unassigned";
 
@@ -16,7 +15,11 @@ type AssignedFilter = "all" | "assigned" | "unassigned";
  * Sessions = Execute 记录页（整体设计方案 §38-§41）：快速找到具体 Session，
  * 不承担 Workstream 浏览。搜索与筛选在前端做，规模大了再转后端。
  */
-export default function SessionsView({ navigate }: { navigate: (r: Route) => void }) {
+export default function SessionsView({ navigate, action, actionSeq }: {
+  navigate: (r: Route) => void;
+  action?: ViewAction;
+  actionSeq: number;
+}) {
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [bindings, setBindings] = useState<Map<string, SessionBindingRow[]>>(new Map());
@@ -26,7 +29,6 @@ export default function SessionsView({ navigate }: { navigate: (r: Route) => voi
   const [wsFilter, setWsFilter] = useState("all");
   const [assigned, setAssigned] = useState<AssignedFilter>("all");
   const [creating, setCreating] = useState(false);
-  const [resumeResult, setResumeResult] = useState<LaunchResult | null>(null);
   const [resumeBusy, setResumeBusy] = useState<string | null>(null);
   const [resumeError, setResumeError] = useState("");
 
@@ -45,10 +47,11 @@ export default function SessionsView({ navigate }: { navigate: (r: Route) => voi
   }, []);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
+  // 页面动作随 Route 到达（palette → New Session）：
+  // actionSeq 让「已在 Sessions 页」的重复命令同样触发。
   useEffect(() => {
-    if (consumeCommand(EVT_NEW_SESSION)) setCreating(true);
-    return onEvent(EVT_NEW_SESSION, () => setCreating(true));
-  }, []);
+    if (action === "new") setCreating(true);
+  }, [action, actionSeq]);
 
   const wsOptions = useMemo(() => {
     const seen = new Map<string, string>();
@@ -93,12 +96,20 @@ export default function SessionsView({ navigate }: { navigate: (r: Route) => voi
   const resume = async (sessionId: string) => {
     setResumeBusy(sessionId); setResumeError("");
     try {
-      setResumeResult(await api.launchResumeSession(sessionId, []));
+      announceLaunch("恢复", await api.launchResumeSession(sessionId, []));
     } catch (e) {
       setResumeError(String(e));
     } finally {
       setResumeBusy(null);
     }
+  };
+
+  const clearFilters = () => {
+    setQuery("");
+    setAgent("all");
+    setProjectId("all");
+    setWsFilter("all");
+    setAssigned("all");
   };
 
   return (
@@ -143,11 +154,19 @@ export default function SessionsView({ navigate }: { navigate: (r: Route) => voi
             <option value="none">— 无归属</option>
           </select>
         </label>
+        <label className="ws-control">
+          <span className="muted small">Assigned</span>
+          <select value={assigned} onChange={(e) => setAssigned(e.target.value as AssignedFilter)}>
+            <option value="all">All</option>
+            <option value="assigned">Assigned</option>
+            <option value="unassigned">Unassigned</option>
+          </select>
+        </label>
         {shown && <span className="muted small">{shown.length} 个</span>}
       </div>
 
       {shown === null && <div className="muted">加载中…</div>}
-      {shown !== null && shown.length === 0 && (
+      {shown !== null && shown.length === 0 && (sessions?.length ?? 0) === 0 && (
         <EmptyState
           title="No sessions have been imported yet."
           hint="启用会话数据源后，本地 Agent 会话会自动出现在这里。"
@@ -156,6 +175,12 @@ export default function SessionsView({ navigate }: { navigate: (r: Route) => voi
               Configure Session Sources
             </button>
           }
+        />
+      )}
+      {shown !== null && shown.length === 0 && (sessions?.length ?? 0) > 0 && (
+        <EmptyState
+          title="没有匹配这些筛选条件的 Session。"
+          actions={<button className="btn small" onClick={clearFilters}>Clear filters</button>}
         />
       )}
       {shown !== null && shown.length > 0 && (
@@ -169,7 +194,6 @@ export default function SessionsView({ navigate }: { navigate: (r: Route) => voi
 
       {resumeError && <div className="badge warn" style={{ marginTop: 10 }}>{resumeError}</div>}
       {creating && <NewSessionModal onClose={() => setCreating(false)} />}
-      {resumeResult && <LaunchResultModal result={resumeResult} onClose={() => setResumeResult(null)} />}
     </div>
   );
 }

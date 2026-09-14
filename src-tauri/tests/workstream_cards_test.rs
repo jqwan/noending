@@ -125,12 +125,11 @@ fn zero_session_workstream_is_a_legal_card_without_resume_target() {
 }
 
 #[test]
-fn default_agent_falls_back_to_claude_code_and_survives_garbage() {
+fn default_agent_prefers_explicit_choice_then_detected_then_none() {
     let database = db("default-agent");
-    assert_eq!(
-        noending::commands::default_agent_of(&database).unwrap(),
-        Agent::ClaudeCode
-    );
+    // No setting, nothing detected → None: the UI disables New instead of
+    // launching an agent that is not installed.
+    assert_eq!(noending::commands::default_agent_of(&database), None);
     database
         .set_setting("launcher.default_agent", "codex")
         .unwrap();
@@ -138,13 +137,15 @@ fn default_agent_falls_back_to_claude_code_and_survives_garbage() {
         noending::commands::default_agent_of(&database).unwrap(),
         Agent::Codex
     );
+    // Explicit choice stays authoritative even while undetected (the UI
+    // warns); garbage falls through to detection.
     database
         .set_setting("launcher.default_agent", "not-an-agent")
         .unwrap();
     assert_eq!(
-        noending::commands::default_agent_of(&database).unwrap(),
-        Agent::ClaudeCode,
-        "an unparseable setting must not break New-session launches"
+        noending::commands::default_agent_of(&database),
+        None,
+        "an unparseable setting must not fabricate an installed agent"
     );
 }
 
