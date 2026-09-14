@@ -1895,6 +1895,11 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
 /// override. (Sync's own re-classification deletes AUTO rows directly in
 /// persist_auto_classification and must NOT route through here: an
 /// automatic replace is a guess being revised, not a user rejection.)
+///
+/// Tombstones are permanent by authority decision — nothing expires them.
+/// `INSERT OR IGNORE` means `created_at` records the FIRST rejection and is
+/// NOT refreshed on re-rejection: never read it as "last rejected at". If
+/// an expiry or audit view is ever added, introduce `updated_at` first.
 pub fn remove_binding_by_user_conn(
     conn: &Connection,
     session_id: &str,
