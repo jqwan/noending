@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
-import type { Route } from "../../App";
+import type { Route } from "../../app/routes";
 import type { SearchHit } from "../../types";
 
 export default function SearchView({ query, navigate }: { query: string; navigate: (r: Route) => void }) {

@@ -1,0 +1,96 @@
+/* NoEnding design tokens (整体设计方案 §67 / 实施方案 §56)
+   Components reference semantic tokens only — never raw colors — so
+   [data-theme="dark"] can re-skin the whole app by overriding variables. */
+
+:root {
+  /* surfaces */
+  --bg-app: #ffffff;
+  --bg-sidebar: #f5f5f3;
+  --bg-panel: #f5f5f3;
+  --bg-hover: #ececea;
+  --bg-active: #e6e6e3;
+
+  /* text */
+  --text-primary: #111111;
+  --text-secondary: #555552;
+  --text-muted: #8a8a86;
+
+  /* borders */
+  --border-subtle: #e4e4e1;
+  --border-default: #c9c9c5;
+
+  /* accents — used sparingly, interactive states only */
+  --accent: #4c6fff;
+  --accent-wash: #eef1ff;
+  --success: #2e7d46;
+  --warning: #b26a00;
+  --warning-wash: #fdf3e7;
+  --danger: #c0392b;
+
+  /* shape & layout */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --sidebar-width: 248px;
+
+  --mono: "SF Mono", ui-monospace, Menlo, monospace;
+
+  /* ---- legacy aliases (existing class CSS keeps working) ---- */
+  --ink: var(--text-primary);
+  --paper: var(--bg-app);
+  --soft: var(--bg-panel);
+  --wash: var(--bg-hover);
+  --line: var(--border-subtle);
+  --gray: var(--text-muted);
+  --rail: var(--sidebar-width);
+}
+
+[data-theme="dark"] {
+  --bg-app: #141413;
+  --bg-sidebar: #191918;
+  --bg-panel: #1e1e1c;
+  --bg-hover: #262625;
+  --bg-active: #2d2d2b;
+
+  --text-primary: #ececea;
+  --text-secondary: #b5b5b0;
+  --text-muted: #8a8a86;
+
+  --border-subtle: #2b2b29;
+  --border-default: #454542;
+
+  --accent: #7d92ff;
+  --accent-wash: #242c4e;
+  --success: #5cb377;
+  --warning: #d9a04a;
+  --warning-wash: #3a2f1c;
+  --danger: #e07a6a;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --bg-app: #141413;
+    --bg-sidebar: #191918;
+    --bg-panel: #1e1e1c;
+    --bg-hover: #262625;
+    --bg-active: #2d2d2b;
+
+    --text-primary: #ececea;
+    --text-secondary: #b5b5b0;
+    --text-muted: #8a8a86;
+
+    --border-subtle: #2b2b29;
+    --border-default: #454542;
+
+    --accent: #7d92ff;
+    --accent-wash: #242c4e;
+    --success: #5cb377;
+    --warning: #d9a04a;
+    --warning-wash: #3a2f1c;
+    --danger: #e07a6a;
+
+    color-scheme: dark;
+  }
+}

@@ -31,6 +31,43 @@ export interface Workstream {
   updated_at: string;
 }
 
+export interface LatestSessionInfo {
+  id: string;
+  agent: Agent;
+}
+
+/** Binding row with workstream title (backend: list_session_bindings). */
+export interface SessionBindingRow {
+  session_id: string;
+  workstream_id: string;
+  role: string;
+  workstream_title: string;
+}
+
+/** Paths for Settings → Data & Advanced (backend: get_app_info). */
+export interface AppInfo {
+  db_path: string;
+  app_data_dir: string;
+}
+
+/** Card view for Home / Workstreams pages (backend: list_workstream_cards). */
+export interface WorkstreamCardData {
+  id: string;
+  project_id: string | null;
+  title: string;
+  description: string;
+  lifecycle: "open" | "completed" | "abandoned";
+  visibility: "normal" | "archived";
+  created_at: string;
+  updated_at: string;
+  project_name: string | null;
+  current_state: string | null;
+  goal: string | null;
+  last_activity_at: string | null;
+  session_count: number;
+  latest_session: LatestSessionInfo | null;
+}
+
 export interface Session {
   id: string;
   agent: Agent;
@@ -129,6 +166,7 @@ export interface ContextSection {
 
 export interface WorkstreamContext {
   workstream: Workstream;
+  project_name: string | null;
   core: ContextSection[];
   items: [ContextItem, ContextItemRevision][];
   related_sessions: Session[];

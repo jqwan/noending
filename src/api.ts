@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Agent, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
-  SearchHit, Session, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
-  SyncRun, Workstream, WorkstreamContext,
+  Agent, AppInfo, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
+  SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
+  SyncRun, Workstream, WorkstreamCardData, WorkstreamContext,
 } from "./types";
 
 export const api = {
@@ -18,6 +18,7 @@ export const api = {
 
   listWorkstreams: (projectId?: string) =>
     invoke<Workstream[]>("list_workstreams", { projectId: projectId ?? null }),
+  listWorkstreamCards: () => invoke<WorkstreamCardData[]>("list_workstream_cards"),
   createWorkstream: (projectId: string | null, title: string, description: string) =>
     invoke<Workstream>("create_workstream", { projectId, title, description }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
@@ -46,6 +47,10 @@ export const api = {
     invoke<void>("assign_session_project", { sessionId, projectId }),
   bindSessionWorkstream: (sessionId: string, workstreamId: string, role: string) =>
     invoke<void>("bind_session_workstream", { sessionId, workstreamId, role }),
+  unbindSessionWorkstream: (sessionId: string, workstreamId: string) =>
+    invoke<void>("unbind_session_workstream", { sessionId, workstreamId }),
+  listSessionBindings: () => invoke<SessionBindingRow[]>("list_session_bindings"),
+  getAppInfo: () => invoke<AppInfo>("get_app_info"),
 
   syncAll: () => invoke<{ started: boolean }>("sync_all"),
   syncSource: (sourceId: string) => invoke<{ started: boolean }>("sync_source", { sourceId }),
@@ -77,6 +82,9 @@ export const api = {
   getStats: () => invoke<Record<string, number>>("get_stats"),
   getAgentStatus: () =>
     invoke<Record<string, { name: string; detected: boolean; executable: string | null; version: string | null }>>("get_agent_status"),
+
+  getDefaultAgent: () => invoke<Agent>("get_default_agent"),
+  setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),
 
   assistantSend: (sessionId: string | null, text: string) =>
     invoke<{ session_id: string; content: string; runtime: string }>("assistant_send", { sessionId, text }),

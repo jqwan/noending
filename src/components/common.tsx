@@ -1,5 +1,5 @@
 import React, { useEffect } from "react";
-import type { Route } from "../App";
+import type { Route } from "../app/routes";
 
 export function useRefreshSignal(cb: () => void) {
   useEffect(() => {

@@ -569,6 +569,86 @@ impl Db {
         Ok(rows)
     }
 
+    /// Card stats for one Workstream: (session_count, latest session as
+    /// (id, agent), that session's activity timestamp). "Latest" follows the
+    /// transcript, not the binding: most recent activity wins.
+    pub fn workstream_session_stats(
+        &self,
+        workstream_id: &str,
+    ) -> Result<(i64, Option<(String, String)>, Option<String>)> {
+        let count: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM session_workstream_bindings WHERE workstream_id = ?1",
+            params![workstream_id],
+            |r| r.get(0),
+        )?;
+        let latest = self
+            .0
+            .query_row(
+                "SELECT s.id, s.agent, COALESCE(s.last_activity_at, s.started_at) AS act
+                 FROM session_workstream_bindings b
+                 JOIN sessions s ON s.id = b.session_id
+                 WHERE b.workstream_id = ?1
+                 ORDER BY act DESC
+                 LIMIT 1",
+                params![workstream_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok((
+            count,
+            latest
+                .as_ref()
+                .map(|(id, agent, _)| (id.clone(), agent.clone())),
+            latest.and_then(|(_, _, act)| act),
+        ))
+    }
+
+    /// Text of the most recently updated active item of `kind`, content
+    /// first, falling back to its title. Returns None when absent or empty.
+    pub fn workstream_state_text(&self, workstream_id: &str, kind: &str) -> Result<Option<String>> {
+        let row = self
+            .0
+            .query_row(
+                "SELECT r.content, r.title
+                 FROM context_items i
+                 JOIN context_item_revisions r ON r.id = i.current_revision_id
+                 WHERE i.workstream_id = ?1 AND i.kind = ?2 AND i.status = 'active'
+                 ORDER BY i.updated_at DESC
+                 LIMIT 1",
+                params![workstream_id, kind],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(content, title)| {
+            let c = content.trim();
+            if !c.is_empty() {
+                Some(c.to_string())
+            } else {
+                let t = title.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            }
+        }))
+    }
+
+    /// Latest context edit inside a Workstream (card "last active" signal).
+    pub fn workstream_items_last_update(&self, workstream_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT MAX(updated_at) FROM context_items WHERE workstream_id = ?1",
+                params![workstream_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     pub fn get_workstream(&self, id: &str) -> Result<Option<Workstream>> {
         Ok(self
             .0

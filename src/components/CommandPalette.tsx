@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { Route } from "../App";
+import { emit, requestCommand, EVT_NEW_SESSION, EVT_NEW_WORKSTREAM, type Route } from "../app/routes";
 import type { SearchHit, Session, Workstream } from "../types";
 
 interface PaletteItem {
@@ -10,6 +10,18 @@ interface PaletteItem {
   hint?: string;
   route: Route;
 }
+
+/** 固定命令（实施方案 §53）：导航 + New 动作，不与实体搜索混淆。 */
+const FIXED_COMMANDS: PaletteItem[] = [
+  { key: "cmd-home", kind: "命令", label: "Go to Home", hint: "继续最近的工作", route: { view: "home" } },
+  { key: "cmd-workstreams", kind: "命令", label: "Go to Workstreams", route: { view: "workstreams" } },
+  { key: "cmd-sessions", kind: "命令", label: "Go to Sessions", route: { view: "sessions" } },
+  { key: "cmd-assistant", kind: "命令", label: "Go to Assistant", route: { view: "assistant" } },
+  { key: "cmd-projects", kind: "命令", label: "Go to Projects", route: { view: "projects" } },
+  { key: "cmd-settings", kind: "命令", label: "Go to Settings", route: { view: "settings", section: "general" } },
+  { key: "cmd-new-ws", kind: "命令", label: "New Workstream", route: { view: "workstreams" }, hint: "创建" },
+  { key: "cmd-new-session", kind: "命令", label: "New Session", route: { view: "sessions" }, hint: "默认 Agent" },
+];
 
 export default function CommandPalette({ onClose, navigate }: {
   onClose: () => void;
@@ -39,6 +51,13 @@ export default function CommandPalette({ onClose, navigate }: {
   const items = useMemo<PaletteItem[]>(() => {
     const out: PaletteItem[] = [];
     const ql = q.trim().toLowerCase();
+    // 固定命令：输入为空时全部可见；输入后按子串过滤
+    for (const c of FIXED_COMMANDS) {
+      if (!ql || c.label.toLowerCase().includes(ql)) out.push(c);
+    }
+    if (!ql || "workstreams".includes(ql)) {
+      out.push({ key: "nav-workstreams", kind: "页面", label: "Workstreams", hint: "看板", route: { view: "workstreams" } });
+    }
     for (const w of workstreams) {
       if (!ql || w.title.toLowerCase().includes(ql)) {
         out.push({ key: `w-${w.id}`, kind: "Workstream", label: w.title, hint: "打开", route: { view: "workstream", workstreamId: w.id } });
@@ -67,6 +86,9 @@ export default function CommandPalette({ onClose, navigate }: {
 
   const go = (item: PaletteItem | undefined) => {
     if (!item) return;
+    // New 命令：跳转到对应页面并由页面打开 Modal（保持可取消、可选项）
+    if (item.key === "cmd-new-ws") requestCommand(EVT_NEW_WORKSTREAM);
+    if (item.key === "cmd-new-session") requestCommand(EVT_NEW_SESSION);
     navigate(item.route);
     onClose();
   };

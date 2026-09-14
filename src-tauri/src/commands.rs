@@ -179,6 +179,136 @@ pub fn list_workstreams(
     with_db(&state, |db| db.list_workstreams(project_id.as_deref()))
 }
 
+/// Card view for Home / Workstreams pages: everything a "continue working"
+/// card needs, computed server-side so the UI stays a thin projection.
+#[derive(Serialize)]
+pub struct LatestSessionInfo {
+    pub id: String,
+    pub agent: String,
+}
+
+#[derive(Serialize)]
+pub struct WorkstreamCardView {
+    #[serde(flatten)]
+    pub workstream: Workstream,
+    pub project_name: Option<String>,
+    /// L1 Current State text (content, falling back to its title).
+    pub current_state: Option<String>,
+    /// L1 Goal text — the card's last content fallback.
+    pub goal: Option<String>,
+    /// max(session activity, context edit, workstream update).
+    pub last_activity_at: Option<String>,
+    pub session_count: i64,
+    /// Most recent bound session — the Resume button's agent + target.
+    pub latest_session: Option<LatestSessionInfo>,
+}
+
+fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
+    let key = |s: &String| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .ok()
+    };
+    match (a, b) {
+        (None, x) | (x, None) => x.clone(),
+        (Some(x), Some(y)) => {
+            let (xt, yt) = (key(x), key(y));
+            match (xt, yt) {
+                (Some(xt), Some(yt)) => {
+                    if yt > xt {
+                        Some(y.clone())
+                    } else {
+                        Some(x.clone())
+                    }
+                }
+                // unparseable timestamps fall back to string order
+                _ => {
+                    if y.as_str() > x.as_str() {
+                        Some(y.clone())
+                    } else {
+                        Some(x.clone())
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn list_workstream_cards(state: State<AppState>) -> Result<Vec<WorkstreamCardView>> {
+    with_db(&state, workstream_cards)
+}
+
+/// Compose card views from the real sources (bindings, items, workstreams).
+/// Also the testable core of `list_workstream_cards`.
+pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
+    let project_names: std::collections::HashMap<String, String> = db
+        .list_projects()?
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+    let mut cards = Vec::new();
+    for w in db.list_workstreams(None)? {
+        let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
+        let items_activity = db.workstream_items_last_update(&w.id)?;
+        // "Last active" only follows real work signals (session activity,
+        // context edits) — renames or metadata touches must not make a
+        // Workstream look freshly active. Sorting still falls back to
+        // updated_at so a brand-new Workstream surfaces at the top.
+        let mut last_activity_at = None;
+        for candidate in [&session_activity, &items_activity] {
+            last_activity_at = later_ts(&last_activity_at, candidate);
+        }
+        cards.push(WorkstreamCardView {
+            project_name: w
+                .project_id
+                .as_ref()
+                .and_then(|pid| project_names.get(pid).cloned()),
+            current_state: db.workstream_state_text(&w.id, "current_state")?,
+            goal: db.workstream_state_text(&w.id, "goal")?,
+            last_activity_at,
+            session_count,
+            latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),
+            workstream: w,
+        });
+    }
+    cards.sort_by(|a, b| {
+        let key = |c: &WorkstreamCardView| {
+            c.last_activity_at
+                .as_deref()
+                .or(Some(c.workstream.updated_at.as_str()))
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        };
+        key(b).cmp(&key(a))
+    });
+    Ok(cards)
+}
+
+// ---------------- Default Agent (Settings → Default Agent) ----------------
+
+const DEFAULT_AGENT_KEY: &str = "launcher.default_agent";
+
+#[tauri::command]
+pub fn get_default_agent(state: State<AppState>) -> Result<String> {
+    with_db(&state, |db| Ok(default_agent_of(db)?.as_str().to_string()))
+}
+
+/// Settings → Default Agent; Claude Code until the user says otherwise.
+pub fn default_agent_of(db: &Db) -> Result<Agent> {
+    Ok(db
+        .get_setting(DEFAULT_AGENT_KEY)?
+        .and_then(|v| Agent::parse(&v))
+        .unwrap_or(Agent::ClaudeCode))
+}
+
+#[tauri::command]
+pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
+    let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
+    with_db(&state, |db| {
+        db.set_setting(DEFAULT_AGENT_KEY, agent.as_str())
+    })
+}
+
 #[tauri::command]
 pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Result<()> {
     with_db(&state, |db| {
@@ -335,6 +465,7 @@ pub fn delete_context_item(state: State<AppState>, item_id: String) -> Result<()
 #[derive(Serialize)]
 pub struct WorkstreamContext {
     pub workstream: Workstream,
+    pub project_name: Option<String>,
     pub core: Vec<crate::context::ContextSection>,
     pub items: Vec<(ContextItem, ContextItemRevision)>,
     pub related_sessions: Vec<Session>,
@@ -358,8 +489,14 @@ pub fn get_workstream_context(
             .filter_map(|b| db.get_session(&b.session_id).ok().flatten())
             .collect();
         let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
+        let project_name = workstream
+            .project_id
+            .as_deref()
+            .map(|pid| db.get_project(pid).ok().flatten().map(|p| p.name))
+            .flatten();
         Ok(WorkstreamContext {
             workstream,
+            project_name,
             core,
             items,
             related_sessions: sessions,
@@ -523,6 +660,67 @@ pub fn bind_session_workstream(
             1.0,
         )
     })
+}
+
+/// Remove a Session ↔ Workstream binding (user edit via Session Detail).
+#[tauri::command]
+pub fn unbind_session_workstream(
+    state: State<AppState>,
+    session_id: String,
+    workstream_id: String,
+) -> Result<()> {
+    with_db(&state, |db| db.unbind(&session_id, &workstream_id))
+}
+
+/// Binding rows with workstream titles — lets the Sessions table show a
+/// Workstream column and Assigned filters without N queries.
+#[derive(Serialize)]
+pub struct SessionBindingRow {
+    pub session_id: String,
+    pub workstream_id: String,
+    pub role: String,
+    pub workstream_title: String,
+}
+
+#[tauri::command]
+pub fn list_session_bindings(state: State<AppState>) -> Result<Vec<SessionBindingRow>> {
+    with_db(&state, |db| {
+        let mut st = db.0.prepare(
+            "SELECT b.session_id, b.workstream_id, b.role, COALESCE(w.title, b.workstream_id)
+                 FROM session_workstream_bindings b
+                 LEFT JOIN workstreams w ON w.id = b.workstream_id",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(SessionBindingRow {
+                    session_id: r.get(0)?,
+                    workstream_id: r.get(1)?,
+                    role: r.get(2)?,
+                    workstream_title: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+/// App info for Settings → Data & Advanced (paths only, no secrets).
+#[derive(Serialize)]
+pub struct AppInfo {
+    pub db_path: String,
+    pub app_data_dir: String,
+}
+
+#[tauri::command]
+pub fn get_app_info(app: AppHandle) -> AppInfo {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    AppInfo {
+        db_path: dir.join("noending.db").to_string_lossy().to_string(),
+        app_data_dir: dir.to_string_lossy().to_string(),
+    }
 }
 
 // ---------------- Sync ----------------

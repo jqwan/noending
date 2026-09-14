@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { timeAgo } from "../../components/common";
-import type { Route } from "../../App";
-import type { SyncRun } from "../../types";
+import type { AssistantScope, Route } from "../../app/routes";
+import type { SyncRun, WorkstreamCardData } from "../../types";
 
 interface AssistantMessage {
   id: string;
@@ -37,7 +37,21 @@ const AGENT_PRESETS: Record<string, { model: string; provider: string; effort: s
   none: { model: "", provider: "", effort: "", label: "仅检索（不调用模型）" },
 };
 
-export default function AssistantView({ navigate }: { navigate: (r: Route) => void }) {
+const SUGGESTIONS = [
+  "最近 NoEnding 项目主要解决了什么？",
+  "Context Integrity 还有哪些 Open Questions？",
+  "找一下讨论 Windows launcher 的 Session。",
+  "把这个决定加入 Context。",
+];
+
+/**
+ * Assistant = Workspace Interface（整体设计方案 §46-§50），不是第四个 Agent。
+ * Scope 只做 prompt 侧注入（§38），不引入新协议。
+ */
+export default function AssistantView({ scope, navigate }: {
+  scope?: AssistantScope;
+  navigate: (r: Route) => void;
+}) {
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -45,6 +59,8 @@ export default function AssistantView({ navigate }: { navigate: (r: Route) => vo
   const [cfg, setCfg] = useState<AssistantConfig | null>(null);
   const [cfgOpen, setCfgOpen] = useState(false);
   const [runs, setRuns] = useState<SyncRun[]>([]);
+  const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
+  const [currentScope, setCurrentScope] = useState<AssistantScope>(scope ?? { type: "workspace" });
   const logRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(() => {
@@ -56,24 +72,40 @@ export default function AssistantView({ navigate }: { navigate: (r: Route) => vo
   useEffect(() => {
     api.assistantConfigGet().then(setCfg).catch(console.error);
     api.listSyncRuns(12).then(setRuns).catch(console.error);
+    api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "open" && c.visibility === "normal"))).catch(console.error);
   }, []);
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [messages]);
 
-  const send = async () => {
-    const q = input.trim();
-    if (!q || busy) return;
+  const scopeLabel = (s: AssistantScope): string => {
+    switch (s.type) {
+      case "workspace": return "Workspace";
+      case "project": return `Project ${s.id.slice(0, 8)}`;
+      case "workstream": {
+        const t = workstreams.find((w) => w.id === s.id)?.title;
+        return t ? `Workstream · ${t}` : `Workstream ${s.id.slice(0, 8)}`;
+      }
+      case "session": return `Session ${s.id.slice(0, 8)}`;
+    }
+  };
+
+  const send = async (raw?: string) => {
+    const base = (raw ?? input).trim();
+    if (!base || busy) return;
     setInput("");
     setBusy(true);
-    // optimistic user bubble
+    // Scope 以元数据前缀注入 prompt（§38），不改变协议
+    const scoped = currentScope.type === "workspace"
+      ? base
+      : `[Scope: ${scopeLabel(currentScope)}]\n${base}`;
     setMessages((m) => [...m, {
       id: `tmp-${Date.now()}`, session_id: sessionId ?? "", role: "user",
-      content: q, action_json: null, runtime: null,
+      content: base, action_json: null, runtime: null,
       created_at: new Date().toISOString(),
     }]);
     try {
-      const reply = await api.assistantSend(sessionId, q);
+      const reply = await api.assistantSend(sessionId, scoped);
       setSessionId(reply.session_id);
       const msgs = await api.assistantMessages(reply.session_id);
       setMessages(msgs);
@@ -120,7 +152,7 @@ export default function AssistantView({ navigate }: { navigate: (r: Route) => vo
         <div>
           <h1>Assistant</h1>
           <p className="page-sub">
-            经你已登录的 Agent CLI 无头运行（<span className="mono">{cfg ? `${cfg.agent}${cfg.model ? " · " + cfg.model : ""}` : "…"}</span>），后台自动同步共用此配置。
+            Workspace Assistant，经由你已登录的 Agent CLI 无头运行（<span className="mono">{cfg ? `${cfg.agent}${cfg.model ? " · " + cfg.model : ""}` : "…"}</span>）。
           </p>
         </div>
         <div className="actions">
@@ -128,14 +160,32 @@ export default function AssistantView({ navigate }: { navigate: (r: Route) => vo
         </div>
       </div>
 
+      <div className="scope-row">
+        <span className="muted small">Scope:</span>
+        <select value={currentScope.type === "workstream" ? currentScope.id : "workspace"}
+          onChange={(e) => {
+            const v = e.target.value;
+            setCurrentScope(v === "workspace" ? { type: "workspace" } : { type: "workstream", id: v });
+          }}>
+          <option value="workspace">Workspace</option>
+          {workstreams.map((w) => (
+            <option key={w.id} value={w.id}>Workstream · {w.title}</option>
+          ))}
+        </select>
+      </div>
+
       <div ref={logRef} className="chat-log" style={{ flex: 1, overflowY: "auto", minHeight: 260 }}>
         {messages.length === 0 && (
-          <div className="chat-msg assistant"><div className="bubble">
-            我是 Workspace Assistant。可以直接问我，例如：
-            {"\n"}· 最近的同步里 Context Sync 有什么变化？
-            {"\n"}· 用 Claude Code 继续 Domain Model 这个 Workstream
-            {"\n"}· 总结一下昨天所有 Session 做了什么
-          </div></div>
+          <div className="assistant-empty">
+            <div className="spark">✦</div>
+            <h2>What are you working on?</h2>
+            <p className="hint">Ask about your Workstreams, Sessions and Context.</p>
+            <div className="suggest-list">
+              {SUGGESTIONS.map((s) => (
+                <button key={s} className="suggest-chip" onClick={() => send(s)}>{s}</button>
+              ))}
+            </div>
+          </div>
         )}
         {messages.map((m) => (
           <div key={m.id} className={`chat-msg ${m.role === "user" ? "user" : "assistant"}`}>
@@ -156,10 +206,10 @@ export default function AssistantView({ navigate }: { navigate: (r: Route) => vo
       </div>
 
       <div className="row" style={{ marginTop: 10 }}>
-        <input type="text" placeholder="问上下文、启动 Session、查同步历史…" value={input}
+        <input type="text" placeholder="Ask NoEnding...（问上下文、启动 Session、查同步历史）" value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()} />
-        <button className="btn primary" onClick={send} disabled={busy}>发送</button>
+        <button className="btn primary" onClick={() => send()} disabled={busy}>Send</button>
       </div>
 
       <details className="details-feed">
@@ -209,6 +259,7 @@ export default function AssistantView({ navigate }: { navigate: (r: Route) => vo
   );
 }
 
+/** Action Card（§50）：所有改变 Domain 的操作先摘要、确认后才执行。 */
 function ActionCard({ json, onExecute, navigate }: {
   json: string;
   onExecute: () => void;

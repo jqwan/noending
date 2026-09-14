@@ -10,7 +10,7 @@ import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
  *   重新抓取，绑定与上下文条目保留）；
  * - 入库在后台执行（不阻塞界面），进度通过 sync-* 事件推送。
  */
-export default function SourcesView({ onSync }: { onSync?: () => void }) {
+export default function SourcesView({ onSync, embedded }: { onSync?: () => void; embedded?: boolean }) {
   const [sources, setSources] = useState<IngestSource[]>([]);
   const [agent, setAgent] = useState<Agent>("codex");
   const [path, setPath] = useState("");
@@ -121,11 +121,20 @@ export default function SourcesView({ onSync }: { onSync?: () => void }) {
   const enabledCount = sources.filter((s) => s.enabled).length;
 
   return (
-    <div className="main">
-      <h1>会话数据源</h1>
-      <p className="page-sub">
-        只有勾选启用的目录会被扫描入库。默认 agent 目录（~/.codex、~/.claude、~/.pi）仅作为候选预置，是否入库由你决定；也可以添加任意自定义目录，按所选 Agent 的会话格式（内容指纹校验）递归扫描。入库在后台执行，不会阻塞界面。
-      </p>
+    <div className={embedded ? "" : "main"}>
+      {!embedded && (
+        <>
+          <h1>会话数据源</h1>
+          <p className="page-sub">
+            只有勾选启用的目录会被扫描入库。默认 agent 目录（~/.codex、~/.claude、~/.pi）仅作为候选预置，是否入库由你决定；也可以添加任意自定义目录，按所选 Agent 的会话格式（内容指纹校验）递归扫描。入库在后台执行，不会阻塞界面。
+          </p>
+        </>
+      )}
+      {embedded && (
+        <p className="muted small" style={{ marginTop: 0 }}>
+          只有勾选启用的目录会被扫描入库；默认 agent 目录仅作为候选预置。入库在后台执行。
+        </p>
+      )}
 
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}>
         <button className="btn primary" disabled={syncing} onClick={syncAll}>
@@ -169,7 +178,7 @@ export default function SourcesView({ onSync }: { onSync?: () => void }) {
       <div className="card">
         {sources.length === 0 && <div className="muted small">暂无数据源。</div>}
         {sources.map((src) => (
-          <div key={src.id} className="row" style={{ padding: "8px 4px", borderBottom: "1px solid rgba(128,128,128,0.15)", alignItems: "center", gap: 8 }}>
+          <div key={src.id} className="row" style={{ padding: "8px 4px", borderBottom: "1px solid var(--border-subtle)", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
               style={{ width: "auto" }}

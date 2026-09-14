@@ -1,129 +1,109 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
+import PageHeader from "../../layout/PageHeader";
 import { Modal, timeAgo, useRefreshSignal } from "../../components/common";
-import type { Route } from "../../App";
-import { AgentBadge } from "../../App";
-import type { Project, ProjectResource, Session, Workstream } from "../../types";
-import LauncherModal from "../launcher/LauncherModal";
+import AgentIcon from "../../components/AgentIcon";
+import NewWorkstreamModal from "../workstreams/NewWorkstreamModal";
+import type { Route } from "../../app/routes";
+import { AGENT_LABELS, type Project, type ProjectResource, type Session, type Workstream } from "../../types";
 
-export default function ProjectDetail({ projectId, navigate, refreshSidebar }: {
+/**
+ * Project Detail（整体设计方案 §53/§54）：Workstreams 是主要 section，
+ * Resources 用轻量行；Project 视觉权重保持次于 Workstream。
+ */
+export default function ProjectDetail({ projectId, navigate }: {
   projectId: string;
   navigate: (r: Route) => void;
-  refreshSidebar: () => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [resources, setResources] = useState<ProjectResource[]>([]);
   const [creatingWs, setCreatingWs] = useState(false);
-  const [title, setTitle] = useState("");
-  const [desc, setDesc] = useState("");
   const [addingRes, setAddingRes] = useState(false);
   const [resKind, setResKind] = useState("url");
   const [resUri, setResUri] = useState("");
-  const [launchWs, setLaunchWs] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     api.listProjects().then((ps) => setProject(ps.find((p) => p.id === projectId) ?? null)).catch(console.error);
-    api.listWorkstreams(projectId).then((ws) => setWorkstreams(ws.filter((w) => w.visibility === "normal"))).catch(console.error);
+    api.listWorkstreamCards().then((cards) =>
+      setWorkstreams(cards.filter((w) => w.project_id === projectId && w.visibility === "normal")),
+    ).catch(console.error);
     api.listSessions(projectId).then(setSessions).catch(console.error);
     api.listResources(projectId).then(setResources).catch(console.error);
   }, [projectId]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  if (!project) return <div className="main">加载中…</div>;
-
-  const createWs = async () => {
-    if (!title.trim()) return;
-    const w = await api.createWorkstream(projectId, title, desc);
-    setCreatingWs(false); setTitle(""); setDesc("");
-    refreshSidebar(); refresh();
-    navigate({ view: "workstream", workstreamId: w.id });
-  };
+  if (!project) return <div className="main narrow">加载中…</div>;
 
   return (
-    <div className="main">
-      <div className="page-head">
-        <div>
-          <h1>{project.name}</h1>
-          <p className="page-sub">{project.description || "Project 提供长期主题边界。"}</p>
-        </div>
-        <div className="actions">
-          <button className="btn primary" onClick={() => setCreatingWs(true)}>New Workstream</button>
-        </div>
-      </div>
+    <div className="main narrow">
+      <PageHeader
+        back="Projects"
+        onBack={() => navigate({ view: "projects" })}
+        title={project.name}
+        sub={project.description || undefined}
+        actions={
+          <>
+            <button className="btn ghost"
+              onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
+              Ask Assistant
+            </button>
+            <button className="btn" onClick={() => setCreatingWs(true)}>New Workstream</button>
+          </>
+        }
+      />
 
-      <h2>Workstreams</h2>
+      <div className="section-label" style={{ marginTop: 26 }}>Workstreams</div>
       {workstreams.length === 0 && (
-        <div className="empty">
-          这个 Project 下还没有 Workstream。
-          <div className="invite"><button className="btn small" onClick={() => setCreatingWs(true)}>New Workstream</button></div>
-        </div>
+        <div className="l1-none">这个 Project 下还没有 Workstream。</div>
       )}
-      <div>
-        {workstreams.map((w) => (
-          <div key={w.id} className="list-row" onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
-            <div className="grow">
-              <div className="title">{w.title}</div>
-              {w.description && <div className="meta">{w.description}</div>}
-            </div>
-            <div className="side" onClick={(e) => e.stopPropagation()}>
-              {w.lifecycle !== "open" && <span className="badge">{w.lifecycle}</span>}
-              <span>{timeAgo(w.updated_at)}</span>
-              <button className="btn small" onClick={() => setLaunchWs(w.id)}>New Session</button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <h2>Recent Sessions</h2>
-      {sessions.length === 0 && (
-        <div className="empty">
-          这个 Project 下还没有 Session。先在侧栏同步 Agent Sessions，再在 Session 详情里关联到本 Project。
-        </div>
-      )}
-      <div>
-        {sessions.slice(0, 8).map((s) => (
-          <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
-            <div className="grow">
-              <div className="title">{s.title ?? s.agent_session_id}</div>
-              <div className="meta mono">{s.cwd ?? "无工作目录"}</div>
-            </div>
-            <div className="side">
-              <AgentBadge agent={s.agent} />
-              <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <h2>Resources <span className="muted small">（可选；Project 不依赖任何路径）</span></h2>
-      {resources.map((r) => (
-        <div className="list-row" key={r.id} style={{ cursor: "default" }}>
+      {workstreams.map((w) => (
+        <div key={w.id} className="list-row" onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
           <div className="grow">
-            <div className="title"><span className="badge" style={{ marginRight: 8 }}>{r.kind}</span><span className="mono small">{r.uri}</span></div>
+            <div className="title">{w.title}</div>
+            {(w as any).current_state && <div className="meta">{(w as any).current_state}</div>}
           </div>
           <div className="side">
-            <button className="link" onClick={async () => { await api.removeResource(r.id); refresh(); }}>移除</button>
+            <span>{timeAgo((w as any).last_activity_at ?? w.updated_at)}</span>
           </div>
         </div>
       ))}
-      <div style={{ marginTop: 8 }}>
+
+      <div className="section-label" style={{ marginTop: 34 }}>Recent Sessions</div>
+      {sessions.length === 0 && (
+        <div className="l1-none">这个 Project 下还没有 Session。</div>
+      )}
+      {sessions.slice(0, 8).map((s) => (
+        <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
+          <div className="grow">
+            <div className="title">{s.title ?? s.agent_session_id}</div>
+          </div>
+          <div className="side">
+            <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
+            <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
+          </div>
+        </div>
+      ))}
+
+      <div className="page-head" style={{ marginTop: 34, marginBottom: 8 }}>
+        <div className="section-label" style={{ margin: 0 }}>Resources</div>
         <button className="btn small ghost" onClick={() => setAddingRes(true)}>添加 Resource</button>
       </div>
+      {resources.length === 0 && (
+        <div className="l1-none">暂无 Resource。Project 不依赖任何路径，这里只是可选的引用集合。</div>
+      )}
+      {resources.map((r) => (
+        <div className="ext-row" key={r.id}>
+          <span className="badge">{r.kind}</span>
+          <span className="ext-title mono">{r.uri}</span>
+          <button className="link" onClick={async () => { await api.removeResource(r.id); refresh(); }}>移除</button>
+        </div>
+      ))}
 
       {creatingWs && (
-        <Modal title="New Workstream" onClose={() => setCreatingWs(false)}>
-          <label className="field"><span>标题</span>
-            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus
-              placeholder="例如：Context Sync / 行程设计 / 预算" /></label>
-          <label className="field"><span>描述（可选）</span><textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setCreatingWs(false)}>取消</button>
-            <button className="btn primary" onClick={createWs}>创建并打开</button>
-          </div>
-        </Modal>
+        <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={() => refresh()} />
       )}
 
       {addingRes && (
@@ -145,8 +125,6 @@ export default function ProjectDetail({ projectId, navigate, refreshSidebar }: {
           </div>
         </Modal>
       )}
-
-      {launchWs && <LauncherModal workstreamIds={[launchWs]} mode="new" onClose={() => setLaunchWs(null)} />}
     </div>
   );
 }
