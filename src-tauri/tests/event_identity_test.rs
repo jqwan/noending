@@ -750,13 +750,18 @@ fn migration_v4_claims_diverged_legacy_store_from_real_source() {
                 .unwrap();
         }
 
-        // reopen: v4 stamps the alias column and rewinds cursors
+        // reopen: the migration stamps the alias column and rewinds cursors
         let db = Db::open(&path).unwrap();
         let version: i64 = db
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4, "{}: schema advanced", label);
+        assert_eq!(
+            version,
+            noending::storage::SCHEMA_VERSION,
+            "{}: schema advanced to the current generation",
+            label
+        );
         let cursor = db.get_source_cursor(&session_id).unwrap();
         assert_eq!(
             cursor.identity_tail_hash, "",

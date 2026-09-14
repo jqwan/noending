@@ -3,8 +3,9 @@
 //! sync cursors verbatim, a role edit changes only the role — and on an
 //! AUTOMATIC binding upgrades the provenance to user_assigned so the user's
 //! choice survives the next auto-classification (which replaces AUTO rows
-//! wholesale with role="related"). Removing an auto binding leaves a durable
-//! removal tombstone so sync cannot silently re-add the rejected guess.
+//! wholesale with role="related"). ANY user removal — regardless of the
+//! removed binding's provenance — leaves a durable removal tombstone so
+//! sync cannot silently re-add the rejected workstream.
 
 use std::path::PathBuf;
 
@@ -254,7 +255,7 @@ fn removed_auto_binding_is_tombstoned_and_never_reclassified() {
 }
 
 #[test]
-fn removing_a_strong_binding_needs_no_tombstone() {
+fn removing_a_strong_binding_is_durable_too() {
     let database = db("strong-rm");
     let sid = session(&database, "s-strong-rm");
     let wa = workstream(&database, "Workstream A");
@@ -271,8 +272,18 @@ fn removing_a_strong_binding_needs_no_tombstone() {
 
     assert!(database.bindings_for_session(&sid).unwrap().is_empty());
     assert!(
-        !database.binding_removal_exists(&sid, &wa).unwrap(),
-        "sync never re-adds strong bindings, so no negative override is needed"
+        database.binding_removal_exists(&sid, &wa).unwrap(),
+        "a user rejection is durable regardless of provenance: with the last \
+         strong binding gone the session is auto-classifiable again"
+    );
+
+    // the next classification proposing A again must be suppressed
+    database
+        .tx(|tx| persist_auto_classification(tx, &sid, &[wa.clone()]))
+        .unwrap();
+    assert!(
+        database.bindings_for_session(&sid).unwrap().is_empty(),
+        "the rejected workstream must not come back as an auto binding"
     );
 }
 

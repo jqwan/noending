@@ -1168,3 +1168,127 @@ fn stale_commit_when_strong_binding_appears_during_extraction() {
         "a stale run must not persist its automatic classification"
     );
 }
+
+/// A tombstoned workstream must not even become an extraction candidate.
+/// Filtering only at binding write-back would still run the extractor
+/// against it and COMMIT context mutations into a workstream the user
+/// explicitly removed — touching Context Integrity, not just UI state.
+#[test]
+fn prepare_filters_tombstoned_workstreams_before_extraction() {
+    let db = open_db("tombstone-prepare");
+    let s = session_row(&db);
+    let ws_a = ws_row(&db, "量化回测引擎");
+
+    let e1 = noending::domain::SessionEvent {
+        id: new_id(),
+        session_id: s.id.clone(),
+        sequence: 1,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: "line:1".into(),
+        ts: Some(now()),
+        kind: "user_message".into(),
+        text: Some(
+            "我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度".into(),
+        ),
+        raw_ref: "/tmp/x.jsonl#line:1".into(),
+        metadata: serde_json::json!({}),
+    };
+    db.append_events(std::slice::from_ref(&e1)).unwrap();
+
+    let engine = noending::sync::SyncEngine::default();
+
+    // sanity: without the tombstone the keyword match proposes A
+    let pre1 = engine
+        .prepare(&db, &s, std::slice::from_ref(&e1), 0, 1)
+        .unwrap()
+        .expect("prepared");
+    assert_eq!(pre1.candidates, vec![ws_a.id.clone()]);
+
+    // the user rejects A — a durable negative override, even though no
+    // binding row exists right now
+    db.unbind(&s.id, &ws_a.id).unwrap();
+    assert!(db.binding_removal_exists(&s.id, &ws_a.id).unwrap());
+
+    // the next sync must not route A into candidates → extractor → mutations
+    let pre2 = engine
+        .prepare(&db, &s, std::slice::from_ref(&e1), 0, 1)
+        .unwrap()
+        .expect("prepared");
+    assert!(
+        !pre2.candidates.contains(&ws_a.id),
+        "a user-rejected workstream must never become an extraction candidate"
+    );
+
+    // and the commit writes nothing into A
+    let out = engine
+        .commit(&db, &s, &pre2, vec![], "heuristic", vec![])
+        .unwrap();
+    assert_eq!(out.applied, 0);
+    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
+}
+
+/// The binding-decision CAS must catch strong→strong routing changes too:
+/// prepare saw strong binding A, the user re-routed the session to B while
+/// the extractor ran. The old check (auto→strong only) let this commit.
+#[test]
+fn stale_commit_when_strong_binding_replaced_during_extraction() {
+    let db = open_db("stale-strong-swap");
+    let s = session_row(&db);
+    let ws_a = ws_row(&db, "前端界面重构");
+    let ws_b = ws_row(&db, "数据导出管线");
+
+    db.bind(&SessionWorkstreamBinding {
+        session_id: s.id.clone(),
+        workstream_id: ws_a.id.clone(),
+        role: "primary".into(),
+        source: binding_source::USER_ASSIGNED.into(),
+        confidence: 1.0,
+        last_seen_revision: None,
+        last_sync_cursor: 0,
+        created_at: now(),
+        last_used_at: now(),
+    })
+    .unwrap();
+
+    let engine = noending::sync::SyncEngine::default();
+    let pre = engine
+        .prepare(&db, &s, &[], 0, 0)
+        .unwrap()
+        .expect("prepared");
+    assert!(!pre.candidates_are_automatic);
+    assert_eq!(pre.candidates, vec![ws_a.id.clone()]);
+
+    // the user re-routes the session from A to B while extraction "runs":
+    // strong binding A removed (tombstoned), strong binding B added
+    db.unbind(&s.id, &ws_a.id).unwrap();
+    db.bind(&SessionWorkstreamBinding {
+        session_id: s.id.clone(),
+        workstream_id: ws_b.id.clone(),
+        role: "primary".into(),
+        source: binding_source::USER_ASSIGNED.into(),
+        confidence: 1.0,
+        last_seen_revision: None,
+        last_sync_cursor: 0,
+        created_at: now(),
+        last_used_at: now(),
+    })
+    .unwrap();
+
+    let out = engine
+        .commit(&db, &s, &pre, vec![], "heuristic", vec![])
+        .unwrap();
+    assert_eq!(
+        out.status, "stale",
+        "mutations aimed at the old routing must not commit over the user's new one"
+    );
+    assert_eq!(out.applied, 0);
+    assert_eq!(
+        db.get_processed_sequence(&s.id).unwrap(),
+        0,
+        "processed cursor must not advance for a stale run"
+    );
+    let bound = db.bindings_for_session(&s.id).unwrap();
+    assert_eq!(bound.len(), 1);
+    assert_eq!(bound[0].workstream_id, ws_b.id);
+}

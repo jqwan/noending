@@ -364,13 +364,14 @@ pub fn record_binding(
 /// an AUTOMATIC binding upgrades it to user_assigned: sync replaces AUTO
 /// rows wholesale (role reset to "related"), so without the upgrade the
 /// user's role choice would be silently undone by the next classification;
-/// as a strong binding it also arms the existing "strong binding appeared
-/// during extraction → discard stale auto run" guard. Role edits on
-/// explicit/user bindings keep their provenance. Removed AUTO rows leave a
-/// removal tombstone (sync cannot re-add them); only genuinely new rows
-/// are inserted as user_assigned. This replaces the old unbind-all →
-/// rebind-all edit flow, which reset provenance and cursors and could
-/// leave partial state on failure.
+/// as a strong binding it also arms the binding-decision CAS. Role edits on
+/// explicit/user bindings keep their provenance. Every removed row — any
+/// provenance — leaves a durable removal tombstone: a user rejection must
+/// survive even the loss of the session's last strong binding (which would
+/// make the session auto-classifiable again). Only genuinely new rows are
+/// inserted as user_assigned. This replaces the old unbind-all → rebind-all
+/// edit flow, which reset provenance and cursors and could leave partial
+/// state on failure.
 pub fn replace_session_bindings(
     db: &Db,
     session_id: &str,
@@ -401,8 +402,9 @@ pub fn replace_session_bindings(
         use rusqlite::params;
         for b in &existing {
             if !desired.iter().any(|(ws, _)| *ws == b.workstream_id) {
-                // tombstones an AUTO removal so classification cannot re-add it
-                crate::storage::remove_binding_conn(tx, session_id, &b.workstream_id)?;
+                // a user rejection is durable for ANY provenance: tombstone
+                // the pair so classification cannot re-propose it
+                crate::storage::remove_binding_by_user_conn(tx, session_id, &b.workstream_id)?;
             }
         }
         for (workstream_id, role) in &desired {

@@ -140,6 +140,12 @@ pub struct PreparedSync {
     /// `automatic_classification` bindings inside the run transaction, so
     /// the UI's session state matches what sync actually used.
     pub candidates_are_automatic: bool,
+    /// CAS snapshot of the session's binding decision (strong bindings +
+    /// removal tombstones) at prepare time. A binding decision IS a Context
+    /// routing decision; commit re-computes it and discards the run when it
+    /// changed during the lock-free extraction — one check that covers
+    /// auto→strong, strong→none, strong A→strong B and tombstone changes.
+    pub binding_decision_hash: String,
     pub meaningful: Vec<SessionEvent>,
     pub meaningful_count: usize,
     pub unclassified: usize,
@@ -236,7 +242,19 @@ impl SyncEngine {
             .map(|b| b.workstream_id.clone())
             .collect();
         let (candidates, candidates_are_automatic) = if strong.is_empty() {
-            (self.auto_classify(db, session, events), true)
+            // Durable negative overrides filter BEFORE extraction: a
+            // workstream the user explicitly removed must not even become an
+            // extraction candidate. Filtering only at binding write-back
+            // would still run the extractor against it and COMMIT context
+            // mutations into a workstream the user rejected.
+            let proposed = self.auto_classify(db, session, events);
+            let mut kept = Vec::with_capacity(proposed.len());
+            for ws in proposed {
+                if !db.binding_removal_exists(&session.id, &ws)? {
+                    kept.push(ws);
+                }
+            }
+            (kept, true)
         } else {
             (strong, false)
         };
@@ -255,7 +273,9 @@ impl SyncEngine {
             0
         };
 
-        // 3. snapshot everything extraction needs while the lock is held
+        // 3. snapshot everything extraction needs while the lock is held.
+        // The binding decision hash rides along as the commit-phase CAS.
+        let binding_decision = binding_decision_hash(&db.0, &session.id)?;
         let inputs = if self.llm.is_some() {
             extractor::collect_prompt_inputs(db, &candidates)?
         } else {
@@ -270,6 +290,7 @@ impl SyncEngine {
             to_sequence,
             candidates,
             candidates_are_automatic,
+            binding_decision_hash: binding_decision,
             meaningful_count: meaningful.len(),
             meaningful,
             unclassified,
@@ -360,39 +381,34 @@ impl SyncEngine {
                 });
             }
 
-            // Revalidate the classification snapshot too (AGENTS.md: revalidate
-            // state before committing work prepared while the lock was
-            // released). prepare classified automatically only because NO
-            // strong binding existed; if the user assigned an explicit binding
-            // while extraction ran (minutes, no lock held), the extraction
-            // targeted workstreams the user has since overridden — discard the
-            // run WITHOUT advancing the processed cursor, so the next sync
-            // prepares against the user's decision.
-            if pre.candidates_are_automatic {
-                let strong_count: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM session_workstream_bindings
-                     WHERE session_id = ?1 AND source IN (?2, ?3)",
-                    rusqlite::params![
-                        session.id,
-                        binding_source::EXPLICIT_LAUNCH,
-                        binding_source::USER_ASSIGNED
-                    ],
-                    |r| r.get(0),
-                )?;
-                if strong_count > 0 {
-                    eprintln!(
-                        "[sync] run {} stale: strong binding appeared during extraction, discarding",
-                        pre.run_id
-                    );
-                    return Ok(SyncJobOutput {
-                        run_id: pre.run_id.clone(),
-                        status: "stale".into(),
-                        applied: 0,
-                        skipped: 0,
-                        unclassified: 0,
-                        summary: "提取期间用户为该 Session 建立了显式/手工 Workstream 绑定，本次自动分类结果作废，待下次同步按新绑定重新提取。".into(),
-                    });
-                }
+            // CAS on the binding decision (AGENTS.md: revalidate state before
+            // committing work prepared while the lock was released). A
+            // binding decision IS a Context routing decision: strong
+            // bindings and removal tombstones decide where this session's
+            // context may go. If either changed while the extractor ran
+            // (user edit, launch selection, removal), the prepared mutations
+            // target a routing that no longer exists — discard the run
+            // WITHOUT advancing the processed cursor, so the next sync
+            // re-prepares against the user's decision. One hash comparison
+            // covers every transition (auto→strong, strong→none,
+            // strong A→strong B, tombstone added/removed) instead of
+            // case-by-case counters.
+            let current_decision = binding_decision_hash(tx, &session.id)?;
+            if current_decision != pre.binding_decision_hash {
+                eprintln!(
+                    "[sync] run {} stale: binding decision changed during extraction, discarding",
+                    pre.run_id
+                );
+                return Ok(SyncJobOutput {
+                    run_id: pre.run_id.clone(),
+                    status: "stale".into(),
+                    applied: 0,
+                    skipped: 0,
+                    unclassified: 0,
+                    summary:
+                        "提取期间该 Session 的 Workstream 绑定发生了变化，本次结果作废，待下次同步按新绑定重新准备。"
+                            .into(),
+                });
             }
 
             let mut applied = 0usize;
@@ -558,6 +574,57 @@ impl SyncEngine {
 
 /// Stable fingerprint of a processed delta: ordered event ids. A completed
 /// SyncRun with the same fingerprint means "this batch is already merged".
+/// CAS snapshot of a session's binding decision: the sorted set of strong
+/// bindings (workstream_id + role) plus removal tombstones. AUTO rows are
+/// deliberately excluded — sync rewrites them on every classification run,
+/// so they are not part of the *decision*. Accepts `&Connection` or
+/// `&Transaction` (deref).
+pub fn binding_decision_hash(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> crate::error::Result<String> {
+    use sha2::Digest;
+
+    let mut st = conn.prepare(
+        "SELECT workstream_id, role FROM session_workstream_bindings
+         WHERE session_id = ?1 AND source IN (?2, ?3)
+         ORDER BY workstream_id",
+    )?;
+    let strong = st
+        .query_map(
+            rusqlite::params![
+                session_id,
+                binding_source::EXPLICIT_LAUNCH,
+                binding_source::USER_ASSIGNED
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut st2 = conn.prepare(
+        "SELECT workstream_id FROM session_binding_removals
+         WHERE session_id = ?1 ORDER BY workstream_id",
+    )?;
+    let removed = st2
+        .query_map(rusqlite::params![session_id], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut h = sha2::Sha256::new();
+    for (ws, role) in strong {
+        h.update(b"B\x1f");
+        h.update(ws.as_bytes());
+        h.update(b"\x1f");
+        h.update(role.as_bytes());
+        h.update(b"\x1e");
+    }
+    for ws in removed {
+        h.update(b"R\x1f");
+        h.update(ws.as_bytes());
+        h.update(b"\x1e");
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
 /// Testable core of the auto-classification persist step: replace the
 /// previous AUTOMATIC guesses with the fresh candidates, skipping
 /// workstreams the user explicitly removed (durable removal tombstones —

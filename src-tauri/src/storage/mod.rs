@@ -24,8 +24,10 @@ pub struct Db(pub Connection);
 /// from pre-upgrade rewrites) recomputed identity hashes in store order; v4
 /// replaced that with a lazy, source-driven migration — legacy events carry
 /// a claimable alias and are re-identified from the REAL source on the next
-/// full re-scan, event ids preserved.
-pub const SCHEMA_VERSION: i64 = 4;
+/// full re-scan, event ids preserved; v5 added `session_binding_removals`
+/// (durable negative overrides: a user-rejected workstream is never
+/// re-proposed by auto-classification).
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -1106,8 +1108,11 @@ impl Db {
         bind_conn(&self.0, b)
     }
 
+    /// User-initiated removal — leaves a durable tombstone so
+    /// auto-classification can never re-add the rejected workstream,
+    /// regardless of the removed binding's provenance.
     pub fn unbind(&self, session_id: &str, workstream_id: &str) -> Result<()> {
-        self.tx(|tx| remove_binding_conn(tx, session_id, workstream_id))
+        self.tx(|tx| remove_binding_by_user_conn(tx, session_id, workstream_id))
     }
 
     /// Durable negative override lookup: has the user removed this binding?
@@ -1880,28 +1885,26 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
     Ok(())
 }
 
-/// Remove a binding row. Removing an AUTOMATIC binding leaves a durable
-/// removal tombstone, so the next auto-classification cannot silently
-/// re-add the guess the user just rejected; removing a strong binding
-/// needs no tombstone (sync never re-adds explicit/user bindings, and a
-/// later strong write would lift it anyway).
-pub fn remove_binding_conn(conn: &Connection, session_id: &str, workstream_id: &str) -> Result<()> {
-    let source: String = conn
-        .query_row(
-            "SELECT source FROM session_workstream_bindings
-             WHERE session_id = ?1 AND workstream_id = ?2",
-            params![session_id, workstream_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_default();
-    if source == binding_source::AUTO {
-        conn.execute(
-            "INSERT OR IGNORE INTO session_binding_removals (session_id, workstream_id, created_at)
-             VALUES (?1, ?2, ?3)",
-            params![session_id, workstream_id, now()],
-        )?;
-    }
+/// Remove a binding on behalf of the USER. Any user-initiated removal is a
+/// durable negative decision regardless of the removed binding's
+/// provenance: once the last strong binding goes away the session becomes
+/// auto-classifiable again, and without the tombstone the next
+/// classification could re-add the very workstream the user just rejected.
+/// The tombstone is written even when no binding row exists — an explicit
+/// "this session must not bind here" also works as a pure negative
+/// override. (Sync's own re-classification deletes AUTO rows directly in
+/// persist_auto_classification and must NOT route through here: an
+/// automatic replace is a guess being revised, not a user rejection.)
+pub fn remove_binding_by_user_conn(
+    conn: &Connection,
+    session_id: &str,
+    workstream_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO session_binding_removals (session_id, workstream_id, created_at)
+         VALUES (?1, ?2, ?3)",
+        params![session_id, workstream_id, now()],
+    )?;
     conn.execute(
         "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND workstream_id = ?2",
         params![session_id, workstream_id],
