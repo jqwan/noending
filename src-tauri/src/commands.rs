@@ -291,7 +291,7 @@ const DEFAULT_AGENT_KEY: &str = "launcher.default_agent";
 #[tauri::command]
 pub fn get_default_agent(state: State<AppState>) -> Result<Option<String>> {
     with_db(&state, |db| {
-        Ok(default_agent_of(db).map(|a| a.as_str().to_string()))
+        Ok(default_agent_of(db)?.map(|a| a.as_str().to_string()))
     })
 }
 
@@ -300,15 +300,34 @@ pub fn get_default_agent(state: State<AppState>) -> Result<Option<String>> {
 /// of silently substituting); without an explicit choice we fall back to the
 /// first detected agent; with no detected agent at all the default is None
 /// and New actions render disabled instead of failing at launch.
-pub fn default_agent_of(db: &Db) -> Option<Agent> {
-    if let Ok(Some(v)) = db.get_setting(DEFAULT_AGENT_KEY) {
+/// Storage errors propagate — a broken DB must not masquerade as "no agent".
+pub fn default_agent_of(db: &Db) -> Result<Option<Agent>> {
+    if let Some(v) = db.get_setting(DEFAULT_AGENT_KEY)? {
         if let Some(a) = Agent::parse(&v) {
-            return Some(a);
+            return Ok(Some(a));
         }
     }
-    Agent::all()
-        .into_iter()
-        .find(|a| matches!(db.get_installation(*a), Ok(Some(_))))
+    for a in Agent::all() {
+        if db.get_installation(a)?.is_some() {
+            return Ok(Some(a));
+        }
+    }
+    Ok(None)
+}
+
+/// Startup detection snapshot (ExecutableResolver refresh): a successful
+/// resolve upserts the cached installation, a failed one DELETES the row —
+/// a CLI that disappeared must stop being reported as detected and stop
+/// being auto-selected as default agent.
+pub fn record_installation_probe(
+    db: &Db,
+    agent: Agent,
+    resolved: Option<crate::platform::exec_resolver::AgentInstallation>,
+) -> Result<()> {
+    match resolved {
+        Some(install) => db.save_installation(&install),
+        None => db.delete_installation(agent),
+    }
 }
 
 #[tauri::command]

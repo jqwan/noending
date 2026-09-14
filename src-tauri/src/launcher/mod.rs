@@ -358,12 +358,19 @@ pub fn record_binding(
     Ok(())
 }
 
-/// Apply the user's edited binding set for a Session as ONE atomic diff:
-/// unchanged rows are kept verbatim (provenance, created_at and sync
-/// cursors survive), a role change updates only the role, removed rows are
-/// deleted, and only genuinely new rows are inserted as user_assigned.
-/// This replaces the old unbind-all → rebind-all edit flow, which reset
-/// provenance and cursors and could leave partial state on failure.
+/// Apply the user's edited binding set for a Session as ONE atomic diff.
+/// Unchanged rows are kept verbatim (provenance, created_at, cursors and
+/// last_used_at survive — a metadata edit is not a "use"). A role edit on
+/// an AUTOMATIC binding upgrades it to user_assigned: sync replaces AUTO
+/// rows wholesale (role reset to "related"), so without the upgrade the
+/// user's role choice would be silently undone by the next classification;
+/// as a strong binding it also arms the existing "strong binding appeared
+/// during extraction → discard stale auto run" guard. Role edits on
+/// explicit/user bindings keep their provenance. Removed AUTO rows leave a
+/// removal tombstone (sync cannot re-add them); only genuinely new rows
+/// are inserted as user_assigned. This replaces the old unbind-all →
+/// rebind-all edit flow, which reset provenance and cursors and could
+/// leave partial state on failure.
 pub fn replace_session_bindings(
     db: &Db,
     session_id: &str,
@@ -394,26 +401,35 @@ pub fn replace_session_bindings(
         use rusqlite::params;
         for b in &existing {
             if !desired.iter().any(|(ws, _)| *ws == b.workstream_id) {
-                tx.execute(
-                    "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND workstream_id = ?2",
-                    params![session_id, b.workstream_id],
-                )?;
+                // tombstones an AUTO removal so classification cannot re-add it
+                crate::storage::remove_binding_conn(tx, session_id, &b.workstream_id)?;
             }
         }
         for (workstream_id, role) in &desired {
             match existing.iter().find(|b| b.workstream_id == *workstream_id) {
                 Some(b) if b.role != *role => {
-                    // role-only edit: provenance, created_at and cursors stay
+                    // role-only edit: created_at, cursors and last_used_at
+                    // stay; an auto provenance becomes user_assigned so the
+                    // decision survives the next auto-classification.
                     tx.execute(
                         "UPDATE session_workstream_bindings
-                         SET role = ?3, last_used_at = ?4
+                         SET role = ?3,
+                             source = CASE WHEN source = ?4 THEN ?5 ELSE source END,
+                             confidence = CASE WHEN source = ?4 THEN 1.0 ELSE confidence END
                          WHERE session_id = ?1 AND workstream_id = ?2",
-                        params![session_id, workstream_id, role, now()],
+                        params![
+                            session_id,
+                            workstream_id,
+                            role,
+                            binding_source::AUTO,
+                            binding_source::USER_ASSIGNED
+                        ],
                     )?;
                 }
                 Some(_) => {} // unchanged: the row is kept exactly as-is
                 None => {
-                    // only a binding the user just added is user_assigned
+                    // only a binding the user just added is user_assigned;
+                    // bind_conn also lifts any removal tombstone for the pair
                     let b = SessionWorkstreamBinding {
                         session_id: session_id.to_string(),
                         workstream_id: workstream_id.clone(),

@@ -129,24 +129,57 @@ fn default_agent_prefers_explicit_choice_then_detected_then_none() {
     let database = db("default-agent");
     // No setting, nothing detected → None: the UI disables New instead of
     // launching an agent that is not installed.
-    assert_eq!(noending::commands::default_agent_of(&database), None);
+    assert_eq!(
+        noending::commands::default_agent_of(&database).unwrap(),
+        None
+    );
+
+    // A startup probe that resolves becomes the detected fallback default.
+    noending::commands::record_installation_probe(
+        &database,
+        Agent::Codex,
+        Some(installation(Agent::Codex)),
+    )
+    .unwrap();
+    assert_eq!(
+        noending::commands::default_agent_of(&database).unwrap(),
+        Some(Agent::Codex)
+    );
+
+    // Explicit choice stays authoritative even while undetected (the UI
+    // warns instead of silently substituting).
     database
-        .set_setting("launcher.default_agent", "codex")
+        .set_setting("launcher.default_agent", "claude_code")
         .unwrap();
     assert_eq!(
         noending::commands::default_agent_of(&database).unwrap(),
-        Agent::Codex
+        Some(Agent::ClaudeCode)
     );
-    // Explicit choice stays authoritative even while undetected (the UI
-    // warns); garbage falls through to detection.
+
+    // Uninstall snapshot: a failed startup probe REMOVES the cached row —
+    // the stale "detected" state must not survive a restart.
+    noending::commands::record_installation_probe(&database, Agent::Codex, None).unwrap();
+    assert!(database.get_installation(Agent::Codex).unwrap().is_none());
+
+    // Garbage setting falls through to detection; nothing detected left.
     database
         .set_setting("launcher.default_agent", "not-an-agent")
         .unwrap();
     assert_eq!(
-        noending::commands::default_agent_of(&database),
+        noending::commands::default_agent_of(&database).unwrap(),
         None,
         "an unparseable setting must not fabricate an installed agent"
     );
+}
+
+fn installation(agent: Agent) -> noending::platform::exec_resolver::AgentInstallation {
+    noending::platform::exec_resolver::AgentInstallation {
+        agent,
+        executable_path: format!("/tmp/fake-cli-{}", agent.as_str()),
+        version: Some("test".into()),
+        source: "test".into(),
+        last_verified_at: now(),
+    }
 }
 
 #[test]

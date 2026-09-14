@@ -416,27 +416,11 @@ impl SyncEngine {
             // than dropped. (Strong bindings are never touched here: prepare
             // only reaches the automatic path when none exist, and
             // bind_conn's precedence still guards a racing explicit bind.)
+            // Candidates the user explicitly removed are skipped via the
+            // durable removal tombstones — a rejected guess must not come
+            // back.
             if pre.candidates_are_automatic && !pre.candidates.is_empty() {
-                tx.execute(
-                    "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND source = ?2",
-                    rusqlite::params![session.id, binding_source::AUTO],
-                )?;
-                for ws_id in &pre.candidates {
-                    crate::storage::bind_conn(
-                        tx,
-                        &SessionWorkstreamBinding {
-                            session_id: session.id.clone(),
-                            workstream_id: ws_id.clone(),
-                            role: "related".into(),
-                            source: binding_source::AUTO.into(),
-                            confidence: 0.6,
-                            last_seen_revision: None,
-                            last_sync_cursor: 0,
-                            created_at: now(),
-                            last_used_at: now(),
-                        },
-                    )?;
-                }
+                persist_auto_classification(tx, &session.id, &pre.candidates)?;
             }
 
             let mut summary = format!(
@@ -574,6 +558,50 @@ impl SyncEngine {
 
 /// Stable fingerprint of a processed delta: ordered event ids. A completed
 /// SyncRun with the same fingerprint means "this batch is already merged".
+/// Testable core of the auto-classification persist step: replace the
+/// previous AUTOMATIC guesses with the fresh candidates, skipping
+/// workstreams the user explicitly removed (durable removal tombstones —
+/// a rejected guess must not silently come back).
+pub fn persist_auto_classification(
+    tx: &rusqlite::Transaction,
+    session_id: &str,
+    candidates: &[String],
+) -> crate::error::Result<()> {
+    use crate::domain::{binding_source, SessionWorkstreamBinding};
+    use crate::storage::{bind_conn, now};
+
+    tx.execute(
+        "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND source = ?2",
+        rusqlite::params![session_id, binding_source::AUTO],
+    )?;
+    for ws_id in candidates {
+        let removed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_binding_removals
+             WHERE session_id = ?1 AND workstream_id = ?2)",
+            rusqlite::params![session_id, ws_id],
+            |r| r.get(0),
+        )?;
+        if removed {
+            continue;
+        }
+        bind_conn(
+            tx,
+            &SessionWorkstreamBinding {
+                session_id: session_id.to_string(),
+                workstream_id: ws_id.clone(),
+                role: "related".into(),
+                source: binding_source::AUTO.into(),
+                confidence: 0.6,
+                last_seen_revision: None,
+                last_sync_cursor: 0,
+                created_at: now(),
+                last_used_at: now(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 pub fn delta_fingerprint(session_id: &str, events: &[SessionEvent]) -> String {
     let mut h = Sha256::new();
     h.update(session_id);

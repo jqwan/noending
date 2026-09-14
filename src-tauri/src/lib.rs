@@ -26,17 +26,20 @@ pub fn run() {
             let db = storage::Db::open(&db_path)?;
             eprintln!("[noending] db at {}", db_path.display());
 
-            // refresh + cache agent CLI detections (ExecutableResolver)
+            // refresh + cache agent CLI detections (ExecutableResolver).
+            // Snapshot semantics: a failed resolve REMOVES the cached row so
+            // an uninstalled CLI is no longer reported as detected and can
+            // no longer be auto-selected as default agent.
             {
                 for agent in domain::Agent::all() {
-                    if let Ok(install) = platform::exec_resolver::resolve(agent) {
-                        let _ = db.save_installation(&install);
-                    } else {
+                    let resolved = platform::exec_resolver::resolve(agent).ok();
+                    if resolved.is_none() {
                         eprintln!(
                             "[noending] {} CLI not found — adapter will be unavailable",
                             agent.display_name()
                         );
                     }
+                    let _ = commands::record_installation_probe(&db, agent, resolved);
                 }
             }
 

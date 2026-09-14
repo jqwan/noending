@@ -212,6 +212,15 @@ impl Db {
               last_used_at TEXT NOT NULL,
               PRIMARY KEY (session_id, workstream_id)
             );
+            -- Durable negative override: the user removed this (auto) binding.
+            -- Sync's auto-classification must not re-add it; a later strong
+            -- write to the same (session, workstream) clears the row.
+            CREATE TABLE IF NOT EXISTS session_binding_removals (
+              session_id TEXT NOT NULL,
+              workstream_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (session_id, workstream_id)
+            );
             CREATE TABLE IF NOT EXISTS context_items (
               id TEXT PRIMARY KEY,
               workstream_id TEXT NOT NULL REFERENCES workstreams(id),
@@ -1098,11 +1107,16 @@ impl Db {
     }
 
     pub fn unbind(&self, session_id: &str, workstream_id: &str) -> Result<()> {
-        self.0.execute(
-            "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND workstream_id = ?2",
+        self.tx(|tx| remove_binding_conn(tx, session_id, workstream_id))
+    }
+
+    /// Durable negative override lookup: has the user removed this binding?
+    pub fn binding_removal_exists(&self, session_id: &str, workstream_id: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_binding_removals WHERE session_id = ?1 AND workstream_id = ?2)",
             params![session_id, workstream_id],
-        )?;
-        Ok(())
+            |r| r.get(0),
+        )?)
     }
 
     pub fn bindings_for_session(&self, session_id: &str) -> Result<Vec<SessionWorkstreamBinding>> {
@@ -1705,6 +1719,17 @@ impl Db {
             .optional()?)
     }
 
+    /// Drop a cached installation row (startup snapshot: a failed resolve
+    /// means the CLI is gone; keeping the row would keep reporting it as
+    /// detected and let it be chosen as default agent).
+    pub fn delete_installation(&self, agent: Agent) -> Result<()> {
+        self.0.execute(
+            "DELETE FROM agent_installations WHERE agent = ?1",
+            params![agent.as_str()],
+        )?;
+        Ok(())
+    }
+
     // ---------------- FTS ----------------
 
     pub fn fts_available(&self) -> bool {
@@ -1855,6 +1880,35 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
     Ok(())
 }
 
+/// Remove a binding row. Removing an AUTOMATIC binding leaves a durable
+/// removal tombstone, so the next auto-classification cannot silently
+/// re-add the guess the user just rejected; removing a strong binding
+/// needs no tombstone (sync never re-adds explicit/user bindings, and a
+/// later strong write would lift it anyway).
+pub fn remove_binding_conn(conn: &Connection, session_id: &str, workstream_id: &str) -> Result<()> {
+    let source: String = conn
+        .query_row(
+            "SELECT source FROM session_workstream_bindings
+             WHERE session_id = ?1 AND workstream_id = ?2",
+            params![session_id, workstream_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    if source == binding_source::AUTO {
+        conn.execute(
+            "INSERT OR IGNORE INTO session_binding_removals (session_id, workstream_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![session_id, workstream_id, now()],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND workstream_id = ?2",
+        params![session_id, workstream_id],
+    )?;
+    Ok(())
+}
+
 pub fn bind_conn(conn: &Connection, b: &SessionWorkstreamBinding) -> Result<()> {
     // Binding sources have an explicit PRECEDENCE, not just confidence:
     // explicit launch selection (3) > user_assigned (2) > automatic (1).
@@ -1863,6 +1917,17 @@ pub fn bind_conn(conn: &Connection, b: &SessionWorkstreamBinding) -> Result<()> 
     // resume can never rewrite an explicit_launch_selection into a weaker
     // provenance even at equal confidence, and role changes only when the
     // binding itself is replaced.
+    //
+    // A strong write (explicit / user_assigned) also lifts any removal
+    // tombstone for the pair: the user re-established the binding, so the
+    // earlier "don't auto-classify here" decision no longer applies. Auto
+    // writes (sync re-classification) must NOT clear it.
+    if b.source == binding_source::EXPLICIT_LAUNCH || b.source == binding_source::USER_ASSIGNED {
+        conn.execute(
+            "DELETE FROM session_binding_removals WHERE session_id = ?1 AND workstream_id = ?2",
+            params![b.session_id, b.workstream_id],
+        )?;
+    }
     conn.execute(
         "INSERT INTO session_workstream_bindings
          (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
