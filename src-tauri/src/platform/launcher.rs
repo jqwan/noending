@@ -43,10 +43,12 @@ pub fn render_bash(cmd: &AgentCommand) -> String {
     let mut script = String::from("#!/bin/bash\n");
     if let Some(cwd) = &cmd.cwd {
         // A stale recorded cwd must not abort the launch (exit 1 would leave
-        // the user with a dead window and no agent); fall back to $HOME.
+        // the user with a dead window and no agent); fall back to $HOME —
+        // but say so: a silent fallback looks like "the agent launched in
+        // the wrong directory" with no explanation.
+        let dir = shell_quote(&cwd.to_string_lossy());
         script.push_str(&format!(
-            "cd {} 2>/dev/null || cd \"$HOME\" || true\n",
-            shell_quote(&cwd.to_string_lossy())
+            "cd {dir} 2>/dev/null || {{ printf 'NoEnding: 工作目录不可用: %s — 已回退到 $HOME\\n' {dir}; cd \"$HOME\"; }} || true\n",
         ));
     }
     let mut parts: Vec<String> = vec![shell_quote(&cmd.program)];
@@ -68,10 +70,13 @@ pub fn render_bash(cmd: &AgentCommand) -> String {
 pub fn render_ps(cmd: &AgentCommand) -> String {
     let mut script = String::new();
     if let Some(cwd) = &cmd.cwd {
-        // stale cwd must not abort the launch — continue in the default dir
+        // stale cwd must not abort the launch — continue in the default dir,
+        // but announce the fallback instead of failing silently.
+        let dir = ps_quote(&cwd.to_string_lossy());
+        // The notice concatenates quoted segments — interpolating the quoted
+        // path INSIDE a single-quoted literal would break on paths with quotes.
         script.push_str(&format!(
-            "Set-Location -LiteralPath {} -ErrorAction SilentlyContinue\n",
-            ps_quote(&cwd.to_string_lossy())
+            "if (Test-Path -LiteralPath {dir}) {{ Set-Location -LiteralPath {dir} }} else {{ Write-Host ('NoEnding: 工作目录不可用: ' + {dir} + ' — 已回退到默认目录') }}\n",
         ));
     }
     if !cmd.args.is_empty() {
@@ -108,13 +113,51 @@ fn script_name(kind: &str) -> String {
     )
 }
 
+/// Launch scripts and their ack sentinels are diagnostics of a single
+/// launch; drop anything older than a day so the directory cannot grow
+/// unboundedly. Only `launch-*` files here are ours.
+fn prune_old_scripts() {
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    if let Ok(rd) = std::fs::read_dir(script_dir()) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let ours = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("launch-"))
+                .unwrap_or(false);
+            if !ours {
+                continue;
+            }
+            if let Ok(modified) = e.metadata().and_then(|m| m.modified()) {
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+}
+
+/// Prepend the ack line: the script's very first action writes a sentinel
+/// file, turning "did the typed command actually execute?" into a
+/// checkable fact. Used by the macOS launch only, but pure string building
+/// so it stays testable everywhere.
+#[allow(dead_code)]
+fn prepend_ack_line(sentinel: &std::path::Path, body: &str) -> String {
+    format!(": > {}\n{}", shell_quote(&sentinel.to_string_lossy()), body)
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
 
     pub fn launch(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+        prune_old_scripts();
         let path = script_dir().join(script_name("macos"));
-        std::fs::write(&path, render_bash(cmd))?;
+        let sentinel = path.with_extension("ok");
+        let _ = std::fs::remove_file(&sentinel);
+
+        std::fs::write(&path, prepend_ack_line(&sentinel, &render_bash(cmd)))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -129,27 +172,47 @@ mod imp {
             format!("\"{}\"", script_path.replace('"', "\\\""))
         );
 
-        let child = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&osascript)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+        // `do script` TYPES its text into the new window's shell. While
+        // that shell is still initializing (login + zshrc + nvm can take
+        // seconds) the typed text can be swallowed and the command ends up
+        // sitting unexecuted at the prompt — observed in the wild, and it
+        // looks exactly like "a terminal window opened but nothing
+        // happened". The sentinel makes the failure detectable: retype the
+        // launch into a fresh window instead of failing silently.
+        let attempts = 3;
+        for _ in 1..=attempts {
+            let child = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(&osascript)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
 
-        let pid = child.id();
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            return Err(other(format!(
-                "osascript 启动 Terminal 失败: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )));
+            let pid = child.id();
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                return Err(other(format!(
+                    "osascript 启动 Terminal 失败: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                )));
+            }
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+            while std::time::Instant::now() < deadline {
+                if sentinel.exists() {
+                    return Ok(LaunchOutcome {
+                        launched_via: "macOS Terminal".into(),
+                        command_line: cmd.display(),
+                        pid: Some(pid),
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
         }
-        Ok(LaunchOutcome {
-            launched_via: "macOS Terminal".into(),
-            command_line: cmd.display(),
-            pid: Some(pid),
-        })
+        Err(other(
+            "终端窗口已打开但启动脚本未执行（终端初始化竞争，已重试 3 次）。请检查已打开的终端窗口。",
+        ))
     }
 
     pub fn open_uri(uri: &str) -> Result<()> {
@@ -272,10 +335,56 @@ mod tests {
             cwd: Some("/tmp/some dir".into()),
         };
         let s = render_bash(&cmd);
-        assert!(s.contains("cd '/tmp/some dir' 2>/dev/null || cd \"$HOME\" || true"));
+        // cd failure must be VISIBLE (printf fallback notice), never silent
+        assert!(s.contains("cd '/tmp/some dir' 2>/dev/null || { printf 'NoEnding: 工作目录不可用: %s — 已回退到 $HOME\\n' '/tmp/some dir'; cd \"$HOME\"; } || true"));
         assert!(
             s.contains("'/usr/local/bin/My Agent' 'resume' 'sess-1' 'line1\nline2 '\\''q'\\'' $X'")
         );
+    }
+
+    #[test]
+    fn bash_render_skips_cd_when_no_cwd() {
+        let cmd = AgentCommand {
+            program: "pi".into(),
+            args: vec![],
+            cwd: None,
+        };
+        let s = render_bash(&cmd);
+        assert!(!s.contains("cd "));
+        assert!(s.starts_with("#!/bin/bash\n"));
+    }
+
+    #[test]
+    fn ack_line_precedes_rendered_body() {
+        let cmd = AgentCommand {
+            program: "pi".into(),
+            args: vec!["hello".into()],
+            cwd: Some("/tmp/x".into()),
+        };
+        let sentinel = std::path::PathBuf::from("/tmp/launch-macos-x.ok");
+        let body = prepend_ack_line(&sentinel, &render_bash(&cmd));
+        let mut lines = body.lines();
+        // First action of the script must be the sentinel write — the ack
+        // fires before cd/agent, so "script started" is observable even if
+        // the agent itself exits instantly.
+        assert_eq!(lines.next(), Some(": > '/tmp/launch-macos-x.ok'"));
+        assert_eq!(lines.next(), Some("#!/bin/bash"));
+        assert!(body.contains(&render_bash(&cmd)));
+    }
+
+    /// The cd-failure notice must not interpolate the quoted path inside a
+    /// single-quoted PowerShell literal: a quote in the path would close
+    /// the string mid-message and turn the rest into bare tokens.
+    #[test]
+    fn ps_render_cd_notice_survives_quotes_in_path() {
+        let cmd = AgentCommand {
+            program: "x".into(),
+            args: vec![],
+            cwd: Some("C:\\my 'docs'".into()),
+        };
+        let s = render_ps(&cmd);
+        assert!(s.contains("Test-Path -LiteralPath 'C:\\my ''docs'''"));
+        assert!(s.contains("+ 'C:\\my ''docs''' +"));
     }
 
     #[test]
@@ -286,7 +395,8 @@ mod tests {
             cwd: Some("C:\\Users\\me docs".into()),
         };
         let s = render_ps(&cmd);
-        assert!(s.contains("Set-Location -LiteralPath 'C:\\Users\\me docs'"));
+        // guarded cd: only chdir when the dir exists, otherwise say so
+        assert!(s.contains("if (Test-Path -LiteralPath 'C:\\Users\\me docs') { Set-Location -LiteralPath 'C:\\Users\\me docs' } else { Write-Host ('NoEnding: 工作目录不可用: ' + 'C:\\Users\\me docs' + ' — 已回退到默认目录') }"));
         assert!(s.contains("& 'C:\\Program Files\\claude.exe' @argv"));
         // exact array shape: comma between items, none after the last —
         // PowerShell rejects a trailing comma ("Missing expression after ',")

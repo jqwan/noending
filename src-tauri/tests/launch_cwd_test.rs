@@ -157,3 +157,74 @@ fn default_cwd_roundtrips_through_storage() {
         None
     );
 }
+
+/// Users type `~/projects/x` — the terminal renderers quote the path, and a
+/// literal `~` inside quotes never expands (the launch would silently land
+/// in $HOME). Resolution must hand the renderers an absolute path.
+#[test]
+fn tilde_in_default_cwd_expands_to_home_directory() {
+    let database = db("tilde");
+    let w = workstream(&database, "W", Some("~/projects/noending"));
+    let home = dirs::home_dir().expect("home dir available in test env");
+
+    assert_eq!(
+        resolve_new_session_cwd(&database, &[w.clone()], None)
+            .unwrap()
+            .as_deref(),
+        Some(home.join("projects/noending").to_string_lossy().as_ref())
+    );
+    // the stored value keeps the user's original text — expansion is the
+    // single launch-time concern
+    assert_eq!(
+        database
+            .get_workstream(&w)
+            .unwrap()
+            .unwrap()
+            .default_cwd
+            .as_deref(),
+        Some("~/projects/noending")
+    );
+}
+
+#[test]
+fn bare_tilde_expands_to_home_root() {
+    let database = db("tilde-bare");
+    let w = workstream(&database, "W", Some("~"));
+    let home = dirs::home_dir().unwrap();
+
+    assert_eq!(
+        resolve_new_session_cwd(&database, &[w], None)
+            .unwrap()
+            .as_deref(),
+        Some(home.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn explicit_tilde_cwd_also_expands() {
+    let database = db("tilde-explicit");
+    let w = workstream(&database, "W", Some("/default/dir"));
+    let home = dirs::home_dir().unwrap();
+
+    assert_eq!(
+        resolve_new_session_cwd(&database, &[w], Some("~/notes"))
+            .unwrap()
+            .as_deref(),
+        Some(home.join("notes").to_string_lossy().as_ref())
+    );
+}
+
+/// `~` only means home at the leading position; an absolute path containing
+/// it is not touched.
+#[test]
+fn tilde_expands_only_at_leading_position() {
+    let database = db("tilde-mid");
+    let w = workstream(&database, "W", Some("/opt/a~b/dir"));
+
+    assert_eq!(
+        resolve_new_session_cwd(&database, &[w], None)
+            .unwrap()
+            .as_deref(),
+        Some("/opt/a~b/dir")
+    );
+}

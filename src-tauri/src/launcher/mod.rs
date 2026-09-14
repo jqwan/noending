@@ -363,12 +363,44 @@ pub fn record_binding(
     Ok(())
 }
 
+/// Expand a leading `~` / `~/` / `~\` to the user's home directory.
+/// Users type `~/projects/x` into default_cwd; passing the tilde through to
+/// the rendered terminal script would break it — POSIX single quotes and
+/// PowerShell `-LiteralPath` both treat `~` literally, so the cd silently
+/// falls back to $HOME. Absolute paths (and `~` anywhere but the leading
+/// position) pass through untouched; `~user` is intentionally unsupported.
+/// The stored default_cwd keeps the user's original text — this is the one
+/// canonical expansion point, so LaunchIntent records the absolute path.
+pub fn expand_tilde(p: &str) -> String {
+    let trimmed = p.trim();
+    let rest = if trimmed == "~" {
+        Some("")
+    } else if let Some(r) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        Some(r)
+    } else {
+        None
+    };
+    match rest {
+        Some(r) => match dirs::home_dir() {
+            // join("") would append a trailing separator to a bare `~`
+            Some(home) if r.is_empty() => home.to_string_lossy().into_owned(),
+            Some(home) => home.join(r).to_string_lossy().into_owned(),
+            None => p.to_string(),
+        },
+        None => p.to_string(),
+    }
+}
+
 /// Launch directory for a New Session, in priority order:
 /// 1. the caller's explicit value (kept for API completeness);
 /// 2. a selected Workstream's `default_cwd` — the first set one in the
 ///    user's selection order;
 /// 3. the most recent session cwd across the selected Workstreams
-///    ("continue where you left off").
+///    ("continue where you left off", absolute by construction — it comes
+///    from parsed transcripts — so no tilde expansion is applied there).
 /// A Workstream's default_cwd is a launch convenience, never identity:
 /// the Workstream is not a path, and Sessions keep their own cwd.
 pub fn resolve_new_session_cwd(
@@ -377,12 +409,12 @@ pub fn resolve_new_session_cwd(
     explicit: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(c) = explicit {
-        return Ok(Some(c.to_string()));
+        return Ok(Some(expand_tilde(c)));
     }
     for ws_id in workstream_ids {
         if let Some(w) = db.get_workstream(ws_id)? {
             if let Some(cwd) = w.default_cwd {
-                return Ok(Some(cwd));
+                return Ok(Some(expand_tilde(&cwd)));
             }
         }
     }
