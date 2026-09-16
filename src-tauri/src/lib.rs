@@ -116,6 +116,8 @@ pub fn run() {
             commands::list_workstream_cards,
             commands::get_default_agent,
             commands::set_default_agent,
+            commands::get_context_delivery_level,
+            commands::set_context_delivery_level,
             commands::archive_workstream,
             commands::merge_workstreams,
             commands::add_context_item,

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Agent, AppInfo, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
+  Agent, AppInfo, ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
   SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext,
 } from "./types";
@@ -92,6 +92,10 @@ export const api = {
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
   setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),
+
+  getContextDeliveryLevel: () => invoke<ContextDeliveryLevel>("get_context_delivery_level"),
+  setContextDeliveryLevel: (level: ContextDeliveryLevel) =>
+    invoke<void>("set_context_delivery_level", { level }),
 
   assistantSend: (sessionId: string | null, text: string) =>
     invoke<{ session_id: string; content: string; runtime: string }>("assistant_send", { sessionId, text }),

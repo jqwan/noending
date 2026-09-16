@@ -38,6 +38,7 @@ When changing the system, preserve these rules:
 * User-selected Workstream bindings are stronger than automatic classification; automatic bindings stay **revisable** — re-classification replaces them, it never freezes them.
 * A user-removed Workstream binding is a **permanent negative decision** (removal tombstone): sync rounds and elapsed time never revive it, and auto-classification must never re-propose the pair — not even as an extraction candidate. Only a user strong write (explicit launch / user assignment) lifts it. If rejection ever needs to become revisable, that must be an explicit user action ("allow classification again"), never a TTL.
 * A Sync run is committed against the binding decision it prepared with: the decision snapshot (strong bindings + removal tombstones) is re-checked at commit, and any change during extraction discards the run as stale without advancing the cursor.
+* **Context Delivery controls outbound context injection only.** Turning delivery Off MUST NOT disable ingestion, sync, extraction, Workstream bindings, or context evolution. A ContextDelivery snapshot MUST be advanced only when the corresponding context was actually delivered to the Agent.
 * macOS and Windows are first-class platforms.
 
 When uncertain, prefer **preserving history, provenance, and user intent** over convenience.

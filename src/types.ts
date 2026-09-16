@@ -191,8 +191,15 @@ export interface SearchHit {
   rank: number;
 }
 
+export type ContextDeliveryLevel =
+  | "off"
+  | "compact"
+  | "balanced"
+  | "detailed";
+
 export interface SessionContextBundle {
   mode: string;
+  delivery_level?: string;
   workstream_ids: string[];
   sections: ContextSection[];
   markdown: string;

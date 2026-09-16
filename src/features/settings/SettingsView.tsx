@@ -3,7 +3,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import SourcesSettings from "./SourcesSettings";
-import { AGENT_LABELS, type Agent, type AppInfo } from "../../types";
+import { AGENT_LABELS, type Agent, type AppInfo, type ContextDeliveryLevel } from "../../types";
 import type { Route, SettingsSection } from "../../app/routes";
 
 const SECTIONS: { key: SettingsSection; label: string }[] = [
@@ -158,33 +158,108 @@ function AgentsSettings() {
   );
 }
 
-/** Context & Sync：当前固定开启，先只展示说明（§50），不创造无意义开关。 */
+const DELIVERY_LEVELS: { key: ContextDeliveryLevel; label: string; hint: string }[] = [
+  {
+    key: "off",
+    label: "Off",
+    hint: "Don't send NoEnding Workstream context to Agent sessions.",
+  },
+  {
+    key: "compact",
+    label: "Compact",
+    hint: "Send only the most important current context and recent changes.",
+  },
+  {
+    key: "balanced",
+    label: "Balanced",
+    hint: "Send core context plus relevant supporting information. Recommended.",
+  },
+  {
+    key: "detailed",
+    label: "Detailed",
+    hint: "Send broader supporting context when more background may be useful.",
+  },
+];
+
+/** Context & Sync：Context Delivery 梯度控制与只读自动化说明（§50）。 */
 function ContextSyncSettings() {
+  const [level, setLevel] = useState<ContextDeliveryLevel>("balanced");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.getContextDeliveryLevel().then(setLevel).catch(console.error);
+  }, []);
+
+  const changeLevel = async (next: ContextDeliveryLevel) => {
+    const prev = level;
+    setLevel(next);
+    setError(null);
+    try {
+      await api.setContextDeliveryLevel(next);
+    } catch (err) {
+      console.error(err);
+      setLevel(prev);
+      setError(String(err));
+    }
+  };
+
+  const currentHint = DELIVERY_LEVELS.find((d) => d.key === level)?.hint;
+
   return (
-    <section>
-      <h3 style={{ marginTop: 0 }}>Context & Sync</h3>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Automatic Sync</div>
-          <div className="settings-row-hint">Session 有新内容时自动提取 Context 变更（带审计 Revision）。</div>
+    <>
+      <section>
+        <h3 style={{ marginTop: 0 }}>Context Delivery</h3>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Controls how much Workstream context NoEnding sends when starting or resuming Agent sessions.
+        </p>
+        <div className="settings-seg">
+          {DELIVERY_LEVELS.map((d) => (
+            <button
+              key={d.key}
+              className={level === d.key ? "on" : ""}
+              onClick={() => changeLevel(d.key)}
+            >
+              {d.label}
+            </button>
+          ))}
         </div>
-        <span className="badge success">On</span>
-      </div>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Automatic Workstream Classification</div>
-          <div className="settings-row-hint">自动归类只影响未显式绑定的 Session；你的手动指定优先。</div>
+        {currentHint && (
+          <p className="muted small" style={{ marginBottom: 0, marginTop: 8 }}>
+            {currentHint}
+          </p>
+        )}
+        {error && (
+          <p className="small" style={{ color: "var(--danger)", marginBottom: 0, marginTop: 8 }}>
+            {error}
+          </p>
+        )}
+      </section>
+
+      <section>
+        <h3>Automation</h3>
+        <div className="row-line">
+          <div>
+            <div className="settings-row-label">Automatic Sync</div>
+            <div className="settings-row-hint">Session 有新内容时自动提取 Context 变更（带审计 Revision）。</div>
+          </div>
+          <span className="badge success">On</span>
         </div>
-        <span className="badge success">On</span>
-      </div>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Background Reconcile</div>
-          <div className="settings-row-hint">应用启动时补摄离开期间产生的会话内容。</div>
+        <div className="row-line">
+          <div>
+            <div className="settings-row-label">Automatic Workstream Classification</div>
+            <div className="settings-row-hint">自动归类只影响未显式绑定的 Session；你的手动指定优先。</div>
+          </div>
+          <span className="badge success">On</span>
         </div>
-        <span className="badge success">On</span>
-      </div>
-    </section>
+        <div className="row-line">
+          <div>
+            <div className="settings-row-label">Background Reconcile</div>
+            <div className="settings-row-hint">应用启动时补摄离开期间产生的会话内容。</div>
+          </div>
+          <span className="badge success">On</span>
+        </div>
+      </section>
+    </>
   );
 }
 
