@@ -457,7 +457,7 @@ fn build_resume_sections(
         for rev_id in &delivery.delivered_revisions {
             if let Some(rev) = db.get_revision(rev_id)? {
                 if let Some(item) = db.get_item(&rev.item_id)? {
-                    if item.status != "active" && item.status != "deleted" {
+                    if item.status != "active" {
                         any_change = true;
                         sections.push(ContextSection {
                             kind: "gone".into(),
@@ -467,6 +467,7 @@ fn build_resume_sections(
                                 match item.status.as_str() {
                                     "resolved" => "被标记完成",
                                     "superseded" => "被新版本取代",
+                                    "deleted" => "被删除",
                                     other => other,
                                 }
                             ),
@@ -491,6 +492,51 @@ fn build_resume_sections(
                 conf_count += 1;
                 any_change = true;
                 sections.push(conflict_section(db, &c)?);
+            }
+        }
+
+        // 4. resolved or closed conflicts that were previously delivered to the agent
+        for cid in &delivery.delivered_conflicts {
+            match db.get_conflict(cid)? {
+                Some(c) if c.status != "open" => {
+                    any_change = true;
+                    let left = db.get_item(&c.left_item_id)?;
+                    let left_desc = match &left {
+                        Some(i) => format!("{}（{}）", i.kind, i.authority),
+                        None => "(已删除)".into(),
+                    };
+                    let resolution_text =
+                        c.resolution.as_deref().unwrap_or(match c.status.as_str() {
+                            "resolved" => "已解决",
+                            "ignored" => "已忽略",
+                            "closed" => "已关闭",
+                            other => other,
+                        });
+                    sections.push(ContextSection {
+                        kind: "conflict_resolved".into(),
+                        title: format!("既有冲突已解决（{}）", left_desc),
+                        content: format!("解决状态：{}", resolution_text),
+                        authority: "user_explicit".into(),
+                        source_ref: None,
+                        workstream_id: Some(ws_id.clone()),
+                        revision_id: None,
+                        conflict_id: Some(c.id.clone()),
+                    });
+                }
+                None => {
+                    any_change = true;
+                    sections.push(ContextSection {
+                        kind: "conflict_resolved".into(),
+                        title: "既有冲突已移除".into(),
+                        content: "该冲突已被删除，不再有效。".into(),
+                        authority: "user_explicit".into(),
+                        source_ref: None,
+                        workstream_id: Some(ws_id.clone()),
+                        revision_id: None,
+                        conflict_id: Some(cid.clone()),
+                    });
+                }
+                _ => {}
             }
         }
     }
@@ -575,8 +621,9 @@ fn render_section(s: &ContextSection) -> String {
         ("decision", "Decisions / 决定"),
         ("open_question", "Open Questions / 未决问题"),
         ("delta", "Changed Since Your Last Activity"),
-        ("gone", "Resolved / Superseded"),
+        ("gone", "Resolved / Superseded / Deleted"),
         ("conflict", "New Conflicts"),
+        ("conflict_resolved", "Resolved Conflicts / 已解决冲突"),
     ];
 
     let label = labels

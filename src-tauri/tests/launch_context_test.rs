@@ -1590,3 +1590,425 @@ fn builder_requires_session_in_resume_mode_even_when_off() {
         .to_string()
         .contains("Resume 模式必须提供 Session"));
 }
+
+/// P1: A deleted item must produce a `gone` section with "被删除" on the next resume,
+/// and once delivered, it is removed from the Agent-Known State.
+#[test]
+fn resume_emits_gone_for_deleted_item() {
+    let db = open_db("resume-gone-deleted");
+    let ws = ws_row(&db, "deleted ws", None);
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "将被删除的约束",
+        "约束内容",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+    let rev_id = db
+        .get_item(&item.id)
+        .unwrap()
+        .unwrap()
+        .current_revision_id
+        .unwrap();
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    // 1. Initial delivery: agent receives the item
+    let d0 = ContextDelivery {
+        id: new_id(),
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        bundle_id: "bundle-0".into(),
+        delivered_revisions: vec![rev_id.clone()],
+        delivered_conflicts: vec![],
+        delivered_at: now(),
+    };
+    db.record_delivery(&d0).unwrap();
+
+    // 2. User deletes the item
+    db.apply_status_change(&item.id, "deleted", "user", "已由用户彻底删除", None, &[])
+        .unwrap();
+
+    // 3. Next resume: must produce a `gone` section mentioning "被删除"
+    let b1 = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+
+    let gone_sec = b1
+        .sections
+        .iter()
+        .find(|sec| sec.kind == "gone")
+        .expect("must produce gone section for deleted item");
+    assert!(
+        gone_sec.content.contains("被删除"),
+        "Gone section content must say '被删除', got: {}",
+        gone_sec.content
+    );
+    assert!(b1.markdown.contains("被删除"));
+
+    // 4. Record cumulative delivery: revision is removed from known_revisions
+    let d1 =
+        launcher::compute_cumulative_delivery(&db, &s.id, &ws.id, &b1, Some(&d0), &ws.id).unwrap();
+    assert!(
+        !d1.delivered_revisions.contains(&rev_id),
+        "Deleted item revision must be removed from delivered_revisions"
+    );
+    db.record_delivery(&d1).unwrap();
+
+    // 5. Subsequent resume without changes: `gone` is NOT repeated
+    let b2 = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+    assert!(
+        !b2.sections.iter().any(|sec| sec.kind == "gone"),
+        "Delivered gone section must not be repeated"
+    );
+}
+
+/// P1: If a `gone` section is truncated by token budget, the revision must
+/// NOT be prematurely removed from Agent-Known State; it must remain until delivered.
+#[test]
+fn gone_truncated_by_budget_preserves_revision_in_snapshot() {
+    let db = open_db("gone-truncated");
+    let ws = ws_row(&db, "gone trunc ws", None);
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "约束",
+        "内容",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+    let rev_id = db
+        .get_item(&item.id)
+        .unwrap()
+        .unwrap()
+        .current_revision_id
+        .unwrap();
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    let d0 = ContextDelivery {
+        id: new_id(),
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        bundle_id: "bundle-0".into(),
+        delivered_revisions: vec![rev_id.clone()],
+        delivered_conflicts: vec![],
+        delivered_at: now(),
+    };
+    db.record_delivery(&d0).unwrap();
+
+    // Item becomes deleted
+    db.apply_status_change(&item.id, "deleted", "user", "删除", None, &[])
+        .unwrap();
+
+    // Resume with tiny budget where gone section is truncated
+    let tiny_policy = context::ContextDeliveryPolicy {
+        enabled: true,
+        new_token_budget: 5,
+        resume_token_budget: 5,
+        new_extended_limit: 0,
+        resume_first_delivery_extended_limit: 0,
+        conflict_limit: 0,
+    };
+    let b_tiny = context::build_bundle_with_policy(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        tiny_policy,
+        "custom",
+    )
+    .unwrap();
+    assert!(!b_tiny.sections.iter().any(|sec| sec.kind == "gone"));
+
+    // Cumulative delivery computed from truncated bundle must KEEP rev_id
+    let d_tiny =
+        launcher::compute_cumulative_delivery(&db, &s.id, &ws.id, &b_tiny, Some(&d0), &ws.id)
+            .unwrap();
+    assert!(
+        d_tiny.delivered_revisions.contains(&rev_id),
+        "Truncated gone section must NOT remove revision from delivery snapshot"
+    );
+    db.record_delivery(&d_tiny).unwrap();
+
+    // Next resume with normal budget: gone section appears again!
+    let b_normal = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+    assert!(b_normal.sections.iter().any(|sec| sec.kind == "gone"));
+}
+
+/// P1: A resolved conflict must produce a `conflict_resolved` section on resume,
+/// and only after actual delivery is the conflict ID removed from delivered_conflicts.
+#[test]
+fn resume_emits_conflict_resolved_when_conflict_closed() {
+    let db = open_db("conflict-resolved");
+    let ws = ws_row(&db, "conflict resolved ws", None);
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "冲突约束",
+        "内容",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    let conflict_id = new_id();
+    db.insert_conflict(&noending::domain::ContextConflict {
+        id: conflict_id.clone(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+    })
+    .unwrap();
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    // Initial delivery: agent knows the open conflict
+    let d0 = ContextDelivery {
+        id: new_id(),
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        bundle_id: "bundle-0".into(),
+        delivered_revisions: vec![],
+        delivered_conflicts: vec![conflict_id.clone()],
+        delivered_at: now(),
+    };
+    db.record_delivery(&d0).unwrap();
+
+    // Conflict is resolved by user
+    db.update_conflict_status(&conflict_id, "resolved", Some("双方已达成共识并合并"))
+        .unwrap();
+
+    // Next resume: must produce a `conflict_resolved` section
+    let b1 = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+
+    let res_sec = b1
+        .sections
+        .iter()
+        .find(|sec| sec.kind == "conflict_resolved")
+        .expect("must produce conflict_resolved section");
+    assert_eq!(res_sec.conflict_id.as_deref(), Some(conflict_id.as_str()));
+    assert!(res_sec.content.contains("双方已达成共识并合并"));
+    assert!(b1.markdown.contains("Resolved Conflicts"));
+
+    // Record delivery: conflict ID is removed from delivered_conflicts
+    let d1 =
+        launcher::compute_cumulative_delivery(&db, &s.id, &ws.id, &b1, Some(&d0), &ws.id).unwrap();
+    assert!(
+        !d1.delivered_conflicts.contains(&conflict_id),
+        "Resolved conflict must be removed from delivered_conflicts after delivery"
+    );
+    db.record_delivery(&d1).unwrap();
+
+    // Subsequent resume without changes: conflict_resolved is NOT repeated
+    let b2 = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+    assert!(
+        !b2.sections
+            .iter()
+            .any(|sec| sec.kind == "conflict_resolved"),
+        "Delivered conflict_resolved must not be repeated"
+    );
+}
+
+/// P1: If `conflict_resolved` is truncated by token budget, the conflict ID
+/// must remain in `delivered_conflicts` until delivered.
+#[test]
+fn conflict_resolved_truncated_by_budget_retains_conflict_id() {
+    let db = open_db("conflict-res-trunc");
+    let ws = ws_row(&db, "conflict res trunc ws", None);
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "约束",
+        "内容",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    let conflict_id = new_id();
+    db.insert_conflict(&noending::domain::ContextConflict {
+        id: conflict_id.clone(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+    })
+    .unwrap();
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    let d0 = ContextDelivery {
+        id: new_id(),
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        bundle_id: "bundle-0".into(),
+        delivered_revisions: vec![],
+        delivered_conflicts: vec![conflict_id.clone()],
+        delivered_at: now(),
+    };
+    db.record_delivery(&d0).unwrap();
+
+    // Conflict resolved
+    db.update_conflict_status(&conflict_id, "resolved", Some("已解决"))
+        .unwrap();
+
+    // Resume with tiny budget where conflict_resolved is truncated
+    let tiny_policy = context::ContextDeliveryPolicy {
+        enabled: true,
+        new_token_budget: 5,
+        resume_token_budget: 5,
+        new_extended_limit: 0,
+        resume_first_delivery_extended_limit: 0,
+        conflict_limit: 0,
+    };
+    let b_tiny = context::build_bundle_with_policy(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        tiny_policy,
+        "custom",
+    )
+    .unwrap();
+    assert!(!b_tiny
+        .sections
+        .iter()
+        .any(|sec| sec.kind == "conflict_resolved"));
+
+    // Cumulative delivery computed from truncated bundle must KEEP conflict_id
+    let d_tiny =
+        launcher::compute_cumulative_delivery(&db, &s.id, &ws.id, &b_tiny, Some(&d0), &ws.id)
+            .unwrap();
+    assert!(
+        d_tiny.delivered_conflicts.contains(&conflict_id),
+        "Truncated conflict_resolved must NOT remove conflict from delivery snapshot"
+    );
+    db.record_delivery(&d_tiny).unwrap();
+
+    // Next resume with normal budget: conflict_resolved appears and is delivered
+    let b_normal = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+    assert!(b_normal
+        .sections
+        .iter()
+        .any(|sec| sec.kind == "conflict_resolved"));
+}
+
+/// P2: apply_match must record deliveries for workstreams that only have conflicts
+/// (even if they have 0 revisions).
+#[test]
+fn apply_match_handles_conflict_only_workstream() {
+    let db = open_db("match-conflict-only");
+    let ws_a = ws_row(&db, "WS A", None);
+    let ws_b = ws_row(&db, "WS B", None);
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    let conflict_id = new_id();
+
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        selected_workstream_ids: vec![ws_a.id.clone(), ws_b.id.clone()],
+        cwd: None,
+        context_bundle_markdown: Some("bundle".into()),
+        context_bundle_revisions: Some(
+            serde_json::json!({
+                "bundle_id": "b-test",
+                "by_workstream": {
+                    ws_a.id.clone(): ["rev-a-1"]
+                },
+                "conflicts_by_workstream": {
+                    ws_b.id.clone(): [conflict_id.clone()]
+                }
+            })
+            .to_string(),
+        ),
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    launcher::apply_match(&db, &intent, &s).unwrap();
+
+    let deliveries = db.latest_deliveries(&s.id).unwrap();
+    let d_b = deliveries
+        .iter()
+        .find(|d| d.workstream_id == ws_b.id)
+        .expect("workstream with only conflicts must still have ContextDelivery recorded");
+    assert_eq!(d_b.delivered_conflicts, vec![conflict_id]);
+    assert!(d_b.delivered_revisions.is_empty());
+}

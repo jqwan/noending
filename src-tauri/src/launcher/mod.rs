@@ -414,18 +414,14 @@ pub fn compute_cumulative_delivery(
                             }
                         }
                     }
+                    "conflict_resolved" => {
+                        if let Some(cid) = &s.conflict_id {
+                            known_conflicts.retain(|c| c != cid);
+                        }
+                    }
                     _ => {}
                 }
             }
-
-            // Prune conflicts that are no longer open in DB
-            known_conflicts.retain(|cid| {
-                if let Ok(Some(c)) = db.get_conflict(cid) {
-                    c.status == "open"
-                } else {
-                    false
-                }
-            });
 
             Ok(ContextDelivery {
                 id: new_id(),
@@ -756,36 +752,45 @@ pub fn apply_match(db: &Db, intent: &LaunchIntent, session: &Session) -> Result<
                 .and_then(|b| b.as_str())
                 .unwrap_or(&intent.id)
                 .to_string();
+            let by_ws = v.get("by_workstream").and_then(|m| m.as_object());
             let confs_by_ws = v.get("conflicts_by_workstream").and_then(|m| m.as_object());
-            if let Some(by_ws) = v.get("by_workstream").and_then(|m| m.as_object()) {
-                for (ws_id, revs) in by_ws {
-                    let revisions: Vec<String> = revs
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let conflicts: Vec<String> = confs_by_ws
-                        .and_then(|c| c.get(ws_id))
-                        .and_then(|a| a.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    db.record_delivery(&ContextDelivery {
-                        id: new_id(),
-                        session_id: session.id.clone(),
-                        workstream_id: ws_id.clone(),
-                        bundle_id: bundle_id.clone(),
-                        delivered_revisions: revisions,
-                        delivered_conflicts: conflicts,
-                        delivered_at: now(),
-                    })?;
-                }
+
+            let mut all_ws_ids = std::collections::BTreeSet::new();
+            if let Some(m) = by_ws {
+                all_ws_ids.extend(m.keys().cloned());
+            }
+            if let Some(m) = confs_by_ws {
+                all_ws_ids.extend(m.keys().cloned());
+            }
+
+            for ws_id in all_ws_ids {
+                let revisions: Vec<String> = by_ws
+                    .and_then(|m| m.get(&ws_id))
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let conflicts: Vec<String> = confs_by_ws
+                    .and_then(|c| c.get(&ws_id))
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                db.record_delivery(&ContextDelivery {
+                    id: new_id(),
+                    session_id: session.id.clone(),
+                    workstream_id: ws_id,
+                    bundle_id: bundle_id.clone(),
+                    delivered_revisions: revisions,
+                    delivered_conflicts: conflicts,
+                    delivered_at: now(),
+                })?;
             }
         }
     }
