@@ -43,6 +43,8 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
 }
 
 fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<String>) -> Session {
+    let raw = std::env::temp_dir().join(format!("noending-raw-{}.jsonl", new_id()));
+    let _ = std::fs::write(&raw, "");
     let s = Session {
         id: new_id(),
         agent,
@@ -50,7 +52,7 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
         title: None,
         cwd,
         project_id: None,
-        raw_path: "/tmp/x.jsonl".into(),
+        raw_path: raw.to_string_lossy().to_string(),
         parent_agent_session_id: None,
         started_at: started_at.clone(),
         last_activity_at: started_at,
@@ -2011,4 +2013,233 @@ fn apply_match_handles_conflict_only_workstream() {
         .expect("workstream with only conflicts must still have ContextDelivery recorded");
     assert_eq!(d_b.delivered_conflicts, vec![conflict_id]);
     assert!(d_b.delivered_revisions.is_empty());
+}
+
+#[test]
+fn prepare_new_does_not_create_intent_or_delivery_or_file() {
+    let db = open_db("prep-new-no-side-effects");
+    let ws = ws_row(&db, "test ws", None);
+    seed_context(&db, &ws.id, &["约束 A", "约束 B"]);
+
+    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: tmp_dir.clone(),
+    };
+
+    let prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+
+    // 1. PreparedLaunch captures the exact bundle & fingerprint
+    assert_eq!(prepared.mode, "new");
+    assert_eq!(prepared.workstream_ids, vec![ws.id.clone()]);
+    assert!(!prepared.state_fingerprint.is_empty());
+    assert_eq!(prepared.bundle.workstream_ids, vec![ws.id.clone()]);
+    assert!(prepared.bundle.sections.iter().any(|s| s.title == "约束 A"));
+
+    // 2. INVARIANT: No LaunchIntent created
+    let intents = db.list_launch_intents(&[], 100).unwrap();
+    assert!(
+        intents.is_empty(),
+        "prepare_new must not insert LaunchIntent"
+    );
+
+    // 3. INVARIANT: No context file written to disk
+    let bundle_dir = tmp_dir.join("context-bundles");
+    assert!(
+        !bundle_dir.exists(),
+        "prepare_new must not write context file"
+    );
+}
+
+#[test]
+fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
+    let db = open_db("prep-resume-no-side-effects");
+    let ws1 = ws_row(&db, "ws1", None);
+    let ws2 = ws_row(&db, "ws2", None);
+    seed_context(&db, &ws1.id, &["约束 1"]);
+    seed_context(&db, &ws2.id, &["约束 2"]);
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+    // ws1 is already bound
+    launcher::record_binding(
+        &db,
+        &s.id,
+        &ws1.id,
+        "related",
+        binding_source::USER_ASSIGNED,
+        1.0,
+    )
+    .unwrap();
+
+    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: tmp_dir.clone(),
+    };
+
+    // User chooses to add ws2 during resume preparation
+    let prepared = launcher
+        .prepare_resume(&db, &s.id, &[ws2.id.clone()])
+        .unwrap();
+
+    assert_eq!(prepared.mode, "resume");
+    assert_eq!(
+        prepared.workstream_ids,
+        vec![ws1.id.clone(), ws2.id.clone()]
+    );
+    assert_eq!(prepared.extra_workstream_ids, vec![ws2.id.clone()]);
+    assert!(prepared.bundle.sections.iter().any(|s| s.title == "约束 2"));
+
+    // INVARIANT: ws2 is NOT yet committed to DB
+    let bindings = db.bindings_for_session(&s.id).unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].workstream_id, ws1.id);
+
+    // INVARIANT: No delivery snapshot recorded
+    let deliveries = db.latest_deliveries(&s.id).unwrap();
+    assert!(deliveries.is_empty());
+
+    // INVARIANT: No context file written
+    let bundle_dir = tmp_dir.join("context-bundles");
+    assert!(!bundle_dir.exists());
+}
+
+#[test]
+fn state_fingerprint_stale_detection_on_context_change() {
+    let db = open_db("stale-context-detection");
+    let ws = ws_row(&db, "test ws", None);
+    seed_context(&db, &ws.id, &["初始约束"]);
+
+    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: tmp_dir,
+    };
+
+    let prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+
+    // Context changes in the background (e.g. new item added)
+    seed_context(&db, &ws.id, &["新插入的约束"]);
+
+    // Attempting to launch with stale prepared launch MUST fail with stale error
+    let err = launcher.launch_prepared(&db, &prepared).unwrap_err();
+    assert!(
+        err.to_string().contains("stale"),
+        "expected stale error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
+    let db = open_db("stale-delivery-detection");
+    let ws = ws_row(&db, "test ws", None);
+    seed_context(&db, &ws.id, &["约束"]);
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+    launcher::record_binding(
+        &db,
+        &s.id,
+        &ws.id,
+        "related",
+        binding_source::USER_ASSIGNED,
+        1.0,
+    )
+    .unwrap();
+
+    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: tmp_dir,
+    };
+
+    let prepared = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
+
+    // Background process advances delivery snapshot
+    let delivery = ContextDelivery {
+        id: new_id(),
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        bundle_id: "other-bundle".into(),
+        delivered_revisions: vec!["some-rev".into()],
+        delivered_conflicts: vec![],
+        delivered_at: now(),
+    };
+    db.record_delivery(&delivery).unwrap();
+
+    let err = launcher.launch_prepared(&db, &prepared).unwrap_err();
+    assert!(
+        err.to_string().contains("stale"),
+        "expected stale error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn state_fingerprint_stale_detection_on_delivery_level_change() {
+    let db = open_db("stale-delivery-level");
+    let ws = ws_row(&db, "test ws", None);
+    seed_context(&db, &ws.id, &["约束"]);
+
+    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: tmp_dir,
+    };
+
+    let prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+    assert_eq!(
+        prepared.delivery_level,
+        context::ContextDeliveryLevel::Balanced
+    );
+
+    // Global setting changes to Off
+    noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Off)
+        .unwrap();
+
+    let err = launcher.launch_prepared(&db, &prepared).unwrap_err();
+    assert!(
+        err.to_string().contains("stale"),
+        "expected stale error on delivery level change, got: {}",
+        err
+    );
+}
+
+#[test]
+fn prepared_bundle_identity_preserved_and_deterministic() {
+    let db = open_db("bundle-identity");
+    let ws = ws_row(&db, "test ws", None);
+    seed_context(&db, &ws.id, &["约束 1", "约束 2"]);
+
+    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: tmp_dir,
+    };
+
+    let p1 = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+
+    // Fingerprint recomputed against unchanged state is identical
+    let current_fp = launcher::compute_state_fingerprint(
+        &db,
+        "new",
+        None,
+        &p1.workstream_ids,
+        p1.delivery_level,
+    )
+    .unwrap();
+    assert_eq!(p1.state_fingerprint, current_fp);
+
+    // Off mode produces empty bundle markdown & sections
+    noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Off)
+        .unwrap();
+    let p_off = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+    assert_eq!(p_off.delivery_level, context::ContextDeliveryLevel::Off);
+    assert!(p_off.bundle.sections.is_empty());
+    assert!(p_off.bundle.markdown.is_empty());
+    assert_eq!(p_off.bundle.approx_tokens, 0);
 }
