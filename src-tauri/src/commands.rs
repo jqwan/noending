@@ -343,6 +343,35 @@ pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
     })
 }
 
+// ---------------- Context Delivery Level (Settings → Context Delivery) ----------------
+
+pub const CONTEXT_DELIVERY_LEVEL_KEY: &str = "context.delivery_level";
+
+pub fn context_delivery_level_of(db: &Db) -> Result<crate::context::ContextDeliveryLevel> {
+    if let Some(v) = db.get_setting(CONTEXT_DELIVERY_LEVEL_KEY)? {
+        if let Some(lvl) = crate::context::ContextDeliveryLevel::parse(&v) {
+            return Ok(lvl);
+        }
+    }
+    Ok(crate::context::ContextDeliveryLevel::Balanced)
+}
+
+#[tauri::command]
+pub fn get_context_delivery_level(state: State<AppState>) -> Result<String> {
+    with_db(&state, |db| {
+        Ok(context_delivery_level_of(db)?.as_str().to_string())
+    })
+}
+
+#[tauri::command]
+pub fn set_context_delivery_level(state: State<AppState>, level: String) -> Result<()> {
+    let lvl = crate::context::ContextDeliveryLevel::parse(&level)
+        .ok_or_else(|| other("Invalid context delivery level"))?;
+    with_db(&state, |db| {
+        db.set_setting(CONTEXT_DELIVERY_LEVEL_KEY, lvl.as_str())
+    })
+}
+
 #[tauri::command]
 pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Result<()> {
     with_db(&state, |db| {
@@ -967,6 +996,7 @@ pub fn preview_context_bundle(
     session_id: Option<String>,
 ) -> Result<crate::context::SessionContextBundle> {
     with_db(&state, |db| {
+        let level = context_delivery_level_of(db)?;
         let mode = mode.as_deref().unwrap_or("new");
         match mode {
             "resume" => {
@@ -976,9 +1006,9 @@ pub fn preview_context_bundle(
                 let session = db
                     .get_session(sid)?
                     .ok_or_else(|| other("Session 不存在"))?;
-                crate::context::build_bundle(db, "resume", Some(&session), &workstream_ids, 4000)
+                crate::context::build_bundle(db, "resume", Some(&session), &workstream_ids, level)
             }
-            _ => crate::context::build_bundle(db, "new", None, &workstream_ids, 4000),
+            _ => crate::context::build_bundle(db, "new", None, &workstream_ids, level),
         }
     })
 }

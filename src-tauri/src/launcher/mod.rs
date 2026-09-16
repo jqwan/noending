@@ -87,10 +87,13 @@ impl SessionLauncher {
         //     directory prompt stops the session from ever starting.
         let effective_cwd: Option<String> = resolve_new_session_cwd(db, workstream_ids, cwd)?;
 
-        // 2. build context bundle; zero contexts → plain launch, no injection.
-        //    (UX rule: 关联 Workstream 永远是可选项。)
-        let bundle = crate::context::build_bundle(db, "new", None, workstream_ids, 4000)?;
-        let ctx_file = if workstream_ids.is_empty() {
+        // 2. build context bundle; zero contexts or Off → plain launch, no injection.
+        //    (UX rule: 关联 Workstream 永远是可选项；Context Delivery 控制是否注入。)
+        let delivery_level = crate::commands::context_delivery_level_of(db)?;
+        let bundle = crate::context::build_bundle(db, "new", None, workstream_ids, delivery_level)?;
+        let ctx_file = if workstream_ids.is_empty()
+            || delivery_level == crate::context::ContextDeliveryLevel::Off
+        {
             None
         } else {
             let title_hint = workstream_ids
@@ -178,9 +181,11 @@ impl SessionLauncher {
             bundle,
             note: if ctx_file.is_some() {
                 "新 Session 启动后会在发现时通过 LaunchIntent 自动建立显式 Workstream 绑定。".into()
-            } else {
+            } else if workstream_ids.is_empty() {
                 "已直接启动（未携带 Workstream Context）；此启动未选择 Workstream，允许 0 绑定。"
                     .into()
+            } else {
+                "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
             },
             launch_intent_id: Some(intent.id),
         })
@@ -222,13 +227,16 @@ impl SessionLauncher {
             }
         }
 
-        // 3. delta bundle against last delivered revisions (empty → no injection)
-        let bundle = crate::context::build_bundle(db, "resume", Some(&session), &ws_ids, 3000)?;
-        let ctx_file = if ws_ids.is_empty() {
-            None
-        } else {
-            Some(self.write_context_file("resume", &bundle.markdown)?)
-        };
+        // 3. delta bundle against last delivered revisions (empty or Off → no injection)
+        let delivery_level = crate::commands::context_delivery_level_of(db)?;
+        let bundle =
+            crate::context::build_bundle(db, "resume", Some(&session), &ws_ids, delivery_level)?;
+        let ctx_file =
+            if ws_ids.is_empty() || delivery_level == crate::context::ContextDeliveryLevel::Off {
+                None
+            } else {
+                Some(self.write_context_file("resume", &bundle.markdown)?)
+            };
 
         // 4. launch
         let install = resolve_install(db, session.agent)?;
@@ -248,6 +256,7 @@ impl SessionLauncher {
         //    workstream with the full list would corrupt cross-workstream
         //    delta computation (wrong `gone` sections, double deliveries).
         //    Also touch binding usage.
+        //    INVARIANT: Only advance delivery snapshot when context was ACTUALLY delivered.
         let delivered_by_ws = delivered_revisions_by_workstream(
             &bundle,
             ws_ids.first().map(|s| s.as_str()).unwrap_or(""),
@@ -261,14 +270,16 @@ impl SessionLauncher {
                 binding_source::USER_ASSIGNED,
                 1.0,
             )?;
-            db.record_delivery(&ContextDelivery {
-                id: new_id(),
-                session_id: session_id.to_string(),
-                workstream_id: ws_id.clone(),
-                bundle_id: bundle.bundle_id.clone(),
-                delivered_revisions: delivered_by_ws.get(ws_id).cloned().unwrap_or_default(),
-                delivered_at: now(),
-            })?;
+            if ctx_file.is_some() {
+                db.record_delivery(&ContextDelivery {
+                    id: new_id(),
+                    session_id: session_id.to_string(),
+                    workstream_id: ws_id.clone(),
+                    bundle_id: bundle.bundle_id.clone(),
+                    delivered_revisions: delivered_by_ws.get(ws_id).cloned().unwrap_or_default(),
+                    delivered_at: now(),
+                })?;
+            }
         }
 
         Ok(LaunchResult {
@@ -281,8 +292,10 @@ impl SessionLauncher {
             bundle,
             note: if ctx_file.is_some() {
                 "已同步最新消息并生成增量上下文（基于上次实际交付的修订快照）。".into()
-            } else {
+            } else if ws_ids.is_empty() {
                 "该 Session 未关联 Workstream：已同步自身消息后直接恢复，未注入上下文。".into()
+            } else {
+                "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
             },
             launch_intent_id: None,
         })

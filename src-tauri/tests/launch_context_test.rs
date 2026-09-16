@@ -301,10 +301,24 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
     // resume without a session is rejected
-    assert!(context::build_bundle(&db, "resume", None, &[ws.id.clone()], 4000).is_err());
+    assert!(context::build_bundle(
+        &db,
+        "resume",
+        None,
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced
+    )
+    .is_err());
 
     // first resume (no delivery yet): full context is delivered
-    let bundle = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
+    let bundle = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
     assert!(bundle.markdown.contains("约束一"));
     assert!(bundle.markdown.contains("约束二"));
 
@@ -326,7 +340,14 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
     .unwrap();
 
     // no changes since delivery → only the minimal reminder, no full re-dump
-    let unchanged = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
+    let unchanged = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
     assert!(unchanged.markdown.contains("Current Task Reminder"));
     assert!(
         !unchanged.markdown.contains("约束二"),
@@ -342,7 +363,14 @@ fn resume_delta_shows_changes_and_disappearances() {
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
     // deliver everything
-    let bundle = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
+    let bundle = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
     let delivered: Vec<String> = bundle
         .sections
         .iter()
@@ -375,7 +403,14 @@ fn resume_delta_shows_changes_and_disappearances() {
     )
     .unwrap();
 
-    let delta = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
+    let delta = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
     assert!(
         delta.markdown.contains("新决定：切换构建工具"),
         "new item appears"
@@ -449,8 +484,14 @@ fn multi_workstream_bundle_dedups_and_labels_primary_related() {
     })
     .unwrap();
 
-    let bundle =
-        context::build_bundle(&db, "new", None, &[ws1.id.clone(), ws2.id.clone()], 8000).unwrap();
+    let bundle = context::build_bundle(
+        &db,
+        "new",
+        None,
+        &[ws1.id.clone(), ws2.id.clone()],
+        context::ContextDeliveryLevel::Detailed,
+    )
+    .unwrap();
     assert!(bundle.markdown.contains("## 主 Workstream"));
     assert!(bundle.markdown.contains("Related Workstream"));
     // dedup: the shared constraint appears once (primary wins)
@@ -783,7 +824,14 @@ fn launch_intent_match_records_delivery_snapshot() {
     );
 
     // first resume: the delivered item is NOT re-sent in full
-    let bundle = context::build_bundle(&db, "resume", Some(&s), &[ws.id.clone()], 4000).unwrap();
+    let bundle = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
     assert!(
         !bundle.markdown.contains("已交付约束"),
         "already-delivered content must not be re-sent, got: {}",
@@ -895,7 +943,23 @@ fn token_budget_limits_sections_to_actually_delivered_content() {
         named.push((title.into(), head_rev(&item.id)));
     }
 
-    let bundle = context::build_bundle(&db, "new", None, &[ws.id.clone()], 200).unwrap();
+    let policy = context::ContextDeliveryPolicy {
+        enabled: true,
+        new_token_budget: 200,
+        resume_token_budget: 200,
+        new_extended_limit: 20,
+        resume_first_delivery_extended_limit: 10,
+        conflict_limit: 10,
+    };
+    let bundle = context::build_bundle_with_policy(
+        &db,
+        "new",
+        None,
+        &[ws.id.clone()],
+        policy,
+        "test_custom",
+    )
+    .unwrap();
 
     assert!(
         bundle.approx_tokens <= 200,
@@ -930,4 +994,252 @@ fn token_budget_limits_sections_to_actually_delivered_content() {
             title
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Context Delivery Level tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn context_delivery_level_default_and_roundtrip() {
+    let db = open_db("delivery-level-setting");
+
+    // 1. Unset → default is Balanced
+    let lvl = noending::commands::context_delivery_level_of(&db).unwrap();
+    assert_eq!(lvl, context::ContextDeliveryLevel::Balanced);
+
+    // 2. Persisted compact → Compact
+    db.set_setting(noending::commands::CONTEXT_DELIVERY_LEVEL_KEY, "compact")
+        .unwrap();
+    let lvl = noending::commands::context_delivery_level_of(&db).unwrap();
+    assert_eq!(lvl, context::ContextDeliveryLevel::Compact);
+
+    // 3. String parser checks & illegal values
+    assert_eq!(
+        context::ContextDeliveryLevel::parse("off"),
+        Some(context::ContextDeliveryLevel::Off)
+    );
+    assert_eq!(
+        context::ContextDeliveryLevel::parse("compact"),
+        Some(context::ContextDeliveryLevel::Compact)
+    );
+    assert_eq!(
+        context::ContextDeliveryLevel::parse("balanced"),
+        Some(context::ContextDeliveryLevel::Balanced)
+    );
+    assert_eq!(
+        context::ContextDeliveryLevel::parse("detailed"),
+        Some(context::ContextDeliveryLevel::Detailed)
+    );
+    assert_eq!(context::ContextDeliveryLevel::parse("invalid"), None);
+    assert_eq!(context::ContextDeliveryLevel::parse(""), None);
+}
+
+#[test]
+fn context_delivery_policy_monotonicity() {
+    let off = context::ContextDeliveryLevel::Off.policy();
+    assert!(!off.enabled);
+    assert_eq!(off.new_token_budget, 0);
+    assert_eq!(off.resume_token_budget, 0);
+
+    let compact = context::ContextDeliveryLevel::Compact.policy();
+    let balanced = context::ContextDeliveryLevel::Balanced.policy();
+    let detailed = context::ContextDeliveryLevel::Detailed.policy();
+
+    assert!(compact.enabled && balanced.enabled && detailed.enabled);
+
+    // strictly increasing budgets
+    assert!(compact.new_token_budget < balanced.new_token_budget);
+    assert!(balanced.new_token_budget < detailed.new_token_budget);
+    assert_eq!(balanced.new_token_budget, 4000);
+
+    assert!(compact.resume_token_budget < balanced.resume_token_budget);
+    assert!(balanced.resume_token_budget < detailed.resume_token_budget);
+    assert_eq!(balanced.resume_token_budget, 3000);
+
+    // strictly increasing item limits
+    assert!(compact.new_extended_limit < balanced.new_extended_limit);
+    assert!(balanced.new_extended_limit < detailed.new_extended_limit);
+
+    assert!(
+        compact.resume_first_delivery_extended_limit
+            < balanced.resume_first_delivery_extended_limit
+    );
+    assert!(
+        balanced.resume_first_delivery_extended_limit
+            < detailed.resume_first_delivery_extended_limit
+    );
+
+    assert!(compact.conflict_limit < balanced.conflict_limit);
+    assert!(balanced.conflict_limit < detailed.conflict_limit);
+}
+
+#[test]
+fn context_delivery_off_produces_empty_bundle() {
+    let db = open_db("delivery-off-bundle");
+    let ws = ws_row(&db, "off ws", None);
+    seed_context(&db, &ws.id, &["重要目标", "关键约束"]);
+
+    // New bundle with Off
+    let bundle = context::build_bundle(
+        &db,
+        "new",
+        None,
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Off,
+    )
+    .unwrap();
+
+    assert!(bundle.sections.is_empty());
+    assert!(bundle.markdown.is_empty());
+    assert_eq!(bundle.approx_tokens, 0);
+    assert_eq!(bundle.delivery_level, "off");
+
+    // Resume bundle with Off
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+    let r_bundle = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Off,
+    )
+    .unwrap();
+
+    assert!(r_bundle.sections.is_empty());
+    assert!(r_bundle.markdown.is_empty());
+    assert_eq!(r_bundle.approx_tokens, 0);
+    assert_eq!(r_bundle.delivery_level, "off");
+}
+
+/// Invariant: New Session launched with Context Delivery = Off must STILL
+/// record selected_workstream_ids and create explicit bindings on discovery,
+/// but must NEVER record a ContextDelivery snapshot.
+#[test]
+fn launch_intent_with_off_creates_bindings_but_no_delivery() {
+    let db = open_db("intent-off-delivery");
+    let ws = ws_row(&db, "ws-off", None);
+    seed_context(&db, &ws.id, &["约束"]);
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    // In Off mode, Launcher creates intent without context markdown / revisions
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        selected_workstream_ids: vec![ws.id.clone()],
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    assert!(launcher::apply_match(&db, &intent, &s).is_ok());
+
+    // Explicit binding is preserved!
+    let bound = db.bindings_for_session(&s.id).unwrap();
+    assert_eq!(bound.len(), 1);
+    assert_eq!(bound[0].workstream_id, ws.id);
+    assert_eq!(bound[0].source, binding_source::EXPLICIT_LAUNCH);
+    assert_eq!(bound[0].confidence, 1.0);
+
+    // But NO ContextDelivery is recorded!
+    let deliveries = db.latest_deliveries(&s.id).unwrap();
+    assert!(
+        deliveries.is_empty(),
+        "Off mode must not create a ContextDelivery row"
+    );
+}
+
+/// P0 Invariant: Balanced → Off → Balanced
+/// When delivery is turned Off, interim revisions created during Off phase
+/// are NOT marked as delivered. When switched back to Balanced, the next
+/// resume DELTA must deliver all those interim revisions!
+#[test]
+fn balanced_off_balanced_preserves_revisions_in_delta() {
+    let db = open_db("balanced-off-balanced");
+    let ws = ws_row(&db, "ws-lifecycle", None);
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    let head_rev = |item_id: &str| {
+        db.get_item(item_id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap()
+    };
+
+    // Phase 1: Balanced delivery. Agent receives Revision 1.
+    let item1 = &seed_context(&db, &ws.id, &["初始约束 1"])[0];
+    let rev1 = head_rev(&item1.id);
+
+    db.record_delivery(&ContextDelivery {
+        id: new_id(),
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        bundle_id: "bundle-initial".into(),
+        delivered_revisions: vec![rev1.clone()],
+        delivered_at: now(),
+    })
+    .unwrap();
+
+    // Phase 2: User sets Context Delivery = Off.
+    // In the meantime, two new items (Revision 2 & 3) are added.
+    let item2 = &seed_context(&db, &ws.id, &["中期决策 2"])[0];
+    let item3 = &seed_context(&db, &ws.id, &["中期架构 3"])[0];
+    let _rev2 = head_rev(&item2.id);
+    let _rev3 = head_rev(&item3.id);
+
+    // During Off, a Resume occurs.
+    let off_bundle = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Off,
+    )
+    .unwrap();
+    assert_eq!(off_bundle.delivery_level, "off");
+    assert!(off_bundle.markdown.is_empty());
+    // Crucial: Launcher in Off mode does NOT call db.record_delivery.
+    // Latest delivery snapshot is still at Phase 1 (rev1).
+    let deliveries = db.latest_deliveries(&s.id).unwrap();
+    let last = deliveries
+        .iter()
+        .find(|d| d.workstream_id == ws.id)
+        .unwrap();
+    assert_eq!(last.delivered_revisions, vec![rev1.clone()]);
+
+    // Phase 3: User turns Context Delivery back to Balanced.
+    // Next Resume occurs.
+    let balanced_bundle = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+
+    // Both interim revisions MUST be present in the delta!
+    assert!(
+        balanced_bundle.markdown.contains("中期决策 2"),
+        "Interim revision 2 must be delivered in delta after re-enabling Balanced"
+    );
+    assert!(
+        balanced_bundle.markdown.contains("中期架构 3"),
+        "Interim revision 3 must be delivered in delta after re-enabling Balanced"
+    );
+    // Revision 1 was already delivered in Phase 1, so it shouldn't be in delta
+    assert!(
+        !balanced_bundle.markdown.contains("初始约束 1"),
+        "Revision 1 was delivered previously, must not be repeated"
+    );
 }
