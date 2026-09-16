@@ -983,6 +983,41 @@ pub fn launch_resume_session(
     })
 }
 
+/// Maximum time a prepared launch remains valid in memory before lazy cleanup (30 minutes).
+pub const PREPARED_LAUNCH_TTL_SECS: i64 = 30 * 60;
+
+/// Prune stale prepared launches whose `prepared_at` timestamp exceeds TTL.
+/// Pure in-memory check without background thread.
+pub fn prune_stale_prepared_launches(
+    map: &mut std::collections::HashMap<String, crate::launcher::PreparedLaunch>,
+) {
+    let now = chrono::Utc::now();
+    map.retain(|_, p| {
+        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&p.prepared_at) {
+            (now - ts.with_timezone(&chrono::Utc)).num_seconds() < PREPARED_LAUNCH_TTL_SECS
+        } else {
+            false
+        }
+    });
+}
+
+/// Atomically consume a prepared launch capability.
+///
+/// INVARIANT: PreparedLaunch = single-use capability.
+/// Once consumed, it is removed immediately so no concurrent or repeated launch can reuse it.
+pub fn consume_prepared_launch(
+    map: &std::sync::Mutex<std::collections::HashMap<String, crate::launcher::PreparedLaunch>>,
+    prepared_id: &str,
+) -> Result<crate::launcher::PreparedLaunch> {
+    let mut guard = map
+        .lock()
+        .map_err(|_| other("prepared_launches lock poisoned"))?;
+    prune_stale_prepared_launches(&mut guard);
+    guard
+        .remove(prepared_id)
+        .ok_or_else(|| other("Prepared launch 已被使用或已过期，请刷新预览"))
+}
+
 #[tauri::command]
 pub fn prepare_new_session(
     app: AppHandle,
@@ -1006,6 +1041,7 @@ pub fn prepare_new_session(
         .prepared_launches
         .lock()
         .map_err(|_| other("prepared_launches lock poisoned"))?;
+    prune_stale_prepared_launches(&mut map);
     map.insert(prepared.id.clone(), prepared.clone());
     Ok(prepared)
 }
@@ -1031,6 +1067,7 @@ pub fn prepare_resume_session(
         .prepared_launches
         .lock()
         .map_err(|_| other("prepared_launches lock poisoned"))?;
+    prune_stale_prepared_launches(&mut map);
     map.insert(prepared.id.clone(), prepared.clone());
     Ok(prepared)
 }
@@ -1041,15 +1078,7 @@ pub fn launch_prepared(
     state: State<AppState>,
     prepared_id: String,
 ) -> Result<crate::launcher::LaunchResult> {
-    let prepared = {
-        let map = state
-            .prepared_launches
-            .lock()
-            .map_err(|_| other("prepared_launches lock poisoned"))?;
-        map.get(&prepared_id)
-            .cloned()
-            .ok_or_else(|| other("未找到准备好的启动任务，或已过期。请重新预览"))?
-    };
+    let prepared = consume_prepared_launch(&state.prepared_launches, &prepared_id)?;
 
     let app_data = app
         .path()
@@ -1058,12 +1087,7 @@ pub fn launch_prepared(
     let launcher = crate::launcher::SessionLauncher {
         app_data_dir: app_data,
     };
-    let res = with_db(&state, |db| launcher.launch_prepared(db, &prepared))?;
-
-    if let Ok(mut map) = state.prepared_launches.lock() {
-        map.remove(&prepared_id);
-    }
-    Ok(res)
+    with_db(&state, |db| launcher.launch_prepared(db, &prepared))
 }
 
 #[tauri::command]
@@ -1072,6 +1096,7 @@ pub fn cancel_prepared(state: State<AppState>, prepared_id: String) -> Result<()
         .prepared_launches
         .lock()
         .map_err(|_| other("prepared_launches lock poisoned"))?;
+    prune_stale_prepared_launches(&mut map);
     map.remove(&prepared_id);
     Ok(())
 }

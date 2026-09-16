@@ -80,15 +80,31 @@ export default function NewSessionModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const handleClose = () => {
+    if (prepared) {
+      api.cancelPrepared(prepared.id).catch(console.error);
+      setPrepared(null);
+    }
+    onClose();
+  };
+
+  const handleWsChange = (newWsId: string) => {
+    if (prepared) {
+      api.cancelPrepared(prepared.id).catch(console.error);
+      setPrepared(null);
+    }
+    setWsId(newWsId);
+  };
+
   const isNone = wsId === "none";
   const isOff = deliveryLevel === "off";
 
   return (
     <>
-      <Modal title="New Session" onClose={onClose}>
+      <Modal title="New Session" onClose={handleClose}>
         <label className="field">
           <span>Workstream（可不选，Session 之后由 Sync 自动关联）</span>
-          <select value={wsId} onChange={(e) => setWsId(e.target.value)}>
+          <select value={wsId} onChange={(e) => handleWsChange(e.target.value)}>
             <option value="none">None（直接开始）</option>
             {workstreams.map((w) => (
               <option key={w.id} value={w.id}>
@@ -152,7 +168,7 @@ export default function NewSessionModal({ onClose }: { onClose: () => void }) {
           className="row"
           style={{ justifyContent: "flex-end", marginTop: 14 }}
         >
-          <button className="btn" onClick={onClose}>
+          <button className="btn" onClick={handleClose}>
             取消
           </button>
           <button
@@ -168,7 +184,10 @@ export default function NewSessionModal({ onClose }: { onClose: () => void }) {
       {previewOpen && prepared && (
         <ContextPreviewModal
           prepared={prepared}
-          onClose={() => setPreviewOpen(false)}
+          onClose={() => {
+            setPreviewOpen(false);
+            setPrepared(null);
+          }}
           onRefresh={doPrepare}
           onLaunched={onClose}
         />

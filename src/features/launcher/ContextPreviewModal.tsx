@@ -24,6 +24,11 @@ export default function ContextPreviewModal({
   const [refreshing, setRefreshing] = useState(false);
   const [staleError, setStaleError] = useState<string | null>(null);
 
+  const handleClose = () => {
+    api.cancelPrepared(prepared.id).catch(console.error);
+    onClose();
+  };
+
   const handleLaunch = async () => {
     if (busy) return;
     setBusy(true);
@@ -47,10 +52,14 @@ export default function ContextPreviewModal({
   const handleRefresh = async () => {
     setRefreshing(true);
     setStaleError(null);
+    const oldId = prepared.id;
     try {
       const refreshed = await onRefresh();
       if (refreshed) {
         setPrepared(refreshed);
+        if (oldId !== refreshed.id) {
+          api.cancelPrepared(oldId).catch(console.error);
+        }
       }
     } catch (e: unknown) {
       setStaleError(`刷新失败: ${String(e)}`);
@@ -63,7 +72,7 @@ export default function ContextPreviewModal({
   const isEmpty = prepared.bundle.sections.length === 0;
 
   return (
-    <Modal title="Context 准备就绪预览" onClose={onClose}>
+    <Modal title="Context 准备就绪预览" onClose={handleClose}>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
         <span className="badge accent">模式: {prepared.mode === "new" ? "New Session" : "Resume"}</span>
         <span className="badge">等级: {prepared.delivery_level}</span>
@@ -168,7 +177,7 @@ export default function ContextPreviewModal({
         </button>
 
         <div className="row" style={{ gap: 8 }}>
-          <button className="btn" onClick={onClose} disabled={busy}>
+          <button className="btn" onClick={handleClose} disabled={busy}>
             取消
           </button>
           <button

@@ -2243,3 +2243,112 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
     assert!(p_off.bundle.markdown.is_empty());
     assert_eq!(p_off.bundle.approx_tokens, 0);
 }
+
+#[test]
+fn prepared_launch_single_use_atomic_consumption() {
+    let db = open_db("single-use-prep");
+    let ws = ws_row(&db, "test ws", None);
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: std::env::temp_dir(),
+    };
+    let prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+
+    let map = std::sync::Mutex::new(std::collections::HashMap::new());
+    map.lock()
+        .unwrap()
+        .insert(prepared.id.clone(), prepared.clone());
+
+    // 1. First consume succeeds
+    let first = noending::commands::consume_prepared_launch(&map, &prepared.id);
+    assert!(first.is_ok());
+    assert_eq!(first.unwrap().id, prepared.id);
+
+    // 2. Second consume fails immediately with "已被使用或已过期"
+    let second = noending::commands::consume_prepared_launch(&map, &prepared.id);
+    assert!(second.is_err());
+    let err_msg = second.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("已过期") || err_msg.contains("已被使用"),
+        "expected consumed error, got: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn prepared_launch_concurrent_consumption_is_exclusive() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let db = open_db("concurrent-prep");
+    let ws = ws_row(&db, "test ws", None);
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: std::env::temp_dir(),
+    };
+    let prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+
+    let map = Arc::new(Mutex::new(HashMap::new()));
+    map.lock()
+        .unwrap()
+        .insert(prepared.id.clone(), prepared.clone());
+
+    let num_threads = 8;
+    let mut handles = Vec::new();
+
+    for _ in 0..num_threads {
+        let map_clone = Arc::clone(&map);
+        let pid = prepared.id.clone();
+        handles.push(std::thread::spawn(move || {
+            noending::commands::consume_prepared_launch(&map_clone, &pid)
+        }));
+    }
+
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let successes = results.iter().filter(|r| r.is_ok()).count();
+    let failures = results.iter().filter(|r| r.is_err()).count();
+
+    // INVARIANT: Exactly one consumer succeeds; all other 7 fail.
+    assert_eq!(successes, 1, "exactly 1 thread must succeed in consuming");
+    assert_eq!(failures, num_threads - 1, "all other threads must fail");
+}
+
+#[test]
+fn prepared_launch_lazy_ttl_cleanup() {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    let db = open_db("ttl-cleanup-prep");
+    let ws = ws_row(&db, "test ws", None);
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: std::env::temp_dir(),
+    };
+    let mut stale_prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+    // Simulate an old timestamp: 35 minutes ago
+    let old_ts = chrono::Utc::now() - chrono::Duration::seconds(35 * 60);
+    stale_prepared.prepared_at = old_ts.to_rfc3339();
+
+    let fresh_prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+
+    let map = Mutex::new(HashMap::new());
+    {
+        let mut guard = map.lock().unwrap();
+        guard.insert(stale_prepared.id.clone(), stale_prepared.clone());
+        guard.insert(fresh_prepared.id.clone(), fresh_prepared.clone());
+    }
+
+    // 1. Attempting to consume stale prepared fails because TTL pruned it
+    let stale_res = noending::commands::consume_prepared_launch(&map, &stale_prepared.id);
+    assert!(stale_res.is_err());
+
+    // 2. Fresh prepared launch is still present and can be consumed
+    let fresh_res = noending::commands::consume_prepared_launch(&map, &fresh_prepared.id);
+    assert!(fresh_res.is_ok());
+    assert_eq!(fresh_res.unwrap().id, fresh_prepared.id);
+}
