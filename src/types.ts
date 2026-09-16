@@ -198,12 +198,27 @@ export type ContextDeliveryLevel =
   | "detailed";
 
 export interface SessionContextBundle {
+  bundle_id?: string;
   mode: string;
   delivery_level: ContextDeliveryLevel;
   workstream_ids: string[];
   sections: ContextSection[];
   markdown: string;
   approx_tokens: number;
+}
+
+export interface PreparedLaunch {
+  id: string;
+  mode: "new" | "resume";
+  agent: Agent;
+  session_id?: string | null;
+  workstream_ids: string[];
+  extra_workstream_ids: string[];
+  cwd?: string | null;
+  delivery_level: ContextDeliveryLevel;
+  bundle: SessionContextBundle;
+  state_fingerprint: string;
+  prepared_at: string;
 }
 
 export interface LaunchResult {

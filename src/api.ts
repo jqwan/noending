@@ -69,6 +69,14 @@ export const api = {
     invoke<LaunchResult>("launch_new_session", { agent, workstreamIds, cwd: cwd ?? null }),
   launchResumeSession: (sessionId: string, extraWorkstreamIds: string[]) =>
     invoke<LaunchResult>("launch_resume_session", { sessionId, extraWorkstreamIds }),
+  prepareNewSession: (agent: Agent, workstreamIds: string[], cwd?: string) =>
+    invoke<import("./types").PreparedLaunch>("prepare_new_session", { agent, workstreamIds, cwd: cwd ?? null }),
+  prepareResumeSession: (sessionId: string, extraWorkstreamIds: string[]) =>
+    invoke<import("./types").PreparedLaunch>("prepare_resume_session", { sessionId, extraWorkstreamIds }),
+  launchPrepared: (preparedId: string) =>
+    invoke<LaunchResult>("launch_prepared", { preparedId }),
+  cancelPrepared: (preparedId: string) =>
+    invoke<void>("cancel_prepared", { preparedId }),
   previewBundle: (workstreamIds: string[], mode?: string, sessionId?: string) =>
     invoke<SessionContextBundle>("preview_context_bundle", {
       workstreamIds,
