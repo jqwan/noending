@@ -345,16 +345,10 @@ pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
 
 // ---------------- Context Delivery Level (Settings → Context Delivery) ----------------
 
-pub const CONTEXT_DELIVERY_LEVEL_KEY: &str = "context.delivery_level";
-
-pub fn context_delivery_level_of(db: &Db) -> Result<crate::context::ContextDeliveryLevel> {
-    if let Some(v) = db.get_setting(CONTEXT_DELIVERY_LEVEL_KEY)? {
-        if let Some(lvl) = crate::context::ContextDeliveryLevel::parse(&v) {
-            return Ok(lvl);
-        }
-    }
-    Ok(crate::context::ContextDeliveryLevel::Balanced)
-}
+pub use crate::settings::{
+    context_delivery_level_of, set_context_delivery_level as set_delivery_level,
+    CONTEXT_DELIVERY_LEVEL_KEY,
+};
 
 #[tauri::command]
 pub fn get_context_delivery_level(state: State<AppState>) -> Result<String> {
@@ -368,7 +362,7 @@ pub fn set_context_delivery_level(state: State<AppState>, level: String) -> Resu
     let lvl = crate::context::ContextDeliveryLevel::parse(&level)
         .ok_or_else(|| other("Invalid context delivery level"))?;
     with_db(&state, |db| {
-        db.set_setting(CONTEXT_DELIVERY_LEVEL_KEY, lvl.as_str())
+        crate::settings::set_context_delivery_level(db, lvl)
     })
 }
 

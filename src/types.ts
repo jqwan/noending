@@ -199,7 +199,7 @@ export type ContextDeliveryLevel =
 
 export interface SessionContextBundle {
   mode: string;
-  delivery_level?: string;
+  delivery_level: ContextDeliveryLevel;
   workstream_ids: string[];
   sections: ContextSection[];
   markdown: string;

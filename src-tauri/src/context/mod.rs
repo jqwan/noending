@@ -110,6 +110,8 @@ pub struct ContextSection {
     pub workstream_id: Option<String>,
     /// The revision this section reflects (for delivery snapshots).
     pub revision_id: Option<String>,
+    /// The conflict this section reflects (for delivery snapshots).
+    pub conflict_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +159,7 @@ pub fn resolve_core_context(db: &Db, workstream_id: &str) -> Result<Vec<ContextS
                     source_ref: rev.source_ref.clone(),
                     workstream_id: Some(workstream_id.to_string()),
                     revision_id: Some(rev.id.clone()),
+                    conflict_id: None,
                 });
             }
         }
@@ -238,6 +241,10 @@ pub fn build_bundle_with_policy(
     policy: ContextDeliveryPolicy,
     delivery_level_label: &str,
 ) -> Result<SessionContextBundle> {
+    if mode == "resume" && session.is_none() {
+        return Err(crate::error::other("Resume 模式必须提供 Session"));
+    }
+
     if !policy.enabled {
         return Ok(SessionContextBundle {
             bundle_id: new_id(),
@@ -277,6 +284,7 @@ pub fn build_bundle_with_policy(
             source_ref: None,
             workstream_id: Some(ws.id.clone()),
             revision_id: None,
+            conflict_id: None,
         });
     }
 
@@ -298,10 +306,11 @@ pub fn build_bundle_with_policy(
         let mut seen_ext: HashSet<String> = HashSet::new();
         for ws_id in workstream_ids {
             let items = db.items_for_workstream(ws_id, false)?;
-            for (item, rev) in items.iter().take(policy.new_extended_limit) {
-                if CORE_ITEM_TYPES.contains(&item.kind.as_str()) {
-                    continue;
-                }
+            for (item, rev) in items
+                .iter()
+                .filter(|(item, _)| !CORE_ITEM_TYPES.contains(&item.kind.as_str()))
+                .take(policy.new_extended_limit)
+            {
                 let key = format!("{}|{}", item.kind, normalize_title(&rev.title));
                 if !seen_ext.insert(key) {
                     continue;
@@ -314,6 +323,7 @@ pub fn build_bundle_with_policy(
                     source_ref: rev.source_ref.clone(),
                     workstream_id: Some(ws_id.clone()),
                     revision_id: Some(rev.id.clone()),
+                    conflict_id: None,
                 });
             }
         }
@@ -388,11 +398,9 @@ fn build_resume_sections(
             let items = db.items_for_workstream(ws_id, false)?;
             for (item, rev) in items
                 .iter()
+                .filter(|(item, _)| !CORE_ITEM_TYPES.contains(&item.kind.as_str()))
                 .take(policy.resume_first_delivery_extended_limit)
             {
-                if CORE_ITEM_TYPES.contains(&item.kind.as_str()) {
-                    continue;
-                }
                 sections.push(ContextSection {
                     kind: item.kind.clone(),
                     title: rev.title.clone(),
@@ -401,13 +409,26 @@ fn build_resume_sections(
                     source_ref: rev.source_ref.clone(),
                     workstream_id: Some(ws_id.clone()),
                     revision_id: Some(rev.id.clone()),
+                    conflict_id: None,
                 });
+            }
+            for c in db
+                .conflicts_for_workstream(ws_id, false)?
+                .iter()
+                .take(policy.conflict_limit)
+            {
+                sections.push(conflict_section(db, c)?);
             }
             continue;
         };
 
         let delivered: HashSet<&str> = delivery
             .delivered_revisions
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let delivered_conflicts: HashSet<&str> = delivery
+            .delivered_conflicts
             .iter()
             .map(|s| s.as_str())
             .collect();
@@ -426,6 +447,7 @@ fn build_resume_sections(
                     source_ref: rev.source_ref.clone(),
                     workstream_id: Some(ws_id.clone()),
                     revision_id: Some(rev.id.clone()),
+                    conflict_id: None,
                 });
             }
         }
@@ -452,16 +474,17 @@ fn build_resume_sections(
                             source_ref: rev.source_ref.clone(),
                             workstream_id: Some(ws_id.clone()),
                             revision_id: Some(rev.id.clone()),
+                            conflict_id: None,
                         });
                     }
                 }
             }
         }
 
-        // 3. new conflicts since last delivery.
+        // 3. new or undelivered conflicts.
         let mut conf_count = 0;
         for c in db.conflicts_for_workstream(ws_id, false)? {
-            if c.created_at > delivery.delivered_at {
+            if !delivered_conflicts.contains(c.id.as_str()) {
                 if conf_count >= policy.conflict_limit {
                     break;
                 }
@@ -512,6 +535,7 @@ fn conflict_section(db: &Db, c: &ContextConflict) -> Result<ContextSection> {
         source_ref: None,
         workstream_id: Some(c.workstream_id.clone()),
         revision_id: None,
+        conflict_id: Some(c.id.clone()),
     })
 }
 

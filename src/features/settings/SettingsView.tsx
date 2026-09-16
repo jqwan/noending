@@ -184,14 +184,35 @@ const DELIVERY_LEVELS: { key: ContextDeliveryLevel; label: string; hint: string 
 /** Context & Sync：Context Delivery 梯度控制与只读自动化说明（§50）。 */
 function ContextSyncSettings() {
   const [level, setLevel] = useState<ContextDeliveryLevel>("balanced");
+  const [loading, setLoading] = useState<boolean>(true);
+  const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.getContextDeliveryLevel().then(setLevel).catch(console.error);
+    let active = true;
+    setLoading(true);
+    api.getContextDeliveryLevel()
+      .then((lvl) => {
+        if (active) setLevel(lvl);
+      })
+      .catch((err) => {
+        if (active) {
+          console.error(err);
+          setError(String(err));
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const changeLevel = async (next: ContextDeliveryLevel) => {
+    if (saving || loading || next === level) return;
     const prev = level;
+    setSaving(true);
     setLevel(next);
     setError(null);
     try {
@@ -200,6 +221,8 @@ function ContextSyncSettings() {
       console.error(err);
       setLevel(prev);
       setError(String(err));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -216,6 +239,7 @@ function ContextSyncSettings() {
           {DELIVERY_LEVELS.map((d) => (
             <button
               key={d.key}
+              disabled={loading || saving}
               className={level === d.key ? "on" : ""}
               onClick={() => changeLevel(d.key)}
             >

@@ -89,7 +89,7 @@ impl SessionLauncher {
 
         // 2. build context bundle; zero contexts or Off → plain launch, no injection.
         //    (UX rule: 关联 Workstream 永远是可选项；Context Delivery 控制是否注入。)
-        let delivery_level = crate::commands::context_delivery_level_of(db)?;
+        let delivery_level = crate::settings::context_delivery_level_of(db)?;
         let bundle = crate::context::build_bundle(db, "new", None, workstream_ids, delivery_level)?;
         let ctx_file = if workstream_ids.is_empty()
             || delivery_level == crate::context::ContextDeliveryLevel::Off
@@ -110,8 +110,8 @@ impl SessionLauncher {
         //    revision snapshot travels with the intent: when a session
         //    matches, apply_match records it as ContextDelivery so the
         //    session's FIRST resume is a true delta, not a full re-send.
-        let delivered_by_ws = if ctx_file.is_some() {
-            delivered_revisions_by_workstream(
+        let (delivered_by_ws, delivered_confs_by_ws) = if ctx_file.is_some() {
+            delivered_revisions_and_conflicts_by_workstream(
                 &bundle,
                 workstream_ids.first().map(|s| s.as_str()).unwrap_or(""),
             )
@@ -134,6 +134,7 @@ impl SessionLauncher {
                     serde_json::json!({
                         "bundle_id": bundle.bundle_id,
                         "by_workstream": delivered_by_ws,
+                        "conflicts_by_workstream": delivered_confs_by_ws,
                     })
                     .to_string(),
                 )
@@ -228,7 +229,7 @@ impl SessionLauncher {
         }
 
         // 3. delta bundle against last delivered revisions (empty or Off → no injection)
-        let delivery_level = crate::commands::context_delivery_level_of(db)?;
+        let delivery_level = crate::settings::context_delivery_level_of(db)?;
         let bundle =
             crate::context::build_bundle(db, "resume", Some(&session), &ws_ids, delivery_level)?;
         let ctx_file =
@@ -257,10 +258,8 @@ impl SessionLauncher {
         //    delta computation (wrong `gone` sections, double deliveries).
         //    Also touch binding usage.
         //    INVARIANT: Only advance delivery snapshot when context was ACTUALLY delivered.
-        let delivered_by_ws = delivered_revisions_by_workstream(
-            &bundle,
-            ws_ids.first().map(|s| s.as_str()).unwrap_or(""),
-        );
+        //    Delivery snapshots are cumulative (Agent-Known State).
+        let prev_deliveries = db.latest_deliveries(session_id)?;
         for ws_id in &ws_ids {
             record_binding(
                 db,
@@ -271,14 +270,16 @@ impl SessionLauncher {
                 1.0,
             )?;
             if ctx_file.is_some() {
-                db.record_delivery(&ContextDelivery {
-                    id: new_id(),
-                    session_id: session_id.to_string(),
-                    workstream_id: ws_id.clone(),
-                    bundle_id: bundle.bundle_id.clone(),
-                    delivered_revisions: delivered_by_ws.get(ws_id).cloned().unwrap_or_default(),
-                    delivered_at: now(),
-                })?;
+                let prev = prev_deliveries.iter().find(|d| &d.workstream_id == ws_id);
+                let delivery = compute_cumulative_delivery(
+                    db,
+                    session_id,
+                    ws_id,
+                    &bundle,
+                    prev,
+                    ws_ids.first().map(|s| s.as_str()).unwrap_or(""),
+                )?;
+                db.record_delivery(&delivery)?;
             }
         }
 
@@ -302,27 +303,141 @@ impl SessionLauncher {
     }
 }
 
-/// Group the bundle's delivered revision ids by the workstream that owns
-/// each section. Sections without a workstream attribution (rare) fall back
-/// to `fallback_ws`.
-fn delivered_revisions_by_workstream(
+/// Group the bundle's delivered revision ids and conflict ids by the workstream that owns
+/// each section. Sections without a workstream attribution (rare) fall back to `fallback_ws`.
+pub fn delivered_revisions_and_conflicts_by_workstream(
     bundle: &crate::context::SessionContextBundle,
     fallback_ws: &str,
-) -> std::collections::BTreeMap<String, Vec<String>> {
-    let mut by_ws: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+) -> (
+    std::collections::BTreeMap<String, Vec<String>>,
+    std::collections::BTreeMap<String, Vec<String>>,
+) {
+    let mut revs_by_ws: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut confs_by_ws: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for s in &bundle.sections {
+        let ws = s
+            .workstream_id
+            .clone()
+            .unwrap_or_else(|| fallback_ws.to_string());
         if let Some(rev) = &s.revision_id {
-            let ws = s
-                .workstream_id
-                .clone()
-                .unwrap_or_else(|| fallback_ws.to_string());
-            let entry = by_ws.entry(ws).or_default();
+            let entry = revs_by_ws.entry(ws.clone()).or_default();
             if !entry.contains(rev) {
                 entry.push(rev.clone());
             }
         }
+        if let Some(cid) = &s.conflict_id {
+            let entry = confs_by_ws.entry(ws).or_default();
+            if !entry.contains(cid) {
+                entry.push(cid.clone());
+            }
+        }
     }
-    by_ws
+    (revs_by_ws, confs_by_ws)
+}
+
+/// Compute cumulative delivery snapshot (Agent-Known State) for a workstream.
+/// Resume context represents Current − AgentKnownState.
+/// Therefore, the delivery snapshot must accumulate everything the agent knows,
+/// rather than just what was sent in the most recent single message.
+pub fn compute_cumulative_delivery(
+    db: &Db,
+    session_id: &str,
+    workstream_id: &str,
+    bundle: &crate::context::SessionContextBundle,
+    prev_delivery: Option<&ContextDelivery>,
+    fallback_ws: &str,
+) -> Result<ContextDelivery> {
+    let ws_sections: Vec<&crate::context::ContextSection> = bundle
+        .sections
+        .iter()
+        .filter(|s| s.workstream_id.as_deref().unwrap_or(fallback_ws) == workstream_id)
+        .collect();
+
+    match prev_delivery {
+        None => {
+            let mut revisions = Vec::new();
+            let mut conflicts = Vec::new();
+            for s in ws_sections {
+                if let Some(rev) = &s.revision_id {
+                    if !revisions.contains(rev) {
+                        revisions.push(rev.clone());
+                    }
+                }
+                if let Some(cid) = &s.conflict_id {
+                    if !conflicts.contains(cid) {
+                        conflicts.push(cid.clone());
+                    }
+                }
+            }
+            Ok(ContextDelivery {
+                id: new_id(),
+                session_id: session_id.to_string(),
+                workstream_id: workstream_id.to_string(),
+                bundle_id: bundle.bundle_id.clone(),
+                delivered_revisions: revisions,
+                delivered_conflicts: conflicts,
+                delivered_at: now(),
+            })
+        }
+        Some(prev) => {
+            let mut known_revisions = prev.delivered_revisions.clone();
+            let mut known_conflicts = prev.delivered_conflicts.clone();
+
+            for s in ws_sections {
+                match s.kind.as_str() {
+                    "delta" => {
+                        if let Some(new_rev_id) = &s.revision_id {
+                            if let Some(new_rev) = db.get_revision(new_rev_id)? {
+                                // Remove any older revision of the same item
+                                known_revisions.retain(|rev_id| {
+                                    if let Ok(Some(r)) = db.get_revision(rev_id) {
+                                        r.item_id != new_rev.item_id
+                                    } else {
+                                        true
+                                    }
+                                });
+                            }
+                            if !known_revisions.contains(new_rev_id) {
+                                known_revisions.push(new_rev_id.clone());
+                            }
+                        }
+                    }
+                    "gone" => {
+                        if let Some(gone_rev_id) = &s.revision_id {
+                            known_revisions.retain(|r| r != gone_rev_id);
+                        }
+                    }
+                    "conflict" => {
+                        if let Some(cid) = &s.conflict_id {
+                            if !known_conflicts.contains(cid) {
+                                known_conflicts.push(cid.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Prune conflicts that are no longer open in DB
+            known_conflicts.retain(|cid| {
+                if let Ok(Some(c)) = db.get_conflict(cid) {
+                    c.status == "open"
+                } else {
+                    false
+                }
+            });
+
+            Ok(ContextDelivery {
+                id: new_id(),
+                session_id: session_id.to_string(),
+                workstream_id: workstream_id.to_string(),
+                bundle_id: bundle.bundle_id.clone(),
+                delivered_revisions: known_revisions,
+                delivered_conflicts: known_conflicts,
+                delivered_at: now(),
+            })
+        }
+    }
 }
 
 fn resolve_install(
@@ -641,10 +756,20 @@ pub fn apply_match(db: &Db, intent: &LaunchIntent, session: &Session) -> Result<
                 .and_then(|b| b.as_str())
                 .unwrap_or(&intent.id)
                 .to_string();
+            let confs_by_ws = v.get("conflicts_by_workstream").and_then(|m| m.as_object());
             if let Some(by_ws) = v.get("by_workstream").and_then(|m| m.as_object()) {
                 for (ws_id, revs) in by_ws {
                     let revisions: Vec<String> = revs
                         .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let conflicts: Vec<String> = confs_by_ws
+                        .and_then(|c| c.get(ws_id))
+                        .and_then(|a| a.as_array())
                         .map(|a| {
                             a.iter()
                                 .filter_map(|x| x.as_str().map(String::from))
@@ -657,6 +782,7 @@ pub fn apply_match(db: &Db, intent: &LaunchIntent, session: &Session) -> Result<
                         workstream_id: ws_id.clone(),
                         bundle_id: bundle_id.clone(),
                         delivered_revisions: revisions,
+                        delivered_conflicts: conflicts,
                         delivered_at: now(),
                     })?;
                 }

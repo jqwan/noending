@@ -11,6 +11,7 @@ pub mod ingestion;
 pub mod launcher;
 pub mod platform;
 pub mod search;
+pub mod settings;
 pub mod storage;
 pub mod sync;
 

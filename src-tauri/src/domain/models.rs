@@ -395,6 +395,7 @@ pub struct ContextDelivery {
     pub workstream_id: Id,
     pub bundle_id: Id,
     pub delivered_revisions: Vec<Id>,
+    pub delivered_conflicts: Vec<Id>,
     pub delivered_at: String,
 }
 

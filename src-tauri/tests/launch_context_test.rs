@@ -335,6 +335,7 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
         workstream_id: ws.id.clone(),
         bundle_id: bundle.bundle_id.clone(),
         delivered_revisions: delivered,
+        delivered_conflicts: vec![],
         delivered_at: now(),
     })
     .unwrap();
@@ -382,6 +383,7 @@ fn resume_delta_shows_changes_and_disappearances() {
         workstream_id: ws.id.clone(),
         bundle_id: bundle.bundle_id.clone(),
         delivered_revisions: delivered,
+        delivered_conflicts: vec![],
         delivered_at: now(),
     })
     .unwrap();
@@ -869,6 +871,7 @@ fn multi_workstream_delivery_groups_revisions_by_workstream() {
             workstream_id: ws_id.clone(),
             bundle_id: "bundle-2".into(),
             delivered_revisions: revs.clone(),
+            delivered_conflicts: vec![],
             delivered_at: now(),
         })
         .unwrap();
@@ -1186,6 +1189,7 @@ fn balanced_off_balanced_preserves_revisions_in_delta() {
         workstream_id: ws.id.clone(),
         bundle_id: "bundle-initial".into(),
         delivered_revisions: vec![rev1.clone()],
+        delivered_conflicts: vec![],
         delivered_at: now(),
     })
     .unwrap();
@@ -1242,4 +1246,347 @@ fn balanced_off_balanced_preserves_revisions_in_delta() {
         !balanced_bundle.markdown.contains("初始约束 1"),
         "Revision 1 was delivered previously, must not be repeated"
     );
+}
+
+/// P0: Delivery snapshots are cumulative (Agent-Known State). Consecutive
+/// resumes without changes must NEVER re-send items as spurious deltas.
+#[test]
+fn resume_preserves_cumulative_known_state_without_spurious_deltas() {
+    let db = open_db("cumulative-state");
+    let ws = ws_row(&db, "cumulative ws", None);
+
+    let goal = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "goal",
+        "核心目标",
+        "目标描述",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+    let state = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "current_state",
+        "当前状态",
+        "状态描述",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+    let constraint = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "核心约束",
+        "必须向后兼容",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+    let decision = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "decision",
+        "重大决定",
+        "采用 SQLite",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    let head_rev = |id: &str| {
+        db.get_item(id)
+            .unwrap()
+            .unwrap()
+            .current_revision_id
+            .unwrap()
+    };
+
+    let all_revs = vec![
+        head_rev(&goal.id),
+        head_rev(&state.id),
+        head_rev(&constraint.id),
+        head_rev(&decision.id),
+    ];
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    // Initial delivery snapshot (e.g. from New Session launch)
+    let d0 = ContextDelivery {
+        id: new_id(),
+        session_id: s.id.clone(),
+        workstream_id: ws.id.clone(),
+        bundle_id: "bundle-initial".into(),
+        delivered_revisions: all_revs.clone(),
+        delivered_conflicts: vec![],
+        delivered_at: now(),
+    };
+    db.record_delivery(&d0).unwrap();
+
+    // Resume round 1: No changes in DB
+    let b1 = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+    // Round 1 only has reminders, no deltas
+    assert!(!b1.sections.iter().any(|sec| sec.kind == "delta"));
+
+    // Compute cumulative delivery for round 1
+    let d1 =
+        launcher::compute_cumulative_delivery(&db, &s.id, &ws.id, &b1, Some(&d0), &ws.id).unwrap();
+    // Invariant: The cumulative snapshot must STILL contain all 4 revisions!
+    assert_eq!(
+        d1.delivered_revisions.len(),
+        4,
+        "Round 1 cumulative delivery must retain all known revisions"
+    );
+    for r in &all_revs {
+        assert!(d1.delivered_revisions.contains(r));
+    }
+    db.record_delivery(&d1).unwrap();
+
+    // Resume round 2: Still no changes in DB
+    let b2 = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+
+    // Prior bug: In round 2, Constraint and Decision were treated as undelivered
+    // and emitted as deltas!
+    // With cumulative snapshots, there MUST be NO deltas!
+    let deltas: Vec<&context::ContextSection> = b2
+        .sections
+        .iter()
+        .filter(|sec| sec.kind == "delta")
+        .collect();
+    assert!(
+        deltas.is_empty(),
+        "No spurious deltas allowed on second resume without changes, but got: {:?}",
+        deltas
+    );
+    assert!(!b2.markdown.contains("Changed Since Your Last Activity"));
+}
+
+/// P1: Conflicts truncated by token budget must not be permanently lost,
+/// and delivered conflicts must be deduplicated across consecutive resumes.
+#[test]
+fn conflict_not_lost_when_truncated_by_budget() {
+    let db = open_db("conflict-budget");
+    let ws = ws_row(&db, "conflict ws", None);
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "约束条目",
+        "内容",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    let conflict_id = new_id();
+    db.insert_conflict(&noending::domain::ContextConflict {
+        id: conflict_id.clone(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+    })
+    .unwrap();
+
+    let s = session_row(&db, Agent::Codex, Some(now()), None);
+
+    // Initial delivery where conflict is truncated by a tiny budget (e.g. 5 tokens)
+    let tiny_policy = context::ContextDeliveryPolicy {
+        enabled: true,
+        new_token_budget: 5,
+        resume_token_budget: 5,
+        new_extended_limit: 0,
+        resume_first_delivery_extended_limit: 0,
+        conflict_limit: 1,
+    };
+    let b_tiny = context::build_bundle_with_policy(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        tiny_policy,
+        "custom",
+    )
+    .unwrap();
+    // Budget truncated the conflict section
+    assert!(!b_tiny
+        .sections
+        .iter()
+        .any(|sec| sec.conflict_id.as_deref() == Some(&conflict_id)));
+
+    // Cumulative delivery computed from truncated bundle
+    let d_tiny =
+        launcher::compute_cumulative_delivery(&db, &s.id, &ws.id, &b_tiny, None, &ws.id).unwrap();
+    assert!(
+        !d_tiny.delivered_conflicts.contains(&conflict_id),
+        "Truncated conflict must not be recorded as delivered"
+    );
+    db.record_delivery(&d_tiny).unwrap();
+
+    // Next resume with normal Balanced budget: the conflict was never delivered, so it must be delivered now!
+    let b_normal = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+    assert!(
+        b_normal
+            .sections
+            .iter()
+            .any(|sec| sec.conflict_id.as_deref() == Some(&conflict_id)),
+        "Undelivered conflict must appear in normal resume"
+    );
+
+    // Record delivery of b_normal
+    let d_normal =
+        launcher::compute_cumulative_delivery(&db, &s.id, &ws.id, &b_normal, Some(&d_tiny), &ws.id)
+            .unwrap();
+    assert!(
+        d_normal.delivered_conflicts.contains(&conflict_id),
+        "Delivered conflict must be tracked"
+    );
+    db.record_delivery(&d_normal).unwrap();
+
+    // Subsequent resume: conflict already delivered, must not be repeated
+    let b_after = context::build_bundle(
+        &db,
+        "resume",
+        Some(&s),
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
+    assert!(
+        !b_after
+            .sections
+            .iter()
+            .any(|sec| sec.conflict_id.as_deref() == Some(&conflict_id)),
+        "Delivered conflict must not be re-delivered"
+    );
+}
+
+/// P1: Filtering of core items must happen BEFORE taking extended_limit,
+/// preventing core items from starving extended items in Compact/Balanced modes.
+#[test]
+fn extended_items_filtering_order_not_starved_by_core_items() {
+    let db = open_db("extended-starve");
+    let ws = ws_row(&db, "starve ws", None);
+
+    // Seed 5 core items first
+    for kind in [
+        "goal",
+        "current_state",
+        "constraint",
+        "decision",
+        "open_question",
+    ] {
+        noending::sync::create_item(
+            &db,
+            &ws.id,
+            kind,
+            &format!("核心条目 {}", kind),
+            "内容",
+            "user_explicit",
+            "user_explicit",
+            &[],
+            None,
+            "user",
+        )
+        .unwrap();
+    }
+
+    // Seed 1 extended item
+    noending::sync::create_item(
+        &db,
+        &ws.id,
+        "key_fact",
+        "核心架构事实：使用 Tokio 运行时",
+        "详细说明",
+        "user_explicit",
+        "user_explicit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    // In Compact mode (new_extended_limit = 1):
+    // Prior bug: items.iter().take(1) took the first item (core item) and skipped it, producing 0 extended items.
+    // Fixed: filter(!CORE).take(1) takes the extended item!
+    let bundle = context::build_bundle(
+        &db,
+        "new",
+        None,
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Compact,
+    )
+    .unwrap();
+
+    assert!(
+        bundle.markdown.contains("使用 Tokio 运行时"),
+        "Compact mode must include extended items without starvation by core items"
+    );
+    assert!(bundle.sections.iter().any(|s| s.kind == "key_fact"));
+}
+
+/// P3: Builder validation must enforce that resume mode requires a session,
+/// even when Context Delivery is Off.
+#[test]
+fn builder_requires_session_in_resume_mode_even_when_off() {
+    let db = open_db("resume-off-valid");
+    let ws = ws_row(&db, "off ws", None);
+
+    let err = context::build_bundle(
+        &db,
+        "resume",
+        None,
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Off,
+    );
+    assert!(
+        err.is_err(),
+        "Resume mode without session must error even in Off mode"
+    );
+    assert!(err
+        .unwrap_err()
+        .to_string()
+        .contains("Resume 模式必须提供 Session"));
 }

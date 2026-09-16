@@ -27,8 +27,9 @@ pub struct Db(pub Connection);
 /// full re-scan, event ids preserved; v5 added `session_binding_removals`
 /// (durable negative overrides: a user-rejected workstream is never
 /// re-proposed by auto-classification); v6 added `workstreams.default_cwd`
-/// (optional launch-directory suggestion, convenience not identity).
-pub const SCHEMA_VERSION: i64 = 6;
+/// (optional launch-directory suggestion, convenience not identity); v7 added
+/// `context_deliveries.delivered_conflicts` (JSON array of conflict IDs).
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -316,6 +317,7 @@ impl Db {
               workstream_id TEXT NOT NULL REFERENCES workstreams(id),
               bundle_id TEXT NOT NULL,
               delivered_revisions TEXT NOT NULL DEFAULT '[]',
+              delivered_conflicts TEXT NOT NULL DEFAULT '[]',
               delivered_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS ingest_sources (
@@ -389,6 +391,7 @@ impl Db {
             "ALTER TABLE launch_intents ADD COLUMN context_bundle_revisions TEXT",
             "ALTER TABLE session_events ADD COLUMN legacy_identity_hash TEXT",
             "ALTER TABLE workstreams ADD COLUMN default_cwd TEXT",
+            "ALTER TABLE context_deliveries ADD COLUMN delivered_conflicts TEXT NOT NULL DEFAULT '[]'",
         ] {
             if let Err(e) = self.0.execute_batch(stmt) {
                 if !e.to_string().contains("duplicate column name") {
@@ -1367,6 +1370,18 @@ impl Db {
         Ok(())
     }
 
+    pub fn get_conflict(&self, conflict_id: &str) -> Result<Option<ContextConflict>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at
+                 FROM context_conflicts WHERE id = ?1",
+                params![conflict_id],
+                row_conflict,
+            )
+            .optional()?)
+    }
+
     // ---------------- Sync runs ----------------
 
     pub fn insert_sync_run(&self, run: &SyncRun) -> Result<()> {
@@ -1506,9 +1521,17 @@ impl Db {
 
     pub fn record_delivery(&self, d: &ContextDelivery) -> Result<()> {
         self.0.execute(
-            "INSERT INTO context_deliveries (id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![d.id, d.session_id, d.workstream_id, d.bundle_id, serde_json::to_string(&d.delivered_revisions)?, d.delivered_at],
+            "INSERT INTO context_deliveries (id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                d.id,
+                d.session_id,
+                d.workstream_id,
+                d.bundle_id,
+                serde_json::to_string(&d.delivered_revisions)?,
+                serde_json::to_string(&d.delivered_conflicts)?,
+                d.delivered_at,
+            ],
         )?;
         Ok(())
     }
@@ -1516,7 +1539,7 @@ impl Db {
     /// Latest successful delivery per workstream for a session.
     pub fn latest_deliveries(&self, session_id: &str) -> Result<Vec<ContextDelivery>> {
         let mut st = self.0.prepare(
-            "SELECT id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_at
+            "SELECT id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at
              FROM context_deliveries WHERE session_id = ?1 ORDER BY delivered_at",
         )?;
         let all = st
@@ -2450,7 +2473,8 @@ fn row_delivery(r: &Row) -> rusqlite::Result<ContextDelivery> {
         workstream_id: r.get(2)?,
         bundle_id: r.get(3)?,
         delivered_revisions: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-        delivered_at: r.get(5)?,
+        delivered_conflicts: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+        delivered_at: r.get(6)?,
     })
 }
 
