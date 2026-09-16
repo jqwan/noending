@@ -10,11 +10,94 @@
 
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::{ContextConflict, Session, CORE_ITEM_TYPES};
 use crate::error::Result;
 use crate::storage::{new_id, Db};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextDeliveryLevel {
+    Off,
+    Compact,
+    Balanced,
+    Detailed,
+}
+
+impl Default for ContextDeliveryLevel {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+impl ContextDeliveryLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Compact => "compact",
+            Self::Balanced => "balanced",
+            Self::Detailed => "detailed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "compact" => Some(Self::Compact),
+            "balanced" => Some(Self::Balanced),
+            "detailed" => Some(Self::Detailed),
+            _ => None,
+        }
+    }
+
+    pub fn policy(&self) -> ContextDeliveryPolicy {
+        match self {
+            Self::Off => ContextDeliveryPolicy {
+                enabled: false,
+                new_token_budget: 0,
+                resume_token_budget: 0,
+                new_extended_limit: 0,
+                resume_first_delivery_extended_limit: 0,
+                conflict_limit: 0,
+            },
+            Self::Compact => ContextDeliveryPolicy {
+                enabled: true,
+                new_token_budget: 2000,
+                resume_token_budget: 1500,
+                new_extended_limit: 3,
+                resume_first_delivery_extended_limit: 2,
+                conflict_limit: 2,
+            },
+            Self::Balanced => ContextDeliveryPolicy {
+                enabled: true,
+                new_token_budget: 4000,
+                resume_token_budget: 3000,
+                new_extended_limit: 10,
+                resume_first_delivery_extended_limit: 5,
+                conflict_limit: 5,
+            },
+            Self::Detailed => ContextDeliveryPolicy {
+                enabled: true,
+                new_token_budget: 8000,
+                resume_token_budget: 6000,
+                new_extended_limit: 20,
+                resume_first_delivery_extended_limit: 10,
+                conflict_limit: 10,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextDeliveryPolicy {
+    pub enabled: bool,
+    pub new_token_budget: usize,
+    pub resume_token_budget: usize,
+    pub new_extended_limit: usize,
+    pub resume_first_delivery_extended_limit: usize,
+    pub conflict_limit: usize,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextSection {
@@ -33,6 +116,7 @@ pub struct ContextSection {
 pub struct SessionContextBundle {
     pub bundle_id: String,
     pub mode: String, // new | resume
+    pub delivery_level: String,
     pub workstream_ids: Vec<String>,
     pub sections: Vec<ContextSection>,
     pub markdown: String,
@@ -134,8 +218,38 @@ pub fn build_bundle(
     mode: &str,
     session: Option<&Session>,
     workstream_ids: &[String],
-    token_budget: usize,
+    delivery_level: ContextDeliveryLevel,
 ) -> Result<SessionContextBundle> {
+    build_bundle_with_policy(
+        db,
+        mode,
+        session,
+        workstream_ids,
+        delivery_level.policy(),
+        delivery_level.as_str(),
+    )
+}
+
+pub fn build_bundle_with_policy(
+    db: &Db,
+    mode: &str,
+    session: Option<&Session>,
+    workstream_ids: &[String],
+    policy: ContextDeliveryPolicy,
+    delivery_level_label: &str,
+) -> Result<SessionContextBundle> {
+    if !policy.enabled {
+        return Ok(SessionContextBundle {
+            bundle_id: new_id(),
+            mode: mode.to_string(),
+            delivery_level: delivery_level_label.to_string(),
+            workstream_ids: workstream_ids.to_vec(),
+            sections: vec![],
+            markdown: String::new(),
+            approx_tokens: 0,
+        });
+    }
+
     let mut sections: Vec<ContextSection> = Vec::new();
     let agg = aggregate_context(db, workstream_ids)?;
 
@@ -168,7 +282,13 @@ pub fn build_bundle(
 
     if mode == "resume" {
         let session = session.ok_or_else(|| crate::error::other("Resume 模式必须提供 Session"))?;
-        sections.extend(build_resume_sections(db, session, workstream_ids, &agg)?);
+        sections.extend(build_resume_sections(
+            db,
+            session,
+            workstream_ids,
+            &agg,
+            &policy,
+        )?);
     } else {
         // aggregated core (deduped across workstreams, primary wins)
         sections.extend(agg.core.clone());
@@ -178,7 +298,7 @@ pub fn build_bundle(
         let mut seen_ext: HashSet<String> = HashSet::new();
         for ws_id in workstream_ids {
             let items = db.items_for_workstream(ws_id, false)?;
-            for (item, rev) in items.iter().take(10) {
+            for (item, rev) in items.iter().take(policy.new_extended_limit) {
                 if CORE_ITEM_TYPES.contains(&item.kind.as_str()) {
                     continue;
                 }
@@ -199,19 +319,25 @@ pub fn build_bundle(
         }
 
         if !agg.conflicts.is_empty() {
-            for c in agg.conflicts.iter().take(5) {
+            for c in agg.conflicts.iter().take(policy.conflict_limit) {
                 sections.push(conflict_section(db, c)?);
             }
         }
     }
 
+    let budget = if mode == "resume" {
+        policy.resume_token_budget
+    } else {
+        policy.new_token_budget
+    };
+
     // Sections fit the budget or they are not delivered — and what is not
     // delivered must not appear in `sections` (see doc above).
-    let (markdown, delivered_sections) =
-        render_markdown_within_budget(mode, &sections, token_budget * 3);
+    let (markdown, delivered_sections) = render_markdown_within_budget(mode, &sections, budget * 3);
     Ok(SessionContextBundle {
         bundle_id: new_id(),
         mode: mode.to_string(),
+        delivery_level: delivery_level_label.to_string(),
         workstream_ids: workstream_ids.to_vec(),
         sections: delivered_sections,
         approx_tokens: markdown.len() / 3, // rough CJK/EN mix heuristic
@@ -227,6 +353,7 @@ fn build_resume_sections(
     session: &Session,
     workstream_ids: &[String],
     agg: &AggregatedContext,
+    policy: &ContextDeliveryPolicy,
 ) -> Result<Vec<ContextSection>> {
     let deliveries = db.latest_deliveries(&session.id)?;
     let delivered_for = |ws_id: &str| -> Option<&crate::domain::ContextDelivery> {
@@ -259,7 +386,10 @@ fn build_resume_sections(
                 sections.push(s.clone());
             }
             let items = db.items_for_workstream(ws_id, false)?;
-            for (item, rev) in items.iter().take(5) {
+            for (item, rev) in items
+                .iter()
+                .take(policy.resume_first_delivery_extended_limit)
+            {
                 if CORE_ITEM_TYPES.contains(&item.kind.as_str()) {
                     continue;
                 }
@@ -329,8 +459,13 @@ fn build_resume_sections(
         }
 
         // 3. new conflicts since last delivery.
+        let mut conf_count = 0;
         for c in db.conflicts_for_workstream(ws_id, false)? {
             if c.created_at > delivery.delivered_at {
+                if conf_count >= policy.conflict_limit {
+                    break;
+                }
+                conf_count += 1;
                 any_change = true;
                 sections.push(conflict_section(db, &c)?);
             }

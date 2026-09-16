@@ -217,7 +217,14 @@ fn context_bundle_contains_core_sections() {
     )
     .unwrap();
 
-    let bundle = context::build_bundle(&db, "new", None, &[ws.id.clone()], 4000).unwrap();
+    let bundle = context::build_bundle(
+        &db,
+        "new",
+        None,
+        &[ws.id.clone()],
+        context::ContextDeliveryLevel::Balanced,
+    )
+    .unwrap();
     assert!(bundle.markdown.contains("Goal"));
     assert!(bundle.markdown.contains("规划关西七日行程"));
     assert!(bundle.markdown.contains("预算不超过 3 万"));
