@@ -12,9 +12,10 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::adapters::AgentCommand;
+use crate::context::ContextDeliveryLevel;
 use crate::domain::{
     binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, Session,
     SessionWorkstreamBinding,
@@ -28,6 +29,21 @@ const MATCH_WINDOW_SECS: i64 = 6 * 3600;
 const MATCH_CLOCK_SKEW_SECS: i64 = 120;
 /// Pending intents older than this never match again.
 const INTENT_TTL_SECS: i64 = 24 * 3600;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparedLaunch {
+    pub id: String,
+    pub mode: String, // "new" | "resume"
+    pub agent: Agent,
+    pub session_id: Option<String>,
+    pub workstream_ids: Vec<String>,
+    pub extra_workstream_ids: Vec<String>,
+    pub cwd: Option<String>,
+    pub delivery_level: ContextDeliveryLevel,
+    pub bundle: crate::context::SessionContextBundle,
+    pub state_fingerprint: String,
+    pub prepared_at: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LaunchResult {
@@ -72,143 +88,63 @@ impl SessionLauncher {
         Ok(synced)
     }
 
-    pub fn new_session(
+    /// Prepare New Session:
+    /// Ingests/syncs stale workstream sessions, resolves cwd and delivery level,
+    /// builds the exact context bundle, and captures a state fingerprint.
+    ///
+    /// INVARIANT: Zero premature side effects. Does NOT insert LaunchIntent,
+    /// does NOT write context files, and does NOT record delivery snapshots.
+    pub fn prepare_new(
         &self,
         db: &Db,
         agent: Agent,
         workstream_ids: &[String],
         cwd: Option<&str>,
-    ) -> Result<LaunchResult> {
-        // 1. sync stale sessions that share these workstreams (no-op when empty)
+    ) -> Result<PreparedLaunch> {
         self.sync_stale_for_workstreams(db, workstream_ids)?;
 
-        // 1b. effective cwd. Launching WITHOUT a directory drops the agent
-        //     into the terminal's default ($HOME), where an untrusted-
-        //     directory prompt stops the session from ever starting.
-        let effective_cwd: Option<String> = resolve_new_session_cwd(db, workstream_ids, cwd)?;
+        let effective_cwd = resolve_new_session_cwd(db, workstream_ids, cwd)?;
 
-        // 2. build context bundle; zero contexts or Off → plain launch, no injection.
-        //    (UX rule: 关联 Workstream 永远是可选项；Context Delivery 控制是否注入。)
         let delivery_level = crate::settings::context_delivery_level_of(db)?;
         let bundle = crate::context::build_bundle(db, "new", None, workstream_ids, delivery_level)?;
-        let ctx_file = if workstream_ids.is_empty()
-            || delivery_level == crate::context::ContextDeliveryLevel::Off
-        {
-            None
-        } else {
-            let title_hint = workstream_ids
-                .first()
-                .and_then(|id| db.get_workstream(id).ok().flatten())
-                .map(|w| w.title)
-                .unwrap_or_else(|| "bundle".into());
-            Some(self.write_context_file(&title_hint, &bundle.markdown)?)
-        };
 
-        // 3. durable LaunchIntent BEFORE launching: the user's explicit
-        //    Workstream selection must survive discovery latency and even a
-        //    NoEnding crash right after spawn. The bundle's delivered
-        //    revision snapshot travels with the intent: when a session
-        //    matches, apply_match records it as ContextDelivery so the
-        //    session's FIRST resume is a true delta, not a full re-send.
-        let (delivered_by_ws, delivered_confs_by_ws) = if ctx_file.is_some() {
-            delivered_revisions_and_conflicts_by_workstream(
-                &bundle,
-                workstream_ids.first().map(|s| s.as_str()).unwrap_or(""),
-            )
-        } else {
-            Default::default()
-        };
-        let intent = LaunchIntent {
+        let state_fingerprint =
+            compute_state_fingerprint(db, "new", None, workstream_ids, delivery_level)?;
+
+        Ok(PreparedLaunch {
             id: new_id(),
-            launch_type: "new".into(),
+            mode: "new".into(),
             agent,
-            selected_workstream_ids: workstream_ids.to_vec(),
-            cwd: effective_cwd.clone(),
-            context_bundle_markdown: if ctx_file.is_some() {
-                Some(bundle.markdown.clone())
-            } else {
-                None
-            },
-            context_bundle_revisions: if ctx_file.is_some() {
-                Some(
-                    serde_json::json!({
-                        "bundle_id": bundle.bundle_id,
-                        "by_workstream": delivered_by_ws,
-                        "conflicts_by_workstream": delivered_confs_by_ws,
-                    })
-                    .to_string(),
-                )
-            } else {
-                None
-            },
-            process_id: None,
-            launched_at: now(),
-            matched_session_id: None,
-            status: launch_status::PENDING.into(),
-            note: String::new(),
-            created_at: now(),
-            updated_at: now(),
-        };
-        db.insert_launch_intent(&intent)?;
-
-        // 4. resolve agent CLI
-        let install = resolve_install(db, agent)?;
-        let adapter = crate::adapters::adapter_for(agent);
-        let cwd_path = effective_cwd.map(PathBuf::from);
-
-        // 5. adapter builds command, platform launches it
-        let cmd: AgentCommand =
-            adapter.build_new_command(&install, ctx_file.as_deref(), cwd_path.as_deref())?;
-        let outcome = crate::platform::launcher::launch(&cmd)?;
-
-        db.update_launch_intent(
-            &intent.id,
-            launch_status::PENDING,
-            None,
-            &format!(
-                "launched_via={};pid={:?}",
-                outcome.launched_via, outcome.pid
-            ),
-        )?;
-
-        // 6. bindings will be created when discovery matches the intent
-        Ok(LaunchResult {
-            launched_via: outcome.launched_via,
-            command_line: outcome.command_line,
-            context_file: ctx_file
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            session_id: None,
+            workstream_ids: workstream_ids.to_vec(),
+            extra_workstream_ids: vec![],
+            cwd: effective_cwd,
+            delivery_level,
             bundle,
-            note: if ctx_file.is_some() {
-                "新 Session 启动后会在发现时通过 LaunchIntent 自动建立显式 Workstream 绑定。".into()
-            } else if workstream_ids.is_empty() {
-                "已直接启动（未携带 Workstream Context）；此启动未选择 Workstream，允许 0 绑定。"
-                    .into()
-            } else {
-                "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
-            },
-            launch_intent_id: Some(intent.id),
+            state_fingerprint,
+            prepared_at: now(),
         })
     }
 
-    pub fn resume_session(
+    /// Prepare Resume Session:
+    /// Syncs session's own messages, computes effective workstream list (existing + extra),
+    /// builds the delta context bundle against last delivered revisions, and captures fingerprint.
+    ///
+    /// INVARIANT: Zero premature side effects. Does NOT commit extra workstream bindings,
+    /// does NOT write context files, and does NOT advance delivery snapshots.
+    pub fn prepare_resume(
         &self,
         db: &Db,
         session_id: &str,
         extra_workstream_ids: &[String],
-    ) -> Result<LaunchResult> {
+    ) -> Result<PreparedLaunch> {
         let session = db
             .get_session(session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
 
-        // 1. sync this session's own new messages first
         let engine = crate::sync::SyncEngine::from_settings(db);
         sync_one_session_with_engine(db, &engine, &session)?;
 
-        // 2. resolve workstreams: existing bindings + user-added extras.
-        //    An empty set is valid: resume natively without context injection.
-        //    Resume never re-guesses bindings — they already exist.
         let mut ws_ids: Vec<String> = db
             .bindings_for_session(session_id)?
             .into_iter()
@@ -217,6 +153,177 @@ impl SessionLauncher {
         for extra in extra_workstream_ids {
             if !ws_ids.contains(extra) {
                 ws_ids.push(extra.clone());
+            }
+        }
+
+        let delivery_level = crate::settings::context_delivery_level_of(db)?;
+        let bundle =
+            crate::context::build_bundle(db, "resume", Some(&session), &ws_ids, delivery_level)?;
+
+        let state_fingerprint =
+            compute_state_fingerprint(db, "resume", Some(session_id), &ws_ids, delivery_level)?;
+
+        Ok(PreparedLaunch {
+            id: new_id(),
+            mode: "resume".into(),
+            agent: session.agent,
+            session_id: Some(session_id.to_string()),
+            workstream_ids: ws_ids,
+            extra_workstream_ids: extra_workstream_ids.to_vec(),
+            cwd: session.cwd.clone(),
+            delivery_level,
+            bundle,
+            state_fingerprint,
+            prepared_at: now(),
+        })
+    }
+
+    /// Launch a previously prepared launch.
+    ///
+    /// INVARIANT:
+    /// 1. Verifies state fingerprint matches current DB state. If context or delivery level
+    ///    changed since preview, aborts with a stale error.
+    /// 2. Identity preservation: Writes the EXACT prepared bundle markdown (NO re-building).
+    /// 3. Commits LaunchIntent (new) or extra bindings & cumulative delivery snapshots (resume)
+    ///    only upon actual launch.
+    pub fn launch_prepared(&self, db: &Db, prepared: &PreparedLaunch) -> Result<LaunchResult> {
+        let current_delivery_level = crate::settings::context_delivery_level_of(db)?;
+        if current_delivery_level != prepared.delivery_level {
+            return Err(other(
+                "Prepared launch is stale: context delivery level changed since preview. Please refresh preview.",
+            ));
+        }
+        let current_fingerprint = compute_state_fingerprint(
+            db,
+            &prepared.mode,
+            prepared.session_id.as_deref(),
+            &prepared.workstream_ids,
+            current_delivery_level,
+        )?;
+        if current_fingerprint != prepared.state_fingerprint {
+            return Err(other(
+                "Prepared launch is stale: context state changed since preview. Please refresh preview.",
+            ));
+        }
+
+        let ctx_file = if prepared.workstream_ids.is_empty()
+            || prepared.delivery_level == crate::context::ContextDeliveryLevel::Off
+        {
+            None
+        } else {
+            let title_hint = prepared
+                .workstream_ids
+                .first()
+                .and_then(|id| db.get_workstream(id).ok().flatten())
+                .map(|w| w.title)
+                .unwrap_or_else(|| "bundle".into());
+            Some(self.write_context_file(&title_hint, &prepared.bundle.markdown)?)
+        };
+
+        if prepared.mode == "new" {
+            let (delivered_by_ws, delivered_confs_by_ws) = if ctx_file.is_some() {
+                delivered_revisions_and_conflicts_by_workstream(
+                    &prepared.bundle,
+                    prepared
+                        .workstream_ids
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or(""),
+                )
+            } else {
+                Default::default()
+            };
+            let intent = LaunchIntent {
+                id: new_id(),
+                launch_type: "new".into(),
+                agent: prepared.agent,
+                selected_workstream_ids: prepared.workstream_ids.clone(),
+                cwd: prepared.cwd.clone(),
+                context_bundle_markdown: if ctx_file.is_some() {
+                    Some(prepared.bundle.markdown.clone())
+                } else {
+                    None
+                },
+                context_bundle_revisions: if ctx_file.is_some() {
+                    Some(
+                        serde_json::json!({
+                            "bundle_id": prepared.bundle.bundle_id,
+                            "by_workstream": delivered_by_ws,
+                            "conflicts_by_workstream": delivered_confs_by_ws,
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    None
+                },
+                process_id: None,
+                launched_at: now(),
+                matched_session_id: None,
+                status: launch_status::PENDING.into(),
+                note: String::new(),
+                created_at: now(),
+                updated_at: now(),
+            };
+            db.insert_launch_intent(&intent)?;
+
+            let install = resolve_install(db, prepared.agent)?;
+            let adapter = crate::adapters::adapter_for(prepared.agent);
+            let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
+
+            let cmd: AgentCommand =
+                adapter.build_new_command(&install, ctx_file.as_deref(), cwd_path.as_deref())?;
+            let outcome = crate::platform::launcher::launch(&cmd)?;
+
+            db.update_launch_intent(
+                &intent.id,
+                launch_status::PENDING,
+                None,
+                &format!(
+                    "launched_via={};pid={:?}",
+                    outcome.launched_via, outcome.pid
+                ),
+            )?;
+
+            Ok(LaunchResult {
+                launched_via: outcome.launched_via,
+                command_line: outcome.command_line,
+                context_file: ctx_file
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                bundle: prepared.bundle.clone(),
+                note: if ctx_file.is_some() {
+                    "新 Session 启动后会在发现时通过 LaunchIntent 自动建立显式 Workstream 绑定。"
+                        .into()
+                } else if prepared.workstream_ids.is_empty() {
+                    "已直接启动（未携带 Workstream Context）；此启动未选择 Workstream，允许 0 绑定。"
+                        .into()
+                } else {
+                    "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
+                },
+                launch_intent_id: Some(intent.id),
+            })
+        } else {
+            let session_id = prepared
+                .session_id
+                .as_deref()
+                .ok_or_else(|| other("Prepared resume launch missing session_id"))?;
+            let session = db
+                .get_session(session_id)?
+                .ok_or_else(|| other("Session 不存在"))?;
+
+            let install = resolve_install(db, session.agent)?;
+            let adapter = crate::adapters::adapter_for(session.agent);
+            let cwd_path = session.cwd.clone().map(PathBuf::from);
+            let cmd = adapter.build_resume_command(
+                &install,
+                &session.agent_session_id,
+                ctx_file.as_deref(),
+                cwd_path.as_deref(),
+            )?;
+            let outcome = crate::platform::launcher::launch(&cmd)?;
+
+            for extra in &prepared.extra_workstream_ids {
                 record_binding(
                     db,
                     session_id,
@@ -226,81 +333,173 @@ impl SessionLauncher {
                     1.0,
                 )?;
             }
-        }
 
-        // 3. delta bundle against last delivered revisions (empty or Off → no injection)
-        let delivery_level = crate::settings::context_delivery_level_of(db)?;
-        let bundle =
-            crate::context::build_bundle(db, "resume", Some(&session), &ws_ids, delivery_level)?;
-        let ctx_file =
-            if ws_ids.is_empty() || delivery_level == crate::context::ContextDeliveryLevel::Off {
-                None
-            } else {
-                Some(self.write_context_file("resume", &bundle.markdown)?)
-            };
-
-        // 4. launch
-        let install = resolve_install(db, session.agent)?;
-        let adapter = crate::adapters::adapter_for(session.agent);
-        let cwd_path = session.cwd.clone().map(PathBuf::from);
-        let cmd = adapter.build_resume_command(
-            &install,
-            &session.agent_session_id,
-            ctx_file.as_deref(),
-            cwd_path.as_deref(),
-        )?;
-        let outcome = crate::platform::launcher::launch(&cmd)?;
-
-        // 5. successful launch → record what was actually delivered, so the
-        //    NEXT resume computes a true delta. Revisions are attributed to
-        //    the workstream that OWNS each section — stamping every
-        //    workstream with the full list would corrupt cross-workstream
-        //    delta computation (wrong `gone` sections, double deliveries).
-        //    Also touch binding usage.
-        //    INVARIANT: Only advance delivery snapshot when context was ACTUALLY delivered.
-        //    Delivery snapshots are cumulative (Agent-Known State).
-        let prev_deliveries = db.latest_deliveries(session_id)?;
-        for ws_id in &ws_ids {
-            record_binding(
-                db,
-                session_id,
-                ws_id,
-                "related",
-                binding_source::USER_ASSIGNED,
-                1.0,
-            )?;
-            if ctx_file.is_some() {
-                let prev = prev_deliveries.iter().find(|d| &d.workstream_id == ws_id);
-                let delivery = compute_cumulative_delivery(
+            let prev_deliveries = db.latest_deliveries(session_id)?;
+            for ws_id in &prepared.workstream_ids {
+                record_binding(
                     db,
                     session_id,
                     ws_id,
-                    &bundle,
-                    prev,
-                    ws_ids.first().map(|s| s.as_str()).unwrap_or(""),
+                    "related",
+                    binding_source::USER_ASSIGNED,
+                    1.0,
                 )?;
-                db.record_delivery(&delivery)?;
+                if ctx_file.is_some() {
+                    let prev = prev_deliveries.iter().find(|d| &d.workstream_id == ws_id);
+                    let delivery = compute_cumulative_delivery(
+                        db,
+                        session_id,
+                        ws_id,
+                        &prepared.bundle,
+                        prev,
+                        prepared
+                            .workstream_ids
+                            .first()
+                            .map(|s| s.as_str())
+                            .unwrap_or(""),
+                    )?;
+                    db.record_delivery(&delivery)?;
+                }
+            }
+
+            Ok(LaunchResult {
+                launched_via: outcome.launched_via,
+                command_line: outcome.command_line,
+                context_file: ctx_file
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                bundle: prepared.bundle.clone(),
+                note: if ctx_file.is_some() {
+                    "已同步最新消息并生成增量上下文（基于上次实际交付的修订快照）。".into()
+                } else if prepared.workstream_ids.is_empty() {
+                    "该 Session 未关联 Workstream：已同步自身消息后直接恢复，未注入上下文。".into()
+                } else {
+                    "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
+                },
+                launch_intent_id: None,
+            })
+        }
+    }
+
+    pub fn new_session(
+        &self,
+        db: &Db,
+        agent: Agent,
+        workstream_ids: &[String],
+        cwd: Option<&str>,
+    ) -> Result<LaunchResult> {
+        let prepared = self.prepare_new(db, agent, workstream_ids, cwd)?;
+        self.launch_prepared(db, &prepared)
+    }
+
+    pub fn resume_session(
+        &self,
+        db: &Db,
+        session_id: &str,
+        extra_workstream_ids: &[String],
+    ) -> Result<LaunchResult> {
+        let prepared = self.prepare_resume(db, session_id, extra_workstream_ids)?;
+        self.launch_prepared(db, &prepared)
+    }
+}
+
+/// Compute a deterministic SHA-256 fingerprint representing the exact context inputs
+/// and backing DB state (workstream metadata, active context items & current revisions,
+/// conflicts, and for resume mode: session cursor, bindings, and delivery snapshots).
+pub fn compute_state_fingerprint(
+    db: &Db,
+    mode: &str,
+    session_id: Option<&str>,
+    effective_workstream_ids: &[String],
+    delivery_level: ContextDeliveryLevel,
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(mode.as_bytes());
+    hasher.update(b":");
+    hasher.update(delivery_level.as_str().as_bytes());
+    hasher.update(b":");
+
+    for ws_id in effective_workstream_ids {
+        hasher.update(ws_id.as_bytes());
+        hasher.update(b":");
+        if let Some(ws) = db.get_workstream(ws_id)? {
+            hasher.update(b"exists:1:");
+            hasher.update(ws.title.as_bytes());
+            hasher.update(ws.description.as_bytes());
+            hasher.update(ws.updated_at.as_bytes());
+        } else {
+            hasher.update(b"exists:0:");
+        }
+        let mut items = db.items_for_workstream(ws_id, true)?;
+        items.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+        for (item, rev) in items {
+            hasher.update(item.id.as_bytes());
+            hasher.update(item.status.as_bytes());
+            if let Some(rid) = &item.current_revision_id {
+                hasher.update(rid.as_bytes());
+            }
+            hasher.update(rev.id.as_bytes());
+            hasher.update(rev.title.as_bytes());
+            hasher.update(rev.content.as_bytes());
+            hasher.update(rev.created_at.as_bytes());
+        }
+        let mut confs = db.conflicts_for_workstream(ws_id, true)?;
+        confs.sort_by(|a, b| a.id.cmp(&b.id));
+        for c in confs {
+            hasher.update(c.id.as_bytes());
+            hasher.update(c.status.as_bytes());
+            if let Some(res) = &c.resolution {
+                hasher.update(res.as_bytes());
+            }
+            hasher.update(c.updated_at.as_bytes());
+        }
+    }
+
+    if mode == "resume" {
+        if let Some(sid) = session_id {
+            hasher.update(sid.as_bytes());
+            hasher.update(b":");
+            if let Some(s) = db.get_session(sid)? {
+                hasher.update(b"session_exists:1:");
+                if let Some(la) = &s.last_activity_at {
+                    hasher.update(la.as_bytes());
+                }
+                if let Ok(cursor) = db.get_source_cursor(sid) {
+                    hasher.update(&cursor.last_sequence.to_le_bytes());
+                    hasher.update(&cursor.byte_offset.to_le_bytes());
+                    hasher.update(cursor.identity_tail_hash.as_bytes());
+                }
+            } else {
+                hasher.update(b"session_exists:0:");
+            }
+            let mut bindings = db.bindings_for_session(sid)?;
+            bindings.sort_by(|a, b| a.workstream_id.cmp(&b.workstream_id));
+            for b in bindings {
+                hasher.update(b.workstream_id.as_bytes());
+                hasher.update(b.role.as_bytes());
+                hasher.update(b.source.as_bytes());
+            }
+            let mut deliveries = db.latest_deliveries(sid)?;
+            deliveries.sort_by(|a, b| a.workstream_id.cmp(&b.workstream_id));
+            for d in deliveries {
+                hasher.update(d.workstream_id.as_bytes());
+                hasher.update(d.bundle_id.as_bytes());
+                for rev in &d.delivered_revisions {
+                    hasher.update(rev.as_bytes());
+                }
+                for conf in &d.delivered_conflicts {
+                    hasher.update(conf.as_bytes());
+                }
+                hasher.update(d.delivered_at.as_bytes());
             }
         }
-
-        Ok(LaunchResult {
-            launched_via: outcome.launched_via,
-            command_line: outcome.command_line,
-            context_file: ctx_file
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            bundle,
-            note: if ctx_file.is_some() {
-                "已同步最新消息并生成增量上下文（基于上次实际交付的修订快照）。".into()
-            } else if ws_ids.is_empty() {
-                "该 Session 未关联 Workstream：已同步自身消息后直接恢复，未注入上下文。".into()
-            } else {
-                "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
-            },
-            launch_intent_id: None,
-        })
     }
+
+    let hash = hasher.finalize();
+    Ok(format!("{:x}", hash))
 }
 
 /// Group the bundle's delivered revision ids and conflict ids by the workstream that owns

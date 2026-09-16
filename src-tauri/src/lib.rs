@@ -50,6 +50,7 @@ pub fn run() {
             app.manage(commands::AppState {
                 db: Mutex::new(db),
                 sync_in_progress: std::sync::atomic::AtomicBool::new(false),
+                prepared_launches: Mutex::new(std::collections::HashMap::new()),
             });
 
             // make pre-existing events searchable (idempotent)
@@ -151,6 +152,10 @@ pub fn run() {
             commands::resolve_launch_intent,
             commands::launch_new_session,
             commands::launch_resume_session,
+            commands::prepare_new_session,
+            commands::prepare_resume_session,
+            commands::launch_prepared,
+            commands::cancel_prepared,
             commands::preview_context_bundle,
             commands::search,
             commands::get_stats,

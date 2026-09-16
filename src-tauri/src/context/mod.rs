@@ -99,7 +99,7 @@ pub struct ContextDeliveryPolicy {
     pub conflict_limit: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSection {
     pub kind: String, // goal | current_state | constraint | decision | open_question | item | delta | gone | conflict | reminder
     pub title: String,
@@ -114,7 +114,7 @@ pub struct ContextSection {
     pub conflict_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionContextBundle {
     pub bundle_id: String,
     pub mode: String, // new | resume

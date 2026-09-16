@@ -13,6 +13,9 @@ pub struct AppState {
     pub db: std::sync::Mutex<Db>,
     /// Guards against concurrent background sync jobs.
     pub sync_in_progress: std::sync::atomic::AtomicBool,
+    /// In-memory store for prepared launches awaiting user confirmation.
+    pub prepared_launches:
+        std::sync::Mutex<std::collections::HashMap<String, crate::launcher::PreparedLaunch>>,
 }
 
 /// Spawn a background sync job: returns immediately, emits `sync-started`,
@@ -978,6 +981,99 @@ pub fn launch_resume_session(
     with_db(&state, |db| {
         launcher.resume_session(db, &session_id, &extra_workstream_ids)
     })
+}
+
+#[tauri::command]
+pub fn prepare_new_session(
+    app: AppHandle,
+    state: State<AppState>,
+    agent: String,
+    workstream_ids: Vec<String>,
+    cwd: Option<String>,
+) -> Result<crate::launcher::PreparedLaunch> {
+    let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let launcher = crate::launcher::SessionLauncher {
+        app_data_dir: app_data,
+    };
+    let prepared = with_db(&state, |db| {
+        launcher.prepare_new(db, agent, &workstream_ids, cwd.as_deref())
+    })?;
+    let mut map = state
+        .prepared_launches
+        .lock()
+        .map_err(|_| other("prepared_launches lock poisoned"))?;
+    map.insert(prepared.id.clone(), prepared.clone());
+    Ok(prepared)
+}
+
+#[tauri::command]
+pub fn prepare_resume_session(
+    app: AppHandle,
+    state: State<AppState>,
+    session_id: String,
+    extra_workstream_ids: Vec<String>,
+) -> Result<crate::launcher::PreparedLaunch> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let launcher = crate::launcher::SessionLauncher {
+        app_data_dir: app_data,
+    };
+    let prepared = with_db(&state, |db| {
+        launcher.prepare_resume(db, &session_id, &extra_workstream_ids)
+    })?;
+    let mut map = state
+        .prepared_launches
+        .lock()
+        .map_err(|_| other("prepared_launches lock poisoned"))?;
+    map.insert(prepared.id.clone(), prepared.clone());
+    Ok(prepared)
+}
+
+#[tauri::command]
+pub fn launch_prepared(
+    app: AppHandle,
+    state: State<AppState>,
+    prepared_id: String,
+) -> Result<crate::launcher::LaunchResult> {
+    let prepared = {
+        let map = state
+            .prepared_launches
+            .lock()
+            .map_err(|_| other("prepared_launches lock poisoned"))?;
+        map.get(&prepared_id)
+            .cloned()
+            .ok_or_else(|| other("未找到准备好的启动任务，或已过期。请重新预览"))?
+    };
+
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let launcher = crate::launcher::SessionLauncher {
+        app_data_dir: app_data,
+    };
+    let res = with_db(&state, |db| launcher.launch_prepared(db, &prepared))?;
+
+    if let Ok(mut map) = state.prepared_launches.lock() {
+        map.remove(&prepared_id);
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn cancel_prepared(state: State<AppState>, prepared_id: String) -> Result<()> {
+    let mut map = state
+        .prepared_launches
+        .lock()
+        .map_err(|_| other("prepared_launches lock poisoned"))?;
+    map.remove(&prepared_id);
+    Ok(())
 }
 
 /// Preview a context bundle. Resume mode MUST carry the session id — the
