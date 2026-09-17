@@ -77,18 +77,18 @@ export default function WorkstreamContext({ ctx, focusedItemId, onChanged, onNav
   useEffect(() => {
     if (!focusedItemId) return;
     const el = document.querySelector(`[data-context-item-id="${focusedItemId}"]`);
-    if (el) {
+    const hiddenByDetails = el?.closest("details:not([open])");
+    const found = ctx.items.find(([i]) => i.id === focusedItemId);
+
+    if (el && !hiddenByDetails) {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
       el.classList.add("item-highlight-pulse");
       const timer = setTimeout(() => {
         el.classList.remove("item-highlight-pulse");
       }, 2000);
       return () => clearTimeout(timer);
-    } else {
-      const found = ctx.items.find(([i]) => i.id === focusedItemId);
-      if (found) {
-        openHistory(found[0]);
-      }
+    } else if (found) {
+      openHistory(found[0]);
     }
   }, [focusedItemId, ctx.items]);
 

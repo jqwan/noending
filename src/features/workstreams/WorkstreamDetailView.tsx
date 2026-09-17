@@ -63,7 +63,7 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
       if (!cancelled) {
         setReviewWindow(w);
         setReviewSummary(s);
-        setReviewDirty(false);
+        setReviewDirty(s.unseen_change_count !== w.unseen_changes.length);
       }
     }).catch(console.error);
 
@@ -97,7 +97,7 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
       ]);
       setReviewWindow(w);
       setReviewSummary(s);
-      setReviewDirty(false);
+      setReviewDirty(s.unseen_change_count !== w.unseen_changes.length);
     } catch (err) {
       console.error("Failed to refresh review window:", err);
     }
@@ -117,7 +117,7 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
       ]);
       setReviewWindow(nextWindow);
       setReviewSummary(nextSummary);
-      setReviewDirty(false);
+      setReviewDirty(nextSummary.unseen_change_count !== nextWindow.unseen_changes.length);
     } catch (err) {
       console.error("Failed to mark workstream reviewed:", err);
     } finally {
@@ -307,7 +307,6 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
           }}
           onChanged={() => {
             refresh();
-            handleRefreshReview();
           }}
         />
       )}
