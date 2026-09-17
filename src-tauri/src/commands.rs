@@ -530,6 +530,8 @@ pub struct WorkstreamContext {
     pub items: Vec<(ContextItem, ContextItemRevision)>,
     pub related_sessions: Vec<Session>,
     pub conflicts: Vec<ContextConflict>,
+    pub relations: Vec<ContextItemRelation>,
+    pub recent_changes: Vec<ContextChange>,
 }
 
 #[tauri::command]
@@ -549,6 +551,8 @@ pub fn get_workstream_context(
             .filter_map(|b| db.get_session(&b.session_id).ok().flatten())
             .collect();
         let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
+        let relations = db.item_relations_for_workstream(&workstream_id)?;
+        let recent_changes = db.list_workstream_context_changes(&workstream_id, 20)?;
         let project_name = workstream
             .project_id
             .as_deref()
@@ -561,8 +565,18 @@ pub fn get_workstream_context(
             items,
             related_sessions: sessions,
             conflicts,
+            relations,
+            recent_changes,
         })
     })
+}
+
+#[tauri::command]
+pub fn get_context_revision_source(
+    state: State<AppState>,
+    revision_id: String,
+) -> Result<Option<ContextSourceDetail>> {
+    with_db(&state, |db| db.get_context_revision_source(&revision_id))
 }
 
 // ---------------- Conflicts ----------------

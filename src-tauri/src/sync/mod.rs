@@ -774,5 +774,7 @@ pub fn create_item_conn(
         created_at: now(),
     };
     crate::storage::insert_item_conn(conn, &item, &rev)?;
+    let mut item = item;
+    item.current_revision_id = Some(rev.id);
     Ok(item)
 }

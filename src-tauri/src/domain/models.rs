@@ -337,7 +337,7 @@ pub struct ContextItemRevision {
 /// First-class conflict between two context items. Conflicts are kept, not
 /// auto-resolved; the older user-side item stays untouched until a human or
 /// stronger evidence resolves the conflict.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConflict {
     pub id: Id,
     pub workstream_id: Id,
@@ -348,6 +348,48 @@ pub struct ContextConflict {
     pub resolution: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextItemRef {
+    pub id: Id,
+    pub kind: String,
+    pub title: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextItemRelation {
+    pub item_id: Id,
+    pub supersedes: Option<ContextItemRef>,
+    pub superseded_by: Vec<ContextItemRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextChange {
+    pub id: String,
+    pub item_id: Option<Id>,
+    pub conflict_id: Option<Id>,
+    pub kind: String, // added | edited | resolved | superseded | deleted | conflict_created | conflict_resolved
+    pub title: String,
+    pub actor: String,
+    pub source_type: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextSourceDetail {
+    pub revision_id: Id,
+    pub authority: String,
+    pub source_type: Option<String>,
+    pub source_ref: Option<String>,
+    pub sync_run_id: Option<Id>,
+    pub session_id: Option<Id>,
+    pub session_title: Option<String>,
+    pub agent: Option<Agent>,
+    pub event_sequence: Option<i64>,
+    pub event_ts: Option<String>,
+    pub evidence: Option<String>,
 }
 
 /// Evidence that a session/workstream belongs to a Project. cwd / repo path

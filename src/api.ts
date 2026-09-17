@@ -43,6 +43,12 @@ export const api = {
   getItemHistory: (itemId: string) =>
     invoke<ContextItemRevision[]>("get_item_history", { itemId }),
   deleteContextItem: (itemId: string) => invoke<void>("delete_context_item", { itemId }),
+  getContextRevisionSource: (revisionId: string) =>
+    invoke<import("./types").ContextSourceDetail | null>("get_context_revision_source", { revisionId }),
+  listConflicts: (workstreamId: string, includeClosed?: boolean) =>
+    invoke<import("./types").ContextConflict[]>("list_conflicts", { workstreamId, includeClosed: includeClosed ?? false }),
+  resolveConflict: (conflictId: string, status: string, resolution?: string) =>
+    invoke<void>("resolve_conflict", { conflictId, status, resolution: resolution ?? null }),
 
   listSessions: (projectId?: string, agent?: Agent) =>
     invoke<Session[]>("list_sessions", { projectId: projectId ?? null, agent: agent ?? null }),

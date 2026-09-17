@@ -1318,6 +1318,71 @@ impl Db {
         Ok(rows)
     }
 
+    pub fn item_relations_for_workstream(
+        &self,
+        workstream_id: &str,
+    ) -> Result<Vec<ContextItemRelation>> {
+        item_relations_for_workstream_conn(&self.0, workstream_id)
+    }
+
+    pub fn get_context_revision_source(
+        &self,
+        revision_id: &str,
+    ) -> Result<Option<ContextSourceDetail>> {
+        let rev = self.get_revision(revision_id)?;
+        let Some(rev) = rev else {
+            return Ok(None);
+        };
+        let item = self.get_item(&rev.item_id)?;
+        let authority = item
+            .as_ref()
+            .map(|i| i.authority.clone())
+            .unwrap_or_else(|| "agent_statement".into());
+
+        let mut session_id = None;
+        let mut session_title = None;
+        let mut agent = None;
+        let mut event_sequence = None;
+        let mut event_ts = None;
+        let mut evidence = None;
+
+        if let Some(sref) = &rev.source_ref {
+            if let Some(ev) = self.get_event_by_ref(sref)? {
+                event_sequence = Some(ev.sequence);
+                event_ts = ev.ts;
+                evidence = ev.text;
+                let sid = ev.session_id;
+                if let Some(s) = self.get_session(&sid)? {
+                    session_title = s.title.or(Some(s.agent_session_id));
+                    agent = Some(s.agent);
+                }
+                session_id = Some(sid);
+            }
+        }
+
+        Ok(Some(ContextSourceDetail {
+            revision_id: rev.id,
+            authority,
+            source_type: rev.source_type,
+            source_ref: rev.source_ref,
+            sync_run_id: rev.sync_run_id,
+            session_id,
+            session_title,
+            agent,
+            event_sequence,
+            event_ts,
+            evidence,
+        }))
+    }
+
+    pub fn list_workstream_context_changes(
+        &self,
+        workstream_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ContextChange>> {
+        list_workstream_context_changes_conn(&self.0, workstream_id, limit)
+    }
+
     // ---------------- Conflicts ----------------
 
     pub fn insert_conflict(&self, c: &ContextConflict) -> Result<()> {
@@ -2520,4 +2585,227 @@ pub fn ensure_not_empty(name: &str, v: &str) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+pub fn item_relations_for_workstream_conn(
+    conn: &Connection,
+    workstream_id: &str,
+) -> Result<Vec<ContextItemRelation>> {
+    let items = items_for_workstream_conn(conn, workstream_id, true)?;
+    let mut ref_map: std::collections::HashMap<String, ContextItemRef> =
+        std::collections::HashMap::new();
+    for (item, rev) in &items {
+        ref_map.insert(
+            item.id.clone(),
+            ContextItemRef {
+                id: item.id.clone(),
+                kind: item.kind.clone(),
+                title: rev.title.clone(),
+                status: item.status.clone(),
+            },
+        );
+    }
+
+    let mut relations = Vec::with_capacity(items.len());
+    for (item, _) in &items {
+        let supersedes = item
+            .supersedes_item_id
+            .as_ref()
+            .and_then(|sid| ref_map.get(sid).cloned());
+        let superseded_by: Vec<ContextItemRef> = items
+            .iter()
+            .filter(|(other, _)| other.supersedes_item_id.as_deref() == Some(&item.id))
+            .filter_map(|(other, _)| ref_map.get(&other.id).cloned())
+            .collect();
+
+        relations.push(ContextItemRelation {
+            item_id: item.id.clone(),
+            supersedes,
+            superseded_by,
+        });
+    }
+
+    Ok(relations)
+}
+
+pub fn list_workstream_context_changes_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    limit: usize,
+) -> Result<Vec<ContextChange>> {
+    let limit = if limit == 0 { 20 } else { limit };
+    let mut changes = Vec::new();
+
+    // 1. Revisions for items belonging to this workstream
+    let sql_revs = "SELECT r.id, r.item_id, r.title, r.metadata, r.source_type, r.sync_run_id, r.created_at,
+                           i.authority, i.created_by,
+                           (SELECT MIN(r2.created_at) FROM context_item_revisions r2 WHERE r2.item_id = r.item_id) AS first_created_at
+                    FROM context_item_revisions r
+                    JOIN context_items i ON i.id = r.item_id
+                    WHERE i.workstream_id = ?1
+                    ORDER BY r.created_at DESC
+                    LIMIT ?2";
+    let mut st = conn.prepare(sql_revs)?;
+    let rev_rows = st.query_map(params![workstream_id, limit as i64], |r| {
+        let id: String = r.get(0)?;
+        let item_id: String = r.get(1)?;
+        let title: String = r.get(2)?;
+        let metadata_str: String = r.get(3)?;
+        let source_type: Option<String> = r.get(4)?;
+        let sync_run_id: Option<String> = r.get(5)?;
+        let created_at: String = r.get(6)?;
+        let authority: String = r.get(7)?;
+        let created_by: String = r.get(8)?;
+        let first_created_at: Option<String> = r.get(9)?;
+        Ok((
+            id,
+            item_id,
+            title,
+            metadata_str,
+            source_type,
+            sync_run_id,
+            created_at,
+            authority,
+            created_by,
+            first_created_at,
+        ))
+    })?;
+
+    for row in rev_rows {
+        let (
+            id,
+            item_id,
+            title,
+            metadata_str,
+            source_type,
+            sync_run_id,
+            created_at,
+            authority,
+            created_by,
+            first_created_at,
+        ) = row?;
+        let is_first = first_created_at.as_deref() == Some(&created_at);
+        let metadata_json: serde_json::Value =
+            serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null);
+
+        let (kind, actor) = if source_type.as_deref() == Some("status_change") {
+            let audit = metadata_json.get("audit");
+            let new_status = audit
+                .and_then(|a| a.get("new_status"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let actor_str = audit
+                .and_then(|a| a.get("actor"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("user");
+            let kind = match new_status {
+                "resolved" => "resolved",
+                "superseded" => "superseded",
+                "deleted" | "obsolete" => "deleted",
+                _ => "edited",
+            };
+            (
+                kind.to_string(),
+                if actor_str == "user" {
+                    "User".to_string()
+                } else {
+                    actor_str.to_string()
+                },
+            )
+        } else if is_first {
+            let actor = if source_type.as_deref() == Some("user_edit")
+                || created_by == "user"
+                || authority.starts_with("user")
+            {
+                "User"
+            } else if sync_run_id.is_some() || created_by.starts_with("sync:") {
+                "Agent"
+            } else {
+                "System"
+            };
+            ("added".to_string(), actor.to_string())
+        } else {
+            let actor =
+                if source_type.as_deref() == Some("user_edit") || authority.starts_with("user") {
+                    "User"
+                } else if sync_run_id.is_some() {
+                    "Agent"
+                } else {
+                    "System"
+                };
+            ("edited".to_string(), actor.to_string())
+        };
+
+        changes.push(ContextChange {
+            id,
+            item_id: Some(item_id),
+            conflict_id: None,
+            kind,
+            title,
+            actor,
+            source_type,
+            created_at,
+        });
+    }
+
+    // 2. Conflicts for this workstream
+    let sql_conflicts = "SELECT id, left_item_id, right_item_id, status, created_at, updated_at
+                         FROM context_conflicts
+                         WHERE workstream_id = ?1
+                         ORDER BY created_at DESC
+                         LIMIT ?2";
+    let mut st = conn.prepare(sql_conflicts)?;
+    let conflict_rows = st.query_map(params![workstream_id, limit as i64], |r| {
+        let id: String = r.get(0)?;
+        let left_item_id: String = r.get(1)?;
+        let right_item_id: Option<String> = r.get(2)?;
+        let status: String = r.get(3)?;
+        let created_at: String = r.get(4)?;
+        let updated_at: String = r.get(5)?;
+        Ok((
+            id,
+            left_item_id,
+            right_item_id,
+            status,
+            created_at,
+            updated_at,
+        ))
+    })?;
+
+    for row in conflict_rows {
+        let (id, left_item_id, _right_item_id, status, created_at, updated_at) = row?;
+        changes.push(ContextChange {
+            id: format!("conflict-created-{}", id),
+            item_id: Some(left_item_id.clone()),
+            conflict_id: Some(id.clone()),
+            kind: "conflict_created".into(),
+            title: "发现潜在 Context 冲突".into(),
+            actor: "Agent".into(),
+            source_type: Some("conflict".into()),
+            created_at,
+        });
+
+        if status != "open" {
+            changes.push(ContextChange {
+                id: format!("conflict-resolved-{}", id),
+                item_id: Some(left_item_id),
+                conflict_id: Some(id),
+                kind: "conflict_resolved".into(),
+                title: if status == "resolved" {
+                    "冲突已解决".into()
+                } else {
+                    "冲突已忽略".into()
+                },
+                actor: "User".into(),
+                source_type: Some("conflict_resolution".into()),
+                created_at: updated_at,
+            });
+        }
+    }
+
+    // Sort descending by created_at
+    changes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    changes.truncate(limit);
+
+    Ok(changes)
 }

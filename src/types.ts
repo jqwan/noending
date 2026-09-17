@@ -165,6 +165,66 @@ export interface ContextSection {
   content: string;
   authority: string;
   source_ref: string | null;
+  workstream_id?: string | null;
+  revision_id?: string | null;
+  conflict_id?: string | null;
+}
+
+export interface ContextConflict {
+  id: string;
+  workstream_id: string;
+  left_item_id: string;
+  right_item_id: string | null;
+  conflict_type: string;
+  status: string; // "open" | "resolved" | "dismissed"
+  resolution: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContextItemRef {
+  id: string;
+  kind: string;
+  title: string;
+  status: string;
+}
+
+export interface ContextItemRelation {
+  item_id: string;
+  supersedes: ContextItemRef | null;
+  superseded_by: ContextItemRef[];
+}
+
+export interface ContextChange {
+  id: string;
+  item_id: string | null;
+  conflict_id: string | null;
+  kind:
+    | "added"
+    | "edited"
+    | "resolved"
+    | "superseded"
+    | "deleted"
+    | "conflict_created"
+    | "conflict_resolved";
+  title: string;
+  actor: string;
+  source_type: string | null;
+  created_at: string;
+}
+
+export interface ContextSourceDetail {
+  revision_id: string;
+  authority: string;
+  source_type: string | null;
+  source_ref: string | null;
+  sync_run_id: string | null;
+  session_id: string | null;
+  session_title: string | null;
+  agent: Agent | null;
+  event_sequence: number | null;
+  event_ts: string | null;
+  evidence: string | null;
 }
 
 export interface WorkstreamContext {
@@ -173,6 +233,9 @@ export interface WorkstreamContext {
   core: ContextSection[];
   items: [ContextItem, ContextItemRevision][];
   related_sessions: Session[];
+  conflicts: ContextConflict[];
+  relations: ContextItemRelation[];
+  recent_changes: ContextChange[];
 }
 
 export interface SessionDetail {

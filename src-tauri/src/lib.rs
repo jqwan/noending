@@ -128,6 +128,7 @@ pub fn run() {
             commands::get_item_history,
             commands::delete_context_item,
             commands::get_workstream_context,
+            commands::get_context_revision_source,
             commands::list_conflicts,
             commands::resolve_conflict,
             commands::list_sessions,
