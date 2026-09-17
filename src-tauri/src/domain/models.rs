@@ -351,6 +351,17 @@ pub struct ContextConflict {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConflictEvent {
+    pub id: Id,
+    pub conflict_id: Id,
+    pub previous_status: String,
+    pub new_status: String,
+    pub resolution: Option<String>,
+    pub actor: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextItemRef {
     pub id: Id,
     pub kind: String,

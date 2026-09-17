@@ -28,8 +28,9 @@ pub struct Db(pub Connection);
 /// (durable negative overrides: a user-rejected workstream is never
 /// re-proposed by auto-classification); v6 added `workstreams.default_cwd`
 /// (optional launch-directory suggestion, convenience not identity); v7 added
-/// `context_deliveries.delivered_conflicts` (JSON array of conflict IDs).
-pub const SCHEMA_VERSION: i64 = 7;
+/// `context_deliveries.delivered_conflicts` (JSON array of conflict IDs); v8 added
+/// `context_conflict_events` (auditable conflict resolution events).
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -357,6 +358,16 @@ impl Db {
               runtime TEXT,
               created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS context_conflict_events (
+              id TEXT PRIMARY KEY,
+              conflict_id TEXT NOT NULL REFERENCES context_conflicts(id),
+              previous_status TEXT NOT NULL,
+              new_status TEXT NOT NULL,
+              resolution TEXT,
+              actor TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_conflict_events_conflict ON context_conflict_events(conflict_id);
             "#,
         )?;
 
@@ -1428,11 +1439,28 @@ impl Db {
         status: &str,
         resolution: Option<&str>,
     ) -> Result<()> {
-        self.0.execute(
-            "UPDATE context_conflicts SET status = ?2, resolution = COALESCE(?3, resolution), updated_at = ?4 WHERE id = ?1",
-            params![conflict_id, status, resolution, now()],
+        self.resolve_conflict_audited(conflict_id, status, resolution, "user")
+    }
+
+    pub fn resolve_conflict_audited(
+        &self,
+        conflict_id: &str,
+        status: &str,
+        resolution: Option<&str>,
+        actor: &str,
+    ) -> Result<()> {
+        self.tx(|tx| resolve_conflict_audited_conn(tx, conflict_id, status, resolution, actor))
+    }
+
+    pub fn conflict_history(&self, conflict_id: &str) -> Result<Vec<ContextConflictEvent>> {
+        let mut st = self.0.prepare(
+            "SELECT id, conflict_id, previous_status, new_status, resolution, actor, created_at
+             FROM context_conflict_events WHERE conflict_id = ?1 ORDER BY created_at ASC",
         )?;
-        Ok(())
+        let rows = st
+            .query_map(params![conflict_id], row_conflict_event)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn get_conflict(&self, conflict_id: &str) -> Result<Option<ContextConflict>> {
@@ -2773,32 +2801,60 @@ pub fn list_workstream_context_changes_conn(
     })?;
 
     for row in conflict_rows {
-        let (id, left_item_id, _right_item_id, status, created_at, updated_at) = row?;
+        let (id, left_item_id, _right_item_id, _status, created_at, _updated_at) = row?;
         changes.push(ContextChange {
             id: format!("conflict-created-{}", id),
-            item_id: Some(left_item_id.clone()),
-            conflict_id: Some(id.clone()),
+            item_id: Some(left_item_id),
+            conflict_id: Some(id),
             kind: "conflict_created".into(),
             title: "发现潜在 Context 冲突".into(),
             actor: "Agent".into(),
             source_type: Some("conflict".into()),
             created_at,
         });
+    }
 
-        if status != "open" {
+    // 3. Conflict resolution events from context_conflict_events table
+    let sql_conflict_events =
+        "SELECT e.id, e.conflict_id, c.left_item_id, e.new_status, e.actor, e.created_at
+                               FROM context_conflict_events e
+                               JOIN context_conflicts c ON c.id = e.conflict_id
+                               WHERE c.workstream_id = ?1
+                               ORDER BY e.created_at DESC
+                               LIMIT ?2";
+    if let Ok(mut st) = conn.prepare(sql_conflict_events) {
+        let event_rows = st.query_map(params![workstream_id, limit as i64], |r| {
+            let id: String = r.get(0)?;
+            let conflict_id: String = r.get(1)?;
+            let left_item_id: String = r.get(2)?;
+            let new_status: String = r.get(3)?;
+            let actor: String = r.get(4)?;
+            let created_at: String = r.get(5)?;
+            Ok((id, conflict_id, left_item_id, new_status, actor, created_at))
+        })?;
+
+        for row in event_rows {
+            let (id, conflict_id, left_item_id, new_status, actor, created_at) = row?;
+            let title = if new_status == "resolved" {
+                "冲突已解决".to_string()
+            } else if new_status == "dismissed" {
+                "冲突已忽略".to_string()
+            } else {
+                format!("冲突状态更新为 {}", new_status)
+            };
             changes.push(ContextChange {
-                id: format!("conflict-resolved-{}", id),
+                id: format!("conflict-event-{}", id),
                 item_id: Some(left_item_id),
-                conflict_id: Some(id),
+                conflict_id: Some(conflict_id),
                 kind: "conflict_resolved".into(),
-                title: if status == "resolved" {
-                    "冲突已解决".into()
+                title,
+                actor: if actor == "user" {
+                    "User".to_string()
                 } else {
-                    "冲突已忽略".into()
+                    actor
                 },
-                actor: "User".into(),
                 source_type: Some("conflict_resolution".into()),
-                created_at: updated_at,
+                created_at,
             });
         }
     }
@@ -2808,4 +2864,48 @@ pub fn list_workstream_context_changes_conn(
     changes.truncate(limit);
 
     Ok(changes)
+}
+
+pub fn resolve_conflict_audited_conn(
+    conn: &Connection,
+    conflict_id: &str,
+    new_status: &str,
+    resolution: Option<&str>,
+    actor: &str,
+) -> Result<()> {
+    let prev_status: String = conn
+        .query_row(
+            "SELECT status FROM context_conflicts WHERE id = ?1",
+            params![conflict_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| other(format!("冲突不存在: {}", conflict_id)))?;
+
+    let event_id = new_id();
+    let ts = now();
+    conn.execute(
+        "INSERT INTO context_conflict_events (id, conflict_id, previous_status, new_status, resolution, actor, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![event_id, conflict_id, prev_status, new_status, resolution, actor, ts],
+    )?;
+
+    conn.execute(
+        "UPDATE context_conflicts SET status = ?2, resolution = COALESCE(?3, resolution), updated_at = ?4 WHERE id = ?1",
+        params![conflict_id, new_status, resolution, ts],
+    )?;
+
+    Ok(())
+}
+
+fn row_conflict_event(r: &Row) -> rusqlite::Result<ContextConflictEvent> {
+    Ok(ContextConflictEvent {
+        id: r.get(0)?,
+        conflict_id: r.get(1)?,
+        previous_status: r.get(2)?,
+        new_status: r.get(3)?,
+        resolution: r.get(4)?,
+        actor: r.get(5)?,
+        created_at: r.get(6)?,
+    })
 }

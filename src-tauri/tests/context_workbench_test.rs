@@ -297,3 +297,77 @@ fn list_workstream_context_changes_timeline() {
     assert!(kinds.contains(&"edited"));
     assert!(kinds.contains(&"added"));
 }
+
+#[test]
+fn conflict_audited_resolution_and_history() {
+    let db = open_db("conflict-audit");
+    let ws = ws_row(&db, "Conflict Audit WS");
+
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "current_state",
+        "Architecture Draft",
+        "Monolith vs Microservices",
+        "user_explicit",
+        "user_edit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // 1. Resolve with reason
+    db.resolve_conflict_audited(
+        &conflict.id,
+        "resolved",
+        Some("Confirmed modular monolith"),
+        "user",
+    )
+    .unwrap();
+
+    let c1 = db.get_conflict(&conflict.id).unwrap().unwrap();
+    assert_eq!(c1.status, "resolved");
+    assert_eq!(c1.resolution.as_deref(), Some("Confirmed modular monolith"));
+
+    let history = db.conflict_history(&conflict.id).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].previous_status, "open");
+    assert_eq!(history[0].new_status, "resolved");
+    assert_eq!(history[0].actor, "user");
+    assert_eq!(
+        history[0].resolution.as_deref(),
+        Some("Confirmed modular monolith")
+    );
+
+    // 2. Dismiss/re-decide
+    db.resolve_conflict_audited(
+        &conflict.id,
+        "dismissed",
+        Some("No longer relevant"),
+        "user",
+    )
+    .unwrap();
+
+    let c2 = db.get_conflict(&conflict.id).unwrap().unwrap();
+    assert_eq!(c2.status, "dismissed");
+    assert_eq!(c2.resolution.as_deref(), Some("No longer relevant"));
+
+    let history2 = db.conflict_history(&conflict.id).unwrap();
+    assert_eq!(history2.len(), 2);
+    assert_eq!(history2[1].previous_status, "resolved");
+    assert_eq!(history2[1].new_status, "dismissed");
+}
