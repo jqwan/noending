@@ -8,17 +8,32 @@ import {
 
 interface Props {
   cases: ConflictReviewCase[];
+  initialConflictId?: string;
   onClose: () => void;
   onChanged: () => void;
 }
 
 export default function ConflictReviewModal({
   cases,
+  initialConflictId,
   onClose,
   onChanged,
 }: Props) {
   const openCases = cases.filter((c) => c.conflict.status === "open");
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState(() => {
+    if (initialConflictId) {
+      const idx = openCases.findIndex((c) => c.conflict.id === initialConflictId);
+      if (idx >= 0) return idx;
+    }
+    return 0;
+  });
+
+  React.useEffect(() => {
+    if (initialConflictId) {
+      const idx = openCases.findIndex((c) => c.conflict.id === initialConflictId);
+      if (idx >= 0) setCurrentIndex(idx);
+    }
+  }, [initialConflictId]);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

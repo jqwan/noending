@@ -1,16 +1,23 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal } from "../../components/common";
-import { AGENT_LABELS, type Agent, type WorkstreamContext as WorkstreamContextData } from "../../types";
+import {
+  AGENT_LABELS,
+  type Agent,
+  type WorkstreamContext as WorkstreamContextData,
+  type WorkstreamReviewSummary,
+  type WorkstreamReviewWindow,
+} from "../../types";
 import type { Route } from "../../app/routes";
 import WorkstreamContext from "./WorkstreamContext";
 import WorkstreamSessions from "./WorkstreamSessions";
 import NeedsAttentionSection from "./NeedsAttentionSection";
 import ConflictReviewModal from "./ConflictReviewModal";
 import RecentChangesTimeline from "./RecentChangesTimeline";
+import SinceLastReview from "./SinceLastReview";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 
 /**
@@ -30,12 +37,94 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
   const [cwdOpen, setCwdOpen] = useState(false);
   const [cwdInput, setCwdInput] = useState("");
   const [reviewingConflict, setReviewingConflict] = useState(false);
+  const [reviewingConflictId, setReviewingConflictId] = useState<string | undefined>(undefined);
 
+  // Review loop state: frozen window + summary
+  const [reviewWindow, setReviewWindow] = useState<WorkstreamReviewWindow | null>(null);
+  const [reviewSummary, setReviewSummary] = useState<WorkstreamReviewSummary | null>(null);
+  const [reviewDirty, setReviewDirty] = useState(false);
+  const [markingReviewed, setMarkingReviewed] = useState(false);
+  const [focusedItemId, setFocusedItemId] = useState<string | null>(null);
+
+  const reviewWindowRef = useRef<WorkstreamReviewWindow | null>(null);
+  reviewWindowRef.current = reviewWindow;
+
+  // Initial load when workstreamId changes
+  useEffect(() => {
+    let cancelled = false;
+    api.getWorkstreamContext(workstreamId).then((c) => {
+      if (!cancelled) setCtx(c);
+    }).catch(console.error);
+
+    Promise.all([
+      api.getWorkstreamReviewWindow(workstreamId),
+      api.getWorkstreamReviewSummary(workstreamId),
+    ]).then(([w, s]) => {
+      if (!cancelled) {
+        setReviewWindow(w);
+        setReviewSummary(s);
+        setReviewDirty(false);
+      }
+    }).catch(console.error);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workstreamId]);
+
+  // Regular contextual or background refresh:
+  // Updates context & summary, but preserves the frozen reviewWindow!
+  // If background changes have increased unseen count beyond current window, marks reviewDirty.
   const refresh = useCallback(() => {
     api.getWorkstreamContext(workstreamId).then(setCtx).catch(console.error);
+    api.getWorkstreamReviewSummary(workstreamId).then((s) => {
+      setReviewSummary(s);
+      const cur = reviewWindowRef.current;
+      if (cur && s.unseen_change_count > cur.unseen_changes.length) {
+        setReviewDirty(true);
+      }
+    }).catch(console.error);
   }, [workstreamId]);
-  useEffect(refresh, [refresh]);
+
   useRefreshSignal(refresh);
+
+  // Explicit user refresh of review window
+  const handleRefreshReview = useCallback(async () => {
+    try {
+      const [w, s] = await Promise.all([
+        api.getWorkstreamReviewWindow(workstreamId),
+        api.getWorkstreamReviewSummary(workstreamId),
+      ]);
+      setReviewWindow(w);
+      setReviewSummary(s);
+      setReviewDirty(false);
+    } catch (err) {
+      console.error("Failed to refresh review window:", err);
+    }
+  }, [workstreamId]);
+
+  // Mark reviewed action:
+  // Critical invariant: uses observed reviewWindow.mark_through, NOT a newly fetched frontier!
+  const handleMarkReviewed = useCallback(async () => {
+    if (!reviewWindow || markingReviewed) return;
+    const observed = reviewWindow;
+    setMarkingReviewed(true);
+    try {
+      await api.markWorkstreamReviewed(workstreamId, observed.mark_through);
+      const [nextWindow, nextSummary] = await Promise.all([
+        api.getWorkstreamReviewWindow(workstreamId),
+        api.getWorkstreamReviewSummary(workstreamId),
+      ]);
+      setReviewWindow(nextWindow);
+      setReviewSummary(nextSummary);
+      setReviewDirty(false);
+    } catch (err) {
+      console.error("Failed to mark workstream reviewed:", err);
+    } finally {
+      setMarkingReviewed(false);
+    }
+  }, [workstreamId, reviewWindow, markingReviewed]);
+
   useEffect(() => {
     api.getDefaultAgent().then(setDefaultAgent).catch(console.error);
   }, []);
@@ -170,8 +259,27 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
 
       <div className="ws-detail-grid">
         <div>
+          {reviewWindow && reviewSummary && (
+            <SinceLastReview
+              window={reviewWindow}
+              summary={reviewSummary}
+              dirty={reviewDirty}
+              marking={markingReviewed}
+              onMarkReviewed={handleMarkReviewed}
+              onRefresh={handleRefreshReview}
+              onOpenItem={(itemId) => {
+                setFocusedItemId(null);
+                setTimeout(() => setFocusedItemId(itemId), 20);
+              }}
+              onOpenConflict={(conflictId) => {
+                setReviewingConflictId(conflictId);
+                setReviewingConflict(true);
+              }}
+            />
+          )}
           <WorkstreamContext
             ctx={ctx}
+            focusedItemId={focusedItemId}
             onChanged={refresh}
             onNavigateSession={(sessionId) => navigate({ view: "session", sessionId })}
           />
@@ -179,7 +287,10 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
         <div>
           <NeedsAttentionSection
             conflicts={ctx.conflicts ?? []}
-            onReview={() => setReviewingConflict(true)}
+            onReview={() => {
+              setReviewingConflictId(undefined);
+              setReviewingConflict(true);
+            }}
           />
           <WorkstreamSessions sessions={related_sessions} navigate={navigate} />
           <RecentChangesTimeline changes={ctx.recent_changes ?? []} />
@@ -189,8 +300,15 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
       {reviewingConflict && (
         <ConflictReviewModal
           cases={ctx.conflict_cases ?? []}
-          onClose={() => setReviewingConflict(false)}
-          onChanged={refresh}
+          initialConflictId={reviewingConflictId}
+          onClose={() => {
+            setReviewingConflict(false);
+            setReviewingConflictId(undefined);
+          }}
+          onChanged={() => {
+            refresh();
+            handleRefreshReview();
+          }}
         />
       )}
 

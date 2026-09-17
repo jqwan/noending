@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { api } from "../../api";
 import { Modal, timeAgo } from "../../components/common";
 import {
@@ -20,6 +20,7 @@ const RESOLVABLE = ["todo", "open_question", "issue"];
 
 interface Props {
   ctx: WorkstreamContext;
+  focusedItemId?: string | null;
   onChanged: () => void;
   onNavigateSession?: (sessionId: string) => void;
 }
@@ -30,7 +31,7 @@ interface Props {
  * - 提供 Provenance 追溯 (SourceDetailModal)、演进历史 (History) 与关系标签 (替代/被替代)
  * - 支持标题 + 详细内容双字段内联编辑，保存生成 user_edit 新 Revision
  */
-export default function WorkstreamContext({ ctx, onChanged, onNavigateSession }: Props) {
+export default function WorkstreamContext({ ctx, focusedItemId, onChanged, onNavigateSession }: Props) {
   const [editing, setEditing] = useState<string | null>(null); // item id
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");
@@ -72,6 +73,24 @@ export default function WorkstreamContext({ ctx, onChanged, onNavigateSession }:
     const revs = await api.getItemHistory(item.id);
     setHistoryOf([item, revs]);
   };
+
+  useEffect(() => {
+    if (!focusedItemId) return;
+    const el = document.querySelector(`[data-context-item-id="${focusedItemId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("item-highlight-pulse");
+      const timer = setTimeout(() => {
+        el.classList.remove("item-highlight-pulse");
+      }, 2000);
+      return () => clearTimeout(timer);
+    } else {
+      const found = ctx.items.find(([i]) => i.id === focusedItemId);
+      if (found) {
+        openHistory(found[0]);
+      }
+    }
+  }, [focusedItemId, ctx.items]);
 
   const renderRelations = (itemId: string) => {
     const rel = relationsMap.get(itemId);
@@ -159,7 +178,11 @@ export default function WorkstreamContext({ ctx, onChanged, onNavigateSession }:
                   }
 
                   return (
-                    <div className="ctx-entry" key={sec.revision_id ?? itemId}>
+                    <div
+                      className="ctx-entry"
+                      key={sec.revision_id ?? itemId}
+                      data-context-item-id={item?.id ?? itemId}
+                    >
                       <div className="row between" style={{ alignItems: "flex-start", gap: 12 }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div className="entry-title">{sec.title}</div>
@@ -252,7 +275,7 @@ export default function WorkstreamContext({ ctx, onChanged, onNavigateSession }:
         <div className="l1-none">暂无扩展条目。Sync 会自动从相关 Session 提取 todo、finding 等条目。</div>
       )}
       {extShown.map(([item, rev]) => (
-        <div className="ext-row ctx-entry" key={item.id}>
+        <div className="ext-row ctx-entry" key={item.id} data-context-item-id={item.id}>
           {editing === item.id ? (
             <div className="ctx-edit" style={{ flex: 1, padding: "4px 0" }}>
               <label className="field" style={{ marginBottom: 6 }}>
@@ -322,7 +345,7 @@ export default function WorkstreamContext({ ctx, onChanged, onNavigateSession }:
           <summary>已解决 / 已废弃 <span className="muted">（{closed.length}）</span></summary>
           <div>
             {closed.map(([item, rev]) => (
-              <div className="feed-row" key={item.id}>
+              <div className="feed-row" key={item.id} data-context-item-id={item.id}>
                 <span className="badge">{item.status}</span>
                 <span style={{ flex: 1 }}>{rev.title}</span>
                 <button className="link" onClick={() => openHistory(item)}>历史</button>
