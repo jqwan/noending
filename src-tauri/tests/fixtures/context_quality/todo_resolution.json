@@ -1,0 +1,47 @@
+{
+  "name": "todo_resolution",
+  "description": "Active todo is completed and verified in session; resolve mutation updates status to resolved and removes it from effective core context",
+  "dimension": "evolution_correctness",
+  "workstreams": [
+    {
+      "id": "ws-ingestion",
+      "title": "Session Ingestion",
+      "description": "Incremental session event ingestion and cursor tracking"
+    }
+  ],
+  "initial_context": [
+    {
+      "id": "todo-truncate",
+      "workstream_id": "ws-ingestion",
+      "kind": "todo",
+      "title": "实现 SessionCursor 的 truncate 回退检测",
+      "content": "当源文件长度缩小或重写时，识别并触发重新摄取，保持 SourceReference 可解析。",
+      "authority": "agent_statement",
+      "status": "active"
+    }
+  ],
+  "session": {
+    "agent": "codex",
+    "title": "Cursor truncate detection"
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "kind": "assistant_message",
+      "text": "我已经在 ingestion 模块中完成了 SessionCursor 的 truncate 检测实现，并补齐了文件长度缩小与重写的回归测试，全部 10 项测试均已通过。"
+    }
+  ],
+  "mock_model_output": "[{\"op\":\"resolve\",\"item_id\":\"todo-truncate\",\"refs\":[\"#1\"]}]",
+  "expected": {
+    "mutations": [
+      {
+        "op": "resolve",
+        "item_id": "todo-truncate"
+      }
+    ],
+    "effective_core": {
+      "ws-ingestion": []
+    },
+    "conflicts_count": 0
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "name": "decision_supersede",
+  "description": "Decision to use WebSockets is superseded by Server-Sent Events; obsolete decision is replaced in core and lineage preserved",
+  "dimension": "evolution_correctness",
+  "workstreams": [
+    {
+      "id": "ws-realtime",
+      "title": "Realtime Sync",
+      "description": "Event streaming and UI updates"
+    }
+  ],
+  "initial_context": [
+    {
+      "id": "dec-websocket",
+      "workstream_id": "ws-realtime",
+      "kind": "decision",
+      "title": "使用 WebSocket 进行前后端长连接通讯",
+      "content": "采用 WebSocket 支持客户端与服务端双向实时事件推送。",
+      "authority": "agent_statement",
+      "status": "active"
+    }
+  ],
+  "session": {
+    "agent": "codex",
+    "title": "Transport layer evaluation"
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "kind": "user_message",
+      "text": "WebSocket 在部分企业代理和跨域场景经常遭遇连接阻断，而且客户端重连成本高。我们决定推翻之前的决定，改用 Server-Sent Events (SSE) 做单向事件推送。"
+    },
+    {
+      "sequence": 2,
+      "kind": "assistant_message",
+      "text": "好的，已确认废除 WebSocket，全面改用 SSE 做单向流式推送。"
+    }
+  ],
+  "mock_model_output": "[{\"op\":\"supersede\",\"item_id\":\"dec-websocket\",\"title\":\"采用 Server-Sent Events (SSE) 做单向事件推送\",\"content\":\"废除 WebSocket，改用 SSE 单向推送以规避代理阻断与降低重连成本。\",\"refs\":[\"#1\"]}]",
+  "expected": {
+    "mutations": [
+      {
+        "op": "supersede",
+        "item_id": "dec-websocket",
+        "title": "采用 Server-Sent Events (SSE) 做单向事件推送",
+        "authority": "user_explicit"
+      }
+    ],
+    "effective_core": {
+      "ws-realtime": [
+        {
+          "kind": "decision",
+          "title": "采用 Server-Sent Events (SSE) 做单向事件推送"
+        }
+      ]
+    },
+    "conflicts_count": 0
+  }
+}

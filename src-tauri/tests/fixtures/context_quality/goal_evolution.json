@@ -1,0 +1,59 @@
+{
+  "name": "goal_evolution",
+  "description": "Project goal shifts from prototype to production hardening; updates existing goal without duplicate active goals",
+  "dimension": "evolution_correctness",
+  "workstreams": [
+    {
+      "id": "ws-auth",
+      "title": "Authentication & RBAC",
+      "description": "User authentication and role-based access control"
+    }
+  ],
+  "initial_context": [
+    {
+      "id": "goal-initial",
+      "workstream_id": "ws-auth",
+      "kind": "goal",
+      "title": "搭建身份认证原型与 Mock Token",
+      "content": "完成基础的原型验证，使用内存 mock 验证路由拦截与登录状态。",
+      "authority": "agent_statement",
+      "status": "active"
+    }
+  ],
+  "session": {
+    "agent": "codex",
+    "title": "Auth System Hardening"
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "kind": "user_message",
+      "text": "身份认证原型和 Mock Token 已经全部测通并通过验收。我们现在的核心目标调整为：完善生产级认证系统，支持 JWT 轮转和基于角色的 RBAC 权限体系。"
+    },
+    {
+      "sequence": 2,
+      "kind": "assistant_message",
+      "text": "收到。核心目标已更新为生产级认证系统，接下来按 JWT 轮转与 RBAC 权限设计方案展开。"
+    }
+  ],
+  "mock_model_output": "[{\"op\":\"update\",\"item_id\":\"goal-initial\",\"title\":\"完善生产级认证系统，支持 JWT 轮转和 RBAC 权限\",\"content\":\"原型已测通，核心目标调整为完善生产级认证系统，支持 JWT 轮转与 RBAC 权限。\",\"refs\":[\"#1\"]}]",
+  "expected": {
+    "mutations": [
+      {
+        "op": "update",
+        "item_id": "goal-initial",
+        "title": "完善生产级认证系统，支持 JWT 轮转和 RBAC 权限",
+        "authority": "user_explicit"
+      }
+    ],
+    "effective_core": {
+      "ws-auth": [
+        {
+          "kind": "goal",
+          "title": "完善生产级认证系统，支持 JWT 轮转和 RBAC 权限"
+        }
+      ]
+    },
+    "conflicts_count": 0
+  }
+}

@@ -54,9 +54,16 @@ export default function WorkstreamDetailView({
   const reviewWindowRef = useRef<WorkstreamReviewWindow | null>(null);
   reviewWindowRef.current = reviewWindow;
 
-  // Auto-open conflict review modal if entry === "conflicts" and open conflicts exist
+  const consumedEntryRef = useRef(false);
+
   useEffect(() => {
-    if (entry === "conflicts" && ctx && (ctx.conflicts?.length ?? 0) > 0) {
+    consumedEntryRef.current = false;
+  }, [workstreamId]);
+
+  // Auto-open conflict review modal if entry === "conflicts" and open conflicts exist (one-shot navigation intent)
+  useEffect(() => {
+    if (!consumedEntryRef.current && entry === "conflicts" && ctx && (ctx.conflicts?.length ?? 0) > 0) {
+      consumedEntryRef.current = true;
       setReviewingConflict(true);
     }
   }, [entry, ctx]);
