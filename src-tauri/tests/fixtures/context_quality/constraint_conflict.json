@@ -56,6 +56,7 @@
   "extractor_gold": {
     "required_mutations": [
       {
+        "id": "flag-migration-proposal",
         "op": ["update", "conflict"],
         "item_id": "const-migration",
         "source_events": [1]
@@ -64,15 +65,18 @@
     "forbidden_mutations": [],
     "required_context": {
       "ws-storage": [
-        { "kind": "constraint", "title_contains": ["migration"] }
+        { "id": "migration-constraint-intact", "kind": "constraint", "title_contains": ["migration"] }
       ]
     },
     "forbidden_context": {
       "ws-storage": [
-        { "kind": "constraint", "title_contains": ["直接修改"] }
+        { "id": "proposal-not-effective", "kind": "constraint", "title_contains": ["直接修改"] }
       ]
     },
     "conflicts_count": 1
   },
-  "heuristic_expected_failure": "the agent proposal matches no hint and yields zero mutations: the disagreement with the user constraint is never surfaced as a ContextConflict"
+  "heuristic_expected_failed_checks": [
+    "required:flag-migration-proposal",
+    "conflicts:count"
+  ]
 }

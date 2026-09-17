@@ -61,6 +61,7 @@
   "extractor_gold": {
     "required_mutations": [
       {
+        "id": "goal-update",
         "op": ["update", "supersede"],
         "item_id": "goal-initial",
         "content_contains": ["生产级"],
@@ -69,6 +70,7 @@
     ],
     "forbidden_mutations": [
       {
+        "id": "no-duplicate-goal",
         "op": ["add"],
         "item_kind": ["goal"],
         "workstream_id": "ws-auth"
@@ -76,15 +78,19 @@
     ],
     "required_context": {
       "ws-auth": [
-        { "kind": "goal", "title_contains": ["生产级"] }
+        { "id": "goal-reflects-production-goal", "kind": "goal", "title_contains": ["生产级"] }
       ]
     },
     "forbidden_context": {
       "ws-auth": [
-        { "kind": "goal", "title_contains": ["Mock Token"] }
+        { "id": "prototype-goal-retired", "kind": "goal", "title_contains": ["Mock Token"] }
       ]
     },
     "conflicts_count": 0
   },
-  "heuristic_expected_failure": "heuristic can only add: it restates the shift as a parallel current_state note and never updates goal-initial, so the goal itself does not evolve"
+  "heuristic_expected_failed_checks": [
+    "required:goal-update",
+    "required_context:goal-reflects-production-goal",
+    "forbidden_context:prototype-goal-retired"
+  ]
 }

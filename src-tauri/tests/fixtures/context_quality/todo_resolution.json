@@ -49,18 +49,24 @@
   "extractor_gold": {
     "required_mutations": [
       {
+        "id": "resolve-truncate-todo",
         "op": ["resolve"],
         "item_id": "todo-truncate",
         "source_events": [1]
       }
     ],
     "forbidden_mutations": [],
-    "forbidden_context": {
-      "ws-ingestion": [
-        { "kind": "todo", "title_contains": ["truncate"] }
-      ]
-    },
+    "required_item_status": [
+      {
+        "id": "truncate-todo-resolved",
+        "item_id": "todo-truncate",
+        "status": "resolved"
+      }
+    ],
     "conflicts_count": 0
   },
-  "heuristic_expected_failure": "implicit completion is invisible to the heuristic: the verified completion report matches no hint, so todo-truncate stays active forever"
+  "heuristic_expected_failed_checks": [
+    "required:resolve-truncate-todo",
+    "item_status:truncate-todo-resolved"
+  ]
 }

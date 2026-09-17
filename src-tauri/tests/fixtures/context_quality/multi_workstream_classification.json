@@ -63,32 +63,39 @@
   "extractor_gold": {
     "required_mutations": [
       {
+        "id": "launcher-decision-added",
         "op": ["add"],
         "workstream_id": "ws-launcher",
         "item_kind": ["decision"],
         "content_contains": ["prepare_resume"],
-        "source_events": [1]
+        "source_events": [1],
+        "authority": "user_explicit"
       }
     ],
     "forbidden_mutations": [
       {
+        "id": "coffee-chatter-ignored",
         "source_events": [2]
       },
       {
+        "id": "sync-stays-clean",
         "workstream_id": "ws-sync"
       }
     ],
     "required_context": {
       "ws-launcher": [
-        { "kind": "decision", "title_contains": ["prepare_resume"] }
+        { "id": "launcher-decision-effective", "kind": "decision", "title_contains": ["prepare_resume"] }
       ]
     },
     "forbidden_context": {
       "ws-sync": [
-        { "kind": "decision" }
+        { "id": "ws-sync-no-decisions", "kind": "decision" }
       ]
     },
     "conflicts_count": 0
   },
-  "heuristic_expected_failure": "the hint vocabulary misses this phrasing entirely and the heuristic extracts zero mutations: the launcher decision is lost (chatter exclusion holds only trivially)"
+  "heuristic_expected_failed_checks": [
+    "required:launcher-decision-added",
+    "required_context:launcher-decision-effective"
+  ]
 }

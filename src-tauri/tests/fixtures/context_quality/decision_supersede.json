@@ -61,6 +61,7 @@
   "extractor_gold": {
     "required_mutations": [
       {
+        "id": "supersede-websocket-decision",
         "op": ["supersede"],
         "item_id": "dec-websocket",
         "content_contains": ["SSE"],
@@ -69,6 +70,7 @@
     ],
     "forbidden_mutations": [
       {
+        "id": "no-duplicate-decision",
         "op": ["add"],
         "item_kind": ["decision"],
         "workstream_id": "ws-realtime"
@@ -76,15 +78,19 @@
     ],
     "required_context": {
       "ws-realtime": [
-        { "kind": "decision", "title_contains": ["SSE"] }
+        { "id": "sse-decision-active", "kind": "decision", "title_contains": ["SSE"] }
       ]
     },
     "forbidden_context": {
       "ws-realtime": [
-        { "kind": "decision", "title_contains": ["WebSocket"] }
+        { "id": "websocket-decision-retired", "kind": "decision", "title_contains": ["WebSocket"] }
       ]
     },
     "conflicts_count": 0
   },
-  "heuristic_expected_failure": "heuristic adds a duplicate decision beside the still-active WebSocket decision instead of superseding dec-websocket: single-active-decision and lineage both break"
+  "heuristic_expected_failed_checks": [
+    "required:supersede-websocket-decision",
+    "forbidden:no-duplicate-decision",
+    "forbidden_context:websocket-decision-retired"
+  ]
 }

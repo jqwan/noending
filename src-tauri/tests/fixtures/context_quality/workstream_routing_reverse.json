@@ -63,32 +63,41 @@
   "extractor_gold": {
     "required_mutations": [
       {
+        "id": "launcher-decision-added",
         "op": ["add"],
         "workstream_id": "ws-launcher",
         "item_kind": ["decision"],
         "content_contains": ["prepare_resume"],
-        "source_events": [1]
+        "source_events": [1],
+        "authority": "user_explicit"
       }
     ],
     "forbidden_mutations": [
       {
+        "id": "coffee-chatter-ignored",
         "source_events": [2]
       },
       {
+        "id": "sync-stays-clean",
         "workstream_id": "ws-sync"
       }
     ],
     "required_context": {
       "ws-launcher": [
-        { "kind": "decision", "title_contains": ["prepare_resume"] }
+        { "id": "launcher-decision-effective", "kind": "decision", "title_contains": ["prepare_resume"] }
       ]
     },
     "forbidden_context": {
       "ws-sync": [
-        { "kind": "decision" }
+        { "id": "ws-sync-no-decisions", "kind": "decision" }
       ]
     },
     "conflicts_count": 0
   },
-  "heuristic_expected_failure": "routing pins candidates[0]: the heuristic never weighs transcript content against candidate descriptions, so a Sync-first candidate order steals the Launcher decision"
+  "heuristic_expected_failed_checks": [
+    "required:launcher-decision-added",
+    "forbidden:sync-stays-clean",
+    "required_context:launcher-decision-effective",
+    "forbidden_context:ws-sync-no-decisions"
+  ]
 }
