@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
@@ -21,10 +21,13 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
   const [deliveryLevel, setDeliveryLevel] =
     useState<ContextDeliveryLevel>("balanced");
   const [prepared, setPrepared] = useState<PreparedLaunch | null>(null);
+  const [tokenEstimate, setTokenEstimate] = useState<number>(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const preparedRef = useRef<PreparedLaunch | null>(null);
 
   const doPrepare = async (): Promise<PreparedLaunch | null> => {
     return await api.prepareResumeSession(sessionId, []);
@@ -32,6 +35,7 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+
     api
       .getSessionDetail(sessionId)
       .then((d) => {
@@ -48,8 +52,26 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
 
     setPreparing(true);
     doPrepare()
-      .then((p) => {
-        if (!cancelled && p) setPrepared(p);
+      .then(async (p) => {
+        if (!p) return;
+        // P2: 如果异步返回前组件已卸载，取消该准备，防止孤儿 preparation
+        if (cancelled) {
+          api.cancelPrepared(p.id).catch(console.error);
+          return;
+        }
+        preparedRef.current = p;
+        setPrepared(p);
+        setTokenEstimate(p.bundle.approx_tokens);
+
+        // UX: Prepare 内部会执行 session sync，在此刷新 session detail 确保 UI binding 与 prepare 一致
+        try {
+          const freshDetail = await api.getSessionDetail(sessionId);
+          if (!cancelled) {
+            setDetail(freshDetail);
+          }
+        } catch (e) {
+          console.error(e);
+        }
       })
       .catch((err) => {
         if (!cancelled) setError(String(err));
@@ -60,12 +82,18 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
 
     return () => {
       cancelled = true;
+      // 卸载时释放持有的 preparation
+      if (preparedRef.current) {
+        api.cancelPrepared(preparedRef.current.id).catch(console.error);
+        preparedRef.current = null;
+      }
     };
   }, [sessionId]);
 
   const handleClose = () => {
-    if (prepared) {
-      api.cancelPrepared(prepared.id).catch(console.error);
+    if (preparedRef.current) {
+      api.cancelPrepared(preparedRef.current.id).catch(console.error);
+      preparedRef.current = null;
       setPrepared(null);
     }
     onClose();
@@ -82,8 +110,12 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
     try {
       const p = await doPrepare();
       if (p) {
+        preparedRef.current = p;
         setPrepared(p);
+        setTokenEstimate(p.bundle.approx_tokens);
         setPreviewOpen(true);
+        const refreshed = await api.getSessionDetail(sessionId);
+        setDetail(refreshed);
       }
     } catch (e: unknown) {
       setError(String(e));
@@ -96,14 +128,62 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
     if (busy) return;
     setBusy(true);
     setError("");
+
+    // P1: 任何 launchPrepared 调用之后，无论成功失败，原 PreparedLaunch 都不得再次使用
+    const current = preparedRef.current;
+    preparedRef.current = null;
+    setPrepared(null);
+
     try {
-      const res = prepared
-        ? await api.launchPrepared(prepared.id)
+      const res = current
+        ? await api.launchPrepared(current.id)
         : await api.launchResumeSession(sessionId, []);
       announceLaunch("恢复", res);
       onClose();
     } catch (e: unknown) {
-      setError(String(e));
+      const errStr = String(e);
+      const isStaleOrExpired =
+        errStr.includes("stale") ||
+        errStr.includes("过期") ||
+        errStr.includes("已被使用") ||
+        errStr.includes("不存在") ||
+        errStr.includes("变化");
+
+      if (isStaleOrExpired) {
+        // stale / expired 时自动重新 prepareResumeSession 并刷新 session detail
+        setPreparing(true);
+        try {
+          const fresh = await doPrepare();
+          if (fresh) {
+            preparedRef.current = fresh;
+            setPrepared(fresh);
+            setTokenEstimate(fresh.bundle.approx_tokens);
+            const freshDetail = await api.getSessionDetail(sessionId);
+            setDetail(freshDetail);
+          }
+          setError("Context 已发生变化，启动计划已刷新，请再次确认 Resume。");
+        } catch (prepErr) {
+          setError(`启动失败（${errStr}），且自动刷新失败：${String(prepErr)}`);
+        } finally {
+          setPreparing(false);
+        }
+      } else {
+        // 其他错误同样重新生成有效 preparation 保持可用
+        setPreparing(true);
+        try {
+          const fresh = await doPrepare();
+          if (fresh) {
+            preparedRef.current = fresh;
+            setPrepared(fresh);
+            setTokenEstimate(fresh.bundle.approx_tokens);
+          }
+        } catch (prepErr) {
+          console.error(prepErr);
+        } finally {
+          setPreparing(false);
+        }
+        setError(errStr);
+      }
       setBusy(false);
     }
   };
@@ -119,14 +199,21 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
   }
 
   const { session, bindings } = detail;
-  const isNone = bindings.length === 0;
+  // 以 PreparedLaunch 中的有效 Workstream 为权威来源，若尚在 prepare 中则 fallback 到 bindings
+  const effectiveWsIds = prepared
+    ? prepared.workstream_ids
+    : bindings.map(([b]) => b.workstream_id);
+  const isNone = effectiveWsIds.length === 0;
   const isOff = deliveryLevel === "off";
-  const approxTokens = prepared?.bundle.approx_tokens ?? 0;
+  const approxTokens = prepared?.bundle.approx_tokens ?? tokenEstimate;
 
   const wsDisplay = isNone
     ? "未关联 Workstream"
-    : bindings.map(([, title]) => title).filter(Boolean).join(" · ") ||
-      `${bindings.length} 个关联 Workstream`;
+    : bindings
+        .filter(([b]) => effectiveWsIds.includes(b.workstream_id))
+        .map(([, title]) => title)
+        .filter(Boolean)
+        .join(" · ") || `${effectiveWsIds.length} 个关联 Workstream`;
 
   return (
     <>
@@ -150,7 +237,7 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
             <div className="settings-row-hint">{wsDisplay}</div>
           </div>
           <span className="badge">
-            {bindings.length > 0 ? `${bindings.length} 个` : "0 绑定"}
+            {effectiveWsIds.length > 0 ? `${effectiveWsIds.length} 个` : "0 绑定"}
           </span>
         </div>
 
@@ -198,10 +285,10 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
           </button>
           <button
             className="btn primary"
-            disabled={busy}
+            disabled={busy || preparing}
             onClick={handleResume}
           >
-            {busy ? "恢复中…" : "Resume"}
+            {busy ? "恢复中…" : preparing ? "准备中…" : "Resume"}
           </button>
         </div>
       </Modal>
@@ -212,9 +299,35 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
           onClose={() => {
             setPreviewOpen(false);
             setPrepared(null);
+            preparedRef.current = null;
+            // Preview 关闭时其内部会 cancel 当前 ID，此处重新准备一份新的 preparation 保持就绪
+            setPreparing(true);
+            doPrepare()
+              .then((fresh) => {
+                if (fresh) {
+                  preparedRef.current = fresh;
+                  setPrepared(fresh);
+                  setTokenEstimate(fresh.bundle.approx_tokens);
+                }
+              })
+              .catch(console.error)
+              .finally(() => setPreparing(false));
           }}
-          onRefresh={doPrepare}
-          onLaunched={onClose}
+          onRefresh={async () => {
+            const p = await doPrepare();
+            if (p) {
+              preparedRef.current = p;
+              setPrepared(p);
+              setTokenEstimate(p.bundle.approx_tokens);
+              api.getSessionDetail(sessionId).then(setDetail).catch(console.error);
+            }
+            return p;
+          }}
+          onLaunched={() => {
+            preparedRef.current = null;
+            setPrepared(null);
+            onClose();
+          }}
         />
       )}
     </>
