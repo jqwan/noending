@@ -131,6 +131,7 @@ pub fn run() {
             commands::get_context_revision_source,
             commands::list_conflicts,
             commands::resolve_conflict,
+            commands::resolve_conflict_with_edit,
             commands::list_sessions,
             commands::get_session_detail,
             commands::assign_session_project,

@@ -1283,11 +1283,7 @@ impl Db {
     }
 
     pub fn set_item_authority(&self, item_id: &str, authority: &str) -> Result<()> {
-        self.0.execute(
-            "UPDATE context_items SET authority = ?2, updated_at = ?3 WHERE id = ?1",
-            params![item_id, authority, now()],
-        )?;
-        Ok(())
+        set_item_authority_conn(&self.0, item_id, authority)
     }
 
     pub fn get_item(&self, id: &str) -> Result<Option<ContextItem>> {
@@ -1447,7 +1443,7 @@ impl Db {
         status: &str,
         resolution: Option<&str>,
     ) -> Result<()> {
-        self.resolve_conflict_audited(conflict_id, status, resolution, "user")
+        self.resolve_conflict_with_edit(conflict_id, status, resolution, None, "user")
     }
 
     pub fn resolve_conflict_audited(
@@ -1457,7 +1453,20 @@ impl Db {
         resolution: Option<&str>,
         actor: &str,
     ) -> Result<()> {
-        self.tx(|tx| resolve_conflict_audited_conn(tx, conflict_id, status, resolution, actor))
+        self.resolve_conflict_with_edit(conflict_id, status, resolution, None, actor)
+    }
+
+    pub fn resolve_conflict_with_edit(
+        &self,
+        conflict_id: &str,
+        status: &str,
+        resolution: Option<&str>,
+        edit: Option<&ContextItemEditPayload>,
+        actor: &str,
+    ) -> Result<()> {
+        self.tx(|tx| {
+            resolve_conflict_with_edit_conn(tx, conflict_id, status, resolution, edit, actor)
+        })
     }
 
     pub fn conflict_history(&self, conflict_id: &str) -> Result<Vec<ContextConflictEvent>> {
@@ -1903,10 +1912,7 @@ impl Db {
     }
 
     pub fn unindex(&self, kind: &str, ref_id: &str) {
-        let _ = self.0.execute(
-            "DELETE FROM search_index WHERE kind = ?1 AND ref_id = ?2",
-            params![kind, ref_id],
-        );
+        unindex_conn(&self.0, kind, ref_id);
     }
 
     pub fn index_project(&self, p: &Project) -> Result<()> {
@@ -1928,14 +1934,31 @@ impl Db {
     }
 
     pub fn index_item(&self, item: &ContextItem, rev: &ContextItemRevision) -> Result<()> {
-        self.unindex("item", &item.id);
-        self.0.execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('item', ?1, ?2, ?3, ?4)",
-            params![item.id, item.workstream_id, rev.title, rev.content],
-        )?;
-        Ok(())
+        index_item_conn(&self.0, item, rev)
     }
+}
 
+pub fn unindex_conn(conn: &Connection, kind: &str, ref_id: &str) {
+    let _ = conn.execute(
+        "DELETE FROM search_index WHERE kind = ?1 AND ref_id = ?2",
+        params![kind, ref_id],
+    );
+}
+
+pub fn index_item_conn(
+    conn: &Connection,
+    item: &ContextItem,
+    rev: &ContextItemRevision,
+) -> Result<()> {
+    unindex_conn(conn, "item", &item.id);
+    conn.execute(
+        "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('item', ?1, ?2, ?3, ?4)",
+        params![item.id, item.workstream_id, rev.title, rev.content],
+    )?;
+    Ok(())
+}
+
+impl Db {
     /// Index newly stored events. Insert-only per event ref: because event
     /// identity dedup happens at the event layer, incremental batches never
     /// need to wipe the session's earlier index rows.
@@ -2386,6 +2409,14 @@ pub fn set_item_head_conn(
             params![item_id, revision_id, now()],
         )?;
     }
+    Ok(())
+}
+
+pub fn set_item_authority_conn(conn: &Connection, item_id: &str, authority: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE context_items SET authority = ?2, updated_at = ?3 WHERE id = ?1",
+        params![item_id, authority, now()],
+    )?;
     Ok(())
 }
 
@@ -2934,11 +2965,62 @@ pub fn resolve_conflict_audited_conn(
     resolution: Option<&str>,
     actor: &str,
 ) -> Result<()> {
+    resolve_conflict_with_edit_conn(conn, conflict_id, new_status, resolution, None, actor)
+}
+
+pub fn resolve_conflict_with_edit_conn(
+    conn: &Connection,
+    conflict_id: &str,
+    new_status: &str,
+    resolution: Option<&str>,
+    edit: Option<&ContextItemEditPayload>,
+    actor: &str,
+) -> Result<()> {
+    if new_status != "resolved" && new_status != "dismissed" {
+        return Err(other(format!(
+            "无效的冲突状态: {} (仅支持 resolved 或 dismissed)",
+            new_status
+        )));
+    }
+
     let conflict = get_conflict_conn(conn, conflict_id)?
         .ok_or_else(|| other(format!("冲突不存在: {}", conflict_id)))?;
 
-    let event_id = new_id();
-    let ts = now();
+    let mut resolved_revision_id = None;
+    if let Some(e) = edit {
+        let title = e.title.trim();
+        if title.is_empty() {
+            return Err(other("标题不能为空"));
+        }
+        let mut item = get_item_conn(conn, &conflict.left_item_id)?
+            .ok_or_else(|| other(format!("条目不存在: {}", conflict.left_item_id)))?;
+
+        let new_rev = ContextItemRevision {
+            id: new_id(),
+            item_id: item.id.clone(),
+            title: title.to_string(),
+            content: e.content.clone(),
+            metadata: serde_json::json!({
+                "provenance": {
+                    "authority": "user_edit",
+                    "actor": "user",
+                    "source_type": "user_edit",
+                    "source_ref": serde_json::Value::Null,
+                }
+            }),
+            source_type: Some("user_edit".into()),
+            source_ref: None,
+            sync_run_id: None,
+            created_at: now(),
+        };
+        insert_revision_conn(conn, &new_rev)?;
+        set_item_head_conn(conn, &item.id, &new_rev.id, None)?;
+        set_item_authority_conn(conn, &item.id, "user_edit")?;
+        item.updated_at = now();
+        let _ = index_item_conn(conn, &item, &new_rev);
+
+        resolved_revision_id = Some(new_rev.id);
+    }
 
     let candidate_snapshot = conflict
         .candidate_snapshot_json
@@ -2951,8 +3033,12 @@ pub fn resolve_conflict_audited_conn(
         "right_item_id": conflict.right_item_id,
         "left_revision_id": conflict.left_revision_id,
         "right_revision_id": conflict.right_revision_id,
+        "resolved_revision_id": resolved_revision_id.as_ref().or(conflict.left_revision_id.as_ref()),
         "candidate_snapshot": candidate_snapshot,
     });
+
+    let event_id = new_id();
+    let ts = now();
 
     conn.execute(
         "INSERT INTO context_conflict_events (id, conflict_id, previous_status, new_status, resolution, actor, created_at, snapshot_json)

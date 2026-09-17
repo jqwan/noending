@@ -45,6 +45,20 @@ export default function ConflictReviewModal({
   const rightItem = rightPair ? rightPair[0] : null;
   const rightRev = rightPair ? rightPair[1] : null;
 
+  let candidateSnapshot: {
+    title?: string;
+    content?: string;
+    authority?: string;
+    source_refs?: string[];
+  } | null = null;
+  if (currentConflict?.candidate_snapshot_json) {
+    try {
+      candidateSnapshot = JSON.parse(currentConflict.candidate_snapshot_json);
+    } catch {
+      // ignore
+    }
+  }
+
   const startEditLeft = () => {
     if (!leftRev) return;
     setEditTitle(leftRev.title);
@@ -57,18 +71,25 @@ export default function ConflictReviewModal({
     setBusy(true);
     setError("");
     try {
-      if (editingLeft && leftItem) {
-        if (!editTitle.trim()) {
-          setError("标题不能为空");
-          setBusy(false);
-          return;
-        }
-        await api.editContextItem(leftItem.id, editTitle.trim(), editContent);
+      const edit =
+        editingLeft && status === "resolved"
+          ? {
+              title: editTitle.trim(),
+              content: editContent,
+            }
+          : undefined;
+
+      if (editingLeft && status === "resolved" && !editTitle.trim()) {
+        setError("标题不能为空");
+        setBusy(false);
+        return;
       }
-      await api.resolveConflict(
+
+      await api.resolveConflictWithEdit(
         currentConflict.id,
         status,
         note.trim() || undefined,
+        edit,
       );
       setNote("");
       setEditingLeft(false);
@@ -223,11 +244,15 @@ export default function ConflictReviewModal({
                 <span className="section-label" style={{ margin: 0, color: "var(--warning, #eab308)" }}>
                   冲突证据 (Agent Evidence)
                 </span>
-                {rightItem && (
+                {rightItem ? (
                   <span className="badge" style={{ fontSize: 10 }}>
                     {AUTHORITY_LABELS[rightItem.authority] ?? rightItem.authority}
                   </span>
-                )}
+                ) : candidateSnapshot?.authority ? (
+                  <span className="badge" style={{ fontSize: 10 }}>
+                    提议: {AUTHORITY_LABELS[candidateSnapshot.authority] ?? candidateSnapshot.authority}
+                  </span>
+                ) : null}
               </div>
 
               {rightRev ? (
@@ -249,6 +274,31 @@ export default function ConflictReviewModal({
                   <div className="small muted">
                     {timeAgo(rightRev.created_at)}
                     {rightRev.source_ref ? ` · ${rightRev.source_ref}` : ""}
+                  </div>
+                </div>
+              ) : candidateSnapshot ? (
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 4 }}>
+                    {candidateSnapshot.title ?? "未命名提议"}
+                  </div>
+                  {candidateSnapshot.content && (
+                    <div
+                      className="small"
+                      style={{
+                        whiteSpace: "pre-wrap",
+                        color: "var(--text-secondary)",
+                        marginBottom: 10,
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {candidateSnapshot.content}
+                    </div>
+                  )}
+                  <div className="small muted">
+                    Agent 提取提议（已被权威策略拦截未生效）
+                    {candidateSnapshot.source_refs?.length
+                      ? ` · ${candidateSnapshot.source_refs.join(", ")}`
+                      : ""}
                   </div>
                 </div>
               ) : (

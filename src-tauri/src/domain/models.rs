@@ -321,6 +321,12 @@ pub struct ContextItem {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextItemEditPayload {
+    pub title: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextItemRevision {
     pub id: Id,

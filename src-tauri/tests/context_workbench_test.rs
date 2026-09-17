@@ -1,5 +1,6 @@
 use noending::domain::{
-    Agent, ContextConflict, ContextItem, ContextItemRevision, Session, SessionEvent,
+    Agent, ContextConflict, ContextItem, ContextItemEditPayload, ContextItemRevision, Session,
+    SessionEvent,
 };
 use noending::storage::{new_id, now, Db};
 
@@ -542,4 +543,160 @@ fn test_conflict_snapshots_freeze() {
         serde_json::from_str(history[0].snapshot_json.as_ref().unwrap()).unwrap();
     assert_eq!(snapshot["left_revision_id"], rev1_id);
     assert_eq!(snapshot["candidate_snapshot"]["title"], "Keep on premise");
+}
+
+#[test]
+fn test_resolve_conflict_with_edit_atomic_transaction() {
+    let db = open_db("conflict-atomic-tx");
+    let ws = ws_row(&db, "Atomic Conflict WS");
+
+    // 1. Setup item and conflict
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "Max Memory",
+        "Max memory is 2GB",
+        "agent_statement",
+        "session_event",
+        &["session-event:1".into()],
+        None,
+        "agent",
+    )
+    .unwrap();
+    let rev1_id = item.current_revision_id.clone().unwrap();
+
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: Some(rev1_id.clone()),
+        right_revision_id: None,
+        candidate_snapshot_json: Some(
+            serde_json::json!({
+                "title": "Max Memory 4GB",
+                "content": "Requested 4GB for cache",
+            })
+            .to_string(),
+        ),
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // 2. Resolve conflict with user edit atomically
+    let edit_payload = ContextItemEditPayload {
+        title: "Max Memory 3GB".into(),
+        content: "Compromise limit is 3GB".into(),
+    };
+
+    db.resolve_conflict_with_edit(
+        &conflict.id,
+        "resolved",
+        Some("Resolved by compromise at 3GB"),
+        Some(&edit_payload),
+        "user",
+    )
+    .unwrap();
+
+    // Verify conflict row
+    let c1 = db.get_conflict(&conflict.id).unwrap().unwrap();
+    assert_eq!(c1.status, "resolved");
+    assert_eq!(
+        c1.resolution.as_deref(),
+        Some("Resolved by compromise at 3GB")
+    );
+
+    // Verify item updated to new revision with user_edit authority
+    let item_after = db.get_item(&item.id).unwrap().unwrap();
+    assert_eq!(item_after.authority, "user_edit");
+    let rev2_id = item_after.current_revision_id.unwrap();
+    assert_ne!(rev2_id, rev1_id);
+
+    // Verify revision provenance is user_edit / user
+    let src2 = db.get_context_revision_source(&rev2_id).unwrap().unwrap();
+    assert_eq!(src2.authority, "user_edit");
+
+    // Verify audit history event captures resolved_revision_id
+    let history = db.conflict_history(&conflict.id).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].previous_status, "open");
+    assert_eq!(history[0].new_status, "resolved");
+    assert_eq!(
+        history[0].resolution.as_deref(),
+        Some("Resolved by compromise at 3GB")
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_str(history[0].snapshot_json.as_ref().unwrap()).unwrap();
+    assert_eq!(snapshot["left_revision_id"], rev1_id);
+    assert_eq!(snapshot["resolved_revision_id"], rev2_id);
+
+    // 3. Verify no stale COALESCE inheritance: re-resolving with resolution = None clears it
+    db.resolve_conflict_with_edit(&conflict.id, "dismissed", None, None, "user")
+        .unwrap();
+    let c2 = db.get_conflict(&conflict.id).unwrap().unwrap();
+    assert_eq!(c2.status, "dismissed");
+    assert_eq!(
+        c2.resolution, None,
+        "Resolution must be cleared when None is provided, not retain stale note"
+    );
+
+    // 4. Verify transaction rollback on error: empty title fails and rolls back everything
+    let conflict2 = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: Some(rev2_id.clone()),
+        right_revision_id: None,
+        candidate_snapshot_json: None,
+    };
+    db.insert_conflict(&conflict2).unwrap();
+
+    let invalid_edit = ContextItemEditPayload {
+        title: "   ".into(), // whitespace only
+        content: "Something".into(),
+    };
+
+    let err = db
+        .resolve_conflict_with_edit(
+            &conflict2.id,
+            "resolved",
+            Some("Should fail"),
+            Some(&invalid_edit),
+            "user",
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("标题不能为空"));
+
+    // Verify conflict2 remains open and untouched
+    let c2_check = db.get_conflict(&conflict2.id).unwrap().unwrap();
+    assert_eq!(c2_check.status, "open");
+    assert_eq!(c2_check.resolution, None);
+
+    // Verify no conflict event was written
+    let h2 = db.conflict_history(&conflict2.id).unwrap();
+    assert_eq!(h2.len(), 0);
+
+    // Verify item head was NOT updated
+    let item_check = db.get_item(&item.id).unwrap().unwrap();
+    assert_eq!(
+        item_check.current_revision_id.as_deref(),
+        Some(rev2_id.as_str())
+    );
+
+    // 5. Verify invalid status rejection
+    let err_status = db
+        .resolve_conflict_with_edit(&conflict2.id, "unsupported_status", None, None, "user")
+        .unwrap_err();
+    assert!(err_status.to_string().contains("无效的冲突状态"));
 }

@@ -49,6 +49,20 @@ export const api = {
     invoke<import("./types").ContextConflict[]>("list_conflicts", { workstreamId, includeClosed: includeClosed ?? false }),
   resolveConflict: (conflictId: string, status: string, resolution?: string) =>
     invoke<void>("resolve_conflict", { conflictId, status, resolution: resolution ?? null }),
+  resolveConflictWithEdit: (
+    conflictId: string,
+    status: string,
+    resolution?: string,
+    edit?: { title: string; content: string },
+  ) =>
+    invoke<void>("resolve_conflict_with_edit", {
+      args: {
+        conflict_id: conflictId,
+        status,
+        resolution: resolution ?? null,
+        edit: edit ?? null,
+      },
+    }),
 
   listSessions: (projectId?: string, agent?: Agent) =>
     invoke<Session[]>("list_sessions", { projectId: projectId ?? null, agent: agent ?? null }),

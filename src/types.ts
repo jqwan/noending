@@ -196,6 +196,11 @@ export interface ContextConflictEvent {
   snapshot_json?: string | null;
 }
 
+export interface ContextItemEditPayload {
+  title: string;
+  content: string;
+}
+
 export interface ContextItemRef {
   id: string;
   kind: string;

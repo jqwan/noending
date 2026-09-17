@@ -599,6 +599,30 @@ pub fn list_conflicts(
     })
 }
 
+#[derive(Deserialize)]
+pub struct ResolveConflictWithEditArgs {
+    pub conflict_id: String,
+    pub status: String,
+    pub resolution: Option<String>,
+    pub edit: Option<crate::domain::ContextItemEditPayload>,
+}
+
+#[tauri::command]
+pub fn resolve_conflict_with_edit(
+    state: State<AppState>,
+    args: ResolveConflictWithEditArgs,
+) -> Result<()> {
+    with_db(&state, |db| {
+        db.resolve_conflict_with_edit(
+            &args.conflict_id,
+            &args.status,
+            args.resolution.as_deref(),
+            args.edit.as_ref(),
+            "user",
+        )
+    })
+}
+
 #[tauri::command]
 pub fn resolve_conflict(
     state: State<AppState>,
@@ -607,7 +631,7 @@ pub fn resolve_conflict(
     resolution: Option<String>,
 ) -> Result<()> {
     with_db(&state, |db| {
-        db.update_conflict_status(&conflict_id, &status, resolution.as_deref())
+        db.resolve_conflict_with_edit(&conflict_id, &status, resolution.as_deref(), None, "user")
     })
 }
 
