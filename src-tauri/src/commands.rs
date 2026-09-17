@@ -589,6 +589,33 @@ pub fn get_context_revision_source(
     with_db(&state, |db| db.get_context_revision_source(&revision_id))
 }
 
+#[tauri::command]
+pub fn get_workstream_review_state(
+    state: State<AppState>,
+    workstream_id: String,
+) -> Result<Option<WorkstreamReviewState>> {
+    with_db(&state, |db| db.get_workstream_review_state(&workstream_id))
+}
+
+#[tauri::command]
+pub fn get_workstream_review_window(
+    state: State<AppState>,
+    workstream_id: String,
+) -> Result<WorkstreamReviewWindow> {
+    with_db(&state, |db| db.get_workstream_review_window(&workstream_id))
+}
+
+#[tauri::command]
+pub fn mark_workstream_reviewed(
+    state: State<AppState>,
+    workstream_id: String,
+    frontier: ReviewFrontier,
+) -> Result<WorkstreamReviewState> {
+    with_db(&state, |db| {
+        db.mark_workstream_reviewed(&workstream_id, &frontier)
+    })
+}
+
 // ---------------- Conflicts ----------------
 
 #[tauri::command]

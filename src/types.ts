@@ -290,6 +290,23 @@ export interface WorkstreamContext {
   recent_changes: ContextChange[];
 }
 
+export interface ReviewFrontier {
+  through_at: string;
+  boundary_change_ids: string[];
+}
+
+export interface WorkstreamReviewState {
+  workstream_id: string;
+  frontier: ReviewFrontier;
+  reviewed_at: string;
+}
+
+export interface WorkstreamReviewWindow {
+  state: WorkstreamReviewState;
+  unseen_changes: ContextChange[];
+  mark_through: ReviewFrontier;
+}
+
 export interface SessionDetail {
   session: Session;
   events: SessionEvent[];

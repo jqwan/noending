@@ -424,7 +424,7 @@ pub struct ContextItemRelation {
     pub superseded_by: Vec<ContextItemRef>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextChange {
     pub id: String,
     pub item_id: Option<Id>,
@@ -522,3 +522,29 @@ pub const BUILTIN_EXTENDED_TYPES: [&str; 10] = [
     "decision_detail",
     "research_note",
 ];
+
+/// Review Frontier marking the latest observed context mutation boundary for a Workstream.
+/// Ordering comparison relies strictly on local mutation commit time (`through_at`),
+/// with `boundary_change_ids` resolving any ties at the frontier timestamp losslessly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFrontier {
+    pub through_at: String,
+    pub boundary_change_ids: Vec<Id>,
+}
+
+/// Durable review checkpoint for a Workstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkstreamReviewState {
+    pub workstream_id: Id,
+    pub frontier: ReviewFrontier,
+    pub reviewed_at: String,
+}
+
+/// Window token presented to the user during context review.
+/// Guarantees that marking reviewed only advances through the changes actually observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkstreamReviewWindow {
+    pub state: WorkstreamReviewState,
+    pub unseen_changes: Vec<ContextChange>,
+    pub mark_through: ReviewFrontier,
+}

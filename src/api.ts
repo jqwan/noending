@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AppInfo, ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
-  SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
-  SyncRun, Workstream, WorkstreamCardData, WorkstreamContext,
+  ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
+  SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
 } from "./types";
 
 export const api = {
@@ -45,6 +45,12 @@ export const api = {
   deleteContextItem: (itemId: string) => invoke<void>("delete_context_item", { itemId }),
   getContextRevisionSource: (revisionId: string) =>
     invoke<import("./types").ContextSourceDetail | null>("get_context_revision_source", { revisionId }),
+  getWorkstreamReviewState: (workstreamId: string) =>
+    invoke<WorkstreamReviewState | null>("get_workstream_review_state", { workstreamId }),
+  getWorkstreamReviewWindow: (workstreamId: string) =>
+    invoke<WorkstreamReviewWindow>("get_workstream_review_window", { workstreamId }),
+  markWorkstreamReviewed: (workstreamId: string, frontier: ReviewFrontier) =>
+    invoke<WorkstreamReviewState>("mark_workstream_reviewed", { workstreamId, frontier }),
   listConflicts: (workstreamId: string, includeClosed?: boolean) =>
     invoke<import("./types").ContextConflict[]>("list_conflicts", { workstreamId, includeClosed: includeClosed ?? false }),
   resolveConflict: (conflictId: string, status: string, resolution?: string) =>

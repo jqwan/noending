@@ -31,8 +31,9 @@ pub struct Db(pub Connection);
 /// `context_deliveries.delivered_conflicts` (JSON array of conflict IDs); v8 added
 /// `context_conflict_events` (auditable conflict resolution events); v9 added
 /// conflict creation snapshots (left_revision_id, right_revision_id, candidate_snapshot_json)
-/// and conflict event audit snapshots (snapshot_json).
-pub const SCHEMA_VERSION: i64 = 9;
+/// and conflict event audit snapshots (snapshot_json); v10 added
+/// `workstream_review_state` (workstream-level review frontier checkpoint).
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -374,6 +375,12 @@ impl Db {
               snapshot_json TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_conflict_events_conflict ON context_conflict_events(conflict_id);
+            CREATE TABLE IF NOT EXISTS workstream_review_state (
+              workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id) ON DELETE CASCADE,
+              reviewed_through_at TEXT NOT NULL,
+              reviewed_boundary_change_ids TEXT NOT NULL DEFAULT '[]',
+              reviewed_at TEXT NOT NULL
+            );
             "#,
         )?;
 
@@ -433,6 +440,17 @@ impl Db {
         // SourceReference to them — never change).
         if current_version < 4 {
             self.migrate_legacy_identity_aliases()?;
+        }
+
+        // v9 → v10: baseline existing workstreams so pre-migration context
+        // changes are treated as already reviewed.
+        if current_version < 10 {
+            let ts = now();
+            self.0.execute(
+                "INSERT OR IGNORE INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
+                 SELECT id, ?1, '[]', ?1 FROM workstreams",
+                params![ts],
+            )?;
         }
 
         self.0.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1398,6 +1416,28 @@ impl Db {
         list_workstream_context_changes_conn(&self.0, workstream_id, limit)
     }
 
+    pub fn get_workstream_review_state(
+        &self,
+        workstream_id: &str,
+    ) -> Result<Option<WorkstreamReviewState>> {
+        get_workstream_review_state_conn(&self.0, workstream_id)
+    }
+
+    pub fn get_workstream_review_window(
+        &self,
+        workstream_id: &str,
+    ) -> Result<WorkstreamReviewWindow> {
+        get_workstream_review_window_conn(&self.0, workstream_id)
+    }
+
+    pub fn mark_workstream_reviewed(
+        &self,
+        workstream_id: &str,
+        frontier: &ReviewFrontier,
+    ) -> Result<WorkstreamReviewState> {
+        mark_workstream_reviewed_conn(&self.0, workstream_id, frontier)
+    }
+
     // ---------------- Conflicts ----------------
 
     pub fn insert_conflict(&self, c: &ContextConflict) -> Result<()> {
@@ -2059,6 +2099,11 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
            project_id = ?2,
            title = ?3, description = ?4, lifecycle = ?5, visibility = ?6, default_cwd = ?7, updated_at = ?9",
         params![w.id, w.project_id, w.title, w.description, w.lifecycle, w.visibility, w.default_cwd, w.created_at, w.updated_at],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
+         VALUES (?1, ?2, '[]', ?2)",
+        params![w.id, w.created_at],
     )?;
     Ok(())
 }
@@ -2880,6 +2925,95 @@ pub fn item_relations_for_workstream_conn(
     Ok(relations)
 }
 
+fn parse_revision_context_change(
+    id: String,
+    item_id: String,
+    title: String,
+    metadata_str: String,
+    source_type: Option<String>,
+    sync_run_id: Option<String>,
+    created_at: String,
+    created_by: String,
+    first_created_at: Option<String>,
+) -> ContextChange {
+    let is_first = first_created_at.as_deref() == Some(&created_at);
+    let metadata_json: serde_json::Value =
+        serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null);
+
+    let (kind, actor) = if source_type.as_deref() == Some("status_change") {
+        let audit = metadata_json.get("audit");
+        let new_status = audit
+            .and_then(|a| a.get("new_status"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        let actor_str = audit
+            .and_then(|a| a.get("actor"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("user");
+        let kind = match new_status {
+            "resolved" => "resolved",
+            "superseded" => "superseded",
+            "deleted" | "obsolete" => "deleted",
+            _ => "edited",
+        };
+        (
+            kind.to_string(),
+            if actor_str == "user" {
+                "User".to_string()
+            } else {
+                actor_str.to_string()
+            },
+        )
+    } else {
+        let prov_actor = metadata_json
+            .get("provenance")
+            .and_then(|p| p.get("actor"))
+            .and_then(|a| a.as_str());
+        let actor = if let Some(a) = prov_actor {
+            match a {
+                "user" => "User",
+                "agent" => "Agent",
+                "system" => "System",
+                other => other,
+            }
+            .to_string()
+        } else if source_type.as_deref() == Some("user_edit") || created_by == "user" {
+            "User".to_string()
+        } else if sync_run_id.is_some()
+            || created_by.starts_with("sync:")
+            || source_type.as_deref() == Some("session_event")
+        {
+            "Agent".to_string()
+        } else {
+            "System".to_string()
+        };
+        let kind = if is_first { "added" } else { "edited" };
+        (kind.to_string(), actor)
+    };
+
+    ContextChange {
+        id,
+        item_id: Some(item_id),
+        conflict_id: None,
+        kind,
+        title,
+        actor,
+        source_type,
+        created_at,
+    }
+}
+
+pub fn is_review_relevant(change: &ContextChange) -> bool {
+    if change.kind == "conflict_created" {
+        return true;
+    }
+    let actor_lower = change.actor.to_lowercase();
+    if actor_lower == "user" {
+        return false;
+    }
+    actor_lower == "agent" || actor_lower == "system"
+}
+
 pub fn list_workstream_context_changes_conn(
     conn: &Connection,
     workstream_id: &str,
@@ -2936,71 +3070,18 @@ pub fn list_workstream_context_changes_conn(
             created_by,
             first_created_at,
         ) = row?;
-        let is_first = first_created_at.as_deref() == Some(&created_at);
-        let metadata_json: serde_json::Value =
-            serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null);
 
-        let (kind, actor) = if source_type.as_deref() == Some("status_change") {
-            let audit = metadata_json.get("audit");
-            let new_status = audit
-                .and_then(|a| a.get("new_status"))
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            let actor_str = audit
-                .and_then(|a| a.get("actor"))
-                .and_then(|s| s.as_str())
-                .unwrap_or("user");
-            let kind = match new_status {
-                "resolved" => "resolved",
-                "superseded" => "superseded",
-                "deleted" | "obsolete" => "deleted",
-                _ => "edited",
-            };
-            (
-                kind.to_string(),
-                if actor_str == "user" {
-                    "User".to_string()
-                } else {
-                    actor_str.to_string()
-                },
-            )
-        } else {
-            let prov_actor = metadata_json
-                .get("provenance")
-                .and_then(|p| p.get("actor"))
-                .and_then(|a| a.as_str());
-            let actor = if let Some(a) = prov_actor {
-                match a {
-                    "user" => "User",
-                    "agent" => "Agent",
-                    "system" => "System",
-                    other => other,
-                }
-                .to_string()
-            } else if source_type.as_deref() == Some("user_edit") || created_by == "user" {
-                "User".to_string()
-            } else if sync_run_id.is_some()
-                || created_by.starts_with("sync:")
-                || source_type.as_deref() == Some("session_event")
-            {
-                "Agent".to_string()
-            } else {
-                "System".to_string()
-            };
-            let kind = if is_first { "added" } else { "edited" };
-            (kind.to_string(), actor)
-        };
-
-        changes.push(ContextChange {
+        changes.push(parse_revision_context_change(
             id,
-            item_id: Some(item_id),
-            conflict_id: None,
-            kind,
+            item_id,
             title,
-            actor,
+            metadata_str,
             source_type,
+            sync_run_id,
             created_at,
-        });
+            created_by,
+            first_created_at,
+        ));
     }
 
     // 2. Conflicts for this workstream
@@ -3091,6 +3172,399 @@ pub fn list_workstream_context_changes_conn(
     changes.truncate(limit);
 
     Ok(changes)
+}
+
+pub fn list_workstream_review_changes_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    frontier: &ReviewFrontier,
+) -> Result<Vec<ContextChange>> {
+    let mut unseen_changes = Vec::new();
+
+    // 1. Revisions for items in this workstream with created_at >= frontier.through_at
+    let sql_revs = "SELECT r.id, r.item_id, r.title, r.metadata, r.source_type, r.sync_run_id, r.created_at,
+                           i.authority, i.created_by,
+                           (SELECT MIN(r2.created_at) FROM context_item_revisions r2 WHERE r2.item_id = r.item_id) AS first_created_at
+                    FROM context_item_revisions r
+                    JOIN context_items i ON i.id = r.item_id
+                    WHERE i.workstream_id = ?1 AND r.created_at >= ?2
+                    ORDER BY r.created_at ASC";
+    let mut st = conn.prepare(sql_revs)?;
+    let rev_rows = st.query_map(params![workstream_id, frontier.through_at], |r| {
+        let id: String = r.get(0)?;
+        let item_id: String = r.get(1)?;
+        let title: String = r.get(2)?;
+        let metadata_str: String = r.get(3)?;
+        let source_type: Option<String> = r.get(4)?;
+        let sync_run_id: Option<String> = r.get(5)?;
+        let created_at: String = r.get(6)?;
+        let authority: String = r.get(7)?;
+        let created_by: String = r.get(8)?;
+        let first_created_at: Option<String> = r.get(9)?;
+        Ok((
+            id,
+            item_id,
+            title,
+            metadata_str,
+            source_type,
+            sync_run_id,
+            created_at,
+            authority,
+            created_by,
+            first_created_at,
+        ))
+    })?;
+
+    for row in rev_rows {
+        let (
+            id,
+            item_id,
+            title,
+            metadata_str,
+            source_type,
+            sync_run_id,
+            created_at,
+            _authority,
+            created_by,
+            first_created_at,
+        ) = row?;
+
+        let change = parse_revision_context_change(
+            id,
+            item_id,
+            title,
+            metadata_str,
+            source_type,
+            sync_run_id,
+            created_at,
+            created_by,
+            first_created_at,
+        );
+
+        let is_reviewed = if change.created_at < frontier.through_at {
+            true
+        } else if change.created_at == frontier.through_at {
+            frontier.boundary_change_ids.contains(&change.id)
+        } else {
+            false
+        };
+
+        if !is_reviewed && is_review_relevant(&change) {
+            unseen_changes.push(change);
+        }
+    }
+
+    // 2. Conflicts for this workstream with created_at >= frontier.through_at
+    let sql_conflicts = "SELECT id, left_item_id, right_item_id, status, created_at, updated_at
+                         FROM context_conflicts
+                         WHERE workstream_id = ?1 AND created_at >= ?2
+                         ORDER BY created_at ASC";
+    let mut st = conn.prepare(sql_conflicts)?;
+    let conflict_rows = st.query_map(params![workstream_id, frontier.through_at], |r| {
+        let id: String = r.get(0)?;
+        let left_item_id: String = r.get(1)?;
+        let right_item_id: Option<String> = r.get(2)?;
+        let status: String = r.get(3)?;
+        let created_at: String = r.get(4)?;
+        let updated_at: String = r.get(5)?;
+        Ok((
+            id,
+            left_item_id,
+            right_item_id,
+            status,
+            created_at,
+            updated_at,
+        ))
+    })?;
+
+    for row in conflict_rows {
+        let (id, left_item_id, _right_item_id, _status, created_at, _updated_at) = row?;
+        let change = ContextChange {
+            id: format!("conflict-created-{}", id),
+            item_id: Some(left_item_id),
+            conflict_id: Some(id),
+            kind: "conflict_created".into(),
+            title: "发现潜在 Context 冲突".into(),
+            actor: "Agent".into(),
+            source_type: Some("conflict".into()),
+            created_at,
+        };
+
+        let is_reviewed = if change.created_at < frontier.through_at {
+            true
+        } else if change.created_at == frontier.through_at {
+            frontier.boundary_change_ids.contains(&change.id)
+        } else {
+            false
+        };
+
+        if !is_reviewed && is_review_relevant(&change) {
+            unseen_changes.push(change);
+        }
+    }
+
+    // 3. Conflict resolution events for this workstream with created_at >= frontier.through_at
+    let sql_conflict_events =
+        "SELECT e.id, e.conflict_id, c.left_item_id, e.new_status, e.actor, e.created_at
+         FROM context_conflict_events e
+         JOIN context_conflicts c ON c.id = e.conflict_id
+         WHERE c.workstream_id = ?1 AND e.created_at >= ?2
+         ORDER BY e.created_at ASC";
+    if let Ok(mut st) = conn.prepare(sql_conflict_events) {
+        let event_rows = st.query_map(params![workstream_id, frontier.through_at], |r| {
+            let id: String = r.get(0)?;
+            let conflict_id: String = r.get(1)?;
+            let left_item_id: String = r.get(2)?;
+            let new_status: String = r.get(3)?;
+            let actor: String = r.get(4)?;
+            let created_at: String = r.get(5)?;
+            Ok((id, conflict_id, left_item_id, new_status, actor, created_at))
+        })?;
+
+        for row in event_rows {
+            let (id, conflict_id, left_item_id, new_status, actor, created_at) = row?;
+            let title = if new_status == "resolved" {
+                "冲突已解决".to_string()
+            } else if new_status == "dismissed" {
+                "冲突已忽略".to_string()
+            } else {
+                format!("冲突状态更新为 {}", new_status)
+            };
+            let change = ContextChange {
+                id: format!("conflict-event-{}", id),
+                item_id: Some(left_item_id),
+                conflict_id: Some(conflict_id),
+                kind: "conflict_resolved".into(),
+                title,
+                actor: if actor == "user" {
+                    "User".to_string()
+                } else {
+                    actor
+                },
+                source_type: Some("conflict_resolution".into()),
+                created_at,
+            };
+
+            let is_reviewed = if change.created_at < frontier.through_at {
+                true
+            } else if change.created_at == frontier.through_at {
+                frontier.boundary_change_ids.contains(&change.id)
+            } else {
+                false
+            };
+
+            if !is_reviewed && is_review_relevant(&change) {
+                unseen_changes.push(change);
+            }
+        }
+    }
+
+    // Sort chronologically and deterministically
+    unseen_changes.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    Ok(unseen_changes)
+}
+
+pub fn get_workstream_review_state_conn(
+    conn: &Connection,
+    workstream_id: &str,
+) -> Result<Option<WorkstreamReviewState>> {
+    let mut st = conn.prepare(
+        "SELECT workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at
+         FROM workstream_review_state
+         WHERE workstream_id = ?1",
+    )?;
+    let mut rows = st.query(params![workstream_id])?;
+    if let Some(r) = rows.next()? {
+        let workstream_id: String = r.get(0)?;
+        let through_at: String = r.get(1)?;
+        let ids_str: String = r.get(2)?;
+        let reviewed_at: String = r.get(3)?;
+        let boundary_change_ids: Vec<Id> = serde_json::from_str(&ids_str).unwrap_or_default();
+        Ok(Some(WorkstreamReviewState {
+            workstream_id,
+            frontier: ReviewFrontier {
+                through_at,
+                boundary_change_ids,
+            },
+            reviewed_at,
+        }))
+    } else {
+        // If the workstream exists but has no review state row, initialize baseline
+        let ws_created_at: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM workstreams WHERE id = ?1",
+                params![workstream_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(created_at) = ws_created_at {
+            conn.execute(
+                "INSERT OR IGNORE INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
+                 VALUES (?1, ?2, '[]', ?2)",
+                params![workstream_id, created_at],
+            )?;
+            Ok(Some(WorkstreamReviewState {
+                workstream_id: workstream_id.to_string(),
+                frontier: ReviewFrontier {
+                    through_at: created_at.clone(),
+                    boundary_change_ids: Vec::new(),
+                },
+                reviewed_at: created_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+pub fn get_workstream_review_window_conn(
+    conn: &Connection,
+    workstream_id: &str,
+) -> Result<WorkstreamReviewWindow> {
+    let state = match get_workstream_review_state_conn(conn, workstream_id)? {
+        Some(s) => s,
+        None => return Err(other(format!("Workstream {} not found", workstream_id))),
+    };
+
+    let unseen_changes = list_workstream_review_changes_conn(conn, workstream_id, &state.frontier)?;
+
+    let mark_through = if unseen_changes.is_empty() {
+        state.frontier.clone()
+    } else {
+        let newest_ts = unseen_changes
+            .iter()
+            .map(|c| &c.created_at)
+            .max()
+            .unwrap()
+            .clone();
+
+        let mut boundary_change_ids: Vec<Id> = unseen_changes
+            .iter()
+            .filter(|c| c.created_at == newest_ts)
+            .map(|c| c.id.clone())
+            .collect();
+
+        if newest_ts == state.frontier.through_at {
+            for old_id in &state.frontier.boundary_change_ids {
+                if !boundary_change_ids.contains(old_id) {
+                    boundary_change_ids.push(old_id.clone());
+                }
+            }
+        }
+        boundary_change_ids.sort();
+        boundary_change_ids.dedup();
+
+        ReviewFrontier {
+            through_at: newest_ts,
+            boundary_change_ids,
+        }
+    };
+
+    Ok(WorkstreamReviewWindow {
+        state,
+        unseen_changes,
+        mark_through,
+    })
+}
+
+pub fn mark_workstream_reviewed_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    new_frontier: &ReviewFrontier,
+) -> Result<WorkstreamReviewState> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM workstreams WHERE id = ?1",
+            params![workstream_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+
+    if !exists {
+        return Err(other(format!("Workstream {} not found", workstream_id)));
+    }
+
+    let current = get_workstream_review_state_conn(conn, workstream_id)?;
+    let now_ts = now();
+
+    match current {
+        Some(old_state) => {
+            if new_frontier.through_at > old_state.frontier.through_at {
+                let mut sorted_ids = new_frontier.boundary_change_ids.clone();
+                sorted_ids.sort();
+                sorted_ids.dedup();
+                let ids_json =
+                    serde_json::to_string(&sorted_ids).unwrap_or_else(|_| "[]".to_string());
+                conn.execute(
+                    "UPDATE workstream_review_state
+                     SET reviewed_through_at = ?2, reviewed_boundary_change_ids = ?3, reviewed_at = ?4
+                     WHERE workstream_id = ?1",
+                    params![workstream_id, new_frontier.through_at, ids_json, now_ts],
+                )?;
+                Ok(WorkstreamReviewState {
+                    workstream_id: workstream_id.to_string(),
+                    frontier: ReviewFrontier {
+                        through_at: new_frontier.through_at.clone(),
+                        boundary_change_ids: sorted_ids,
+                    },
+                    reviewed_at: now_ts,
+                })
+            } else if new_frontier.through_at == old_state.frontier.through_at {
+                let mut merged_ids = old_state.frontier.boundary_change_ids.clone();
+                for id in &new_frontier.boundary_change_ids {
+                    if !merged_ids.contains(id) {
+                        merged_ids.push(id.clone());
+                    }
+                }
+                merged_ids.sort();
+                merged_ids.dedup();
+                let ids_json =
+                    serde_json::to_string(&merged_ids).unwrap_or_else(|_| "[]".to_string());
+                conn.execute(
+                    "UPDATE workstream_review_state
+                     SET reviewed_boundary_change_ids = ?2, reviewed_at = ?3
+                     WHERE workstream_id = ?1",
+                    params![workstream_id, ids_json, now_ts],
+                )?;
+                Ok(WorkstreamReviewState {
+                    workstream_id: workstream_id.to_string(),
+                    frontier: ReviewFrontier {
+                        through_at: old_state.frontier.through_at,
+                        boundary_change_ids: merged_ids,
+                    },
+                    reviewed_at: now_ts,
+                })
+            } else {
+                // Stale token; monotonic invariant prevents rewinding.
+                Ok(old_state)
+            }
+        }
+        None => {
+            let mut sorted_ids = new_frontier.boundary_change_ids.clone();
+            sorted_ids.sort();
+            sorted_ids.dedup();
+            let ids_json = serde_json::to_string(&sorted_ids).unwrap_or_else(|_| "[]".to_string());
+            conn.execute(
+                "INSERT INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![workstream_id, new_frontier.through_at, ids_json, now_ts],
+            )?;
+            Ok(WorkstreamReviewState {
+                workstream_id: workstream_id.to_string(),
+                frontier: ReviewFrontier {
+                    through_at: new_frontier.through_at.clone(),
+                    boundary_change_ids: sorted_ids,
+                },
+                reviewed_at: now_ts,
+            })
+        }
+    }
 }
 
 pub fn resolve_conflict_audited_conn(

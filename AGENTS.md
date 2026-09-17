@@ -48,6 +48,10 @@ When changing the system, preserve these rules:
 * **Explicit Fact Evolution & Supersession**: Relations between superseded and replacement items form a directed acyclic evolution graph; replacing an item must explicitly track `supersedes` / `superseded_by` rather than breaking lineage.
 * **Activity reflects true event stream**: Activity and recent changes must reflect the actual `ContextChange` event stream (revisions and conflict events), never a pseudo-timeline sorting items by `updated_at`.
 * **User edits elevate authority**: Any user inline edit elevates the item to `user_edit` authority and produces a new Revision, preserving the full revision chain and immutable historical facts.
+* **Review State Integrity**: ReviewState records what the human has observed; it is completely independent from ContextDelivery, Sync cursors, and Session bindings.
+* **Mark Reviewed is observational acknowledgement only**: It MUST NOT mutate Context facts, resolve conflicts, advance ContextDelivery, or alter Session state.
+* **Mark Reviewed MUST advance only to the exact ReviewFrontier that accompanied the ReviewWindow observed by the user**: Concurrent later changes remain unseen.
+* **Context review ordering uses local Context mutation commit time**: It uses local `created_at`, never the originating transcript/event timestamp.
 * macOS and Windows are first-class platforms.
 
 When uncertain, prefer **preserving history, provenance, and user intent** over convenience.
