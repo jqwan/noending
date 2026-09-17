@@ -156,7 +156,6 @@ pub fn run() {
             commands::prepare_resume_session,
             commands::launch_prepared,
             commands::cancel_prepared,
-            commands::preview_context_bundle,
             commands::search,
             commands::get_stats,
             commands::get_agent_status,

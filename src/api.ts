@@ -77,12 +77,6 @@ export const api = {
     invoke<LaunchResult>("launch_prepared", { preparedId }),
   cancelPrepared: (preparedId: string) =>
     invoke<void>("cancel_prepared", { preparedId }),
-  previewBundle: (workstreamIds: string[], mode?: string, sessionId?: string) =>
-    invoke<SessionContextBundle>("preview_context_bundle", {
-      workstreamIds,
-      mode: mode ?? null,
-      sessionId: sessionId ?? null,
-    }),
 
   listIngestSources: () =>
     invoke<import("./types").IngestSource[]>("list_ingest_sources"),

@@ -1101,33 +1101,6 @@ pub fn cancel_prepared(state: State<AppState>, prepared_id: String) -> Result<()
     Ok(())
 }
 
-/// Preview a context bundle. Resume mode MUST carry the session id — the
-/// delta is computed against what that specific session last received.
-#[tauri::command]
-pub fn preview_context_bundle(
-    state: State<AppState>,
-    workstream_ids: Vec<String>,
-    mode: Option<String>,
-    session_id: Option<String>,
-) -> Result<crate::context::SessionContextBundle> {
-    with_db(&state, |db| {
-        let level = context_delivery_level_of(db)?;
-        let mode = mode.as_deref().unwrap_or("new");
-        match mode {
-            "resume" => {
-                let sid = session_id
-                    .as_deref()
-                    .ok_or_else(|| other("Resume 预览必须提供 session_id"))?;
-                let session = db
-                    .get_session(sid)?
-                    .ok_or_else(|| other("Session 不存在"))?;
-                crate::context::build_bundle(db, "resume", Some(&session), &workstream_ids, level)
-            }
-            _ => crate::context::build_bundle(db, "new", None, &workstream_ids, level),
-        }
-    })
-}
-
 // ---------------- Ingest sources ----------------
 
 #[derive(Serialize)]

@@ -5,7 +5,7 @@ import EmptyState from "../../components/EmptyState";
 import { useRefreshSignal } from "../../components/common";
 import SessionTable from "./SessionTable";
 import NewSessionModal from "./NewSessionModal";
-import { announceLaunch } from "../launcher/LaunchResultModal";
+import ResumeSessionModal from "./ResumeSessionModal";
 import { AGENT_LABELS, type Agent, type Project, type Session, type SessionBindingRow } from "../../types";
 import type { Route, ViewAction } from "../../app/routes";
 
@@ -29,8 +29,7 @@ export default function SessionsView({ navigate, action, actionSeq }: {
   const [wsFilter, setWsFilter] = useState("all");
   const [assigned, setAssigned] = useState<AssignedFilter>("all");
   const [creating, setCreating] = useState(false);
-  const [resumeBusy, setResumeBusy] = useState<string | null>(null);
-  const [resumeError, setResumeError] = useState("");
+  const [resumeModalSessionId, setResumeModalSessionId] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     api.listAllSessions().then(setSessions).catch(console.error);
@@ -93,15 +92,8 @@ export default function SessionsView({ navigate, action, actionSeq }: {
       );
   }, [sessions, bindings, query, agent, projectId, wsFilter, assigned]);
 
-  const resume = async (sessionId: string) => {
-    setResumeBusy(sessionId); setResumeError("");
-    try {
-      announceLaunch("恢复", await api.launchResumeSession(sessionId, []));
-    } catch (e) {
-      setResumeError(String(e));
-    } finally {
-      setResumeBusy(null);
-    }
+  const resume = (sessionId: string) => {
+    setResumeModalSessionId(sessionId);
   };
 
   const clearFilters = () => {
@@ -192,8 +184,13 @@ export default function SessionsView({ navigate, action, actionSeq }: {
         />
       )}
 
-      {resumeError && <div className="badge warn" style={{ marginTop: 10 }}>{resumeError}</div>}
       {creating && <NewSessionModal onClose={() => setCreating(false)} />}
+      {resumeModalSessionId && (
+        <ResumeSessionModal
+          sessionId={resumeModalSessionId}
+          onClose={() => setResumeModalSessionId(null)}
+        />
+      )}
     </div>
   );
 }

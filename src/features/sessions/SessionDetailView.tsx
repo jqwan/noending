@@ -4,7 +4,7 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import SessionMessage, { type SessionMessageData } from "./SessionMessage";
-import { announceLaunch } from "../launcher/LaunchResultModal";
+import ResumeSessionModal from "./ResumeSessionModal";
 import { Modal } from "../../components/common";
 import { AGENT_LABELS, type SessionDetail, type Workstream } from "../../types";
 import type { Route } from "../../app/routes";
@@ -19,8 +19,8 @@ export default function SessionDetailView({ sessionId, navigate }: {
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [syncMsg, setSyncMsg] = useState("");
-  const [busy, setBusy] = useState(false);
   const [bindingOpen, setBindingOpen] = useState(false);
+  const [resumeOpen, setResumeOpen] = useState(false);
 
   const refresh = useCallback(() => {
     api.getSessionDetail(sessionId).then(setDetail).catch(console.error);
@@ -37,19 +37,6 @@ export default function SessionDetailView({ sessionId, navigate }: {
     setSyncMsg(r.applied > 0 ? `提取了 ${r.applied} 个 Context 变更` : "没有新的有效上下文");
     refresh();
     setTimeout(() => setSyncMsg(""), 4000);
-  };
-
-  const resume = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      announceLaunch("恢复", await api.launchResumeSession(sessionId, []));
-    } catch (e) {
-      setSyncMsg(`Resume 失败：${e}`);
-      setTimeout(() => setSyncMsg(""), 5000);
-    } finally {
-      setBusy(false);
-    }
   };
 
   const messages: SessionMessageData[] = events.map((e) => ({
@@ -70,8 +57,8 @@ export default function SessionDetailView({ sessionId, navigate }: {
           <>
             {syncMsg && <span className="badge accent" style={{ padding: "4px 10px" }}>{syncMsg}</span>}
             <button className="btn ghost" onClick={doSync}>同步提取</button>
-            <button className="btn primary" disabled={busy} onClick={resume}>
-              {busy ? "启动中…" : "Resume"}
+            <button className="btn primary" onClick={() => setResumeOpen(true)}>
+              Resume
             </button>
           </>
         }
@@ -129,6 +116,12 @@ export default function SessionDetailView({ sessionId, navigate }: {
           bindings={bindings.map(([b]) => b)}
           onClose={() => setBindingOpen(false)}
           onChanged={refresh}
+        />
+      )}
+      {resumeOpen && (
+        <ResumeSessionModal
+          sessionId={sessionId}
+          onClose={() => setResumeOpen(false)}
         />
       )}
     </div>
