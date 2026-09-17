@@ -5,6 +5,7 @@ pub mod adapters;
 pub mod assistant;
 pub mod commands;
 pub mod context;
+pub mod context_eval;
 pub mod domain;
 pub mod error;
 pub mod ingestion;
