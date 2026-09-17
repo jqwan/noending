@@ -28,7 +28,13 @@ export default function Router({ route, navigate, actionSeq }: {
         />
       );
     case "workstream":
-      return <WorkstreamDetailView workstreamId={route.workstreamId} navigate={navigate} />;
+      return (
+        <WorkstreamDetailView
+          workstreamId={route.workstreamId}
+          entry={route.entry}
+          navigate={navigate}
+        />
+      );
     case "sessions":
       return (
         <SessionsView

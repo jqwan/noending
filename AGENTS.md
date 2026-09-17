@@ -52,6 +52,7 @@ When changing the system, preserve these rules:
 * **Mark Reviewed is observational acknowledgement only**: It MUST NOT mutate Context facts, resolve conflicts, advance ContextDelivery, or alter Session state.
 * **Mark Reviewed MUST advance only to the exact ReviewFrontier that accompanied the ReviewWindow observed by the user**: Concurrent later changes remain unseen.
 * **Context review ordering uses local Context mutation commit time**: It uses local `created_at`, never the originating transcript/event timestamp.
+* **Home Attention Integrity**: Home may surface ReviewSummary state and navigate the user to a Workstream review experience. Home MUST NOT advance ReviewState. Viewing a Home attention item, clicking a Workstream card, or navigating into a Workstream MUST NOT mark anything reviewed.
 * macOS and Windows are first-class platforms.
 
 When uncertain, prefer **preserving history, provenance, and user intent** over convenience.

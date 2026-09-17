@@ -4,6 +4,7 @@ import AgentIcon from "../../components/AgentIcon";
 import SidebarLogo from "../../components/SidebarLogo";
 import type { Route } from "../../app/routes";
 import { ContinueSection, RecentSessions } from "./ContinueSection";
+import ContextUpdatesSection from "./ContextUpdatesSection";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
 import NewWorkstreamModal from "../workstreams/NewWorkstreamModal";
 import { announceLaunch } from "../launcher/LaunchResultModal";
@@ -13,7 +14,7 @@ import { announceLaunch } from "../launcher/LaunchResultModal";
  * 唯一任务：让用户用最短路径回到最近推进的 Workstream。
  */
 export default function HomeView({ navigate }: { navigate: (r: Route) => void }) {
-  const { cards, defaultAgent, refresh } = useWorkstreamCards();
+  const { cards, defaultAgent, reviewSummaries, refresh } = useWorkstreamCards();
   const [creatingWs, setCreatingWs] = useState(false);
 
   if (cards === null) return <div className="main narrow">加载中…</div>;
@@ -78,6 +79,12 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
         <h1>Good to see you again.</h1>
         <p className="sub">Continue where you left off.</p>
       </div>
+
+      <ContextUpdatesSection
+        cards={cards}
+        summaries={reviewSummaries ?? []}
+        navigate={navigate}
+      />
 
       <ContinueSection navigate={navigate} defaultAgent={defaultAgent} cards={cards} />
       <RecentSessions navigate={navigate} />

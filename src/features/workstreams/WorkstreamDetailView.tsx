@@ -11,7 +11,7 @@ import {
   type WorkstreamReviewSummary,
   type WorkstreamReviewWindow,
 } from "../../types";
-import type { Route } from "../../app/routes";
+import type { Route, WorkstreamEntry } from "../../app/routes";
 import WorkstreamContext from "./WorkstreamContext";
 import WorkstreamSessions from "./WorkstreamSessions";
 import NeedsAttentionSection from "./NeedsAttentionSection";
@@ -25,8 +25,13 @@ import { announceLaunch } from "../launcher/LaunchResultModal";
  * 第一屏回答：这是什么 / 做到哪 / 目标 / 问题 / 决定 / 约束 / 最近 Session，
  * 并可直接 New、Resume latest、Resume specific、Ask Assistant。
  */
-export default function WorkstreamDetailView({ workstreamId, navigate }: {
+export default function WorkstreamDetailView({
+  workstreamId,
+  entry,
+  navigate,
+}: {
   workstreamId: string;
+  entry?: WorkstreamEntry;
   navigate: (r: Route) => void;
 }) {
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(null);
@@ -48,6 +53,13 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
 
   const reviewWindowRef = useRef<WorkstreamReviewWindow | null>(null);
   reviewWindowRef.current = reviewWindow;
+
+  // Auto-open conflict review modal if entry === "conflicts" and open conflicts exist
+  useEffect(() => {
+    if (entry === "conflicts" && ctx && (ctx.conflicts?.length ?? 0) > 0) {
+      setReviewingConflict(true);
+    }
+  }, [entry, ctx]);
 
   // Initial load when workstreamId changes
   useEffect(() => {

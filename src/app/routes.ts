@@ -21,10 +21,12 @@ export type SettingsSection =
  */
 export type ViewAction = "new";
 
+export type WorkstreamEntry = "review" | "conflicts";
+
 export type Route =
   | { view: "home" }
   | { view: "workstreams"; action?: ViewAction }
-  | { view: "workstream"; workstreamId: string }
+  | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry }
   | { view: "sessions"; action?: ViewAction }
   | { view: "session"; sessionId: string }
   | { view: "assistant"; scope?: AssistantScope }

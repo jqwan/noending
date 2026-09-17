@@ -545,3 +545,73 @@
   border-radius: var(--radius-sm);
 }
 
+/* ---------- Home: Context Updates ---------- */
+.context-updates-section {
+  margin-bottom: 28px;
+}
+
+.context-updates-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.context-update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.context-update-row:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-default);
+}
+
+.context-update-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.context-update-title {
+  font-size: 13.5px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-update-project {
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+
+.context-update-signals {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.context-update-action {
+  flex-shrink: 0;
+}
+
+.context-update-action .btn {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+.context-updates-more {
+  margin-top: 8px;
+}
+
