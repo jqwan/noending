@@ -167,7 +167,11 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
 
       <div className="ws-detail-grid">
         <div>
-          <WorkstreamContext ctx={ctx} onChanged={refresh} />
+          <WorkstreamContext
+            ctx={ctx}
+            onChanged={refresh}
+            onNavigateSession={(sessionId) => navigate({ view: "session", sessionId })}
+          />
         </div>
         <div>
           <WorkstreamSessions sessions={related_sessions} navigate={navigate} />

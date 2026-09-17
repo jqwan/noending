@@ -5,6 +5,7 @@ import {
   AUTHORITY_LABELS, KIND_LABELS,
   type ContextItem, type ContextItemRevision, type WorkstreamContext,
 } from "../../types";
+import SourceDetailModal from "./SourceDetailModal";
 
 const CORE_ORDER = ["current_state", "goal", "open_question", "decision", "constraint"] as const;
 const CORE_LABELS: Record<string, { en: string; zh: string }> = {
@@ -17,46 +18,52 @@ const CORE_LABELS: Record<string, { en: string; zh: string }> = {
 const EXTENDED_KINDS = ["todo", "finding", "issue", "risk", "note", "reference", "artifact", "requirement", "decision_detail", "research_note"];
 const RESOLVABLE = ["todo", "open_question", "issue"];
 
-/**
- * Workstream Context 主栏（整体设计方案 §31-§34）：
- * Core Context（Current State 第一位）→ Extended Context（compact rows + View all）。
- * 编辑直接内联完成，保存生成 user_edit 新 Revision（§32）；历史走 Modal（§33）。
- */
-export default function WorkstreamContext({ ctx, onChanged }: {
+interface Props {
   ctx: WorkstreamContext;
   onChanged: () => void;
-}) {
+  onNavigateSession?: (sessionId: string) => void;
+}
+
+/**
+ * Workstream Context Workbench（当前事实、追溯来源、演进关系、状态纠偏控制面）：
+ * - Core Context 严格以后端 ctx.core (resolve_core_context 权威投影) 为准展示当前事实
+ * - 提供 Provenance 追溯 (SourceDetailModal)、演进历史 (History) 与关系标签 (替代/被替代)
+ * - 支持标题 + 详细内容双字段内联编辑，保存生成 user_edit 新 Revision
+ */
+export default function WorkstreamContext({ ctx, onChanged, onNavigateSession }: Props) {
   const [editing, setEditing] = useState<string | null>(null); // item id
-  const [draft, setDraft] = useState("");
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
   const [historyOf, setHistoryOf] = useState<[ContextItem, ContextItemRevision[]] | null>(null);
+  const [sourceRevisionId, setSourceRevisionId] = useState<string | null>(null);
+
   const [adding, setAdding] = useState(false);
   const [newKind, setNewKind] = useState("todo");
   const [newTitle, setNewTitle] = useState("");
   const [newContent, setNewContent] = useState("");
   const [showAllExt, setShowAllExt] = useState(false);
 
+  // Maps for fast lookup
+  const itemByRevId = new Map(ctx.items.map(([item, rev]) => [rev.id, [item, rev] as const]));
+  const itemById = new Map(ctx.items.map(([item, rev]) => [item.id, [item, rev] as const]));
+  const relationsMap = new Map((ctx.relations ?? []).map((r) => [r.item_id, r]));
+
   const active = ctx.items.filter(([i]) => i.status === "active");
-  const coreOf = (kind: string) =>
-    active
-      .filter(([i]) => i.kind === kind)
-      .sort((a, b) => b[0].updated_at.localeCompare(a[0].updated_at));
   const extended = active
     .filter(([i]) => !(CORE_ORDER as readonly string[]).includes(i.kind))
     .sort((a, b) => b[0].updated_at.localeCompare(a[0].updated_at));
   const closed = ctx.items.filter(([i]) => i.status !== "active" && i.status !== "deleted");
   const extShown = showAllExt ? extended : extended.slice(0, 8);
 
-  const startEdit = async (item: ContextItem) => {
-    const revs = await api.getItemHistory(item.id);
-    const head = revs[revs.length - 1];
+  const startEdit = (item: ContextItem, rev: { title: string; content: string }) => {
     setEditing(item.id);
-    setDraft(head?.content ?? "");
+    setEditTitle(rev.title);
+    setEditContent(rev.content ?? "");
   };
 
-  const saveEdit = async (item: ContextItem) => {
-    const revs = await api.getItemHistory(item.id);
-    const head = revs[revs.length - 1];
-    await api.editContextItem(item.id, head?.title ?? "", draft);
+  const saveEdit = async (itemId: string) => {
+    if (!editTitle.trim()) return;
+    await api.editContextItem(itemId, editTitle.trim(), editContent);
     setEditing(null);
     onChanged();
   };
@@ -66,12 +73,36 @@ export default function WorkstreamContext({ ctx, onChanged }: {
     setHistoryOf([item, revs]);
   };
 
+  const renderRelations = (itemId: string) => {
+    const rel = relationsMap.get(itemId);
+    if (!rel) return null;
+    const hasSupersedes = Boolean(rel.supersedes);
+    const hasSupersededBy = Boolean(rel.superseded_by && rel.superseded_by.length > 0);
+    if (!hasSupersedes && !hasSupersededBy) return null;
+
+    return (
+      <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+        {rel.supersedes && (
+          <span className="badge" title={`已替代旧条目: ${rel.supersedes.title}`}>
+            替代: {rel.supersedes.title}
+          </span>
+        )}
+        {hasSupersededBy && rel.superseded_by.map((s) => (
+          <span key={s.id} className="badge warn" title={`已被新条目替代: ${s.title}`}>
+            被替代: {s.title}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
   return (
     <div>
-      <div className="section-label">Context</div>
+      <div className="section-label">Current Context</div>
       <div className="l1">
         {CORE_ORDER.map((kind) => {
-          const entries = coreOf(kind);
+          // Strictly adhere to L1 projection ctx.core
+          const sections = (ctx.core ?? []).filter((s) => s.kind === kind);
           return (
             <div className="l1-row" key={kind}>
               <div className="label">
@@ -79,35 +110,134 @@ export default function WorkstreamContext({ ctx, onChanged }: {
                 {CORE_LABELS[kind].zh}
               </div>
               <div className="l1-body">
-                {entries.length === 0 && <div className="l1-none">还没有内容</div>}
-                {entries.map(([item, rev]) => (
-                  <div className="ctx-entry" key={item.id}>
-                    {editing === item.id ? (
-                      <div className="ctx-edit">
-                        <textarea value={draft} autoFocus onChange={(e) => setDraft(e.target.value)} />
-                        <div className="row" style={{ justifyContent: "flex-end" }}>
+                {sections.length === 0 && (
+                  <div className="row between" style={{ alignItems: "center" }}>
+                    <div className="l1-none">暂无当前 {CORE_LABELS[kind].zh}</div>
+                    <button
+                      className="btn small ghost"
+                      onClick={() => {
+                        setNewKind(kind);
+                        setAdding(true);
+                      }}
+                    >
+                      + 设定
+                    </button>
+                  </div>
+                )}
+                {sections.map((sec, idx) => {
+                  const pair = sec.revision_id ? itemByRevId.get(sec.revision_id) : null;
+                  const item = pair ? pair[0] : null;
+                  const rev = pair ? pair[1] : null;
+                  const itemId = item ? item.id : `sec-${idx}`;
+
+                  if (item && editing === item.id) {
+                    return (
+                      <div className="ctx-edit" key={itemId} style={{ padding: "8px 0" }}>
+                        <label className="field" style={{ marginBottom: 6 }}>
+                          <span>标题</span>
+                          <input
+                            type="text"
+                            value={editTitle}
+                            autoFocus
+                            onChange={(e) => setEditTitle(e.target.value)}
+                          />
+                        </label>
+                        <label className="field" style={{ marginBottom: 8 }}>
+                          <span>内容</span>
+                          <textarea
+                            value={editContent}
+                            rows={3}
+                            onChange={(e) => setEditContent(e.target.value)}
+                          />
+                        </label>
+                        <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
                           <button className="btn small" onClick={() => setEditing(null)}>取消</button>
-                          <button className="btn small primary" onClick={() => saveEdit(item)}>保存为新 Revision</button>
+                          <button className="btn small primary" onClick={() => saveEdit(item.id)}>保存为新 Revision</button>
                         </div>
                       </div>
-                    ) : (
-                      <>
-                        <div className="entry-title">{rev.title}</div>
-                        {rev.content && rev.content !== rev.title && (
-                          <div className="small" style={{ whiteSpace: "pre-wrap", marginTop: 2 }}>{rev.content}</div>
-                        )}
-                        <div className="entry-src">
-                          {AUTHORITY_LABELS[item.authority] ?? item.authority}
-                          {rev.source_ref ? ` ${rev.source_ref}` : ""}
+                    );
+                  }
+
+                  return (
+                    <div className="ctx-entry" key={sec.revision_id ?? itemId}>
+                      <div className="row between" style={{ alignItems: "flex-start", gap: 12 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="entry-title">{sec.title}</div>
+                          {sec.content && sec.content !== sec.title && (
+                            <div className="small" style={{ whiteSpace: "pre-wrap", marginTop: 3, color: "var(--text-secondary)" }}>
+                              {sec.content}
+                            </div>
+                          )}
+                          {item && renderRelations(item.id)}
+                          <div className="entry-src" style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                            <span className="badge" style={{ fontSize: 10, padding: "0 6px" }}>
+                              {AUTHORITY_LABELS[sec.authority] ?? sec.authority}
+                            </span>
+                            {item && <span>{timeAgo(item.updated_at)}</span>}
+                            {rev?.source_type && (
+                              <>
+                                <span>·</span>
+                                <span>{rev.source_type}</span>
+                              </>
+                            )}
+                          </div>
                         </div>
-                        <div className="ctx-hover">
-                          <button className="link" onClick={() => startEdit(item)}>Edit</button>
-                          <button className="link" onClick={() => openHistory(item)}>History</button>
+
+                        <div className="ctx-hover" style={{ position: "static", display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }}>
+                          {sec.revision_id && (
+                            <button
+                              className="btn small ghost"
+                              title="查看来源凭据与权威"
+                              onClick={() => setSourceRevisionId(sec.revision_id!)}
+                            >
+                              来源
+                            </button>
+                          )}
+                          {item && (
+                            <>
+                              <button
+                                className="btn small ghost"
+                                title="查看演进历史"
+                                onClick={() => openHistory(item)}
+                              >
+                                历史
+                              </button>
+                              <button
+                                className="btn small ghost"
+                                title="编辑标题与内容"
+                                onClick={() => startEdit(item, rev ?? { title: sec.title, content: sec.content })}
+                              >
+                                编辑
+                              </button>
+                              {RESOLVABLE.includes(sec.kind) && (
+                                <button
+                                  className="btn small ghost"
+                                  title="标记为已解决"
+                                  onClick={async () => {
+                                    await api.setItemStatus(item.id, "resolved");
+                                    onChanged();
+                                  }}
+                                >
+                                  完成
+                                </button>
+                              )}
+                              <button
+                                className="btn small ghost"
+                                title="标记为废弃"
+                                onClick={async () => {
+                                  await api.setItemStatus(item.id, "obsolete");
+                                  onChanged();
+                                }}
+                              >
+                                废弃
+                              </button>
+                            </>
+                          )}
                         </div>
-                      </>
-                    )}
-                  </div>
-                ))}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           );
@@ -124,28 +254,60 @@ export default function WorkstreamContext({ ctx, onChanged }: {
       {extShown.map(([item, rev]) => (
         <div className="ext-row ctx-entry" key={item.id}>
           {editing === item.id ? (
-            <div className="ctx-edit" style={{ flex: 1 }}>
-              <textarea value={draft} autoFocus onChange={(e) => setDraft(e.target.value)} />
-              <div className="row" style={{ justifyContent: "flex-end" }}>
+            <div className="ctx-edit" style={{ flex: 1, padding: "4px 0" }}>
+              <label className="field" style={{ marginBottom: 6 }}>
+                <span>标题</span>
+                <input
+                  type="text"
+                  value={editTitle}
+                  autoFocus
+                  onChange={(e) => setEditTitle(e.target.value)}
+                />
+              </label>
+              <label className="field" style={{ marginBottom: 8 }}>
+                <span>内容</span>
+                <textarea
+                  value={editContent}
+                  rows={3}
+                  onChange={(e) => setEditContent(e.target.value)}
+                />
+              </label>
+              <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
                 <button className="btn small" onClick={() => setEditing(null)}>取消</button>
-                <button className="btn small primary" onClick={() => saveEdit(item)}>保存为新 Revision</button>
+                <button className="btn small primary" onClick={() => saveEdit(item.id)}>保存为新 Revision</button>
               </div>
             </div>
           ) : (
-            <>
-              <span className="badge">{KIND_LABELS[item.kind] ?? item.kind}</span>
-              <span className="ext-title">{rev.title}</span>
-              {rev.content && rev.content !== rev.title && <span className="ext-content">{rev.content}</span>}
-              <span className="muted small" style={{ flex: "none" }}>{timeAgo(item.updated_at)}</span>
-              <div className="ctx-hover" style={{ position: "static" }}>
-                {RESOLVABLE.includes(item.kind) && (
-                  <button className="link" onClick={async () => { await api.setItemStatus(item.id, "resolved"); onChanged(); }}>完成</button>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", width: "100%", gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="row" style={{ gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                  <span className="badge">{KIND_LABELS[item.kind] ?? item.kind}</span>
+                  <span className="ext-title" style={{ fontWeight: 550 }}>{rev.title}</span>
+                  <span className="muted small" style={{ flex: "none" }}>{timeAgo(item.updated_at)}</span>
+                </div>
+                {rev.content && rev.content !== rev.title && (
+                  <div className="small" style={{ marginTop: 3, color: "var(--text-secondary)", whiteSpace: "pre-wrap" }}>
+                    {rev.content}
+                  </div>
                 )}
-                <button className="link" onClick={() => startEdit(item)}>Edit</button>
-                <button className="link" onClick={() => openHistory(item)}>History</button>
-                <button className="link" onClick={async () => { await api.setItemStatus(item.id, "obsolete"); onChanged(); }}>废弃</button>
+                {renderRelations(item.id)}
               </div>
-            </>
+              <div className="ctx-hover" style={{ position: "static", display: "flex", gap: 4, flexShrink: 0 }}>
+                <button className="btn small ghost" title="查看来源凭据" onClick={() => setSourceRevisionId(rev.id)}>来源</button>
+                <button className="btn small ghost" title="查看演进历史" onClick={() => openHistory(item)}>历史</button>
+                <button className="btn small ghost" title="编辑" onClick={() => startEdit(item, rev)}>编辑</button>
+                {RESOLVABLE.includes(item.kind) && (
+                  <button className="btn small ghost" title="标记为完成" onClick={async () => { await api.setItemStatus(item.id, "resolved"); onChanged(); }}>完成</button>
+                )}
+                <button className="btn small ghost" title="标记为废弃" onClick={async () => { await api.setItemStatus(item.id, "obsolete"); onChanged(); }}>废弃</button>
+                <button className="btn small ghost" title="删除" onClick={async () => {
+                  if (window.confirm(`确定删除「${rev.title}」吗？`)) {
+                    await api.deleteContextItem(item.id);
+                    onChanged();
+                  }
+                }}>删除</button>
+              </div>
+            </div>
           )}
         </div>
       ))}
@@ -163,7 +325,7 @@ export default function WorkstreamContext({ ctx, onChanged }: {
               <div className="feed-row" key={item.id}>
                 <span className="badge">{item.status}</span>
                 <span style={{ flex: 1 }}>{rev.title}</span>
-                <button className="link" onClick={() => openHistory(item)}>History</button>
+                <button className="link" onClick={() => openHistory(item)}>历史</button>
               </div>
             ))}
           </div>
@@ -185,7 +347,7 @@ export default function WorkstreamContext({ ctx, onChanged }: {
             <button className="btn" onClick={() => setAdding(false)}>取消</button>
             <button className="btn primary" onClick={async () => {
               if (!newTitle.trim()) return;
-              await api.addContextItem(ctx.workstream.id, newKind, newTitle, newContent);
+              await api.addContextItem(ctx.workstream.id, newKind, newTitle.trim(), newContent);
               setAdding(false); setNewTitle(""); setNewContent("");
               onChanged();
             }}>保存</button>
@@ -199,7 +361,10 @@ export default function WorkstreamContext({ ctx, onChanged }: {
             <div className="card hairline" key={rev.id} style={{ marginBottom: 8 }}>
               <div className="row between">
                 <strong className="small">#{i + 1} {timeAgo(rev.created_at)}</strong>
-                <span className="entry-src">{rev.source_type ?? "manual"}{rev.source_ref ? ` ${rev.source_ref}` : ""}</span>
+                <div className="row" style={{ gap: 8 }}>
+                  <span className="entry-src">{rev.source_type ?? "manual"}{rev.source_ref ? ` ${rev.source_ref}` : ""}</span>
+                  <button className="link small" onClick={() => setSourceRevisionId(rev.id)}>来源凭据</button>
+                </div>
               </div>
               <div className="small" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{rev.content || rev.title}</div>
             </div>
@@ -207,6 +372,15 @@ export default function WorkstreamContext({ ctx, onChanged }: {
           {historyOf[1].length === 0 && <div className="muted small">无历史记录。</div>}
         </Modal>
       )}
+
+      {sourceRevisionId && (
+        <SourceDetailModal
+          revisionId={sourceRevisionId}
+          onClose={() => setSourceRevisionId(null)}
+          onNavigateSession={onNavigateSession}
+        />
+      )}
     </div>
   );
 }
+
