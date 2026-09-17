@@ -50,7 +50,7 @@ pub struct CheckResult {
 }
 
 /// Result of evaluating one fixture through one extractor (Layer B).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EvalCaseResult {
     pub fixture_name: String,
     pub dimension: String,
