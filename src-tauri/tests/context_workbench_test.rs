@@ -281,6 +281,9 @@ fn list_workstream_context_changes_timeline() {
         resolution: None,
         created_at: now(),
         updated_at: now(),
+        left_revision_id: None,
+        right_revision_id: None,
+        candidate_snapshot_json: None,
     };
     db.insert_conflict(&conflict).unwrap();
 
@@ -327,6 +330,9 @@ fn conflict_audited_resolution_and_history() {
         resolution: None,
         created_at: now(),
         updated_at: now(),
+        left_revision_id: None,
+        right_revision_id: None,
+        candidate_snapshot_json: None,
     };
     db.insert_conflict(&conflict).unwrap();
 
@@ -370,4 +376,170 @@ fn conflict_audited_resolution_and_history() {
     assert_eq!(history2.len(), 2);
     assert_eq!(history2[1].previous_status, "resolved");
     assert_eq!(history2[1].new_status, "dismissed");
+}
+
+#[test]
+fn test_historical_provenance_freeze() {
+    let db = open_db("provenance-freeze");
+    let ws = ws_row(&db, "Provenance Freeze WS");
+
+    // 1. Agent creates an item with agent_statement authority
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "decision",
+        "Architecture Style",
+        "Use SQLite for local persistence",
+        "agent_statement",
+        "session_event",
+        &["session-event:100".into()],
+        None,
+        "agent",
+    )
+    .unwrap();
+
+    let rev1_id = item.current_revision_id.clone().unwrap();
+
+    // Verify revision 1 source before any edits
+    let src1_before = db.get_context_revision_source(&rev1_id).unwrap().unwrap();
+    assert_eq!(src1_before.authority, "agent_statement");
+    assert_eq!(src1_before.source_type.as_deref(), Some("session_event"));
+
+    // 2. User edits the item, elevating item authority to user_edit
+    let rev2 = ContextItemRevision {
+        id: new_id(),
+        item_id: item.id.clone(),
+        title: "Architecture Style Updated".into(),
+        content: "Use SQLite with WAL mode".into(),
+        metadata: serde_json::json!({
+            "provenance": {
+                "authority": "user_edit",
+                "actor": "user",
+                "source_type": "user_edit",
+                "source_ref": serde_json::Value::Null,
+            }
+        }),
+        source_type: Some("user_edit".into()),
+        source_ref: None,
+        sync_run_id: None,
+        created_at: now(),
+    };
+    db.insert_revision(&rev2).unwrap();
+    db.set_item_head(&item.id, &rev2.id, None).unwrap();
+    db.set_item_authority(&item.id, "user_edit").unwrap();
+
+    // Verify current item authority is user_edit
+    let updated_item = db.get_item(&item.id).unwrap().unwrap();
+    assert_eq!(updated_item.authority, "user_edit");
+
+    // 3. Invariant check: Inspecting historical rev1 still returns agent_statement!
+    let src1_after = db.get_context_revision_source(&rev1_id).unwrap().unwrap();
+    assert_eq!(
+        src1_after.authority, "agent_statement",
+        "Historical revision authority must be frozen and not overwritten by subsequent user edit"
+    );
+
+    // Inspecting rev2 returns user_edit
+    let src2 = db.get_context_revision_source(&rev2.id).unwrap().unwrap();
+    assert_eq!(src2.authority, "user_edit");
+
+    // Activity timeline correctly reports actors
+    let changes = db.list_workstream_context_changes(&ws.id, 10).unwrap();
+    assert_eq!(changes.len(), 2);
+    // Most recent first:
+    assert_eq!(changes[0].actor, "User");
+    assert_eq!(changes[1].actor, "Agent");
+}
+
+#[test]
+fn test_conflict_snapshots_freeze() {
+    let db = open_db("conflict-snapshot-freeze");
+    let ws = ws_row(&db, "Conflict Snapshot Freeze WS");
+
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "goal",
+        "Deploy to Cloud",
+        "Initial proposal",
+        "agent_statement",
+        "session_event",
+        &[],
+        None,
+        "agent",
+    )
+    .unwrap();
+    let rev1_id = item.current_revision_id.clone().unwrap();
+
+    // Conflict created referencing rev1 and candidate snapshot
+    let candidate_val = serde_json::json!({
+        "title": "Keep on premise",
+        "content": "Privacy requirement",
+        "authority": "user_explicit",
+    });
+
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: Some(rev1_id.clone()),
+        right_revision_id: None,
+        candidate_snapshot_json: Some(candidate_val.to_string()),
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // Item evolves to rev2
+    let rev2 = ContextItemRevision {
+        id: new_id(),
+        item_id: item.id.clone(),
+        title: "Deploy to Hybrid Cloud".into(),
+        content: "Hybrid model".into(),
+        metadata: serde_json::json!({
+            "provenance": {
+                "authority": "agent_statement",
+                "actor": "agent",
+                "source_type": "session_event",
+                "source_ref": serde_json::Value::Null,
+            }
+        }),
+        source_type: Some("session_event".into()),
+        source_ref: None,
+        sync_run_id: None,
+        created_at: now(),
+    };
+    db.insert_revision(&rev2).unwrap();
+    db.set_item_head(&item.id, &rev2.id, None).unwrap();
+
+    // Query conflict: left_revision_id is still rev1!
+    let fetched = db.get_conflict(&conflict.id).unwrap().unwrap();
+    assert_eq!(fetched.left_revision_id.as_deref(), Some(rev1_id.as_str()));
+    assert_eq!(
+        fetched.candidate_snapshot_json.as_deref(),
+        Some(candidate_val.to_string().as_str())
+    );
+
+    // Resolve conflict audited
+    db.resolve_conflict_audited(
+        &conflict.id,
+        "resolved",
+        Some("Resolved in favor of privacy"),
+        "user",
+    )
+    .unwrap();
+
+    // Check conflict history audit event snapshot
+    let history = db.conflict_history(&conflict.id).unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(history[0].snapshot_json.is_some());
+
+    let snapshot: serde_json::Value =
+        serde_json::from_str(history[0].snapshot_json.as_ref().unwrap()).unwrap();
+    assert_eq!(snapshot["left_revision_id"], rev1_id);
+    assert_eq!(snapshot["candidate_snapshot"]["title"], "Keep on premise");
 }

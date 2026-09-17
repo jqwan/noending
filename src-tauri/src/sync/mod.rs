@@ -763,10 +763,31 @@ pub fn create_item_conn(
         item_id: item.id.clone(),
         title: title.to_string(),
         content: content.to_string(),
-        metadata: if source_refs.len() > 1 {
-            serde_json::json!({ "source_refs": source_refs })
-        } else {
-            serde_json::json!({})
+        metadata: {
+            let actor = if authority.starts_with("user") || created_by == "user" {
+                "user"
+            } else if created_by == "agent"
+                || created_by.starts_with("sync:")
+                || sync_run_id.is_some()
+                || authority.starts_with("agent")
+                || source_type == "session_event"
+            {
+                "agent"
+            } else {
+                "system"
+            };
+            let mut meta = serde_json::json!({
+                "provenance": {
+                    "authority": authority,
+                    "actor": actor,
+                    "source_type": source_type,
+                    "source_ref": source_refs.first(),
+                }
+            });
+            if source_refs.len() > 1 {
+                meta["source_refs"] = serde_json::json!(source_refs);
+            }
+            meta
         },
         source_type: Some(source_type.to_string()),
         source_ref: source_refs.first().cloned(),

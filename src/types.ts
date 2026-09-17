@@ -180,6 +180,20 @@ export interface ContextConflict {
   resolution: string | null;
   created_at: string;
   updated_at: string;
+  left_revision_id?: string | null;
+  right_revision_id?: string | null;
+  candidate_snapshot_json?: string | null;
+}
+
+export interface ContextConflictEvent {
+  id: string;
+  conflict_id: string;
+  previous_status: string;
+  new_status: string;
+  resolution: string | null;
+  actor: string;
+  created_at: string;
+  snapshot_json?: string | null;
 }
 
 export interface ContextItemRef {

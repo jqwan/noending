@@ -29,8 +29,10 @@ pub struct Db(pub Connection);
 /// re-proposed by auto-classification); v6 added `workstreams.default_cwd`
 /// (optional launch-directory suggestion, convenience not identity); v7 added
 /// `context_deliveries.delivered_conflicts` (JSON array of conflict IDs); v8 added
-/// `context_conflict_events` (auditable conflict resolution events).
-pub const SCHEMA_VERSION: i64 = 8;
+/// `context_conflict_events` (auditable conflict resolution events); v9 added
+/// conflict creation snapshots (left_revision_id, right_revision_id, candidate_snapshot_json)
+/// and conflict event audit snapshots (snapshot_json).
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -300,7 +302,10 @@ impl Db {
               status TEXT NOT NULL DEFAULT 'open',
               resolution TEXT,
               created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              left_revision_id TEXT,
+              right_revision_id TEXT,
+              candidate_snapshot_json TEXT
             );
             CREATE TABLE IF NOT EXISTS project_affinity_evidence (
               id TEXT PRIMARY KEY,
@@ -365,7 +370,8 @@ impl Db {
               new_status TEXT NOT NULL,
               resolution TEXT,
               actor TEXT NOT NULL,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              snapshot_json TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_conflict_events_conflict ON context_conflict_events(conflict_id);
             "#,
@@ -403,6 +409,10 @@ impl Db {
             "ALTER TABLE session_events ADD COLUMN legacy_identity_hash TEXT",
             "ALTER TABLE workstreams ADD COLUMN default_cwd TEXT",
             "ALTER TABLE context_deliveries ADD COLUMN delivered_conflicts TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE context_conflicts ADD COLUMN left_revision_id TEXT",
+            "ALTER TABLE context_conflicts ADD COLUMN right_revision_id TEXT",
+            "ALTER TABLE context_conflicts ADD COLUMN candidate_snapshot_json TEXT",
+            "ALTER TABLE context_conflict_events ADD COLUMN snapshot_json TEXT",
         ] {
             if let Err(e) = self.0.execute_batch(stmt) {
                 if !e.to_string().contains("duplicate column name") {
@@ -1344,11 +1354,22 @@ impl Db {
         let Some(rev) = rev else {
             return Ok(None);
         };
-        let item = self.get_item(&rev.item_id)?;
-        let authority = item
-            .as_ref()
-            .map(|i| i.authority.clone())
-            .unwrap_or_else(|| "agent_statement".into());
+        // Read authority strictly from the immutable revision metadata!
+        // Never let subsequent item edits pollute historical revision authority.
+        let authority = rev
+            .metadata
+            .get("provenance")
+            .and_then(|p| p.get("authority"))
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                // Legacy fallback: if metadata lacks provenance, try item.authority or "unknown"
+                self.get_item(&rev.item_id)
+                    .ok()
+                    .flatten()
+                    .map(|i| i.authority)
+                    .unwrap_or_else(|| "unknown".into())
+            });
 
         let mut session_id = None;
         let mut session_title = None;
@@ -1405,26 +1426,13 @@ impl Db {
         workstream_id: &str,
         include_closed: bool,
     ) -> Result<Vec<ContextConflict>> {
-        let filter = if include_closed {
-            ""
-        } else {
-            " AND status = 'open'"
-        };
-        let sql = format!(
-            "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at
-             FROM context_conflicts WHERE workstream_id = ?1{} ORDER BY created_at DESC",
-            filter
-        );
-        let mut st = self.0.prepare(&sql)?;
-        let rows = st
-            .query_map(params![workstream_id], row_conflict)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        conflicts_for_workstream_conn(&self.0, workstream_id, include_closed)
     }
 
     pub fn open_conflicts_for_item(&self, item_id: &str) -> Result<Vec<ContextConflict>> {
         let mut st = self.0.prepare(
-            "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at
+            "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at,
+                    left_revision_id, right_revision_id, candidate_snapshot_json
              FROM context_conflicts WHERE (left_item_id = ?1 OR right_item_id = ?1) AND status = 'open'",
         )?;
         let rows = st
@@ -1454,7 +1462,7 @@ impl Db {
 
     pub fn conflict_history(&self, conflict_id: &str) -> Result<Vec<ContextConflictEvent>> {
         let mut st = self.0.prepare(
-            "SELECT id, conflict_id, previous_status, new_status, resolution, actor, created_at
+            "SELECT id, conflict_id, previous_status, new_status, resolution, actor, created_at, snapshot_json
              FROM context_conflict_events WHERE conflict_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = st
@@ -1464,15 +1472,7 @@ impl Db {
     }
 
     pub fn get_conflict(&self, conflict_id: &str) -> Result<Option<ContextConflict>> {
-        Ok(self
-            .0
-            .query_row(
-                "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at
-                 FROM context_conflicts WHERE id = ?1",
-                params![conflict_id],
-                row_conflict,
-            )
-            .optional()?)
+        get_conflict_conn(&self.0, conflict_id)
     }
 
     // ---------------- Sync runs ----------------
@@ -2298,6 +2298,12 @@ pub fn apply_status_change_conn(
                 "actor": actor,
                 "reason": reason,
                 "source_refs": source_refs,
+            },
+            "provenance": {
+                "authority": if actor == "user" { "user_edit" } else { "system_observed" },
+                "actor": actor,
+                "source_type": "status_change",
+                "source_ref": source_refs.first(),
             }
         }),
         source_type: Some("status_change".into()),
@@ -2385,11 +2391,60 @@ pub fn set_item_head_conn(
 
 pub fn insert_conflict_conn(conn: &Connection, c: &ContextConflict) -> Result<()> {
     conn.execute(
-        "INSERT INTO context_conflicts (id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![c.id, c.workstream_id, c.left_item_id, c.right_item_id, c.conflict_type, c.status, c.resolution, c.created_at, c.updated_at],
+        "INSERT INTO context_conflicts (id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at,
+                                        left_revision_id, right_revision_id, candidate_snapshot_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            c.id,
+            c.workstream_id,
+            c.left_item_id,
+            c.right_item_id,
+            c.conflict_type,
+            c.status,
+            c.resolution,
+            c.created_at,
+            c.updated_at,
+            c.left_revision_id,
+            c.right_revision_id,
+            c.candidate_snapshot_json,
+        ],
     )?;
     Ok(())
+}
+
+pub fn conflicts_for_workstream_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    include_closed: bool,
+) -> Result<Vec<ContextConflict>> {
+    let filter = if include_closed {
+        ""
+    } else {
+        " AND status = 'open'"
+    };
+    let sql = format!(
+        "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at,
+                left_revision_id, right_revision_id, candidate_snapshot_json
+         FROM context_conflicts WHERE workstream_id = ?1{} ORDER BY created_at DESC",
+        filter
+    );
+    let mut st = conn.prepare(&sql)?;
+    let rows = st
+        .query_map(params![workstream_id], row_conflict)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_conflict_conn(conn: &Connection, conflict_id: &str) -> Result<Option<ContextConflict>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at,
+                    left_revision_id, right_revision_id, candidate_snapshot_json
+             FROM context_conflicts WHERE id = ?1",
+            params![conflict_id],
+            row_conflict,
+        )
+        .optional()?)
 }
 
 // row mappers -------------------------------------------------------------
@@ -2513,6 +2568,9 @@ fn row_conflict(r: &Row) -> rusqlite::Result<ContextConflict> {
         resolution: r.get(6)?,
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
+        left_revision_id: r.get(9)?,
+        right_revision_id: r.get(10)?,
+        candidate_snapshot_json: r.get(11)?,
     })
 }
 
@@ -2708,7 +2766,7 @@ pub fn list_workstream_context_changes_conn(
             source_type,
             sync_run_id,
             created_at,
-            authority,
+            _authority,
             created_by,
             first_created_at,
         ) = row?;
@@ -2740,28 +2798,31 @@ pub fn list_workstream_context_changes_conn(
                     actor_str.to_string()
                 },
             )
-        } else if is_first {
-            let actor = if source_type.as_deref() == Some("user_edit")
-                || created_by == "user"
-                || authority.starts_with("user")
-            {
-                "User"
-            } else if sync_run_id.is_some() || created_by.starts_with("sync:") {
-                "Agent"
-            } else {
-                "System"
-            };
-            ("added".to_string(), actor.to_string())
         } else {
-            let actor =
-                if source_type.as_deref() == Some("user_edit") || authority.starts_with("user") {
-                    "User"
-                } else if sync_run_id.is_some() {
-                    "Agent"
-                } else {
-                    "System"
-                };
-            ("edited".to_string(), actor.to_string())
+            let prov_actor = metadata_json
+                .get("provenance")
+                .and_then(|p| p.get("actor"))
+                .and_then(|a| a.as_str());
+            let actor = if let Some(a) = prov_actor {
+                match a {
+                    "user" => "User",
+                    "agent" => "Agent",
+                    "system" => "System",
+                    other => other,
+                }
+                .to_string()
+            } else if source_type.as_deref() == Some("user_edit") || created_by == "user" {
+                "User".to_string()
+            } else if sync_run_id.is_some()
+                || created_by.starts_with("sync:")
+                || source_type.as_deref() == Some("session_event")
+            {
+                "Agent".to_string()
+            } else {
+                "System".to_string()
+            };
+            let kind = if is_first { "added" } else { "edited" };
+            (kind.to_string(), actor)
         };
 
         changes.push(ContextChange {
@@ -2873,25 +2934,43 @@ pub fn resolve_conflict_audited_conn(
     resolution: Option<&str>,
     actor: &str,
 ) -> Result<()> {
-    let prev_status: String = conn
-        .query_row(
-            "SELECT status FROM context_conflicts WHERE id = ?1",
-            params![conflict_id],
-            |r| r.get(0),
-        )
-        .optional()?
+    let conflict = get_conflict_conn(conn, conflict_id)?
         .ok_or_else(|| other(format!("冲突不存在: {}", conflict_id)))?;
 
     let event_id = new_id();
     let ts = now();
+
+    let candidate_snapshot = conflict
+        .candidate_snapshot_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+
+    let snapshot = serde_json::json!({
+        "conflict_id": conflict.id,
+        "left_item_id": conflict.left_item_id,
+        "right_item_id": conflict.right_item_id,
+        "left_revision_id": conflict.left_revision_id,
+        "right_revision_id": conflict.right_revision_id,
+        "candidate_snapshot": candidate_snapshot,
+    });
+
     conn.execute(
-        "INSERT INTO context_conflict_events (id, conflict_id, previous_status, new_status, resolution, actor, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![event_id, conflict_id, prev_status, new_status, resolution, actor, ts],
+        "INSERT INTO context_conflict_events (id, conflict_id, previous_status, new_status, resolution, actor, created_at, snapshot_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            event_id,
+            conflict_id,
+            conflict.status,
+            new_status,
+            resolution,
+            actor,
+            ts,
+            snapshot.to_string(),
+        ],
     )?;
 
     conn.execute(
-        "UPDATE context_conflicts SET status = ?2, resolution = COALESCE(?3, resolution), updated_at = ?4 WHERE id = ?1",
+        "UPDATE context_conflicts SET status = ?2, resolution = ?3, updated_at = ?4 WHERE id = ?1",
         params![conflict_id, new_status, resolution, ts],
     )?;
 
@@ -2907,5 +2986,6 @@ fn row_conflict_event(r: &Row) -> rusqlite::Result<ContextConflictEvent> {
         resolution: r.get(4)?,
         actor: r.get(5)?,
         created_at: r.get(6)?,
+        snapshot_json: r.get(7)?,
     })
 }

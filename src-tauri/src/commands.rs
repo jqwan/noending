@@ -481,7 +481,14 @@ pub fn edit_context_item(state: State<AppState>, args: EditItemArgs) -> Result<(
             item_id: item.id.clone(),
             title: args.title.trim().to_string(),
             content: args.content.clone(),
-            metadata: serde_json::json!({}),
+            metadata: serde_json::json!({
+                "provenance": {
+                    "authority": "user_edit",
+                    "actor": "user",
+                    "source_type": "user_edit",
+                    "source_ref": serde_json::Value::Null,
+                }
+            }),
             source_type: Some("user_edit".into()),
             source_ref: None,
             sync_run_id: None,

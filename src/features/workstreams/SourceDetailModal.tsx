@@ -54,8 +54,8 @@ export default function SourceDetailModal({
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="row-line" style={{ borderTop: 0 }}>
             <div>
-              <div className="settings-row-label">可信度与权威 (Authority)</div>
-              <div className="settings-row-hint">系统对该项当前事实的信度级别</div>
+              <div className="settings-row-label">事实权威级别 (Authority)</div>
+              <div className="settings-row-hint">系统对该修订事实的权威归属与来源类型</div>
             </div>
             <span className="badge accent">
               {AUTHORITY_LABELS[detail.authority] ?? detail.authority}

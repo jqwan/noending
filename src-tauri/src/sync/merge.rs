@@ -216,6 +216,12 @@ impl MergeEngine {
                     Some(&ctx.run_id),
                     &format!("sync:{}", ctx.runtime),
                 )?;
+                let candidate_snapshot = serde_json::json!({
+                    "title": title,
+                    "content": content,
+                    "authority": "agent_inferred",
+                    "source_refs": source_refs,
+                });
                 insert_conflict_conn(
                     conn,
                     &ContextConflict {
@@ -235,6 +241,11 @@ impl MergeEngine {
                         resolution: None,
                         created_at: now(),
                         updated_at: now(),
+                        left_revision_id: existing
+                            .as_ref()
+                            .and_then(|i| i.current_revision_id.clone()),
+                        right_revision_id: right.current_revision_id.clone(),
+                        candidate_snapshot_json: Some(candidate_snapshot.to_string()),
                     },
                 )?;
                 Ok(true)
@@ -324,6 +335,12 @@ impl MergeEngine {
             Some(&ctx.run_id),
             &format!("sync:{}", ctx.runtime),
         )?;
+        let candidate_snapshot = serde_json::json!({
+            "title": title,
+            "content": content,
+            "authority": "agent_statement",
+            "source_refs": source_refs,
+        });
         insert_conflict_conn(
             conn,
             &ContextConflict {
@@ -336,6 +353,9 @@ impl MergeEngine {
                 resolution: None,
                 created_at: now(),
                 updated_at: now(),
+                left_revision_id: user_item.current_revision_id.clone(),
+                right_revision_id: right.current_revision_id.clone(),
+                candidate_snapshot_json: Some(candidate_snapshot.to_string()),
             },
         )?;
         Ok(())
@@ -353,16 +373,23 @@ fn agent_revision(
     source_refs: &[String],
     ctx: &MergeContext,
 ) -> Result<crate::domain::ContextItemRevision> {
+    let mut meta = serde_json::json!({
+        "provenance": {
+            "authority": "agent_statement",
+            "actor": "agent",
+            "source_type": "session_event",
+            "source_ref": source_refs.first(),
+        }
+    });
+    if source_refs.len() > 1 {
+        meta["source_refs"] = serde_json::json!(source_refs);
+    }
     let rev = crate::domain::ContextItemRevision {
         id: new_id(),
         item_id: item.id.clone(),
         title: title.to_string(),
         content: content.to_string(),
-        metadata: if source_refs.len() > 1 {
-            serde_json::json!({ "source_refs": source_refs })
-        } else {
-            serde_json::json!({})
-        },
+        metadata: meta,
         source_type: Some("session_event".into()),
         source_ref: source_refs.first().cloned(),
         sync_run_id: Some(ctx.run_id.clone()),

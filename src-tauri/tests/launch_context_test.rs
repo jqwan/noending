@@ -485,6 +485,9 @@ fn multi_workstream_bundle_dedups_and_labels_primary_related() {
         resolution: None,
         created_at: now(),
         updated_at: now(),
+        left_revision_id: None,
+        right_revision_id: None,
+        candidate_snapshot_json: None,
     })
     .unwrap();
 
@@ -1422,6 +1425,9 @@ fn conflict_not_lost_when_truncated_by_budget() {
         resolution: None,
         created_at: now(),
         updated_at: now(),
+        left_revision_id: None,
+        right_revision_id: None,
+        candidate_snapshot_json: None,
     })
     .unwrap();
 
@@ -1799,6 +1805,9 @@ fn resume_emits_conflict_resolved_when_conflict_closed() {
         resolution: None,
         created_at: now(),
         updated_at: now(),
+        left_revision_id: None,
+        right_revision_id: None,
+        candidate_snapshot_json: None,
     })
     .unwrap();
 
@@ -1896,6 +1905,9 @@ fn conflict_resolved_truncated_by_budget_retains_conflict_id() {
         resolution: None,
         created_at: now(),
         updated_at: now(),
+        left_revision_id: None,
+        right_revision_id: None,
+        candidate_snapshot_json: None,
     })
     .unwrap();
 

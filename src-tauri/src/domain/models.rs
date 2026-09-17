@@ -348,6 +348,9 @@ pub struct ContextConflict {
     pub resolution: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub left_revision_id: Option<Id>,
+    pub right_revision_id: Option<Id>,
+    pub candidate_snapshot_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +362,7 @@ pub struct ContextConflictEvent {
     pub resolution: Option<String>,
     pub actor: String,
     pub created_at: String,
+    pub snapshot_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
