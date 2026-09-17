@@ -8,7 +8,9 @@ import { AGENT_LABELS, type Agent, type WorkstreamContext as WorkstreamContextDa
 import type { Route } from "../../app/routes";
 import WorkstreamContext from "./WorkstreamContext";
 import WorkstreamSessions from "./WorkstreamSessions";
-import WorkstreamActivity from "./WorkstreamActivity";
+import NeedsAttentionSection from "./NeedsAttentionSection";
+import ConflictReviewModal from "./ConflictReviewModal";
+import RecentChangesTimeline from "./RecentChangesTimeline";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 
 /**
@@ -27,6 +29,7 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [cwdOpen, setCwdOpen] = useState(false);
   const [cwdInput, setCwdInput] = useState("");
+  const [reviewingConflict, setReviewingConflict] = useState(false);
 
   const refresh = useCallback(() => {
     api.getWorkstreamContext(workstreamId).then(setCtx).catch(console.error);
@@ -174,10 +177,23 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
           />
         </div>
         <div>
+          <NeedsAttentionSection
+            conflicts={ctx.conflicts ?? []}
+            onReview={() => setReviewingConflict(true)}
+          />
           <WorkstreamSessions sessions={related_sessions} navigate={navigate} />
-          <WorkstreamActivity items={ctx.items} />
+          <RecentChangesTimeline changes={ctx.recent_changes ?? []} />
         </div>
       </div>
+
+      {reviewingConflict && (
+        <ConflictReviewModal
+          conflicts={ctx.conflicts ?? []}
+          items={ctx.items}
+          onClose={() => setReviewingConflict(false)}
+          onChanged={refresh}
+        />
+      )}
 
       {cwdOpen && (
         <Modal title="工作目录" onClose={() => setCwdOpen(false)}>

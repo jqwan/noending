@@ -41,6 +41,13 @@ When changing the system, preserve these rules:
 * **Context Delivery controls outbound context injection only.** Turning delivery Off MUST NOT disable ingestion, sync, extraction, Workstream bindings, or context evolution. A ContextDelivery snapshot MUST be advanced only when the corresponding context was actually delivered to the Agent.
 * **Launch Preparation Integrity**: Prepare may refresh observed state (ingestion / sync / read DB), but MUST NOT commit launch-specific user decisions (bindings, LaunchIntent) or delivery state (`ContextDelivery`).
 * **Preview-Launch Identity**: What you preview is what the Agent receives. Launch Prepared uses the exact prepared bundle and aborts if the state fingerprint changed since preview.
+* **Current Context is an authoritative projection, not raw item filtering**: `resolve_core_context` determines the active fact set; UI display and Agent delivery bundle must remain 100% isomorphic and derived from the same domain projection.
+* **Context Provenance Fidelity**: Every context fact must be resolvable back to its originating Session, Event sequence, observed timestamp, Agent identity, and raw transcript evidence.
+* **Never silently overwrite on conflict**: When Agent-extracted information disagrees with user-explicit or user-edited facts, NoEnding must materialize an explicit `ContextConflict`. Silent, automated, or heuristic overwrites are strictly prohibited.
+* **Auditable Conflict Resolution**: Resolving a conflict must atomically record the decision action, actor, resolution rationale/note, and exact snapshot of involved revisions into `context_conflict_events`, forming an immutable audit trail.
+* **Explicit Fact Evolution & Supersession**: Relations between superseded and replacement items form a directed acyclic evolution graph; replacing an item must explicitly track `supersedes` / `superseded_by` rather than breaking lineage.
+* **Activity reflects true event stream**: Activity and recent changes must reflect the actual `ContextChange` event stream (revisions and conflict events), never a pseudo-timeline sorting items by `updated_at`.
+* **User edits elevate authority**: Any user inline edit elevates the item to `user_edit` authority and produces a new Revision, preserving the full revision chain and immutable historical facts.
 * macOS and Windows are first-class platforms.
 
 When uncertain, prefer **preserving history, provenance, and user intent** over convenience.
