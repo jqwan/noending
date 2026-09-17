@@ -607,3 +607,121 @@ fn review_state_isolated_from_domain_state() {
     );
     assert_eq!(bindings_before[0].role, bindings_after[0].role);
 }
+
+/// 8. sync_status_change_is_review_relevant
+/// Sync automated status changes (e.g. actor = "sync:heuristic") must be normalized
+/// to Agent and appear in unseen_changes.
+#[test]
+fn sync_status_change_is_review_relevant() {
+    let db = open_db("sync-status-relevant");
+    let ws = ws_row(&db, "Sync Status WS");
+
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "todo",
+        "Auto Resolvable Todo",
+        "Will be resolved by sync",
+        "agent_inferred",
+        "session_event",
+        &[],
+        None,
+        "agent",
+    )
+    .unwrap();
+
+    // Catch up frontier
+    let win0 = db.get_workstream_review_window(&ws.id).unwrap();
+    db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // Simulate Sync automated resolution: actor = "sync:heuristic"
+    noending::storage::apply_status_change_conn(
+        db.conn(),
+        &item.id,
+        "resolved",
+        "sync:heuristic",
+        "自动推断已完成",
+        Some("sync-run-1"),
+        &[],
+    )
+    .unwrap();
+
+    let win = db.get_workstream_review_window(&ws.id).unwrap();
+    assert_eq!(win.unseen_changes.len(), 1);
+    assert_eq!(win.unseen_changes[0].kind, "resolved");
+    assert_eq!(win.unseen_changes[0].actor, "Agent");
+}
+
+/// 9. conflict_evidence_is_not_double_counted
+/// When a conflict occurs in production, the finding item created as evidence
+/// (source_type = "conflict") must be suppressed in the review loop, so that only
+/// the conflict_created event appears as unseen.
+#[test]
+fn conflict_evidence_is_not_double_counted() {
+    let db = open_db("conflict-dedup");
+    let ws = ws_row(&db, "Conflict Evidence WS");
+
+    let existing = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "constraint",
+        "Keep DB lock short",
+        "Do not hold lock across network",
+        "user_explicit",
+        "user_edit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    // Catch up frontier
+    let win0 = db.get_workstream_review_window(&ws.id).unwrap();
+    db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // 1. Production merge engine creates an evidence item with source_type = "conflict"
+    let finding = noending::sync::create_item_conn(
+        db.conn(),
+        &ws.id,
+        "finding",
+        "Conflicting constraint claim",
+        "Agent observed lock can be held",
+        "agent_inferred",
+        "conflict",
+        &[],
+        Some("sync-run-1"),
+        "sync:claude-3-7-sonnet",
+    )
+    .unwrap();
+
+    // 2. Production merge engine inserts ContextConflict
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: existing.id.clone(),
+        right_item_id: Some(finding.id.clone()),
+        conflict_type: "direct_contradiction".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: existing.current_revision_id.clone(),
+        right_revision_id: finding.current_revision_id.clone(),
+        candidate_snapshot_json: None,
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // Review window must only contain the conflict_created event, NOT the finding evidence item!
+    let win = db.get_workstream_review_window(&ws.id).unwrap();
+    assert_eq!(
+        win.unseen_changes.len(),
+        1,
+        "Finding evidence item must be suppressed from unseen changes"
+    );
+    assert_eq!(win.unseen_changes[0].kind, "conflict_created");
+    assert_eq!(win.unseen_changes[0].conflict_id, Some(conflict.id));
+}

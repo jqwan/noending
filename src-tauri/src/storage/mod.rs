@@ -2925,6 +2925,17 @@ pub fn item_relations_for_workstream_conn(
     Ok(relations)
 }
 
+pub fn normalize_change_actor(actor: &str) -> String {
+    let lower = actor.to_lowercase();
+    match lower.as_str() {
+        "user" => "User".into(),
+        "agent" => "Agent".into(),
+        "system" => "System".into(),
+        a if a.starts_with("sync:") => "Agent".into(),
+        _ => actor.to_string(),
+    }
+}
+
 fn parse_revision_context_change(
     id: String,
     item_id: String,
@@ -2956,27 +2967,14 @@ fn parse_revision_context_change(
             "deleted" | "obsolete" => "deleted",
             _ => "edited",
         };
-        (
-            kind.to_string(),
-            if actor_str == "user" {
-                "User".to_string()
-            } else {
-                actor_str.to_string()
-            },
-        )
+        (kind.to_string(), normalize_change_actor(actor_str))
     } else {
         let prov_actor = metadata_json
             .get("provenance")
             .and_then(|p| p.get("actor"))
             .and_then(|a| a.as_str());
         let actor = if let Some(a) = prov_actor {
-            match a {
-                "user" => "User",
-                "agent" => "Agent",
-                "system" => "System",
-                other => other,
-            }
-            .to_string()
+            normalize_change_actor(a)
         } else if source_type.as_deref() == Some("user_edit") || created_by == "user" {
             "User".to_string()
         } else if sync_run_id.is_some()
@@ -3006,6 +3004,9 @@ fn parse_revision_context_change(
 pub fn is_review_relevant(change: &ContextChange) -> bool {
     if change.kind == "conflict_created" {
         return true;
+    }
+    if change.source_type.as_deref() == Some("conflict") {
+        return false;
     }
     let actor_lower = change.actor.to_lowercase();
     if actor_lower == "user" {
@@ -3156,11 +3157,7 @@ pub fn list_workstream_context_changes_conn(
                 conflict_id: Some(conflict_id),
                 kind: "conflict_resolved".into(),
                 title,
-                actor: if actor == "user" {
-                    "User".to_string()
-                } else {
-                    actor
-                },
+                actor: normalize_change_actor(&actor),
                 source_type: Some("conflict_resolution".into()),
                 created_at,
             });
@@ -3336,11 +3333,7 @@ pub fn list_workstream_review_changes_conn(
                 conflict_id: Some(conflict_id),
                 kind: "conflict_resolved".into(),
                 title,
-                actor: if actor == "user" {
-                    "User".to_string()
-                } else {
-                    actor
-                },
+                actor: normalize_change_actor(&actor),
                 source_type: Some("conflict_resolution".into()),
                 created_at,
             };
