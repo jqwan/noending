@@ -1438,6 +1438,17 @@ impl Db {
         mark_workstream_reviewed_conn(&self.0, workstream_id, frontier)
     }
 
+    pub fn get_workstream_review_summary(
+        &self,
+        workstream_id: &str,
+    ) -> Result<WorkstreamReviewSummary> {
+        get_workstream_review_summary_conn(&self.0, workstream_id)
+    }
+
+    pub fn list_workstream_review_summaries(&self) -> Result<Vec<WorkstreamReviewSummary>> {
+        list_workstream_review_summaries_conn(&self.0)
+    }
+
     // ---------------- Conflicts ----------------
 
     pub fn insert_conflict(&self, c: &ContextConflict) -> Result<()> {
@@ -3558,6 +3569,71 @@ pub fn mark_workstream_reviewed_conn(
             })
         }
     }
+}
+
+pub fn get_workstream_review_summary_conn(
+    conn: &Connection,
+    workstream_id: &str,
+) -> Result<WorkstreamReviewSummary> {
+    let window = get_workstream_review_window_conn(conn, workstream_id)?;
+
+    let mut new_facts = 0;
+    let mut updated_facts = 0;
+    let mut resolved_items = 0;
+    let mut superseded_items = 0;
+
+    for c in &window.unseen_changes {
+        match c.kind.as_str() {
+            "added" => new_facts += 1,
+            "edited" => updated_facts += 1,
+            "resolved" | "deleted" => resolved_items += 1,
+            "superseded" => superseded_items += 1,
+            _ => {}
+        }
+    }
+
+    let open_conflict_count: usize = conn.query_row(
+        "SELECT COUNT(*) FROM context_conflicts WHERE workstream_id = ?1 AND status = 'open'",
+        params![workstream_id],
+        |r| r.get(0),
+    )?;
+
+    let unseen_change_count = window.unseen_changes.len();
+    let last_unseen_change_at = window
+        .unseen_changes
+        .iter()
+        .map(|c| &c.created_at)
+        .max()
+        .cloned();
+
+    Ok(WorkstreamReviewSummary {
+        workstream_id: workstream_id.to_string(),
+        unseen_change_count,
+        open_conflict_count,
+        new_facts,
+        updated_facts,
+        resolved_items,
+        superseded_items,
+        last_unseen_change_at,
+        reviewed_at: window.state.reviewed_at,
+        has_updates: unseen_change_count > 0,
+        needs_attention: open_conflict_count > 0,
+    })
+}
+
+pub fn list_workstream_review_summaries_conn(
+    conn: &Connection,
+) -> Result<Vec<WorkstreamReviewSummary>> {
+    let mut st = conn.prepare("SELECT id FROM workstreams ORDER BY updated_at DESC")?;
+    let ids: Vec<String> = st
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut summaries = Vec::with_capacity(ids.len());
+    for id in ids {
+        summaries.push(get_workstream_review_summary_conn(conn, &id)?);
+    }
+    Ok(summaries)
 }
 
 pub fn resolve_conflict_audited_conn(

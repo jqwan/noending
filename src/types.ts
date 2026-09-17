@@ -307,6 +307,20 @@ export interface WorkstreamReviewWindow {
   mark_through: ReviewFrontier;
 }
 
+export interface WorkstreamReviewSummary {
+  workstream_id: string;
+  unseen_change_count: number;
+  open_conflict_count: number;
+  new_facts: number;
+  updated_facts: number;
+  resolved_items: number;
+  superseded_items: number;
+  last_unseen_change_at: string | null;
+  reviewed_at: string;
+  has_updates: boolean;
+  needs_attention: boolean;
+}
+
 export interface SessionDetail {
   session: Session;
   events: SessionEvent[];

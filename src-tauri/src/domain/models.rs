@@ -548,3 +548,19 @@ pub struct WorkstreamReviewWindow {
     pub unseen_changes: Vec<ContextChange>,
     pub mark_through: ReviewFrontier,
 }
+
+/// Lightweight summary of context updates and attention items for a Workstream since its last review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkstreamReviewSummary {
+    pub workstream_id: Id,
+    pub unseen_change_count: usize,
+    pub open_conflict_count: usize,
+    pub new_facts: usize,
+    pub updated_facts: usize,
+    pub resolved_items: usize,
+    pub superseded_items: usize,
+    pub last_unseen_change_at: Option<String>,
+    pub reviewed_at: String,
+    pub has_updates: bool,
+    pub needs_attention: bool,
+}

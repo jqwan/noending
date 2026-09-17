@@ -725,3 +725,325 @@ fn conflict_evidence_is_not_double_counted() {
     assert_eq!(win.unseen_changes[0].kind, "conflict_created");
     assert_eq!(win.unseen_changes[0].conflict_id, Some(conflict.id));
 }
+
+/// 10. review_summary_category_breakdown
+/// Verifies that WorkstreamReviewSummary correctly counts each category:
+/// new_facts, updated_facts, resolved_items, superseded_items, unseen_change_count, open_conflict_count.
+#[test]
+fn review_summary_category_breakdown() {
+    let db = open_db("summary-categories");
+    let ws = ws_row(&db, "Category Breakdown WS");
+
+    // Baseline catch up
+    let win0 = db.get_workstream_review_window(&ws.id).unwrap();
+    db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // 1. Added item (new_facts + 1)
+    let item1 = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "todo",
+        "Task 1",
+        "First task",
+        "agent_inferred",
+        "session_event",
+        &[],
+        None,
+        "agent",
+    )
+    .unwrap();
+
+    // 2. Added item (new_facts + 1), then edited (updated_facts + 1)
+    let item2 = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "goal",
+        "Goal 2",
+        "Initial goal content",
+        "agent_inferred",
+        "session_event",
+        &[],
+        None,
+        "agent",
+    )
+    .unwrap();
+
+    let edit_rev = ContextItemRevision {
+        id: new_id(),
+        item_id: item2.id.clone(),
+        title: "Goal 2 Updated".into(),
+        content: "Refined goal content".into(),
+        metadata: serde_json::json!({
+            "provenance": {
+                "authority": "agent_inferred",
+                "actor": "agent",
+                "source_type": "session_event",
+            }
+        }),
+        source_type: Some("session_event".into()),
+        source_ref: None,
+        sync_run_id: Some("sync-run-2".into()),
+        created_at: now(),
+    };
+    db.insert_revision(&edit_rev).unwrap();
+    db.set_item_head(&item2.id, &edit_rev.id, None).unwrap();
+
+    // 3. Added item (new_facts + 1), then resolved via sync (resolved_items + 1)
+    let item3 = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "todo",
+        "Task 3",
+        "Will resolve",
+        "agent_inferred",
+        "session_event",
+        &[],
+        None,
+        "agent",
+    )
+    .unwrap();
+
+    noending::storage::apply_status_change_conn(
+        db.conn(),
+        &item3.id,
+        "resolved",
+        "sync:heuristic",
+        "Auto completed",
+        Some("sync-run-3"),
+        &[],
+    )
+    .unwrap();
+
+    // 4. Added item (new_facts + 1), then superseded via sync (superseded_items + 1)
+    let item4 = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "decision",
+        "Decision 4",
+        "Old decision",
+        "agent_inferred",
+        "session_event",
+        &[],
+        None,
+        "agent",
+    )
+    .unwrap();
+
+    noending::storage::apply_status_change_conn(
+        db.conn(),
+        &item4.id,
+        "superseded",
+        "sync:heuristic",
+        "Superseded by sync",
+        Some("sync-run-4"),
+        &[],
+    )
+    .unwrap();
+
+    // 5. Open conflict (open_conflict_count = 1, conflict_created counts in unseen_change_count only)
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item1.id.clone(),
+        right_item_id: Some(item2.id.clone()),
+        conflict_type: "direct_contradiction".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: item1.current_revision_id.clone(),
+        right_revision_id: item2.current_revision_id.clone(),
+        candidate_snapshot_json: None,
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    let summary = db.get_workstream_review_summary(&ws.id).unwrap();
+
+    assert_eq!(summary.workstream_id, ws.id);
+    assert_eq!(summary.new_facts, 4, "4 added items");
+    assert_eq!(summary.updated_facts, 1, "1 edited item");
+    assert_eq!(summary.resolved_items, 1, "1 resolved item");
+    assert_eq!(summary.superseded_items, 1, "1 superseded item");
+    assert_eq!(summary.open_conflict_count, 1, "1 open conflict");
+    // unseen_change_count = 4 (added) + 1 (edited) + 1 (resolved) + 1 (superseded) + 1 (conflict_created) = 8
+    assert_eq!(summary.unseen_change_count, 8);
+    assert!(summary.has_updates);
+    assert!(summary.needs_attention);
+    assert!(summary.last_unseen_change_at.is_some());
+}
+
+/// 11. review_summary_updates_vs_attention_independence
+/// Tests the core invariant: has_updates and needs_attention are completely independent.
+/// Even after a user marks a window reviewed (has_updates -> false), an unresolved
+/// conflict keeps needs_attention -> true until resolved.
+#[test]
+fn review_summary_updates_vs_attention_independence() {
+    let db = open_db("summary-independence");
+    let ws = ws_row(&db, "Independence WS");
+
+    let item1 = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "goal",
+        "Goal 1",
+        "G1",
+        "user_explicit",
+        "user_edit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+
+    // Baseline catch up
+    let win0 = db.get_workstream_review_window(&ws.id).unwrap();
+    db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // Create open conflict
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item1.id.clone(),
+        right_item_id: None,
+        conflict_type: "external_contradiction".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: item1.current_revision_id.clone(),
+        right_revision_id: None,
+        candidate_snapshot_json: None,
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // Before review: has_updates = true, needs_attention = true
+    let s0 = db.get_workstream_review_summary(&ws.id).unwrap();
+    assert_eq!(s0.unseen_change_count, 1);
+    assert_eq!(s0.open_conflict_count, 1);
+    assert!(s0.has_updates);
+    assert!(s0.needs_attention);
+
+    // Human reviews the changes: mark reviewed
+    let win1 = db.get_workstream_review_window(&ws.id).unwrap();
+    db.mark_workstream_reviewed(&ws.id, &win1.mark_through)
+        .unwrap();
+
+    // After review but before conflict resolution:
+    // has_updates MUST be false (no new changes), but needs_attention MUST remain true!
+    let s1 = db.get_workstream_review_summary(&ws.id).unwrap();
+    assert_eq!(s1.unseen_change_count, 0);
+    assert_eq!(s1.open_conflict_count, 1);
+    assert!(
+        !s1.has_updates,
+        "has_updates must be false when unseen_change_count is 0"
+    );
+    assert!(
+        s1.needs_attention,
+        "needs_attention must remain true because conflict is open"
+    );
+    assert!(s1.last_unseen_change_at.is_none());
+
+    // Now resolve the conflict
+    db.resolve_conflict_audited(
+        &conflict.id,
+        "resolved",
+        Some("Accepted user state"),
+        "user",
+    )
+    .unwrap();
+
+    // After resolution: has_updates = false, needs_attention = false
+    let s2 = db.get_workstream_review_summary(&ws.id).unwrap();
+    assert_eq!(s2.unseen_change_count, 0);
+    assert_eq!(s2.open_conflict_count, 0);
+    assert!(!s2.has_updates);
+    assert!(!s2.needs_attention);
+}
+
+/// 12. review_summary_batch_list
+/// Verifies that list_workstream_review_summaries returns isomorphic summaries
+/// for all workstreams without N+1 mismatches.
+#[test]
+fn review_summary_batch_list() {
+    let db = open_db("summary-batch");
+    let ws1 = ws_row(&db, "Batch WS 1");
+    let ws2 = ws_row(&db, "Batch WS 2");
+    let ws3 = ws_row(&db, "Batch WS 3");
+
+    // Baseline catch up for all
+    for ws in [&ws1, &ws2, &ws3] {
+        let win = db.get_workstream_review_window(&ws.id).unwrap();
+        db.mark_workstream_reviewed(&ws.id, &win.mark_through)
+            .unwrap();
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // ws1 has a new agent item
+    noending::sync::create_item(
+        &db,
+        &ws1.id,
+        "todo",
+        "WS1 Task",
+        "Details",
+        "agent_inferred",
+        "session_event",
+        &[],
+        None,
+        "agent",
+    )
+    .unwrap();
+
+    // ws2 has an open conflict
+    let item2 = noending::sync::create_item(
+        &db,
+        &ws2.id,
+        "goal",
+        "WS2 Goal",
+        "G",
+        "user_explicit",
+        "user_edit",
+        &[],
+        None,
+        "user",
+    )
+    .unwrap();
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws2.id.clone(),
+        left_item_id: item2.id.clone(),
+        right_item_id: None,
+        conflict_type: "user_disagreement".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: item2.current_revision_id.clone(),
+        right_revision_id: None,
+        candidate_snapshot_json: None,
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // ws3 has no new changes
+
+    let batch = db.list_workstream_review_summaries().unwrap();
+    assert_eq!(batch.len(), 3);
+
+    let s1 = batch.iter().find(|s| s.workstream_id == ws1.id).unwrap();
+    let s2 = batch.iter().find(|s| s.workstream_id == ws2.id).unwrap();
+    let s3 = batch.iter().find(|s| s.workstream_id == ws3.id).unwrap();
+
+    assert_eq!(s1, &db.get_workstream_review_summary(&ws1.id).unwrap());
+    assert_eq!(s2, &db.get_workstream_review_summary(&ws2.id).unwrap());
+    assert_eq!(s3, &db.get_workstream_review_summary(&ws3.id).unwrap());
+
+    assert!(s1.has_updates && !s1.needs_attention);
+    assert!(s2.has_updates && s2.needs_attention);
+    assert!(!s3.has_updates && !s3.needs_attention);
+}

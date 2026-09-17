@@ -132,6 +132,8 @@ pub fn run() {
             commands::get_workstream_review_state,
             commands::get_workstream_review_window,
             commands::mark_workstream_reviewed,
+            commands::get_workstream_review_summary,
+            commands::list_workstream_review_summaries,
             commands::list_conflicts,
             commands::get_conflict_review_case,
             commands::list_conflict_review_cases,

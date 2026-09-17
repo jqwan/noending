@@ -3,6 +3,7 @@ import type {
   Agent, AppInfo, ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
   ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
+  WorkstreamReviewSummary,
 } from "./types";
 
 export const api = {
@@ -51,6 +52,10 @@ export const api = {
     invoke<WorkstreamReviewWindow>("get_workstream_review_window", { workstreamId }),
   markWorkstreamReviewed: (workstreamId: string, frontier: ReviewFrontier) =>
     invoke<WorkstreamReviewState>("mark_workstream_reviewed", { workstreamId, frontier }),
+  getWorkstreamReviewSummary: (workstreamId: string) =>
+    invoke<WorkstreamReviewSummary>("get_workstream_review_summary", { workstreamId }),
+  listWorkstreamReviewSummaries: () =>
+    invoke<WorkstreamReviewSummary[]>("list_workstream_review_summaries"),
   listConflicts: (workstreamId: string, includeClosed?: boolean) =>
     invoke<import("./types").ContextConflict[]>("list_conflicts", { workstreamId, includeClosed: includeClosed ?? false }),
   resolveConflict: (conflictId: string, status: string, resolution?: string) =>

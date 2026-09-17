@@ -616,6 +616,23 @@ pub fn mark_workstream_reviewed(
     })
 }
 
+#[tauri::command]
+pub fn get_workstream_review_summary(
+    state: State<AppState>,
+    workstream_id: String,
+) -> Result<WorkstreamReviewSummary> {
+    with_db(&state, |db| {
+        db.get_workstream_review_summary(&workstream_id)
+    })
+}
+
+#[tauri::command]
+pub fn list_workstream_review_summaries(
+    state: State<AppState>,
+) -> Result<Vec<WorkstreamReviewSummary>> {
+    with_db(&state, |db| db.list_workstream_review_summaries())
+}
+
 // ---------------- Conflicts ----------------
 
 #[tauri::command]
