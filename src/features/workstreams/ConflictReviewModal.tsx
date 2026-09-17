@@ -3,25 +3,21 @@ import { api } from "../../api";
 import { Modal, timeAgo } from "../../components/common";
 import {
   AUTHORITY_LABELS,
-  type ContextConflict,
-  type ContextItem,
-  type ContextItemRevision,
+  type ConflictReviewCase,
 } from "../../types";
 
 interface Props {
-  conflicts: ContextConflict[];
-  items: [ContextItem, ContextItemRevision][];
+  cases: ConflictReviewCase[];
   onClose: () => void;
   onChanged: () => void;
 }
 
 export default function ConflictReviewModal({
-  conflicts,
-  items,
+  cases,
   onClose,
   onChanged,
 }: Props) {
-  const openConflicts = conflicts.filter((c) => c.status === "open");
+  const openCases = cases.filter((c) => c.conflict.status === "open");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -32,42 +28,18 @@ export default function ConflictReviewModal({
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");
 
-  const itemsById = new Map(items.map(([item, rev]) => [item.id, [item, rev] as const]));
-
-  const currentConflict = openConflicts[currentIndex];
-  const leftPair = currentConflict ? itemsById.get(currentConflict.left_item_id) : null;
-  const leftItem = leftPair ? leftPair[0] : null;
-  const leftRev = leftPair ? leftPair[1] : null;
-
-  const rightPair = currentConflict?.right_item_id
-    ? itemsById.get(currentConflict.right_item_id)
-    : null;
-  const rightItem = rightPair ? rightPair[0] : null;
-  const rightRev = rightPair ? rightPair[1] : null;
-
-  let candidateSnapshot: {
-    title?: string;
-    content?: string;
-    authority?: string;
-    source_refs?: string[];
-  } | null = null;
-  if (currentConflict?.candidate_snapshot_json) {
-    try {
-      candidateSnapshot = JSON.parse(currentConflict.candidate_snapshot_json);
-    } catch {
-      // ignore
-    }
-  }
+  const currentCase = openCases[currentIndex];
 
   const startEditLeft = () => {
-    if (!leftRev) return;
-    setEditTitle(leftRev.title);
-    setEditContent(leftRev.content);
+    const base = currentCase?.current_left ?? currentCase?.left_at_conflict;
+    if (!base) return;
+    setEditTitle(base.title);
+    setEditContent(base.content);
     setEditingLeft(true);
   };
 
   const handleResolve = async (status: "resolved" | "dismissed") => {
-    if (!currentConflict || busy) return;
+    if (!currentCase || busy) return;
     setBusy(true);
     setError("");
     try {
@@ -86,7 +58,7 @@ export default function ConflictReviewModal({
       }
 
       await api.resolveConflictWithEdit(
-        currentConflict.id,
+        currentCase.conflict.id,
         status,
         note.trim() || undefined,
         edit,
@@ -94,8 +66,8 @@ export default function ConflictReviewModal({
       setNote("");
       setEditingLeft(false);
       onChanged();
-      if (currentIndex >= openConflicts.length - 1) {
-        setCurrentIndex(Math.max(0, openConflicts.length - 2));
+      if (currentIndex >= openCases.length - 1) {
+        setCurrentIndex(Math.max(0, openCases.length - 2));
       }
     } catch (e) {
       setError(String(e));
@@ -106,7 +78,7 @@ export default function ConflictReviewModal({
 
   return (
     <Modal title="Context 冲突审查 (Conflict Review)" onClose={onClose}>
-      {openConflicts.length === 0 ? (
+      {openCases.length === 0 ? (
         <div style={{ textAlign: "center", padding: "24px 0" }}>
           <div style={{ fontSize: 24, marginBottom: 8 }}>✓</div>
           <div style={{ fontWeight: 550, marginBottom: 4 }}>所有冲突已处理完毕</div>
@@ -120,7 +92,7 @@ export default function ConflictReviewModal({
       ) : (
         <div>
           {/* Conflict switcher if more than one */}
-          {openConflicts.length > 1 && (
+          {openCases.length > 1 && (
             <div
               className="row"
               style={{
@@ -130,9 +102,9 @@ export default function ConflictReviewModal({
                 paddingBottom: 4,
               }}
             >
-              {openConflicts.map((c, idx) => (
+              {openCases.map((c, idx) => (
                 <button
-                  key={c.id}
+                  key={c.conflict.id}
                   className={`btn small ${idx === currentIndex ? "primary" : "ghost"}`}
                   onClick={() => {
                     setCurrentIndex(idx);
@@ -157,7 +129,7 @@ export default function ConflictReviewModal({
               marginBottom: 16,
             }}
           >
-            {/* Left: Current Fact */}
+            {/* Left: Fact at Conflict */}
             <div
               className="card"
               style={{
@@ -167,10 +139,13 @@ export default function ConflictReviewModal({
               }}
             >
               <div className="row between" style={{ marginBottom: 8 }}>
-                <span className="section-label" style={{ margin: 0 }}>当前事实 (Current Fact)</span>
-                {leftItem && (
+                <span className="section-label" style={{ margin: 0 }}>
+                  冲突时事实 (Fact at Conflict)
+                </span>
+                {currentCase.left_at_conflict && (
                   <span className="badge accent" style={{ fontSize: 10 }}>
-                    {AUTHORITY_LABELS[leftItem.authority] ?? leftItem.authority}
+                    {AUTHORITY_LABELS[currentCase.left_at_conflict.authority] ??
+                      currentCase.left_at_conflict.authority}
                   </span>
                 )}
               </div>
@@ -178,7 +153,7 @@ export default function ConflictReviewModal({
               {editingLeft ? (
                 <div>
                   <label className="field" style={{ marginBottom: 6 }}>
-                    <span>标题</span>
+                    <span>标题 (修正当前事实)</span>
                     <input
                       type="text"
                       value={editTitle}
@@ -204,9 +179,9 @@ export default function ConflictReviewModal({
               ) : (
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 4 }}>
-                    {leftRev?.title ?? currentConflict.left_item_id}
+                    {currentCase.left_at_conflict?.title ?? currentCase.conflict.left_item_id}
                   </div>
-                  {leftRev?.content && (
+                  {currentCase.left_at_conflict?.content && (
                     <div
                       className="small"
                       style={{
@@ -216,17 +191,63 @@ export default function ConflictReviewModal({
                         lineHeight: 1.45,
                       }}
                     >
-                      {leftRev.content}
+                      {currentCase.left_at_conflict.content}
                     </div>
                   )}
                   <div className="row between" style={{ marginTop: 8 }}>
                     <span className="small muted">
-                      {leftItem ? timeAgo(leftItem.updated_at) : ""}
+                      {currentCase.left_at_conflict
+                        ? timeAgo(currentCase.left_at_conflict.created_at)
+                        : ""}
                     </span>
                     <button className="link small" onClick={startEditLeft}>
-                      ✎ 修正内容
+                      ✎ 修正当前事实
                     </button>
                   </div>
+
+                  {/* Warning if current fact evolved since conflict */}
+                  {currentCase.left_changed_since_conflict && currentCase.current_left && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        background: "rgba(59, 130, 246, 0.08)",
+                        border: "1px solid rgba(59, 130, 246, 0.25)",
+                      }}
+                    >
+                      <div
+                        className="small"
+                        style={{
+                          fontWeight: 600,
+                          color: "var(--accent, #3b82f6)",
+                          marginBottom: 4,
+                        }}
+                      >
+                        ⚠ 当前事实在此冲突后已发生变化
+                      </div>
+                      <div className="small" style={{ fontWeight: 550, marginBottom: 2 }}>
+                        {currentCase.current_left.title}
+                      </div>
+                      {currentCase.current_left.content && (
+                        <div
+                          className="small muted"
+                          style={{
+                            whiteSpace: "pre-wrap",
+                            marginBottom: 4,
+                            fontSize: 11.5,
+                          }}
+                        >
+                          {currentCase.current_left.content}
+                        </div>
+                      )}
+                      <div className="small muted" style={{ fontSize: 11 }}>
+                        最新修订: {timeAgo(currentCase.current_left.created_at)} · 权威:{" "}
+                        {AUTHORITY_LABELS[currentCase.current_left.authority] ??
+                          currentCase.current_left.authority}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -241,24 +262,30 @@ export default function ConflictReviewModal({
               }}
             >
               <div className="row between" style={{ marginBottom: 8 }}>
-                <span className="section-label" style={{ margin: 0, color: "var(--warning, #eab308)" }}>
-                  冲突证据 (Agent Evidence)
+                <span
+                  className="section-label"
+                  style={{ margin: 0, color: "var(--warning, #eab308)" }}
+                >
+                  冲突证据 (Conflicting Evidence)
                 </span>
-                {rightItem ? (
+                {currentCase.right_at_conflict ? (
                   <span className="badge" style={{ fontSize: 10 }}>
-                    {AUTHORITY_LABELS[rightItem.authority] ?? rightItem.authority}
+                    {AUTHORITY_LABELS[currentCase.right_at_conflict.authority] ??
+                      currentCase.right_at_conflict.authority}
                   </span>
-                ) : candidateSnapshot?.authority ? (
+                ) : currentCase.candidate_at_conflict ? (
                   <span className="badge" style={{ fontSize: 10 }}>
-                    提议: {AUTHORITY_LABELS[candidateSnapshot.authority] ?? candidateSnapshot.authority}
+                    提议:{" "}
+                    {AUTHORITY_LABELS[currentCase.candidate_at_conflict.authority] ??
+                      currentCase.candidate_at_conflict.authority}
                   </span>
                 ) : null}
               </div>
 
-              {rightRev ? (
+              {currentCase.right_at_conflict ? (
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 4 }}>
-                    {rightRev.title}
+                    {currentCase.right_at_conflict.title}
                   </div>
                   <div
                     className="small"
@@ -269,19 +296,50 @@ export default function ConflictReviewModal({
                       lineHeight: 1.45,
                     }}
                   >
-                    {rightRev.content}
+                    {currentCase.right_at_conflict.content}
                   </div>
                   <div className="small muted">
-                    {timeAgo(rightRev.created_at)}
-                    {rightRev.source_ref ? ` · ${rightRev.source_ref}` : ""}
+                    {timeAgo(currentCase.right_at_conflict.created_at)}
+                    {currentCase.right_at_conflict.source_ref
+                      ? ` · ${currentCase.right_at_conflict.source_ref}`
+                      : ""}
                   </div>
+
+                  {currentCase.right_changed_since_conflict && currentCase.current_right && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        background: "rgba(234, 179, 8, 0.08)",
+                        border: "1px solid rgba(234, 179, 8, 0.25)",
+                      }}
+                    >
+                      <div
+                        className="small"
+                        style={{
+                          fontWeight: 600,
+                          color: "var(--warning, #eab308)",
+                          marginBottom: 4,
+                        }}
+                      >
+                        ⚠ 右侧条目在此冲突后也已演进
+                      </div>
+                      <div className="small" style={{ fontWeight: 550, marginBottom: 2 }}>
+                        {currentCase.current_right.title}
+                      </div>
+                      <div className="small muted" style={{ fontSize: 11 }}>
+                        最新修订: {timeAgo(currentCase.current_right.created_at)}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              ) : candidateSnapshot ? (
+              ) : currentCase.candidate_at_conflict ? (
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 4 }}>
-                    {candidateSnapshot.title ?? "未命名提议"}
+                    {currentCase.candidate_at_conflict.title ?? "未命名提议"}
                   </div>
-                  {candidateSnapshot.content && (
+                  {currentCase.candidate_at_conflict.content && (
                     <div
                       className="small"
                       style={{
@@ -291,19 +349,19 @@ export default function ConflictReviewModal({
                         lineHeight: 1.45,
                       }}
                     >
-                      {candidateSnapshot.content}
+                      {currentCase.candidate_at_conflict.content}
                     </div>
                   )}
                   <div className="small muted">
                     Agent 提取提议（已被权威策略拦截未生效）
-                    {candidateSnapshot.source_refs?.length
-                      ? ` · ${candidateSnapshot.source_refs.join(", ")}`
+                    {currentCase.candidate_at_conflict.source_refs?.length
+                      ? ` · ${currentCase.candidate_at_conflict.source_refs.join(", ")}`
                       : ""}
                   </div>
                 </div>
               ) : (
                 <div className="muted small">
-                  {currentConflict.conflict_type === "authority"
+                  {currentCase.conflict.conflict_type === "authority"
                     ? "Agent 尝试修改或完成已被用户保护的事实。"
                     : "未找到右侧条目详情。"}
                 </div>

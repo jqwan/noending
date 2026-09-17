@@ -63,6 +63,13 @@ export const api = {
         edit: edit ?? null,
       },
     }),
+  getConflictReviewCase: (conflictId: string) =>
+    invoke<import("./types").ConflictReviewCase | null>("get_conflict_review_case", { conflictId }),
+  listConflictReviewCases: (workstreamId: string, includeClosed?: boolean) =>
+    invoke<import("./types").ConflictReviewCase[]>("list_conflict_review_cases", {
+      workstreamId,
+      includeClosed: includeClosed ?? false,
+    }),
 
   listSessions: (projectId?: string, agent?: Agent) =>
     invoke<Session[]>("list_sessions", { projectId: projectId ?? null, agent: agent ?? null }),

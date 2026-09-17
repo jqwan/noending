@@ -537,6 +537,7 @@ pub struct WorkstreamContext {
     pub items: Vec<(ContextItem, ContextItemRevision)>,
     pub related_sessions: Vec<Session>,
     pub conflicts: Vec<ContextConflict>,
+    pub conflict_cases: Vec<crate::domain::ConflictReviewCase>,
     pub relations: Vec<ContextItemRelation>,
     pub recent_changes: Vec<ContextChange>,
 }
@@ -558,6 +559,7 @@ pub fn get_workstream_context(
             .filter_map(|b| db.get_session(&b.session_id).ok().flatten())
             .collect();
         let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
+        let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
         let relations = db.item_relations_for_workstream(&workstream_id)?;
         let recent_changes = db.list_workstream_context_changes(&workstream_id, 20)?;
         let project_name = workstream
@@ -572,6 +574,7 @@ pub fn get_workstream_context(
             items,
             related_sessions: sessions,
             conflicts,
+            conflict_cases,
             relations,
             recent_changes,
         })
@@ -596,6 +599,25 @@ pub fn list_conflicts(
 ) -> Result<Vec<ContextConflict>> {
     with_db(&state, |db| {
         db.conflicts_for_workstream(&workstream_id, include_closed.unwrap_or(false))
+    })
+}
+
+#[tauri::command]
+pub fn get_conflict_review_case(
+    state: State<AppState>,
+    conflict_id: String,
+) -> Result<Option<crate::domain::ConflictReviewCase>> {
+    with_db(&state, |db| db.get_conflict_review_case(&conflict_id))
+}
+
+#[tauri::command]
+pub fn list_conflict_review_cases(
+    state: State<AppState>,
+    workstream_id: String,
+    include_closed: Option<bool>,
+) -> Result<Vec<crate::domain::ConflictReviewCase>> {
+    with_db(&state, |db| {
+        db.list_conflict_review_cases(&workstream_id, include_closed.unwrap_or(false))
     })
 }
 

@@ -130,6 +130,8 @@ pub fn run() {
             commands::get_workstream_context,
             commands::get_context_revision_source,
             commands::list_conflicts,
+            commands::get_conflict_review_case,
+            commands::list_conflict_review_cases,
             commands::resolve_conflict,
             commands::resolve_conflict_with_edit,
             commands::list_sessions,

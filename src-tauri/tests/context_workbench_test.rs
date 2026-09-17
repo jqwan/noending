@@ -3,6 +3,7 @@ use noending::domain::{
     SessionEvent,
 };
 use noending::storage::{new_id, now, Db};
+use rusqlite::params;
 
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-workbench-{}-{}", tag, new_id()));
@@ -699,4 +700,287 @@ fn test_resolve_conflict_with_edit_atomic_transaction() {
         .resolve_conflict_with_edit(&conflict2.id, "unsupported_status", None, None, "user")
         .unwrap_err();
     assert!(err_status.to_string().contains("无效的冲突状态"));
+}
+
+#[test]
+fn test_conflict_review_case_frozen_vs_current() {
+    let db = open_db("conflict-case-frozen-vs-current");
+    let ws = ws_row(&db, "Conflict Review Case WS");
+
+    // 1. Create item A with initial revision A1
+    let item_a = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "goal",
+        "A1 Title",
+        "A1 Content",
+        "agent_statement",
+        "session_event",
+        &["session-event:a1".into()],
+        None,
+        "agent",
+    )
+    .unwrap();
+    let rev_a1_id = item_a.current_revision_id.clone().unwrap();
+
+    // 2. Create item B with initial revision B1
+    let item_b = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "goal",
+        "B1 Title",
+        "B1 Content",
+        "agent_statement",
+        "session_event",
+        &["session-event:b1".into()],
+        None,
+        "agent",
+    )
+    .unwrap();
+    let rev_b1_id = item_b.current_revision_id.clone().unwrap();
+
+    // 3. Conflict linking A1 and B1
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item_a.id.clone(),
+        right_item_id: Some(item_b.id.clone()),
+        conflict_type: "content".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: Some(rev_a1_id.clone()),
+        right_revision_id: Some(rev_b1_id.clone()),
+        candidate_snapshot_json: None,
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // 4. Evolve item A to A2
+    let rev_a2 = ContextItemRevision {
+        id: new_id(),
+        item_id: item_a.id.clone(),
+        title: "A2 Title".into(),
+        content: "A2 Content".into(),
+        metadata: serde_json::json!({
+            "provenance": {
+                "authority": "user_edit",
+                "actor": "user",
+                "source_type": "user_edit",
+                "source_ref": serde_json::Value::Null,
+            }
+        }),
+        source_type: Some("user_edit".into()),
+        source_ref: None,
+        sync_run_id: None,
+        created_at: now(),
+    };
+    db.insert_revision(&rev_a2).unwrap();
+    db.set_item_head(&item_a.id, &rev_a2.id, None).unwrap();
+    db.set_item_authority(&item_a.id, "user_edit").unwrap();
+
+    // 5. Evolve item B to B2
+    let rev_b2 = ContextItemRevision {
+        id: new_id(),
+        item_id: item_b.id.clone(),
+        title: "B2 Title".into(),
+        content: "B2 Content".into(),
+        metadata: serde_json::json!({
+            "provenance": {
+                "authority": "agent_statement",
+                "actor": "agent",
+                "source_type": "session_event",
+                "source_ref": serde_json::Value::Null,
+            }
+        }),
+        source_type: Some("session_event".into()),
+        source_ref: None,
+        sync_run_id: None,
+        created_at: now(),
+    };
+    db.insert_revision(&rev_b2).unwrap();
+    db.set_item_head(&item_b.id, &rev_b2.id, None).unwrap();
+
+    // 6. Query review case
+    let review_case = db
+        .get_conflict_review_case(&conflict.id)
+        .unwrap()
+        .expect("review case must exist");
+
+    // Frozen matches conflict-time evidence A1 / B1
+    assert_eq!(
+        review_case.left_at_conflict.as_ref().map(|r| &r.id),
+        Some(&rev_a1_id)
+    );
+    assert_eq!(
+        review_case
+            .left_at_conflict
+            .as_ref()
+            .map(|r| r.title.as_str()),
+        Some("A1 Title")
+    );
+    assert_eq!(
+        review_case.right_at_conflict.as_ref().map(|r| &r.id),
+        Some(&rev_b1_id)
+    );
+    assert_eq!(
+        review_case
+            .right_at_conflict
+            .as_ref()
+            .map(|r| r.title.as_str()),
+        Some("B1 Title")
+    );
+
+    // Current matches latest head revisions A2 / B2
+    assert_eq!(
+        review_case.current_left.as_ref().map(|r| &r.id),
+        Some(&rev_a2.id)
+    );
+    assert_eq!(
+        review_case.current_left.as_ref().map(|r| r.title.as_str()),
+        Some("A2 Title")
+    );
+    assert_eq!(
+        review_case.current_right.as_ref().map(|r| &r.id),
+        Some(&rev_b2.id)
+    );
+    assert_eq!(
+        review_case.current_right.as_ref().map(|r| r.title.as_str()),
+        Some("B2 Title")
+    );
+
+    // Evolution flags are accurately detected
+    assert!(review_case.left_changed_since_conflict);
+    assert!(review_case.right_changed_since_conflict);
+}
+
+#[test]
+fn test_fts_failure_rolls_back_entire_conflict_transaction() {
+    let db = open_db("fts-rollback");
+    let ws = ws_row(&db, "FTS Rollback WS");
+
+    let item = noending::sync::create_item(
+        &db,
+        &ws.id,
+        "decision",
+        "Initial Decision",
+        "Some details",
+        "agent_statement",
+        "session_event",
+        &["session-event:1".into()],
+        None,
+        "agent",
+    )
+    .unwrap();
+    let rev1_id = item.current_revision_id.clone().unwrap();
+
+    let conflict = ContextConflict {
+        id: new_id(),
+        workstream_id: ws.id.clone(),
+        left_item_id: item.id.clone(),
+        right_item_id: None,
+        conflict_type: "authority".into(),
+        status: "open".into(),
+        resolution: None,
+        created_at: now(),
+        updated_at: now(),
+        left_revision_id: Some(rev1_id.clone()),
+        right_revision_id: None,
+        candidate_snapshot_json: None,
+    };
+    db.insert_conflict(&conflict).unwrap();
+
+    // Drop the search_index table to force an FTS indexing error inside the transaction
+    db.0.execute_batch("DROP TABLE search_index;").unwrap();
+
+    let edit_payload = ContextItemEditPayload {
+        title: "Attempted Fix".into(),
+        content: "New content".into(),
+    };
+
+    let err = db
+        .resolve_conflict_with_edit(
+            &conflict.id,
+            "resolved",
+            Some("Should rollback completely"),
+            Some(&edit_payload),
+            "user",
+        )
+        .unwrap_err();
+
+    // Confirm that error occurred from FTS
+    assert!(err.to_string().contains("search_index") || err.to_string().contains("no such table"));
+
+    // Verify entire transaction rolled back:
+    // 1. Item head unchanged
+    let item_after = db.get_item(&item.id).unwrap().unwrap();
+    assert_eq!(
+        item_after.current_revision_id.as_deref(),
+        Some(rev1_id.as_str())
+    );
+    // 2. Item authority unchanged
+    assert_eq!(item_after.authority, "agent_statement");
+    // 3. Conflict status still open
+    let c_check = db.get_conflict(&conflict.id).unwrap().unwrap();
+    assert_eq!(c_check.status, "open");
+    assert_eq!(c_check.resolution, None);
+    // 4. No conflict event recorded
+    let history = db.conflict_history(&conflict.id).unwrap();
+    assert_eq!(history.len(), 0);
+}
+
+#[test]
+fn test_legacy_revision_authority_never_polluted_by_item_authority() {
+    let db = open_db("legacy-rev-authority");
+    let ws = ws_row(&db, "Legacy WS");
+
+    // 1. Manually insert an item and revision simulating pre-v9 data with NO metadata.provenance
+    let item_id = new_id();
+    let rev1_id = new_id();
+    let ts = now();
+
+    db.0.execute(
+        "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, created_at, updated_at)
+         VALUES (?1, ?2, 'goal', 'active', 'agent_statement', 'sync:codex', ?3, ?4, ?4)",
+        params![item_id, ws.id, rev1_id, ts],
+    ).unwrap();
+
+    // Revision metadata is completely empty (no provenance object)
+    db.0.execute(
+        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
+         VALUES (?1, ?2, 'Legacy Agent Goal', 'Extracted by agent', '{}', 'session_event', 'sync-run-1', ?3)",
+        params![rev1_id, item_id, ts],
+    ).unwrap();
+
+    // 2. Query revision source before user edit: authority is inferred as agent_statement
+    let src_before = db.get_context_revision_source(&rev1_id).unwrap().unwrap();
+    assert_eq!(src_before.authority, "agent_statement");
+
+    // 3. Item is subsequently edited by user, changing context_items.authority to user_edit
+    db.set_item_authority(&item_id, "user_edit").unwrap();
+    let item_check = db.get_item(&item_id).unwrap().unwrap();
+    assert_eq!(item_check.authority, "user_edit");
+
+    // 4. Invariant check: Inspecting historical rev1 STILL returns agent_statement, NEVER user_edit!
+    let src_after = db.get_context_revision_source(&rev1_id).unwrap().unwrap();
+    assert_eq!(
+        src_after.authority, "agent_statement",
+        "Legacy revision authority must NEVER fall back to mutable item.authority"
+    );
+    assert_ne!(src_after.authority, "user_edit");
+
+    // 5. Test completely un-inferrable revision falls back to legacy_unknown, NOT item.authority
+    let rev_unknown_id = new_id();
+    db.0.execute(
+        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
+         VALUES (?1, ?2, 'Unknown Legacy', 'No source', '{}', NULL, NULL, ?3)",
+        params![rev_unknown_id, item_id, ts],
+    ).unwrap();
+
+    let src_unknown = db
+        .get_context_revision_source(&rev_unknown_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(src_unknown.authority, "legacy_unknown");
+    assert_ne!(src_unknown.authority, "user_edit");
 }

@@ -1350,22 +1350,9 @@ impl Db {
         let Some(rev) = rev else {
             return Ok(None);
         };
-        // Read authority strictly from the immutable revision metadata!
+        // Read authority strictly from the immutable revision metadata and frozen lineage!
         // Never let subsequent item edits pollute historical revision authority.
-        let authority = rev
-            .metadata
-            .get("provenance")
-            .and_then(|p| p.get("authority"))
-            .and_then(|a| a.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                // Legacy fallback: if metadata lacks provenance, try item.authority or "unknown"
-                self.get_item(&rev.item_id)
-                    .ok()
-                    .flatten()
-                    .map(|i| i.authority)
-                    .unwrap_or_else(|| "unknown".into())
-            });
+        let authority = resolve_revision_authority(&rev);
 
         let mut session_id = None;
         let mut session_title = None;
@@ -1482,6 +1469,21 @@ impl Db {
 
     pub fn get_conflict(&self, conflict_id: &str) -> Result<Option<ContextConflict>> {
         get_conflict_conn(&self.0, conflict_id)
+    }
+
+    pub fn get_conflict_review_case(
+        &self,
+        conflict_id: &str,
+    ) -> Result<Option<ConflictReviewCase>> {
+        get_conflict_review_case_conn(&self.0, conflict_id)
+    }
+
+    pub fn list_conflict_review_cases(
+        &self,
+        workstream_id: &str,
+        include_closed: bool,
+    ) -> Result<Vec<ConflictReviewCase>> {
+        list_conflict_review_cases_conn(&self.0, workstream_id, include_closed)
     }
 
     // ---------------- Sync runs ----------------
@@ -2478,6 +2480,139 @@ pub fn get_conflict_conn(conn: &Connection, conflict_id: &str) -> Result<Option<
         .optional()?)
 }
 
+/// Authoritative resolver for revision authority:
+/// 1. provenance authority stored directly in revision metadata
+/// 2. audit metadata / source_type / sync_run_id inference if determinable
+/// 3. legacy_unknown
+/// NEVER falls back to mutable item.authority!
+pub fn resolve_revision_authority(rev: &ContextItemRevision) -> String {
+    if let Some(auth) = rev
+        .metadata
+        .get("provenance")
+        .and_then(|p| p.get("authority"))
+        .and_then(|a| a.as_str())
+    {
+        return auth.to_string();
+    }
+    if let Some(audit) = rev.metadata.get("audit") {
+        if let Some(actor) = audit.get("actor").and_then(|a| a.as_str()) {
+            if actor == "user" {
+                return "user_edit".into();
+            }
+        }
+    }
+    if rev.source_type.as_deref() == Some("user_edit") {
+        "user_edit".into()
+    } else if rev.source_type.as_deref() == Some("session_event") || rev.sync_run_id.is_some() {
+        "agent_statement".into()
+    } else {
+        "legacy_unknown".into()
+    }
+}
+
+pub fn revision_snapshot_from_rev(rev: &ContextItemRevision) -> RevisionSnapshot {
+    RevisionSnapshot {
+        id: rev.id.clone(),
+        item_id: rev.item_id.clone(),
+        title: rev.title.clone(),
+        content: rev.content.clone(),
+        authority: resolve_revision_authority(rev),
+        created_at: rev.created_at.clone(),
+        source_ref: rev.source_ref.clone(),
+        source_type: rev.source_type.clone(),
+    }
+}
+
+pub fn build_conflict_review_case_conn(
+    conn: &Connection,
+    conflict: ContextConflict,
+) -> Result<ConflictReviewCase> {
+    // 1. Current left
+    let current_left_item = get_item_conn(conn, &conflict.left_item_id)?;
+    let current_left = current_left_item
+        .as_ref()
+        .and_then(|i| i.current_revision_id.as_deref())
+        .and_then(|rid| get_revision_conn(conn, rid).ok().flatten())
+        .map(|rev| revision_snapshot_from_rev(&rev));
+
+    // 2. Frozen left at conflict
+    let left_at_conflict = conflict
+        .left_revision_id
+        .as_deref()
+        .and_then(|rid| get_revision_conn(conn, rid).ok().flatten())
+        .map(|rev| revision_snapshot_from_rev(&rev))
+        .or_else(|| current_left.clone());
+
+    let left_changed_since_conflict = match (&left_at_conflict, &current_left) {
+        (Some(frozen), Some(curr)) => frozen.id != curr.id,
+        _ => false,
+    };
+
+    // 3. Current right
+    let current_right_item = conflict
+        .right_item_id
+        .as_deref()
+        .and_then(|rid| get_item_conn(conn, rid).ok().flatten());
+    let current_right = current_right_item
+        .as_ref()
+        .and_then(|i| i.current_revision_id.as_deref())
+        .and_then(|rid| get_revision_conn(conn, rid).ok().flatten())
+        .map(|rev| revision_snapshot_from_rev(&rev));
+
+    // 4. Frozen right at conflict
+    let right_at_conflict = conflict
+        .right_revision_id
+        .as_deref()
+        .and_then(|rid| get_revision_conn(conn, rid).ok().flatten())
+        .map(|rev| revision_snapshot_from_rev(&rev))
+        .or_else(|| current_right.clone());
+
+    let right_changed_since_conflict = match (&right_at_conflict, &current_right) {
+        (Some(frozen), Some(curr)) => frozen.id != curr.id,
+        _ => false,
+    };
+
+    // 5. Candidate snapshot at conflict
+    let candidate_at_conflict = conflict
+        .candidate_snapshot_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<CandidateSnapshot>(s).ok());
+
+    Ok(ConflictReviewCase {
+        conflict,
+        left_at_conflict,
+        right_at_conflict,
+        candidate_at_conflict,
+        current_left,
+        current_right,
+        left_changed_since_conflict,
+        right_changed_since_conflict,
+    })
+}
+
+pub fn get_conflict_review_case_conn(
+    conn: &Connection,
+    conflict_id: &str,
+) -> Result<Option<ConflictReviewCase>> {
+    let Some(conflict) = get_conflict_conn(conn, conflict_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(build_conflict_review_case_conn(conn, conflict)?))
+}
+
+pub fn list_conflict_review_cases_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    include_closed: bool,
+) -> Result<Vec<ConflictReviewCase>> {
+    let conflicts = conflicts_for_workstream_conn(conn, workstream_id, include_closed)?;
+    let mut cases = Vec::with_capacity(conflicts.len());
+    for c in conflicts {
+        cases.push(build_conflict_review_case_conn(conn, c)?);
+    }
+    Ok(cases)
+}
+
 // row mappers -------------------------------------------------------------
 
 fn row_project(r: &Row) -> rusqlite::Result<Project> {
@@ -3017,7 +3152,7 @@ pub fn resolve_conflict_with_edit_conn(
         set_item_head_conn(conn, &item.id, &new_rev.id, None)?;
         set_item_authority_conn(conn, &item.id, "user_edit")?;
         item.updated_at = now();
-        let _ = index_item_conn(conn, &item, &new_rev);
+        index_item_conn(conn, &item, &new_rev)?;
 
         resolved_revision_id = Some(new_rev.id);
     }

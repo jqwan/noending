@@ -188,8 +188,7 @@ export default function WorkstreamDetailView({ workstreamId, navigate }: {
 
       {reviewingConflict && (
         <ConflictReviewModal
-          conflicts={ctx.conflicts ?? []}
-          items={ctx.items}
+          cases={ctx.conflict_cases ?? []}
           onClose={() => setReviewingConflict(false)}
           onChanged={refresh}
         />

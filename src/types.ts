@@ -201,6 +201,38 @@ export interface ContextItemEditPayload {
   content: string;
 }
 
+export interface RevisionSnapshot {
+  id: string;
+  item_id: string;
+  title: string;
+  content: string;
+  authority: string;
+  created_at: string;
+  source_ref: string | null;
+  source_type: string | null;
+}
+
+export interface CandidateSnapshot {
+  title: string;
+  content: string;
+  authority: string;
+  source_refs?: string[];
+}
+
+export interface ConflictReviewCase {
+  conflict: ContextConflict;
+
+  left_at_conflict: RevisionSnapshot | null;
+  right_at_conflict: RevisionSnapshot | null;
+  candidate_at_conflict: CandidateSnapshot | null;
+
+  current_left: RevisionSnapshot | null;
+  current_right: RevisionSnapshot | null;
+
+  left_changed_since_conflict: boolean;
+  right_changed_since_conflict: boolean;
+}
+
 export interface ContextItemRef {
   id: string;
   kind: string;
@@ -253,6 +285,7 @@ export interface WorkstreamContext {
   items: [ContextItem, ContextItemRevision][];
   related_sessions: Session[];
   conflicts: ContextConflict[];
+  conflict_cases?: ConflictReviewCase[];
   relations: ContextItemRelation[];
   recent_changes: ContextChange[];
 }
@@ -351,4 +384,5 @@ export const AUTHORITY_LABELS: Record<string, string> = {
   system_observed: "系统观察",
   agent_statement: "Agent 陈述",
   agent_inferred: "Agent 推断",
+  legacy_unknown: "未知权威 (历史版本)",
 };

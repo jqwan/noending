@@ -372,6 +372,44 @@ pub struct ContextConflictEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionSnapshot {
+    pub id: Id,
+    pub item_id: Id,
+    pub title: String,
+    pub content: String,
+    pub authority: String,
+    pub created_at: String,
+    pub source_ref: Option<String>,
+    pub source_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateSnapshot {
+    pub title: String,
+    pub content: String,
+    pub authority: String,
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+}
+
+/// Read model for conflict review guaranteeing user review sees exact
+/// conflict-time evidence alongside current fact state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictReviewCase {
+    pub conflict: ContextConflict,
+
+    pub left_at_conflict: Option<RevisionSnapshot>,
+    pub right_at_conflict: Option<RevisionSnapshot>,
+    pub candidate_at_conflict: Option<CandidateSnapshot>,
+
+    pub current_left: Option<RevisionSnapshot>,
+    pub current_right: Option<RevisionSnapshot>,
+
+    pub left_changed_since_conflict: bool,
+    pub right_changed_since_conflict: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextItemRef {
     pub id: Id,
     pub kind: String,
