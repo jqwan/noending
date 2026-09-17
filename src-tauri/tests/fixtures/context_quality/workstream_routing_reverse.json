@@ -1,18 +1,18 @@
 {
-  "name": "multi_workstream_classification",
-  "description": "Multi-workstream environment routes decision to Launcher UI while Sync Engine remains clean; casual conversational banter is ignored",
+  "name": "workstream_routing_reverse",
+  "description": "Candidate list is Sync-first while the transcript only discusses Launcher work; routing must follow content, never candidate order",
   "dimension": "workstream_classification",
   "input": {
     "workstreams": [
       {
-        "id": "ws-launcher",
-        "title": "Launcher UI",
-        "description": "New session and resume launcher dialogs, prepared launch capabilities, and intent tracking"
-      },
-      {
         "id": "ws-sync",
         "title": "Sync Engine",
         "description": "Incremental session event delta ingestion, extraction, and context merge"
+      },
+      {
+        "id": "ws-launcher",
+        "title": "Launcher UI",
+        "description": "New session and resume launcher dialogs, prepared launch capabilities, and intent tracking"
       }
     ],
     "initial_context": [],
@@ -24,39 +24,39 @@
       {
         "sequence": 1,
         "kind": "user_message",
-        "text": "我们开始开发 Launcher UI 的 ResumeSessionModal。启动前必须调用 prepare_resume 接口生成 PreparedLaunch 令牌并锁定快照。"
+        "text": "我们决定在 ResumeSessionModal 里采用 prepare_resume 锁定快照后再启动会话，这个方案就这么定了。"
       },
       {
         "sequence": 2,
         "kind": "assistant_message",
-        "text": "好的，喝杯咖啡休息一下吧，今天天气真不错。"
+        "text": "好的，今天天气真不错，喝杯咖啡休息一下吧。"
       },
       {
         "sequence": 3,
         "kind": "assistant_message",
-        "text": "ResumeSessionModal 已实现完成，用户点击 Resume 时严格走 prepare_resume 锁定上下文快照。"
+        "text": "ResumeSessionModal 已实现完成，Resume 一律先调用 prepare_resume 生成 PreparedLaunch 并锁定上下文快照。"
       }
     ]
   },
-  "recorded_model_output": "[{\"op\":\"add\",\"workstream_id\":\"ws-launcher\",\"item_kind\":\"decision\",\"title\":\"Resume 弹窗在启动前严格调用 prepare_resume 锁定快照\",\"content\":\"用户点击 Resume 时调用 prepare_resume 生成 PreparedLaunch 令牌并锁定上下文快照。\",\"refs\":[\"#1\",\"#3\"]}]",
+  "recorded_model_output": "[{\"op\":\"add\",\"workstream_id\":\"ws-launcher\",\"item_kind\":\"decision\",\"title\":\"Resume 启动前必须先调用 prepare_resume 锁定上下文快照\",\"content\":\"ResumeSessionModal 在启动前调用 prepare_resume 生成 PreparedLaunch 令牌并锁定上下文快照。\",\"refs\":[\"#1\",\"#3\"]}]",
   "gold": {
     "mutations": [
       {
         "op": "add",
         "workstream_id": "ws-launcher",
         "item_kind": "decision",
-        "title": "Resume 弹窗在启动前严格调用 prepare_resume 锁定快照",
+        "title": "Resume 启动前必须先调用 prepare_resume 锁定上下文快照",
         "authority": "user_explicit"
       }
     ],
     "effective_context": {
+      "ws-sync": [],
       "ws-launcher": [
         {
           "kind": "decision",
-          "title": "Resume 弹窗在启动前严格调用 prepare_resume 锁定快照"
+          "title": "Resume 启动前必须先调用 prepare_resume 锁定上下文快照"
         }
-      ],
-      "ws-sync": []
+      ]
     },
     "conflicts_count": 0
   },
@@ -90,5 +90,5 @@
     },
     "conflicts_count": 0
   },
-  "heuristic_expected_failure": "the hint vocabulary misses this phrasing entirely and the heuristic extracts zero mutations: the launcher decision is lost (chatter exclusion holds only trivially)"
+  "heuristic_expected_failure": "routing pins candidates[0]: the heuristic never weighs transcript content against candidate descriptions, so a Sync-first candidate order steals the Launcher decision"
 }
