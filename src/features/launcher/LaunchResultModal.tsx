@@ -2,26 +2,26 @@ import React, { useEffect, useState } from "react";
 import type { LaunchResult } from "../../types";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import { useDeliveryOff } from "../../app/experience";
 
 /**
  * What happened after a launch: command, context file, delivered bundle.
  *
- * 注入关闭时不显示 Context bundle，也不显示任何 token 计数（§15、§24）：
- * 这块内容直接不存在，而不是显示「计数为零 / 未注入」之类的占位说明。
+ * 「注入了什么」按这次启动**实际投递**的内容决定显隐（§15、§24）：不注入时
+ * markdown 为空，这块内容直接不存在，而不是显示零计数或「未注入」占位。
+ * 用实际结果而不是当前设置判断，因为设置可能在启动之后、弹窗关闭之前被改过。
  */
 export default function LaunchResultModal({ result, onClose }: {
   result: LaunchResult;
   onClose: () => void;
 }) {
-  const deliveryOff = useDeliveryOff();
+  const delivered = result.bundle.markdown.trim().length > 0;
   return (
     <Modal title="启动详情" onClose={onClose}>
       <div className="badge accent" style={{ marginBottom: 12 }}>已通过 {result.launched_via} 启动</div>
       <p className="small">{result.note}</p>
       <h3>执行的命令</h3>
       <div className="card mono small">{result.command_line}</div>
-      {!deliveryOff && (
+      {delivered && (
         <>
           <h3>注入的 Context</h3>
           <div className="card mono small" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto" }}>{result.bundle.markdown}</div>

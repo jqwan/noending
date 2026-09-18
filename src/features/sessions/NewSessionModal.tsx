@@ -197,7 +197,7 @@ export default function NewSessionModal({
               <div className="settings-row-label">Agent</div>
               <div className="settings-row-hint">
                 {agentResolved
-                  ? "未检测到可用的 Agent CLI — 请先在 设置 → Agents 配置"
+                  ? "未检测到可用的 Agent CLI — 请先在 设置 → Agent 配置"
                   : "加载中…"}
               </div>
             </div>

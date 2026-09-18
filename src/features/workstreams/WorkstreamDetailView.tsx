@@ -235,7 +235,7 @@ export default function WorkstreamDetailView({
               </button>
             ) : (
               <button className="btn ws-btn" disabled
-                title="未检测到可用的 Agent CLI — 到 Settings → Agents 配置">
+                title="未检测到可用的 Agent CLI — 到 设置 → Agent 配置">
                 {related_sessions.length === 0 ? "Start" : "New"}
               </button>
             )}

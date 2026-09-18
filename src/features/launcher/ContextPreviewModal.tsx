@@ -34,15 +34,19 @@ export default function ContextPreviewModal({
   const [staleError, setStaleError] = useState<string | null>(null);
   const deliveryOff = useDeliveryOff();
 
-  // 预览打开期间注入被关掉：交出关闭权，让调用方回收并重新准备。
-  useEffect(() => {
-    if (deliveryOff) onClose();
-  }, [deliveryOff, onClose]);
-
   const handleClose = () => {
     api.cancelPrepared(prepared.id).catch(console.error);
     onClose();
   };
+
+  // 预览开着的时候注入被关掉：自己先回收令牌，再把关闭权交出去。
+  // 调用方收到 onClose 时认为令牌已由预览释放，少这一句就会留下一个
+  // 只能等 TTL 清理的 preparation。
+  useEffect(() => {
+    if (!deliveryOff) return;
+    api.cancelPrepared(prepared.id).catch(console.error);
+    onClose();
+  }, [deliveryOff, prepared.id, onClose]);
 
   const handleLaunch = async () => {
     if (busy) return;
