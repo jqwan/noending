@@ -14,6 +14,7 @@
 //! in default resolution.
 
 pub mod capabilities;
+pub mod discovery;
 pub mod store;
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,7 @@ use crate::storage::Db;
 pub use capabilities::{
     capabilities_of, validate_runtime_overrides, AgentRuntimeCapabilities, RuntimeFieldCapability,
 };
+pub use discovery::{discover_runtime_options, AgentRuntimeDiscovery, ModelCatalog, ModelOption};
 pub use store::{get_runtime_overrides, set_runtime_overrides};
 
 /// Explicit user overrides for one Agent. `None` = Agent default = no CLI argument.
