@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import type { Route } from "../app/routes";
 
 export function useRefreshSignal(cb: () => void) {
@@ -21,10 +21,36 @@ export function timeAgo(iso: string | null | undefined): string {
   return new Date(iso).toLocaleDateString();
 }
 
+/**
+ * 共用的确认 / 编辑 / 关系弹窗外壳（整体设计方案 §65）。
+ *
+ * Escape 与点击背板走的是同一个 `onClose`，所以调用方挂在 `onClose` 上的收尾
+ * （例如 New / Resume 释放 PreparedLaunch 令牌）不会因为键盘退出而漏掉。
+ *
+ * 弹窗可以叠（启动 Modal 上面再开 Context 预览）。两个 Modal 的 keydown 监听
+ * 都在 document 上，一次按键会同时命中，所以只让**最上面那一个**响应：
+ * 自己不是最后一个 `.modal-backdrop` 时直接忽略。
+ */
 export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  const backdropRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const backdrops = document.querySelectorAll(".modal-backdrop");
+      const top = backdrops[backdrops.length - 1];
+      if (top !== backdropRef.current) return;
+      e.stopPropagation();
+      onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
+    <div className="modal-backdrop" ref={backdropRef}
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
         <h2>{title}</h2>
         {children}
       </div>

@@ -87,7 +87,7 @@ function GeneralSettings() {
               <AgentIcon agent={a} size={16} />
               <span className="grow">{AGENT_LABELS[a]}</span>
               {agents[a] && !agents[a].detected && (
-                <span className="muted small">未检测到</span>
+                <span className="muted small">未检测</span>
               )}
               {defaultAgent === a && <span className="muted small">默认</span>}
             </button>
@@ -100,7 +100,7 @@ function GeneralSettings() {
         )}
         {defaultAgent === null && (
           <p className="muted small" style={{ marginBottom: 0 }}>
-            未检测到任何 Agent CLI，新建 / 继续已停用。安装任意 Agent CLI 后重启应用即可启用。
+            未检测到任何 Agent CLI，新建 / 继续无法启动。安装任意 Agent CLI 后即可恢复。
           </p>
         )}
       </section>
@@ -142,7 +142,7 @@ function AgentsSettings() {
 }
 
 const DELIVERY_LEVELS: { key: ContextDeliveryLevel; label: string; hint: string }[] = [
-  { key: "off", label: "关闭", hint: "不把 NoEnding 的 Workstream Context 送进 Agent 会话。" },
+  { key: "off", label: "关闭", hint: "不把 NoEnding 的 Workstream Context 送进 Agent Session。" },
   { key: "compact", label: "精简", hint: "只送最重要的当前 Context 与最近变更。" },
   { key: "balanced", label: "均衡", hint: "送核心 Context 加少量相关信息。" },
   { key: "detailed", label: "详细", hint: "在需要更多背景时送更广的支撑信息。" },
@@ -248,7 +248,7 @@ function ContextDeliverySettings() {
     <section>
       <h3 style={{ marginTop: 0 }}>Context 注入</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
-        控制新建 / 继续 Agent 会话时，NoEnding 送进去多少 Workstream Context。
+        控制新建 / 继续 Session 时，NoEnding 送进去多少 Workstream Context。
         它只影响对外注入，不会停止摄入与同步。
       </p>
       <div className="settings-seg">
@@ -310,7 +310,7 @@ function AutomationSettings() {
       <div className="row-line">
         <div>
           <div className="settings-row-label">后台补摄</div>
-          <div className="settings-row-hint">应用启动时补摄离开期间产生的会话内容。</div>
+          <div className="settings-row-hint">应用启动时补摄离开期间产生的 Session 内容。</div>
         </div>
         <span className="badge success">开</span>
       </div>

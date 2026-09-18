@@ -20,7 +20,7 @@ const SOURCE_NOTE: Record<ModelSource, string | null> = {
   not_loaded: null,
   dynamic: null,
   suggested: "以下是 NoEnding 的建议值，不代表你账号当前可用的完整模型列表。",
-  unavailable: "无法从 Agent 获取模型列表；Agent default 与 Custom 仍然可用。",
+  unavailable: "无法从 Agent 获取模型列表；「Agent 默认值」与「自定义」仍然可用。",
 };
 
 export function isOverridable(cap: RuntimeFieldCapability) {
@@ -29,7 +29,7 @@ export function isOverridable(cap: RuntimeFieldCapability) {
 
 /**
  * Preview 里的 Runtime 意图：显示的就是 Launch 将要（或不会）传给 CLI 的参数。
- * 数据来源是 PreparedLaunch 中冻结的 override，不是重新读取的 Settings。
+ * 数据来源是 PreparedLaunch 中冻结的 override，不是重新读取的设置。
  */
 export function RuntimeIntentBadges({ agent, runtime }: {
   agent: Agent;
@@ -38,7 +38,7 @@ export function RuntimeIntentBadges({ agent, runtime }: {
   const fields = Object.keys(FIELD_LABELS[agent]) as Field[];
   const overridden = fields.filter((f) => runtime[f] !== null);
   if (overridden.length === 0) {
-    return <span className="badge">Runtime: 全部 Agent default</span>;
+    return <span className="badge">Runtime：Agent 默认值</span>;
   }
   return (
     <>
@@ -48,15 +48,15 @@ export function RuntimeIntentBadges({ agent, runtime }: {
         </span>
       ))}
       {overridden.length < fields.length && (
-        <span className="badge">其余 Agent default</span>
+        <span className="badge">其余为 Agent 默认值</span>
       )}
     </>
   );
 }
 
 /**
- * Settings → Agents 的一块：安装状态 + 该 Agent 的 Runtime Overrides。
- * 每个字段只有两种状态——Agent default（不传参数）或显式 Override。
+ * 设置 → Agent 的一块：安装状态 + 该 Agent 的 Runtime Overrides。
+ * 每个字段只有两种状态——Agent 默认值（不传参数）或显式 Override。
  */
 export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
   const [st, setSt] = useState<AgentRuntimeSettings | null>(null);
@@ -94,7 +94,11 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
   }, [refresh]);
 
   if (!st) {
-    return <div className="settings-agent-runtime muted small">{AGENT_LABELS[agent]} …</div>;
+    return (
+      <div className="settings-agent-runtime muted small">
+        {AGENT_LABELS[agent]} 加载中…
+      </div>
+    );
   }
 
   const overrides = st.overrides;
@@ -161,19 +165,19 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
           {value === null ? "" : <em className="runtime-override-tag">Override</em>}
         </span>
         <select value={selectValue} onChange={(e) => pick(field, e.target.value)}>
-          <option value={DEFAULT_VALUE}>Agent default</option>
+          <option value={DEFAULT_VALUE}>Agent 默认值</option>
           {known.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
           {isCustomValue && <option value={value}>{value}</option>}
-          <option value={CUSTOM_VALUE}>Custom…</option>
+          <option value={CUSTOM_VALUE}>自定义…</option>
         </select>
         {custom === field ? (
           <input
             type="text"
             autoFocus
             value={customText}
-            placeholder={field === "model" ? "model id" : "value"}
+            placeholder={field === "model" ? "模型 ID" : "自定义值"}
             onChange={(e) => setCustomText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") commitCustom(field);
@@ -203,7 +207,7 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
         <div className="row">
           {st.version && <span className="muted mono small">{st.version}</span>}
           <span className={`badge ${st.detected ? "success" : ""}`}>
-            {st.detected ? "Detected" : "Not detected"}
+            {st.detected ? "已检测" : "未检测"}
           </span>
         </div>
       </div>
@@ -214,7 +218,7 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
 
       <div className="runtime-footer">
         <button className="btn ghost small" onClick={() => void refresh()} disabled={loadingModels}>
-          {loadingModels ? "Refreshing…" : "Refresh models"}
+          {loadingModels ? "正在刷新…" : "刷新模型"}
         </button>
         <span className="muted small">
           {SOURCE_NOTE[modelSource] ?? `${models.length} 个模型来自 ${AGENT_LABELS[agent]} CLI`}

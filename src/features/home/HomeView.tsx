@@ -57,7 +57,10 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
           <div className="actions-row">
             {/* 打开的是全局新建 Session 面板：Agent 未检测到时由面板给出
                 「未检测到可用的 Agent CLI」与不可点的启动按钮，这里不再自己
-                判断（避免在 Agent 还在解析时把按钮误标成「未检测」）。 */}
+                判断（避免在 Agent 还在解析时把按钮误标成「未检测」）。
+                也正因为如此，这里不再额外挂一个 `!defaultAgent` 的「配置 Agent」
+                链接：defaultAgent 从 hook 里异步解析，链接会在解析期间闪一下，
+                而它承诺的「没有 Agent」那时还只是未知（§25 状态必须是真的）。 */}
             <button className="btn ws-btn" onClick={() => setCreatingSession(true)}>
               {defaultAgent ? (
                 <>
@@ -68,12 +71,6 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
                 "新建 Session"
               )}
             </button>
-            {!defaultAgent && (
-              <button className="link small"
-                onClick={() => navigate({ view: "settings", section: "agents" })}>
-                配置 Agent
-              </button>
-            )}
           </div>
           {archivedOnly && (
             <p className="muted small" style={{ marginTop: 18 }}>

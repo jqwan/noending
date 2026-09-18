@@ -40,8 +40,8 @@ export default function SourceDetailModal({
   }, [revisionId]);
 
   return (
-    <Modal title="Context 来源追溯 (Provenance)" onClose={onClose}>
-      {loading && <div className="muted" style={{ padding: "16px 0" }}>正在解析来源凭据…</div>}
+    <Modal title="Context 来源追溯" onClose={onClose}>
+      {loading && <div className="muted" style={{ padding: "16px 0" }}>加载中…</div>}
       {error && <div className="badge warn" style={{ marginBottom: 12 }}>{error}</div>}
 
       {!loading && !detail && !error && (
@@ -54,7 +54,7 @@ export default function SourceDetailModal({
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="row-line" style={{ borderTop: 0 }}>
             <div>
-              <div className="settings-row-label">事实权威级别 (Authority)</div>
+              <div className="settings-row-label">事实权威级别</div>
               <div className="settings-row-hint">系统对该修订事实的权威归属与来源类型</div>
             </div>
             <span className="badge accent">
@@ -64,11 +64,11 @@ export default function SourceDetailModal({
 
           <div className="row-line">
             <div>
-              <div className="settings-row-label">来源类型 (Source Type)</div>
+              <div className="settings-row-label">来源类型</div>
               <div className="settings-row-hint">产生该修订版本的机制</div>
             </div>
             <span className="badge">
-              {detail.source_type ?? "unknown"}
+              {detail.source_type ?? "未知"}
             </span>
           </div>
 
@@ -101,7 +101,7 @@ export default function SourceDetailModal({
                     onNavigateSession(detail.session_id!);
                   }}
                 >
-                  查看会话
+                  查看 Session
                 </button>
               )}
             </div>
@@ -110,8 +110,8 @@ export default function SourceDetailModal({
           {detail.event_sequence !== null && detail.event_sequence !== undefined && (
             <div className="row-line">
               <div>
-                <div className="settings-row-label">消息序号 (Sequence)</div>
-                <div className="settings-row-hint">在源 Transcript 中的事件序号</div>
+                <div className="settings-row-label">消息序号</div>
+                <div className="settings-row-hint">在原始转录记录中的事件序号</div>
               </div>
               <span className="mono small">#{detail.event_sequence}</span>
             </div>
@@ -120,7 +120,7 @@ export default function SourceDetailModal({
           {detail.event_ts && (
             <div className="row-line">
               <div>
-                <div className="settings-row-label">观测时间 (Observed)</div>
+                <div className="settings-row-label">观测时间</div>
                 <div className="settings-row-hint">{detail.event_ts}</div>
               </div>
               <span className="small muted">{timeAgo(detail.event_ts)}</span>
@@ -129,7 +129,7 @@ export default function SourceDetailModal({
 
           {detail.evidence && (
             <div style={{ marginTop: 6 }}>
-              <div className="section-label" style={{ margin: "0 0 6px" }}>原文证据 (Evidence)</div>
+              <div className="section-label" style={{ margin: "0 0 6px" }}>原文证据</div>
               <div
                 style={{
                   padding: "10px 12px",
@@ -161,8 +161,8 @@ export default function SourceDetailModal({
           {detail.source_ref && (
             <div className="row-line">
               <div>
-                <div className="settings-row-label">内部引用 (Source Reference)</div>
-                <div className="settings-row-hint">事件定位或引用标识符</div>
+                <div className="settings-row-label">内部引用</div>
+                <div className="settings-row-hint">指回原始记录的事件定位符</div>
               </div>
               <span className="mono small">{detail.source_ref}</span>
             </div>

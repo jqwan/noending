@@ -20,7 +20,7 @@ interface AssistantMessage {
 
 interface AssistantConfig {
   /** Which Agent answers — the Assistant's only runtime choice. Model /
-   *  provider / effort come from Settings → Agents like every consumer. */
+   *  provider / effort come from 设置 → Agent like every consumer. */
   agent: string;
 }
 
@@ -47,7 +47,7 @@ function runtimeSummary(st: AgentRuntimeSettings | null): string {
   const passed = (["model", "provider", "effort"] as const)
     .filter((f) => o[f] !== null)
     .map((f) => `${f}=${o[f]}`);
-  return passed.length ? `Runtime: ${passed.join(" · ")}` : "Runtime: Agent default";
+  return passed.length ? `Runtime：${passed.join(" · ")}` : "Runtime：Agent 默认值";
 }
 
 const SUGGESTIONS = [
@@ -110,7 +110,7 @@ export default function AssistantView({ scope, navigate }: {
     api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "open" && c.visibility === "normal"))).catch(console.error);
     api.listProjects().then(setProjects).catch(console.error);
   }, []);
-  // Runtime 是只读视图：真正的编辑发生在 Settings → Agents，这里只显示
+  // Runtime 是只读视图：真正的编辑发生在「设置 → Agent」，这里只显示
   // Assistant 所选 Agent 当前的 override。
   const loadRuntime = useCallback((agent: string) => {
     if (agent === "none") {
@@ -199,7 +199,7 @@ export default function AssistantView({ scope, navigate }: {
         <div>
           <h1>Assistant</h1>
           <p className="page-sub">
-            Workspace Assistant，经由你已登录的 Agent CLI 无头运行（<span className="mono">{cfg ? `${cfg.agent} · ${cfg.agent === "none" ? "retrieval-only" : runtimeSummary(runtime)}` : "…"}</span>）。
+            Assistant 经由你已登录的 Agent CLI 无头运行（<span className="mono">{cfg ? `${CHOICE_LABELS[cfg.agent] ?? cfg.agent} · ${cfg.agent === "none" ? "仅检索" : runtimeSummary(runtime)}` : "…"}</span>）。
           </p>
         </div>
         <div className="actions">
@@ -208,10 +208,10 @@ export default function AssistantView({ scope, navigate }: {
       </div>
 
       <div className="scope-row">
-        <span className="muted small">Scope:</span>
+        <span className="muted small">范围</span>
         <select value={scopeValue(currentScope)}
           onChange={(e) => setCurrentScope(scopeFromValue(e.target.value))}>
-          <option value="workspace">Workspace</option>
+          <option value="workspace">整个工作区</option>
           {projects.map((p) => (
             <option key={p.id} value={`project:${p.id}`}>Project · {p.name}</option>
           ))}
@@ -236,8 +236,8 @@ export default function AssistantView({ scope, navigate }: {
         {messages.length === 0 && (
           <div className="assistant-empty">
             <div className="spark">✦</div>
-            <h2>What are you working on?</h2>
-            <p className="hint">Ask about your Workstreams, Sessions and Context.</p>
+            <h2>你现在在推进什么？</h2>
+            <p className="hint">可以问 Workstreams、Sessions 与 Context。</p>
             <div className="suggest-list">
               {SUGGESTIONS.map((s) => (
                 <button key={s} className="suggest-chip" onClick={() => send(s)}>{s}</button>
@@ -255,7 +255,7 @@ export default function AssistantView({ scope, navigate }: {
                 </div>
               )}
               {m.runtime && m.role === "assistant" && (
-                <div className="muted small" style={{ marginTop: 6 }}>runtime: {m.runtime}</div>
+                <div className="muted small" style={{ marginTop: 6 }}>Runtime：{m.runtime}</div>
               )}
             </div>
           </div>
@@ -264,14 +264,14 @@ export default function AssistantView({ scope, navigate }: {
       </div>
 
       <div className="row" style={{ marginTop: 10 }}>
-        <input type="text" placeholder="Ask NoEnding...（问上下文、启动 Session、查同步历史）" value={input}
+        <input type="text" placeholder="问 NoEnding…（问上下文、启动 Session、查摄入历史）" value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()} />
-        <button className="btn primary" onClick={() => send()} disabled={busy}>Send</button>
+        <button className="btn primary" onClick={() => send()} disabled={busy}>发送</button>
       </div>
 
       <details className="details-feed">
-        <summary>最近同步 <span className="muted">（Background Mode，共 {runs.length} 条）</span></summary>
+        <summary>最近同步 <span className="muted">（后台，共 {runs.length} 条）</span></summary>
         <div>
           {runs.map((r) => (
             <div key={r.id} className="feed-row">
@@ -290,7 +290,7 @@ export default function AssistantView({ scope, navigate }: {
             <h2>Assistant 使用的 Agent</h2>
             <p className="muted small">
               Assistant 经你已登录的 Agent CLI 无头运行，无需单独 API Key。模型 / Provider / Effort 属于
-              Runtime 配置，由 Settings → Agents 统一管理（与 New Session、Resume、后台同步同一套 override）；
+              Runtime 配置，由「设置 → Agent」统一管理（与新建 Session、继续 Session、后台同步同一套 override）；
               这里只显示、不编辑。
             </p>
             {AGENT_CHOICES.map((k) => (
@@ -319,7 +319,7 @@ export default function AssistantView({ scope, navigate }: {
             )}
             <div className="row" style={{ justifyContent: "space-between", marginTop: 14 }}>
               <button className="btn" onClick={() => { setCfgOpen(false); navigate({ view: "settings", section: "agents" }); }}>
-                Settings → Agents
+                前往设置 → Agent
               </button>
               <button className="btn primary" onClick={() => setCfgOpen(false)}>完成</button>
             </div>
@@ -340,8 +340,8 @@ function ActionCard({ json, onExecute, navigate }: {
   try { action = JSON.parse(json); } catch { /* ignore */ }
   if (!action) return null;
   const label = action.action === "launch_new_session"
-    ? `启动 New Session · ${action.agent ?? "?"}`
-    : `Resume Session · ${action.session_id?.slice(0, 8) ?? "?"}`;
+    ? `启动新建的 Session · ${CHOICE_LABELS[action.agent ?? ""] ?? action.agent ?? "?"}`
+    : `继续 Session · ${action.session_id?.slice(0, 8) ?? "?"}`;
   return (
     <div className="card" style={{ margin: 0 }}>
       <div className="row between">

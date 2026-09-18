@@ -8,7 +8,7 @@ export default function LazyRouter(props: {
   actionSeq: number;
 }) {
   return (
-    <Suspense fallback={<div className="main">Loading…</div>}>
+    <Suspense fallback={<div className="main">加载中…</div>}>
       <Router {...props} />
     </Suspense>
   );

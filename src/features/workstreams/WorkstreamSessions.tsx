@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import ResumeSessionModal from "../sessions/ResumeSessionModal";
+import { sessionDisplayTitle, UNTITLED_SESSION } from "../sessions/SessionTable";
 import { AGENT_LABELS, type Session } from "../../types";
 import type { Route } from "../../app/routes";
 
@@ -43,7 +44,9 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession }:
         <div className="rail-row" key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
           <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
           <div className="rail-main">
-            <div className="rail-title">{s.title ?? s.agent_session_id}</div>
+            <div className="rail-title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
+              {sessionDisplayTitle(s.title)}
+            </div>
             <div className="rail-sub">{timeAgo(s.last_activity_at ?? s.started_at)}</div>
           </div>
           <button className="btn small"
