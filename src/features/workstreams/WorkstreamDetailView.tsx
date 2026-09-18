@@ -7,6 +7,7 @@ import { useRefreshSignal, Modal } from "../../components/common";
 import { IntelligenceOnly } from "../../app/experience";
 import NewSessionModal from "../sessions/NewSessionModal";
 import ResumeSessionModal from "../sessions/ResumeSessionModal";
+import { cwdDisplayLabel } from "../sessions/SessionTable";
 import {
   AGENT_LABELS,
   type Agent,
@@ -57,6 +58,27 @@ export default function WorkstreamDetailView({
   const [descriptionInput, setDescriptionInput] = useState("");
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState("");
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // ••• 菜单：点击外部与 Escape 都要收起。之前只有再点一次 ••• 才关得掉，
+  // 点别处它一直悬着（§25 交互一致性）。mousedown 阶段监听，先于 click，
+  // 所以菜单项自己的 click 仍然正常触发。
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,10 +134,27 @@ export default function WorkstreamDetailView({
     }
   };
 
+  /**
+   * 归档是后端对 `visibility` 的一次翻转（commands.rs `archive_workstream`）。
+   * 之前这里 `await` 完不判成败就跳走：失败时菜单收起、页面不动、没有任何
+   * 回执，用户只会以为"点了没反应"。现在失败留在原地说明原因，成功才跳板。
+   */
   const toggleArchive = async () => {
     setMenuOpen(false);
-    await api.archiveWorkstream(workstream.id);
-    navigate({ view: "workstreams" });
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    setActionError("");
+    try {
+      await api.archiveWorkstream(workstream.id);
+      navigate({ view: "workstreams" });
+    } catch (e) {
+      console.error(e);
+      setActionError(`归档失败：${String(e)}`);
+      refresh();
+    } finally {
+      setBusy(false);
+    }
   };
 
   const openCwdEditor = () => {
@@ -167,8 +206,9 @@ export default function WorkstreamDetailView({
         title={<span style={{ overflowWrap: "anywhere" }}>{workstream.title}</span>}
         actions={
           <>
-            <div style={{ position: "relative" }}>
-              <button className="btn ghost" onClick={() => setMenuOpen((v) => !v)} title="更多操作">
+            <div style={{ position: "relative" }} ref={menuRef}>
+              <button className="btn ghost" onClick={() => setMenuOpen((v) => !v)} title="更多操作"
+                aria-haspopup="true" aria-expanded={menuOpen}>
                 •••
               </button>
               {menuOpen && (
@@ -182,30 +222,27 @@ export default function WorkstreamDetailView({
                   <button className="menu-item" onClick={openCwdEditor}>
                     工作目录…
                   </button>
+                  {/* 不写 disabled={busy}：全局样式只给了 `button.btn:disabled`
+                      一种弱化态（global.css:56），`.menu-item` 上的 disabled 既
+                      不变灰也不换 cursor，等于"看着能点、点了没反应"。真正的
+                      重复提交由 toggleArchive 里的 busy 守卫挡掉。 */}
                   <button className="menu-item" onClick={toggleArchive}>
                     {archived ? "取消归档" : "归档"}
                   </button>
                 </div>
               )}
             </div>
-            {defaultAgent ? (
-              <button
-                className="btn ws-btn"
-                title={`用 ${AGENT_LABELS[defaultAgent]} 新建 Session`}
-                onClick={() => setNewSessionOpen(true)}
-              >
-                <AgentIcon agent={defaultAgent} />
-                新建 Session
-              </button>
-            ) : (
-              <button
-                className="btn ws-btn"
-                disabled
-                title="未检测到可用的 Agent CLI — 到 设置 → Agent 配置"
-              >
-                新建 Session
-              </button>
-            )}
+            {/* 与 Home / Workstream 卡片同一个判断：这一页不自己宣称「没有 Agent」。
+                defaultAgent 是本页异步读回来的，解析期间 disabled + 「未检测到」
+                的 tooltip 会说假话；真正判定交给 NewSessionModal（唯一启动路径）。 */}
+            <button
+              className="btn ws-btn"
+              title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建 Session` : "新建 Session"}
+              onClick={() => setNewSessionOpen(true)}
+            >
+              {defaultAgent ? <AgentIcon agent={defaultAgent} /> : null}
+              新建 Session
+            </button>
             {latest && (
               <button
                 className="btn primary ws-btn resume-primary"
@@ -222,7 +259,9 @@ export default function WorkstreamDetailView({
         <div className="ws-detail-head-meta">
           {ctx.project_name && (
             <>
-              <button className="link" onClick={() => workstream.project_id && navigate({ view: "project", projectId: workstream.project_id })}>
+              <button className="link" title={ctx.project_name}
+                style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                onClick={() => workstream.project_id && navigate({ view: "project", projectId: workstream.project_id })}>
                 {ctx.project_name}
               </button>
               <span className="dot-sep" />
@@ -234,15 +273,24 @@ export default function WorkstreamDetailView({
           {workstream.default_cwd && (
             <>
               <span className="dot-sep" />
-              <span className="mono small" title="新建 Session 的默认工作目录（点击 ••• 可修改）">
-                {workstream.default_cwd}
+              {/* 这一行是不换行的 flex：超长 cwd（Windows 深路径、中文目录）会把
+                  后面的状态与「最近更新」挤出屏幕。中段省略，完整路径留在 title。 */}
+              <span
+                className="mono small"
+                title={`新建 Session 的默认工作目录（点击 ••• 可修改）\n${workstream.default_cwd}`}
+              >
+                {cwdDisplayLabel(workstream.default_cwd, 30)}
               </span>
             </>
           )}
           <span className="dot-sep" />
           <span>最近更新 {timeAgo(workstream.updated_at)}</span>
-          {error && <span style={{ color: "var(--warning)" }}>保存失败</span>}
         </div>
+        {(error || actionError) && (
+          <div className="small" style={{ color: "var(--warning)", marginTop: 6, overflowWrap: "anywhere" }}>
+            {actionError || `保存失败：${error}`}
+          </div>
+        )}
       </PageHeader>
 
       {/* ---------- Base Experience：Workstream 自身（§14） ---------- */}

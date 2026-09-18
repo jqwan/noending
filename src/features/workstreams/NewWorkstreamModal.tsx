@@ -21,6 +21,7 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
   const [project, setProject] = useState(initialProjectId ?? "none");
   const [defaultCwd, setDefaultCwd] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     api.listProjects().then(setProjects).catch(console.error);
@@ -29,6 +30,7 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
   const create = async () => {
     if (!title.trim() || busy) return;
     setBusy(true);
+    setError("");
     try {
       const w = await api.createWorkstream(
         project === "none" ? null : project,
@@ -39,7 +41,9 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
       onCreated?.(w);
       onClose();
     } catch (e) {
+      // 失败时留在弹窗里、把原因说出来：静默关闭会让用户以为已经建好了。
       console.error(e);
+      setError(String(e));
     } finally {
       setBusy(false);
     }
@@ -61,9 +65,14 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
           <option value="none">不归属（Workstream 可以独立存在）</option>
           {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select></label>
+      {error && (
+        <div className="badge warn" style={{ marginBottom: 10, overflowWrap: "anywhere" }}>{error}</div>
+      )}
       <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn primary" disabled={busy || !title.trim()} onClick={create}>创建</button>
+        <button className="btn" onClick={onClose} disabled={busy}>取消</button>
+        <button className="btn primary" disabled={busy || !title.trim()} onClick={create}>
+          {busy ? "创建中…" : "创建"}
+        </button>
       </div>
     </Modal>
   );

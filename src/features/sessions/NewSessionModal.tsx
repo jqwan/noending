@@ -190,18 +190,18 @@ export default function NewSessionModal({
         </label>
 
         {defaultAgent ? (
-          <AgentRow agent={defaultAgent} hint="Settings 中的默认 Agent" first />
+          <AgentRow agent={defaultAgent} hint="设置中的默认 Agent" first />
         ) : (
           <div className="row-line" style={{ borderTop: 0 }}>
             <div>
               <div className="settings-row-label">Agent</div>
               <div className="settings-row-hint">
                 {agentResolved
-                  ? "未检测到可用的 Agent CLI — 请先在 设置 → Agent 配置"
+                  ? "未检测到可用的 Agent CLI — 请先到「设置 → Agent」配置"
                   : "加载中…"}
               </div>
             </div>
-            <span className="badge">{agentResolved ? "未配置" : "—"}</span>
+            <span className="badge">{agentResolved ? "未检测" : "—"}</span>
           </div>
         )}
         <CwdRow cwd={prepared?.cwd} pending={preparing} />

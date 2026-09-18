@@ -44,7 +44,7 @@ export function runtimeIntentHint(
 ): string {
   return overriddenFields(agent, runtime).length === 0
     ? "未设置 override，由 Agent 自己决定"
-    : "来自 Settings 的 override，已随本次预览冻结";
+    : "来自设置中的 override，已随本次预览冻结";
 }
 
 /** 实验区文案：四级 delivery 的中文名（§2.1，只在 Delivery 未关闭时出现）。 */

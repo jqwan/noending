@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
 import WorkstreamCard from "../workstreams/WorkstreamCard";
+import { sessionDisplayTitle, UNTITLED_SESSION } from "../sessions/SessionTable";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Session } from "../../types";
@@ -84,7 +85,9 @@ export function RecentSessions({ navigate, onNewSession }: {
         sessions.map((s) => (
           <div className="list-row" key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
             <div className="grow">
-              <div className="title">{s.title ?? s.agent_session_id}</div>
+              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
+                {sessionDisplayTitle(s.title)}
+              </div>
             </div>
             <div className="side">
               <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>

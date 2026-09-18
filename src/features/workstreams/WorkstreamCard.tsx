@@ -43,18 +43,30 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
     <>
       <article className={`ws-card ${mode}`} onClick={openDetail}>
         <header className="ws-card-head">
-          <h3 className="ws-card-title">{card.title}</h3>
+          {/* 单行截断（.ws-card-title）与两行 clamp（.ws-card-body）都靠 title
+              把完整内容留给用户，否则长标题在窄窗口里就永久丢了。 */}
+          <h3 className="ws-card-title" title={card.title}>{card.title}</h3>
           <div className="ws-card-side">
             {card.lifecycle !== "open" && (
               <span className="badge">{LIFECYCLE_LABELS[card.lifecycle] ?? card.lifecycle}</span>
             )}
-            {/* Project 是可选组织层：未归属时不显示任何占位 */}
-            {card.project_name && <span className="ws-card-project">{card.project_name}</span>}
+            {/* Project 是可选组织层：未归属时不显示任何占位。
+                .ws-card-side 是 flex:none，长 Project 名会把标题挤没，
+                所以这里就地限宽并把全名留在 title 上。 */}
+            {card.project_name && (
+              <span
+                className="ws-card-project"
+                title={card.project_name}
+                style={{ maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              >
+                {card.project_name}
+              </span>
+            )}
           </div>
         </header>
 
         {body ? (
-          <p className="ws-card-body">{body}</p>
+          <p className="ws-card-body" title={body}>{body}</p>
         ) : (
           <p className="ws-card-body muted">还没有描述 — 在详情页补充。</p>
         )}
@@ -66,32 +78,19 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
               : `最近活动 ${timeAgo(card.last_activity_at)} · ${card.session_count} 个 Session`}
           </span>
           <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-            {defaultAgent ? (
-              <button
-                className="btn small ws-btn"
-                title={`用 ${AGENT_LABELS[defaultAgent]} 新建 Session`}
-                onClick={() => setNewSessionOpen(true)}
-              >
-                <AgentIcon agent={defaultAgent} />
-                新建 Session
-              </button>
-            ) : (
-              <button
-                className="btn small ws-btn"
-                disabled
-                title="未检测到可用的 Agent CLI — 到 设置 → Agent 配置"
-              >
-                新建 Session
-              </button>
-            )}
-            {!defaultAgent && (
-              <button
-                className="link small"
-                onClick={() => navigate({ view: "settings", section: "agents" })}
-              >
-                配置
-              </button>
-            )}
+            {/* 与 Home 同一个判断：卡片不自己宣称「没有 Agent」。`defaultAgent`
+                由 useWorkstreamCards 异步解析（返回形状按 §8.1.1 冻结，没有
+                "解析完成"这一位），所以在解析期间 disabled + 「未检测到」的
+                tooltip 会说假话。是否真的没有 Agent 一律交给 NewSessionModal
+                自己判定——它同时是唯一的启动路径。 */}
+            <button
+              className="btn small ws-btn"
+              title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建 Session` : "新建 Session"}
+              onClick={() => setNewSessionOpen(true)}
+            >
+              {defaultAgent ? <AgentIcon agent={defaultAgent} /> : null}
+              新建 Session
+            </button>
             {card.latest_session && (
               <button
                 className={`btn small ws-btn ${mode === "compact" ? "resume-primary" : ""}`}

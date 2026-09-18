@@ -6,7 +6,7 @@ import { useRefreshSignal } from "../../components/common";
 import SessionTable, { agentDisplayLabel, sessionDisplayTitle } from "./SessionTable";
 import NewSessionModal from "./NewSessionModal";
 import ResumeSessionModal from "./ResumeSessionModal";
-import { AGENT_LABELS, type Agent, type Project, type Session, type SessionBindingRow } from "../../types";
+import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session, type SessionBindingRow } from "../../types";
 import type { Route, ViewAction } from "../../app/routes";
 
 type AssignedFilter = "all" | "assigned" | "unassigned";
@@ -23,6 +23,12 @@ export default function SessionsView({ navigate, action, actionSeq }: {
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [bindings, setBindings] = useState<Map<string, SessionBindingRow[]>>(new Map());
+  /**
+   * Session 来源只用来把"空"拆成两种真实情况：一个来源都没启用 vs
+   * 启用了但还没发现 Session（§23）。读失败时保持 null，文案退回中性说法——
+   * 不能把"读不到"说成"没启用"。
+   */
+  const [sources, setSources] = useState<IngestSource[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [query, setQuery] = useState("");
   const [agent, setAgent] = useState<"all" | Agent>("all");
@@ -34,6 +40,10 @@ export default function SessionsView({ navigate, action, actionSeq }: {
 
   const refresh = useCallback(() => {
     let cancelled = false;
+    // 来源列表独立加载：它只为空状态分类服务，读失败不该让整张表变成"读取失败"。
+    api.listIngestSources()
+      .then((ss) => { if (!cancelled) setSources(ss); })
+      .catch((e) => { console.error(e); if (!cancelled) setSources(null); });
     Promise.all([api.listAllSessions(), api.listProjects(), api.listSessionBindings()])
       .then(([ss, ps, rows]) => {
         if (cancelled) return;
@@ -134,6 +144,22 @@ export default function SessionsView({ navigate, action, actionSeq }: {
     setAssigned("all");
   };
 
+  /**
+   * 空库的三种情况分开说话（§23「无 Session」不是一条提示能覆盖的）：
+   * 一个来源都没启用 / 启用的来源目录不在了 / 来源正常但确实还没跑过。
+   * 来源读不到时退回中性说法，不宣称任何一件没被证实的事。
+   */
+  const noSourcesEnabled = sources !== null && sources.every((s) => !s.enabled);
+  const missingSourcePath = sources?.find((s) => s.enabled && !s.exists)?.path ?? "";
+  const emptyTitle = noSourcesEnabled ? "还没有启用任何 Session 来源" : "还没有发现本地 Session";
+  const emptyHint = noSourcesEnabled
+    ? "NoEnding 只读取 Agent 自己目录里的 Session 文件，不会修改它们。到「设置 → Session 来源」勾选要扫描的目录，应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的 Session。"
+    : missingSourcePath
+      ? `已启用的来源里有目录当前不存在：${missingSourcePath}。接回移动盘或换一台机器时，到「设置 → Session 来源」调整目录即可。`
+      : sources === null
+        ? "NoEnding 只读取 Agent 自己目录里的 Session 文件，不会修改它们。应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的 Session；也可以新建一个 Session 立刻开始。"
+        : "已启用的来源里还没有可发现的 Session。Agent 跑过之后应用会在启动时自动发现；也可以新建一个 Session 立刻开始。";
+
   return (
     <div className="main">
       <PageHeader
@@ -204,8 +230,8 @@ export default function SessionsView({ navigate, action, actionSeq }: {
       )}
       {shown !== null && shown.length === 0 && (sessions?.length ?? 0) === 0 && !loadFailed && (
         <EmptyState
-          title="尚未导入任何 Session"
-          hint="NoEnding 只读取 Agent 自己目录里的会话文件，不会修改它们。启用 Session 来源后，应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的会话。"
+          title={emptyTitle}
+          hint={emptyHint}
           actions={
             <>
               <button className="btn small" onClick={() => navigate({ view: "settings", section: "sources" })}>

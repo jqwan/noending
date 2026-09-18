@@ -20,6 +20,8 @@ export default function Sidebar({ route, navigate, onSearch }: {
   const [creatingProject, setCreatingProject] = useState(false);
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [projectError, setProjectError] = useState("");
 
   const refresh = useCallback(() => {
     api.listProjects().then(setProjects).catch(console.error);
@@ -42,12 +44,23 @@ export default function Sidebar({ route, navigate, onSearch }: {
   useEffect(() => onEvent(EVT_SYNCED, refresh), [refresh]);
 
   const createProject = async () => {
-    if (!name.trim()) return;
-    await api.createProject(name, desc);
-    setCreatingProject(false);
-    setName("");
-    setDesc("");
-    refresh();
+    if (!name.trim() || projectBusy) return;
+    setProjectBusy(true);
+    setProjectError("");
+    try {
+      await api.createProject(name, desc);
+      setCreatingProject(false);
+      setName("");
+      setDesc("");
+      refresh();
+    } catch (e) {
+      // 失败时保留弹窗和已输入的内容，把原因写在脸上；静默返回会让用户
+      // 以为这个 Project 已经建好了（§25 错误状态）。
+      console.error(e);
+      setProjectError(String(e));
+    } finally {
+      setProjectBusy(false);
+    }
   };
 
   const workspaceActive = (v: "workstreams" | "sessions" | "assistant") => {
@@ -139,9 +152,16 @@ export default function Sidebar({ route, navigate, onSearch }: {
                 placeholder="例如：Agent Workspace / Japan Trip" /></label>
             <label className="field"><span>描述（可选）</span>
               <textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
+            {projectError && (
+              <div className="badge warn" style={{ marginBottom: 10, overflowWrap: "anywhere" }}>
+                {projectError}
+              </div>
+            )}
             <div className="row" style={{ justifyContent: "flex-end" }}>
-              <button className="btn" onClick={() => setCreatingProject(false)}>取消</button>
-              <button className="btn primary" onClick={createProject}>创建</button>
+              <button className="btn" onClick={() => setCreatingProject(false)} disabled={projectBusy}>取消</button>
+              <button className="btn primary" disabled={projectBusy || !name.trim()} onClick={createProject}>
+                {projectBusy ? "创建中…" : "创建"}
+              </button>
             </div>
           </div>
         </div>

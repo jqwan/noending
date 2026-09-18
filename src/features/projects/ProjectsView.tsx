@@ -17,6 +17,8 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   const refresh = () => {
     api.listProjects().then(setProjects).catch(console.error);
@@ -41,10 +43,20 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   }, [projects, workstreams, sessions]);
 
   const create = async () => {
-    if (!name.trim()) return;
-    await api.createProject(name, desc);
-    setCreating(false); setName(""); setDesc("");
-    refresh();
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.createProject(name, desc);
+      setCreating(false); setName(""); setDesc("");
+      refresh();
+    } catch (e) {
+      // 失败时保留弹窗与已输入的内容：用户不该重新打一遍名字。
+      console.error(e);
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -53,16 +65,16 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
         title="Projects"
         sub="Project 是可选的长期整理层；Workstream 不要求归属任何 Project。"
         actions={
-          <button className="btn primary" onClick={() => setCreating(true)}>+ New Project</button>
+          <button className="btn primary" onClick={() => setCreating(true)}>+ 新建 Project</button>
         }
       />
 
       {projects === null && <div className="muted">加载中…</div>}
       {projects !== null && projects.length === 0 && (
         <EmptyState
-          title="No projects yet."
-          hint="Projects are optional. 当你想把相关的工作归到同一个长期主题时再创建即可。"
-          actions={<button className="btn small" onClick={() => setCreating(true)}>+ New Project</button>}
+          title="还没有 Project"
+          hint="Project 是可选的。当你想把相关的工作归到同一个长期主题时再创建即可。"
+          actions={<button className="btn small" onClick={() => setCreating(true)}>+ 新建 Project</button>}
         />
       )}
 
@@ -72,12 +84,12 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
           return (
             <div key={p.id} className="ws-card compact" onClick={() => navigate({ view: "project", projectId: p.id })}>
               <header className="ws-card-head">
-                <h3 className="ws-card-title">{p.name}</h3>
+                <h3 className="ws-card-title" title={p.name}>{p.name}</h3>
               </header>
               {p.description && <p className="ws-card-body">{p.description}</p>}
               <footer className="ws-card-meta">
-                <span>{st?.ws ?? 0} workstreams · {st?.sessions ?? 0} sessions</span>
-                <span>Last active {st?.last ? timeAgo(st.last) : "—"}</span>
+                <span>{st?.ws ?? 0} 个 Workstream · {st?.sessions ?? 0} 个 Session</span>
+                <span>最近活动 {st?.last ? timeAgo(st.last) : "—"}</span>
               </footer>
             </div>
           );
@@ -91,9 +103,14 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
               placeholder="例如：Agent Workspace / Japan Trip" /></label>
           <label className="field"><span>描述（可选）</span>
             <textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
+          {error && (
+            <div className="badge warn" style={{ marginBottom: 10, overflowWrap: "anywhere" }}>{error}</div>
+          )}
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setCreating(false)}>取消</button>
-            <button className="btn primary" onClick={create}>创建</button>
+            <button className="btn" onClick={() => setCreating(false)} disabled={busy}>取消</button>
+            <button className="btn primary" disabled={busy || !name.trim()} onClick={create}>
+              {busy ? "创建中…" : "创建"}
+            </button>
           </div>
         </Modal>
       )}
