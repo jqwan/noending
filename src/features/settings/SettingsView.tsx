@@ -4,21 +4,24 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import SourcesSettings from "./SourcesSettings";
 import AgentRuntimeRow from "./AgentRuntimeSettings";
+import { refreshBaseExperience, useBaseExperience } from "../../app/experience";
 import { AGENT_LABELS, type Agent, type AppInfo, type ContextDeliveryLevel } from "../../types";
 import type { Route, SettingsSection } from "../../app/routes";
 
 const SECTIONS: { key: SettingsSection; label: string }[] = [
-  { key: "general", label: "General" },
-  { key: "agents", label: "Agents" },
-  { key: "sources", label: "Session Sources" },
-  { key: "sync", label: "Context & Sync" },
-  { key: "appearance", label: "Appearance" },
-  { key: "advanced", label: "Data & Advanced" },
+  { key: "general", label: "通用" },
+  { key: "agents", label: "Agent" },
+  { key: "sources", label: "Session 来源" },
+  { key: "appearance", label: "外观" },
+  { key: "advanced", label: "数据与高级" },
 ];
 
 /**
  * Settings（整体设计方案 §56-§62）：Main 内部二级导航 + 内容区。
  * 只暴露真正有用户价值的设置；实现细节（threshold/authority/cursor）不进 UI。
+ *
+ * Base Experience（方案 v0.1 §11.7）：Context 相关设置不再是普通入口，
+ * 统一收进「数据与高级 → 实验性功能」。
  */
 export default function SettingsView({ section, navigate }: {
   section: SettingsSection;
@@ -28,7 +31,7 @@ export default function SettingsView({ section, navigate }: {
 
   return (
     <div className="main narrow">
-      <PageHeader title="Settings" />
+      <PageHeader title="设置" />
       <div className="settings-layout">
         <nav className="settings-nav">
           {SECTIONS.map((s) => (
@@ -43,7 +46,6 @@ export default function SettingsView({ section, navigate }: {
           {current === "general" && <GeneralSettings />}
           {current === "agents" && <AgentsSettings />}
           {current === "sources" && <SourcesSettings />}
-          {current === "sync" && <ContextSyncSettings />}
           {current === "appearance" && <AppearanceSettings />}
           {current === "advanced" && <AdvancedSettings />}
         </div>
@@ -73,9 +75,9 @@ function GeneralSettings() {
   return (
     <>
       <section>
-        <h3 style={{ marginTop: 0 }}>Default Agent</h3>
+        <h3 style={{ marginTop: 0 }}>默认 Agent</h3>
         <p className="muted small" style={{ marginTop: 0 }}>
-          所有 Workstream 卡片与 Sessions 里的 New / Start 都使用这个 Agent，不再每次选择。
+          所有 Workstream 卡片与 Sessions 里的新建 / 继续都使用这个 Agent，不再每次选择。
         </p>
         <div className="settings-agents">
           {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
@@ -93,30 +95,30 @@ function GeneralSettings() {
         </div>
         {selectedUndetected && (
           <p className="muted small" style={{ color: "var(--warning)", marginBottom: 0 }}>
-            当前默认 Agent 未在本机检测到，New / Start 会失败。请安装它，或改选其他已检测的 Agent。
+            当前默认 Agent 未在本机检测到，新建 / 继续会失败。请安装它，或改选其他已检测的 Agent。
           </p>
         )}
         {defaultAgent === null && (
           <p className="muted small" style={{ marginBottom: 0 }}>
-            未检测到任何 Agent CLI，New / Start 已停用。安装任意 Agent CLI 后重启应用即可启用。
+            未检测到任何 Agent CLI，新建 / 继续已停用。安装任意 Agent CLI 后重启应用即可启用。
           </p>
         )}
       </section>
       <section>
-        <h3>Startup</h3>
+        <h3>启动</h3>
         <div className="row-line">
           <div>
-            <div className="settings-row-label">Startup Page</div>
-            <div className="settings-row-hint">应用启动固定进入 Home，继续最近的工作。</div>
+            <div className="settings-row-label">启动页面</div>
+            <div className="settings-row-hint">应用启动固定进入首页，继续最近的工作。</div>
           </div>
-          <span className="badge">Home</span>
+          <span className="badge">首页</span>
         </div>
         <div className="row-line">
           <div>
-            <div className="settings-row-label">Confirm before launching Session</div>
-            <div className="settings-row-hint">New / Resume 一键直达，不经确认页。</div>
+            <div className="settings-row-label">启动 Session 前确认</div>
+            <div className="settings-row-hint">新建 / 继续一键直达，不经确认页。</div>
           </div>
-          <span className="badge">Off</span>
+          <span className="badge">关闭</span>
         </div>
       </section>
     </>
@@ -127,10 +129,10 @@ function GeneralSettings() {
 function AgentsSettings() {
   return (
     <section>
-      <h3 style={{ marginTop: 0 }}>Agents</h3>
+      <h3 style={{ marginTop: 0 }}>Agent</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
         本机检测到的 Agent CLI。未检测到的 Agent 不可启动。
-        Runtime 每个字段默认都是 Agent default —— NoEnding 不传对应参数，也不猜测 Agent 的默认模型。
+        Runtime 每个字段默认都是 Agent 默认值 —— NoEnding 不传对应参数，也不猜测 Agent 的默认模型。
       </p>
       {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
         <AgentRuntimeRow key={a} agent={a} />
@@ -140,31 +142,63 @@ function AgentsSettings() {
 }
 
 const DELIVERY_LEVELS: { key: ContextDeliveryLevel; label: string; hint: string }[] = [
-  {
-    key: "off",
-    label: "Off",
-    hint: "Don't send NoEnding Workstream context to Agent sessions.",
-  },
-  {
-    key: "compact",
-    label: "Compact",
-    hint: "Send only the most important current context and recent changes.",
-  },
-  {
-    key: "balanced",
-    label: "Balanced",
-    hint: "Send core context plus relevant supporting information. Recommended.",
-  },
-  {
-    key: "detailed",
-    label: "Detailed",
-    hint: "Send broader supporting context when more background may be useful.",
-  },
+  { key: "off", label: "关闭", hint: "不把 NoEnding 的 Workstream Context 送进 Agent 会话。" },
+  { key: "compact", label: "精简", hint: "只送最重要的当前 Context 与最近变更。" },
+  { key: "balanced", label: "均衡", hint: "送核心 Context 加少量相关信息。" },
+  { key: "detailed", label: "详细", hint: "在需要更多背景时送更广的支撑信息。" },
 ];
 
-/** Context & Sync：Context Delivery 梯度控制与只读自动化说明（§50）。 */
-function ContextSyncSettings() {
-  const [level, setLevel] = useState<ContextDeliveryLevel>("balanced");
+/** 智能处理开关（§11.1）。它与注入梯度是两个正交开关。 */
+function IntelligenceSettings() {
+  const { intelligenceEnabled } = useBaseExperience();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const change = async (next: boolean) => {
+    if (busy || next === intelligenceEnabled) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setContextIntelligenceEnabled(next);
+      await refreshBaseExperience();
+    } catch (err) {
+      console.error(err);
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section>
+      <h3>实验性功能</h3>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        NoEnding 首先是一个可靠的本地工作空间：发现 Session、留下历史、随时继续。
+        下面这个开关决定它是否额外去自动理解你的工作。
+      </p>
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label">Context 智能处理</div>
+          <div className="settings-row-hint">
+            提取 Context 变更、自动归类 Workstream、生成待审阅与冲突。关闭时 Session 仍会被摄入和索引，
+            已有的 Context 与历史不会丢失；重新开启后从冻结的处理位置继续。
+          </div>
+        </div>
+        <div className="settings-seg">
+          <button disabled={busy} className={intelligenceEnabled ? "on" : ""} onClick={() => change(true)}>开启</button>
+          <button disabled={busy} className={intelligenceEnabled ? "" : "on"} onClick={() => change(false)}>关闭</button>
+        </div>
+      </div>
+      {error && (
+        <p className="small" style={{ color: "var(--danger)", marginBottom: 0 }}>{error}</p>
+      )}
+    </section>
+  );
+}
+
+/** Context Delivery：注入梯度（实验区，§11.7）。 */
+function ContextDeliverySettings() {
+  const [level, setLevel] = useState<ContextDeliveryLevel>("off");
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -198,6 +232,7 @@ function ContextSyncSettings() {
     setError(null);
     try {
       await api.setContextDeliveryLevel(next);
+      await refreshBaseExperience();
     } catch (err) {
       console.error(err);
       setLevel(prev);
@@ -210,66 +245,82 @@ function ContextSyncSettings() {
   const currentHint = DELIVERY_LEVELS.find((d) => d.key === level)?.hint;
 
   return (
-    <>
-      <section>
-        <h3 style={{ marginTop: 0 }}>Context Delivery</h3>
-        <p className="muted small" style={{ marginTop: 0 }}>
-          Controls how much Workstream context NoEnding sends when starting or resuming Agent sessions.
+    <section>
+      <h3 style={{ marginTop: 0 }}>Context 注入</h3>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        控制新建 / 继续 Agent 会话时，NoEnding 送进去多少 Workstream Context。
+        它只影响对外注入，不会停止摄入与同步。
+      </p>
+      <div className="settings-seg">
+        {DELIVERY_LEVELS.map((d) => (
+          <button
+            key={d.key}
+            disabled={loading || saving}
+            className={level === d.key ? "on" : ""}
+            onClick={() => changeLevel(d.key)}
+          >
+            {d.label}
+          </button>
+        ))}
+      </div>
+      {currentHint && (
+        <p className="muted small" style={{ marginBottom: 0, marginTop: 8 }}>
+          {currentHint}
         </p>
-        <div className="settings-seg">
-          {DELIVERY_LEVELS.map((d) => (
-            <button
-              key={d.key}
-              disabled={loading || saving}
-              className={level === d.key ? "on" : ""}
-              onClick={() => changeLevel(d.key)}
-            >
-              {d.label}
-            </button>
-          ))}
-        </div>
-        {currentHint && (
-          <p className="muted small" style={{ marginBottom: 0, marginTop: 8 }}>
-            {currentHint}
-          </p>
-        )}
-        {error && (
-          <p className="small" style={{ color: "var(--danger)", marginBottom: 0, marginTop: 8 }}>
-            {error}
-          </p>
-        )}
-      </section>
+      )}
+      {error && (
+        <p className="small" style={{ color: "var(--danger)", marginBottom: 0, marginTop: 8 }}>
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
 
-      <section>
-        <h3>Automation</h3>
-        <div className="row-line">
-          <div>
-            <div className="settings-row-label">Automatic Sync</div>
-            <div className="settings-row-hint">Session 有新内容时自动提取 Context 变更（带审计 Revision）。</div>
-          </div>
-          <span className="badge success">On</span>
+/** 自动化：只读说明，状态必须是真的（§6）。 */
+function AutomationSettings() {
+  const { intelligenceEnabled, deliveryLevel } = useBaseExperience();
+  const deliveryLabel = DELIVERY_LEVELS.find((d) => d.key === deliveryLevel)?.label ?? deliveryLevel;
+  return (
+    <section>
+      <h3 style={{ marginTop: 0 }}>自动化</h3>
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label">Session 摄入与索引</div>
+          <div className="settings-row-hint">发现 Session、存下事件、建立搜索索引，始终运行。</div>
         </div>
-        <div className="row-line">
-          <div>
-            <div className="settings-row-label">Automatic Workstream Classification</div>
-            <div className="settings-row-hint">自动归类只影响未显式绑定的 Session；你的手动指定优先。</div>
-          </div>
-          <span className="badge success">On</span>
+        <span className="badge success">开</span>
+      </div>
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label">Context 提取与自动归类</div>
+          <div className="settings-row-hint">自动归类只影响未显式绑定的 Session；你的手动指定优先。</div>
         </div>
-        <div className="row-line">
-          <div>
-            <div className="settings-row-label">Background Reconcile</div>
-            <div className="settings-row-hint">应用启动时补摄离开期间产生的会话内容。</div>
-          </div>
-          <span className="badge success">On</span>
+        <span className={`badge ${intelligenceEnabled ? "success" : ""}`}>
+          {intelligenceEnabled ? "开" : "关"}
+        </span>
+      </div>
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label">Context 注入</div>
+          <div className="settings-row-hint">由「实验性功能 → Context 注入」决定送多少。</div>
         </div>
-      </section>
-    </>
+        <span className={`badge ${deliveryLevel === "off" ? "" : "success"}`}>{deliveryLabel}</span>
+      </div>
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label">后台补摄</div>
+          <div className="settings-row-hint">应用启动时补摄离开期间产生的会话内容。</div>
+        </div>
+        <span className="badge success">开</span>
+      </div>
+    </section>
   );
 }
 
 /** Appearance：Theme（tokens 支持暗色，§61/§88）；Density 暂缓。 */
 type Theme = "system" | "light" | "dark";
+const THEME_LABELS: Record<Theme, string> = { system: "跟随系统", light: "浅色", dark: "深色" };
 function AppearanceSettings() {
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem("noending.theme");
@@ -289,22 +340,22 @@ function AppearanceSettings() {
 
   return (
     <section>
-      <h3 style={{ marginTop: 0 }}>Theme</h3>
+      <h3 style={{ marginTop: 0 }}>主题</h3>
       <div className="settings-seg">
-        {(["system", "light", "dark"] as Theme[]).map((t) => (
+        {(Object.keys(THEME_LABELS) as Theme[]).map((t) => (
           <button key={t} className={theme === t ? "on" : ""} onClick={() => apply(t)}>
-            {t[0].toUpperCase() + t.slice(1)}
+            {THEME_LABELS[t]}
           </button>
         ))}
       </div>
       <p className="muted small" style={{ marginBottom: 0 }}>
-        跟随系统时自动切换 Light / Dark。
+        跟随系统时自动切换浅色 / 深色。
       </p>
     </section>
   );
 }
 
-/** Data & Advanced（§62）：第一版只展示数据库路径。 */
+/** Data & Advanced（§62）：数据库位置 + 实验性功能（含 Context 相关设置，§11.7）。 */
 function AdvancedSettings() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   useEffect(() => {
@@ -312,24 +363,29 @@ function AdvancedSettings() {
   }, []);
 
   return (
-    <section>
-      <h3 style={{ marginTop: 0 }}>Database</h3>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Database Path</div>
-          <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
-            {info?.db_path ?? "…"}
+    <>
+      <IntelligenceSettings />
+      <ContextDeliverySettings />
+      <AutomationSettings />
+      <section>
+        <h3>数据库</h3>
+        <div className="row-line">
+          <div>
+            <div className="settings-row-label">数据库路径</div>
+            <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
+              {info?.db_path ?? "…"}
+            </div>
           </div>
         </div>
-      </div>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Data Folder</div>
-          <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
-            {info?.app_data_dir ?? "…"}
+        <div className="row-line">
+          <div>
+            <div className="settings-row-label">数据目录</div>
+            <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
+              {info?.app_data_dir ?? "…"}
+            </div>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
+    </>
   );
 }

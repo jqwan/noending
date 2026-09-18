@@ -31,11 +31,23 @@ export default function SessionDetailView({ sessionId, navigate }: {
   if (!detail) return <div className="main narrow">加载中…</div>;
   const { session, events, bindings } = detail;
 
+  /** 刷新 = 只摄入。Context 提取只在智能开启时发生（方案 v0.1 §11.6）。 */
   const doSync = async () => {
-    setSyncMsg("同步中…");
-    const r = await api.syncSession(sessionId);
-    setSyncMsg(r.applied > 0 ? `提取了 ${r.applied} 个 Context 变更` : "没有新的有效上下文");
-    refresh();
+    setSyncMsg("正在刷新…");
+    try {
+      const r = await api.syncSession(sessionId);
+      setSyncMsg(
+        r.ingested > 0
+          ? `摄入了 ${r.ingested} 条新消息`
+          : r.applied > 0
+            ? `提取了 ${r.applied} 个 Context 变更`
+            : "没有新内容",
+      );
+      refresh();
+    } catch (e) {
+      console.error(e);
+      setSyncMsg("刷新失败");
+    }
     setTimeout(() => setSyncMsg(""), 4000);
   };
 
@@ -56,7 +68,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
         actions={
           <>
             {syncMsg && <span className="badge accent" style={{ padding: "4px 10px" }}>{syncMsg}</span>}
-            <button className="btn ghost" onClick={doSync}>同步提取</button>
+            <button className="btn ghost" onClick={doSync}>刷新</button>
             <button className="btn primary" onClick={() => setResumeOpen(true)}>
               Resume
             </button>
@@ -87,7 +99,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
       </div>
       {bindings.length === 0 && (
         <div className="l1-none">
-          尚未关联 Workstream。同步之后系统会尝试自动归类；也可以不带上下文直接 Resume。
+          尚未关联 Workstream。可以在这里关联，也可以直接继续这个 Session。
         </div>
       )}
       {bindings.map(([b, title]) => (
@@ -106,7 +118,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
       {messages.length === 0 && (
         <div className="empty">
           还没有摄入消息。
-          <div className="invite"><button className="btn small" onClick={doSync}>同步这个 Session</button></div>
+          <div className="invite"><button className="btn small" onClick={doSync}>刷新这个 Session</button></div>
         </div>
       )}
 

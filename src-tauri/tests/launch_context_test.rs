@@ -1012,9 +1012,18 @@ fn token_budget_limits_sections_to_actually_delivered_content() {
 fn context_delivery_level_default_and_roundtrip() {
     let db = open_db("delivery-level-setting");
 
-    // 1. Unset → default is Balanced
+    // 1. Unset → Base Experience default is Off (nothing is injected until the
+    // user chooses a level; the v11 migration pins an explicit 'off' row for
+    // databases that predate it, and a missing row still means Off).
     let lvl = noending::commands::context_delivery_level_of(&db).unwrap();
-    assert_eq!(lvl, context::ContextDeliveryLevel::Balanced);
+    assert_eq!(lvl, context::ContextDeliveryLevel::Off);
+    db.delete_setting(noending::commands::CONTEXT_DELIVERY_LEVEL_KEY)
+        .unwrap();
+    assert_eq!(
+        noending::commands::context_delivery_level_of(&db).unwrap(),
+        context::ContextDeliveryLevel::Off,
+        "a missing row must never re-enable injection"
+    );
 
     // 2. Persisted compact → Compact
     db.set_setting(noending::commands::CONTEXT_DELIVERY_LEVEL_KEY, "compact")
@@ -2030,6 +2039,10 @@ fn apply_match_handles_conflict_only_workstream() {
 #[test]
 fn prepare_new_does_not_create_intent_or_delivery_or_file() {
     let db = open_db("prep-new-no-side-effects");
+    // This test is about prepare's side-effect contract, which needs a bundle
+    // to exist: opt into delivery explicitly (Off is the shipped default).
+    noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Balanced)
+        .unwrap();
     let ws = ws_row(&db, "test ws", None);
     seed_context(&db, &ws.id, &["约束 A", "约束 B"]);
 
@@ -2067,6 +2080,9 @@ fn prepare_new_does_not_create_intent_or_delivery_or_file() {
 #[test]
 fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
     let db = open_db("prep-resume-no-side-effects");
+    // Needs a delivered bundle to assert on: opt into delivery explicitly.
+    noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Balanced)
+        .unwrap();
     let ws1 = ws_row(&db, "ws1", None);
     let ws2 = ws_row(&db, "ws2", None);
     seed_context(&db, &ws1.id, &["约束 1"]);
@@ -2321,6 +2337,10 @@ fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
 #[test]
 fn state_fingerprint_stale_detection_on_delivery_level_change() {
     let db = open_db("stale-delivery-level");
+    // The transition under test is Balanced → Off, so the starting level has to
+    // be chosen explicitly now that Off is the default.
+    noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Balanced)
+        .unwrap();
     let ws = ws_row(&db, "test ws", None);
     seed_context(&db, &ws.id, &["约束"]);
 

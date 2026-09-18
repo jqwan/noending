@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { Route } from "../app/routes";
+import { useBaseExperience } from "../app/experience";
 import type { SearchHit, Session, Workstream } from "../types";
 
 interface PaletteItem {
@@ -12,16 +13,17 @@ interface PaletteItem {
 }
 
 /** 固定命令（实施方案 §53）：导航 + New 动作，不与实体搜索混淆。
- *  New 动作以 route.action 携带意图，目标页已挂载时同样会打开 Modal。 */
+ *  New 动作以 route.action 携带意图，目标页已挂载时同样会打开 Modal。
+ *  cmd-assistant 只在 Context Intelligence 开启时出现（§11.4）。 */
 const FIXED_COMMANDS: PaletteItem[] = [
-  { key: "cmd-home", kind: "命令", label: "Go to Home", hint: "继续最近的工作", route: { view: "home" } },
-  { key: "cmd-workstreams", kind: "命令", label: "Go to Workstreams", route: { view: "workstreams" } },
-  { key: "cmd-sessions", kind: "命令", label: "Go to Sessions", route: { view: "sessions" } },
-  { key: "cmd-assistant", kind: "命令", label: "Go to Assistant", route: { view: "assistant" } },
-  { key: "cmd-projects", kind: "命令", label: "Go to Projects", route: { view: "projects" } },
-  { key: "cmd-settings", kind: "命令", label: "Go to Settings", route: { view: "settings", section: "general" } },
-  { key: "cmd-new-ws", kind: "命令", label: "New Workstream", route: { view: "workstreams", action: "new" }, hint: "创建" },
-  { key: "cmd-new-session", kind: "命令", label: "New Session", route: { view: "sessions", action: "new" }, hint: "默认 Agent" },
+  { key: "cmd-home", kind: "命令", label: "前往首页", hint: "继续最近的工作", route: { view: "home" } },
+  { key: "cmd-workstreams", kind: "命令", label: "前往 Workstreams", route: { view: "workstreams" } },
+  { key: "cmd-sessions", kind: "命令", label: "前往 Sessions", route: { view: "sessions" } },
+  { key: "cmd-assistant", kind: "命令", label: "前往 Assistant", route: { view: "assistant" } },
+  { key: "cmd-projects", kind: "命令", label: "前往 Projects", route: { view: "projects" } },
+  { key: "cmd-settings", kind: "命令", label: "前往设置", route: { view: "settings", section: "general" } },
+  { key: "cmd-new-ws", kind: "命令", label: "新建 Workstream", route: { view: "workstreams", action: "new" }, hint: "创建" },
+  { key: "cmd-new-session", kind: "命令", label: "新建 Session", route: { view: "sessions", action: "new" }, hint: "默认 Agent" },
 ];
 
 export default function CommandPalette({ onClose, navigate }: {
@@ -34,6 +36,7 @@ export default function CommandPalette({ onClose, navigate }: {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { intelligenceEnabled } = useBaseExperience();
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -54,6 +57,7 @@ export default function CommandPalette({ onClose, navigate }: {
     const ql = q.trim().toLowerCase();
     // 固定命令：输入为空时全部可见；输入后按子串过滤
     for (const c of FIXED_COMMANDS) {
+      if (c.key === "cmd-assistant" && !intelligenceEnabled) continue;
       if (!ql || c.label.toLowerCase().includes(ql)) out.push(c);
     }
     if (!ql || "workstreams".includes(ql)) {
@@ -81,7 +85,7 @@ export default function CommandPalette({ onClose, navigate }: {
     // dedupe by key, cap
     const seen = new Set<string>();
     return out.filter((i) => !seen.has(i.key) && seen.add(i.key)).slice(0, 12);
-  }, [q, workstreams, sessions, hits]);
+  }, [q, workstreams, sessions, hits, intelligenceEnabled]);
 
   useEffect(() => { setSelected(0); }, [q]);
 

@@ -101,7 +101,12 @@ export const api = {
   syncAll: () => invoke<{ started: boolean }>("sync_all"),
   syncSource: (sourceId: string) => invoke<{ started: boolean }>("sync_source", { sourceId }),
   reingestSource: (sourceId: string) => invoke<{ started: boolean }>("reingest_source", { sourceId }),
-  syncSession: (sessionId: string) => invoke<{ applied: number }>("sync_session", { sessionId }),
+  /** Ingest one Session now; Context extraction only runs while Intelligence is on. */
+  syncSession: (sessionId: string) =>
+    invoke<{ applied: number; ingested: number; context_processing_enabled: boolean }>(
+      "sync_session",
+      { sessionId },
+    ),
   listSyncRuns: (limit?: number) => invoke<SyncRun[]>("list_sync_runs", { limit: limit ?? 50 }),
 
   launchNewSession: (agent: Agent, workstreamIds: string[], cwd?: string) =>
@@ -144,6 +149,14 @@ export const api = {
   getContextDeliveryLevel: () => invoke<ContextDeliveryLevel>("get_context_delivery_level"),
   setContextDeliveryLevel: (level: ContextDeliveryLevel) =>
     invoke<void>("set_context_delivery_level", { level }),
+
+  /** Context Intelligence — orthogonal to delivery level. Off = Base
+   *  Experience: Sessions are still ingested and indexed, but no Context is
+   *  extracted, classified or injected. See src/app/experience.tsx. */
+  getContextIntelligenceEnabled: () =>
+    invoke<boolean>("get_context_intelligence_enabled"),
+  setContextIntelligenceEnabled: (enabled: boolean) =>
+    invoke<void>("set_context_intelligence_enabled", { enabled }),
 
   assistantSend: (sessionId: string | null, text: string) =>
     invoke<{ session_id: string; content: string; runtime: string }>("assistant_send", { sessionId, text }),

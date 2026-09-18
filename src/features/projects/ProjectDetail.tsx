@@ -5,6 +5,7 @@ import { Modal, timeAgo, useRefreshSignal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import NewWorkstreamModal from "../workstreams/NewWorkstreamModal";
 import type { Route } from "../../app/routes";
+import { IntelligenceOnly } from "../../app/experience";
 import { AGENT_LABELS, type Project, type ProjectResource, type Session, type Workstream } from "../../types";
 
 /**
@@ -46,11 +47,13 @@ export default function ProjectDetail({ projectId, navigate }: {
         sub={project.description || undefined}
         actions={
           <>
-            <button className="btn ghost"
-              onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
-              Ask Assistant
-            </button>
-            <button className="btn" onClick={() => setCreatingWs(true)}>New Workstream</button>
+            <IntelligenceOnly>
+              <button className="btn ghost"
+                onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
+                询问 Assistant
+              </button>
+            </IntelligenceOnly>
+            <button className="btn" onClick={() => setCreatingWs(true)}>新建 Workstream</button>
           </>
         }
       />

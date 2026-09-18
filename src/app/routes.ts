@@ -10,7 +10,6 @@ export type SettingsSection =
   | "general"
   | "agents"
   | "sources"
-  | "sync"
   | "appearance"
   | "advanced";
 

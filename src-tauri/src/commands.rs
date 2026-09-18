@@ -369,6 +369,24 @@ pub fn set_context_delivery_level(state: State<AppState>, level: String) -> Resu
     })
 }
 
+// ---------------- Context Intelligence (Base Experience switch) ----------------
+
+/// Context Intelligence is a separate switch from delivery: turning delivery
+/// Off stops outbound injection only, never extraction.
+#[tauri::command]
+pub fn get_context_intelligence_enabled(state: State<AppState>) -> Result<bool> {
+    with_db(&state, |db| {
+        crate::settings::context_intelligence_enabled(db)
+    })
+}
+
+#[tauri::command]
+pub fn set_context_intelligence_enabled(state: State<AppState>, enabled: bool) -> Result<()> {
+    with_db(&state, |db| {
+        crate::settings::set_context_intelligence_enabled(db, enabled)
+    })
+}
+
 #[tauri::command]
 pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Result<()> {
     with_db(&state, |db| {
@@ -1004,8 +1022,12 @@ pub fn sync_session(state: State<AppState>, session_id: String) -> Result<serde_
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
         let engine = crate::sync::SyncEngine::from_settings(db);
-        let applied = crate::launcher::sync_one_session_with_engine(db, &engine, &session)?;
-        Ok(serde_json::json!({ "applied": applied }))
+        let (ingested, applied) = crate::launcher::ingest_and_sync_session(db, &engine, &session)?;
+        Ok(serde_json::json!({
+            "applied": applied,
+            "ingested": ingested,
+            "context_processing_enabled": crate::settings::context_intelligence_enabled(db)?,
+        }))
     })
 }
 

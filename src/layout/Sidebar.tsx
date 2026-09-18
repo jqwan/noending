@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { onEvent, EVT_SYNCED, type Route } from "../app/routes";
+import { IntelligenceOnly } from "../app/experience";
 import SidebarLogo from "../components/SidebarLogo";
 import type { Project, WorkstreamCardData } from "../types";
 
@@ -60,7 +61,7 @@ export default function Sidebar({ route, navigate, onSearch }: {
   return (
     <div className="sidebar">
       {/* Brand → Home（§6）：Home 是产品起点，不设一级菜单项 */}
-      <button className="brand" onClick={() => navigate({ view: "home" })} title="Home">
+      <button className="brand" onClick={() => navigate({ view: "home" })} title="首页">
         <SidebarLogo size={22} />
         <span className="brand-name">NoEnding</span>
       </button>
@@ -68,12 +69,12 @@ export default function Sidebar({ route, navigate, onSearch }: {
 
       <div className="sidebar-scroll">
         <button className="nav-item" onClick={onSearch}>
-          Search
+          搜索
           <span style={{ flex: 1 }} />
           <span className="kbd">⌘K</span>
         </button>
 
-        <div className="nav-section">Workspace</div>
+        <div className="nav-section">工作区</div>
         <button className={`nav-item ${workspaceActive("workstreams")}`}
           onClick={() => navigate({ view: "workstreams" })}>
           Workstreams
@@ -82,12 +83,14 @@ export default function Sidebar({ route, navigate, onSearch }: {
           onClick={() => navigate({ view: "sessions" })}>
           Sessions
         </button>
-        <button className={`nav-item ${workspaceActive("assistant")}`}
-          onClick={() => navigate({ view: "assistant" })}>
-          Assistant
-        </button>
+        <IntelligenceOnly>
+          <button className={`nav-item ${workspaceActive("assistant")}`}
+            onClick={() => navigate({ view: "assistant" })}>
+            Assistant
+          </button>
+        </IntelligenceOnly>
 
-        <div className="nav-section">Recent</div>
+        <div className="nav-section">最近</div>
         {recent.length === 0 && <div className="nav-item muted small">暂无</div>}
         {recent.map((w) => (
           <button key={w.id}
@@ -120,7 +123,7 @@ export default function Sidebar({ route, navigate, onSearch }: {
           className={`nav-item ${route.view === "settings" ? "active" : ""}`}
           onClick={() => navigate({ view: "settings", section: "general" })}
         >
-          Settings
+          设置
         </button>
       </div>
 

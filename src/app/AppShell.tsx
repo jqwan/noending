@@ -6,6 +6,7 @@ import CommandPalette from "../components/CommandPalette";
 import ToastHost from "../components/Toast";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, type Route } from "./routes";
+import { refreshBaseExperience } from "./experience";
 
 /**
  * AppShell（实施方案 §4/§80）：只负责骨架 —— Sidebar、RouterOutlet、
@@ -21,6 +22,11 @@ export default function AppShell() {
   const navigate = useCallback((r: Route) => {
     setRoute(r);
     if ("action" in r && r.action) setActionSeq(++seqRef.current);
+  }, []);
+
+  // Base Experience 开关：整个应用读一次，判断集中在 experience.tsx（§11.9）。
+  useEffect(() => {
+    refreshBaseExperience();
   }, []);
 
   // ⌘K / Ctrl+K opens the command palette

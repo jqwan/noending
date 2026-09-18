@@ -32,8 +32,9 @@ pub struct Db(pub Connection);
 /// `context_conflict_events` (auditable conflict resolution events); v9 added
 /// conflict creation snapshots (left_revision_id, right_revision_id, candidate_snapshot_json)
 /// and conflict event audit snapshots (snapshot_json); v10 added
-/// `workstream_review_state` (workstream-level review frontier checkpoint).
-pub const SCHEMA_VERSION: i64 = 10;
+/// `workstream_review_state` (workstream-level review frontier checkpoint); v11
+/// pinned `context.delivery_level` explicitly for Base Experience (see migrate).
+pub const SCHEMA_VERSION: i64 = 11;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -451,6 +452,25 @@ impl Db {
                  SELECT id, ?1, '[]', ?1 FROM workstreams",
                 params![ts],
             )?;
+        }
+
+        // v10 → v11: Base Experience becomes the shipped default. Context
+        // Delivery never had a stored default — a missing row silently fell
+        // through to `balanced` in code, so every existing database was running
+        // Balanced without anyone choosing it. Pin the level as a real,
+        // editable row instead of flipping a constant nobody can see: the
+        // pre-migration behavior (implicit balanced) is recorded here, and the
+        // user can turn delivery back on from Settings → 数据与高级.
+        //
+        // `context.intelligence_enabled` is deliberately NOT seeded: it is a
+        // brand-new key, so "missing row" means OFF for old and new databases
+        // alike (one accessor, one default — see `settings` module docs).
+        if current_version < 11
+            && self
+                .get_setting(crate::settings::CONTEXT_DELIVERY_LEVEL_KEY)?
+                .is_none()
+        {
+            self.set_setting(crate::settings::CONTEXT_DELIVERY_LEVEL_KEY, "off")?;
         }
 
         self.0.pragma_update(None, "user_version", SCHEMA_VERSION)?;

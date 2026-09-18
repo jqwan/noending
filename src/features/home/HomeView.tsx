@@ -3,6 +3,7 @@ import { api } from "../../api";
 import AgentIcon from "../../components/AgentIcon";
 import SidebarLogo from "../../components/SidebarLogo";
 import type { Route } from "../../app/routes";
+import { IntelligenceOnly } from "../../app/experience";
 import { ContinueSection, RecentSessions } from "./ContinueSection";
 import ContextUpdatesSection from "./ContextUpdatesSection";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
@@ -38,14 +39,14 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
       <div className="main narrow home">
         <div className="hero">
           <SidebarLogo size={64} animated />
-          <div className="tagline">Conversations end. Context doesn't.</div>
+          <div className="tagline">对话会结束，上下文不会。</div>
           <p className="page-sub" style={{ textAlign: "center", marginBottom: 18 }}>
             开始一件可以跨 Session、跨 Agent 继续推进的事。
           </p>
           <div className="actions-row">
-            <button className="btn primary" onClick={() => setCreatingWs(true)}>+ New Workstream</button>
+            <button className="btn primary" onClick={() => setCreatingWs(true)}>+ 新建 Workstream</button>
           </div>
-          <div className="muted small" style={{ margin: "10px 0" }}>or</div>
+          <div className="muted small" style={{ margin: "10px 0" }}>或</div>
           <div className="actions-row">
             <button className="btn ws-btn" disabled={!defaultAgent}
               title={defaultAgent ? undefined : "未检测到可用的 Agent CLI"}
@@ -53,16 +54,16 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
               {defaultAgent ? (
                 <>
                   <AgentIcon agent={defaultAgent} />
-                  New Session
+                  新建 Session
                 </>
               ) : (
-                "New Session"
+                "新建 Session"
               )}
             </button>
             {!defaultAgent && (
               <button className="link small"
                 onClick={() => navigate({ view: "settings", section: "agents" })}>
-                Configure Agents
+                配置 Agent
               </button>
             )}
           </div>
@@ -76,21 +77,23 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   return (
     <div className="main narrow">
       <div className="home-greeting">
-        <h1>Good to see you again.</h1>
-        <p className="sub">Continue where you left off.</p>
+        <h1>欢迎回来</h1>
+        <p className="sub">继续上次的工作</p>
       </div>
 
-      <ContextUpdatesSection
-        cards={cards}
-        summaries={reviewSummaries ?? []}
-        navigate={navigate}
-      />
+      <IntelligenceOnly>
+        <ContextUpdatesSection
+          cards={cards}
+          summaries={reviewSummaries ?? []}
+          navigate={navigate}
+        />
+      </IntelligenceOnly>
 
       <ContinueSection navigate={navigate} defaultAgent={defaultAgent} cards={cards} />
       <RecentSessions navigate={navigate} />
 
       <div className="home-foot">
-        <button className="btn small ghost" onClick={() => setCreatingWs(true)}>+ New Workstream</button>
+        <button className="btn small ghost" onClick={() => setCreatingWs(true)}>+ 新建 Workstream</button>
       </div>
 
       {creatingWs && <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={refresh} />}

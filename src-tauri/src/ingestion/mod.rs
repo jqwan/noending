@@ -58,6 +58,10 @@ pub(crate) fn ingest_delta(
 /// Ingest + sync one session while the caller holds the DB lock — used by
 /// interactive single-session flows (resume, per-session sync), which are
 /// heuristic-speed. Background reconcile uses the non-blocking twin below.
+///
+/// With Context Intelligence off this stops after ingestion: events are stored
+/// and indexed, the read cursor advances, and nothing is prepared, extracted
+/// or committed, so `processed_sequence` stays frozen for a later replay.
 pub fn ingest_and_sync_session(
     db: &Db,
     engine: &SyncEngine,
@@ -65,6 +69,9 @@ pub fn ingest_and_sync_session(
 ) -> Result<(i64, usize)> {
     let adapter = crate::adapters::adapter_for(session.agent);
     let stored = ingest_delta(db, adapter, session)?;
+    if !crate::settings::context_intelligence_enabled(db)? {
+        return Ok((stored.len() as i64, 0));
+    }
     let processed = db.get_processed_sequence(&session.id)?;
     let pending = db.get_events(&session.id, Some(processed), 10_000)?;
     let mut applied = 0usize;
@@ -88,13 +95,17 @@ pub fn ingest_and_sync_session_nb(
         let guard = crate::sync::lock_db(db_lock)?;
         let adapter = crate::adapters::adapter_for(session.agent);
         let stored = ingest_delta(&guard, adapter, session)?;
-        let processed = guard.get_processed_sequence(&session.id)?;
-        let pending = guard.get_events(&session.id, Some(processed), 10_000)?;
-        let pre = if pending.is_empty() {
+        let pre = if !crate::settings::context_intelligence_enabled(&guard)? {
             None
         } else {
-            let to = pending.last().map(|e| e.sequence).unwrap_or(processed);
-            engine.prepare(&guard, session, &pending, processed, to)?
+            let processed = guard.get_processed_sequence(&session.id)?;
+            let pending = guard.get_events(&session.id, Some(processed), 10_000)?;
+            if pending.is_empty() {
+                None
+            } else {
+                let to = pending.last().map(|e| e.sequence).unwrap_or(processed);
+                engine.prepare(&guard, session, &pending, processed, to)?
+            }
         };
         (stored.len() as i64, pre)
     }; // lock released

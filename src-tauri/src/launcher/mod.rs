@@ -1086,6 +1086,10 @@ pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
 ///    sync engine; mutations + SyncRun + processed cursor commit atomically.
 /// A crash between (1) and (2) self-heals: the events are already durable
 /// and the next run picks them up from the processed cursor.
+///
+/// With Context Intelligence off, step 2 never starts — launch flows still
+/// observe freshly ingested events (so cwd / staleness / fingerprints stay
+/// true) while `processed_sequence` is left untouched for a later replay.
 /// Returns (events_ingested, mutations_applied).
 pub fn ingest_and_sync_session(
     db: &Db,
@@ -1104,6 +1108,9 @@ pub fn ingest_and_sync_session(
         if let Err(e) = db.index_new_events(&stored) {
             eprintln!("[sync] index_events failed: {}", e);
         }
+    }
+    if !crate::settings::context_intelligence_enabled(db)? {
+        return Ok((stored.len() as i64, 0));
     }
 
     // Sync everything not yet processed (may include events ingested by an
