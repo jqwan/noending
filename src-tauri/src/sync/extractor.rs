@@ -254,10 +254,16 @@ impl CliExtractor {
         }
     }
 
+    /// `Ok(None)` has exactly one meaning: Assistant is set to `none`, i.e. no
+    /// model on purpose. Anything else that cannot be honoured is an `Err` —
+    /// a stored Agent name NoEnding cannot resolve is corruption, not a
+    /// request for retrieval-only.
     pub fn try_for_agent(db: &Db, agent: &str) -> Result<Option<CliExtractor>> {
-        let Some(agent) = Agent::parse(agent) else {
+        if agent == "none" {
             return Ok(None);
-        };
+        }
+        let agent =
+            Agent::parse(agent).ok_or_else(|| other(format!("未知的 Assistant Agent: {agent}")))?;
         Ok(Some(CliExtractor::new(
             agent,
             crate::agent_runtime::runtime_exec_options(db, agent)?,
