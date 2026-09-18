@@ -363,6 +363,8 @@ export interface PreparedLaunch {
   cwd?: string | null;
   delivery_level: ContextDeliveryLevel;
   bundle: SessionContextBundle;
+  /** NoEnding 的 override 意图（null = Agent default），与 Launch 完全一致。 */
+  runtime: AgentRuntimeOverrides;
   state_fingerprint: string;
   prepared_at: string;
 }

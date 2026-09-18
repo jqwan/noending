@@ -61,6 +61,25 @@ impl AgentRuntimeOverrides {
         o.model.is_none() && o.provider.is_none() && o.effort.is_none()
     }
 
+    /// Audit text for "did NoEnding pass anything at launch?". It never names a
+    /// resolved default: `agent-default` means no CLI argument was passed.
+    pub fn intent_summary(&self) -> String {
+        let o = self.normalized();
+        let parts: Vec<String> = [
+            ("model", o.model),
+            ("provider", o.provider),
+            ("effort", o.effort),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| format!("{k}={v}")))
+        .collect();
+        if parts.is_empty() {
+            "agent-default".into()
+        } else {
+            parts.join(",")
+        }
+    }
+
     /// The single conversion every consumer shares: New Session, Resume,
     /// Context Eval and the Assistant all reach the CLI through this.
     pub fn exec_options(&self) -> ExecOptions {
@@ -73,12 +92,19 @@ impl AgentRuntimeOverrides {
     }
 }
 
-/// Resolve the runtime `ExecOptions` for an Agent from stored overrides.
+/// Resolve the stored override intent for an Agent, ready to freeze into a
+/// launch.
 ///
-/// There is no default resolution here: an unset override yields an
-/// `ExecOptions` field of `None`, which adapters render as no CLI argument.
-pub fn runtime_exec_options(db: &Db, agent: Agent) -> Result<ExecOptions> {
-    let overrides = get_runtime_overrides(db, agent)?;
+/// There is no default resolution here: an unset override yields `None`
+/// fields, which adapters render as no CLI argument. Validation runs on read,
+/// so a hand-edited illegal row fails Prepare instead of reaching the CLI.
+pub fn runtime_overrides_for_launch(db: &Db, agent: Agent) -> Result<AgentRuntimeOverrides> {
+    let overrides = get_runtime_overrides(db, agent)?.normalized();
     validate_runtime_overrides(agent, &overrides)?;
-    Ok(overrides.exec_options())
+    Ok(overrides)
+}
+
+/// Resolve the runtime `ExecOptions` for an Agent from stored overrides.
+pub fn runtime_exec_options(db: &Db, agent: Agent) -> Result<ExecOptions> {
+    Ok(runtime_overrides_for_launch(db, agent)?.exec_options())
 }

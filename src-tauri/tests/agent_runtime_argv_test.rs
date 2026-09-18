@@ -25,6 +25,84 @@ fn exec_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
         .args
 }
 
+fn new_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
+    adapter_for(agent)
+        .build_new_command(&install(agent), opts, None, None)
+        .expect("build")
+        .args
+}
+
+fn resume_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
+    adapter_for(agent)
+        .build_resume_command(&install(agent), opts, "agent-session-id", None, None)
+        .expect("build")
+        .args
+}
+
+/// New / Resume go to a real interactive terminal, so an invented default
+/// there is the most visible way to break "Agent owns defaults".
+#[test]
+fn interactive_launches_pass_no_runtime_flag_without_an_override() {
+    for agent in Agent::all() {
+        for args in [
+            new_args(agent, &ExecOptions::default()),
+            resume_args(agent, &ExecOptions::default()),
+        ] {
+            for flag in RUNTIME_FLAGS {
+                assert!(
+                    !args.iter().any(|a| a.contains(flag)),
+                    "{agent:?} interactive launch with no override passed {flag}: {args:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn resume_keeps_its_session_selector() {
+    for (agent, selector) in [
+        (Agent::Codex, "resume"),
+        (Agent::ClaudeCode, "--resume"),
+        (Agent::Pi, "--session"),
+    ] {
+        let args = resume_args(agent, &ExecOptions::default());
+        let at = args.iter().position(|a| a == selector).expect(selector);
+        assert_eq!(
+            args.get(at + 1).map(|s| s.as_str()),
+            Some("agent-session-id"),
+            "{agent:?} resume argv: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn every_consumer_renders_the_same_override_the_same_way() {
+    // One runtime semantics: the flags an interactive session gets are the
+    // flags the headless run gets — New / Resume / exec cannot diverge.
+    for agent in Agent::all() {
+        let opts = ExecOptions {
+            model: Some("some-model".into()),
+            provider: Some("some-provider".into()),
+            effort: Some("medium".into()),
+        };
+        let runtime = |args: &[String]| -> Vec<String> {
+            RUNTIME_FLAGS
+                .iter()
+                .filter(|f| args.iter().any(|a| a.contains(**f)))
+                .map(|f| (*f).to_string())
+                .collect()
+        };
+        let exec = runtime(&exec_args(agent, &opts));
+        assert_eq!(runtime(&new_args(agent, &opts)), exec, "{agent:?} new");
+        assert_eq!(
+            runtime(&resume_args(agent, &opts)),
+            exec,
+            "{agent:?} resume"
+        );
+        assert!(!exec.is_empty(), "{agent:?} passed nothing at all");
+    }
+}
+
 /// Every runtime flag any of the three CLIs understands.
 const RUNTIME_FLAGS: &[&str] = &[
     "-m",

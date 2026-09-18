@@ -2143,6 +2143,137 @@ fn state_fingerprint_stale_detection_on_context_change() {
     );
 }
 
+/// Preview-Launch Identity covers the Runtime override intent too: an
+/// override edited while the Preview is open must invalidate the preview,
+/// never be silently adopted or silently ignored.
+#[test]
+fn state_fingerprint_stale_detection_on_runtime_override_change() {
+    let db = open_db("stale-runtime-detection");
+    let ws = ws_row(&db, "test ws", None);
+    seed_context(&db, &ws.id, &["初始约束"]);
+
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: std::env::temp_dir(),
+    };
+    let prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+    assert!(prepared.runtime.is_default());
+
+    let fingerprint_of = |db: &Db| {
+        launcher::compute_state_fingerprint(
+            db,
+            "new",
+            None,
+            &prepared.workstream_ids,
+            prepared.delivery_level,
+            Agent::Codex,
+        )
+        .unwrap()
+    };
+    assert_eq!(fingerprint_of(&db), prepared.state_fingerprint);
+
+    noending::agent_runtime::set_runtime_overrides(
+        &db,
+        Agent::Codex,
+        &noending::agent_runtime::AgentRuntimeOverrides {
+            model: Some("gpt-5.6-sol".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_ne!(
+        fingerprint_of(&db),
+        prepared.state_fingerprint,
+        "a runtime override changed after Preview: the fingerprint must change"
+    );
+
+    // Overrides are per Agent: another Agent's configuration is not this
+    // launch's state.
+    noending::agent_runtime::set_runtime_overrides(
+        &db,
+        Agent::Pi,
+        &noending::agent_runtime::AgentRuntimeOverrides {
+            model: Some("qwen/qwen3.8-27b".into()),
+            provider: Some("lmstudio".into()),
+            effort: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fingerprint_of(&db),
+        launcher::compute_state_fingerprint(
+            &db,
+            "new",
+            None,
+            &prepared.workstream_ids,
+            prepared.delivery_level,
+            Agent::Codex,
+        )
+        .unwrap()
+    );
+}
+
+/// Prepare freezes the stored intent instead of resolving a default, so the
+/// argv Launch renders is exactly what Preview described.
+#[test]
+fn prepared_launch_freezes_the_runtime_override_intent() {
+    let db = open_db("prepared-runtime-intent");
+    let ws = ws_row(&db, "test ws", None);
+    seed_context(&db, &ws.id, &["约束"]);
+
+    noending::agent_runtime::set_runtime_overrides(
+        &db,
+        Agent::Codex,
+        &noending::agent_runtime::AgentRuntimeOverrides {
+            model: Some("gpt-5.6-sol".into()),
+            effort: Some("high".into()),
+            provider: None,
+        },
+    )
+    .unwrap();
+
+    let launcher = launcher::SessionLauncher {
+        app_data_dir: std::env::temp_dir(),
+    };
+    let prepared = launcher
+        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .unwrap();
+    assert_eq!(prepared.runtime.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(prepared.runtime.effort.as_deref(), Some("high"));
+    assert_eq!(
+        prepared.runtime.intent_summary(),
+        "model=gpt-5.6-sol,effort=high"
+    );
+
+    // The frozen intent feeds the same conversion New / Resume / exec use.
+    let opts = prepared.runtime.exec_options();
+    let args = noending::adapters::adapter_for(Agent::Codex)
+        .build_new_command(
+            &noending::platform::exec_resolver::AgentInstallation {
+                agent: Agent::Codex,
+                executable_path: "/usr/local/bin/codex".into(),
+                version: None,
+                source: "test".into(),
+                last_verified_at: String::new(),
+            },
+            &opts,
+            None,
+            None,
+        )
+        .unwrap()
+        .args;
+    assert!(args
+        .windows(2)
+        .any(|w| w[0] == "-m" && w[1] == "gpt-5.6-sol"));
+    assert!(args.iter().any(|a| a == "model_reasoning_effort=\"high\""));
+
+    // And clearing the override later does not retroactively change the
+    // already-prepared intent — it just makes the preview stale.
+    noending::agent_runtime::set_runtime_overrides(&db, Agent::Codex, &Default::default()).unwrap();
+    assert_eq!(prepared.runtime.model.as_deref(), Some("gpt-5.6-sol"));
+}
+
 #[test]
 fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
     let db = open_db("stale-delivery-detection");
@@ -2240,9 +2371,13 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
         None,
         &p1.workstream_ids,
         p1.delivery_level,
+        p1.agent,
     )
     .unwrap();
     assert_eq!(p1.state_fingerprint, current_fp);
+    // Nothing was overridden, so the frozen runtime intent is all-default.
+    assert!(p1.runtime.is_default());
+    assert_eq!(p1.runtime.intent_summary(), "agent-default");
 
     // Off mode produces empty bundle markdown & sections
     noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Off)

@@ -129,6 +129,22 @@ impl PiAdapter {
     }
 }
 
+/// Runtime overrides in Pi's spelling — the only CLI of the three where all
+/// three fields have a flag.
+fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(p) = &opts.provider {
+        args.extend(["--provider".into(), p.clone()]);
+    }
+    if let Some(m) = &opts.model {
+        args.extend(["--model".into(), m.clone()]);
+    }
+    if let Some(e) = &opts.effort {
+        args.extend(["--thinking".into(), e.clone()]);
+    }
+    args
+}
+
 impl crate::adapters::AgentAdapter for PiAdapter {
     fn agent(&self) -> Agent {
         Agent::Pi
@@ -216,14 +232,15 @@ impl crate::adapters::AgentAdapter for PiAdapter {
     fn build_new_command(
         &self,
         install: &AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
+        let mut args = runtime_args(opts);
+        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::context_prompt(context_file)?
-                .into_iter()
-                .collect(),
+            args,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -231,11 +248,15 @@ impl crate::adapters::AgentAdapter for PiAdapter {
     fn build_resume_command(
         &self,
         install: &AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let mut args = vec!["--session".into(), agent_session_id.into()];
+        // pi [options] [--] [@files...] [messages...] — options first, then
+        // the session selector and the prompt.
+        let mut args = runtime_args(opts);
+        args.extend(["--session".into(), agent_session_id.into()]);
         args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
@@ -253,15 +274,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         // pi -p: non-interactive; --no-session keeps analysis ephemeral;
         // --no-tools makes it a pure text model call (safe + cheap).
         let mut args: Vec<String> = vec!["-p".into(), "--no-session".into(), "--no-tools".into()];
-        if let Some(p) = &opts.provider {
-            args.extend(["--provider".into(), p.clone()]);
-        }
-        if let Some(m) = &opts.model {
-            args.extend(["--model".into(), m.clone()]);
-        }
-        if let Some(e) = &opts.effort {
-            args.extend(["--thinking".into(), e.clone()]);
-        }
+        args.extend(runtime_args(opts));
         args.push(prompt.to_string());
         Ok(AgentCommand {
             program: install.executable_path.clone(),

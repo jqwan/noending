@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::AgentCommand;
+use crate::agent_runtime::AgentRuntimeOverrides;
 use crate::context::ContextDeliveryLevel;
 use crate::domain::{
     binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, Session,
@@ -41,6 +42,12 @@ pub struct PreparedLaunch {
     pub cwd: Option<String>,
     pub delivery_level: ContextDeliveryLevel,
     pub bundle: crate::context::SessionContextBundle,
+    /// NoEnding's runtime override intent, frozen at Preview time. `None`
+    /// fields mean *Agent default* — Launch must pass no corresponding flag.
+    /// It is part of `state_fingerprint`, so changing an override between
+    /// Preview and Launch invalidates the preview instead of silently
+    /// launching with parameters the user never saw.
+    pub runtime: AgentRuntimeOverrides,
     pub state_fingerprint: String,
     pub prepared_at: String,
 }
@@ -106,10 +113,11 @@ impl SessionLauncher {
         let effective_cwd = resolve_new_session_cwd(db, workstream_ids, cwd)?;
 
         let delivery_level = crate::settings::context_delivery_level_of(db)?;
+        let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
         let bundle = crate::context::build_bundle(db, "new", None, workstream_ids, delivery_level)?;
 
         let state_fingerprint =
-            compute_state_fingerprint(db, "new", None, workstream_ids, delivery_level)?;
+            compute_state_fingerprint(db, "new", None, workstream_ids, delivery_level, agent)?;
 
         Ok(PreparedLaunch {
             id: new_id(),
@@ -121,6 +129,7 @@ impl SessionLauncher {
             cwd: effective_cwd,
             delivery_level,
             bundle,
+            runtime,
             state_fingerprint,
             prepared_at: now(),
         })
@@ -157,11 +166,18 @@ impl SessionLauncher {
         }
 
         let delivery_level = crate::settings::context_delivery_level_of(db)?;
+        let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, session.agent)?;
         let bundle =
             crate::context::build_bundle(db, "resume", Some(&session), &ws_ids, delivery_level)?;
 
-        let state_fingerprint =
-            compute_state_fingerprint(db, "resume", Some(session_id), &ws_ids, delivery_level)?;
+        let state_fingerprint = compute_state_fingerprint(
+            db,
+            "resume",
+            Some(session_id),
+            &ws_ids,
+            delivery_level,
+            session.agent,
+        )?;
 
         Ok(PreparedLaunch {
             id: new_id(),
@@ -173,6 +189,7 @@ impl SessionLauncher {
             cwd: session.cwd.clone(),
             delivery_level,
             bundle,
+            runtime,
             state_fingerprint,
             prepared_at: now(),
         })
@@ -181,9 +198,12 @@ impl SessionLauncher {
     /// Launch a previously prepared launch.
     ///
     /// INVARIANT:
-    /// 1. Verifies state fingerprint matches current DB state. If context or delivery level
-    ///    changed since preview, aborts with a stale error.
-    /// 2. Identity preservation: Writes the EXACT prepared bundle markdown (NO re-building).
+    /// 1. Verifies state fingerprint matches current DB state. If context,
+    ///    delivery level or Runtime override intent changed since preview,
+    ///    aborts with a stale error.
+    /// 2. Identity preservation: Writes the EXACT prepared bundle markdown
+    ///    (NO re-building) and passes the EXACT prepared runtime overrides
+    ///    (NO re-reading Settings).
     /// 3. Commits LaunchIntent (new) or extra bindings & cumulative delivery snapshots (resume)
     ///    only upon actual launch.
     pub fn launch_prepared(&self, db: &Db, prepared: &PreparedLaunch) -> Result<LaunchResult> {
@@ -199,12 +219,17 @@ impl SessionLauncher {
             prepared.session_id.as_deref(),
             &prepared.workstream_ids,
             current_delivery_level,
+            prepared.agent,
         )?;
         if current_fingerprint != prepared.state_fingerprint {
             return Err(other(
-                "Prepared launch is stale: context state changed since preview. Please refresh preview.",
+                "Prepared launch is stale: context or runtime state changed since preview. Please refresh preview.",
             ));
         }
+
+        // Preview = Launch: the argv comes from the frozen intent, not from
+        // whatever Settings holds right now.
+        let runtime_opts = prepared.runtime.exec_options();
 
         let ctx_file = if prepared.workstream_ids.is_empty()
             || prepared.delivery_level == crate::context::ContextDeliveryLevel::Off
@@ -270,8 +295,12 @@ impl SessionLauncher {
             let adapter = crate::adapters::adapter_for(prepared.agent);
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
 
-            let cmd: AgentCommand =
-                adapter.build_new_command(&install, ctx_file.as_deref(), cwd_path.as_deref())?;
+            let cmd: AgentCommand = adapter.build_new_command(
+                &install,
+                &runtime_opts,
+                ctx_file.as_deref(),
+                cwd_path.as_deref(),
+            )?;
             let outcome = crate::platform::launcher::launch(&cmd)?;
 
             db.update_launch_intent(
@@ -279,8 +308,10 @@ impl SessionLauncher {
                 launch_status::PENDING,
                 None,
                 &format!(
-                    "launched_via={};pid={:?}",
-                    outcome.launched_via, outcome.pid
+                    "launched_via={};pid={:?};runtime={}",
+                    outcome.launched_via,
+                    outcome.pid,
+                    prepared.runtime.intent_summary()
                 ),
             )?;
 
@@ -317,6 +348,7 @@ impl SessionLauncher {
             let cwd_path = session.cwd.clone().map(PathBuf::from);
             let cmd = adapter.build_resume_command(
                 &install,
+                &runtime_opts,
                 &session.agent_session_id,
                 ctx_file.as_deref(),
                 cwd_path.as_deref(),
@@ -406,13 +438,15 @@ impl SessionLauncher {
 
 /// Compute a deterministic SHA-256 fingerprint representing the exact context inputs
 /// and backing DB state (workstream metadata, active context items & current revisions,
-/// conflicts, and for resume mode: session cursor, bindings, and delivery snapshots).
+/// conflicts, the Agent's runtime override intent, and for resume mode: session
+/// cursor, bindings, and delivery snapshots).
 pub fn compute_state_fingerprint(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
     effective_workstream_ids: &[String],
     delivery_level: ContextDeliveryLevel,
+    agent: Agent,
 ) -> Result<String> {
     use sha2::{Digest, Sha256};
 
@@ -420,6 +454,17 @@ pub fn compute_state_fingerprint(
     hasher.update(mode.as_bytes());
     hasher.update(b":");
     hasher.update(delivery_level.as_str().as_bytes());
+    hasher.update(b":");
+
+    // Preview-Launch Identity also covers what NoEnding will pass to the CLI:
+    // an override edited after Preview must abort the launch, never be picked
+    // up silently. Only the intent is hashed — NoEnding has no resolved
+    // default to hash.
+    let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
+    hasher.update(b"runtime:");
+    hasher.update(agent.as_str().as_bytes());
+    hasher.update(b"=");
+    hasher.update(runtime.intent_summary().as_bytes());
     hasher.update(b":");
 
     for ws_id in effective_workstream_ids {

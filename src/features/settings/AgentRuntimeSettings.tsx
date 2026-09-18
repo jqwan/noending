@@ -10,7 +10,7 @@ const DEFAULT_VALUE = "__default__";
 const CUSTOM_VALUE = "__custom__";
 
 /** 同一种 override，在三家 CLI 里的叫法不同；unsupported 的字段不展示（§11）。 */
-const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
+export const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
   codex: { model: "Model", provider: "Provider", effort: "Reasoning" },
   claude_code: { model: "Model", provider: "Provider", effort: "Effort" },
   pi: { model: "Model", provider: "Provider", effort: "Thinking" },
@@ -25,6 +25,33 @@ const SOURCE_NOTE: Record<ModelSource, string | null> = {
 
 export function isOverridable(cap: RuntimeFieldCapability) {
   return cap !== "unsupported";
+}
+
+/**
+ * Preview 里的 Runtime 意图：显示的就是 Launch 将要（或不会）传给 CLI 的参数。
+ * 数据来源是 PreparedLaunch 中冻结的 override，不是重新读取的 Settings。
+ */
+export function RuntimeIntentBadges({ agent, runtime }: {
+  agent: Agent;
+  runtime: AgentRuntimeOverrides;
+}) {
+  const fields = Object.keys(FIELD_LABELS[agent]) as Field[];
+  const overridden = fields.filter((f) => runtime[f] !== null);
+  if (overridden.length === 0) {
+    return <span className="badge">Runtime: 全部 Agent default</span>;
+  }
+  return (
+    <>
+      {overridden.map((f) => (
+        <span className="badge accent" key={f}>
+          {FIELD_LABELS[agent][f]}: {runtime[f]}
+        </span>
+      ))}
+      {overridden.length < fields.length && (
+        <span className="badge">其余 Agent default</span>
+      )}
+    </>
+  );
 }
 
 /**

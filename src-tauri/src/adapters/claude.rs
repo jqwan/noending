@@ -128,6 +128,19 @@ impl ClaudeAdapter {
     }
 }
 
+/// Runtime overrides in Claude Code's spelling. Claude has no provider flag
+/// (capability: unsupported), so `ExecOptions::provider` is not rendered.
+fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(m) = &opts.model {
+        args.extend(["--model".into(), m.clone()]);
+    }
+    if let Some(e) = &opts.effort {
+        args.extend(["--effort".into(), e.clone()]);
+    }
+    args
+}
+
 impl crate::adapters::AgentAdapter for ClaudeAdapter {
     fn agent(&self) -> Agent {
         Agent::ClaudeCode
@@ -244,14 +257,15 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
     fn build_new_command(
         &self,
         install: &AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
+        let mut args = runtime_args(opts);
+        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::context_prompt(context_file)?
-                .into_iter()
-                .collect(),
+            args,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -259,11 +273,13 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
     fn build_resume_command(
         &self,
         install: &AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         let mut args = vec!["--resume".into(), agent_session_id.into()];
+        args.extend(runtime_args(opts));
         args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
@@ -279,12 +295,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         prompt: &str,
     ) -> Result<AgentCommand> {
         let mut args: Vec<String> = vec!["-p".into(), "--output-format".into(), "text".into()];
-        if let Some(m) = &opts.model {
-            args.extend(["--model".into(), m.clone()]);
-        }
-        if let Some(e) = &opts.effort {
-            args.extend(["--effort".into(), e.clone()]);
-        }
+        args.extend(runtime_args(opts));
         args.push(prompt.to_string());
         Ok(AgentCommand {
             program: install.executable_path.clone(),

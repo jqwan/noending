@@ -4,6 +4,7 @@ import { api } from "../../api";
 import { announceLaunch } from "./LaunchResultModal";
 import type { PreparedLaunch } from "../../types";
 import { KIND_LABELS, AUTHORITY_LABELS } from "../../types";
+import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
 
 interface Props {
   prepared: PreparedLaunch;
@@ -41,7 +42,7 @@ export default function ContextPreviewModal({
     } catch (e: unknown) {
       const msg = String(e);
       if (msg.includes("stale") || msg.includes("过期") || msg.includes("变化")) {
-        setStaleError("底层 Context 状态已发生变化（Stale），请刷新预览后重新启动。");
+        setStaleError("底层 Context 或 Runtime 配置已发生变化（Stale），请刷新预览后重新启动。");
       } else {
         setStaleError(msg);
       }
@@ -80,6 +81,7 @@ export default function ContextPreviewModal({
           Workstreams: {prepared.workstream_ids.length > 0 ? `${prepared.workstream_ids.length} 个` : "无 (0 绑定)"}
         </span>
         <span className="badge info">估算 Token: ~{prepared.bundle.approx_tokens}</span>
+        <RuntimeIntentBadges agent={prepared.agent} runtime={prepared.runtime} />
       </div>
 
       {staleError && (

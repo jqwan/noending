@@ -116,6 +116,20 @@ impl CodexAdapter {
     }
 }
 
+/// Runtime overrides in Codex's own spelling: `-m <model>` plus a config
+/// override for reasoning effort. Codex has no provider flag, so
+/// `ExecOptions::provider` is deliberately not rendered here.
+fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(m) = &opts.model {
+        args.extend(["-m".into(), m.clone()]);
+    }
+    if let Some(e) = &opts.effort {
+        args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", e)]);
+    }
+    args
+}
+
 impl crate::adapters::AgentAdapter for CodexAdapter {
     fn agent(&self) -> Agent {
         Agent::Codex
@@ -241,14 +255,15 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     fn build_new_command(
         &self,
         install: &AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
+        let mut args = runtime_args(opts);
+        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: crate::adapters::context_prompt(context_file)?
-                .into_iter()
-                .collect(),
+            args,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }
@@ -256,11 +271,15 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     fn build_resume_command(
         &self,
         install: &AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let mut args = vec!["resume".into(), agent_session_id.into()];
+        // codex resume [OPTIONS] [SESSION_ID] [PROMPT]
+        let mut args = vec!["resume".into()];
+        args.extend(runtime_args(opts));
+        args.push(agent_session_id.into());
         args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
@@ -281,12 +300,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             "read-only".into(),
             "--skip-git-repo-check".into(),
         ];
-        if let Some(m) = &opts.model {
-            args.extend(["-m".into(), m.clone()]);
-        }
-        if let Some(e) = &opts.effort {
-            args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", e)]);
-        }
+        args.extend(runtime_args(opts));
         args.push(prompt.to_string());
         Ok(AgentCommand {
             program: install.executable_path.clone(),

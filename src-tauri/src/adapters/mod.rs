@@ -400,9 +400,14 @@ pub trait AgentAdapter: Send + Sync {
     /// Build the command line for a New Session. `context_file` is None when
     /// the user chose to start without any Workstream Context — adapters then
     /// launch the plain CLI with no injected prompt.
+    ///
+    /// `opts` carries NoEnding's override intent only. A `None` field must
+    /// produce no CLI argument at all: the Agent's own configuration stays
+    /// untouched and unguessed.
     fn build_new_command(
         &self,
         install: &AgentInstallation,
+        opts: &ExecOptions,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand>;
@@ -410,6 +415,7 @@ pub trait AgentAdapter: Send + Sync {
     fn build_resume_command(
         &self,
         install: &AgentInstallation,
+        opts: &ExecOptions,
         agent_session_id: &str,
         context_file: Option<&Path>,
         cwd: Option<&Path>,
