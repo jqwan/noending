@@ -4,9 +4,9 @@ import { Modal } from "../../components/common";
 import type { Project, Workstream } from "../../types";
 
 /**
- * New Workstream 的简单 Modal（Title / Description / Project 可选）。
+ * 新建 Workstream 的简单 Modal（标题 / 描述 / 工作目录 / Project 均可选）。
  * Home 与 Workstreams 页共用；创建成功后进入 Workstream Detail（§28），
- * 让用户自然补充 Context 或直接 Start Session。
+ * 让用户直接补充标题与描述，或在那里新建第一个 Session。
  * 从 Project Detail 打开时传入 initialProjectId 继承当前 Project
  * （上下文操作语义）；用户仍可手动切换为「不归属」。
  */
@@ -46,24 +46,24 @@ export default function NewWorkstreamModal({ onClose, onCreated, initialProjectI
   };
 
   return (
-    <Modal title="Create Workstream" onClose={onClose}>
+    <Modal title="新建 Workstream" onClose={onClose}>
       <label className="field"><span>标题</span>
         <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus
-          placeholder="例如：Context Sync / 行程设计 / 预算"
+          placeholder="例如：接口设计 / 行程规划 / 预算整理"
           onKeyDown={(e) => e.key === "Enter" && create()} /></label>
       <label className="field"><span>描述（可选）</span><textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
       <label className="field"><span>工作目录（可选）</span>
         <input type="text" value={defaultCwd} onChange={(e) => setDefaultCwd(e.target.value)}
           className="mono"
-          placeholder="/path/to/project — 该 Workstream 的 New Session 默认在此目录启动" /></label>
+          placeholder="/path/to/project — 该 Workstream 的新建 Session 默认在此目录启动" /></label>
       <label className="field"><span>Project（可选）</span>
         <select value={project} onChange={(e) => setProject(e.target.value)}>
           <option value="none">不归属（Workstream 可以独立存在）</option>
           {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select></label>
       <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn primary" disabled={busy} onClick={create}>Create</button>
+        <button className="btn" onClick={onClose}>取消</button>
+        <button className="btn primary" disabled={busy || !title.trim()} onClick={create}>创建</button>
       </div>
     </Modal>
   );

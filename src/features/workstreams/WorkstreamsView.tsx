@@ -60,52 +60,54 @@ export default function WorkstreamsView({ navigate, action, actionSeq }: {
         title="Workstreams"
         sub="我现在有哪些持续进行中的事情？"
         actions={
-          <button className="btn primary" onClick={() => setCreatingWs(true)}>+ New Workstream</button>
+          <button className="btn primary" onClick={() => setCreatingWs(true)}>+ 新建 Workstream</button>
         }
       />
 
       <input
         type="text"
         className="ws-search"
-        placeholder="Search workstreams...（标题、描述、Current State、Project）"
+        placeholder="搜索 Workstream…（标题、描述、Project）"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
 
       <div className="toolbar ws-controls">
         <label className="ws-control">
-          <span className="muted small">Filter</span>
+          <span className="muted small">筛选</span>
           <select value={filter} onChange={(e) => setFilter(e.target.value as FilterKey)}>
-            <option value="all">All</option>
-            <option value="active">Active</option>
-            <option value="archived">Archived</option>
+            <option value="all">全部</option>
+            <option value="active">进行中</option>
+            <option value="archived">已归档</option>
           </select>
         </label>
         <label className="ws-control">
-          <span className="muted small">Sort</span>
+          <span className="muted small">排序</span>
           <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-            <option value="recent">Last Activity ↓</option>
-            <option value="created">Created</option>
-            <option value="name">Name</option>
+            <option value="recent">最近活动 ↓</option>
+            <option value="created">创建时间</option>
+            <option value="name">名称</option>
           </select>
         </label>
-        {list && <span className="muted small">{list.length} 个</span>}
+        {list && <span className="muted small">{list.length} 个 Workstream</span>}
       </div>
 
       {list === null && <div className="muted">加载中…</div>}
       {list !== null && list.length === 0 && (
         <EmptyState
-          title={query ? "没有匹配的 Workstream。" : filter === "active" ? "No workstreams yet." : "没有已归档 / 已完成的 Workstream。"}
+          title={query ? "没有匹配的 Workstream。" : filter === "active" ? "还没有 Workstream。" : "没有已归档 / 已完成的 Workstream。"}
           hint={
             query
               ? undefined
               : filter === "active"
                 ? "为一件想跨 Session 继续的事情创建一个 Workstream。"
-                : undefined
+                : filter === "archived"
+                  ? "归档后的 Workstream 会留在这里，随时可以取消归档。"
+                  : undefined
           }
           actions={
             !query && filter === "active" ? (
-              <button className="btn small" onClick={() => setCreatingWs(true)}>+ New Workstream</button>
+              <button className="btn small" onClick={() => setCreatingWs(true)}>+ 新建 Workstream</button>
             ) : undefined
           }
         />
