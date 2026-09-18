@@ -1,8 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { timeAgo } from "../../components/common";
+import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
 import type { AssistantScope, Route } from "../../app/routes";
-import type { Project, SyncRun, WorkstreamCardData } from "../../types";
+import { AGENT_LABELS } from "../../types";
+import type {
+  Agent, AgentRuntimeSettings, Project, SyncRun, WorkstreamCardData,
+} from "../../types";
 
 interface AssistantMessage {
   id: string;
@@ -15,10 +19,9 @@ interface AssistantMessage {
 }
 
 interface AssistantConfig {
+  /** Which Agent answers — the Assistant's only runtime choice. Model /
+   *  provider / effort come from Settings → Agents like every consumer. */
   agent: string;
-  model: string;
-  provider: string;
-  effort: string;
 }
 
 interface ActionProposal {
@@ -30,12 +33,22 @@ interface ActionProposal {
   extra_workstream_ids: string[];
 }
 
-const AGENT_PRESETS: Record<string, { model: string; provider: string; effort: string; label: string }> = {
-  codex: { model: "gpt-5.6-luna", provider: "openai-codex", effort: "low", label: "Codex · gpt-5.6-luna (low)" },
-  pi: { model: "qwen/qwen3.8-27b", provider: "lmstudio", effort: "low", label: "Pi · 本地 Qwen (LM Studio)" },
-  claude_code: { model: "sonnet", provider: "", effort: "", label: "Claude Code · sonnet" },
-  none: { model: "", provider: "", effort: "", label: "仅检索（不调用模型）" },
+const AGENT_CHOICES: string[] = [...(Object.keys(AGENT_LABELS) as Agent[]), "none"];
+
+const CHOICE_LABELS: Record<string, string> = {
+  ...AGENT_LABELS,
+  none: "仅检索（不调用模型）",
 };
+
+/** override 摘要：`Runtime: Agent default` 表示 NoEnding 一个参数都不传。 */
+function runtimeSummary(st: AgentRuntimeSettings | null): string {
+  if (!st) return "…";
+  const o = st.overrides;
+  const passed = (["model", "provider", "effort"] as const)
+    .filter((f) => o[f] !== null)
+    .map((f) => `${f}=${o[f]}`);
+  return passed.length ? `Runtime: ${passed.join(" · ")}` : "Runtime: Agent default";
+}
 
 const SUGGESTIONS = [
   "最近 NoEnding 项目主要解决了什么？",
@@ -71,6 +84,7 @@ export default function AssistantView({ scope, navigate }: {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [cfg, setCfg] = useState<AssistantConfig | null>(null);
+  const [runtime, setRuntime] = useState<AgentRuntimeSettings | null>(null);
   const [cfgOpen, setCfgOpen] = useState(false);
   const [runs, setRuns] = useState<SyncRun[]>([]);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
@@ -96,6 +110,21 @@ export default function AssistantView({ scope, navigate }: {
     api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "open" && c.visibility === "normal"))).catch(console.error);
     api.listProjects().then(setProjects).catch(console.error);
   }, []);
+  // Runtime 是只读视图：真正的编辑发生在 Settings → Agents，这里只显示
+  // Assistant 所选 Agent 当前的 override。
+  const loadRuntime = useCallback((agent: string) => {
+    if (agent === "none") {
+      setRuntime(null);
+      return;
+    }
+    api.getAgentRuntimeSettings(agent as Agent).then(setRuntime).catch((e) => {
+      setRuntime(null);
+      console.error(e);
+    });
+  }, []);
+  useEffect(() => {
+    if (cfg) loadRuntime(cfg.agent);
+  }, [cfg, loadRuntime]);
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [messages]);
@@ -146,18 +175,11 @@ export default function AssistantView({ scope, navigate }: {
     }
   };
 
-  const applyPreset = async (agent: string) => {
+  const chooseAgent = async (agent: string) => {
     if (!cfg) return;
-    const p = AGENT_PRESETS[agent];
-    const next = { agent, model: p.model, provider: p.provider, effort: p.effort };
+    const next = { agent };
     setCfg(next);
-    await api.assistantConfigSet(next.agent, next.model, next.provider, next.effort);
-  };
-
-  const saveCfg = async () => {
-    if (!cfg) return;
-    await api.assistantConfigSet(cfg.agent, cfg.model, cfg.provider, cfg.effort);
-    setCfgOpen(false);
+    await api.assistantConfigSet(next.agent);
   };
 
   const executeAction = async (actionJson: string, msgId: string) => {
@@ -177,11 +199,11 @@ export default function AssistantView({ scope, navigate }: {
         <div>
           <h1>Assistant</h1>
           <p className="page-sub">
-            Workspace Assistant，经由你已登录的 Agent CLI 无头运行（<span className="mono">{cfg ? `${cfg.agent}${cfg.model ? " · " + cfg.model : ""}` : "…"}</span>）。
+            Workspace Assistant，经由你已登录的 Agent CLI 无头运行（<span className="mono">{cfg ? `${cfg.agent} · ${cfg.agent === "none" ? "retrieval-only" : runtimeSummary(runtime)}` : "…"}</span>）。
           </p>
         </div>
         <div className="actions">
-          <button className="btn ghost" onClick={() => setCfgOpen(true)}>模型设置</button>
+          <button className="btn ghost" onClick={() => setCfgOpen(true)}>Agent 设置</button>
         </div>
       </div>
 
@@ -265,28 +287,41 @@ export default function AssistantView({ scope, navigate }: {
       {cfgOpen && cfg && (
         <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCfgOpen(false)}>
           <div className="modal">
-            <h2>Assistant 运行模型</h2>
-            <p className="muted small">Assistant 与后台同步共用此配置；调用走 Agent CLI 无头模式，使用你已登录的账号，无需单独 API Key。</p>
-            {Object.entries(AGENT_PRESETS).map(([k, p]) => (
+            <h2>Assistant 使用的 Agent</h2>
+            <p className="muted small">
+              Assistant 经你已登录的 Agent CLI 无头运行，无需单独 API Key。模型 / Provider / Effort 属于
+              Runtime 配置，由 Settings → Agents 统一管理（与 New Session、Resume、后台同步同一套 override）；
+              这里只显示、不编辑。
+            </p>
+            {AGENT_CHOICES.map((k) => (
               <label key={k} className="small" style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
-                <input type="radio" name="agent" style={{ width: "auto" }} checked={cfg.agent === k} onChange={() => applyPreset(k)} />
-                {p.label}
+                <input type="radio" name="agent" style={{ width: "auto" }} checked={cfg.agent === k} onChange={() => chooseAgent(k)} />
+                {CHOICE_LABELS[k]}
               </label>
             ))}
             <hr className="divider" />
-            <div className="grid2">
-              <label className="field"><span>模型</span>
-                <input type="text" value={cfg.model} onChange={(e) => setCfg({ ...cfg, model: e.target.value })} /></label>
-              <label className="field"><span>Effort / Thinking</span>
-                <input type="text" value={cfg.effort} onChange={(e) => setCfg({ ...cfg, effort: e.target.value })} /></label>
-            </div>
-            {cfg.agent === "pi" && (
-              <label className="field"><span>Pi Provider</span>
-                <input type="text" value={cfg.provider} onChange={(e) => setCfg({ ...cfg, provider: e.target.value })} /></label>
+            {cfg.agent === "none" ? (
+              <p className="muted small">当前不调用模型，仅返回检索结果。</p>
+            ) : runtime ? (
+              <>
+                <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                  <span className="muted small">Runtime（{CHOICE_LABELS[cfg.agent]}）</span>
+                  <RuntimeIntentBadges agent={cfg.agent as Agent} runtime={runtime.overrides} />
+                </div>
+                {!runtime.detected && (
+                  <div className="badge warn" style={{ marginTop: 8 }}>
+                    未检测到 {CHOICE_LABELS[cfg.agent]} CLI —— Assistant 会退回仅检索。
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="muted small">Runtime 配置读取中…</p>
             )}
-            <div className="row" style={{ justifyContent: "flex-end" }}>
-              <button className="btn" onClick={() => setCfgOpen(false)}>取消</button>
-              <button className="btn primary" onClick={saveCfg}>保存</button>
+            <div className="row" style={{ justifyContent: "space-between", marginTop: 14 }}>
+              <button className="btn" onClick={() => { setCfgOpen(false); navigate({ view: "settings", section: "agents" }); }}>
+                Settings → Agents
+              </button>
+              <button className="btn primary" onClick={() => setCfgOpen(false)}>完成</button>
             </div>
           </div>
         </div>

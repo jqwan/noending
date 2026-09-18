@@ -28,7 +28,7 @@ pub use capabilities::{
     capabilities_of, validate_runtime_overrides, AgentRuntimeCapabilities, RuntimeFieldCapability,
 };
 pub use discovery::{discover_runtime_options, AgentRuntimeDiscovery, ModelCatalog, ModelOption};
-pub use store::{get_runtime_overrides, set_runtime_overrides};
+pub use store::{get_runtime_overrides, migrate_legacy_assistant_runtime, set_runtime_overrides};
 
 /// Explicit user overrides for one Agent. `None` = Agent default = no CLI argument.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,27 +57,13 @@ impl AgentRuntimeOverrides {
     }
 
     pub fn is_default(&self) -> bool {
-        let o = self.normalized();
-        o.model.is_none() && o.provider.is_none() && o.effort.is_none()
+        self.exec_options().is_default()
     }
 
     /// Audit text for "did NoEnding pass anything at launch?". It never names a
     /// resolved default: `agent-default` means no CLI argument was passed.
     pub fn intent_summary(&self) -> String {
-        let o = self.normalized();
-        let parts: Vec<String> = [
-            ("model", o.model),
-            ("provider", o.provider),
-            ("effort", o.effort),
-        ]
-        .into_iter()
-        .filter_map(|(k, v)| v.map(|v| format!("{k}={v}")))
-        .collect();
-        if parts.is_empty() {
-            "agent-default".into()
-        } else {
-            parts.join(",")
-        }
+        self.exec_options().override_summary()
     }
 
     /// The single conversion every consumer shares: New Session, Resume,

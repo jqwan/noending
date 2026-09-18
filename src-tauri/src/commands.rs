@@ -1427,22 +1427,15 @@ pub fn assistant_config_get(
     })
 }
 
+/// The Assistant's only runtime choice is *which* Agent answers; model /
+/// provider / effort come from Settings → Agents like every other consumer.
 #[tauri::command]
-pub fn assistant_config_set(
-    state: State<AppState>,
-    agent: String,
-    model: String,
-    provider: String,
-    effort: String,
-) -> Result<()> {
+pub fn assistant_config_set(state: State<AppState>, agent: String) -> Result<()> {
     with_db(&state, |db| {
-        crate::sync::extractor::AssistantConfig {
-            agent,
-            model,
-            provider,
-            effort,
+        if agent != "none" {
+            let _ = agent_of(&agent)?;
         }
-        .save(db)
+        crate::sync::extractor::AssistantConfig { agent }.save(db)
     })
 }
 

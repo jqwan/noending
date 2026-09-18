@@ -78,6 +78,33 @@ pub struct ExecOptions {
     pub effort: Option<String>,   // codex model_reasoning_effort / pi --thinking
 }
 
+impl ExecOptions {
+    pub fn is_default(&self) -> bool {
+        self.model.is_none() && self.provider.is_none() && self.effort.is_none()
+    }
+
+    /// Audit rendering of what NoEnding will actually pass: `agent-default`
+    /// means no runtime flag at all, so a record can never be read as
+    /// "NoEnding chose this model" when the Agent did.
+    pub fn override_summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(m) = &self.model {
+            parts.push(format!("model={m}"));
+        }
+        if let Some(p) = &self.provider {
+            parts.push(format!("provider={p}"));
+        }
+        if let Some(e) = &self.effort {
+            parts.push(format!("effort={e}"));
+        }
+        if parts.is_empty() {
+            "agent-default".to_string()
+        } else {
+            parts.join(",")
+        }
+    }
+}
+
 /// Read the context bundle file and return its literal content.
 ///
 /// This replaces the old `$(cat 'file')` shell-substitution helper: the

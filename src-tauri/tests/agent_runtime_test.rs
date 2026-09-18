@@ -5,11 +5,13 @@
 //! never as a value NoEnding invented.
 
 use noending::agent_runtime::{
-    capabilities_of, get_runtime_overrides, runtime_exec_options, set_runtime_overrides,
-    validate_runtime_overrides, AgentRuntimeOverrides,
+    capabilities_of, get_runtime_overrides, migrate_legacy_assistant_runtime, runtime_exec_options,
+    set_runtime_overrides, validate_runtime_overrides, AgentRuntimeOverrides,
 };
 use noending::domain::Agent;
 use noending::storage::{new_id, Db};
+use noending::sync::extractor::CliExtractor;
+use noending::sync::ContextExtractor;
 
 fn temp_db() -> Db {
     let dir = std::env::temp_dir().join(format!("noending-runtime-test-{}", new_id()));
@@ -225,4 +227,135 @@ fn serialized_vocabulary_is_the_ui_contract() {
             .iter()
             .all(|e| e != "off")
     );
+}
+
+// ---------- legacy `assistant.*` migration (§8) ----------
+
+#[test]
+fn legacy_assistant_runtime_becomes_an_override_and_never_returns() {
+    let db = temp_db();
+    db.set_setting("assistant.agent", "codex").unwrap();
+    db.set_setting("assistant.model", "gpt-5.6-luna").unwrap();
+    db.set_setting("assistant.effort", "low").unwrap();
+    // Codex can never receive a provider: carrying it over would be the exact
+    // silent-drop case the design forbids, so the migration drops it.
+    db.set_setting("assistant.provider", "openai-codex")
+        .unwrap();
+
+    assert_eq!(
+        migrate_legacy_assistant_runtime(&db).unwrap(),
+        Some(Agent::Codex)
+    );
+    let opts = runtime_exec_options(&db, Agent::Codex).unwrap();
+    assert_eq!(opts.model.as_deref(), Some("gpt-5.6-luna"));
+    assert_eq!(opts.effort.as_deref(), Some("low"));
+    assert_eq!(opts.provider, None);
+
+    for k in ["assistant.model", "assistant.provider", "assistant.effort"] {
+        assert!(
+            db.get_setting(k).unwrap().is_none(),
+            "{k} must be retired, not double-written"
+        );
+    }
+    // Which Agent the Assistant runs on is a product choice, not runtime.
+    assert_eq!(
+        db.get_setting("assistant.agent").unwrap().as_deref(),
+        Some("codex")
+    );
+
+    // Re-running changes nothing.
+    assert_eq!(migrate_legacy_assistant_runtime(&db).unwrap(), None);
+    assert_eq!(
+        runtime_exec_options(&db, Agent::Codex)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("gpt-5.6-luna")
+    );
+}
+
+#[test]
+fn migration_never_overwrites_a_runtime_setting() {
+    let db = temp_db();
+    db.set_setting("assistant.agent", "codex").unwrap();
+    db.set_setting("assistant.model", "gpt-5.6-luna").unwrap();
+    set_runtime_overrides(
+        &db,
+        Agent::Codex,
+        &overrides(Some("already-chosen"), None, None),
+    )
+    .unwrap();
+
+    assert_eq!(migrate_legacy_assistant_runtime(&db).unwrap(), None);
+    assert_eq!(
+        runtime_exec_options(&db, Agent::Codex)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("already-chosen")
+    );
+    assert!(db.get_setting("assistant.model").unwrap().is_none());
+}
+
+#[test]
+fn an_assistant_without_a_model_has_nothing_to_migrate() {
+    let db = temp_db();
+    db.set_setting("assistant.agent", "none").unwrap();
+    db.set_setting("assistant.model", "gpt-5.6-luna").unwrap();
+    assert_eq!(migrate_legacy_assistant_runtime(&db).unwrap(), None);
+    for agent in Agent::all() {
+        assert!(runtime_exec_options(&db, agent).unwrap().is_default());
+    }
+    assert!(db.get_setting("assistant.model").unwrap().is_none());
+}
+
+// ---------- every consumer names the same intent ----------
+
+#[test]
+fn extractor_names_what_was_actually_passed() {
+    let db = temp_db();
+    assert_eq!(
+        CliExtractor::try_for_agent(&db, "codex")
+            .unwrap()
+            .unwrap()
+            .name(),
+        "cli:codex:agent-default",
+        "no override must read as Agent default, never as a model NoEnding chose"
+    );
+
+    set_runtime_overrides(
+        &db,
+        Agent::Codex,
+        &overrides(Some("gpt-5.6-luna"), None, Some("low")),
+    )
+    .unwrap();
+    let name = CliExtractor::try_for_agent(&db, "codex")
+        .unwrap()
+        .unwrap()
+        .name();
+    assert_eq!(name, "cli:codex:override:model=gpt-5.6-luna,effort=low");
+    // The SyncRun record, the Preview badge and the launch audit all render
+    // this one string.
+    assert_eq!(
+        get_runtime_overrides(&db, Agent::Codex)
+            .unwrap()
+            .intent_summary(),
+        "model=gpt-5.6-luna,effort=low"
+    );
+    assert!(
+        CliExtractor::try_for_agent(&db, "none").unwrap().is_none(),
+        "Assistant without an Agent stays retrieval-only"
+    );
+}
+
+#[test]
+fn an_invalid_override_errors_for_the_assistant_instead_of_downgrading() {
+    let db = temp_db();
+    db.set_setting("agent.runtime.claude_code", r#"{"provider":"openai"}"#)
+        .unwrap();
+    // Waiting interactive answer: report it.
+    assert!(CliExtractor::try_for_agent(&db, "claude_code").is_err());
+    // Background sync keeps its lenient contract: heuristic fallback, and
+    // never a launch carrying a flag the Agent would ignore.
+    assert!(CliExtractor::for_agent(&db, "claude_code").is_none());
 }

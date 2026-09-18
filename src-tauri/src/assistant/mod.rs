@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::error::{other, Result};
 use crate::storage::{AssistantMessageRow, Db};
-use crate::sync::extractor::{AssistantConfig, CliExtractor};
+use crate::sync::extractor::CliExtractor;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ActionProposal {
@@ -145,7 +145,6 @@ impl AssistantService {
         let sid = db.ensure_assistant_session(session_id)?;
         db.insert_assistant_message(&sid, "user", user_text, None, None)?;
 
-        let cfg = AssistantConfig::from_settings(db);
         let history = build_conversation_history(&db.list_assistant_messages(&sid, 50)?);
         let snapshot = build_domain_snapshot(db, user_text)?;
         let prompt = format!(
@@ -156,7 +155,7 @@ impl AssistantService {
             q = user_text
         );
 
-        let (content, runtime) = match CliExtractor::from_config(&cfg) {
+        let (content, runtime) = match CliExtractor::try_from_settings(db)? {
             Some(cli) if crate::adapters::adapter_for(cli.agent).detect().is_some() => {
                 let install = crate::platform::exec_resolver::resolve(cli.agent)?;
                 let adapter = crate::adapters::adapter_for(cli.agent);
@@ -165,7 +164,7 @@ impl AssistantService {
                 let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
                 if text.is_empty() {
                     (
-                        "（模型返回为空，请重试或更换 Assistant 模型。）".to_string(),
+                        "（模型返回为空，请重试，或到 Settings → Agents 调整该 Agent 的 Runtime。）".to_string(),
                         "empty".to_string(),
                     )
                 } else {
@@ -176,10 +175,10 @@ impl AssistantService {
                 // no LLM configured: fall back to pure retrieval answer
                 let hits = crate::search::search(db, user_text, 8)?;
                 let text = if hits.is_empty() {
-                    "尚未配置 Assistant 模型，且检索没有命中。请先在上方选择运行模型。".to_string()
+                    "尚未选择 Assistant 的 Agent，或该 Agent CLI 未安装，且检索没有命中。请在 Settings → Agents 配置。".to_string()
                 } else {
                     format!(
-                        "尚未配置 Assistant 模型，以下是通过检索找到的相关内容：\n{}",
+                        "尚未选择 Assistant 的 Agent（或该 Agent CLI 未安装），以下是通过检索找到的相关内容：\n{}",
                         hits.iter()
                             .map(|h| format!(
                                 "- [{}] {}",
@@ -259,8 +258,8 @@ impl AssistantService {
 /// configured assistant CLI and return cleaned stdout.
 #[allow(dead_code)]
 pub fn raw_prompt(db: &Db, prompt: &str) -> Result<String> {
-    let cfg = AssistantConfig::from_settings(db);
-    let cli = CliExtractor::from_config(&cfg).ok_or_else(|| other("Assistant 模型未配置"))?;
+    let cli = CliExtractor::try_from_settings(db)?
+        .ok_or_else(|| other("Assistant 未选择 Agent（Settings → Agents 配置 Runtime）"))?;
     let install = crate::platform::exec_resolver::resolve(cli.agent)?;
     let adapter = crate::adapters::adapter_for(cli.agent);
     let cmd = adapter.build_exec_command(&install, &cli.opts, prompt)?;

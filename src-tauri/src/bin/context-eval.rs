@@ -1,7 +1,7 @@
 //! context-eval — run the context quality corpus through a real extractor.
 //!
 //! This binary owns everything the `context_eval` engine deliberately does
-//! not: extractor construction (`AssistantConfig` → `CliExtractor`),
+//! not: extractor construction (`--agent/--model/...` → `CliExtractor`),
 //! argument parsing and report rendering. The engine stays extractor-
 //! agnostic; dependency direction remains harness → production.
 //!
@@ -27,11 +27,13 @@
 
 use std::path::{Path, PathBuf};
 
+use noending::agent_runtime::{validate_runtime_overrides, AgentRuntimeOverrides};
 use noending::context_eval::{
     evaluate_extractor, load_fixture, BaselineDiff, ContextQualityFixture, EvalCaseResult,
 };
+use noending::domain::Agent;
 use noending::error::{other, Result};
-use noending::sync::extractor::{AssistantConfig, CliExtractor, HeuristicExtractor};
+use noending::sync::extractor::{CliExtractor, HeuristicExtractor};
 use noending::sync::ContextExtractor;
 
 const USAGE: &str = "\
@@ -43,8 +45,9 @@ USAGE:
 OPTIONS:
   --extractor <heuristic|cli>     Extractor under test (default: heuristic)
   --agent <codex|claude_code|pi>  CLI agent (cli mode; default: codex)
-  --model <model>                 Model override (cli mode)
+  --model <model>                 Model override (cli mode; omit = Agent default)
   --provider <provider>           Provider override, e.g. openai-codex (cli mode)
+                                  (codex/claude_code reject this)
   --effort <effort>               Reasoning effort override (cli mode)
   --corpus <path>                 Corpus directory of *.json fixtures
                                   (default: <crate>/tests/fixtures/context_quality)
@@ -52,6 +55,10 @@ OPTIONS:
   -h, --help                      Show this help
 
 NOTES:
+  cli mode reads its runtime intent from these flags only — never from the
+  app's Settings — so a report is reproducible. With no --model/--provider/
+  --effort, NoEnding passes no runtime flag at all and the Agent's own
+  defaults apply; the extractor then reports as `cli:<agent>:agent-default`.
   heuristic mode compares results against each fixture's recorded
   heuristic_expected_failed_checks baseline and reports known failures and
   unexpected passes/failures.
@@ -217,27 +224,24 @@ fn build_extractor(args: &Args) -> Result<Box<dyn ContextExtractor>> {
     match args.extractor {
         ExtractorKind::Heuristic => Ok(Box::new(HeuristicExtractor)),
         ExtractorKind::Cli => {
-            let mut cfg = AssistantConfig::default();
-            if let Some(agent) = &args.agent {
-                cfg.agent = agent.clone();
-            }
-            if let Some(model) = &args.model {
-                cfg.model = model.clone();
-            }
-            if let Some(provider) = &args.provider {
-                cfg.provider = provider.clone();
-            }
-            if let Some(effort) = &args.effort {
-                cfg.effort = effort.clone();
-            }
-            CliExtractor::from_config(&cfg)
-                .map(|e| Box::new(e) as Box<dyn ContextExtractor>)
-                .ok_or_else(|| {
-                    other(format!(
-                        "cannot build CLI extractor for agent '{}' (expected codex | claude_code | pi, not 'none')",
-                        cfg.agent
-                    ))
-                })
+            // The harness measures a runtime intent, so it takes that intent
+            // from its own arguments and NEVER from the user's Settings: an
+            // eval result must not depend on what happens to be stored.
+            let agent_name = args.agent.clone().unwrap_or_else(|| "codex".into());
+            let agent = Agent::parse(&agent_name).ok_or_else(|| {
+                other(format!(
+                    "unknown --agent '{agent_name}' (expected codex | claude_code | pi)"
+                ))
+            })?;
+            let overrides = AgentRuntimeOverrides {
+                model: args.model.clone(),
+                provider: args.provider.clone(),
+                effort: args.effort.clone(),
+            };
+            // Same contract as launch: an override the Agent cannot receive is
+            // rejected instead of silently dropped.
+            validate_runtime_overrides(agent, &overrides)?;
+            Ok(Box::new(CliExtractor::new(agent, overrides.exec_options())))
         }
     }
 }

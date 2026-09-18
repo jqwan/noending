@@ -194,99 +194,98 @@ pub struct CliExtractor {
     pub timeout_secs: u64,
 }
 
-/// Assistant runtime configuration, persisted in settings.
+/// Assistant configuration, persisted in settings.
+///
+/// This is ONLY the agent choice: which CLI the built-in Assistant runs on is
+/// a product decision, while model / provider / effort are owned by
+/// Settings → Agents like every other consumer's runtime (§14). There is no
+/// second model configuration and no cross-Agent default left to leak.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AssistantConfig {
     pub agent: String, // codex | claude_code | pi | none
-    pub model: String,
-    pub provider: String, // pi only (openai-codex | lmstudio | ...)
-    pub effort: String,   // codex reasoning effort / pi thinking level
 }
 
 impl Default for AssistantConfig {
     fn default() -> Self {
-        // user-facing default: codex + gpt-5.6-luna @ low effort
         Self {
             agent: "codex".into(),
-            model: "gpt-5.6-luna".into(),
-            provider: "openai-codex".into(),
-            effort: "low".into(),
         }
     }
 }
 
 impl AssistantConfig {
     pub fn from_settings(db: &Db) -> AssistantConfig {
-        let mut cfg = Self::default();
-        if let Ok(Some(v)) = db.get_setting("assistant.agent") {
-            cfg.agent = v;
+        AssistantConfig {
+            agent: db
+                .get_setting("assistant.agent")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| AssistantConfig::default().agent),
         }
-        if let Ok(Some(v)) = db.get_setting("assistant.model") {
-            cfg.model = v;
-        }
-        if let Ok(Some(v)) = db.get_setting("assistant.provider") {
-            cfg.provider = v;
-        }
-        if let Ok(Some(v)) = db.get_setting("assistant.effort") {
-            cfg.effort = v;
-        }
-        cfg
     }
 
     pub fn save(&self, db: &Db) -> Result<()> {
-        db.set_setting("assistant.agent", &self.agent)?;
-        db.set_setting("assistant.model", &self.model)?;
-        db.set_setting("assistant.provider", &self.provider)?;
-        db.set_setting("assistant.effort", &self.effort)?;
-        Ok(())
-    }
-
-    pub fn exec_options(&self) -> ExecOptions {
-        ExecOptions {
-            model: if self.model.is_empty() {
-                None
-            } else {
-                Some(self.model.clone())
-            },
-            provider: if self.provider.is_empty() {
-                None
-            } else {
-                Some(self.provider.clone())
-            },
-            effort: if self.effort.is_empty() {
-                None
-            } else {
-                Some(self.effort.clone())
-            },
-        }
+        db.set_setting("assistant.agent", &self.agent)
     }
 }
 
 impl CliExtractor {
     pub fn from_settings(db: &Db) -> Option<CliExtractor> {
-        Self::from_config(&AssistantConfig::from_settings(db))
+        Self::for_agent(db, &AssistantConfig::from_settings(db).agent)
     }
 
-    pub fn from_config(cfg: &AssistantConfig) -> Option<CliExtractor> {
-        if cfg.agent == "none" {
-            return None;
+    /// Interactive variant: an invalid stored override is reported instead of
+    /// quietly downgrading to retrieval-only, because the user *did* configure
+    /// an Agent. `Ok(None)` means Assistant runs with no model on purpose.
+    pub fn try_from_settings(db: &Db) -> Result<Option<CliExtractor>> {
+        Self::try_for_agent(db, &AssistantConfig::from_settings(db).agent)
+    }
+
+    pub fn for_agent(db: &Db, agent: &str) -> Option<CliExtractor> {
+        match Self::try_for_agent(db, agent) {
+            Ok(cli) => cli,
+            Err(e) => {
+                // An invalid stored row degrades to heuristic extraction;
+                // it never becomes a launch with parameters NoEnding was not
+                // allowed to pass.
+                eprintln!("[extractor] {e}");
+                None
+            }
         }
-        let agent = Agent::parse(&cfg.agent)?;
-        Some(CliExtractor {
+    }
+
+    pub fn try_for_agent(db: &Db, agent: &str) -> Result<Option<CliExtractor>> {
+        let Some(agent) = Agent::parse(agent) else {
+            return Ok(None);
+        };
+        Ok(Some(CliExtractor::new(
             agent,
-            opts: cfg.exec_options(),
+            crate::agent_runtime::runtime_exec_options(db, agent)?,
+        )))
+    }
+
+    /// Explicit runtime intent — nothing is read from Settings. `None` fields
+    /// mean the Agent's own defaults are used verbatim.
+    pub fn new(agent: Agent, opts: ExecOptions) -> CliExtractor {
+        CliExtractor {
+            agent,
+            opts,
             timeout_secs: 120,
-        })
+        }
     }
 }
 
 impl ContextExtractor for CliExtractor {
+    /// Names what was actually passed: `agent-default` records that NoEnding
+    /// sent no runtime flag at all, so a SyncRun can never be misread as
+    /// "NoEnding chose this model".
     fn name(&self) -> String {
-        format!(
-            "cli:{}:{}",
-            self.agent.as_str(),
-            self.opts.model.as_deref().unwrap_or("default")
-        )
+        let agent = self.agent.as_str();
+        if self.opts.is_default() {
+            format!("cli:{agent}:agent-default")
+        } else {
+            format!("cli:{agent}:override:{}", self.opts.override_summary())
+        }
     }
 
     fn extract(

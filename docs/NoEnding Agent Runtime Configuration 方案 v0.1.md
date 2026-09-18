@@ -381,6 +381,19 @@ Commit 3 故意提前：它是独立的小修复，且 Commit 1 的 Claude effor
 No override → no runtime CLI argument → Agent owns its native defaults
 ```
 
+## 20. 实施落地记录（与上文设计的差异）
+
+6 个提交全部落地后，以下几处与 v0.1 文本不一致，均为实现期确认过的有意选择，后续以本节为准。
+
+1. **§7 discovery 是目录不是单文件**：`agent_runtime/discovery/`，每家 CLI 的模型目录来源与 parse 方式不同。
+2. **§9 DTO 多两个字段**：`AgentRuntimeSettings` 带 `model_source`（`not_loaded | dynamic | suggested | unavailable`）和 `effort_levels`。理由：catalog 拉取失败时 effort 选择器仍要有候选值；`model_source` 决定 UI 用哪句提示（`SOURCE_NOTE`）。并且 `get_agent_runtime_settings` **不跑 discovery**（返回 `models: []` + `not_loaded`），catalog 只由 `refresh_agent_runtime_options` 提供 —— 该命令签名刻意不带 `State`，从结构上保证 discovery 不可能在 DB 锁内执行（AGENTS.md）。
+3. **§6 Claude effort = `Suggested`**（原写 FreeForm）：候选 `low/medium/high/xhigh/max` 直接来自 `claude --help`，是稳定枚举。
+4. **`discover_runtime_options(agent)` 返回值而非 `Result`**：discovery 是 advisory，失败表达为 `models: []` + `warnings`，因此调用方没有任何一条路径能因它失败。
+5. **§15 extractor 命名**：实际是 `cli:<agent>:override:model=…,effort=…`，不是 `override:<model>`。Pi 的 provider、Codex 的 effort 都必须出现在名字里，单个 `<model>` 段无法表达意图。该文本、`PreparedLaunch` 的 runtime 摘要、launch audit 三处用的是同一个函数 `ExecOptions::override_summary()`，不可能分叉。
+6. **§13 没有新增 `PreparedAgentRuntime`**：`PreparedLaunch` 直接加 `runtime: AgentRuntimeOverrides`。normalized override 本身就是冻结的意图，再包一层只是别名。
+7. **§11 在两个消费者上的不同表现**：新增 `CliExtractor::try_for_agent(db, agent) -> Result<Option<CliExtractor>>`。Assistant（用户在等回答）拿到损坏的 override 行必须**报错**，不能静默退化成 retrieval-only；后台 Sync 保留宽松降级到 heuristic，因为同步中断的代价更高且结果可审计。`Ok(None)` 一律表示「Assistant 故意没选 Agent」。
+8. **§8 迁移入口**：`migrate_legacy_assistant_runtime(db) -> Result<Option<Agent>>`，在 `lib.rs` setup 里调用一次，返回 `Some(agent)` 仅当确实写入了 override（旧 key 无论如何都会被删除，不留语义）。
+
 ## 附录 A：v0.1 落地的代码事实核对
 
 | 事实 | 位置 | 对方案的影响 |

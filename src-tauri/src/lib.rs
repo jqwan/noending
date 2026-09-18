@@ -29,6 +29,18 @@ pub fn run() {
             let db = storage::Db::open(&db_path)?;
             eprintln!("[noending] db at {}", db_path.display());
 
+            // One-shot migration of the pre-runtime-Assistant model keys into
+            // Agent runtime overrides. Reads, writes, then clears the legacy
+            // keys — never a silent dual-write.
+            match agent_runtime::migrate_legacy_assistant_runtime(&db) {
+                Ok(Some(agent)) => eprintln!(
+                    "[noending] migrated legacy assistant runtime settings to {} overrides",
+                    agent.as_str()
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("[noending] assistant runtime migration skipped: {e}"),
+            }
+
             // refresh + cache agent CLI detections (ExecutableResolver).
             // Snapshot semantics: a failed resolve REMOVES the cached row so
             // an uninstalled CLI is no longer reported as detected and can
