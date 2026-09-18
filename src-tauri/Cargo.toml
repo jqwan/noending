@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "NoEnding — Conversations end. Context doesn't."
 authors = ["NoEnding"]
 edition = "2021"
+# `src/bin/*` eval tools are secondary binaries; `cargo run` (and therefore
+# `tauri dev`) must keep resolving to the app binary without --bin.
+default-run = "noending"
 
 [lib]
 name = "noending"
