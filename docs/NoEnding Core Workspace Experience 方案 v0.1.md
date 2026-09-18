@@ -2379,6 +2379,7 @@ Deferred intelligence work:
 | conflict 五支（:639/:650/:658/:677/:693）                       | 不可达           | ConflictReviewModal 不挂载             |
 | `get/set_context_delivery_level`（:357/:364）                 | 仍可达           | 实验区要能回开                            |
 | prepare / launch / cancel / resolve 六支（:1039-:1205）         | **完全不变**      | off 只影响 bundle 内容，不影响完整性链           |
+| `launch_new_session`（:1058）/ `launch_resume_session`（:1079） | **前端零调用点**    | 集成后四条直启全改为挂 modal；命令与 `api.*` 包装按 §5 保留（见 §36.6 第 1 条） |
 | `search`（:1288）、sessions/binding（:719-:908）、sources（:1234-:1287） | 不变            | §6 要求 ON 的部分                       |
 
 一句话：**off 只砍"写 Context"和"读 Context 的智能视图"，launch 链一条都不动。**
@@ -2532,4 +2533,67 @@ A 的其他遗留：Home 里「配置 Agent」链接在 `getDefaultAgent()` 解�
    → 进 §32 dogfood 清单：「Workstream 卡片第一行为什么是 Agent 写的那句」
 6. .ws-card-error 死规则、AgentRuntimeSettings 的「全部 Agent default」、AssistantView
    三处 "Settings → Agents"、Sources/Projects 两页英文：交 Agent E
+```
+
+## 36.7 Agent E — Wave 2 语言与体验审计（代提交）
+
+**E 没有按 §18 交报告**：它在子 Agent 的 150 轮上限处中断（177 次工具调用、约 29 分钟），
+21 个文件的改动停在**已暂存、未提交**状态。Main 逐项审过 `git diff --cached` 后代为提交
+（`913241f polish(workspace): unify chinese base experience`）。这意味着 §22/§23 的**覆盖面
+是 Main 事后核的，不是 E 自报的**——E 原本还打算改什么、有没有中途放弃的项，无人知晓。
+
+Main 的核对结果：
+
+```text
+未删除任何智能组件文件；未移除一处 IntelligenceOnly 门控（diff 里 0 行）
+前端 launchNewSession / launchResumeSession 调用点仍为 0
+未碰 全局 CSS / src-tauri/** / src/types.ts / src/api.ts      → 无需重跑 cargo 门禁
+pnpm build 通过
+```
+
+E 实际做完的（Main 认可）：
+
+```text
+逐页语言 sweep（Sources / Projects / Project Detail / Search / Settings / Assistant /
+  launcher 预览行 等 21 个文件），领域词未被机翻
+三处静默失败修成显式错误：Sidebar 建 Project、ProjectsView 建 Project、
+  NewWorkstreamModal 创建失败（原先 await 抛错就无声返回，用户以为已建成）
+SessionsView 空状态区分「未启用任何 Session 来源」与「已启用但没发现 Session」，
+  并用 source.exists 提示来源路径缺失（B 的 Known issue #4、§23 的 source 丢失）
+Modal 外壳：Escape 关闭，且只有最上层响应；键盘退出仍走 onClose，
+  因此不会漏掉释放 PreparedLaunch 令牌
+••• 菜单补点击外部关闭（C 的遗留）
+「全部 Agent default」→「Runtime：Agent 默认值」；AssistantView 三处
+  "Settings → Agents" → 「设置 → Agent」（D 的 D5 遗留）
+```
+
+合并后 Main 自己再扫了一遍主路径，剩余英文只有：`Override`（Agent Runtime 的显式覆盖标记，
+与封板方案用词一致，保留）、`Unknown view`（Router 的未知路由兜底，非正常主路径）、
+以及 Projects / Workstreams / Sessions 三个作为导航标签的领域词（§1.2 允许）。
+
+**§2.1 补两个 E 期间定下的词：**
+
+```text
+Override（Agent Runtime 的显式覆盖标记）→ 保留英文，与 Runtime 方案文档同一术语
+Empty/loading 提示里的 Ingest Source → Session 来源
+```
+
+## 36.8 集成后端与门禁现状
+
+```text
+main tip           df76634（含 Commit 0 + D + B + C + A + E）
+cargo fmt --check  通过
+cargo check        通过
+cargo test         205 passed / 0 failed / 5 ignored（基线 198 + D 的 7）
+pnpm build         通过
+```
+
+仍未收口的项（都是 Main 名下的小账，不阻塞封板）：
+
+```text
+.ws-card-error 成为死 CSS 规则（全局 CSS 归 Main，未删）
+HomeView 的「配置 Agent」链接在 getDefaultAgent() 解析期间可能闪现
+  （要共享 hook 加 resolved 标志，属 §8.1.1 冻结面，未做）
+新建 Session 比方案冻结前多一步弹窗 —— Preview-Launch Identity 的预期代价，进 dogfood 观察
+run_pending_sync_nonblocking 仍无门禁（L3：无生产调用方；若将来接进生产必须补）
 ```
