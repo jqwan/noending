@@ -1,10 +1,11 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Modal } from "../../components/common";
 import { api } from "../../api";
+import { useDeliveryOff } from "../../app/experience";
 import { announceLaunch } from "./LaunchResultModal";
+import { deliveryLevelLabel, runtimeIntentText } from "./LaunchPreviewRows";
 import type { PreparedLaunch } from "../../types";
 import { KIND_LABELS, AUTHORITY_LABELS } from "../../types";
-import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
 
 interface Props {
   prepared: PreparedLaunch;
@@ -13,6 +14,13 @@ interface Props {
   onLaunched?: () => void;
 }
 
+/**
+ * Context 注入预览 —— 实验路径（§24）：只有 Delivery 未关闭时才可能被打开。
+ *
+ * 这里显示的一切都取自 PreparedLaunch 冻结的那份 bundle：预览的就是 Agent
+ * 真正会收到的东西。关闭注入时本组件整体不挂载（不是 CSS 隐藏），也不显示
+ * 任何 token 计数或「已关闭」字样。
+ */
 export default function ContextPreviewModal({
   prepared: initialPrepared,
   onClose,
@@ -24,6 +32,12 @@ export default function ContextPreviewModal({
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [staleError, setStaleError] = useState<string | null>(null);
+  const deliveryOff = useDeliveryOff();
+
+  // 预览打开期间注入被关掉：交出关闭权，让调用方回收并重新准备。
+  useEffect(() => {
+    if (deliveryOff) onClose();
+  }, [deliveryOff, onClose]);
 
   const handleClose = () => {
     api.cancelPrepared(prepared.id).catch(console.error);
@@ -42,7 +56,7 @@ export default function ContextPreviewModal({
     } catch (e: unknown) {
       const msg = String(e);
       if (msg.includes("stale") || msg.includes("过期") || msg.includes("变化")) {
-        setStaleError("底层 Context 或 Runtime 配置已发生变化（Stale），请刷新预览后重新启动。");
+        setStaleError("状态已变化：Context 或 Runtime 与预览不一致，请刷新预览后重新启动。");
       } else {
         setStaleError(msg);
       }
@@ -69,19 +83,31 @@ export default function ContextPreviewModal({
     }
   };
 
-  const isOff = prepared.delivery_level === "off";
   const isEmpty = prepared.bundle.sections.length === 0;
 
+  if (deliveryOff) return null;
+
   return (
-    <Modal title="Context 准备就绪预览" onClose={handleClose}>
+    <Modal title="Context 注入预览" onClose={handleClose}>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-        <span className="badge accent">模式: {prepared.mode === "new" ? "New Session" : "Resume"}</span>
-        <span className="badge">等级: {prepared.delivery_level}</span>
-        <span className="badge">
-          Workstreams: {prepared.workstream_ids.length > 0 ? `${prepared.workstream_ids.length} 个` : "无 (0 绑定)"}
+        <span className="badge accent">
+          {prepared.mode === "new" ? "新建 Session" : "继续 Session"}
         </span>
-        <span className="badge info">估算 Token: ~{prepared.bundle.approx_tokens}</span>
-        <RuntimeIntentBadges agent={prepared.agent} runtime={prepared.runtime} />
+        <span className="badge">
+          注入等级: {deliveryLevelLabel(prepared.delivery_level)}
+        </span>
+        <span className="badge">
+          Workstream:{" "}
+          {prepared.workstream_ids.length > 0
+            ? `${prepared.workstream_ids.length} 个`
+            : "无"}
+        </span>
+        <span className="badge">
+          工作目录: {prepared.cwd || "未指定"}
+        </span>
+        <span className="badge">
+          Runtime: {runtimeIntentText(prepared.agent, prepared.runtime)}
+        </span>
       </div>
 
       {staleError && (
@@ -109,13 +135,9 @@ export default function ContextPreviewModal({
         </div>
       )}
 
-      {isOff ? (
+      {isEmpty ? (
         <div className="card" style={{ padding: 16, color: "var(--text-muted)" }}>
-          Context Delivery 当前已关闭 (Off)。本次启动不会注入任何上下文文件。
-        </div>
-      ) : isEmpty ? (
-        <div className="card" style={{ padding: 16, color: "var(--text-muted)" }}>
-          当前未选择 Workstream 或该 Workstream 暂无可交付的上下文内容。
+          当前未选择 Workstream，或该 Workstream 暂无可交付的 Context 内容。
         </div>
       ) : (
         <>

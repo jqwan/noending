@@ -2,20 +2,31 @@ import React, { useEffect, useState } from "react";
 import type { LaunchResult } from "../../types";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
+import { useDeliveryOff } from "../../app/experience";
 
-/** What happened after a launch: command, context file, delivered bundle. */
+/**
+ * What happened after a launch: command, context file, delivered bundle.
+ *
+ * 注入关闭时不显示 Context bundle，也不显示任何 token 计数（§15、§24）：
+ * 这块内容直接不存在，而不是显示「计数为零 / 未注入」之类的占位说明。
+ */
 export default function LaunchResultModal({ result, onClose }: {
   result: LaunchResult;
   onClose: () => void;
 }) {
+  const deliveryOff = useDeliveryOff();
   return (
     <Modal title="启动详情" onClose={onClose}>
       <div className="badge accent" style={{ marginBottom: 12 }}>已通过 {result.launched_via} 启动</div>
       <p className="small">{result.note}</p>
       <h3>执行的命令</h3>
       <div className="card mono small">{result.command_line}</div>
-      <h3>注入的上下文（约 {result.bundle.approx_tokens} tokens）</h3>
-      <div className="card mono small" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto" }}>{result.bundle.markdown}</div>
+      {!deliveryOff && (
+        <>
+          <h3>注入的 Context</h3>
+          <div className="card mono small" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto" }}>{result.bundle.markdown}</div>
+        </>
+      )}
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
         <button className="btn primary" onClick={onClose}>关闭</button>
       </div>

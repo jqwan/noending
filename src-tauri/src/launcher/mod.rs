@@ -207,6 +207,26 @@ impl SessionLauncher {
     /// 3. Commits LaunchIntent (new) or extra bindings & cumulative delivery snapshots (resume)
     ///    only upon actual launch.
     pub fn launch_prepared(&self, db: &Db, prepared: &PreparedLaunch) -> Result<LaunchResult> {
+        self.launch_prepared_with(db, prepared, crate::platform::launcher::launch)
+    }
+
+    /// `launch_prepared` with the *process spawn* step injected.
+    ///
+    /// The injected function replaces ONLY the OS call that opens a terminal
+    /// and runs the Agent CLI. Every integrity gate stays on the same path in
+    /// the same order: delivery-level check, state fingerprint (Preview-Launch
+    /// Identity), context-file gating, single-use capability consumption by the
+    /// command layer, LaunchIntent commit and delivery snapshots.
+    ///
+    /// Exists so integration tests can drive the whole
+    /// prepare → launch_prepared chain without opening a real Terminal window
+    /// on the developer's machine. Production callers use `launch_prepared`.
+    pub fn launch_prepared_with(
+        &self,
+        db: &Db,
+        prepared: &PreparedLaunch,
+        spawn: fn(&AgentCommand) -> Result<crate::platform::launcher::LaunchOutcome>,
+    ) -> Result<LaunchResult> {
         let current_delivery_level = crate::settings::context_delivery_level_of(db)?;
         if current_delivery_level != prepared.delivery_level {
             return Err(other(
@@ -301,7 +321,7 @@ impl SessionLauncher {
                 ctx_file.as_deref(),
                 cwd_path.as_deref(),
             )?;
-            let outcome = crate::platform::launcher::launch(&cmd)?;
+            let outcome = spawn(&cmd)?;
 
             db.update_launch_intent(
                 &intent.id,
@@ -353,7 +373,7 @@ impl SessionLauncher {
                 ctx_file.as_deref(),
                 cwd_path.as_deref(),
             )?;
-            let outcome = crate::platform::launcher::launch(&cmd)?;
+            let outcome = spawn(&cmd)?;
 
             for extra in &prepared.extra_workstream_ids {
                 record_binding(

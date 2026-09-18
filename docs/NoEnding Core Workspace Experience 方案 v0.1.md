@@ -2464,3 +2464,20 @@ backlog_ingested_while_off_is_replayed_after_reenabling
 
 **Commit 0 未做（按 §12–§15 归属）：** Workstream Detail 的智能段落卸载（C）、New/Resume 的 Context Preview 隐藏与 prepared flow 统一（D，含 §15 默认处理清单的第 5 条）、Sessions 页面打磨（B）、Home 其余文案（A）。
 
+## 36.2 Agent D — `feat(launcher): streamline base new and resume flows`
+
+分支基线是 `5092e46`（含 `c684869`）。§15 的 D 范围已落地：`NewSessionModal` 增加 §8.1.1 的 optional `workstreamId`、打开即 prepare、显示 `prepared.cwd`、启动只走 `prepareNewSession → launchPrepared`；Delivery Off 时 Context Preview 整块不挂载。与方案的差异：
+
+| # | 方案 | 实做 | 原因 |
+| --- | --- | --- | --- |
+| D1 | §15「纯前端改动，backend 不需要新分支」 | 仍然成立；但 `launcher/mod.rs` 多了一个 `launch_prepared_with(db, prepared, spawn)`：把**进程 spawn 这一步**做成注入参数，`launch_prepared` 原样委托给它 | AGENTS.md 要求为改动的 launcher 不变式写回归测试，而 §27/§35 的 F24 只补了智能侧。真实 `platform::launcher::launch` 在 macOS 上会开 Terminal 打字，测试不能这么跑。所有完整性门禁（level 校验、状态指纹、ctx 文件门控、LaunchIntent、delivery 快照）都留在原路径里，注入只替换最后那一脚 |
+| D2 | §15 只点名 `launchNewSession` 直启 | Resume 侧 `launchResumeSession` 兜底也删了：没有 prepared 令牌时「继续」按钮禁用 + 提供重试 | 该兜底内部虽是 `prepare_resume + launch_prepared`（不是完整性旁路），但它启动的参数和面板上预览的 `prepared` 不是同一份，违反 Preview-Launch Identity 的显示一致性 |
+| D3 | §15「不显示 0 tokens / No context / Context disabled」 | token 估算在 `ContextPreviewModal` 与 `LaunchResultModal` 里**整体移除**（不只是 off 时隐藏） | 唯一能读出"零"的地方就是这两处；实验区仍可用「条目详情 (N)」看真实内容量 |
+| D4 | §11.9 | 两个 modal 改用 `useBaseExperience()` 读 level，不再自己 `api.getContextDeliveryLevel()`；顺带修掉一个既有 bug：它们把 level 的初值写成 `balanced`，而真实默认是 off，于是 off 时也会先渲染一版"注入中"的提示 | 读一次、判一处 |
+| D5 | §2 词表 | `ContextPreviewModal` 不再 import `RuntimeIntentBadges`，改用 launcher 内部的 `runtimeIntentText`（"Agent 默认值"） | `AgentRuntimeSettings.tsx:41` 的「全部 Agent default」不在 D 的 ownership 内，没动它；那处仍待 Main/Agent E |
+| D6 | §15 第 4 条（cwd 可编辑） | 只读显示 | 开放编辑要新增 backend 入参，方案自己标为后续可选项 |
+
+**新增测试（`src-tauri/tests/base_launch_flow_test.rs`，7 支）：** standalone（`workstream_ids = []`）prepare → launch_prepared 成功且 `context_deliveries` 恒 0、不写 context 文件、intent 不声称交付过 bundle；off + 有 Context 的 Workstream 同样零注入；`delivery_level` off→balanced 与 balanced→off 双向都判 stale 且不提交 intent；prepared 令牌 single-use；`prepared.cwd` 就是后端解析结果；off 的 bundle 字面为空。
+
+**D 未做（不是遗漏）：** `WorkstreamDetailView.tsx:165`、`WorkstreamCard.tsx:38`、`WorkstreamSessions.tsx:30`、`HomeView.tsx:31` 四条直启路径在 C/A 的文件里，§8.1.1 已给出接法（挂 `<NewSessionModal workstreamId={ws.id}/>`）；`launchNewSession` / `launchResumeSession` 命令与 `api.*` 包装按 §5「保留代码」原样留着，集成后它们在前端无人调用，§34 的不可达清单要收这四条。
+

@@ -1,294 +1,245 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
-import AgentIcon from "../../components/AgentIcon";
+import { useBaseExperience } from "../../app/experience";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 import ContextPreviewModal from "../launcher/ContextPreviewModal";
 import {
-  AGENT_LABELS,
-  type SessionDetail,
-  type ContextDeliveryLevel,
-  type PreparedLaunch,
-} from "../../types";
+  AgentRow,
+  CwdRow,
+  PreviewRow,
+  RuntimeRow,
+  deliveryLevelLabel,
+} from "../launcher/LaunchPreviewRows";
+import type { PreparedLaunch, SessionDetail } from "../../types";
 
-interface Props {
+/** 冻结契约（§8.1.1）：形状保持不变，B 的 SessionDetailView 正按此调用。 */
+export type ResumeSessionModalProps = {
   sessionId: string;
   onClose: () => void;
-}
+};
 
-export default function ResumeSessionModal({ sessionId, onClose }: Props) {
+/**
+ * 继续 Session（方案 §15）。
+ *
+ * 打开即 Prepare（后端会先摄入这个 Session 自己的最新消息），预览显示
+ * Agent / 工作目录 / Workstream / Runtime；「继续」消费这份 PreparedLaunch。
+ * 不要求用户重新选择任何已经确定的参数。
+ *
+ * ⚠️ Context Preview 的隐藏只是**可见性**改动：eager prepare、关闭预览后的
+ * 重 prepare、卸载时的 cancelPrepared 全部保留——PreparedLaunch 是 single-use
+ * 能力令牌，少一次 prepare 就没有可启动的令牌（§15「UX 简化不能绕开 integrity」）。
+ */
+export default function ResumeSessionModal({
+  sessionId,
+  onClose,
+}: ResumeSessionModalProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [deliveryLevel, setDeliveryLevel] =
-    useState<ContextDeliveryLevel>("balanced");
   const [prepared, setPrepared] = useState<PreparedLaunch | null>(null);
-  const [tokenEstimate, setTokenEstimate] = useState<number>(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const preparedRef = useRef<PreparedLaunch | null>(null);
+  const { deliveryLevel } = useBaseExperience();
+  const deliveryOff = deliveryLevel === "off";
 
-  const doPrepare = async (): Promise<PreparedLaunch | null> => {
-    return await api.prepareResumeSession(sessionId, []);
-  };
+  const preparedRef = useRef<PreparedLaunch | null>(null);
+  const seqRef = useRef(0);
+
+  /**
+   * Stop holding the capability. `alreadyReleased` marks the paths where the
+   * token was destroyed elsewhere: the preview cancels on close, and
+   * `launchPrepared` consumes it. Cancelling again there would either
+   * double-release or kill the launch that is in flight.
+   */
+  const releasePrepared = useCallback((alreadyReleased = false) => {
+    const held = preparedRef.current;
+    preparedRef.current = null;
+    setPrepared(null);
+    if (held && !alreadyReleased) {
+      api.cancelPrepared(held.id).catch(console.error);
+    }
+  }, []);
+
+  /** mount 时 eager prepare，出错时同样从这里重来；这是唯一持有令牌的地方。 */
+  const prepare = useCallback(async (): Promise<PreparedLaunch | null> => {
+    const mine = ++seqRef.current;
+    setPreparing(true);
+    try {
+      const p = await api.prepareResumeSession(sessionId, []);
+      if (seqRef.current !== mine) {
+        // 已被更晚的 prepare 取代或组件已卸载（cleanup 递增了 seq）：立刻回收，不留孤儿 preparation
+        api.cancelPrepared(p.id).catch(console.error);
+        return null;
+      }
+      preparedRef.current = p;
+      setPrepared(p);
+      setError("");
+      // Prepare 内部会摄入 Session 新消息，刷新 detail 让绑定显示与之一致
+      try {
+        const fresh = await api.getSessionDetail(sessionId);
+        if (seqRef.current === mine) setDetail(fresh);
+      } catch (e) {
+        console.error(e);
+      }
+      return p;
+    } catch (e: unknown) {
+      if (seqRef.current === mine) setError(String(e));
+      return null;
+    } finally {
+      if (seqRef.current === mine) setPreparing(false);
+    }
+  }, [sessionId]);
 
   useEffect(() => {
     let cancelled = false;
-
     api
       .getSessionDetail(sessionId)
       .then((d) => {
         if (!cancelled) setDetail(d);
       })
       .catch(console.error);
-
-    api
-      .getContextDeliveryLevel()
-      .then((lvl) => {
-        if (!cancelled) setDeliveryLevel(lvl);
-      })
-      .catch(console.error);
-
-    setPreparing(true);
-    doPrepare()
-      .then(async (p) => {
-        if (!p) return;
-        // P2: 如果异步返回前组件已卸载，取消该准备，防止孤儿 preparation
-        if (cancelled) {
-          api.cancelPrepared(p.id).catch(console.error);
-          return;
-        }
-        preparedRef.current = p;
-        setPrepared(p);
-        setTokenEstimate(p.bundle.approx_tokens);
-
-        // UX: Prepare 内部会执行 session sync，在此刷新 session detail 确保 UI binding 与 prepare 一致
-        try {
-          const freshDetail = await api.getSessionDetail(sessionId);
-          if (!cancelled) {
-            setDetail(freshDetail);
-          }
-        } catch (e) {
-          console.error(e);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) setError(String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setPreparing(false);
-      });
-
+    void prepare();
     return () => {
       cancelled = true;
+      seqRef.current += 1;
       // 卸载时释放持有的 preparation
       if (preparedRef.current) {
         api.cancelPrepared(preparedRef.current.id).catch(console.error);
         preparedRef.current = null;
       }
     };
-  }, [sessionId]);
+  }, [prepare, sessionId]);
 
   const handleClose = () => {
-    if (preparedRef.current) {
-      api.cancelPrepared(preparedRef.current.id).catch(console.error);
-      preparedRef.current = null;
-      setPrepared(null);
-    }
+    releasePrepared();
     onClose();
   };
 
-  const handleOpenPreview = async () => {
-    if (previewOpen) return;
-    if (prepared) {
-      setPreviewOpen(true);
-      return;
-    }
-    setPreparing(true);
-    setError("");
-    try {
-      const p = await doPrepare();
-      if (p) {
-        preparedRef.current = p;
-        setPrepared(p);
-        setTokenEstimate(p.bundle.approx_tokens);
-        setPreviewOpen(true);
-        const refreshed = await api.getSessionDetail(sessionId);
-        setDetail(refreshed);
-      }
-    } catch (e: unknown) {
-      setError(String(e));
-    } finally {
-      setPreparing(false);
-    }
-  };
-
   const handleResume = async () => {
-    if (busy) return;
+    const current = preparedRef.current;
+    if (busy || !current) return;
+    // single-use：launchPrepared 自己消费这份令牌，这里只能松手不能再 cancel
+    releasePrepared(true);
     setBusy(true);
     setError("");
-
-    // P1: 任何 launchPrepared 调用之后，无论成功失败，原 PreparedLaunch 都不得再次使用
-    const current = preparedRef.current;
-    preparedRef.current = null;
-    setPrepared(null);
-
     try {
-      const res = current
-        ? await api.launchPrepared(current.id)
-        : await api.launchResumeSession(sessionId, []);
-      announceLaunch("恢复", res);
+      const res = await api.launchPrepared(current.id);
+      announceLaunch("继续", res);
       onClose();
     } catch (e: unknown) {
-      const errStr = String(e);
-      const isStaleOrExpired =
-        errStr.includes("stale") ||
-        errStr.includes("过期") ||
-        errStr.includes("已被使用") ||
-        errStr.includes("不存在") ||
-        errStr.includes("变化");
-
-      if (isStaleOrExpired) {
-        // stale / expired 时自动重新 prepareResumeSession 并刷新 session detail
-        setPreparing(true);
-        try {
-          const fresh = await doPrepare();
-          if (fresh) {
-            preparedRef.current = fresh;
-            setPrepared(fresh);
-            setTokenEstimate(fresh.bundle.approx_tokens);
-            const freshDetail = await api.getSessionDetail(sessionId);
-            setDetail(freshDetail);
-          }
-          setError("Context 已发生变化，启动计划已刷新，请再次确认 Resume。");
-        } catch (prepErr) {
-          setError(`启动失败（${errStr}），且自动刷新失败：${String(prepErr)}`);
-        } finally {
-          setPreparing(false);
-        }
-      } else {
-        // 其他错误同样重新生成有效 preparation 保持可用
-        setPreparing(true);
-        try {
-          const fresh = await doPrepare();
-          if (fresh) {
-            preparedRef.current = fresh;
-            setPrepared(fresh);
-            setTokenEstimate(fresh.bundle.approx_tokens);
-          }
-        } catch (prepErr) {
-          console.error(prepErr);
-        } finally {
-          setPreparing(false);
-        }
-        setError(errStr);
-      }
       setBusy(false);
+      const fresh = await prepare();
+      if (fresh) {
+        setError("状态已变化，启动计划已刷新，请再次确认「继续」。");
+      } else {
+        setError(`启动失败：${String(e)}`);
+      }
     }
   };
 
   if (!detail) {
     return (
-      <Modal title="Resume Session" onClose={handleClose}>
+      <Modal title="继续 Session" onClose={handleClose}>
         <div style={{ padding: "20px 0", color: "var(--text-muted)" }}>
-          加载会话信息中…
+          {preparing ? "准备中…" : "加载中…"}
         </div>
       </Modal>
     );
   }
 
   const { session, bindings } = detail;
-  // 以 PreparedLaunch 中的有效 Workstream 为权威来源，若尚在 prepare 中则 fallback 到 bindings
+  // PreparedLaunch 里的是这次启动真正生效的 Workstream 集合；未就绪时退回绑定列表
   const effectiveWsIds = prepared
     ? prepared.workstream_ids
     : bindings.map(([b]) => b.workstream_id);
-  const isNone = effectiveWsIds.length === 0;
-  const isOff = deliveryLevel === "off";
-  const approxTokens = prepared?.bundle.approx_tokens ?? tokenEstimate;
-
-  const wsDisplay = isNone
-    ? "未关联 Workstream"
-    : bindings
-        .filter(([b]) => effectiveWsIds.includes(b.workstream_id))
-        .map(([, title]) => title)
-        .filter(Boolean)
-        .join(" · ") || `${effectiveWsIds.length} 个关联 Workstream`;
+  const wsDisplay =
+    effectiveWsIds.length === 0
+      ? "未关联 Workstream"
+      : bindings
+          .filter(([b]) => effectiveWsIds.includes(b.workstream_id))
+          .map(([, title]) => title)
+          .filter(Boolean)
+          .join(" · ") || `${effectiveWsIds.length} 个关联 Workstream`;
 
   return (
     <>
-      <Modal title="Resume Session" onClose={handleClose}>
-        {/* Agent Row */}
-        <div className="row-line" style={{ borderTop: 0 }}>
-          <div>
-            <div className="settings-row-label">Agent</div>
-            <div className="settings-row-hint">Session 所使用的执行 Agent</div>
-          </div>
-          <span className="badge accent ws-btn" style={{ gap: 6 }}>
-            <AgentIcon agent={session.agent} />
-            {AGENT_LABELS[session.agent]}
-          </span>
-        </div>
+      <Modal title="继续 Session" onClose={handleClose}>
+        <AgentRow
+          agent={session.agent}
+          hint="这个 Session 原本使用的 Agent"
+          first
+        />
+        <CwdRow cwd={prepared?.cwd ?? session.cwd} pending={preparing && !prepared} />
 
-        {/* Workstreams Row */}
-        <div className="row-line">
-          <div>
-            <div className="settings-row-label">Workstreams</div>
-            <div className="settings-row-hint">{wsDisplay}</div>
-          </div>
+        <PreviewRow
+          label="Workstream"
+          hint={wsDisplay}
+        >
           <span className="badge">
-            {effectiveWsIds.length > 0 ? `${effectiveWsIds.length} 个` : "0 绑定"}
+            {effectiveWsIds.length > 0 ? `${effectiveWsIds.length} 个` : "无"}
           </span>
-        </div>
+        </PreviewRow>
 
-        {/* Context Visibility Row */}
-        <div className="row-line">
-          <div>
-            <div className="settings-row-label">Context Delivery</div>
-            <div className="settings-row-hint">
-              {isNone
-                ? "No Workstream · 0 tokens"
-                : isOff
-                ? "Off · 不注入"
-                : `${
-                    deliveryLevel.charAt(0).toUpperCase() +
-                    deliveryLevel.slice(1)
-                  } · ~${approxTokens} tokens`}
+        {prepared && (
+          <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
+        )}
+
+        {/* Context Preview 在注入关闭时整块不挂载，也不出现任何 token 计数（§15、§24）。 */}
+        {!deliveryOff && (
+          <div className="row-line">
+            <div>
+              <div className="settings-row-label">Context 注入</div>
+              <div className="settings-row-hint">
+                等级：{deliveryLevelLabel(deliveryLevel)} ·
+                预览显示的就是本次真正注入的 Context
+              </div>
             </div>
-          </div>
-          <div className="row" style={{ gap: 8 }}>
-            {!isNone && !isOff && (
-              <button
-                type="button"
-                className="btn small"
-                disabled={preparing}
-                onClick={handleOpenPreview}
-              >
-                {preparing ? "准备中…" : "Preview"}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {error && (
-          <div className="badge warn" style={{ marginTop: 8 }}>
-            {error}
+            <button
+              type="button"
+              className="btn small"
+              disabled={preparing || busy || !prepared}
+              onClick={() => {
+                if (prepared) setPreviewOpen(true);
+              }}
+            >
+              预览 Context
+            </button>
           </div>
         )}
 
-        <div
-          className="row"
-          style={{ justifyContent: "flex-end", marginTop: 18 }}
-        >
+        {error && (
+          <div
+            className="badge warn"
+            style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}
+          >
+            <span style={{ flex: 1, overflowWrap: "anywhere" }}>{error}</span>
+            {!preparing && !busy && (
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => {
+                  releasePrepared();
+                  void prepare();
+                }}
+              >
+                重试
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
           <button className="btn" onClick={handleClose} disabled={busy}>
-            Cancel
+            取消
           </button>
           <button
             className="btn primary"
-            disabled={busy || preparing}
+            disabled={busy || preparing || !prepared}
             onClick={handleResume}
           >
-            {busy ? "恢复中…" : preparing ? "准备中…" : "Resume"}
+            {busy ? "继续中…" : preparing ? "准备中…" : "继续"}
           </button>
         </div>
       </Modal>
@@ -298,34 +249,18 @@ export default function ResumeSessionModal({ sessionId, onClose }: Props) {
           prepared={prepared}
           onClose={() => {
             setPreviewOpen(false);
-            setPrepared(null);
-            preparedRef.current = null;
-            // Preview 关闭时其内部会 cancel 当前 ID，此处重新准备一份新的 preparation 保持就绪
-            setPreparing(true);
-            doPrepare()
-              .then((fresh) => {
-                if (fresh) {
-                  preparedRef.current = fresh;
-                  setPrepared(fresh);
-                  setTokenEstimate(fresh.bundle.approx_tokens);
-                }
-              })
-              .catch(console.error)
-              .finally(() => setPreparing(false));
+            // 预览内部已回收这个令牌：重新准备一份，保持「继续」随时可用
+            releasePrepared(true);
+            void prepare();
           }}
           onRefresh={async () => {
-            const p = await doPrepare();
-            if (p) {
-              preparedRef.current = p;
-              setPrepared(p);
-              setTokenEstimate(p.bundle.approx_tokens);
-              api.getSessionDetail(sessionId).then(setDetail).catch(console.error);
-            }
-            return p;
+            // 预览在拿到新令牌后自行回收旧的那个。失败时 prepare 返回 null，
+            // 旧令牌仍在手上且依然有效，所以预览保持打开。
+            return await prepare();
           }}
           onLaunched={() => {
-            preparedRef.current = null;
-            setPrepared(null);
+            // 预览内已经启动成功：令牌是被消费掉的，不再 cancel
+            releasePrepared(true);
             onClose();
           }}
         />
