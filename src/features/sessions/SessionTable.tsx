@@ -114,12 +114,16 @@ export function ellipsisPathMiddle(path: string, max: number): string {
 
   const rootMatch = /^([A-Za-z]:[\\/]|\\\\[^\\/]*[\\/]|\/)/.exec(trimmed);
   const root = rootMatch ? rootMatch[1] : "";
-  const segs = trimmed.slice(root.length).split(/[\\/]+/).filter((s) => s.length > 0);
+  // 盘符与 UNC 才两种分隔符通吃（Windows 本来就混用 / 和 \）；POSIX 路径里
+  // `\` 是合法文件名字符，跟着当分隔符切会把 `my\dir` 拆成两段，编造出层级。
+  const isWindowsPath = /^[A-Za-z]:[\\/]|\\\\/.test(trimmed);
+  const segs = trimmed
+    .slice(root.length)
+    .split(isWindowsPath ? /[\\/]+/ : "/")
+    .filter((s) => s.length > 0);
   if (segs.length === 0) return ellipsisTail(trimmed, max);
 
-  const sep = root.includes("\\") || (root === "" && trimmed.includes("\\") && !trimmed.includes("/"))
-    ? "\\"
-    : "/";
+  const sep = isWindowsPath ? "\\" : "/";
   const tail = segs[segs.length - 1];
   const head = segs.slice(0, -1);
   // Unix 根 "/" 不携带身份信息，省掉它换宽度；盘符与 UNC 主机名要留。

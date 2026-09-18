@@ -10,3 +10,6 @@ src-tauri/gen/
 .DS_Store
 *.log
 .tmp/
+
+# Qoder agent worktrees
+.qoder/
