@@ -36,8 +36,12 @@ export function ContinueSection({ navigate, defaultAgent, cards }: {
   );
 }
 
-/** 最近会话：最多 3 条的轻量区域（§21），视觉中心仍是 Workstream。 */
-export function RecentSessions({ navigate }: { navigate: (r: Route) => void }) {
+/** 最近 Sessions：最多 3 条的轻量区域（§21），视觉中心仍是 Workstream。 */
+export function RecentSessions({ navigate, onNewSession }: {
+  navigate: (r: Route) => void;
+  /** 有 Workstream 但还没有任何 Session 时给出的下一步。 */
+  onNewSession?: () => void;
+}) {
   const [sessions, setSessions] = useState<Session[] | null>(null);
 
   const refresh = useMemo(
@@ -60,22 +64,35 @@ export function RecentSessions({ navigate }: { navigate: (r: Route) => void }) {
   // 否则会和已刷新的 Workstream 卡片显示不一致的「最新」状态。
   useRefreshSignal(refresh);
 
-  if (!sessions || sessions.length === 0) return null;
+  // 还没读到数据时不出声，免得把「加载中」当成「没有 Session」。
+  if (!sessions) return null;
 
   return (
     <div className="recent-sessions" style={{ marginTop: 36 }}>
-      <div className="section-label">最近会话</div>
-      {sessions.map((s) => (
-        <div className="list-row" key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
-          <div className="grow">
-            <div className="title">{s.title ?? s.agent_session_id}</div>
-          </div>
-          <div className="side">
-            <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
-            <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
-          </div>
+      <div className="section-label">最近 Sessions</div>
+
+      {/* Workstream 存在但一次都还没跑过：这里必须留下一个明确的下一步，
+          否则首页看起来像空的。 */}
+      {sessions.length === 0 ? (
+        <div className="muted small">
+          还没有 Session。{" "}
+          {onNewSession && (
+            <button className="link small" onClick={onNewSession}>新建 Session</button>
+          )}
         </div>
-      ))}
+      ) : (
+        sessions.map((s) => (
+          <div className="list-row" key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
+            <div className="grow">
+              <div className="title">{s.title ?? s.agent_session_id}</div>
+            </div>
+            <div className="side">
+              <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
+              <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
+            </div>
+          </div>
+        ))
+      )}
     </div>
   );
 }
