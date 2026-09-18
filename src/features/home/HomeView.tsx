@@ -1,40 +1,47 @@
 import React, { useState } from "react";
-import { api } from "../../api";
 import AgentIcon from "../../components/AgentIcon";
 import SidebarLogo from "../../components/SidebarLogo";
 import type { Route } from "../../app/routes";
-import { IntelligenceOnly } from "../../app/experience";
 import { ContinueSection, RecentSessions } from "./ContinueSection";
-import ContextUpdatesSection from "./ContextUpdatesSection";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
 import NewWorkstreamModal from "../workstreams/NewWorkstreamModal";
-import { announceLaunch } from "../launcher/LaunchResultModal";
+import NewSessionModal from "../sessions/NewSessionModal";
 
 /**
  * Home = Continue where you left off（整体设计方案 §12）。
  * 唯一任务：让用户用最短路径回到最近推进的 Workstream。
+ *
+ * Base Experience（方案 §11.5）：Home 不消费 reviewSummaries，也不挂载任何智能
+ * 段落（Context Updates / Review / Conflict 一律不出现在主路径，§24）。这里的
+ * 「新建 Session」不自己启动进程，而是打开全局唯一的启动路径
+ * NewSessionModal → prepareNewSession → launchPrepared（§8.1.1、Preview-Launch
+ * Identity）。Home 也从不推进 ReviewState（Home Attention Integrity）。
  */
 export default function HomeView({ navigate }: { navigate: (r: Route) => void }) {
-  const { cards, defaultAgent, reviewSummaries, refresh } = useWorkstreamCards();
+  const { cards, defaultAgent, refresh } = useWorkstreamCards();
   const [creatingWs, setCreatingWs] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
 
   if (cards === null) return <div className="main narrow">加载中…</div>;
 
-  const hasWorkstreams = cards.some(
+  const activeCards = cards.filter(
     (c) => c.lifecycle === "open" && c.visibility === "normal",
   );
+  // 卡片全是归档：和「真的什么都没有」是两种边界，得告诉用户东西去哪了。
+  const archivedOnly = activeCards.length === 0 && cards.length > 0;
 
-  // Workstream-centered, not Workstream-required：空状态保留直接 New Session。
-  const plainNewSession = async () => {
-    if (!defaultAgent) return;
-    try {
-      announceLaunch("启动", await api.launchNewSession(defaultAgent, []));
-    } catch (e) {
-      console.error(e);
-    }
-  };
+  const modals = (
+    <>
+      {creatingWs && (
+        <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={refresh} />
+      )}
+      {creatingSession && (
+        <NewSessionModal onClose={() => setCreatingSession(false)} />
+      )}
+    </>
+  );
 
-  if (!hasWorkstreams) {
+  if (activeCards.length === 0) {
     return (
       <div className="main narrow home">
         <div className="hero">
@@ -48,9 +55,10 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
           </div>
           <div className="muted small" style={{ margin: "10px 0" }}>或</div>
           <div className="actions-row">
-            <button className="btn ws-btn" disabled={!defaultAgent}
-              title={defaultAgent ? undefined : "未检测到可用的 Agent CLI"}
-              onClick={plainNewSession}>
+            {/* 打开的是全局新建 Session 面板：Agent 未检测到时由面板给出
+                「未检测到可用的 Agent CLI」与不可点的启动按钮，这里不再自己
+                判断（避免在 Agent 还在解析时把按钮误标成「未检测」）。 */}
+            <button className="btn ws-btn" onClick={() => setCreatingSession(true)}>
               {defaultAgent ? (
                 <>
                   <AgentIcon agent={defaultAgent} />
@@ -67,9 +75,18 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
               </button>
             )}
           </div>
+          {archivedOnly && (
+            <p className="muted small" style={{ marginTop: 18 }}>
+              已归档的 Workstream 不会出现在首页。{" "}
+              <button className="link small"
+                onClick={() => navigate({ view: "workstreams" })}>
+                Workstreams →
+              </button>
+            </p>
+          )}
         </div>
 
-        {creatingWs && <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={refresh} />}
+        {modals}
       </div>
     );
   }
@@ -81,22 +98,14 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
         <p className="sub">继续上次的工作</p>
       </div>
 
-      <IntelligenceOnly>
-        <ContextUpdatesSection
-          cards={cards}
-          summaries={reviewSummaries ?? []}
-          navigate={navigate}
-        />
-      </IntelligenceOnly>
-
       <ContinueSection navigate={navigate} defaultAgent={defaultAgent} cards={cards} />
-      <RecentSessions navigate={navigate} />
+      <RecentSessions navigate={navigate} onNewSession={() => setCreatingSession(true)} />
 
       <div className="home-foot">
         <button className="btn small ghost" onClick={() => setCreatingWs(true)}>+ 新建 Workstream</button>
       </div>
 
-      {creatingWs && <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={refresh} />}
+      {modals}
     </div>
   );
 }
