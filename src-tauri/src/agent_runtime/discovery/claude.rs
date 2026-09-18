@@ -11,8 +11,7 @@ use super::ModelOption;
 /// `claude --help`: "Effort level for the current session (low, medium, high, xhigh, max)".
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
-pub(crate) fn discover() -> (ModelCatalog, Vec<String>, Vec<String>) {
-    let levels = EFFORT_LEVELS.iter().map(|s| s.to_string()).collect();
+pub(crate) fn discover() -> (ModelCatalog, Vec<String>) {
     let models = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")]
         .iter()
         .map(|(alias, label)| ModelOption {
@@ -23,5 +22,5 @@ pub(crate) fn discover() -> (ModelCatalog, Vec<String>, Vec<String>) {
             supported_efforts: vec![],
         })
         .collect();
-    (ModelCatalog::Suggested(models), levels, vec![])
+    (ModelCatalog::Suggested(models), vec![])
 }

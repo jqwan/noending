@@ -391,6 +391,44 @@ export const AGENT_LABELS: Record<Agent, string> = {
   pi: "Pi",
 };
 
+// ---------- Agent Runtime Configuration (commands.rs §Agent Runtime) ----------
+
+export type RuntimeFieldCapability = "unsupported" | "free_form" | "suggested" | "discoverable";
+
+/** null 一律表示 Agent default：NoEnding 不传该参数，由 Agent 自己决定。 */
+export interface AgentRuntimeOverrides {
+  model: string | null;
+  provider: string | null;
+  effort: string | null;
+}
+
+/** dynamic = 来自 Agent CLI；suggested = NoEnding 建议值；unavailable = 获取失败。 */
+export type ModelSource = "not_loaded" | "dynamic" | "suggested" | "unavailable";
+
+export interface RuntimeModelOption {
+  id: string;
+  display_name: string | null;
+  provider: string | null;
+  supported_efforts: string[];
+}
+
+export interface AgentRuntimeSettings {
+  agent: Agent;
+  detected: boolean;
+  executable: string | null;
+  version: string | null;
+  overrides: AgentRuntimeOverrides;
+  capabilities: Record<"model" | "provider" | "effort", RuntimeFieldCapability>;
+  models: RuntimeModelOption[];
+  model_source: ModelSource;
+  effort_levels: string[];
+  warnings: string[];
+}
+
+/** refresh_agent_runtime_options 的结果：不含安装状态，只含建议信息。 */
+export type AgentRuntimeDiscovery = Omit<AgentRuntimeSettings,
+  "agent" | "detected" | "executable" | "version" | "overrides">;
+
 export const KIND_LABELS: Record<string, string> = {
   goal: "Goal",
   current_state: "Current State",

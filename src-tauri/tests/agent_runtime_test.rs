@@ -5,8 +5,8 @@
 //! never as a value NoEnding invented.
 
 use noending::agent_runtime::{
-    get_runtime_overrides, runtime_exec_options, set_runtime_overrides, validate_runtime_overrides,
-    AgentRuntimeOverrides,
+    capabilities_of, get_runtime_overrides, runtime_exec_options, set_runtime_overrides,
+    validate_runtime_overrides, AgentRuntimeOverrides,
 };
 use noending::domain::Agent;
 use noending::storage::{new_id, Db};
@@ -198,5 +198,31 @@ fn a_corrupt_override_row_is_an_error_not_a_silent_default() {
 #[test]
 fn overrides_serialise_without_inventing_defaults() {
     let json = serde_json::to_string(&overrides(Some("sonnet"), None, None).normalized()).unwrap();
-    assert_eq!(json, r#"{"model":"sonnet","provider":null,"effort":null}"#,);
+    assert_eq!(json, r#"{"model":"sonnet","provider":null,"effort":null}"#);
+}
+
+/// The UI reads these spellings literally, so a rename is a breaking change.
+#[test]
+fn serialized_vocabulary_is_the_ui_contract() {
+    let caps = serde_json::to_value(capabilities_of(Agent::ClaudeCode)).unwrap();
+    assert_eq!(
+        caps,
+        serde_json::json!({ "model": "suggested", "provider": "unsupported", "effort": "suggested" })
+    );
+    assert_eq!(
+        serde_json::to_value(Agent::ClaudeCode).unwrap(),
+        serde_json::json!("claude_code")
+    );
+    assert_eq!(
+        noending::agent_runtime::discovery::effort_levels_for(Agent::Pi)
+            .first()
+            .map(String::as_str),
+        Some("off"),
+        "pi can switch thinking off"
+    );
+    assert!(
+        noending::agent_runtime::discovery::effort_levels_for(Agent::Codex)
+            .iter()
+            .all(|e| e != "off")
+    );
 }

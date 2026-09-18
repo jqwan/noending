@@ -75,7 +75,8 @@ pub struct AgentRuntimeDiscovery {
 /// catalog (advice), and the effort vocabulary.
 pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
     let capabilities = super::capabilities_of(agent);
-    let (models, effort_levels, warnings) = match agent {
+    let effort_levels = effort_levels_for(agent);
+    let (models, warnings) = match agent {
         Agent::Codex => codex::discover(),
         Agent::ClaudeCode => claude::discover(),
         Agent::Pi => pi::discover(),
@@ -88,6 +89,17 @@ pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
         effort_levels,
         warnings,
     }
+}
+
+/// Effort vocabulary the CLI documents. Static on purpose: the effort picker
+/// must work even when the model catalog could not be fetched.
+pub fn effort_levels_for(agent: Agent) -> Vec<String> {
+    let levels: &[&str] = match agent {
+        Agent::Codex => codex::EFFORT_LEVELS,
+        Agent::ClaudeCode => claude::EFFORT_LEVELS,
+        Agent::Pi => pi::EFFORT_LEVELS,
+    };
+    levels.iter().map(|s| s.to_string()).collect()
 }
 
 /// Run a read-only CLI probe. Failures stay failures: the caller decides how

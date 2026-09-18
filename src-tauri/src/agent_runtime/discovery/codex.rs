@@ -12,25 +12,18 @@ use crate::domain::Agent;
 /// Codex documents no `off` thinking level; reasoning always runs.
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
-pub(crate) fn discover() -> (ModelCatalog, Vec<String>, Vec<String>) {
-    let levels = EFFORT_LEVELS.iter().map(|s| s.to_string()).collect();
+pub(crate) fn discover() -> (ModelCatalog, Vec<String>) {
     match run_cli(Agent::Codex, &["debug", "models"]) {
         Ok(raw) => match parse(&raw) {
-            Ok(models) if !models.is_empty() => (ModelCatalog::Dynamic(models), levels, vec![]),
-            Ok(_) => (
-                ModelCatalog::Unavailable,
-                levels,
-                warn("Codex 返回了空的模型目录"),
-            ),
+            Ok(models) if !models.is_empty() => (ModelCatalog::Dynamic(models), vec![]),
+            Ok(_) => (ModelCatalog::Unavailable, warn("Codex 返回了空的模型目录")),
             Err(e) => (
                 ModelCatalog::Unavailable,
-                levels,
                 warn(format!("Codex 模型目录解析失败: {}", e)),
             ),
         },
         Err(e) => (
             ModelCatalog::Unavailable,
-            levels,
             warn(format!("Codex 模型目录获取失败: {}", e)),
         ),
     }

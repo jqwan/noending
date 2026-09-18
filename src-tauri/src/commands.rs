@@ -1318,6 +1318,82 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Object(out))
 }
 
+// ---------------- Agent Runtime Configuration ----------------
+
+/// What Settings → Agents renders for one Agent: install state plus the
+/// override surface.
+///
+/// `models` is empty in this payload: discovery spawns the Agent CLI, so it
+/// only ever runs through `refresh_agent_runtime_options`. A failed or absent
+/// catalog never hides the saved override.
+#[derive(Serialize)]
+pub struct AgentRuntimeSettings {
+    pub agent: Agent,
+    pub detected: bool,
+    pub executable: Option<String>,
+    pub version: Option<String>,
+    pub overrides: crate::agent_runtime::AgentRuntimeOverrides,
+    pub capabilities: crate::agent_runtime::AgentRuntimeCapabilities,
+    pub models: Vec<crate::agent_runtime::ModelOption>,
+    pub model_source: &'static str,
+    pub effort_levels: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+fn agent_of(s: &str) -> Result<Agent> {
+    Agent::parse(s).ok_or_else(|| other(format!("未知 Agent: {}", s)))
+}
+
+fn runtime_settings(db: &Db, agent: Agent) -> Result<AgentRuntimeSettings> {
+    let install = db.get_installation(agent)?;
+    Ok(AgentRuntimeSettings {
+        agent,
+        detected: install.is_some(),
+        executable: install.as_ref().map(|i| i.executable_path.clone()),
+        version: install.as_ref().and_then(|i| i.version.clone()),
+        overrides: crate::agent_runtime::get_runtime_overrides(db, agent)?,
+        capabilities: crate::agent_runtime::capabilities_of(agent),
+        models: vec![],
+        model_source: "not_loaded",
+        effort_levels: crate::agent_runtime::discovery::effort_levels_for(agent),
+        warnings: vec![],
+    })
+}
+
+#[tauri::command]
+pub fn get_agent_runtime_settings(
+    state: State<AppState>,
+    agent: String,
+) -> Result<AgentRuntimeSettings> {
+    let agent = agent_of(&agent)?;
+    with_db(&state, |db| runtime_settings(db, agent))
+}
+
+#[tauri::command]
+pub fn set_agent_runtime_overrides(
+    state: State<AppState>,
+    agent: String,
+    overrides: crate::agent_runtime::AgentRuntimeOverrides,
+) -> Result<AgentRuntimeSettings> {
+    let agent = agent_of(&agent)?;
+    with_db(&state, |db| {
+        // Validates, then persists; an unsupported field never reaches storage.
+        crate::agent_runtime::set_runtime_overrides(db, agent, &overrides)?;
+        runtime_settings(db, agent)
+    })
+}
+
+/// Advisory only: fetch the Agent's model catalog. Runs with no DB lock held
+/// and cannot fail a launch — the caller renders `warnings` and falls back to
+/// Agent default plus custom input.
+#[tauri::command]
+pub fn refresh_agent_runtime_options(
+    agent: String,
+) -> Result<crate::agent_runtime::AgentRuntimeDiscovery> {
+    let agent = agent_of(&agent)?;
+    Ok(crate::agent_runtime::discover_runtime_options(agent))
+}
+
 // ---------------- Assistant ----------------
 
 #[tauri::command]

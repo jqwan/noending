@@ -39,7 +39,7 @@ pub struct AgentRuntimeCapabilities {
 }
 
 pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
-    use RuntimeFieldCapability::{Discoverable, FreeForm, Suggested, Unsupported};
+    use RuntimeFieldCapability::{Discoverable, Suggested, Unsupported};
     match agent {
         // codex exec -m <model> -c model_reasoning_effort=<effort>
         Agent::Codex => AgentRuntimeCapabilities {
@@ -51,7 +51,7 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
         Agent::ClaudeCode => AgentRuntimeCapabilities {
             model: Suggested,
             provider: Unsupported,
-            effort: FreeForm,
+            effort: Suggested,
         },
         // pi -p --provider <p> --model <m> --thinking <level>
         Agent::Pi => AgentRuntimeCapabilities {

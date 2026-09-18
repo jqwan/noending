@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Agent, AppInfo, ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
+  Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings, AppInfo,
+  ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
   ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
   WorkstreamReviewSummary,
@@ -132,6 +133,13 @@ export const api = {
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
   setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),
+
+  getAgentRuntimeSettings: (agent: Agent) =>
+    invoke<AgentRuntimeSettings>("get_agent_runtime_settings", { agent }),
+  setAgentRuntimeOverrides: (agent: Agent, overrides: AgentRuntimeOverrides) =>
+    invoke<AgentRuntimeSettings>("set_agent_runtime_overrides", { agent, overrides }),
+  refreshAgentRuntimeOptions: (agent: Agent) =>
+    invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
 
   getContextDeliveryLevel: () => invoke<ContextDeliveryLevel>("get_context_delivery_level"),
   setContextDeliveryLevel: (level: ContextDeliveryLevel) =>

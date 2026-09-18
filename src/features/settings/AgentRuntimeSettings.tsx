@@ -1,0 +1,203 @@
+import React, { useCallback, useEffect, useState } from "react";
+import { api } from "../../api";
+import AgentIcon from "../../components/AgentIcon";
+import { AGENT_LABELS, type Agent, type AgentRuntimeOverrides, type AgentRuntimeSettings,
+  type ModelSource, type RuntimeFieldCapability, type RuntimeModelOption } from "../../types";
+
+type Field = keyof AgentRuntimeOverrides;
+
+const DEFAULT_VALUE = "__default__";
+const CUSTOM_VALUE = "__custom__";
+
+/** 同一种 override，在三家 CLI 里的叫法不同；unsupported 的字段不展示（§11）。 */
+const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
+  codex: { model: "Model", provider: "Provider", effort: "Reasoning" },
+  claude_code: { model: "Model", provider: "Provider", effort: "Effort" },
+  pi: { model: "Model", provider: "Provider", effort: "Thinking" },
+};
+
+const SOURCE_NOTE: Record<ModelSource, string | null> = {
+  not_loaded: null,
+  dynamic: null,
+  suggested: "以下是 NoEnding 的建议值，不代表你账号当前可用的完整模型列表。",
+  unavailable: "无法从 Agent 获取模型列表；Agent default 与 Custom 仍然可用。",
+};
+
+export function isOverridable(cap: RuntimeFieldCapability) {
+  return cap !== "unsupported";
+}
+
+/**
+ * Settings → Agents 的一块：安装状态 + 该 Agent 的 Runtime Overrides。
+ * 每个字段只有两种状态——Agent default（不传参数）或显式 Override。
+ */
+export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
+  const [st, setSt] = useState<AgentRuntimeSettings | null>(null);
+  const [models, setModels] = useState<RuntimeModelOption[]>([]);
+  const [modelSource, setModelSource] = useState<ModelSource>("not_loaded");
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [custom, setCustom] = useState<Field | null>(null);
+  const [customText, setCustomText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.getAgentRuntimeSettings(agent).then(setSt).catch(console.error);
+  }, [agent]);
+
+  // Discovery 是建议信息：单独取，失败只留 warning，不影响 override 显示。
+  const refresh = useCallback(async () => {
+    setLoadingModels(true);
+    try {
+      const d = await api.refreshAgentRuntimeOptions(agent);
+      setModels(d.models);
+      setModelSource(d.model_source);
+      setWarnings(d.warnings);
+      setError(null);
+    } catch (e) {
+      setModelSource("unavailable");
+      setWarnings([String(e)]);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [agent]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  if (!st) {
+    return <div className="settings-agent-runtime muted small">{AGENT_LABELS[agent]} …</div>;
+  }
+
+  const overrides = st.overrides;
+  const caps = st.capabilities;
+  const effortLevels = st.effort_levels;
+
+  const providers = Array.from(new Set(models.map((m) => m.provider).filter(Boolean))) as string[];
+
+  const optionsFor = (field: Field): { value: string; label: string }[] => {
+    if (field === "provider") {
+      return providers.map((p) => ({ value: p, label: p }));
+    }
+    if (field === "model") {
+      // Provider 被显式覆盖时按 provider 过滤，但当前值始终保留可选。
+      const picked = overrides.provider;
+      return models
+        .filter((m) => !picked || m.provider === picked)
+        .map((m) => ({ value: m.id, label: m.display_name ?? m.id }));
+    }
+    const model = models.find((m) => m.id === overrides.model);
+    const levels = model?.supported_efforts.length ? model.supported_efforts : effortLevels;
+    return levels.map((l) => ({ value: l, label: l }));
+  };
+
+  const save = async (next: AgentRuntimeOverrides) => {
+    try {
+      const fresh = await api.setAgentRuntimeOverrides(agent, next);
+      setSt(fresh);
+      setError(null);
+    } catch (e) {
+      // 后端拒绝（例如该 Agent 不支持这个字段）：保留原值并说明原因。
+      setError(String(e));
+    }
+  };
+
+  const pick = (field: Field, value: string) => {
+    if (value === CUSTOM_VALUE) {
+      setCustom(field);
+      setCustomText("");
+      return;
+    }
+    setCustom(null);
+    void save({ ...overrides, [field]: value === DEFAULT_VALUE ? null : value });
+  };
+
+  const commitCustom = (field: Field) => {
+    const v = customText.trim();
+    setCustom(null);
+    void save({ ...overrides, [field]: v === "" ? null : v });
+  };
+
+  const renderField = (field: Field) => {
+    if (!isOverridable(caps[field])) return null;
+    const value = overrides[field];
+    const known = optionsFor(field);
+    const isCustomValue = value !== null && !known.some((o) => o.value === value);
+    const selectValue = custom === field ? CUSTOM_VALUE : (value ?? DEFAULT_VALUE);
+    const label = FIELD_LABELS[agent][field];
+
+    return (
+      <label className="field" key={field}>
+        <span>
+          {label}
+          {value === null ? "" : <em className="runtime-override-tag">Override</em>}
+        </span>
+        <select value={selectValue} onChange={(e) => pick(field, e.target.value)}>
+          <option value={DEFAULT_VALUE}>Agent default</option>
+          {known.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+          {isCustomValue && <option value={value}>{value}</option>}
+          <option value={CUSTOM_VALUE}>Custom…</option>
+        </select>
+        {custom === field ? (
+          <input
+            type="text"
+            autoFocus
+            value={customText}
+            placeholder={field === "model" ? "model id" : "value"}
+            onChange={(e) => setCustomText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitCustom(field);
+              if (e.key === "Escape") setCustom(null);
+            }}
+            onBlur={() => commitCustom(field)}
+          />
+        ) : (
+          value !== null && (
+            <span className="muted small">NoEnding 启动该 Agent 时会显式传 {label}。</span>
+          )
+        )}
+      </label>
+    );
+  };
+
+  return (
+    <div className="settings-agent-runtime">
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label row" style={{ gap: 7 }}>
+            <AgentIcon agent={agent} />
+            {AGENT_LABELS[agent]}
+          </div>
+          <div className="settings-row-hint mono">{st.executable ?? "未找到可执行文件"}</div>
+        </div>
+        <div className="row">
+          {st.version && <span className="muted mono small">{st.version}</span>}
+          <span className={`badge ${st.detected ? "success" : ""}`}>
+            {st.detected ? "Detected" : "Not detected"}
+          </span>
+        </div>
+      </div>
+
+      <div className="runtime-fields">
+        {(["provider", "model", "effort"] as Field[]).map(renderField)}
+      </div>
+
+      <div className="runtime-footer">
+        <button className="btn ghost small" onClick={() => void refresh()} disabled={loadingModels}>
+          {loadingModels ? "Refreshing…" : "Refresh models"}
+        </button>
+        <span className="muted small">
+          {SOURCE_NOTE[modelSource] ?? `${models.length} 个模型来自 ${AGENT_LABELS[agent]} CLI`}
+        </span>
+      </div>
+
+      {warnings.map((w) => (
+        <p className="muted small runtime-note" key={w}>{w}</p>
+      ))}
+      {error && <p className="small runtime-note" style={{ color: "var(--danger)" }}>{error}</p>}
+    </div>
+  );
+}

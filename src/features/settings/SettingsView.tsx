@@ -3,6 +3,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import SourcesSettings from "./SourcesSettings";
+import AgentRuntimeRow from "./AgentRuntimeSettings";
 import { AGENT_LABELS, type Agent, type AppInfo, type ContextDeliveryLevel } from "../../types";
 import type { Route, SettingsSection } from "../../app/routes";
 
@@ -122,38 +123,18 @@ function GeneralSettings() {
   );
 }
 
-/** Agents：只读检测状态（§48）。 */
+/** Agents：安装状态 + Runtime Override（§10）。NoEnding 不解析 Agent 默认配置。 */
 function AgentsSettings() {
-  const [agents, setAgents] = useState<Record<string, { name: string; detected: boolean; executable: string | null; version: string | null }>>({});
-
-  useEffect(() => {
-    api.getAgentStatus().then(setAgents).catch(console.error);
-  }, []);
-
   return (
     <section>
       <h3 style={{ marginTop: 0 }}>Agents</h3>
-      <p className="muted small" style={{ marginTop: 0 }}>本机检测到的 Agent CLI。未检测到的 Agent 不可启动。</p>
-      {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => {
-        const st = agents[a];
-        return (
-          <div className="row-line" key={a}>
-            <div>
-              <div className="settings-row-label row" style={{ gap: 7 }}>
-                <AgentIcon agent={a} />
-                {AGENT_LABELS[a]}
-              </div>
-              <div className="settings-row-hint mono">{st?.executable ?? "未找到可执行文件"}</div>
-            </div>
-            <div className="row">
-              {st?.version && <span className="muted mono small">{st.version}</span>}
-              <span className={`badge ${st?.detected ? "success" : ""}`}>
-                {st ? (st.detected ? "Detected" : "Not detected") : "…"}
-              </span>
-            </div>
-          </div>
-        );
-      })}
+      <p className="muted small" style={{ marginTop: 0 }}>
+        本机检测到的 Agent CLI。未检测到的 Agent 不可启动。
+        Runtime 每个字段默认都是 Agent default —— NoEnding 不传对应参数，也不猜测 Agent 的默认模型。
+      </p>
+      {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
+        <AgentRuntimeRow key={a} agent={a} />
+      ))}
     </section>
   );
 }

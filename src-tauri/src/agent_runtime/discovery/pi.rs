@@ -12,24 +12,21 @@ pub const EFFORT_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", 
 
 const THINKING_CAPABLE: &str = "yes";
 
-pub(crate) fn discover() -> (ModelCatalog, Vec<String>, Vec<String>) {
-    let levels = EFFORT_LEVELS.iter().map(|s| s.to_string()).collect();
+pub(crate) fn discover() -> (ModelCatalog, Vec<String>) {
     match run_cli(Agent::Pi, &["--list-models"]) {
         Ok(raw) => {
             let models = parse(&raw);
             if models.is_empty() {
                 (
                     ModelCatalog::Unavailable,
-                    levels,
                     warn("Pi 模型列表为空或格式无法识别"),
                 )
             } else {
-                (ModelCatalog::Dynamic(models), levels, vec![])
+                (ModelCatalog::Dynamic(models), vec![])
             }
         }
         Err(e) => (
             ModelCatalog::Unavailable,
-            levels,
             warn(format!("Pi 模型列表获取失败: {}", e)),
         ),
     }
