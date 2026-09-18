@@ -2,6 +2,7 @@
 //! and hosts the Tauri run() entry.
 
 pub mod adapters;
+pub mod agent_runtime;
 pub mod assistant;
 pub mod commands;
 pub mod context;

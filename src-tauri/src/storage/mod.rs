@@ -1833,6 +1833,12 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.0
+            .execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     // ---------------- Assistant ----------------
 
     pub fn ensure_assistant_session(&self, session_id: Option<&str>) -> Result<String> {
