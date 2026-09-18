@@ -282,6 +282,9 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         if let Some(m) = &opts.model {
             args.extend(["--model".into(), m.clone()]);
         }
+        if let Some(e) = &opts.effort {
+            args.extend(["--effort".into(), e.clone()]);
+        }
         args.push(prompt.to_string());
         Ok(AgentCommand {
             program: install.executable_path.clone(),
