@@ -2481,3 +2481,55 @@ backlog_ingested_while_off_is_replayed_after_reenabling
 
 **D 未做（不是遗漏）：** `WorkstreamDetailView.tsx:165`、`WorkstreamCard.tsx:38`、`WorkstreamSessions.tsx:30`、`HomeView.tsx:31` 四条直启路径在 C/A 的文件里，§8.1.1 已给出接法（挂 `<NewSessionModal workstreamId={ws.id}/>`）；`launchNewSession` / `launchResumeSession` 命令与 `api.*` 包装按 §5「保留代码」原样留着，集成后它们在前端无人调用，§34 的不可达清单要收这四条。
 
+## 36.3 Agent B — `feat(sessions): strengthen session browsing and detail experience`
+
+分支基线 `5092e46`。只动 SessionsView / SessionTable / SessionDetailView / SessionMessage，未碰 Rust。
+
+| # | 方案 | 实做 | 原因 |
+| --- | --- | --- | --- |
+| B1 | §13「移除 Context 变更」 | `SessionDetailView` 里那句「提取了 N 个 Context 变更」**保留**，但只在 `context_processing_enabled && applied > 0` 时出现 | Base Experience 下后端恒报 false，主路径不出现（§24）；用户主动回开智能时，不报真实提取数才是更坏的失败。Main 采纳 |
+| B2 | — | 列表原先显示 `sBindings[0]`（多绑定时是任意一条），改为主关联优先 + `+N` | 与 §2.2「主关联」同源的显示错误 |
+| B3 | — | 三个 fire-and-forget 请求合成一次 `Promise.all` + 显式「读取 Sessions 失败 / 重试」 | `listSessionBindings` 静默失败会让「未关联」筛选给出**错误答案**，不只是少数据 |
+| B4 | §13 字段表 | Session ID 进 Header 且可选中复制 | §11.6/§24 的 provenance 要求：报障时得能给出 id |
+| B5 | — | 省略号规则（保尾省中、Windows 盘符与 UNC、CJK 宽度）集中在 `SessionTable.tsx` 导出复用 | 为了不出 ownership；Main 认可，若再有第 5 个消费者则提 `sessions/display.ts` |
+| B6 | — | `get_session_detail` 每次上限 500 条事件，消息段落改为说明"读到了多少" | 只改显示诚实度；真分页要动 `api.ts` + Rust，超范围 |
+
+**Main 在集成时改掉的一处 bug（B 的注释与代码不符）**：`ellipsisPathMiddle` 承诺「POSIX 段名里的 `\` 不当分隔符」，但 split 用的是 `/[\\/]+/`，真溢出时会把 `/tmp/my\dir/weird/sub` 切成多段、编造出层级（宽度 18 实测应为 `…/my\dir/weird/sub`）。改为只有盘符与 UNC 两种分隔符通吃。见 `fix(sessions): keep a POSIX backslash inside a segment name`。
+
+## 36.4 Agent C — `refactor(workstreams): focus workstream detail on session continuity`
+
+| # | 方案 | 实做 | 原因 |
+| --- | --- | --- | --- |
+| C1 | §15/§14 只点名 3 条新建直启 | 其中一条实为 `launchResumeSession`；C 另把 3 处 Resume 直启（Detail / 卡片 / 每行）改挂 `ResumeSessionModal` | 与 D2 同一理由；集成后 `launch_new_session` / `launch_resume_session` 在前端**零调用点**（已 grep 验证，仅剩 `api.ts` 的包装） |
+| C2 | §14「只是暂时不挂载」 | 智能段落搬进同文件内的私有组件 `IntelligenceSections`，再由 `IntelligenceOnly` 包住 | 直接包 JSX 时 review 那几支请求仍在 mount 时发出；§34 要的是"不可达"而不是"发了再藏"。代码一行未删，Review 逐行保留（含 `reviewWindow.mark_through` 与 `entry==="conflicts"` 一次性语义） |
+| C3 | §14 五段结构 | Base 内容单列，`ws-detail-grid` 只留给智能段落 | 右栏卸载后只剩一段，双列会留大片空白；未新增未修改任何 CSS |
+| C4 | §14 编辑能力 | 新增「重命名」与描述行内编辑，走既有 `update_workstream`，**没有新增后端命令**；改名弹窗明说会让待启动的计划失效 | F12/F14：指纹含 title/description/updated_at，stale 是正确行为，不掩盖 |
+| C5 | §14 Lifecycle | 只读 badge，无状态切换 | F13 |
+
+C 交给 Main / E 的遗留：`WorkstreamCard` 摘要优先级仍是 `current_state || description || goal`（Agent 推断压过用户自己写的描述）；`.ws-card-error` 变成死 CSS 规则；`toggleArchive` 无错误处理；••• 菜单无点击外部关闭。
+
+## 36.5 Agent A — `refactor(home): align home with base experience`
+
+Home 摘掉 `reviewSummaries` 依赖、空状态「新建 Session」改挂 `NewSessionModal`（§15 第 5 条点名的第四条直启路径）、结构与 Commit 0 中文案原样保留、组件文件零删除。
+
+**Main 采纳的一个取舍（A 主动上交的矛盾）**：§11.5/§12 说 Home「只移除 ContextUpdatesSection」，而 §11.9 的机制是 off=不挂载、on=挂载的对称。Home 按 §11.5/§12 字面执行——**即使把智能回开，Home 也不再显示 Context Updates**；智能段落的挂载点保留在 Workstream Detail（C2）。理由：§24 把 Context Updates 归为"非主路径"，而本阶段 Home 的定位就是纯继续入口。要回退是 5 行的事（重新解构 + 重新包 `IntelligenceOnly`）。
+
+A 的其他遗留：Home 里「配置 Agent」链接在 `getDefaultAgent()` 解析期间可能闪现（要共享 hook 加 resolved 标志，属 SHARED）；新建 Session 比原来多一步弹窗（这是 Preview-Launch Identity 的预期代价，进 dogfood 观察项）。
+
+## 36.6 Main 集成决策（合完 D/B/C/A 之后）
+
+```text
+1. 直启清零：src/ 下 api.launchNewSession / launchResumeSession 调用点为 0（只有 api.ts 定义），
+   §34 的不可达清单据此补上这两支命令（后端与包装按 §5 保留）
+2. reviewSummaries 请求：useWorkstreamCards() 改为跟随智能开关才发
+   fix(workstreams): stop fetching review summaries while intelligence is off
+   （返回形状不动，关掉时留 null）→ §34「review 五支不可达」现在是真的
+3. 预览令牌泄漏（D 自己报的 Known issue #1）：ContextPreviewModal 在预览打开期间
+   注入被关掉时，先 cancelPrepared 再交回 onClose
+4. 启动详情的「注入的 Context」改为按这次实际投递的 markdown 决定显隐，不读当前设置
+5. 卡片摘要优先级 current_state > description：不改。它是旧《前端整体设计方案》§4
+   写明的显示优先级，且属于显示排序而非 authority 覆盖，改它超出本阶段范围。
+   → 进 §32 dogfood 清单：「Workstream 卡片第一行为什么是 Agent 写的那句」
+6. .ws-card-error 死规则、AgentRuntimeSettings 的「全部 Agent default」、AssistantView
+   三处 "Settings → Agents"、Sources/Projects 两页英文：交 Agent E
+```
