@@ -428,6 +428,32 @@ useWorkstreamCards.ts (共享 hook) ──▶ HomeView (归 A) + WorkstreamsView
 
 所以 Commit 0 除了开关，还要**定死这四处调用的 props 形状**（见 §11.9）。子 Agent 只能在契约内实现；要动契约＝SHARED FILE CHANGE＋独立 commit＋报告给 Main。否则 §19 的 cherry-pick 顺序会在集成时才发现四个分支互相不兼容。
 
+### 8.1.1 冻结形状（D 实现，B/C/A 消费）
+
+原则：**新增的一律 optional**，这样 B 从基线出发不改一行也能编译。
+
+```ts
+// D 拥有。B/C/A 只许传，不许改签名。
+type NewSessionModalProps = {
+  onClose: () => void;
+  workstreamId?: string | null;  // 预置选中的 Workstream；省略或 "none" = standalone
+};
+
+// D 拥有。形状保持不变（B 的 SessionDetailView 正按此调用）。
+type ResumeSessionModalProps = {
+  sessionId: string;
+  onClose: () => void;
+};
+```
+
+```text
+C 的 Workstream 页新建：改为挂载 <NewSessionModal workstreamId={ws.id} …/>
+A 的 Home 空状态新建：挂载同一个组件（禁止再写第四条启动路径）
+启动路径唯一：NewSessionModal → prepareNewSession → launchPrepared
+useWorkstreamCards() 的返回形状不动（A/C 都不改 hook；
+  reviewSummaries 何时不再 fetch 由 Main 在集成阶段处理）
+```
+
 ## 8.2 ⚠️ 并行的真实成本
 
 `worktrees/` 方案下，每个 worktree 都是独立的 `node_modules`（不在 git 里）和独立的 `src-tauri/target/`。四个并行子 Agent 意味着 4 次冷 cargo 构建。两个选择：
