@@ -185,6 +185,7 @@ pub fn run() {
             // `update_project`, `delete_project` and the resource commands stay
             // as Rust helpers but are deliberately NOT registered (§11, T1).
             commands::project::list_projects,
+            commands::project::list_project_cards,
             commands::project::get_project_detail,
             commands::project::list_project_workstreams,
             commands::project::rename_project,

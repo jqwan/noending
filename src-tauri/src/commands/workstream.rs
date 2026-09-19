@@ -189,7 +189,7 @@ pub struct WorkstreamCardView {
     pub path_count: i64,
 }
 
-fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
+pub(crate) fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
     let key = |s: &String| {
         chrono::DateTime::parse_from_rfc3339(s)
             .map(|t| t.with_timezone(&chrono::Utc))

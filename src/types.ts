@@ -30,6 +30,23 @@ export interface Project {
 
 /** A normalized physical working directory. Identity is `id`, a pure lexical
  *  hash of `canonical_path` — never the path string itself. */
+/** list_project_cards 的一张卡片（Projects Experience v0.2 §4/§8）。
+ *  诊断信息（uuid、git_id）不上卡片——那是 Detail 的事。 */
+export interface ProjectCardData {
+  id: string;
+  name: string;
+  name_customized: boolean;
+  has_git_identity: boolean;
+  path_count: number;
+  missing_path_count: number;
+  primary_workstream_count: number;
+  related_workstream_count: number;
+  session_count: number;
+  representative_paths: string[];
+  last_activity_at: string | null;
+  updated_at: string;
+}
+
 export interface WorkspacePath {
   id: string;
   canonical_path: string;

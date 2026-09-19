@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
   ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult,
-  PermanentDeletionPreview, PermanentDeletionResult, Project,
+  PermanentDeletionPreview, PermanentDeletionResult, Project, ProjectCardData,
   ProjectDetailData, ProjectWorkstreamRow, SessionDeletionJob, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
@@ -19,6 +19,8 @@ export const api = {
   // below are dead by construction and only await removal with their last UI
   // call site. Calling one rejects at runtime — that is the point.
   listProjects: () => invoke<Project[]>("list_projects"),
+  /** §8 — 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
+  listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
   getProjectDetail: (projectId: string) =>
     invoke<ProjectDetailData>("get_project_detail", { projectId }),
   listProjectWorkstreams: (projectId: string) =>

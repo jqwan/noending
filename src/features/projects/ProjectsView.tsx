@@ -1,202 +1,177 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import { timeAgo, useRefreshSignal } from "../../components/common";
-import { PathError, PathText } from "../workstreams/WorkspacePaths";
+import { PathText } from "../workstreams/WorkspacePaths";
 import type { Route } from "../../app/routes";
-import type { Project, ProjectDetailData } from "../../types";
+import type { ProjectCardData } from "../../types";
 
 /**
- * Projects（方案 §22 / §42.3-M22）：v0.2 起 Project 是**派生**的——它是 NoEnding
- * 从物理工作目录（WorkspacePath）整理出来的 workspace family。用户不能新建、
- * 不能删除、也不能把 Workstream 手工挂上去，唯一可编辑的是名字。
+ * Projects Board（Projects Experience v0.2 §3-§7、§29）：Projects 是一等浏览
+ * 页面——物理工作空间，由工作目录自动派生。数据来自**一次** `list_project_cards`
+ * 调用（§8），不再是 1 + N 的 detail 读取。
  *
- * 所以这一页没有创建入口（页头、空态都没有），也没有删除入口；数字全部来自
- * `get_project_detail`（§11 冻结形状），而不是任何缓存成员列 ——
- * `workstreams.project_id` 在 v0.2 里是冻结的兼容列，拿它统计会算出没人指派过
- * 的关系。
+ * 卡片强调「地方」：物理路径、可用性、Workstream / Session 数量、最近活动
+ * （§20）。诊断信息（uuid、git_id、内部 identity）属于 Detail，不上卡片。
+ * 这里没有创建入口：Project 是派生的，Refresh 也不是编辑（§25）。
  */
-interface ProjectStat {
-  pathCount: number;
-  missingPaths: number;
-  primaryWorkstreams: number;
-  relatedWorkstreams: number;
-  sessionCount: number;
-  lastUpdate: string | null;
-  /** 两条代表性目录。`workspace_paths` 由后端按 canonical_path 排序返回，
-   *  Project 一侧没有「主目录」这回事（位置只在 Workstream 的路径列表里存在）。 */
-  listedPaths: string[];
+type FilterKey = "all" | "ok" | "missing";
+type SortKey = "recent" | "name" | "paths";
+
+const FILTERS: Record<FilterKey, (c: ProjectCardData) => boolean> = {
+  all: () => true,
+  // §6: 正常 = 所有 WorkspacePath exists=true
+  ok: (c) => c.missing_path_count === 0,
+  // 有目录缺失 = 至少一个 WorkspacePath exists=false
+  missing: (c) => c.missing_path_count > 0,
+};
+
+const SORTERS: Record<SortKey, (a: ProjectCardData, b: ProjectCardData) => number> = {
+  recent: (a, b) =>
+    (b.last_activity_at ?? b.updated_at).localeCompare(a.last_activity_at ?? a.updated_at),
+  name: (a, b) => a.name.localeCompare(b.name, "zh-Hans"),
+  paths: (a, b) => b.path_count - a.path_count || a.name.localeCompare(b.name, "zh-Hans"),
+};
+
+/** §5 — 搜索面：Project name + WorkspacePath canonical path。 */
+function cardMatches(c: ProjectCardData, q: string): boolean {
+  const needle = q.trim().toLowerCase();
+  if (needle === "") return true;
+  return (
+    c.name.toLowerCase().includes(needle) ||
+    c.representative_paths.some((p) => p.toLowerCase().includes(needle))
+  );
 }
 
 export default function ProjectsView({ navigate }: { navigate: (r: Route) => void }) {
-  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [cards, setCards] = useState<ProjectCardData[] | null>(null);
   const [listError, setListError] = useState("");
-  const [stats, setStats] = useState<Record<string, ProjectStat>>({});
-  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
-  // 每次刷新都有自己的编号：慢回来的旧详情不能盖掉新一轮的结果。
-  const seqRef = useRef(0);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<FilterKey>("all");
+  const [sort, setSort] = useState<SortKey>("recent");
 
   const refresh = useCallback(() => {
-    const seq = ++seqRef.current;
-    setStats({});
-    setDetailErrors({});
-    api.listProjects()
-      .then((ps) => {
-        if (seq !== seqRef.current) return;
-        setProjects(ps);
+    api
+      .listProjectCards()
+      .then((cs) => {
+        setCards(cs);
         setListError("");
-        for (const p of ps) {
-          api.getProjectDetail(p.id)
-            .then((d) => {
-              if (seq !== seqRef.current) return;
-              setStats((cur) => ({ ...cur, [p.id]: statOf(d) }));
-            })
-            .catch((e) => {
-              if (seq !== seqRef.current) return;
-              setDetailErrors((cur) => ({ ...cur, [p.id]: String(e) }));
-            });
-        }
       })
       .catch((e) => {
-        if (seq !== seqRef.current) return;
-        setProjects(null);
-        setListError(`读取 Project 列表失败：${String(e)}`);
+        setCards(null);
+        setListError(`读取 Projects 失败：${String(e)}`);
       });
   }, []);
-
   useEffect(refresh, [refresh]);
+  // 单次卡片查询足够便宜，refresh 信号不再需要防抖。
+  useRefreshSignal(refresh);
 
-  /**
-   * 这一页是 1 + N 次读（列表 + 每个 Project 一份详情）。后台 sync 信号会成串
-   * 到达，直接串起来就是几十次连读，所以把一批信号合并成一次刷新（尾沿 800ms）：
-   * 数字最终会跟上真实状态，代价只是半秒。
-   */
-  const timerRef = useRef<number | null>(null);
-  const scheduleRefresh = useCallback(() => {
-    if (timerRef.current !== null) return;
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null;
-      refresh();
-    }, 800);
-  }, [refresh]);
-  useEffect(() => () => {
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-  }, []);
-  useRefreshSignal(scheduleRefresh);
-
-  const list = projects ?? [];
+  const list = useMemo(() => {
+    if (cards === null) return null;
+    return cards
+      .filter(FILTERS[filter])
+      .filter((c) => cardMatches(c, query))
+      .sort(SORTERS[sort]);
+  }, [cards, query, filter, sort]);
 
   return (
-    <div className="main narrow">
+    <div className="main">
       <PageHeader
         title="Projects"
-        sub={
-          <>
-            Project 是 NoEnding 从物理工作目录（WorkspacePath）自动整理的 workspace family：
-            一个 Project 可以有多个目录，其中一些并不是仓库。它由应用维护 ——
-            <b>你不能新建、不能删除，也不能把 Workstream 手工挂上去，只能改名</b>；
-            当它拥有的最后一个目录离开时，这个 Project 会自动消失。
-          </>
-        }
+        sub="NoEnding 根据 Session 和 Workstream 使用的工作目录自动整理这些工作空间。"
       />
 
-      {listError && (
-        <>
-          <PathError text={listError} />
-          <div className="invite">
-            <button className="btn small" onClick={refresh}>重试</button>
-          </div>
-        </>
+      <input
+        type="text"
+        className="ws-search"
+        placeholder="搜索 Projects…（名称或工作目录）"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+
+      <div className="toolbar ws-controls">
+        <label className="ws-control">
+          <span className="muted small">筛选</span>
+          <select value={filter} onChange={(e) => setFilter(e.target.value as FilterKey)}>
+            <option value="all">全部</option>
+            <option value="ok">正常</option>
+            <option value="missing">有目录缺失</option>
+          </select>
+        </label>
+        <label className="ws-control">
+          <span className="muted small">排序</span>
+          <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
+            <option value="recent">最近活动 ↓</option>
+            <option value="name">名称</option>
+            <option value="paths">目录数</option>
+          </select>
+        </label>
+        {list && <span className="muted small">{list.length} 个 Project</span>}
+      </div>
+
+      {list === null && listError === "" && <div className="muted">加载中…</div>}
+      {listError !== "" && (
+        <div className="card hairline" style={{ padding: 14 }}>
+          <div className="small" style={{ color: "var(--danger)" }}>{listError}</div>
+          <button className="btn small" style={{ marginTop: 8 }} onClick={refresh}>重试</button>
+        </div>
       )}
-
-      {projects === null && listError === "" && <div className="muted">加载中…</div>}
-
-      {projects !== null && projects.length === 0 && (
+      {list !== null && list.length === 0 && cards !== null && cards.length > 0 && (
+        <EmptyState
+          title="没有匹配的 Project"
+          hint="换个关键词，或把筛选切回「全部」。"
+        />
+      )}
+      {cards !== null && cards.length === 0 && (
         <EmptyState
           title="还没有 Project"
-          hint="Project 不是创建出来的，是从工作目录派生出来的：打开一个 Session，或给某条 Workstream 添加一条工作路径，它就会自动出现在这里。"
+          hint="打开 Session 或给 Workstream 添加工作路径后，Project 会自动出现在这里。"
         />
       )}
 
-      <div className="ws-stack">
-        {list.map((p) => {
-          const st = stats[p.id];
-          const detailError = detailErrors[p.id];
-          return (
-            <div key={p.id} className="ws-card compact"
-              onClick={() => navigate({ view: "project", projectId: p.id })}>
-              <header className="ws-card-head">
-                <h3 className="ws-card-title" title={p.name}>{p.name}</h3>
-                <div className="ws-card-side">
-                  {p.git_id && <span className="badge" title="由 Git 家族识别（同一个 common dir 的路径会收敛到一个 Project）">Git 家族</span>}
-                  {st && st.missingPaths > 0 && (
-                    <span className="badge warn" title={`${st.missingPaths} 个目录目前在本机上读不到。存在性只是观察，不是路径的身份。`}>
-                      {st.missingPaths} 个目录不在
-                    </span>
-                  )}
-                </div>
-              </header>
-
-              <p className="ws-card-body">
-                {st === undefined
-                  ? (detailError ? "目录读取失败" : "读取目录中…")
-                  : st.listedPaths.length === 0
-                    ? "这个 Project 目前还没有任何目录（它会在下一次整理时自动消失）"
-                    : <PathText path={st.listedPaths[0]} max={60} />}
-              </p>
-              {st !== undefined && st.listedPaths.length > 1 && (
-                <p className="ws-card-body muted">
-                  <PathText path={st.listedPaths[1]} max={54} />
-                  {st.pathCount > 2 ? ` —— 另有 ${st.pathCount - 2} 个目录` : ""}
-                </p>
-              )}
-
-              <footer className="ws-card-meta">
-                <span>
-                  {detailError
-                    ? "统计读取失败"
-                    : st
-                      ? `${st.pathCount} 个目录 · 主关联 ${st.primaryWorkstreams} · 关联 ${st.relatedWorkstreams} · ${st.sessionCount} 个 Session`
-                      : "统计读取中…"}
-                </span>
-                <span>{st?.lastUpdate ? `最近更新 ${timeAgo(st.lastUpdate)}` : "—"}</span>
-              </footer>
-
-              {detailError && (
-                <div className="ws-card-error small">
-                  <PathError text={`读取 Project 详情失败：${detailError}`} />
-                </div>
-              )}
-            </div>
-          );
-        })}
+      <div className="ws-grid">
+        {list?.map((c) => <ProjectCard key={c.id} card={c} navigate={navigate} />)}
       </div>
-
-      {projects !== null && projects.length > 0 && (
-        <div className="small muted" style={{ marginTop: 18 }}>
-          想改变一个 Project 里有什么，改的不是 Project 而是目录：给 Workstream 添加或移除
-          工作路径，Project 的成员关系会跟着变。
-        </div>
-      )}
     </div>
   );
 }
 
-/** 详情 → 卡片上的数字。全部走 §11 冻结的 get_project_detail 投影。 */
-function statOf(d: ProjectDetailData): ProjectStat {
-  const missing = d.workspace_paths.filter((p) => !p.exists).length;
-  const stamps = [
-    ...d.workstreams.map((w) => w.workstream.updated_at),
-    ...d.sessions.map((s) => s.last_activity_at ?? s.started_at ?? ""),
-  ].filter((t) => t !== "");
-  return {
-    pathCount: d.workspace_paths.length,
-    missingPaths: missing,
-    primaryWorkstreams: d.workstreams.filter((w) => w.is_primary).length,
-    relatedWorkstreams: d.workstreams.filter((w) => !w.is_primary).length,
-    sessionCount: d.sessions.length,
-    lastUpdate: stamps.sort().pop() ?? null,
-    listedPaths: d.workspace_paths.slice(0, 2).map((p) => p.canonical_path),
-  };
+/** §4 — 信息密度受控的卡片：名字、可用性、两条代表路径、计数、最近活动。 */
+function ProjectCard({ card, navigate }: {
+  card: ProjectCardData;
+  navigate: (r: Route) => void;
+}) {
+  const restPaths = card.path_count - card.representative_paths.length;
+  return (
+    <article
+      className="ws-card full"
+      onClick={() => navigate({ view: "project", projectId: card.id })}
+    >
+      <div className="ws-card-head">
+        <div className="ws-card-title">{card.name}</div>
+        <div className="ws-card-side">
+          {card.has_git_identity && <span className="badge">Git 家族</span>}
+          {card.missing_path_count > 0 && (
+            <span className="badge warn">{card.missing_path_count} 个目录不在</span>
+          )}
+        </div>
+      </div>
+
+      <div className="ws-card-body">
+        {card.representative_paths.map((p) => (
+          <div key={p} className="small" style={{ marginBottom: 2 }}>
+            <PathText path={p} />
+          </div>
+        ))}
+        {restPaths > 0 && <div className="muted small">另有 {restPaths} 个目录</div>}
+      </div>
+
+      <div className="ws-card-meta">
+        {card.path_count} 个目录 · {card.primary_workstream_count + card.related_workstream_count} 个
+        Workstream · {card.session_count} 个 Session
+      </div>
+      <div className="ws-card-meta muted small">最近活动 {timeAgo(card.last_activity_at)}</div>
+    </article>
+  );
 }
