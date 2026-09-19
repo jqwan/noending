@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
+import { showToast } from "../../components/Toast";
 import { timeAgo, useRefreshSignal, Modal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
@@ -61,6 +63,35 @@ export default function ProjectDetail({ projectId, navigate }: {
 
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
+
+  // §16 — 定点刷新在后台执行；完成/失败事件把按钮恢复，并重读 detail。
+  // §18 — 刷新可能让 Project 自己消失（最后一条路径被 GC）：
+  // get_project_detail 的「Project <id> 不存在」会把页面切到 gone 视图。
+  const [refreshingWorkspace, setRefreshingWorkspace] = useState(false);
+  useEffect(() => {
+    const unCompleted = listen("workspace-reconcile-completed", () => {
+      setRefreshingWorkspace(false);
+      refresh();
+    });
+    const unFailed = listen("workspace-reconcile-failed", (e) => {
+      setRefreshingWorkspace(false);
+      showToast(`工作区刷新失败：${String((e.payload as { error?: string }).error ?? "")}`);
+    });
+    return () => {
+      unCompleted.then((f) => f());
+      unFailed.then((f) => f());
+    };
+  }, [refresh]);
+
+  const refreshWorkspace = useCallback(() => {
+    setRefreshingWorkspace(true);
+    api
+      .refreshProjectWorkspace(projectId)
+      .catch((e) => {
+        setRefreshingWorkspace(false);
+        showToast(`工作区刷新失败：${String(e)}`);
+      });
+  }, [projectId]);
 
   const detail = data;
   const project = detail?.project ?? null;
@@ -148,6 +179,12 @@ export default function ProjectDetail({ projectId, navigate }: {
               </button>
             </IntelligenceOnly>
             <button className="btn"
+              title="重新检查这个 Project 的工作目录与 Git 状态。"
+              disabled={refreshingWorkspace}
+              onClick={refreshWorkspace}>
+              {refreshingWorkspace ? "正在刷新…" : "刷新目录状态"}
+            </button>
+            <button className="btn"
               onClick={() => { setNameInput(project.name); setRenameError(""); setRenaming(true); }}>
               重命名
             </button>
@@ -164,6 +201,21 @@ export default function ProjectDetail({ projectId, navigate }: {
           <span>创建于 {timeAgo(project.created_at)}</span>
         </div>
       </PageHeader>
+
+      {refreshingWorkspace && (
+        <div className="muted small" style={{ marginTop: 18 }}>
+          正在重新观察这个 Project 的工作目录与 Git 状态…
+        </div>
+      )}
+
+      {/* §19 — 概览：三个数字就是这页的全部规模感。 */}
+      <section className="rail-section" style={{ marginTop: 26 }}>
+        <div className="section-label">概览</div>
+        <div className="ws-card-meta">
+          {detail.workspace_paths.length} 个工作目录 ·{" "}
+          {detail.workstreams.length} 个 Workstream · {detail.sessions.length} 个 Session
+        </div>
+      </section>
 
       <section className="rail-section" style={{ marginTop: 26 }}>
         <div className="section-label">工作目录（WorkspacePath）</div>
