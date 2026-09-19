@@ -21,11 +21,11 @@
 //! out of `upsert_workstream_conn`. It stays compiled only for legacy callers and
 //! must not be registered.
 
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use rusqlite::OptionalExtension;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::*;
@@ -37,8 +37,8 @@ use crate::workspace::project::{
 };
 use crate::workspace::wiring::WorkspaceLayer;
 
-use super::{with_db, AppState};
 use super::workstream::later_ts;
+use super::{with_db, AppState};
 
 // ---------------- Projects: the v0.2 surface ----------------
 
@@ -109,9 +109,7 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
             "SELECT project_id, canonical_path FROM workspace_paths
              ORDER BY project_id, canonical_path",
         )?;
-        let rows = st.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (pid, path) = row?;
             let slot = representative.entry(pid).or_default();
@@ -297,7 +295,9 @@ where
             );
         };
         let result = job(&state, &notify);
-        state.workspace_refresh_in_progress.store(false, Ordering::SeqCst);
+        state
+            .workspace_refresh_in_progress
+            .store(false, Ordering::SeqCst);
         finish(&handle, result);
     });
     Ok(serde_json::json!({ "started": true }))
@@ -359,7 +359,6 @@ pub fn refresh_project_workspace(
         reconcile_workspace_path_ids(&state.db, &layer.projection(), &path_ids, progress)
     })
 }
-
 
 /// Every Project the app derives. There is no filter and no lifecycle: a Project
 /// exists exactly while it owns a WorkspacePath, so this list is the registry
