@@ -1597,3 +1597,126 @@ fn an_unregistered_home_policy_leaves_the_registry_open() {
     assert!(!projection.policy().is_reserved("/anything/at/all"));
     assert_eq!(projection.policy().default_workspace(), None);
 }
+
+// ------------------------------------------------ §44 Windows case aliases
+//
+// 方案 §10 settled this as 方案 A: `ensure_workspace_path_conn` re-derives the id
+// through the host's rule (`project.rs:295`), so a macOS runner can prove the key
+// — `identity.rs` and `workspace_identity_test.rs` do — but not the registry.
+// Injecting a style into that door would mean bending production for the test, so
+// the claim is pinned where it is actually true: CI's `windows-latest` job.
+// 方案 §44.5 requires reading for these two names in that job's log, because on
+// macOS they compile away to nothing — which also means Main could not falsify
+// them by hand here. The falsifiable-on-any-host version is the one below.
+
+/// §44.6 — `git_identities` is found by location, not by spelling. Two spellings
+/// of one `common_dir` must return the id that was created first; before §44 the
+/// second call inserted a fresh row, and §8.5 reads a second family as license to
+/// move a WorkspacePath into a second Project.
+///
+/// Separator-only (rather than case) because the location relation it proves is
+/// the one the host applies: on a Unix runner case is not part of it, and the
+/// case half is what the `#[cfg(windows)]` tests below carry.
+#[test]
+fn one_git_family_is_found_before_it_is_created() {
+    let (_d, db) = temp_db();
+    let first = noending::storage::workspace::ensure_git_identity_conn(&db.0, "C:/Code/Repo/.git")
+        .expect("first family");
+    let again = noending::storage::workspace::ensure_git_identity_conn(&db.0, "C:/Code/Repo/.git/")
+        .expect("same family, trailing separator");
+
+    assert_eq!(
+        first, again,
+        "the location relation has to answer before a row is created"
+    );
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM git_identities WHERE id = ?1",
+            &first
+        ),
+        1
+    );
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM git_identities WHERE common_dir LIKE ?1",
+            "C:%"
+        ),
+        1,
+        "one row, not two spellings of it"
+    );
+}
+
+/// §44: two case spellings of one directory are one WorkspacePath, and the row
+/// keeps the spelling that arrived first — the fold reaches the key, never the
+/// display.
+#[cfg(windows)]
+#[test]
+fn windows_case_aliases_cannot_create_two_workspace_paths() {
+    let (_d, db) = temp_db();
+    let upper = ensure(&db, &plain("C:\\Code\\NoEnding", true));
+    let lower = ensure(&db, &plain("c:\\code\\noending", true));
+
+    assert_eq!(upper.id, lower.id, "one directory, one key");
+    assert_eq!(upper.project_id, lower.project_id);
+    assert_eq!(paths_of(&db, &upper.project_id).len(), 1);
+    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
+    let stored = db
+        .get_workspace_path(&upper.id)
+        .unwrap()
+        .expect("the row exists");
+    assert_eq!(
+        stored.canonical_path,
+        canon("C:\\Code\\NoEnding"),
+        "the first spelling survives; nothing lower-cased the stored row"
+    );
+    registry_is_consistent(&db).expect("every id derived from its own canonical_path");
+}
+
+/// §44.6's harder half: one repository reported under two spellings is one
+/// family. Without the location-keyed `ensure_git_identity_conn`, the second
+/// observation mints a second `git_identities` row, §8.5 reads that as a family
+/// change and moves the path into a second Project — splitting what §8.3 exists to
+/// converge. Falsified by restoring the exact-string-only lookup.
+#[cfg(windows)]
+#[test]
+fn windows_case_aliases_cannot_create_two_projects() {
+    let (_d, db) = temp_db();
+    let upper = ensure(
+        &db,
+        &repo(
+            "C:\\Code\\Repo",
+            "C:\\Code\\Repo\\.git",
+            GitWorktreeKind::Main,
+            &[],
+        ),
+    );
+    let lower = ensure(
+        &db,
+        &repo(
+            "c:\\code\\repo",
+            "c:\\code\\repo\\.git",
+            GitWorktreeKind::Main,
+            &[],
+        ),
+    );
+
+    assert_eq!(
+        upper.project_id, lower.project_id,
+        "one family, one Project"
+    );
+    assert_eq!(db.list_projects().unwrap().len(), 1);
+    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM git_identities WHERE common_dir LIKE ?1",
+            "%"
+        ),
+        1,
+        "the git family keyed by location, not by spelling"
+    );
+    assert_eq!(project_of(&db, &lower).git_id, Some(family_of(&db, &upper)));
+    registry_is_consistent(&db).expect("consistent after the case alias merged");
+}

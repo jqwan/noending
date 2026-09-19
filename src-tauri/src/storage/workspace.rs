@@ -120,20 +120,6 @@ impl Db {
         get_workspace_path_conn(&self.0, id)
     }
 
-    pub fn get_workspace_path_by_canonical(
-        &self,
-        canonical: &str,
-    ) -> Result<Option<WorkspacePath>> {
-        Ok(self
-            .0
-            .query_row(
-                &format!("SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths WHERE canonical_path = ?1"),
-                params![canonical],
-                row_workspace_path,
-            )
-            .optional()?)
-    }
-
     pub fn list_workspace_paths(&self) -> Result<Vec<WorkspacePath>> {
         list_workspace_paths_conn(&self.0)
     }
@@ -280,13 +266,46 @@ impl Db {
 
 /// `git_identities.id` is app-assigned, NOT derived from `common_dir`: a
 /// repository can move and a path hash would silently rename its identity
-/// (design doc §8). Idempotency comes from `common_dir UNIQUE` +
-/// `INSERT OR IGNORE` + re-read, which is also what makes a replayed call
-/// return the same id.
+/// (design doc §8). A replayed call returns the same id because the row is found
+/// before it is created — by exact `common_dir` first, then, if that misses, by
+/// the domain's location relation (方案 §44.6), which is what stops a Windows
+/// case spelling of one repository from becoming two families.
 pub fn ensure_git_identity_conn(conn: &Connection, common_dir: &str) -> Result<String> {
+    // The exact string first: it is the common case on both platforms and costs
+    // one indexed lookup.
+    if let Ok(id) = conn.query_row(
+        "SELECT id FROM git_identities WHERE common_dir = ?1",
+        params![common_dir],
+        |r| r.get::<_, String>(0),
+    ) {
+        return Ok(id);
+    }
+    // 方案 §44.6 — a miss is not proof of a second repository. On a Windows volume
+    // `C:\Code\Repo\.git` and `c:\code\repo\.git` are one directory seen through two
+    // spellings, because git echoes back whatever cwd it was called with. Keyed
+    // literally they become two `git_identities`, and §8.5 reads that as a family
+    // change and moves the WorkspacePath into a second Project — splitting exactly
+    // what §8.3 exists to converge. So ask the domain's location question before
+    // creating anything. On Unix this reduces to the separator-insensitive string
+    // comparison the lookup above already covered, so no macOS identity moves.
+    //
+    // A scan, deliberately: the table holds one row per repository family (tens),
+    // and an index cannot answer a case-folded comparison anyway.
+    let existing: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT id, common_dir FROM git_identities ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if let Some((id, _)) = existing
+        .iter()
+        .find(|(_, stored)| crate::workspace::identity::same_location(stored, common_dir))
+    {
+        return Ok(id.clone());
+    }
+
     let ts = now();
     conn.execute(
-        "INSERT OR IGNORE INTO git_identities (id, common_dir, first_seen_at, last_seen_at, metadata)
+        "INSERT INTO git_identities (id, common_dir, first_seen_at, last_seen_at, metadata)
          VALUES (?1, ?2, ?3, ?3, '{}')",
         params![new_id(), common_dir, ts],
     )?;

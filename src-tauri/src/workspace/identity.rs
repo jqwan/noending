@@ -16,10 +16,17 @@
 //! (方案 §42.3-M8).
 //!
 //! The accepted cost is aliasing: `/tmp/x` and `/private/tmp/x`, or two spellings
-//! that differ only by case on a case-insensitive volume, become two
-//! WorkspacePath rows. That self-heals where it matters — Git detection resolves
-//! both to the same `common_dir`, so §8.3 converges them into one Project — and
-//! it is bounded: no path is ever silently rewritten underneath a user.
+//! that differ only by case on Unix, become two WorkspacePath rows. That
+//! self-heals where it matters — Git detection resolves both to the same
+//! `common_dir`, so §8.3 converges them into one Project — and it is bounded: no
+//! path is ever silently rewritten underneath a user.
+//!
+//! Windows pays the opposite cost instead, on purpose (方案 §44): the volume is
+//! case-insensitive, so a case difference there is not two directories, and an
+//! identity that kept it would give one directory two rows that every gate
+//! already agrees are the same location. Folding case into the Windows identity
+//! merges rather than splits — which is why 方案 §44 accepts it only while no
+//! Windows database exists to migrate.
 
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
@@ -92,8 +99,9 @@ pub fn normalize_path_with(raw: &str, opts: NormalizeOpts<'_>) -> Option<String>
     Some(join(&root, &segments, style))
 }
 
-/// The separator-insensitive form used to derive `path_identity`. Backslashes
-/// become `/`; nothing else changes (no case folding — see module docs).
+/// The separator-normalized **display** key: backslashes become `/`, case is
+/// kept. It feeds `basename` and automatic Project naming, where folding would
+/// mis-render a user's directory, and it is the input to [`identity_key`].
 pub fn path_key(canonical: &str) -> String {
     // Trailing separators are trimmed so a hand-written or externally-supplied
     // `/repo/x/` cannot hash to a second identity for `/repo/x`. `join` already
@@ -109,28 +117,28 @@ pub fn path_key(canonical: &str) -> String {
     base.replace('\\', "/")
 }
 
-/// The form used when two paths are compared *as the same location*.
+/// The **location key**: the form that answers "which directory is this?", and
+/// therefore the single input both [`same_location`] and [`path_identity`] read.
 ///
 /// [`path_key`] normalizes separators only, because it also feeds display
 /// strings (`basename`, automatic Project naming) and folding those would
-/// mis-render a user's directory. This adds the one comparison rule that
-/// display cannot provide: on a Windows-style path, case is not part of
-/// location, so `C:\Users\me\.noending\data` and
-/// `C:\USERS\me\.noending\DATA` are the same directory (方案 §42.3-M8.4:
-/// "大小写折叠只用于身份比较，展示保留原大小写").
+/// mis-render a user's directory. This adds the one rule display cannot
+/// provide: on a Windows-style path, case is not part of location, so
+/// `C:\Users\me\.noending\data` and `C:\USERS\me\.noending\DATA` are the same
+/// directory (方案 §42.3-M8.4, as amended by §44).
 ///
-/// Deliberately **not** applied to [`path_identity`]: `workspace_paths.id` is
-/// already stored for every macOS database, and widening the fold there would
-/// change existing identities, which is a data migration (§42.3-M8 aliasing is
-/// the accepted cost there). This function exists for the gates where aliasing
-/// is not a cosmetic cost but a hole — 方案 §2's reserved app paths and §1.4's
-/// Home-level Git exclusion — where a case-variant spelling of the *same*
-/// directory must not be allowed to slip past.
+/// Until 方案 §44 this key served comparison only while `path_identity` hashed
+/// [`path_key`], which left the app with two answers to "same directory?": a
+/// gate could call two Windows spellings one location and the registry would
+/// keep them as two WorkspacePaths under two Projects. Folding the identity too
+/// was affordable only because no Windows database exists — `workspace_paths.id`
+/// is stored, so on a platform with data this is a migration, not a fix (§44.1).
 ///
 /// Unix is returned unchanged: APFS is case-insensitive by default but
-/// case-preserving, and folding there would make this module's output differ
-/// from the `canonical_path` the same code stores, which is worse than the
-/// alias it prevents.
+/// case-preserving, folding there would make this module's output differ from
+/// the `canonical_path` the same code stores, and macOS v12 rows are already
+/// keyed by it — 方案 §44.5 pins those ids as literals rather than trusting the
+/// rule to look harmless.
 pub fn identity_key(canonical: &str, style: PathStyle) -> String {
     let key = path_key(canonical);
     if style.is_windows() {
@@ -148,20 +156,34 @@ pub fn identity_key(canonical: &str, style: PathStyle) -> String {
 /// is the *display* comparison: it converges separators but keeps case, which
 /// is right for naming and wrong for location on a Windows volume.
 pub fn same_location(a: &str, b: &str) -> bool {
-    let style = PathStyle::current();
+    same_location_with(a, b, PathStyle::current())
+}
+
+/// Fully injected form of [`same_location`], so Windows location equality can be
+/// proven from a macOS runner instead of depending on which runner runs it
+/// (§16-7).
+pub fn same_location_with(a: &str, b: &str, style: PathStyle) -> bool {
     identity_key(a, style) == identity_key(b, style)
 }
 
-/// Deterministic WorkspacePath id for a canonical path.
+/// Deterministic WorkspacePath id for a canonical path, under this host's rules.
 ///
 /// A content id, not a uuid: `ensure_workspace_path` and the v12 backfill must
 /// stay idempotent across a replayed migration (`migrate()` has no transaction),
 /// and a random id would make every retry a new row that then has to be
 /// reconciled. `path-` prefix keeps it visibly distinct from uuid v4 rows.
 pub fn path_identity(canonical: &str) -> String {
+    path_identity_with(canonical, PathStyle::current())
+}
+
+/// The same id under an explicit style: Windows behavior is tested from macOS
+/// with [`PathStyle::Windows`], and the Unix ids stored macOS databases already
+/// carry are pinned with [`PathStyle::Unix`] (方案 §44.5). Neither should be
+/// decided by whichever runner happens to execute the assertion.
+pub fn path_identity_with(canonical: &str, style: PathStyle) -> String {
     let mut h = Sha256::new();
     h.update(b"noending:workspace-path:v1:");
-    h.update(path_key(canonical).as_bytes());
+    h.update(identity_key(canonical, style).as_bytes());
     let digest = h.finalize();
     let mut out = String::with_capacity(37); // "path-" + 32
     out.push_str("path-");
@@ -578,15 +600,103 @@ mod tests {
     fn separators_converge_into_one_identity() {
         // `git` and the Agent CLIs hand back mixed spellings for the same dir;
         // they must not become two WorkspacePaths.
+        let w = PathStyle::Windows;
         assert_eq!(
-            path_identity(&win("C:/a/b").unwrap()),
-            path_identity(&win("C:\\a\\b").unwrap())
+            path_identity_with(&win("C:/a/b").unwrap(), w),
+            path_identity_with(&win("C:\\a\\b").unwrap(), w)
         );
-        assert_ne!(path_identity("/a/b"), path_identity("/a/B"));
+        // The host door is the injected door for the host's own style, which is
+        // the whole reason the injected one exists: an assertion about Windows
+        // must not become true or false depending on which runner executes it.
+        assert_eq!(
+            path_identity("C:/a/b"),
+            path_identity_with("C:/a/b", PathStyle::current())
+        );
+        assert_eq!(
+            path_identity("/a/b"),
+            path_identity_with("/a/b", PathStyle::current())
+        );
         assert_eq!(path_identity("/a/b").len(), 5 + 32);
         assert!(path_identity("/a/b").starts_with("path-"));
         // Stable across processes: no random component.
         assert_eq!(path_identity("/a/b"), path_identity("/a/b"));
+    }
+
+    /// 方案 §44 — on a Windows volume, case is not part of location, so it is
+    /// not part of the stored identity either. The display form still carries
+    /// what the user typed: `canonical_path` is never lower-cased (§44.2), and
+    /// the two spellings below are proof the fold stopped at the key.
+    #[test]
+    fn windows_case_variants_share_path_identity() {
+        let w = PathStyle::Windows;
+        let upper = win("C:\\Code\\NoEnding").unwrap();
+        let lower = win("c:\\code\\noending").unwrap();
+        assert_ne!(upper, lower, "display keeps the spelling it was given");
+        assert_eq!(path_identity_with(&upper, w), path_identity_with(&lower, w));
+        assert!(same_location_with(&upper, &lower, w));
+        assert_eq!(
+            path_identity_with("C:\\Code\\NoEnding", w),
+            path_identity_with("C:\\code\\NOENDING", w),
+            "the fold happens on the key, so an un-normalized spelling joins too"
+        );
+    }
+
+    #[test]
+    fn windows_separator_variants_share_path_identity() {
+        let w = PathStyle::Windows;
+        assert_eq!(
+            path_identity_with("C:\\Code\\NoEnding", w),
+            path_identity_with("C:/Code/NoEnding", w)
+        );
+        assert_eq!(
+            path_identity_with("C:\\Code\\NoEnding\\", w),
+            path_identity_with("C:\\Code\\NoEnding", w),
+            "a trailing separator is a spelling, not a second directory"
+        );
+    }
+
+    /// A UNC root's `server\\share` carries identity — two file servers must not
+    /// collide — but it carries it case-insensitively, like the drive letter.
+    #[test]
+    fn windows_unc_case_variants_share_path_identity() {
+        let w = PathStyle::Windows;
+        let upper = win("\\\\Server\\Share\\Repo").unwrap();
+        let lower = win("\\\\server\\share\\repo").unwrap();
+        // `normalize` keeps server and share verbatim — the display form is what
+        // the user or the transcript said.
+        assert_ne!(upper, lower);
+        assert_eq!(
+            path_identity_with(&upper, w),
+            path_identity_with(&lower, w),
+            "the location relation still folds the UNC root's case"
+        );
+        assert_eq!(
+            path_identity_with("\\\\SERVER\\share\\REPO", w),
+            path_identity_with(&lower, w)
+        );
+        // Still not the same directory as a different server.
+        assert_ne!(
+            path_identity_with("\\\\other\\share\\repo", w),
+            path_identity_with(&lower, w)
+        );
+    }
+
+    /// The counter-check for the three above, and the reason macOS needed no
+    /// migration: a case difference stays two directories on Unix (§44.5 pins
+    /// the stored ids themselves).
+    #[test]
+    fn unix_case_variants_remain_distinct() {
+        let u = PathStyle::Unix;
+        assert_ne!(
+            path_identity_with("/Users/me/Repo", u),
+            path_identity_with("/Users/me/repo", u)
+        );
+        assert!(!same_location_with("/Users/me/Repo", "/Users/me/repo", u));
+        assert_ne!(
+            path_identity_with("/Users/me/Repo", u),
+            path_identity_with("/Users/me/Repo", PathStyle::Windows),
+            "the same spelling is one directory to Windows and two to Unix"
+        );
     }
 
     #[test]
@@ -663,13 +773,18 @@ mod tests {
         );
         assert_eq!(basename("C:\\Users\\ME\\Data"), "Data");
         assert_eq!(auto_project_name("C:\\Users\\ME\\Data", None), "Data");
-        // Identity is unchanged by the new comparison key: two case variants
-        // remain two WorkspacePaths on Windows, which is 方案 §42.3-M8's
-        // accepted, Git-convergeable alias and NOT something to widen here
-        // (widening it changes stored `workspace_paths.id`, i.e. a migration).
+        // Since 方案 §44 the identity key IS the folded one, so two Windows case
+        // variants are one WorkspacePath — while `path_key`, which feeds display
+        // strings, keeps them apart. macOS is unchanged either way, and §44.5
+        // pins that as data rather than as a rule.
+        assert_eq!(
+            path_identity_with("C:\\A\\b", PathStyle::Windows),
+            path_identity_with("C:\\a\\B", PathStyle::Windows)
+        );
         assert_ne!(
-            path_identity(&win("C:\\A\\b").unwrap()),
-            path_identity(&win("C:\\a\\b").unwrap())
+            path_key("C:\\A\\b"),
+            path_key("C:\\a\\B"),
+            "the display key never folds, on either platform"
         );
     }
 

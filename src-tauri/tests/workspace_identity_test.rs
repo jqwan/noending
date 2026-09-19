@@ -16,7 +16,8 @@ use noending::workspace::project::{
     ensure_workspace_path, registry_is_consistent, UnrestrictedWorkspace,
 };
 use noending::workspace::{
-    normalize_path, normalize_path_with, path_identity, path_identity_of, NormalizeOpts, PathStyle,
+    normalize_path, normalize_path_with, path_identity, path_identity_of, path_identity_with,
+    NormalizeOpts, PathStyle,
 };
 
 fn canon(raw: &str) -> String {
@@ -124,47 +125,114 @@ fn one_git_family_cannot_be_claimed_by_two_projects() {
 
 // --------------------------------------------------------- 2. cross-platform
 
-/// §42.3-M8 — every Windows spelling §2 permits collapses to one identity, and
-/// the *display* form keeps the case the user typed.
+/// The Unix half of 方案 §42.3-M8.4, frozen as data rather than as a rule.
+///
+/// macOS ships v12 rows keyed by these values, so an identity change here is a
+/// data migration and not a fix. The literals were produced by an independent
+/// implementation of `sha256("noending:workspace-path:v1:" + path_key)` — not
+/// by running this module and copying what came out — so the test stays a check
+/// even if the module is wrong.
+#[test]
+fn unix_v12_path_identity_vectors_are_stable() {
+    const VECTORS: [(&str, &str); 6] = [
+        (
+            "/Users/example/code/noending",
+            "path-68ce5f80501db78b93ed64f2c82229e3",
+        ),
+        ("/tmp/project", "path-b2d50482a612276bf0fd044f0001f741"),
+        ("/home/user/repo", "path-17728608906fe02ea7bf2ea7bf3a2e25"),
+        (
+            "/Users/me/.noending/workspace",
+            "path-efc8a6c0f1e0ce8676d372f4c0f91295",
+        ),
+        (
+            "/Users/dev/projects/noending",
+            "path-f89dfc8b3a07fb0b6083631898a33217",
+        ),
+        // The case pair that §8's Test 4 keeps apart, pinned as data too.
+        ("/var/data/Repo", "path-ee90d2b156a11b39705abc879aebcde4"),
+    ];
+    for (canonical, expected) in VECTORS {
+        assert_eq!(
+            path_identity_with(canonical, PathStyle::Unix),
+            expected,
+            "{canonical}"
+        );
+    }
+    // The host door has to agree with the Unix door exactly when the host is
+    // Unix — and on a Windows runner it must NOT, which is the other half of the
+    // proof that these literals were not quietly re-derived per platform.
+    if PathStyle::current() == PathStyle::Unix {
+        assert_eq!(
+            path_identity_of(VECTORS[0].0).as_deref(),
+            Some(VECTORS[0].1),
+            "a Unix host keeps storing these ids"
+        );
+    } else {
+        assert_ne!(
+            path_identity_with(VECTORS[0].0, PathStyle::Windows),
+            VECTORS[0].1,
+            "the fold must actually change Windows ids, or §44 fixed nothing"
+        );
+    }
+    // A trailing separator is trimmed by the key itself, because an
+    // externally-supplied spelling must not become a second identity.
+    assert_eq!(
+        path_identity_with("/Users/dev/projects/noending/", PathStyle::Unix),
+        "path-f89dfc8b3a07fb0b6083631898a33217"
+    );
+    // And a case difference is still a different Unix directory.
+    assert_ne!(
+        path_identity_with("/Users/dev/projects/repo", PathStyle::Unix),
+        "path-ee90d2b156a11b39705abc879aebcde4"
+    );
+}
+
+/// §42.3-M8 + §44 — every Windows spelling of one directory carries one
+/// identity, including the case variants §44 folded into the key, and the
+/// *display* form keeps the case the user typed.
 #[test]
 fn windows_spellings_of_one_directory_carry_one_identity() {
     let canonical = win("C:\\Users\\me\\.noending\\workspace");
     assert_eq!(canonical, "C:\\Users\\me\\.noending\\workspace");
-    let expected = path_identity(&canonical);
-    // Separator, trailing-separator, verbatim-prefix and `.`-hop spellings only.
-    // A *case* difference below the drive is deliberately not in this list: see
-    // the assertion after it.
+    let w = PathStyle::Windows;
+    let expected = path_identity_with(&canonical, w);
+    // Separator, trailing-separator, verbatim-prefix, `.`-hop and *case*
+    // spellings. Case joins them because on a Windows volume it names the same
+    // directory, and 方案 §44 made the stored key agree with that comparison
+    // rather than leaving `same_location` and `path_identity` apart.
     for raw in [
         "C:\\Users\\me\\.noending\\workspace",
         "C:/Users/me/.noending/workspace",
         "C:\\Users\\me\\.noending\\workspace\\",
         "C:\\Users\\me\\.noending\\.\\workspace",
         "\\\\?\\C:\\Users\\me\\.noending\\workspace",
+        "C:\\Users\\ME\\.noending\\WORKSPACE",
+        "c:\\Users\\me\\.NoEnding\\Workspace",
     ] {
         assert_eq!(
-            path_identity(&win(raw)),
+            path_identity_with(&win(raw), w),
             expected,
             "{raw} is one directory with {canonical}"
         );
     }
-    // Case below the drive is NOT folded into the identity. `path_identity`
-    // hashes `path_key`, which converges separators only, because
-    // `canonical_path` is a display string as well as a key and
-    // `identity_key` (the folding comparison) is reserved for the gates that
-    // cannot self-heal. This is §42.3-M8's accepted alias — and the boundary is
-    // worth pinning: `C:\\A\\b` and `C:\\a\\b` are two WorkspacePaths, which is
-    // precisely the trade Main should re-read before any Windows release.
-    //
-    // The drive letter itself IS folded, because `normalize_path` upper-cases it
-    // for both platforms, so that one is not an alias.
+    // The fold reaches the key only. Two case variants remain two *strings*,
+    // and the row keeps the spelling that got there first (§44.2).
     assert_ne!(
-        path_identity(&win("C:\\Users\\me\\.noending\\WORKSPACE")),
+        win("C:\\Users\\me\\.noending\\WORKSPACE"),
+        canonical,
+        "identity folded, display did not"
+    );
+    // The drive letter was already upper-cased by normalize for both platforms,
+    // so that alias was never a split to begin with.
+    assert_eq!(
+        path_identity_with(&win("c:\\Users\\me\\.noending\\workspace"), w),
         expected
     );
-    assert_eq!(
-        path_identity(&win("c:\\Users\\me\\.noending\\workspace")),
-        expected,
-        "the drive is upper-cased by normalize, so that one alias is impossible"
+    // And Unix still does not fold: the same pair of spellings is two ids.
+    assert_ne!(
+        path_identity_with("/Repo", PathStyle::Unix),
+        path_identity_with("/repo", PathStyle::Unix)
     );
 }
 

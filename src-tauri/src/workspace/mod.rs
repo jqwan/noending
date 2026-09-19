@@ -50,7 +50,8 @@ pub mod workstream;
 
 pub use identity::{
     auto_project_name, basename, expand_tilde, home_dir, is_within, normalize_path,
-    normalize_path_with, path_identity, path_identity_of, path_key, NormalizeOpts, PathStyle,
+    normalize_path_with, path_identity, path_identity_of, path_identity_with, path_key,
+    NormalizeOpts, PathStyle,
 };
 
 /// The seam that turns a raw path string (a Session cwd, a user-chosen working

@@ -3090,7 +3090,7 @@ WorkstreamPath
 1. **纯函数**：不碰文件系统、不看 symlink、不问 OS。输入字符串 → 输出 `canonical_path` 与派生 `id`，任何时候都一样。
 2. 展开 `~` / `~\`（M23 之后全仓库只有这一个展开器）；相对路径以传入的 `base` 解析（无 base 则拒绝，不猜 `$HOME`）；折叠 `.` 与 `..`（词法，且在越过根时停住而不是抛错）；连续分隔符并一；去尾部分隔符（根除外）。
 3. 分隔符：身份键内部统一用 `/`；`canonical_path` 列存**平台原生**形式（Windows `\`，类 Unix `/`）。
-4. Windows：剥掉 `\\?\` 与 `\\?\UNC\` verbatim 前缀（后者还原为 `\\server\share\…`），盘符大写；大小写折叠**只**用于身份比较，展示保留原大小写。macOS **不折叠**（APFS 默认大小写不敏感但保留大小写；折叠会让展示变错，而且身份已经由词法形式定义，折叠只带来歧义）。
+4. Windows：剥掉 `\\?\` 与 `\\?\UNC\` verbatim 前缀（后者还原为 `\\server\share\…`），盘符大写；**大小写折叠同时用于身份比较和存储身份**（§44 收敛前的原文是"只用于身份比较"，见 §44.1 的裁决理由），展示保留原大小写。macOS **不折叠**（APFS 默认大小写不敏感但保留大小写；折叠会让展示变错，而且身份已经由词法形式定义，折叠只带来歧义）。
 5. 符号链接的代价是**明知故犯、且可自愈**：`/tmp/x` 与 `/private/tmp/x` 会是两条 WorkspacePath。它们各自的 Git 检测会给出同一个 `common_dir`（git 自己解析符号链接），于是 §8.3 的 git identity 收敛会把两条路径归进同一个 Project。**这条兜底成立的前提是 Git 收敛真的跑过**，所以 §33 的 dogfood Case 要包含“同一目录的符号链接拼法出现两次”。
 6. `fs::canonicalize` 仍然允许用于**读 git 输出之后**（git 返回的 `common_dir` / worktree 路径要再过一遍本函数），但**不得**用它产生 `canonical_path`。
 7. **测试**：macOS 上 `std::env::temp_dir()` 是 `/tmp`（符号链接），CI 的 macos runner 一定撞上。所有 resolver 测试断言 `canonical_path` 时禁止硬编码 temp 前缀，必须先过 `normalize_path` 再比。
@@ -3521,7 +3521,8 @@ f9f2912 fix(workspace): stop reading derived caches and spellings as authorities
    从不为显示折叠**。非 Windows 逐字节不变 → 不动任何已存 identity，不触发迁移。
 
   `path_identity` **仍然不折叠**——改它会改已存的 `workspace_paths.id`，那是数据
-  迁移，G 正确地报告而没有擅自做。→ 记为 **M33**。
+  迁移，G 正确地报告而没有擅自做。→ 记为 **M33**。**§44 裁决：M33 在 Windows 侧
+  关闭**（Windows 从未跑过 NoEnding，没有已存 id 可改），macOS 侧仍然不变。
 
 顺带：`registry_is_consistent` 里一条恒真断言（`GROUP BY id HAVING
 COUNT(DISTINCT project_id) > 1`，而 `id` 是主键，永远不可能 >1）换成了 §1.1 真正
@@ -3615,3 +3616,163 @@ Session 都由工作路径决定"；Sessions 页明说"按 Project 筛选只是�
   选项 (b)（临时/一次性目录不建 Project）从"可选优化"变成了"界面可用性问题"。
 - **4 个 Workstream 里 3 个是零路径**——M30 保护的那个状态在你的真实语料里
   是常态而不是边角。
+
+## 44. Windows path identity 收口（封板前最后一项，2026-09-19）
+
+### 44.1 为什么现在可以折叠
+
+要修的不只是 `395066e` 的 Windows CI 红灯，而是一个 domain 洞：`same_location`
+说两个 Windows 拼法是同一个目录，`path_identity` 说不是（`identity.rs:134` 折叠，
+`identity.rs:161` 不折叠）。同一个问题有两个答案，正是 §42.5 T 系列要禁掉的形状。
+
+§43.11 把这件事推给 M33 的唯一理由是"改它会改已存的 `workspace_paths.id`"。这个
+理由只对有数据的平台成立：
+
+```text
+macOS    已有真实 v12 数据   → 逐字节不变，由 §44.5 的向量测试证明
+Windows  从未运行过 NoEnding → 没有已存 id 可改
+```
+
+**前提一旦为假，本节就不是修复而是引入 bug，而且失效是静默的**：
+`ensure_workspace_path_conn`（`project.rs:295`）按新规则重算 id → 查不到旧行 → 走
+"全新路径"分支先 `create_project_row`、再 `insert_workspace_path_conn`
+（`INSERT OR IGNORE`，`storage/workspace.rs:170`）被 UNIQUE 键吞掉。结果是一个目录
+两个 Project、旧行原地不动、**没有任何错误返回**。`registry_is_consistent`
+（`project.rs:1147`）能抓到这种行，但它是**只有测试在跑的守卫**（production 无调用
+者），不会替用户发现。所以：Windows 首发前必须确认没有人跑过 v12；若跑过，本节
+改写成 v13 backfill（重算 `workspace_paths.id` 及其全部外键引用），不是就地折叠。
+
+### 44.2 冻结的定义
+
+```text
+canonical_path  = 保存与展示 = 保留用户原始大小写（不做任何 lowercase 写入）
+location identity:
+  Unix / macOS  = 分隔符归一 + 保留大小写
+  Windows       = 分隔符归一 + 大小写折叠
+```
+
+`same_location` 与 `path_identity` 必须读同一个 location key；`path_identity_with`
+/ `same_location_with` 是显式 style 的注入缝（沿用 `identity_key` /
+`is_within_with` / `normalize_path_with` 已有的约定），生产入口仍只读宿主 style。
+不新增第二套算法，不引入 `location_key` 列，不升 v13。
+
+### 44.3 对用户方案的三处修正
+
+**C1 — 两个红灯测试不按 §7 的 cfg 分叉修。** 本仓库的约定是**测试显式钉住
+style**，而不是让"在哪个平台跑"决定语义：`ResolverContext.style`
+（`resolver.rs`，`inert()` 里就是 `None = 宿主`）、`NoEndingHome::new_with_style`
+都已存在，`home.rs:1042` 的模块自述写着 "every lexical test pins its style
+instead of inheriting the host's"。cfg 分叉会让 Windows 分支只在 CI 上跑、Unix
+分支在 Windows runner 上失守。改法：`normalization_and_exclusions_end_to_end`
+显式 `style: Some(PathStyle::Unix)` 并补一段 Windows；
+`relocation_request_writes_pending_only` 需要的缝还不存在，因此
+`request_relocation` 补 `request_relocation_with(..., style)`，原函数退成宿主
+wrapper。两处都断言**手写的**期望拼写，不重复调用被测函数——§7.1 警惕的自证。
+
+**C2 — 要翻的断言不止两个，是五处。** 除 §7 那两个，还有
+`identity.rs:585`（`assert_ne!(path_identity("/a/b"), path_identity("/a/B"))`，
+Windows 宿主上折叠后会相等）、`identity.rs:670-673`（Windows 大小写变体保持分裂
+的 `assert_ne!` 连同注释）、`workspace_identity_test.rs:160-168`（同一条，注释里
+写的"Main 应该在任何 Windows 发布前重读这个取舍"就是本次裁决），以及 §44.5 的向量
+测试本身——它必须走 `path_identity_with(..., PathStyle::Unix)`，否则在 Windows
+runner 上自己变红。附带一个假门：`get_workspace_path_by_canonical`
+（`storage/workspace.rs:123`）以拼写为键，在"拼写不再决定身份"之后会漏掉大小写
+变体的已存行；唯一调用者是 `tests/launcher_workspace_test.rs:92`，让它走 identity
+门，然后删掉这个 accessor。
+
+**C3 — 折叠是"合并"，而合并不自愈；§44.1 的前提之外还有两种会被错误合并的真实
+情况。** 规则 5 的兜底（Git `common_dir` 收敛）只对**分裂**成立。Windows 上
+(a) 逐目录大小写敏感的 NTFS 目录（`fsutil file setCaseSensitiveInfo`，WSL 创建的
+目录默认如此）和 (b) 宿主为 Windows 而被观察的是 POSIX 拼法
+（`/home/u/Repo` 与 `/home/u/repo`）会被折成一个 WorkspacePath——`identity_key`
+只看 style，不看路径形状。**仍然采纳 style 驱动而不是形状嗅探**：一旦"看起来像
+Windows 路径才折叠"，`same_location` 与 `path_identity` 重新分叉，本节要关的洞又
+开。接受它的理由是窄且可见：这两种情况下 NoEnding 在宿主上拿不到 `exists`/git
+证据，而 `canonical_path` 保留首次拼写，UI 会显示成一个和用户目录对不上的路径。
+这条写进 §44.6 的验收，不藏在实现注释里。
+
+**C4 — §13 禁止动 Git identity，但 §9 的"一个 Project"必须动它才成立。**
+`git_identities` 是按 `common_dir` 字符串精确查的
+（`storage/workspace.rs::ensure_git_identity_conn`，`WHERE common_dir = ?1` +
+`common_dir UNIQUE`），而 git 把调用它时用的那个 cwd 原样吐回来：同一个仓库以
+`C:\Code\Repo\.git` 和 `c:\code\repo\.git` 两次被观察，就是两行 git identity、两个
+`git_id`；§8.5 把"换了 family"当作强证据，把这条 WorkspacePath 迁去第二个
+Project。**折叠 WorkspacePath 身份反而让分裂更容易发生**，§9 的
+`windows_case_aliases_cannot_create_two_projects` 在只改 identity 的方案下必红。
+裁决：`ensure_git_identity_conn` 的创建顺序改成"精确字符串 → location 关系 →
+才插入"（`same_location`，因此 Unix 上等价于原来的比较，不动任何已存
+`workspace_paths.id` / `projects.git_id`）。这是本次唯一的第二处 production 语义
+变化，和被它绕过的 §13 一条禁令一起记在这里，不算"顺手改"。
+顺带半处：`resolver::try_observe` 原来用宿主 style 查 reserved，注入
+`PathStyle::Windows` 的测试因此只半生效，改成读 `ctx.style()`。
+
+### 44.4 本次不动
+
+schema、`workspace_paths` 表结构、Project 合并策略、Git 检测与 worktree 发现、
+Home 迁移流程、launcher cwd 分层、Context、Assistant、Project UI、Workstream
+生命周期。production 侧只碰三处，都有上面的理由：`identity.rs` 的 key 收敛本身、
+§44.3-C1 的 `request_relocation_with` 缝（不改行为，只把已有的宿主读取换成参数）、
+§44.3-C4 的 git identity 查找顺序（外加 `try_observe` 的 reserved 读 `ctx.style()`）。§12 的 TS shim 顺手清掉（Rust
+`create_workstream` 已经只收 `title/description/initial_path`，`projectId` 是纯
+死参数，`defaultCwd` 名不副实；只有一个调用点
+`src/features/workstreams/NewWorkstreamModal.tsx:48`）。
+
+### 44.5 Gate
+
+macOS 本地：`cargo fmt --check`、`cargo check --all-targets`、
+`cargo test --all-targets`、`pnpm build`。identity 回归至少要有：Windows 大小写
+/ 分隔符 / UNC 三组同 identity（`path_identity_with(..., Windows)`，macOS runner
+上就能跑完）、Unix 大小写保持分裂、以及**Unix v12 向量**——六个
+`canonical → path-<hex>` 字面量由**独立实现**（`sha256("noending:workspace-path:v1:"
++ path_key)` 取前 16 字节）算出，不是跑一遍现有代码抄答案；它们在改动落地**之前**
+先红过一次（`/Users/dev/./projects//noending` 那条就是），再对旧实现绿，才叫钉住
+了兼容性。
+
+push 之后只看新 HEAD 的 exact-head 运行，两个平台都要绿，且 **Windows 的
+`frontend install` / `frontend build` 必须真的执行过**——`395066e` 那次是
+`cargo test` 先红导致这两步被跳过，绿灯不能靠跳过。
+
+### 44.6 验收
+
+```text
+Windows:  C:\Repo / c:\repo / C:/REPO  → 一个 WorkspacePath、一个 Project
+macOS:    ~/Repo 与 ~/repo 仍然词法分裂；六个 v12 向量的 id 一字不变
+显示:      canonical_path 保留用户拼写（首次写入者，后续观察只更新 exists/git）
+比较:      same_location 与 path_identity 同源
+不需要:    v13、Windows 历史迁移、location_key 列
+```
+
+外加 §44.1 的前提确认与 §44.3-C3 的已知合并风险。
+
+### 44.7 落地记录（Main，2026-09-19）
+
+改动：`identity.rs` 新增 `path_identity_with` / `same_location_with`，
+`path_identity` 改为 hash `identity_key`（同一 location key），
+`same_location` 走同一个注入缝；`resolver::try_observe` 的 reserved 查询与
+`ensure_git_identity_conn` 的查找顺序按 §44.3-C4 调整；`request_relocation_with`
+新增；`get_workspace_path_by_canonical` 删除，唯一调用点
+`launcher_workspace_test.rs::path_id` 改走 identity 门（§44.3-C2）。
+§8 的四个 key 测试落在 `identity.rs`，§9 的两个 registry 测试落在
+`workspace_project_test.rs` 的 `#[cfg(windows)]` 段。TS 侧 §12 完成，
+`createWorkstream(title, description, initialPath?)`。
+
+macOS 本地 gate：`cargo fmt --check` / `cargo check --all-targets`（0 warning）/
+`cargo test --all-targets` **386 passed, 0 failed, 6 ignored** / `pnpm build` 绿。
+
+可证伪性，逐条交代：
+
+- **亲证**：删掉 `ensure_git_identity_conn` 的 location 查找，
+  `one_git_family_is_found_before_it_is_created` 立刻红（两次调用拿到两个 uuid）。
+- **亲证，而且是以另一种方式**：§44.5 的六个向量先红过一次——我把
+  `/Users/dev/./projects//noending` 当成"同一个 key"，而 `path_key` 只去尾分隔符、
+  不折叠 `.` 和连续分隔符（那是 `normalize_path` 的活）。六条向量本身、以及"去尾
+  分隔符不算第二个身份"那条，独立实现与 Rust 逐字节一致——所以被删掉的是我加错的
+  断言，不是被放宽的期望。
+- **本地无法证伪，只能靠 CI**：`#[cfg(windows)]` 那两个 registry 测试在 macOS 上
+  编译成空。我把它们临时翻成 `cfg(not(windows))` 跑过 `cargo check` +
+  `--list`，确认它们是真的会被编译、真的会跑的测试体，但**它们的红绿只有
+  windows-latest 说得出**——所以 §44.5 要求去那次运行的日志里点名读它们。
+
+前提的证据：`gh release list` 为空（从未发布过任何构建），加上 §44.1 记录的用户
+声明"Windows 从未运行过 NoEnding"。M33 的 Windows 侧随本节关闭，macOS 侧保持
+"折叠即迁移"的原判。

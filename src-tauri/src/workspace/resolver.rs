@@ -429,7 +429,14 @@ impl WorkspaceResolver {
     /// the user Home itself (§1.4)).
     pub fn try_observe(&self, raw: &str) -> Option<WorkspaceObservation> {
         let canonical = self.ctx.canonicalize(raw)?;
-        if self.ctx.reserved.contains(&canonical) {
+        // The reservation question is asked in the context's own style, not the
+        // host's: an injected `PathStyle::Windows` must fold for §2 exactly like
+        // a Windows host does, or the seam only half-applies.
+        if self
+            .ctx
+            .reserved
+            .contains_with(&canonical, self.ctx.style())
+        {
             return None;
         }
         // §1.4, second face: never let the user's Home become a Project. The
@@ -1050,6 +1057,10 @@ bare
 
     /// 必须测试: relative → absolute (rejected without a base) and the §2 / §1.4
     /// exclusions, seen through the resolver rather than the predicate.
+    ///
+    /// The style is pinned, not inherited (方案 §44.3-C1): this module's own
+    /// convention is that a lexical test says which platform's spelling it means,
+    /// so both are proven on every runner instead of one of them.
     #[test]
     fn normalization_and_exclusions_end_to_end() {
         let home = crate::workspace::home::NoEndingHome::new_with_style(
@@ -1059,6 +1070,7 @@ bare
         )
         .unwrap();
         let resolver = WorkspaceResolver::new(ResolverContext {
+            style: Some(PathStyle::Unix),
             user_home: Some("/Users/tester".to_string()),
             reserved: home.reserved(),
             ..ResolverContext::inert()
@@ -1097,6 +1109,43 @@ bare
             based.observe("noending/src").canonical_path,
             "/Users/tester/projects/noending/src"
         );
+
+        // The same story in Windows spelling, with hand-written expectations —
+        // "what a Windows host produces" is the half this test would otherwise
+        // leave to whichever runner happened to execute it.
+        let win_home = crate::workspace::home::NoEndingHome::new_with_style(
+            "C:\\Users\\tester\\.noending",
+            Some("C:\\Users\\tester"),
+            PathStyle::Windows,
+        )
+        .unwrap();
+        let win = WorkspaceResolver::new(ResolverContext {
+            style: Some(PathStyle::Windows),
+            user_home: Some("C:\\Users\\tester".to_string()),
+            reserved: win_home.reserved(),
+            ..ResolverContext::inert()
+        });
+        assert!(win.observe("relative/path").is_none_sentinel());
+        assert!(win
+            .observe("C:\\Users\\tester\\.noending\\data")
+            .is_none_sentinel());
+        assert!(
+            win.observe("C:\\USERS\\tester\\.NoEnding")
+                .is_none_sentinel(),
+            "a case variant of the Home is still the Home (§2, §44)"
+        );
+        assert!(
+            win.observe("C:\\Users\\TESTER").is_none_sentinel(),
+            "§1.4 folds case too"
+        );
+        let repo = win.observe("c:/tester/code/../code/noending\\");
+        assert_eq!(repo.canonical_path, "C:\\tester\\code\\noending");
+        // The stored key is the host's rule, deliberately: a database belongs to
+        // one machine, so an injected *spelling* must not decide what its ids
+        // mean. That is why the Windows identity convergence itself is asserted
+        // by 方案 §8's key tests and §44's `#[cfg(windows)]` registry tests, not
+        // here.
+        assert_eq!(repo.path_id, identity::path_identity(&repo.canonical_path));
     }
 
     /// Small helper so the sentinel reads clearly in the assertions above.

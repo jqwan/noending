@@ -45,7 +45,7 @@ export default function NewWorkstreamModal({ onClose, onCreated }: {
     setBusy(true);
     setError("");
     try {
-      const w = await api.createWorkstream(null, trimmedTitle, desc, rawPath);
+      const w = await api.createWorkstream(trimmedTitle, desc, rawPath);
       if (rawPath !== "") {
         const paths = await api.listWorkstreamPaths(w.id).catch(() => null);
         if (paths !== null && paths.length === 0) {

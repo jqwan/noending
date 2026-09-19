@@ -37,17 +37,16 @@ export const api = {
   /**
    * `create_workstream(title, description, initialPath?)`.
    *
-   * The `projectId` parameter is a transition shim so the existing modal keeps
-   * compiling: v0.2 has no manual Workstream→Project assignment, so it is
-   * dropped here rather than sent. `defaultCwd` is no longer a hint — the path
-   * the user types becomes the Workstream's position-0 path, or nothing at all
-   * if the workspace layer cannot resolve it (F1 replaces both with a path picker).
+   * There is no Project argument to carry: v0.2 has no manual
+   * Workstream→Project assignment. The path the user types is not a hint
+   * either — it becomes the Workstream's position-0 path, or nothing at all
+   * when the workspace layer cannot resolve it.
    */
-  createWorkstream: (projectId: string | null, title: string, description: string, defaultCwd?: string) =>
+  createWorkstream: (title: string, description: string, initialPath?: string) =>
     invoke<Workstream>("create_workstream", {
       title,
       description,
-      initialPath: defaultCwd?.trim() ? defaultCwd : null,
+      initialPath: initialPath?.trim() || null,
     }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
 

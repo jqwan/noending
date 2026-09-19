@@ -516,13 +516,26 @@ pub fn request_relocation(
     new_home: &str,
     user_home: Option<&str>,
 ) -> Result<BootstrapPointer> {
+    request_relocation_with(pointer_path, new_home, user_home, PathStyle::current())
+}
+
+/// Explicit-`style` form of [`request_relocation`] (方案 §44.3-C1), so the
+/// canonical spelling a relocation writes is proven on either runner instead of
+/// meaning whatever platform happened to run the test. Only the target's
+/// spelling is style-dependent: `pointer_path` is a real file on the host.
+pub fn request_relocation_with(
+    pointer_path: &Path,
+    new_home: &str,
+    user_home: Option<&str>,
+    style: PathStyle,
+) -> Result<BootstrapPointer> {
     let (mut pointer, _) = BootstrapPointer::load(pointer_path);
-    let target = NoEndingHome::new(new_home, user_home)
+    let target = NoEndingHome::new_with_style(new_home, user_home, style)
         .ok_or_else(|| other(format!("无法规范化新的 NoEnding Home 路径: {new_home}")))?;
     if let Some(current) = pointer.current_home.as_deref() {
         // Same *location*, not same spelling: a case-variant on a Windows volume
         // would pass for a relocation and then move `data/` onto itself.
-        if identity::same_location(&target.root_str(), current.trim()) {
+        if identity::same_location_with(&target.root_str(), current.trim(), style) {
             return Err(other("新位置与当前 NoEnding Home 相同，无需迁移"));
         }
     }
@@ -1323,8 +1336,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// §44.3-C1 — both platforms' spelling in one run. The expected strings are
+    /// written by hand: deriving them through this module would assert that
+    /// `request_relocation` agrees with itself, which is not the claim.
     #[test]
     fn relocation_request_writes_pending_only() {
+        // Unix Home, Unix target.
         let dir = unique_temp_dir("relocate");
         let path = dir.join(BOOTSTRAP_FILE_NAME);
         BootstrapPointer {
@@ -1334,7 +1351,9 @@ mod tests {
         .save(&path)
         .unwrap();
 
-        let after = request_relocation(&path, "~/new-home", Some("/Users/me")).unwrap();
+        let after =
+            request_relocation_with(&path, "~/new-home", Some("/Users/me"), PathStyle::Unix)
+                .unwrap();
         assert_eq!(after.current_home.as_deref(), Some("/Users/me/.noending"));
         assert_eq!(after.pending_home.as_deref(), Some("/Users/me/new-home"));
         // The live Home is unchanged on disk: `current_home` still points there.
@@ -1342,7 +1361,59 @@ mod tests {
         assert_eq!(reread, after);
 
         // Asking for the current location is refused rather than scheduled.
-        assert!(request_relocation(&path, "/Users/me/.noending", Some("/Users/me")).is_err());
+        assert!(request_relocation_with(
+            &path,
+            "/Users/me/.noending",
+            Some("/Users/me"),
+            PathStyle::Unix
+        )
+        .is_err());
+        // On Unix a case difference is a different directory, so it is a real
+        // relocation and must be accepted.
+        assert!(request_relocation_with(
+            &path,
+            "/Users/me/.NoEnding",
+            Some("/Users/me"),
+            PathStyle::Unix
+        )
+        .is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Windows Home, Windows target — same runner, same three claims, and the
+        // host's separators are not what the pointer gets.
+        let dir = unique_temp_dir("relocate-win");
+        let path = dir.join(BOOTSTRAP_FILE_NAME);
+        BootstrapPointer {
+            current_home: Some("C:\\Users\\me\\.noending".into()),
+            pending_home: None,
+        }
+        .save(&path)
+        .unwrap();
+
+        let after = request_relocation_with(
+            &path,
+            "~\\new-home",
+            Some("C:\\Users\\me"),
+            PathStyle::Windows,
+        )
+        .unwrap();
+        assert_eq!(
+            after.current_home.as_deref(),
+            Some("C:\\Users\\me\\.noending")
+        );
+        assert_eq!(
+            after.pending_home.as_deref(),
+            Some("C:\\Users\\me\\new-home")
+        );
+        // A case variant of the current Home is the same location, so it must be
+        // refused: scheduled, it would move `data/` onto itself.
+        assert!(request_relocation_with(
+            &path,
+            "c:\\users\\ME\\.NoEnding",
+            Some("C:\\Users\\me"),
+            PathStyle::Windows
+        )
+        .is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

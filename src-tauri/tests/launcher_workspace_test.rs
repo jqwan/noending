@@ -40,7 +40,7 @@ use noending::workspace::workstream::{
     add_workstream_path, create_workstream, remove_workstream_path, reorder_workstream_paths,
     workstream_launch_paths,
 };
-use noending::workspace::{normalize_path, WorkspaceAttaching};
+use noending::workspace::{normalize_path, path_identity, WorkspaceAttaching};
 
 const PROJECT: &str = "p-launcher-ws";
 
@@ -89,7 +89,12 @@ impl WorkspaceAttaching for LexicalPaths {
 }
 
 fn path_id(db: &Db, canonical_path: &str) -> String {
-    db.get_workspace_path_by_canonical(canonical_path)
+    // 方案 §44.3-C2 — read the row through the key the app writes it with. A
+    // lookup by spelling can miss a row stored under another case, which is what
+    // a Windows host may now do to the same directory; a test that missed it
+    // would assert against nothing.
+    let id = path_identity(canonical_path);
+    db.get_workspace_path(&id)
         .unwrap()
         .unwrap_or_else(|| panic!("no WorkspacePath row for {canonical_path}"))
         .id
