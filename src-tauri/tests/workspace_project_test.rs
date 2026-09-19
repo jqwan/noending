@@ -1720,3 +1720,373 @@ fn windows_case_aliases_cannot_create_two_projects() {
     assert_eq!(project_of(&db, &lower).git_id, Some(family_of(&db, &upper)));
     registry_is_consistent(&db).expect("consistent after the case alias merged");
 }
+
+// ===========================================================================
+// Projects Experience v0.2 §27 — workspace refresh contract.
+//
+// The two refresh entries (global / per-project) ride ONE rule set: the
+// reconcile_workspace_path_ids primitive below is the same observe → ensure →
+// GC pipeline the global sweep runs. These tests lock that contract without
+// any real git or real Home (§42.3-M13).
+// ===========================================================================
+
+use noending::workspace::project::{
+    reconcile_workspace_path_ids, reconcile_workspace_paths_with_progress,
+};
+
+fn count_rows_locked(db: &Mutex<Db>, sql: &str, arg: &str) -> i64 {
+    let guard = db.lock().unwrap();
+    count_rows(&guard, sql, arg)
+}
+
+#[test]
+fn global_refresh_reobserves_registered_paths() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", true));
+    observer.set("/work/b", plain("/work/b", true));
+    let projection = ProjectProjection::new(&observer);
+    {
+        let guard = db.lock().unwrap();
+        ensure(&guard, &plain("/work/a", true));
+        let b = ensure(&guard, &plain("/work/b", true));
+        // 一条引用，让 b 免于 GC——本测试观察的是"重观察"本身。
+        session(&guard, "s-b", "/work/b", &b.id);
+    }
+    // /work/b 在两次刷新之间从磁盘上消失了。
+    observer.set("/work/b", plain("/work/b", false));
+
+    let progress: std::sync::Arc<Mutex<Vec<(usize, usize)>>> =
+        std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = progress.clone();
+    let report =
+        reconcile_workspace_paths_with_progress(&db, &projection, 500, &move |scanned, total| {
+            sink.lock().unwrap().push((scanned, total));
+        })
+        .unwrap();
+
+    assert_eq!(report.scanned, 2);
+    assert_eq!(report.missing_paths, 1, "only /work/b is gone");
+    assert_eq!(
+        progress.lock().unwrap().last(),
+        Some(&(2, 2)),
+        "§12 progress"
+    );
+    let guard = db.lock().unwrap();
+    let b = guard
+        .get_workspace_path(&path_id_of("/work/b"))
+        .unwrap()
+        .expect("b survives: it is only missing, GC is a separate decision");
+    assert!(!b.exists, "the observation is committed to the registry");
+}
+
+#[test]
+fn project_refresh_does_not_scan_unrelated_projects() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", true));
+    // Scripted 的默认答案是"存在"；若 B 被扫到，它的自定义答案才会生效。
+    observer.set("/work/b", plain("/work/b", false));
+    let projection = ProjectProjection::new(&observer);
+    {
+        let guard = db.lock().unwrap();
+        ensure(&guard, &plain("/work/a", true));
+        ensure(&guard, &plain("/work/b", true));
+    }
+
+    // 只定点刷新 A 的路径。
+    let report =
+        reconcile_workspace_path_ids(&db, &projection, &[path_id_of("/work/a")], &|_, _| {})
+            .unwrap();
+    assert_eq!(report.scanned, 1, "exactly one path was observed");
+
+    let guard = db.lock().unwrap();
+    let b = guard
+        .get_workspace_path(&path_id_of("/work/b"))
+        .unwrap()
+        .expect("b registered");
+    assert!(b.exists, "unrelated project's path was never re-observed");
+}
+
+#[test]
+fn refresh_marks_deleted_directory_missing() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", false));
+    let projection = ProjectProjection::new(&observer);
+    let wp = {
+        let guard = db.lock().unwrap();
+        let wp = ensure(&guard, &plain("/work/a", true));
+        // 引用让路径在 GC 判定下存活，好观察 missing 标记本身。
+        session(&guard, "s-a", "/work/a", &wp.id);
+        wp
+    };
+
+    let report =
+        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(report.missing_paths, 1);
+    let after = {
+        let guard = db.lock().unwrap();
+        guard.get_workspace_path(&wp.id).unwrap()
+    };
+    let after = after.expect("row survives the observation");
+    assert!(!after.exists);
+    assert!(report.outcome.deleted_paths.is_empty());
+}
+
+#[test]
+fn referenced_missing_path_survives_refresh() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", false));
+    let projection = ProjectProjection::new(&observer);
+    let wp = {
+        let guard = db.lock().unwrap();
+        let wp = ensure(&guard, &plain("/work/a", true));
+        // 一条 Session 引用让这条路径不可 GC（§15 的引用条件）。
+        session(&guard, "s-ref", "/work/a", &wp.id);
+        wp
+    };
+
+    let report =
+        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(report.missing_paths, 1);
+    assert!(
+        report.outcome.deleted_paths.is_empty(),
+        "referenced paths are never GC'd, got {:?}",
+        report.outcome.deleted_paths
+    );
+    {
+        let guard = db.lock().unwrap();
+        assert!(guard.get_workspace_path(&wp.id).unwrap().is_some());
+    }
+}
+
+#[test]
+fn unreferenced_missing_path_is_gc_d() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", false));
+    let projection = ProjectProjection::new(&observer);
+    let wp = {
+        let guard = db.lock().unwrap();
+        ensure(&guard, &plain("/work/a", true))
+    };
+
+    let report =
+        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(report.outcome.deleted_paths, vec![wp.id.clone()]);
+    {
+        let guard = db.lock().unwrap();
+        assert!(guard.get_workspace_path(&wp.id).unwrap().is_none());
+    }
+}
+
+#[test]
+fn last_path_gc_retires_project() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", false));
+    let projection = ProjectProjection::new(&observer);
+    let (wp, project_id) = {
+        let guard = db.lock().unwrap();
+        let wp = ensure(&guard, &plain("/work/a", true));
+        let project_id = wp.project_id.clone();
+        (wp, project_id)
+    };
+
+    let report =
+        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(report.outcome.deleted_projects, vec![project_id.clone()]);
+    {
+        let guard = db.lock().unwrap();
+        assert!(guard.get_project(&project_id).unwrap().is_none());
+    }
+    {
+        let guard = db.lock().unwrap();
+        registry_is_consistent(&guard).expect("registry stays consistent");
+    }
+}
+
+#[test]
+fn git_worktree_registration_prevents_premature_gc() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set(
+        "/work/repo",
+        repo(
+            "/work/repo",
+            "/work/repo/.git",
+            GitWorktreeKind::Main,
+            &["/work/repo", "/work/repo-feature"],
+        ),
+    );
+    let projection = ProjectProjection::new(&observer);
+    {
+        let guard = db.lock().unwrap();
+        ensure(&guard, &plain("/work/repo", true));
+    }
+    // 第一轮：feature 经由 `git worktree list` 被收养进注册表（目录尚不存在）。
+    reconcile_workspace_paths(&db, &projection, 500).unwrap();
+
+    // 定点刷新两个家族路径：feature 仍被家族列表提及 → 即使目录缺失也不 GC。
+    let report = reconcile_workspace_path_ids(
+        &db,
+        &projection,
+        &[path_id_of("/work/repo"), path_id_of("/work/repo-feature")],
+        &|_, _| {},
+    )
+    .unwrap();
+    assert_eq!(report.scanned, 2);
+    assert!(
+        report.outcome.deleted_paths.is_empty(),
+        "a prunable worktree listing keeps the path alive, got {:?}",
+        report.outcome.deleted_paths
+    );
+    {
+        let guard = db.lock().unwrap();
+        assert!(guard
+            .get_workspace_path(&path_id_of("/work/repo-feature"))
+            .unwrap()
+            .is_some());
+    }
+}
+
+#[test]
+fn restored_directory_becomes_present_again() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", false));
+    let projection = ProjectProjection::new(&observer);
+    let wp = {
+        let guard = db.lock().unwrap();
+        let wp = ensure(&guard, &plain("/work/a", true));
+        // 移动盘重新挂载的故事：路径有引用（比如 Session），所以两轮都存活。
+        session(&guard, "s-a", "/work/a", &wp.id);
+        wp
+    };
+
+    let gone =
+        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(gone.missing_paths, 1);
+    let still_there = {
+        let guard = db.lock().unwrap();
+        guard.get_workspace_path(&wp.id).unwrap()
+    };
+    assert!(!still_there.expect("row survives").exists);
+
+    // 目录回来了（从备份恢复、移动盘重新挂载……）：下一次刷新把它翻回来。
+    observer.set("/work/a", plain("/work/a", true));
+    let back =
+        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(back.missing_paths, 0);
+    let present = {
+        let guard = db.lock().unwrap();
+        guard.get_workspace_path(&wp.id).unwrap()
+    };
+    assert!(present.expect("row survives").exists);
+}
+
+#[test]
+fn refresh_does_not_touch_workstream_paths() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", true));
+    let projection = ProjectProjection::new(&observer);
+    let wp = {
+        let guard = db.lock().unwrap();
+        let wp = ensure(&guard, &plain("/work/a", true));
+        workstream(&guard, "ws-1", "WS");
+        add_ws_path(&guard, "ws-1", &wp.id);
+        wp
+    };
+    let before = count_rows_locked(
+        &db,
+        "SELECT COUNT(*) FROM workstream_paths WHERE workspace_path_id = ?",
+        &wp.id,
+    );
+    assert_eq!(before, 1);
+
+    reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(
+        count_rows_locked(
+            &db,
+            "SELECT COUNT(*) FROM workstream_paths WHERE workspace_path_id = ?",
+            &wp.id
+        ),
+        before,
+        "refresh never writes workstream_paths (§9)"
+    );
+}
+
+#[test]
+fn refresh_does_not_touch_session_history() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", false));
+    let projection = ProjectProjection::new(&observer);
+    let wp = {
+        let guard = db.lock().unwrap();
+        let wp = ensure(&guard, &plain("/work/a", true));
+        session(&guard, "s-hist", "/work/a", &wp.id);
+        wp
+    };
+    let before = count_rows_locked(
+        &db,
+        "SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?",
+        &wp.id,
+    );
+    assert_eq!(before, 1);
+
+    reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    // 目录消失只会让路径标记 missing；Session 历史一行不动。
+    assert_eq!(
+        count_rows_locked(
+            &db,
+            "SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?",
+            &wp.id
+        ),
+        before
+    );
+    let s = {
+        let guard = db.lock().unwrap();
+        guard
+            .get_session("s-hist")
+            .unwrap()
+            .expect("session intact")
+    };
+    assert!(s.trashed_at.is_none());
+    assert_eq!(s.workspace_path_id.as_deref(), Some(wp.id.as_str()));
+}
+
+#[test]
+fn refresh_does_not_ingest_sessions() {
+    let (_d, db) = temp_db_locked();
+    let observer = Scripted::new();
+    observer.set("/work/a", plain("/work/a", true));
+    let projection = ProjectProjection::new(&observer);
+    let wp = {
+        let guard = db.lock().unwrap();
+        ensure(&guard, &plain("/work/a", true))
+    };
+    let before = {
+        let guard = db.lock().unwrap();
+        guard
+            .0
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+
+    reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    let after = {
+        let guard = db.lock().unwrap();
+        guard
+            .0
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    assert_eq!(
+        before, after,
+        "workspace refresh never runs session ingestion"
+    );
+}
