@@ -46,9 +46,13 @@ export default function AppShell() {
   useEffect(() => {
     const un1 = listen("sync-completed", () => emitSynced());
     const un2 = listen("reconcile-completed", () => emitSynced());
+    // Projects Experience v0.2 §12 — 工作区刷新完成后同样扇出刷新信号，
+    // Sidebar 最近列表等自行 invalidate。
+    const un3 = listen("workspace-reconcile-completed", () => emitSynced());
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
+      un3.then((f) => f());
     };
   }, []);
 

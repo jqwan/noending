@@ -87,6 +87,7 @@ pub fn run() {
             app.manage(commands::AppState {
                 db: Mutex::new(db),
                 sync_in_progress: std::sync::atomic::AtomicBool::new(false),
+                workspace_refresh_in_progress: std::sync::atomic::AtomicBool::new(false),
                 prepared_launches: Mutex::new(std::collections::HashMap::new()),
             });
 
@@ -186,6 +187,8 @@ pub fn run() {
             // as Rust helpers but are deliberately NOT registered (§11, T1).
             commands::project::list_projects,
             commands::project::list_project_cards,
+            commands::project::refresh_workspace_projects,
+            commands::project::refresh_project_workspace,
             commands::project::get_project_detail,
             commands::project::list_project_workstreams,
             commands::project::rename_project,

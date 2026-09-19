@@ -23,14 +23,19 @@
 
 use serde::Serialize;
 use std::collections::BTreeMap;
-use tauri::State;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use rusqlite::OptionalExtension;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 use crate::workspace::project::{
-    project_detail, project_workstreams, ProjectDetail, ProjectWorkstream,
+    project_detail, project_workstreams, reconcile_workspace_path_ids,
+    reconcile_workspace_paths_with_progress, ProjectDetail, ProjectWorkstream,
 };
+use crate::workspace::wiring::WorkspaceLayer;
 
 use super::{with_db, AppState};
 use super::workstream::later_ts;
@@ -227,6 +232,132 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
 #[tauri::command]
 pub fn list_project_cards(state: State<AppState>) -> Result<Vec<ProjectCardData>> {
     with_db(&state, project_cards)
+}
+
+// ---------------- Workspace refresh (方案 §9-§13) ----------------
+//
+// 「刷新工作区状态」不是编辑 Project，而是重新观察外部物理世界，然后让现有
+// domain rules 重新投影（§25）。Reconcile 里会跑 Path::is_dir 和 git 子进程
+// （单次 probe 最长 10s），因此绝不在 command 线程上同步执行：后台线程 +
+// 事件回报（§11、§12），全局与定点共用同一套规则（§17）。
+
+fn spawn_workspace_reconcile<F>(
+    app: &AppHandle,
+    state: &State<AppState>,
+    job: F,
+) -> Result<serde_json::Value>
+where
+    F: FnOnce(
+            &AppState,
+            &dyn Fn(usize, usize),
+        ) -> Result<crate::workspace::project::ReconcileReport>
+        + Send
+        + 'static,
+{
+    use crate::workspace::project::ReconcileReport;
+
+    if state
+        .workspace_refresh_in_progress
+        .swap(true, Ordering::SeqCst)
+    {
+        return Err(other("已有工作区刷新在进行中，请等待完成"));
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        fn finish(handle: &AppHandle, result: Result<ReconcileReport>) {
+            match result {
+                Ok(report) => {
+                    let _ = handle.emit(
+                        "workspace-reconcile-completed",
+                        serde_json::json!({
+                            "scanned": report.scanned,
+                            "missing": report.missing_paths,
+                            "discovered": report.discovered_paths.len(),
+                            "moved": report.moved_paths,
+                            "deleted_paths": report.outcome.deleted_paths.len(),
+                            "deleted_projects": report.outcome.deleted_projects.len(),
+                            "failed": report.failed.len(),
+                        }),
+                    );
+                }
+                Err(e) => {
+                    let _ = handle.emit(
+                        "workspace-reconcile-failed",
+                        serde_json::json!({ "error": e.to_string() }),
+                    );
+                }
+            }
+        }
+        let _ = handle.emit("workspace-reconcile-started", serde_json::json!({}));
+        let state = handle.state::<AppState>();
+        let notify = |scanned: usize, total: usize| {
+            let _ = handle.emit(
+                "workspace-reconcile-progress",
+                serde_json::json!({ "scanned": scanned, "total": total }),
+            );
+        };
+        let result = job(&state, &notify);
+        state.workspace_refresh_in_progress.store(false, Ordering::SeqCst);
+        finish(&handle, result);
+    });
+    Ok(serde_json::json!({ "started": true }))
+}
+
+/// §10 — 重新观察全部已注册 WorkspacePath：存在性、Git 状态、Git family /
+/// worktrees、已有的 Project merge / retire、以及既有 GC 规则。它不是
+/// Session Sync，也不做 Context 提取。长时间运行（2N 个 git 子进程可能各等
+/// 10s），因此在后台线程执行，UI 通过事件跟进（§11）。
+#[tauri::command]
+pub fn refresh_workspace_projects(
+    app: AppHandle,
+    state: State<AppState>,
+    layer: State<'_, Arc<WorkspaceLayer>>,
+) -> Result<serde_json::Value> {
+    let layer = layer.inner().clone();
+    spawn_workspace_reconcile(&app, &state, move |state, progress| {
+        crate::workspace::project::reconcile_workspace_paths_with_progress(
+            &state.db,
+            &layer.projection(),
+            usize::MAX,
+            progress,
+        )
+    })
+}
+
+/// §16/§17 — 定点刷新：只扫当前 Project 自己拥有的 WorkspacePaths，与全局
+/// 刷新走同一个 `reconcile_workspace_path_ids` 规则集。刷新后 Project 可能
+/// 因最后一条路径 GC 而消失——那是正常生命周期（§18），前端以 gone 视图响应。
+#[tauri::command]
+pub fn refresh_project_workspace(
+    app: AppHandle,
+    state: State<AppState>,
+    layer: State<'_, Arc<WorkspaceLayer>>,
+    project_id: String,
+) -> Result<serde_json::Value> {
+    let path_ids = {
+        let guard = crate::sync::lock_db(&state.db)?;
+        let exists: Option<String> = guard
+            .conn()
+            .query_row(
+                "SELECT id FROM projects WHERE id = ?1",
+                rusqlite::params![project_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        exists.ok_or_else(|| other(format!("Project {project_id} 不存在")))?;
+        let ids: Vec<String> = guard
+            .conn()
+            .prepare(
+                "SELECT id FROM workspace_paths WHERE project_id = ?1 ORDER BY canonical_path",
+            )?
+            .query_map(rusqlite::params![project_id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids
+    };
+    let layer = layer.inner().clone();
+    spawn_workspace_reconcile(&app, &state, move |state, progress| {
+        reconcile_workspace_path_ids(&state.db, &layer.projection(), &path_ids, progress)
+    })
 }
 
 

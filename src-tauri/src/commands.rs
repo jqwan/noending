@@ -27,6 +27,9 @@ pub struct AppState {
     pub db: std::sync::Mutex<Db>,
     /// Guards against concurrent background sync jobs.
     pub sync_in_progress: std::sync::atomic::AtomicBool,
+    /// Guards against concurrent workspace reconciles (global AND targeted —
+    /// both mutate the same registry, so one flag serializes them).
+    pub workspace_refresh_in_progress: std::sync::atomic::AtomicBool,
     /// In-memory store for prepared launches awaiting user confirmation.
     pub prepared_launches:
         std::sync::Mutex<std::collections::HashMap<String, crate::launcher::PreparedLaunch>>,

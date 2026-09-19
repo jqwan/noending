@@ -81,7 +81,7 @@
 
 use std::sync::Mutex;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::domain::{
@@ -255,6 +255,10 @@ pub struct GcOutcome {
 #[derive(Debug, Default, Clone)]
 pub struct ReconcileReport {
     pub scanned: usize,
+    /// Swept paths observed as absent from disk THIS round — before the GC
+    /// reference check, so this counts surviving referenced paths too. It is
+    /// the refresh summary's "N 个目录变为不可用" (方案 §12/§13).
+    pub missing_paths: usize,
     /// Paths that ended up under a different Project than they started.
     pub moved_paths: usize,
     /// New WorkspacePaths discovered through Git worktree listings (§9).
@@ -939,10 +943,65 @@ pub fn reconcile_workspace_paths(
     projection: &ProjectProjection<'_>,
     limit: usize,
 ) -> Result<ReconcileReport> {
+    reconcile_workspace_paths_with_progress(db, projection, limit, &|_, _| {})
+}
+
+/// `reconcile_workspace_paths` with a progress callback (方案 §12): called
+/// after every path with (scanned, total) so a refresh UI can show movement
+/// without any Git internals leaving the backend.
+pub fn reconcile_workspace_paths_with_progress(
+    db: &Mutex<Db>,
+    projection: &ProjectProjection<'_>,
+    limit: usize,
+    progress: &dyn Fn(usize, usize),
+) -> Result<ReconcileReport> {
     let targets = {
         let guard = db.lock().map_err(|_| other("db lock poisoned"))?;
         scan_workspace_paths_conn(guard.conn(), limit)?
     };
+    reconcile_workspace_path_targets(db, projection, targets, progress)
+}
+
+/// 方案 §17 — the shared targeted primitive: reconcile an explicit SUBSET of
+/// registered path ids through exactly the same observe → ensure → GC rules
+/// as the global sweep. The global refresh passes every registered id; a
+/// Project refresh passes only the Project's own ids. One rule set, no drift.
+///
+/// Unknown ids are skipped quietly (a GC'd path between listing and sweeping
+/// is simply no longer a target), never an error.
+pub fn reconcile_workspace_path_ids(
+    db: &Mutex<Db>,
+    projection: &ProjectProjection<'_>,
+    path_ids: &[String],
+    progress: &dyn Fn(usize, usize),
+) -> Result<ReconcileReport> {
+    let targets = {
+        let guard = db.lock().map_err(|_| other("db lock poisoned"))?;
+        let conn = guard.conn();
+        let mut targets = Vec::with_capacity(path_ids.len());
+        for id in path_ids {
+            if let Some(row) = conn
+                .query_row(
+                    "SELECT id, canonical_path FROM workspace_paths WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?
+            {
+                targets.push(row);
+            }
+        }
+        targets
+    };
+    reconcile_workspace_path_targets(db, projection, targets, progress)
+}
+
+fn reconcile_workspace_path_targets(
+    db: &Mutex<Db>,
+    projection: &ProjectProjection<'_>,
+    targets: Vec<(String, String)>,
+    progress: &dyn Fn(usize, usize),
+) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
     let mut gone: Vec<String> = Vec::new();
     // Every path some Git family still listed as one of its work trees this round.
@@ -965,6 +1024,7 @@ pub fn reconcile_workspace_paths(
         }
         if !observation.exists {
             gone.push(path_id.clone());
+            report.missing_paths += 1;
         }
         // One short transaction, and the index work in the same lock step: the
         // commit already happened inside `tx`, so this is post-commit, not
@@ -998,6 +1058,7 @@ pub fn reconcile_workspace_paths(
             Err(message) => report.failed.push((path_id.clone(), message)),
         }
         report.scanned += 1;
+        progress(report.scanned, targets.len());
     }
 
     let gone: Vec<String> = gone

@@ -21,6 +21,12 @@ export const api = {
   listProjects: () => invoke<Project[]>("list_projects"),
   /** §8 — 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
   listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
+  /** §10 — 全局「刷新工作区状态」：后台 reconcile，事件回报，立即返回。 */
+  refreshWorkspaceProjects: () =>
+    invoke<{ started: boolean }>("refresh_workspace_projects"),
+  /** §16 — 定点刷新：只重观察这个 Project 自己的工作目录。 */
+  refreshProjectWorkspace: (projectId: string) =>
+    invoke<{ started: boolean }>("refresh_project_workspace", { projectId }),
   getProjectDetail: (projectId: string) =>
     invoke<ProjectDetailData>("get_project_detail", { projectId }),
   listProjectWorkstreams: (projectId: string) =>
