@@ -408,10 +408,33 @@ pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a s
     v.get(key).and_then(|s| s.as_str())
 }
 
-// Source session deletion contract (方案 §13–§18) ------------------------
+// Source session deletion contract (方案 §13–§18, Hardening §2–§4) --------
 
 /// Current frozen-plan format. A stored job whose version differs is stale.
-pub const SOURCE_DELETION_PLAN_VERSION: u32 = 1;
+/// v2 added `source` (verified-present vs confirmed-absent preparation).
+pub const SOURCE_DELETION_PLAN_VERSION: u32 = 2;
+
+/// What prepare concluded about the raw source (Hardening §2/§4):
+/// - `VerifiedPresent`: the file existed and passed the full §16 proof;
+/// - `ConfirmedAbsent`: the file was definitively gone (a bare
+///   `io::ErrorKind::NotFound` — never a permission or I/O failure, which
+///   reject prepare instead, §3). Nothing remains to delete; execute only
+///   re-confirms the absence before the purge runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDeletionState {
+    VerifiedPresent,
+    ConfirmedAbsent,
+}
+
+impl SourceDeletionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceDeletionState::VerifiedPresent => "verified_present",
+            SourceDeletionState::ConfirmedAbsent => "confirmed_absent",
+        }
+    }
+}
 
 /// One file that a permanent deletion will remove from disk.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -436,6 +459,11 @@ pub struct SourceDeletionPlan {
     pub version: u32,
     pub agent: Agent,
     pub agent_session_id: String,
+    pub source: SourceDeletionState,
+    /// The recorded source path(s); exactly one here. The identity fields are
+    /// zeroed exactly when `source` is `ConfirmedAbsent` — there are no
+    /// provable bytes, but the path is kept so execute can re-confirm the
+    /// absence at the same location.
     pub targets: Vec<SourceDeletionTarget>,
 }
 
@@ -606,6 +634,12 @@ pub fn title_from_text(text: &str) -> Option<String> {
 /// `parse_session_id` must be the adapter's own discovery parser (by
 /// construction: a file whose parsed id matches is a file discovery would
 /// identify — §16.5).
+///
+/// Hardening §2/§3: only a bare `io::ErrorKind::NotFound` on the raw source
+/// produces a `ConfirmedAbsent` plan (empty targets — the purge may run).
+/// Every other lookup or read failure (permission, I/O, mount, sharing
+/// violation, unknown) REJECTS prepare — an unmounted drive or a flaky
+/// network path must never be interpreted as "the user deleted the source".
 pub(crate) fn prepare_single_file_source_deletion(
     session: &Session,
     expected_agent: Agent,
@@ -617,11 +651,38 @@ pub(crate) fn prepare_single_file_source_deletion(
     }
     let path = PathBuf::from(&session.raw_path);
 
+    // Hardening §2/§3: definitively gone → confirmed-absent plan; anything
+    // else that cannot be determined → refuse, the session stays in Trash.
+    let link_meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SourceDeletionPlan {
+                version: SOURCE_DELETION_PLAN_VERSION,
+                agent: expected_agent,
+                agent_session_id: session.agent_session_id.clone(),
+                source: SourceDeletionState::ConfirmedAbsent,
+                targets: vec![SourceDeletionTarget {
+                    path: path.to_string_lossy().to_string(),
+                    kind: kind.to_string(),
+                    // Nothing provable about bytes that do not exist.
+                    file_identity: String::new(),
+                    size: 0,
+                    sha256: String::new(),
+                }],
+            });
+        }
+        Err(e) => {
+            return Err(other(format!(
+                "无法确认源会话文件状态 {}: {}（不将其视为已删除）",
+                path.display(),
+                e
+            )))
+        }
+    };
+
     // §16.1/§16.2 + §18: regular file only, never a symlink. symlink_metadata
     // does not follow the link, so a link pointing at a regular file is
     // still refused — v0.1 does not guess "link or target?".
-    let link_meta = std::fs::symlink_metadata(&path)
-        .map_err(|e| other(format!("源会话文件不可访问 {}: {}", path.display(), e)))?;
     if link_meta.file_type().is_symlink() {
         return Err(other("源会话文件是符号链接，永久删除暂不支持"));
     }
@@ -653,6 +714,7 @@ pub(crate) fn prepare_single_file_source_deletion(
         version: SOURCE_DELETION_PLAN_VERSION,
         agent: expected_agent,
         agent_session_id: session.agent_session_id.clone(),
+        source: SourceDeletionState::VerifiedPresent,
         targets: vec![SourceDeletionTarget {
             path: path.to_string_lossy().to_string(),
             kind: kind.to_string(),
@@ -670,6 +732,12 @@ pub(crate) fn prepare_single_file_source_deletion(
 ///   (file type changed to something else counts as divergence — never
 ///   delete a path that no longer holds the confirmed bytes);
 /// - exact match → remove and report [`SourceDeletionOutcome::Deleted`].
+///
+/// Hardening §2: a `ConfirmedAbsent` plan has nothing to delete. Execute
+/// only re-confirms the absence — still absent → AlreadyAbsent (the purge
+/// proceeds); indeterminable → failure (never purge on doubt); a file that
+/// APPEARED since prepare → stale (its bytes were never confirmed, so they
+/// are never removed — the user re-prepares).
 pub(crate) fn execute_single_file_source_deletion(
     plan: &SourceDeletionPlan,
     expected_agent: Agent,
@@ -678,8 +746,30 @@ pub(crate) fn execute_single_file_source_deletion(
     if plan.version != SOURCE_DELETION_PLAN_VERSION {
         return Err(other("源删除计划版本不受支持，请重新准备"));
     }
-    if plan.agent != expected_agent || plan.targets.len() != 1 {
+    if plan.agent != expected_agent {
         return Err(other("源删除计划与适配器能力不一致，请重新准备"));
+    }
+    if plan.targets.len() != 1 {
+        return Err(other("源删除计划与适配器能力不一致，请重新准备"));
+    }
+    if plan.source == SourceDeletionState::ConfirmedAbsent {
+        // Re-confirm the absence at the SAME path (Hardening §2): still gone
+        // → AlreadyAbsent and the purge proceeds; indeterminable → failure,
+        // never purge on doubt; reappeared → stale, because bytes that were
+        // never confirmed are never removed.
+        let path = PathBuf::from(&plan.targets[0].path);
+        return match std::fs::symlink_metadata(&path) {
+            Ok(_) => Err(AppError::SourceDeletionStale(
+                "源会话文件在准备删除后重新出现，请重新准备".to_string(),
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(SourceDeletionOutcome::AlreadyAbsent)
+            }
+            Err(e) => Err(other(format!(
+                "无法确认源会话文件状态: {}（不视为已删除）",
+                e
+            ))),
+        };
     }
     let target = &plan.targets[0];
     let path = PathBuf::from(&target.path);

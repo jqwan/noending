@@ -1150,3 +1150,141 @@ macro_rules! adapter_suite {
 adapter_suite!(codex_suite, Agent::Codex, CodexAdapter);
 adapter_suite!(claude_suite, Agent::ClaudeCode, ClaudeAdapter);
 adapter_suite!(pi_suite, Agent::Pi, PiAdapter);
+
+// ---- Hardening patch §1-A/§1-B -------------------------------------------
+//
+// A: a source already deleted OUTSIDE the app is preparable as
+//    confirmed-absent (a bare NotFound only — never permission/I/O errors),
+//    and its confirmed-absent plan completes the purge.
+// B: trash/restore now commit their FTS writes inside the lifecycle
+//    transaction (crash-safe by construction); the behavioral side stays
+//    locked by trash_is_removed_from_search_and_restore_reindexes above.
+
+#[test]
+fn prepare_allows_permanent_delete_when_source_already_deleted() {
+    let db = open_db("absent-prepare");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "absent-prepare");
+    ingest(&db, &adapter, &s);
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    // The user (or a sync tool) removed the source outside NoEnding.
+    std::fs::remove_file(&s.raw_path).unwrap();
+
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+    assert_eq!(preview.source_state, "confirmed_absent");
+    assert_eq!(
+        preview.source_targets.len(),
+        1,
+        "the path is recorded for re-check"
+    );
+    assert_eq!(preview.source_targets[0].path, s.raw_path);
+
+    // NoEnding 数据完整保留到这一步。
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+            &s.id
+        ),
+        2
+    );
+
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+    assert!(
+        result.purged,
+        "confirmed-absent purge must complete: {:?}",
+        result.error
+    );
+    assert!(db.get_session(&s.id).unwrap().is_none());
+    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn prepare_rejects_indeterminable_source_not_treated_as_absent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let db = open_db("absent-indeterminable");
+    let s = fixture_session(&db, Agent::Codex, "absent-indeterminable");
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    // 无遍历权限的目录：lstat 无法执行 → 无法确定状态，绝不是 NotFound。
+    let dir = Path::new(&s.raw_path).parent().unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let prepare = lifecycle::prepare_session_permanent_delete(&db, &s.id);
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // root 会无视权限位：能 stat 就说明本环境无法模拟该失败，跳过。
+    if std::fs::symlink_metadata(Path::new(&s.raw_path)).is_ok() {
+        return;
+    }
+
+    let err = prepare.unwrap_err();
+    assert!(
+        err.to_string().contains("无法确认源会话文件状态"),
+        "must refuse as indeterminable, got: {err}"
+    );
+    // §3: Session 留在回收站，且不产生任何 deletion job。
+    assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
+    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
+        .unwrap()
+        .is_none());
+    assert!(Path::new(&s.raw_path).exists());
+}
+
+#[test]
+fn confirmed_absent_source_reappearing_at_execute_is_stale() {
+    let db = open_db("absent-reappeared");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "absent-reappeared");
+    ingest(&db, &adapter, &s);
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    std::fs::remove_file(&s.raw_path).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+    assert_eq!(preview.source_state, "confirmed_absent");
+
+    // 用户在确认前把源文件从备份放回了原路径——这些字节从未被确认过，
+    // 绝不能被删（§21 的 confirmed-absent 版本）。
+    write_agent_fixture(Agent::Codex, Path::new(&s.raw_path), &s.agent_session_id);
+
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+    assert!(!result.purged, "a reappeared source must block the purge");
+    let job = result.job.expect("job carried back");
+    assert_eq!(job.state, "stale");
+    assert!(
+        Path::new(&s.raw_path).exists(),
+        "reappeared file is never deleted"
+    );
+    // 会话原封不动留在回收站，用户重新准备或取消。
+    assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+            &s.id
+        ),
+        2
+    );
+}
+
+#[test]
+fn verified_present_plan_records_source_state() {
+    let db = open_db("present-plan");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "present-plan");
+    let plan = adapter.prepare_source_session_deletion(&s).unwrap();
+    assert_eq!(
+        plan.source,
+        noending::adapters::SourceDeletionState::VerifiedPresent
+    );
+    assert_eq!(
+        plan.version,
+        noending::adapters::SOURCE_DELETION_PLAN_VERSION
+    );
+    assert_eq!(plan.targets.len(), 1);
+    assert!(!plan.targets[0].sha256.is_empty());
+}

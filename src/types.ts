@@ -184,6 +184,8 @@ export interface PermanentDeletionPreview {
   agent: Agent;
   agent_session_id: string;
   source_targets: SourceDeletionTarget[];
+  /** prepare 对源文件的结论：verified_present | confirmed_absent（加固 §2）。 */
+  source_state: "verified_present" | "confirmed_absent";
   event_count: number;
   binding_count: number;
   sync_run_count: number;

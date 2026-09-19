@@ -30,6 +30,9 @@ pub struct PermanentDeletionPreview {
     pub agent: Agent,
     pub agent_session_id: String,
     pub source_targets: Vec<crate::adapters::SourceDeletionTarget>,
+    /// `verified_present` | `confirmed_absent` — what prepare concluded about
+    /// the raw source (Hardening §2). The confirmation copy keys off this.
+    pub source_state: &'static str,
     #[serde(flatten)]
     pub counts: PermanentDeletionCounts,
 }
@@ -46,14 +49,25 @@ pub struct PermanentDeletionResult {
 }
 
 /// Normal → Trash (§6). Reversible; never touches the Agent source file.
+///
+/// Hardening §1-B: the FTS unindex commits INSIDE the same transaction as
+/// the lifecycle flip. A crash can no longer leave a trashed session
+/// searchable — there is no post-commit window and no reliance on eventual
+/// self-heal. (FTS-less builds keep working: the index helpers swallow the
+/// missing-table error exactly as `unindex_conn` always has.)
 pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
-    let changed =
-        db.tx(|tx| session_jobs::trash_session_conn(tx, session_id, &crate::storage::now()))?;
+    let changed = db.tx(|tx| {
+        let changed = session_jobs::trash_session_conn(tx, session_id, &crate::storage::now())?;
+        if changed {
+            // §12: a trashed session leaves the search index, atomically
+            // with the flip that hides it.
+            session_jobs::unindex_session_conn(tx, session_id);
+        }
+        Ok(changed)
+    })?;
     if !changed {
         return Err(other("Session 不存在或已在回收站"));
     }
-    // §12: a trashed session leaves the search index; restore puts it back.
-    session_jobs::unindex_session_conn(db.conn(), session_id);
     db.get_session(session_id)?
         .ok_or_else(|| other("Session 不存在"))
 }
@@ -61,9 +75,21 @@ pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
 /// Trash → Normal (§7): same Session id; bindings, events and cursors were
 /// never touched. Refused while a deletion job exists — the user cancels the
 /// deletion first (§42).
+///
+/// Hardening §1-B: the FTS reindex commits INSIDE the restore transaction —
+/// a restored session is searchable exactly when it is visible again, with
+/// no crash window in between.
 pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {
-    db.tx(|tx| session_jobs::restore_session_conn(tx, session_id))?;
-    session_jobs::reindex_session_conn(db.conn(), session_id);
+    let restored = db.tx(|tx| {
+        let restored = session_jobs::restore_session_conn(tx, session_id)?;
+        if restored {
+            session_jobs::reindex_session_conn(tx, session_id);
+        }
+        Ok(restored)
+    })?;
+    if !restored {
+        return Err(other("Session 不存在或不在回收站"));
+    }
     db.get_session(session_id)?
         .ok_or_else(|| other("Session 不存在"))
 }
@@ -115,6 +141,7 @@ pub fn prepare_session_permanent_delete(
         session_title: session.title,
         agent: session.agent,
         agent_session_id: session.agent_session_id,
+        source_state: plan.source.as_str(),
         source_targets: plan.targets,
         counts,
     })

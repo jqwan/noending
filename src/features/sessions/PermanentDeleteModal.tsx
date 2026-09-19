@@ -191,21 +191,35 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             <span className="muted">（{agentDisplayLabel(preview.agent)}）</span>：
           </p>
 
-          {/* §37 关键警告，逐字保留 */}
-          <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
-            此操作会同时删除 Agent 保存的原始会话。
-          </div>
-          <div className="small" style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
-            删除完成后：
-            <ul className="purge-list">
-              <li>NoEnding 中该 Session 的事件、绑定和摄入历史都会消失。</li>
-              <li>Workstream Context 内容不会因此删除。</li>
-              <li>
-                如果你以后从备份恢复原始 Agent 会话，NoEnding
-                会将它作为一个新的 Session 再次收录。
-              </li>
-            </ul>
-          </div>
+          {preview.source_state === "confirmed_absent" ? (
+            <>
+              {/* 加固 §2：源文件在 prepare 时已确认不存在——只删 NoEnding 侧 */}
+              <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
+                Agent 源文件已不存在（可能已在应用外被删除）。
+              </div>
+              <div className="small" style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
+                本次将只删除 NoEnding 中的该会话数据；不会尝试删除任何文件。
+              </div>
+            </>
+          ) : (
+            <>
+              {/* §37 关键警告，逐字保留 */}
+              <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
+                此操作会同时删除 Agent 保存的原始会话。
+              </div>
+              <div className="small" style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
+                删除完成后：
+                <ul className="purge-list">
+                  <li>NoEnding 中该 Session 的事件、绑定和摄入历史都会消失。</li>
+                  <li>Workstream Context 内容不会因此删除。</li>
+                  <li>
+                    如果你以后从备份恢复原始 Agent 会话，NoEnding
+                    会将它作为一个新的 Session 再次收录。
+                  </li>
+                </ul>
+              </div>
+            </>
+          )}
 
           <div className="section-label" style={{ margin: "14px 0 2px" }}>将永久删除</div>
           <ul className="purge-list">
@@ -217,6 +231,9 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
                 </span>
               </li>
             ))}
+            {preview.source_state === "confirmed_absent" && (
+              <li className="muted">Agent 源文件（已确认不存在，无需删除）</li>
+            )}
             <li>1 个 Session</li>
             <li>{fmtCount(preview.event_count)} 个 Events</li>
             <li>{fmtCount(preview.binding_count)} 个 Workstream 绑定</li>
