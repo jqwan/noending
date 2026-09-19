@@ -3826,3 +3826,28 @@ root-relative，键完全不同）——按 §44.3-C1 钉成 `PathStyle::Unix`�
 `"/old/repo"`，而 Windows 上那是 `/old\repo`（§42.3-M8 规则 7）。改完把全测试文件
 按四类模式扫过一遍（stored path 比 Unix 字面量、`assert_ne!(path_identity(..))`、
 `to_string_lossy().replace`、`contains("/")`），剩下的都两头一致。
+
+### 44.8 封板（exact-head `482a28f`，2026-09-19）
+
+双平台绿：run `35450795682`，windows-latest 3m37s、macos-latest 1m33s。Windows job
+里 `cargo check` / `cargo test` / `frontend install` / `frontend build` 四个步骤全部
+真实执行——这正是 §44.5 要的那件事，`395066e` 时代后两步是被 Rust 的红跳过的。
+
+按 §44.5 在那份日志里逐条点名核过的结果：
+
+```text
+windows_case_aliases_cannot_create_two_workspace_paths ... ok
+windows_case_aliases_cannot_create_two_projects        ... ok
+unix_v12_path_identity_vectors_are_stable              ... ok
+one_git_family_is_found_before_it_is_created           ... ok
+```
+
+第三条尤其要看日志而不是只看绿灯：它在 Windows runner 上走的是"折叠必须真的改变
+Windows id"那一支，也就是说六条向量在两个平台上分别证明了"Unix 不变"和"Windows
+确实变了"。前两条是 §10 方案 A 之后唯一能证明注册表级合并的地方。
+
+§17 的验收逐条成立，§18 的四项（Windows CI、Windows path identity、macOS v12
+identity continuity、legacy Workstream API shim removed）全绿：
+
+**Workspace Domain v0.2 — SEALED。** 之后不再修改 Workspace Domain，回到实际
+dogfood；§43.13 记的界面可用性问题与 §42.3 的 M33-macOS 一侧都不在此范围内。
