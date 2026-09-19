@@ -2515,7 +2515,7 @@ Home 摘掉 `reviewSummaries` 依赖、空状态「新建 Session」改挂 `NewS
 
 **Main 采纳的一个取舍（A 主动上交的矛盾）**：§11.5/§12 说 Home「只移除 ContextUpdatesSection」，而 §11.9 的机制是 off=不挂载、on=挂载的对称。Home 按 §11.5/§12 字面执行——**即使把智能回开，Home 也不再显示 Context Updates**；智能段落的挂载点保留在 Workstream Detail（C2）。理由：§24 把 Context Updates 归为"非主路径"，而本阶段 Home 的定位就是纯继续入口。要回退是 5 行的事（重新解构 + 重新包 `IntelligenceOnly`）。
 
-A 的其他遗留：Home 里「配置 Agent」链接在 `getDefaultAgent()` 解析期间可能闪现（要共享 hook 加 resolved 标志，属 SHARED）；新建 Session 比原来多一步弹窗（这是 Preview-Launch Identity 的预期代价，进 dogfood 观察项）。
+A 的其他遗留：Home 里「配置 Agent」链接在 `getDefaultAgent()` 解析期间可能闪现（要共享 hook 加 resolved 标志，属 SHARED）——该链接后来被 Agent E 移除，此条已作废；新建 Session 比原来多一步弹窗（这是 Preview-Launch Identity 的预期代价，进 dogfood 观察项）。
 
 ## 36.6 Main 集成决策（合完 D/B/C/A 之后）
 
@@ -2528,9 +2528,9 @@ A 的其他遗留：Home 里「配置 Agent」链接在 `getDefaultAgent()` 解�
 3. 预览令牌泄漏（D 自己报的 Known issue #1）：ContextPreviewModal 在预览打开期间
    注入被关掉时，先 cancelPrepared 再交回 onClose
 4. 启动详情的「注入的 Context」改为按这次实际投递的 markdown 决定显隐，不读当前设置
-5. 卡片摘要优先级 current_state > description：不改。它是旧《前端整体设计方案》§4
-   写明的显示优先级，且属于显示排序而非 authority 覆盖，改它超出本阶段范围。
-   → 进 §32 dogfood 清单：「Workstream 卡片第一行为什么是 Agent 写的那句」
+5. 卡片摘要优先级 current_state > description：当时判断「不改」（旧《前端整体设计
+   方案》§4 的显示优先级），**已被独立复核推翻**，见 §36.9。理由：这与本阶段的
+   产品定义直接冲突——Base Experience 下 Workstream 应由用户显式组织的信息驱动。
 6. .ws-card-error 死规则、AgentRuntimeSettings 的「全部 Agent default」、AssistantView
    三处 "Settings → Agents"、Sources/Projects 两页英文：交 Agent E
 ```
@@ -2592,8 +2592,59 @@ pnpm build         通过
 
 ```text
 .ws-card-error 成为死 CSS 规则（全局 CSS 归 Main，未删）
-HomeView 的「配置 Agent」链接在 getDefaultAgent() 解析期间可能闪现
-  （要共享 hook 加 resolved 标志，属 §8.1.1 冻结面，未做）
+（原列于此的）HomeView「配置 Agent」链接解析期闪现：已不存在。Agent E 把
+  Home 的新建入口改成常驻按钮 + 弹窗内报错，该链接连同它的问题一起被移除（§36.9 复核）
 新建 Session 比方案冻结前多一步弹窗 —— Preview-Launch Identity 的预期代价，进 dogfood 观察
 run_pending_sync_nonblocking 仍无门禁（L3：无生产调用方；若将来接进生产必须补）
 ```
+
+## 36.9 封板前收口 — `fix(workstreams): keep base experience independent from context summaries`
+
+独立复核指出一个与 §14 产品定义冲突的残留：`intelligence_enabled = false` 时，
+冻结期写下的 `current_state` 仍在主路径上冒充 Workstream 的自我介绍。
+本阶段的定义是「Workstream 由用户显式组织的信息驱动」，因此这不是显示偏好问题。
+
+规则集中成三处调用、一处判定（`WorkstreamCard.tsx` 导出）：
+
+```text
+cardSummaryLine(card, intelligenceEnabled)
+  off → card.description          （只有用户自己写的描述）
+  on  → current_state || description || goal   （原 §4 优先级完整回来）
+
+cardSearchFields(card, intelligenceEnabled)
+  off → title / description / project_name
+  on  → 再加 current_state / goal
+
+searchFieldHint(intelligenceEnabled)
+  placeholder 由同一份字段集派生
+```
+
+判定门一律取 §11.9 的 `useBaseExperience()`，不是新开关。
+
+三个消费点：
+
+```text
+WorkstreamCard.tsx        卡片摘要（Home 的 ContinueSection 同源，一起修好）
+WorkstreamsView.tsx       检索字段 + placeholder 文案
+ProjectDetail.tsx         Project 页的 Workstream 行原先无条件渲染
+                          (w as any).current_state —— 复核未点名的第三处，同类同修
+```
+
+**为什么 placeholder 必须一起改**：原先搜索实际命中
+`title / description / current_state / project_name`，提示却写「标题、描述、Project」。
+Base Experience 下会出现"搜到了、页面上却看不到任何命中这个词的内容"——
+用户拿到一个无法解释的结果。字段集与声明由同一个函数派生，杜绝再次漂移。
+
+同时纠正两处文档/注释与代码不符：
+
+```text
+storage/mod.rs v11 迁移注释里的「pre-migration behavior (implicit balanced) is
+  recorded here」与实际动作矛盾（实际是把旧的隐式默认**改写成**显式 off 行），
+  按复核建议重写为 intentionally converts the old implicit default to explicit Off，
+  并补上「用户已选过的行不覆盖」「删行后仍读作 Off」两句事实。
+§36.5 / §36.8 里 Home「配置 Agent」链接闪现一条已标注作废：Agent E 把 Home 的
+  新建入口改为常驻按钮 + 弹窗内报错，该链接不再存在。
+```
+
+未做：`WorkstreamContext.tsx` 里的 `Current State` 标签与排序不动（它在
+`IntelligenceOnly` 内，智能关闭时不挂载）；`goal` 的字段语义与存储一律不改。
