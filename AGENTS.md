@@ -27,7 +27,9 @@ When changing the system, preserve these rules:
 * **"Same location?" comparisons use `identity::same_location`, never `==` and never `path_key` equality.** On Windows, case is **not** part of the location relation — `C:\Repo` and `c:\repo` are one directory — while the stored display spelling keeps the case the user gave. Identity is case-insensitive there; display is case-preserving. `path_identity` folds by that same location key, so the comparison and the stored `workspace_paths.id` can never disagree (Windows never had an id to preserve), and it stays **byte-for-byte unchanged on macOS/Unix**, where folding would be a data migration.
 * **`sessions.project_id` is a derived cache with exactly three writers**: the in-statement derivation inside `upsert_session`, the bulk refresh when a WorkspacePath changes Project, and the v12 migration. Any other `UPDATE sessions SET project_id` is a violation.
 * **Session cwd drift does not grow a Workstream's path list.** A binding whose `workstream_path_id` stops matching is set to `NULL` (meaning "not brought in by any path"); it is never silently re-pointed or appended. Path lists grow only through a user action or an explicit binding.
-* Raw Agent session files are **read-only**. Never modify or delete them.
+* Raw Agent session data is **read-only during normal operation**. The only exception is an explicit user-confirmed permanent Session deletion executed through the owning Agent adapter against a frozen, revalidated `SourceDeletionPlan`. Core code must never delete `Session.raw_path` directly.
+* **Session lifecycle has one authority**: `sessions.trashed_at` (NULL = Normal, NOT NULL = Trash). Trash is reversible and keeps the same Session.id; it never deletes Agent source data, hides the Session from default projections/search, stops ingestion and sync, and blocks Resume. A trashed (or vanished) session takes no writes: every Session write path re-checks `trashed_at IS NULL` inside its commit transaction.
+* **Permanent deletion keeps no tombstone**: it is prepared against a frozen `SourceDeletionPlan` (only from Trash), deletes the Agent source first via the adapter (`Deleted` / `AlreadyAbsent` are the only outcomes that unlock the purge), and purges all Session-owned rows plus the coordination job in ONE SQLite transaction. Rediscovered sources are brand-new Sessions with new ids; old bindings are never resurrected and deleted provenance is never relinked — surviving Context provenance is redacted to `source_type = 'deleted_session'`.
 * Ingested Session Events are **append-only history**. Never overwrite historical events.
 * Event identity is app-owned and stable. Source file position is metadata, not identity.
 * The fallback event-identity chain continues from the **SourceCursor's tail hash** (the current source chain), never from "the last event in the store" — after a compact the store is ahead of the source.
@@ -71,6 +73,7 @@ Keep responsibilities separated:
 * `src-tauri/src/sync/` — extraction, classification, policy and deterministic merge.
 * `src-tauri/src/context/` — Core Context projection and Session Context bundles.
 * `src-tauri/src/launcher/` — New / Resume flows, LaunchIntent and delivery tracking.
+* `src-tauri/src/lifecycle/` — Session Trash/Restore and prepared permanent deletion rules. Source deletion always flows through the owning Agent adapter; this module never touches the filesystem.
 * `src-tauri/src/workspace/` — path identity (pure lexical normalization), Home resolution, Project/Workstream/Session path rules. `workspace::identity` is the **only** place a path key may be computed.
 * `src-tauri/src/storage/` — SQLite schema, transactions and persistence.
 * `src/` — UI only; domain invariants belong in Rust.

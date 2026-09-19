@@ -532,7 +532,7 @@ fn purge_flow_case(tag: &str, agent: Agent, adapter: &'static dyn AgentAdapter) 
     launch_intent(&db, &s.id, agent);
     db.unbind(&s.id, &ws.id).unwrap(); // writes a removal tombstone… then re-bind
     bind(&db, &s.id, &ws.id);
-    let run = sync_run(&db, &s.id);
+    sync_run(&db, &s.id);
 
     // … another session's context must NOT be redacted.
     let other = fixture_session(&db, agent, &format!("{tag}-other"));
