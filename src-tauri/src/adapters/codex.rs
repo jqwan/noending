@@ -1,5 +1,7 @@
 //! Codex Adapter: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
-//! `CODEX_HOME` overrides the root. Never deletes or modifies raw data.
+//! `CODEX_HOME` overrides the root. Raw data is read-only during normal
+//! operation; the one exception is the adapter-owned, user-confirmed
+//! permanent source deletion below (方案 §39).
 
 use std::path::{Path, PathBuf};
 
@@ -306,6 +308,30 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             program: install.executable_path.clone(),
             args,
             cwd: None, // headless analysis never touches user repos
+        })
+    }
+
+    /// Codex source deletion (方案 §15): the session source is the exact
+    /// `rollout-*.jsonl` at `raw_path`. Validation and removal live here, in
+    /// the adapter — Core never touches the file.
+    fn prepare_source_session_deletion(
+        &self,
+        session: &Session,
+    ) -> Result<crate::adapters::SourceDeletionPlan> {
+        crate::adapters::prepare_single_file_source_deletion(
+            session,
+            Agent::Codex,
+            "codex_rollout",
+            &|p| Ok(Self::parse_rollout(p)?.map(|d| d.agent_session_id)),
+        )
+    }
+
+    fn execute_source_session_deletion(
+        &self,
+        plan: &crate::adapters::SourceDeletionPlan,
+    ) -> Result<crate::adapters::SourceDeletionOutcome> {
+        crate::adapters::execute_single_file_source_deletion(plan, Agent::Codex, &|p| {
+            Ok(Self::parse_rollout(p)?.map(|d| d.agent_session_id))
         })
     }
 }

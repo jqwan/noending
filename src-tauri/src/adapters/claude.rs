@@ -1,5 +1,7 @@
 //! Claude Code Adapter: `~/.claude/projects/<encoded-cwd>/<session>.jsonl`.
-//! `CLAUDE_CONFIG_DIR` overrides the root. Raw transcripts stay untouched.
+//! `CLAUDE_CONFIG_DIR` overrides the root. Raw transcripts stay untouched
+//! during normal operation; the one exception is the adapter-owned,
+//! user-confirmed permanent source deletion below (方案 §39).
 
 use std::path::{Path, PathBuf};
 
@@ -301,6 +303,30 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
             program: install.executable_path.clone(),
             args,
             cwd: None,
+        })
+    }
+
+    /// Claude Code source deletion (方案 §15): the session source is the
+    /// exact discovered `*.jsonl` transcript at `raw_path`. Validation and
+    /// removal live here, in the adapter — Core never touches the file.
+    fn prepare_source_session_deletion(
+        &self,
+        session: &Session,
+    ) -> Result<crate::adapters::SourceDeletionPlan> {
+        crate::adapters::prepare_single_file_source_deletion(
+            session,
+            Agent::ClaudeCode,
+            "claude_code_transcript",
+            &|p| Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id)),
+        )
+    }
+
+    fn execute_source_session_deletion(
+        &self,
+        plan: &crate::adapters::SourceDeletionPlan,
+    ) -> Result<crate::adapters::SourceDeletionOutcome> {
+        crate::adapters::execute_single_file_source_deletion(plan, Agent::ClaudeCode, &|p| {
+            Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id))
         })
     }
 }

@@ -1,5 +1,7 @@
 //! Pi Adapter: `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`.
-//! `PI_HOME` overrides the root. Pi sessions are plain JSONL trees.
+//! `PI_HOME` overrides the root. Pi sessions are plain JSONL trees, read-only
+//! during normal operation; the one exception is the adapter-owned,
+//! user-confirmed permanent source deletion below (方案 §39).
 
 use std::path::{Path, PathBuf};
 
@@ -280,6 +282,30 @@ impl crate::adapters::AgentAdapter for PiAdapter {
             program: install.executable_path.clone(),
             args,
             cwd: None,
+        })
+    }
+
+    /// Pi source deletion (方案 §15): the session source is the exact
+    /// discovered `*.jsonl` transcript at `raw_path`. Validation and removal
+    /// live here, in the adapter — Core never touches the file.
+    fn prepare_source_session_deletion(
+        &self,
+        session: &Session,
+    ) -> Result<crate::adapters::SourceDeletionPlan> {
+        crate::adapters::prepare_single_file_source_deletion(
+            session,
+            Agent::Pi,
+            "pi_session_transcript",
+            &|p| Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id)),
+        )
+    }
+
+    fn execute_source_session_deletion(
+        &self,
+        plan: &crate::adapters::SourceDeletionPlan,
+    ) -> Result<crate::adapters::SourceDeletionOutcome> {
+        crate::adapters::execute_single_file_source_deletion(plan, Agent::Pi, &|p| {
+            Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id))
         })
     }
 }
