@@ -253,9 +253,12 @@ fn a_removed_git_directory_leaves_the_path_but_not_the_evidence() {
     std::fs::remove_dir_all(repo.join(".git")).unwrap();
     let after = resolver.observe(&repo.to_string_lossy());
     assert!(is_observable(&after), "the WorkspacePath identity survives");
+    // Compared as keys, not as strings: `canonical_path` is stored in the host's
+    // native separators, so a hand-written `/` spelling of the same directory is
+    // equal on macOS and unequal on Windows.
     assert_eq!(
-        after.canonical_path,
-        repo.to_string_lossy().replace('\\', "/")
+        identity::path_key(&after.canonical_path),
+        identity::path_key(&repo.to_string_lossy()),
     );
     assert_eq!(
         after.path_id,

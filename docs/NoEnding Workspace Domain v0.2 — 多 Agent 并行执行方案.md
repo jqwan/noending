@@ -3804,3 +3804,16 @@ fixture 都拿一个 NoEnding 从不会存的拼法去比 production 的正确�
 同时按 §44.5 给 CI 的两个 frontend step 加了 `if: always()`，这条已经生效：
 `35449618519` 的 Windows job 里 `frontend install` 与 `frontend build` 都真跑了并
 通过，Rust 那一步仍然正确地红。
+
+**第三轮（`9d7254c`）：5 条红变 1 条。** 剩下的是同一类 fixture 病的另一面——
+`a_removed_git_directory_leaves_the_path_but_not_the_evidence` 拿
+`canonical_path`（宿主原生 `\`）去比 `to_string_lossy().replace('\\', "/")`
+（手写 `/`）。macOS 上两边都是 `/Users/…`，永远相等，所以这条断言在开发机上从未
+真正比较过任何东西；改成两边都过 `identity::path_key`。文件里其余几条两边都折叠了
+分隔符，因此是对的。
+
+于是 §14 的"单提交即可"没有成立，而是四条：`d91c683` 收口 identity、
+`e64a0ce` verbatim（其中归因错了，上面已更正）、`9d7254c` fixture 归一化，加本轮
+的比较修复。理由是 §44.5 的口径本身就是"红一次才算钉住"：这些 Windows-only 的洞
+只有在真 runner 上一次只露一层的情况下才看得见，把它们压成一个提交只会让提交信息
+说不清哪一条治了哪一个。
