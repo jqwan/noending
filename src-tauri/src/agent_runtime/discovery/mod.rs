@@ -73,7 +73,12 @@ pub struct AgentRuntimeDiscovery {
 
 /// What the user may set for one Agent: capabilities (contract), a model
 /// catalog (advice), and the effort vocabulary.
+///
+/// Timing log (方案 §17): agent + duration + outcome only — never CLI output,
+/// tokens, credentials or environment. Slow CLIs show up as long durations.
 pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
+    let started = std::time::Instant::now();
+    eprintln!("[agent-runtime] {} discovery started", agent.as_str());
     let capabilities = super::capabilities_of(agent);
     let effort_levels = effort_levels_for(agent);
     let (models, warnings) = match agent {
@@ -82,6 +87,19 @@ pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
         Agent::Pi => pi::discover(),
     };
     let model_source = models.source();
+    if model_source == "unavailable" {
+        eprintln!(
+            "[agent-runtime] {} discovery failed after {}ms",
+            agent.as_str(),
+            started.elapsed().as_millis()
+        );
+    } else {
+        eprintln!(
+            "[agent-runtime] {} discovery completed in {}ms",
+            agent.as_str(),
+            started.elapsed().as_millis()
+        );
+    }
     AgentRuntimeDiscovery {
         capabilities,
         models: models.options(),

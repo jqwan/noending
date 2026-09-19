@@ -17,7 +17,7 @@ export const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
 };
 
 const SOURCE_NOTE: Record<ModelSource, string | null> = {
-  not_loaded: null,
+  not_loaded: "尚未刷新模型列表；「Agent 默认值」与「自定义…」始终可用。",
   dynamic: null,
   suggested: "以下是 NoEnding 的建议值，不代表你账号当前可用的完整模型列表。",
   unavailable: "无法从 Agent 获取模型列表；「Agent 默认值」与「自定义」仍然可用。",
@@ -73,6 +73,8 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
   }, [agent]);
 
   // Discovery 是建议信息：单独取，失败只留 warning，不影响 override 显示。
+  // 进入页面 ≠ 刷新模型：mount 阶段绝不 spawn Agent CLI（方案 §1/§9），
+  // 「刷新模型」按钮是唯一的 discovery 入口。
   const refresh = useCallback(async () => {
     setLoadingModels(true);
     try {
@@ -82,16 +84,13 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
       setWarnings(d.warnings);
       setError(null);
     } catch (e) {
+      // 失败只降级 catalog：已保存的 override 原样保留（方案 §11）。
       setModelSource("unavailable");
       setWarnings([String(e)]);
     } finally {
       setLoadingModels(false);
     }
   }, [agent]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
 
   if (!st) {
     return (

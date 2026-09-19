@@ -939,15 +939,43 @@ pub fn set_agent_runtime_overrides(
     })
 }
 
+/// Run a blocking closure on Tauri's blocking worker pool. The one door every
+/// potentially-slow (CLI-spawning) command body goes through; the join error
+/// folds into the app error type.
+pub(crate) async fn run_on_blocking_worker<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| other(format!("后台任务失败: {e}")))
+}
+
+/// The blocking-worker seam behind `refresh_agent_runtime_options` (方案 §7/§15):
+/// the CLI probe (`codex debug models` / `pi --list-models`, up to
+/// DISCOVERY_TIMEOUT_SECS) must run on a blocking worker thread, never on the
+/// async command thread or the Tauri main thread. Split out as a named helper
+/// so the threading property is testable without a Tauri harness.
+pub(crate) async fn discover_runtime_options_async(
+    agent: Agent,
+) -> Result<crate::agent_runtime::AgentRuntimeDiscovery> {
+    run_on_blocking_worker(move || crate::agent_runtime::discover_runtime_options(agent)).await
+}
+
 /// Advisory only: fetch the Agent's model catalog. Runs with no DB lock held
 /// and cannot fail a launch — the caller renders `warnings` and falls back to
 /// Agent default plus custom input.
+///
+/// Async on purpose: the Agent CLI probe blocks for up to 20s, so it goes to
+/// `spawn_blocking` and the UI thread stays responsive (方案 §7). Explicit
+/// user action only — opening Settings never reaches this command (§1).
 #[tauri::command]
-pub fn refresh_agent_runtime_options(
+pub async fn refresh_agent_runtime_options(
     agent: String,
 ) -> Result<crate::agent_runtime::AgentRuntimeDiscovery> {
     let agent = agent_of(&agent)?;
-    Ok(crate::agent_runtime::discover_runtime_options(agent))
+    discover_runtime_options_async(agent).await
 }
 
 // ---------------- Assistant ----------------
@@ -1008,4 +1036,37 @@ pub fn assistant_execute_action(
     with_db(&state, |db| {
         crate::assistant::AssistantService::execute_action(db, &action, &launcher, &workspace)
     })
+}
+
+/// 方案 §15 — the async seam test: the refresh command's blocking CLI probe
+/// must run on a blocking worker, never on the calling thread, and the seam
+/// must deliver a usable discovery for an agent whose catalog is static
+/// (no CLI spawn at all).
+#[cfg(test)]
+mod agent_runtime_refresh_seam_tests {
+    use super::*;
+
+    #[test]
+    fn blocking_work_runs_on_a_worker_not_the_calling_thread() {
+        let caller = std::thread::current().id();
+        let worker =
+            tauri::async_runtime::block_on(run_on_blocking_worker(|| std::thread::current().id()))
+                .unwrap();
+        assert_ne!(
+            caller, worker,
+            "spawn_blocking must move work off the calling thread"
+        );
+    }
+
+    #[test]
+    fn async_seam_returns_discovery_without_a_cli_spawn() {
+        // Claude Code's catalog is suggested (static): the seam is exercised
+        // end to end without spawning any CLI — safe in CI on both platforms.
+        let discovery =
+            tauri::async_runtime::block_on(discover_runtime_options_async(Agent::ClaudeCode))
+                .unwrap();
+        assert_eq!(discovery.model_source, "suggested");
+        assert!(!discovery.models.is_empty());
+        assert!(discovery.warnings.is_empty());
+    }
 }

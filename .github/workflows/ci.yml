@@ -59,3 +59,11 @@ jobs:
         if: always()
         working-directory: .
         run: pnpm build
+
+      # 方案 §14: the Settings discovery contract (mount never spawns a CLI,
+      # Refresh is the only entry, overrides survive failures) is locked by
+      # vitest and must gate both platforms like the Rust suite does.
+      - name: frontend test
+        if: always()
+        working-directory: .
+        run: pnpm test
