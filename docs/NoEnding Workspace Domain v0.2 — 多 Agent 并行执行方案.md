@@ -3776,3 +3776,20 @@ macOS 本地 gate：`cargo fmt --check` / `cargo check --all-targets`（0 warnin
 前提的证据：`gh release list` 为空（从未发布过任何构建），加上 §44.1 记录的用户
 声明"Windows 从未运行过 NoEnding"。M33 的 Windows 侧随本节关闭，macOS 侧保持
 "折叠即迁移"的原判。
+
+**exact-head 第一轮（`d91c683`）：macOS 绿，Windows 仍然红——但不是原来那两个红。**
+§7 的两个测试过去了（lib 68 passed），`#[cfg(windows)]` 的两个 registry 测试在
+windows-latest 上跑到并通过（该 binary 29 passed = 26 + 1 + 2）。红的是
+`workspace_resolver_test.rs` 的 5 个真-git 测试，此前**从来没在 Windows 上执行过**：
+`--lib` 一红，cargo 就停在第一个 target 上，后面的 binary 根本没轮到。
+也就是说 §44 修完才把下一层露出来，这是 CI 顺序的产物而不是新引入的 bug。
+
+真正的 bug 是第二个 Windows-only 洞，与 identity 折叠无关：Git for Windows 把
+verbatim 前缀用**正斜杠**打印出来（`//?/C:/Users/…`），而
+`strip_verbatim_prefix` 原来只字面匹配 `\\?\`。`//?/C:` 到了 `split_root` 的 UNC
+分支里被读成"server 叫 `?`、share 叫 `C:`"，于是同一个仓库的 `toplevel` /
+`common_dir` 与我们询问的那个目录算出**不同的键**——§8.3 的家庭识别在真机上根本不
+成立。修法按 §6 归位：前缀判断改成对分隔符不敏感，两种拼法都先还原再算身份；
+`windows_normalization` 补了正反两种斜杠的 verbatim 断言和一条"与朴素拼法同身份"
+的断言。同时按 §44.5 给 CI 的两个 frontend step 加了 `if: always()`——`395066e`
+两次运行的"绿灯缺什么"就是因为这两步被跳过而无人知晓。

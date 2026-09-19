@@ -47,10 +47,15 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets
 
+      # 方案 §44.5: a red `cargo test` must not hide whether the frontend still
+      # builds. Both jobs on `395066e` skipped these two steps and reported
+      # nothing about them; the job still fails on the Rust step above.
       - name: frontend install
+        if: always()
         working-directory: .
         run: pnpm install --frozen-lockfile
 
       - name: frontend build
+        if: always()
         working-directory: .
         run: pnpm build

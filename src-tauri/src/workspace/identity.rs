@@ -423,14 +423,22 @@ fn join(root: &str, segments: &[String], style: PathStyle) -> String {
 /// Windows' `\\?\` verbatim prefix is an API artifact, not part of the path:
 /// it disables the very normalization we need and breaks `exists` checks. UNC
 /// comes back as `\\server\share`.
+///
+/// The test is separator-insensitive because Git for Windows prints this prefix
+/// with forward slashes (`//?/C:/Users/…`). Matched literally, the spelling is
+/// not merely ugly: `//?/C:` reads as a UNC root whose "server" is `?` and whose
+/// "share" is `C:`, so a repository's own `toplevel` and `common_dir` land on a
+/// different key than the directory we asked about, and §8.3 stops recognizing
+/// them as one family.
 fn strip_verbatim_prefix(input: &str, style: PathStyle) -> String {
     if !style.is_windows() {
         return input.to_string();
     }
-    if let Some(rest) = input.strip_prefix("\\\\?\\UNC\\") {
-        return format!("\\\\{}", rest);
+    let slashes = input.replace('\\', "/");
+    if let Some(rest) = slashes.strip_prefix("//?/UNC/") {
+        return format!("//{rest}");
     }
-    if let Some(rest) = input.strip_prefix("\\\\?\\") {
+    if let Some(rest) = slashes.strip_prefix("//?/") {
         return rest.to_string();
     }
     input.to_string()
@@ -579,6 +587,22 @@ mod tests {
             win("\\\\?\\UNC\\server\\share\\work").as_deref(),
             Some("\\\\server\\share\\work"),
             "UNC verbatim restores the leading \\\\"
+        );
+        // The same prefix in the spelling Git for Windows actually emits, which
+        // otherwise parses as a UNC root named `?` / `C:`.
+        assert_eq!(
+            win("//?/C:\\Users\\me").as_deref(),
+            Some("C:\\Users\\me"),
+            "forward-slash verbatim is an API artifact too"
+        );
+        assert_eq!(
+            win("//?/UNC/server/share/work").as_deref(),
+            Some("\\\\server\\share\\work")
+        );
+        assert_eq!(
+            path_identity_with(&win("//?/C:\\Users\\me").unwrap(), PathStyle::Windows),
+            path_identity_with("C:\\Users\\me", PathStyle::Windows),
+            "so it is the same directory as the plain spelling"
         );
         assert_eq!(
             win("\\\\server\\share\\a\\b").as_deref(),
