@@ -2074,3 +2074,67 @@ Rediscovery
 ```
 
 表达其来源已经消失。
+
+---
+
+# 60. 实施记录 — SEALED
+
+```text
+Session Lifecycle & Deletion v0.1 — SEALED
+HEAD: 663c79d01609a1eead01559300b56c38c9f792d6 (main)
+CI:   macOS ✅ / Windows ✅ (run 35457843384, exact-head)
+
+完成矩阵 (§58):
+Session Trash ✅            sessions.trashed_at 单一权威 (schema v13)
+Restore same identity ✅    restore_session 保持同一 Session.id
+Trash hidden from UX ✅     Sessions/Project/Workstream/Home 投影均过滤
+Trash ingestion 抑制 ✅     discovery 跳过 + append_source_events 事务内守卫
+Trash Resume blocked ✅     prepare 拒绝 + fingerprint 折叠 trash 状态 + launch 复查
+
+Prepared permanent deletion ✅   prepare → 冻结 plan → execute (仅提交 job_id)
+Adapter-owned source deletion ✅ remove_file 仅存在于 adapters/mod.rs 一处
+Codex / Claude Code / Pi ✅      各自实现,共享单文件校验机制
+Source stale detection ✅        execute 前 identity/size/sha256/session id 复验
+Crash/retry semantics ✅         启动时 deleting_source → failed,重试走 AlreadyAbsent
+
+NoEnding purge ✅            §29 十二步顺序,单事务
+Bindings/cursors/events ✅   全部清理
+Sync/launch history ✅       sync_runs + matched launch_intents 清理
+Context deliveries ✅
+Provenance redaction ✅      deleted_session + 元数据清洗 + authority 保留
+
+No tombstone ✅              job 行与 Session 同事务删除
+No blacklist ✅
+Future rediscovery ✅        S2 全新 id / 全新摄入生命周期
+No binding resurrection ✅
+No provenance relink ✅
+
+macOS ✅  Windows ✅  exact-head CI ✅
+```
+
+实施 commit 序列 (§56):
+
+```text
+5eb43ee docs(sessions): freeze session lifecycle deletion v0.1
+a3c69aa feat(sessions): add trash, restore and prepared permanent deletion
+0f61a84 feat(adapters): add safe source session deletion
+e6aac07 fix(ingestion): suppress trashed session writes across every commit path
+ad6be70 feat(ui): add session recycle bin and deletion preview
+71d2e52 docs(agents): restate raw-data and lifecycle invariants for deletion v0.1
+9873081 fix(launcher): a trashed session cannot claim a launch intent
+663c79d fix(sessions): final deletion audit fixes
+```
+
+测试:34 个生命周期/adapter 测试 + 2 个 v12→v13 迁移测试;§47 Dogfood Gate
+Case A–E 已由自动化测试覆盖 (trash_preserves / restore_keeps /
+full_purge / source_delete_failure_preserves / restored_source_is_discovered)。
+§55 破坏性审计:10 项全部 PASS,无 P0/P1;3 条 P2 已随 663c79d 修复
+(双胞胎摄入函数对齐、plan 反序列化前置于 deleting_source、FTS 索引按
+字符数对齐),其余 P2 为记录在案的设计内取舍:
+
+- conflict snapshot JSON 中冻结的 legacy 事件引用不脱敏(冲突审计
+  快照不可变,读路径仅展示、不解析,不会悬空报错)。
+- prepare 要求源文件可完整证明;源文件在应用外被删除的会话无法走
+  prepare(需后续版本提供 "源已不存在" 的显式分支)。
+- trash 的 FTS unindex 在事务提交后执行(与全库 FTS 写约定一致),
+  崩溃窗口内可能残留可搜索行,restore/purge 会自愈。
