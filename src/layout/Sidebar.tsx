@@ -3,11 +3,13 @@ import { api } from "../api";
 import { onEvent, EVT_SYNCED, type Route } from "../app/routes";
 import { IntelligenceOnly } from "../app/experience";
 import SidebarLogo from "../components/SidebarLogo";
-import type { Project, WorkstreamCardData } from "../types";
+import type { WorkstreamCardData } from "../types";
 
 /**
- * Sidebar（整体设计方案 §5-§11）：Brand→Home、Search、WORKSPACE 一级导航、
- * RECENT（最近 6 个 open Workstream）、PROJECTS（独立展示）、底部固定 Settings。
+ * Sidebar（Projects Experience v0.2 §1-§2、§21-§23）：Brand→Home、Search、
+ * 工作区一级导航（Workstreams / Projects / Sessions / Assistant）、
+ * 最近（最近 6 个 open Workstream，§21 保留）、底部固定 Settings。
+ * Project 不再逐个铺在导航上——它们整体进入 Projects Board（§1）；
  * 自己负责自己的数据；AppShell 只传 route/navigate。
  */
 export default function Sidebar({ route, navigate, onSearch }: {
@@ -15,11 +17,9 @@ export default function Sidebar({ route, navigate, onSearch }: {
   navigate: (r: Route) => void;
   onSearch: () => void;
 }) {
-  const [projects, setProjects] = useState<Project[]>([]);
   const [recent, setRecent] = useState<WorkstreamCardData[]>([]);
 
   const refresh = useCallback(() => {
-    api.listProjects().then(setProjects).catch(console.error);
     api
       .listWorkstreamCards()
       .then((cards) =>
@@ -38,11 +38,13 @@ export default function Sidebar({ route, navigate, onSearch }: {
   useEffect(refresh, [refresh]);
   useEffect(() => onEvent(EVT_SYNCED, refresh), [refresh]);
 
-  const workspaceActive = (v: "workstreams" | "sessions" | "assistant") => {
+  const workspaceActive = (v: "workstreams" | "projects" | "sessions" | "assistant") => {
     if (route.view === v) return "active";
     // Workstream Detail → Workstreams 保持弱高亮（§10）
     if (v === "workstreams" && route.view === "workstream") return "weak";
     if (v === "sessions" && route.view === "session") return "active";
+    // §22 — Project Detail → Projects 弱高亮，与 Workstreams 同一模式
+    if (v === "projects" && route.view === "project") return "weak";
     return "";
   };
 
@@ -67,6 +69,12 @@ export default function Sidebar({ route, navigate, onSearch }: {
           onClick={() => navigate({ view: "workstreams" })}>
           Workstreams
         </button>
+        {/* §2 — Projects 成为一等导航项：Workstream=我正在做什么，
+            Project=我在哪里做，Session=我做过哪些执行 */}
+        <button className={`nav-item ${workspaceActive("projects")}`}
+          onClick={() => navigate({ view: "projects" })}>
+          Projects
+        </button>
         <button className={`nav-item ${workspaceActive("sessions")}`}
           onClick={() => navigate({ view: "sessions" })}>
           Sessions
@@ -88,20 +96,6 @@ export default function Sidebar({ route, navigate, onSearch }: {
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 }}>
               {w.title}
             </span>
-          </button>
-        ))}
-
-        {/* v0.2：Project 由工作目录派生，侧栏没有创建入口（方案 §22、§42.3-M22）。 */}
-        <div className="nav-section">Projects</div>
-        {projects.length === 0 && (
-          <div className="nav-item muted small">打开 Session 或选目录后自动出现</div>
-        )}
-        {projects.map((p) => (
-          <button key={p.id}
-            className={`nav-item ${route.view === "project" && route.projectId === p.id ? "active" : ""}`}
-            title={p.name}
-            onClick={() => navigate({ view: "project", projectId: p.id })}>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
           </button>
         ))}
       </div>
