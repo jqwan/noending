@@ -1,10 +1,10 @@
-//! WorkspacePath / GitIdentity persistence (schema v12).
+//! WorkspacePath / GitIdentity / Project-row persistence (schema v12).
 //!
 //! These are the *mechanical* operations every workspace layer shares: read a
 //! row, insert a row, move a row's Project, and keep the derived Session cache
 //! consistent when it moves. The policy that decides WHEN to call them lives in
 //! `workspace::project` (方案 §17), so nothing here re-reads the filesystem or
-//! runs Git.
+//! runs Git — and nothing here decides ownership, it only applies it.
 //!
 //! Column note: the schema calls it `exists_on_disk` because `EXISTS` is a
 //! SQLite keyword (方案 §42.2-E13); the domain field is `exists`.
@@ -12,7 +12,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::domain::*;
-use crate::error::Result;
+use crate::error::{other, Result};
 
 use super::{new_id, now, Db};
 
@@ -32,16 +32,92 @@ fn row_workspace_path(r: &Row) -> rusqlite::Result<WorkspacePath> {
 const WORKSPACE_PATH_COLUMNS: &str =
     "id, canonical_path, project_id, git_state, git_kind, exists_on_disk, first_seen_at, last_seen_at";
 
+// connection-level readers -------------------------------------------------
+// Free functions over `&Connection`, so Project policy can run inside the
+// caller's transaction (`workspace::project` is called from ingest batches that
+// must commit atomically — 方案 §42.3-M3). The `Db` methods delegate here, so
+// there stays exactly one SQL path per fact.
+
+pub fn get_workspace_path_conn(conn: &Connection, id: &str) -> Result<Option<WorkspacePath>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths WHERE id = ?1"),
+            params![id],
+            row_workspace_path,
+        )
+        .optional()?)
+}
+
+pub fn list_workspace_paths_conn(conn: &Connection) -> Result<Vec<WorkspacePath>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths ORDER BY canonical_path"
+    ))?;
+    let mapped = st.query_map([], row_workspace_path)?;
+    Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub fn list_workspace_paths_for_project_conn(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<WorkspacePath>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths
+          WHERE project_id = ?1 ORDER BY canonical_path"
+    ))?;
+    let mapped = st.query_map(params![project_id], row_workspace_path)?;
+    Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// §42.3-M7 — the reconcile sweep walks the registry in `path_id` order under a
+/// hard cap, so a restart cannot shuffle the pass and move `last_seen_at` across
+/// the whole table at once.
+pub fn scan_workspace_paths_conn(conn: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
+    let mut st =
+        conn.prepare("SELECT id, canonical_path FROM workspace_paths ORDER BY id LIMIT ?1")?;
+    let mapped = st.query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn row_project_row(r: &Row) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: r.get("id")?,
+        name: r.get("name")?,
+        description: r.get("description")?,
+        archived: r.get::<_, i64>("archived")? != 0,
+        git_id: r.get("git_id")?,
+        name_customized: r.get::<_, i64>("name_customized")? != 0,
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
+    })
+}
+
+pub fn get_project_conn(conn: &Connection, id: &str) -> Result<Option<Project>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM projects WHERE id = ?1",
+            params![id],
+            row_project_row,
+        )
+        .optional()?)
+}
+
+/// The Project that owns a Git family, if any. `idx_projects_git_id` is a partial
+/// UNIQUE index, so "at most one row" is structural (§8.3): one Git family is one
+/// Project, which is what makes two worktrees of one repository converge instead
+/// of compete.
+pub fn project_by_git_id_conn(conn: &Connection, git_id: &str) -> Result<Option<Project>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM projects WHERE git_id = ?1",
+            params![git_id],
+            row_project_row,
+        )
+        .optional()?)
+}
+
 impl Db {
     pub fn get_workspace_path(&self, id: &str) -> Result<Option<WorkspacePath>> {
-        Ok(self
-            .0
-            .query_row(
-                &format!("SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths WHERE id = ?1"),
-                params![id],
-                row_workspace_path,
-            )
-            .optional()?)
+        get_workspace_path_conn(&self.0, id)
     }
 
     pub fn get_workspace_path_by_canonical(
@@ -59,20 +135,11 @@ impl Db {
     }
 
     pub fn list_workspace_paths(&self) -> Result<Vec<WorkspacePath>> {
-        let mut st = self.0.prepare(&format!(
-            "SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths ORDER BY canonical_path"
-        ))?;
-        let mapped = st.query_map([], row_workspace_path)?;
-        Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+        list_workspace_paths_conn(&self.0)
     }
 
     pub fn list_workspace_paths_for_project(&self, project_id: &str) -> Result<Vec<WorkspacePath>> {
-        let mut st = self.0.prepare(&format!(
-            "SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths
-              WHERE project_id = ?1 ORDER BY canonical_path"
-        ))?;
-        let mapped = st.query_map(params![project_id], row_workspace_path)?;
-        Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+        list_workspace_paths_for_project_conn(&self.0, project_id)
     }
 
     pub fn count_workspace_paths_for_project(&self, project_id: &str) -> Result<i64> {
@@ -238,10 +305,11 @@ pub fn touch_git_identity_conn(conn: &Connection, git_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// §35 — the zero-path test a caller runs after removing a path. Deletion itself
-/// goes through `Db::delete_project_and_children` (which owns its transaction
-/// and the FTS un-index), never from inside a borrowed `tx`, so the FK ordering
-/// and the index cleanup live in exactly one place.
+/// §1.2 — the zero-path test a caller runs after removing a path. The delete
+/// itself is [`delete_zero_path_project_conn`] (borrowed connection, caller's
+/// transaction, FTS row left for the post-commit `unindex`); the `Db`-level
+/// `delete_project_and_children` is the same statement order wrapped in its own
+/// transaction for callers that are not already inside one.
 pub fn project_is_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
     let owned: i64 = conn.query_row(
         "SELECT COUNT(*) FROM workspace_paths WHERE project_id = ?1",
@@ -249,6 +317,115 @@ pub fn project_is_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
         |r| r.get(0),
     )?;
     Ok(owned == 0)
+}
+
+// ---- Project writes (narrow, one column-set each) -------------------------
+//
+// `upsert_project_conn` is the *whole-object* write the legacy command used, and
+// v0.2 retires it from the product surface: a Project row is now app-owned, so
+// every write here changes one documented fact and nothing else. In particular
+// no function here can clear `git_id` or `name_customized` — both are one-way.
+
+// Creating a Project lives in `workspace::project` (it needs the naming policy);
+// it calls `upsert_project_conn`, the one whole-object write that is safe on a
+// row that does not exist yet. Everything below is a narrow, single-fact update.
+
+/// §8.4 — a Project that had no Git family adopts one. `Project.id` does not
+/// change, so every Session, WorkstreamPath and audit reference keeps pointing
+/// at the same row: this is the whole reason an upgrade is not a merge.
+/// Returns false when the Project already carries a family, which is a different
+/// decision (§8.5) and must never be taken here.
+pub fn adopt_git_identity_conn(conn: &Connection, project_id: &str, git_id: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE projects SET git_id = ?2, updated_at = ?3
+          WHERE id = ?1 AND git_id IS NULL",
+        params![project_id, git_id, now()],
+    )? > 0)
+}
+
+/// §17-17 — a merge may hand the survivor a name that came from a user.
+/// `customized` is written with the name because the pair is one fact: a name a
+/// person chose is a name automatic naming may not touch again.
+pub fn set_project_name_conn(
+    conn: &Connection,
+    project_id: &str,
+    name: &str,
+    customized: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET name = ?2, name_customized = ?3, updated_at = ?4 WHERE id = ?1",
+        params![project_id, name, customized as i64, now()],
+    )?;
+    Ok(())
+}
+
+/// §17-14/15 — the only user-facing Project name write in v0.2. It sets
+/// `name_customized`, which is what stops every later automatic rename
+/// (`upsert_project_conn`'s `CASE`, the merge adoption below).
+pub fn rename_project_conn(conn: &Connection, project_id: &str, name: &str) -> Result<Project> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(other("项目名称不能为空"));
+    }
+    let changed = conn.execute(
+        "UPDATE projects SET name = ?2, name_customized = 1, updated_at = ?3 WHERE id = ?1",
+        params![project_id, name, now()],
+    )?;
+    if changed == 0 {
+        return Err(other(format!("Project {project_id} 不存在")));
+    }
+    get_project_conn(conn, project_id)?.ok_or_else(|| other(format!("Project {project_id} 不存在")))
+}
+
+/// §1.2/§42.3-M4 — delete a Project that no longer owns any WorkspacePath.
+///
+/// Both child tables reference `projects(id) NOT NULL` without a cascade, so the
+/// order is fixed: clear the two nullable references, then
+/// `project_resources` → `project_affinity_evidence` → `projects`. Skipping the
+/// evidence table is the pre-v12 bug that made any suggested Project undeletable.
+/// The FTS row is NOT dropped here: `unindex` belongs after the commit
+/// (`ProjectionEffect::projects_deleted` carries the ids), and an un-committed
+/// delete must not leave search with a hole if this transaction rolls back.
+///
+/// A Project that still owns a path is refused rather than silently emptied —
+/// §1.2 says a Project exists exactly while it owns one, so reaching this point
+/// with paths is a caller bug, and deleting a live Project would orphan the very
+/// fact chain everything else reads through.
+pub fn delete_zero_path_project_conn(conn: &Connection, project_id: &str) -> Result<bool> {
+    if get_project_conn(conn, project_id)?.is_none() {
+        return Ok(false);
+    }
+    if !project_is_unowned(conn, project_id)? {
+        return Err(other(format!(
+            "Project {project_id} 仍然拥有 WorkspacePath，不能删除（§1.2）"
+        )));
+    }
+    conn.execute(
+        "UPDATE workstreams SET project_id = NULL, updated_at = ?2 WHERE project_id = ?1",
+        params![project_id, now()],
+    )?;
+    // Referential hygiene, not a write to the derived cache: no Session can
+    // still be projecting onto a Project that owns no path.
+    super::session_paths::clear_sessions_project_for_project_conn(conn, project_id)?;
+    conn.execute(
+        "DELETE FROM project_resources WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    conn.execute(
+        "DELETE FROM project_affinity_evidence WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+    Ok(true)
+}
+
+/// §1.2 — the zero-path rule as an action: retire a Project the moment it owns
+/// nothing. Returns true when it is gone, so callers can record the FTS cleanup.
+pub fn retire_project_if_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
+    if !project_is_unowned(conn, project_id)? {
+        return Ok(false);
+    }
+    delete_zero_path_project_conn(conn, project_id)
 }
 
 /// §42.3-M18 — a Workstream's search row is parented by its PRIMARY-path
@@ -268,7 +445,14 @@ pub fn refresh_workstream_search_parents_conn(
     {
         return Ok(());
     }
-    let markers = vec!["?1"; path_ids.len()].join(",");
+    // Distinct `?1..?n` indexes, one per path id: repeating `?1` would make the
+    // statement take ONE parameter while the caller supplies N, which rusqlite
+    // rejects (`InvalidParameterCount`) — so a batch over two or more paths has to
+    // number them.
+    let markers = (1..=path_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
     let affected = format!(
         "SELECT DISTINCT workstream_id FROM workstream_paths WHERE workspace_path_id IN ({markers})"
     );

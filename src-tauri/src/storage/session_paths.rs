@@ -13,16 +13,26 @@
 //! from the path in the same statement instead of taking a Project from the
 //! caller:
 //!
-//! 1. `Db::upsert_session` (in `storage/mod.rs`) — discovery / launch matching;
-//! 2. [`attach_session_workspace_path_conn`] — an explicit re-attach;
+//! 1. `Db::upsert_session` (in `storage/mod.rs`) — discovery / launch matching,
+//!    called by `ingestion::ensure_session_row`;
+//! 2. [`attach_session_workspace_path_conn`] — an explicit re-attach, called when
+//!    discovery sees the cwd move (`workspace::session`);
 //! 3. [`refresh_sessions_project_for_path_conn`] — a WorkspacePath changed Project,
-//!    so every Session behind it must follow in the same transaction.
+//!    so every Session behind it must follow in the same transaction
+//!    (`storage::workspace::reassign_workspace_path_project_conn`).
 //!
-//! Plus one referential-cleanup case: `Db::delete_project_and_children` clearing
-//! `project_id` for a Project that is going away. Anything else — notably the
-//! retired `assign_session_project`, which was a raw
-//! `UPDATE sessions SET project_id = ?` — is a domain violation, guarded by
-//! 方案 §42.5-T2.
+//! Plus one referential-cleanup case: [`clear_sessions_project_for_project_conn`]
+//! invalidates the cache for a Project that is going away — both
+//! `Db::delete_project_and_children` and `workspace::project`'s zero-path
+//! auto-delete funnel through it, so the cleanup stays one statement in one
+//! file. Anything else — notably the retired `assign_session_project`, which was
+//! a raw `UPDATE sessions SET project_id = ?` — is a domain violation, guarded by
+//! 方案 §42.5-T2 (and executably by
+//! `tests/session_workspace_test::project_id_writers_are_confined_to_the_derived_doors`).
+//!
+//! [`reconcile_binding_paths_conn`] is not a fourth writer: it moves no Session and
+//! touches no `project_id`, it only keeps the *binding* side of §5.6 honest after
+//! one of the three doors above has run.
 
 use rusqlite::{params, Connection};
 
@@ -133,4 +143,22 @@ pub fn reconcile_binding_paths_conn(conn: &Connection, session_id: &str) -> Resu
         params![session_id],
     )?;
     Ok(matched + cleared)
+}
+
+/// A Project is going away: every Session that was only *projecting* onto it
+/// through the derived cache must stop doing so.
+///
+/// This is invalidation, not assignment — it writes `NULL` and nothing else, so
+/// it cannot mint a membership the path chain does not imply. It lives here so
+/// the question "who may write `sessions.project_id`?" has one answer per file:
+/// `grep 'UPDATE sessions SET project_id'` finds this module and the
+/// derivation/migration statements in `storage/mod.rs`, nowhere else.
+pub fn clear_sessions_project_for_project_conn(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE sessions SET project_id = NULL WHERE project_id = ?1",
+        params![project_id],
+    )?)
 }

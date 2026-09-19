@@ -776,10 +776,7 @@ impl Db {
                 "UPDATE workstreams SET project_id = NULL, updated_at = ?2 WHERE project_id = ?1",
                 params![project_id, now()],
             )?;
-            tx.execute(
-                "UPDATE sessions SET project_id = NULL WHERE project_id = ?1",
-                params![project_id],
-            )?;
+            session_paths::clear_sessions_project_for_project_conn(tx, project_id)?;
             tx.execute(
                 "DELETE FROM project_resources WHERE project_id = ?1",
                 params![project_id],

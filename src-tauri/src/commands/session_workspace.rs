@@ -1,15 +1,25 @@
 //! Session commands: listing, detail, and Workstream binding.
 //!
-//! Owned by `Agent D` (方案 §19). Binding a Session now ensures a WorkstreamPath
-//! and records which one brought it in, and `assign_session_project` /
-//! `suggest_session_project` are legacy surface that Wave 1 un-registers (方案 §11).
+//! Owned by `Agent D` (方案 §19). These are thin: they take the lock, map the
+//! wire shape and hand over to `workspace::session`, which owns the rules.
+//!
+//! Binding a Session now also decides the Workstream's ordered path list — the
+//! Session's own WorkspacePath is reused if it is already there, appended if a
+//! user action says it should be, and recorded on the binding by exact equality
+//! (§1.8, §42.3-M1). Unbinding removes the binding only (§1.9). Which
+//! WorkstreamPath brought a Session in is a derived fact, so no command here
+//! accepts it from the UI.
+//!
+//! `assign_session_project` / `suggest_session_project` are retired surface:
+//! the first wrote the derived cache by hand, the second fed the name-substring
+//! affinity heuristic that §42.2-E11 removes. Both stay compilable so nothing
+//! that still references them fails to build, and neither writes any more.
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::domain::*;
 use crate::error::{other, Result};
-use crate::storage::{new_id, now};
 
 use super::{with_db, AppState};
 
@@ -70,47 +80,41 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
     })
 }
 
+/// RETIRED (方案 §11, §42.2-E11): Wave 1 un-registers it.
+///
+/// This used to be a raw `UPDATE sessions SET project_id`, i.e. a fourth writer
+/// for a column that v0.2 defines as a derived cache with exactly three (§42.3-M3)
+/// — which is precisely how `project_id` and the WorkspacePath behind it came to
+/// disagree. It refuses instead of writing, so that an old frontend or a
+/// scripted call cannot reintroduce the split authority; Project membership is
+/// now derived from where the Session actually ran.
 #[tauri::command]
 pub fn assign_session_project(
     state: State<AppState>,
     session_id: String,
     project_id: Option<String>,
 ) -> Result<()> {
-    with_db(&state, |db| {
-        db.0.execute(
-            "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
-            rusqlite::params![session_id, project_id],
-        )?;
-        // a user correction is itself the strongest kind of evidence
-        if let Some(pid) = project_id {
-            db.insert_evidence(&ProjectAffinityEvidence {
-                id: new_id(),
-                session_id: Some(session_id),
-                workstream_id: None,
-                project_id: pid,
-                evidence_type: "user_correction".into(),
-                source: "manual assignment".into(),
-                score: 10.0,
-                created_at: now(),
-            })?;
-        }
-        Ok(())
-    })
+    let _ = (state, session_id, project_id);
+    Err(other(
+        "Project 由 Session 的工作路径自动派生，不能再手工指派；移动路径归属即移动成员",
+    ))
 }
 
-/// cwd/repo only ever *suggest*: return the scored suggestion from recorded
-/// evidence, never assign anything.
+/// RETIRED (方案 §11, §42.2-E11): Wave 1 un-registers it; no frontend calls it.
+///
+/// It used to record fresh name-substring affinity evidence on every read. That
+/// write is gone: this now only resolves evidence already in the store, so the
+/// history stays readable without growing new inferences.
 #[tauri::command]
 pub fn suggest_session_project(
     state: State<AppState>,
     session_id: String,
 ) -> Result<serde_json::Value> {
     with_db(&state, |db| {
-        let session = db
-            .get_session(&session_id)?
-            .ok_or_else(|| other("Session 不存在"))?;
-        // record fresh evidence for the current cwd, then resolve
-        crate::ingestion::record_session_project_evidence(db, &session);
+        // existence is still the contract; only the inference is gone
+        if db.get_session(&session_id)?.is_none() {
+            return Err(other("Session 不存在"));
+        }
         match db.resolve_project_affinity(&session_id)? {
             Some((project_id, score)) => {
                 let name = db
@@ -126,6 +130,14 @@ pub fn suggest_session_project(
     })
 }
 
+/// Bind a Session into a Workstream (user action).
+///
+/// v0.2: the same click also decides the Workstream's path list — if the
+/// Session's own WorkspacePath is not in it, it is appended (position 0 for a
+/// Workstream with no path yet) — and the binding records that WorkstreamPath by
+/// exact equality (§1.8, §42.3-M1). One transaction, so a binding never exists
+/// without its claim and a path never exists without the binding that asked for
+/// it.
 #[tauri::command]
 pub fn bind_session_workstream(
     state: State<AppState>,
@@ -134,7 +146,7 @@ pub fn bind_session_workstream(
     role: String,
 ) -> Result<()> {
     with_db(&state, |db| {
-        crate::launcher::record_binding(
+        crate::workspace::session::record_user_binding(
             db,
             &session_id,
             &workstream_id,
@@ -146,6 +158,10 @@ pub fn bind_session_workstream(
 }
 
 /// Remove a Session ↔ Workstream binding (user edit via Session Detail).
+///
+/// Only the binding goes away: the WorkstreamPath that brought the Session in
+/// stays in the user's list (§1.9), and the pair leaves a permanent removal
+/// tombstone so auto-classification cannot re-propose it.
 #[tauri::command]
 pub fn unbind_session_workstream(
     state: State<AppState>,
@@ -166,6 +182,13 @@ pub struct DesiredBinding {
 /// rows keep their provenance/created_at/cursors, role edits update only the
 /// role, removed rows are deleted, and only newly added rows become
 /// user_assigned. The frontend never orchestrates unbind+bind itself.
+///
+/// v0.2 adds the path half of the join: an added binding ensures its
+/// WorkstreamPath (§1.8), a kept binding gets a NULL claim repaired when the
+/// Session's own path is now in the list (§5.6), and no removal here ever
+/// removes a WorkstreamPath (§1.9). The wire shape stays `(workstream_id,
+/// role)` on purpose: which WorkstreamPath a binding came through is a derived
+/// fact, not something the UI may assert.
 #[tauri::command]
 pub fn replace_session_bindings(
     state: State<AppState>,
@@ -174,10 +197,14 @@ pub fn replace_session_bindings(
 ) -> Result<()> {
     let desired = bindings
         .into_iter()
-        .map(|b| (b.workstream_id, b.role))
+        .map(|b| crate::workspace::session::DesiredBinding {
+            workstream_id: b.workstream_id,
+            role: b.role,
+            workstream_path_id: None,
+        })
         .collect::<Vec<_>>();
     with_db(&state, |db| {
-        crate::launcher::replace_session_bindings(db, &session_id, &desired)
+        crate::workspace::session::replace_session_bindings(db, &session_id, &desired)
     })
 }
 

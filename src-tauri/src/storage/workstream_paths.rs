@@ -16,7 +16,16 @@
 //! position)` stops two paths claiming the same slot.
 //!
 //! Policy that calls these — add/remove/reorder endpoints, the recycle bin, the
-//! binding side-effects — is `workspace::workstream` (方案 §18).
+//! binding side-effects — is `workspace::workstream` (方案 §18). Two of them
+//! live here rather than there because they are mechanical and total:
+//! [`purge_workstream_data_conn`] (the whole §42.3-M6 delete order, in the
+//! caller's transaction) and [`reindex_workstream_search_conn`] (one Workstream's
+//! search row, re-derived from position 0).
+//!
+//! [`reorder_workstream_paths_conn`] is the one helper here a caller must not run
+//! on a `&Connection` it cannot roll back: it stages through negative positions,
+//! so a mid-way failure would leave the list half-renumbered. Always pass a
+//! transaction.
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
@@ -252,6 +261,208 @@ pub fn reorder_workstream_paths_conn(
             params![workstream_id, path_id, i as i64],
         )?;
     }
+    Ok(())
+}
+
+/// One entry of the list by its own id, scoped to the Workstream that owns it.
+///
+/// The `workstream_id` predicate is not decoration: a `workstream_paths.id`
+/// copied from another Workstream (a stale UI row, a race between two lists)
+/// must resolve to `None` rather than mutate someone else's path list.
+pub fn workstream_path_by_id_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    id: &str,
+) -> Result<Option<WorkstreamPath>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM workstream_paths WHERE workstream_id = ?1 AND id = ?2",
+            params![workstream_id, id],
+            row_workstream_path,
+        )
+        .optional()?)
+}
+
+/// §22 — how many Sessions came in through this WorkstreamPath, which is exactly
+/// how many bindings removing it will take with it. Read-only, so the UI can
+/// warn before asking, and the warning cannot be stale by the time it is
+/// rendered.
+pub fn count_bindings_for_workstream_path_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    workstream_path_id: &str,
+) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM session_workstream_bindings
+          WHERE workstream_id = ?1 AND workstream_path_id = ?2",
+        params![workstream_id, workstream_path_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// §12/§13 — the list as canonical path strings, **in position order**.
+///
+/// Ordering is the contract: this is the byte sequence the PreparedLaunch
+/// fingerprint hashes, so a reorder that moves position 0 changes the launch
+/// plan and a sorted copy of the list can never make two different orders look
+/// equal (§42.3-M17).
+pub fn ordered_canonical_paths_for_workstream(
+    conn: &Connection,
+    workstream_id: &str,
+) -> Result<Vec<String>> {
+    let mut st = conn.prepare(
+        "SELECT wp.canonical_path FROM workstream_paths wsp
+           JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
+          WHERE wsp.workstream_id = ?1 ORDER BY wsp.position",
+    )?;
+    let mapped = st.query_map(params![workstream_id], |r| r.get::<_, String>(0))?;
+    Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// §42.3-M18 — rewrite one Workstream's search row so its `parent_id` follows
+/// the CURRENT position-0 path.
+///
+/// The generic [`super::workspace::refresh_workstream_search_parents_conn`]
+/// finds affected Workstreams *through* `workstream_paths`, which cannot work
+/// for a removal: by the time it runs, the row that connected the Workstream to
+/// the path is gone. This one takes the Workstream id directly and is therefore
+/// usable on both sides of a mutation.
+///
+/// A no-op when the bundled SQLite has no FTS5 (`search_index` absent), exactly
+/// like the sibling helper.
+pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
+    if conn
+        .query_row("SELECT 1 FROM search_index LIMIT 1", [], |_| Ok(()))
+        .is_err()
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
+        params![workstream_id],
+    )?;
+    conn.execute(
+        "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
+         SELECT 'workstream', w.id,
+                (SELECT wp.project_id FROM workstream_paths wsp
+                   JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
+                  WHERE wsp.workstream_id = w.id AND wsp.position = 0),
+                w.title, w.description
+         FROM workstreams w WHERE w.id = ?1",
+        params![workstream_id],
+    )?;
+    Ok(())
+}
+
+/// §42.3-M6 — delete every row a Workstream owns, in FK order, inside the
+/// caller's transaction. A permanent delete is all-or-nothing: a half-purged
+/// Workstream would keep Context rows whose owner no longer exists.
+///
+/// The plan's list, expanded by the two references it does not mention:
+///
+/// * `project_affinity_evidence.workstream_id` is a 6th FK onto `workstreams`
+///   (`storage/mod.rs:331`). It is nullable, so the history-preserving repair
+///   is to NULL the attribution and keep the row: the evidence explains a
+///   Project decision and is not this Workstream's property. §42.2-E11 keeps
+///   that table as read-only history, so deleting rows would be worse than
+///   unlabelling one column.
+/// * `search_index` is an FTS5 table with no FK at all. Its `kind='item'` rows
+///   carry `parent_id = workstream_id`, so deleting the items without deleting
+///   their index rows leaves search returning facts that no longer exist.
+///
+/// `workstream_review_state` cascades; it is deleted explicitly anyway so the
+/// order is written down rather than inferred from the schema.
+///
+/// NOT touched, on purpose: `sessions`, `session_events`, `session_cursors`,
+/// `launch_intents`, `workspace_paths`, `projects`, `sync_runs` and the Agents'
+/// raw transcript files. A Session survives the Workstream that referenced it
+/// (§18-12); `launch_intents` keep their recorded `cwd` as historical evidence
+/// even when it names a Workstream that is gone (§42.3-M24).
+pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> Result<()> {
+    // 1. conflict audit trail — references context_conflicts.
+    tx.execute(
+        "DELETE FROM context_conflict_events
+          WHERE conflict_id IN (SELECT id FROM context_conflicts WHERE workstream_id = ?1)",
+        params![workstream_id],
+    )?;
+    // 2. conflicts — they also reference context_items, so they must go first.
+    tx.execute(
+        "DELETE FROM context_conflicts WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    // 3. revision history — references context_items.
+    tx.execute(
+        "DELETE FROM context_item_revisions
+          WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)",
+        params![workstream_id],
+    )?;
+    // 4. the item search rows, while we can still see which items they were.
+    search_delete_conn(
+        tx,
+        "DELETE FROM search_index WHERE kind = 'item' AND parent_id = ?1",
+        workstream_id,
+    )?;
+    // 5. items.
+    tx.execute(
+        "DELETE FROM context_items WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    // 6. delivery snapshots — provenance of what an Agent was told.
+    tx.execute(
+        "DELETE FROM context_deliveries WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    // 7. bindings. The Sessions they point at are left exactly as they were.
+    tx.execute(
+        "DELETE FROM session_workstream_bindings WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    // 8. the ordered path list. `workspace_paths` rows survive: they are
+    //    physical facts other Sessions and Workstreams may share, and Project /
+    //    WorkspacePath GC is `workspace::project`'s job (§10).
+    tx.execute(
+        "DELETE FROM workstream_paths WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    // 9. negative decisions about this pair. No FK points here, so nothing
+    //    else would ever remove them and they would outlive their subject.
+    tx.execute(
+        "DELETE FROM session_binding_removals WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    // 10. legacy affinity evidence: keep the row, drop the attribution.
+    tx.execute(
+        "UPDATE project_affinity_evidence SET workstream_id = NULL WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    // 11. review state (ON DELETE CASCADE — explicit for the same reason as #9).
+    tx.execute(
+        "DELETE FROM workstream_review_state WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    search_delete_conn(
+        tx,
+        "DELETE FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
+        workstream_id,
+    )?;
+    // 12. the Workstream itself.
+    tx.execute(
+        "DELETE FROM workstreams WHERE id = ?1",
+        params![workstream_id],
+    )?;
+    Ok(())
+}
+
+/// `search_index` is optional (FTS5 may be absent from the bundled SQLite), so
+/// every direct statement against it has to tolerate its absence.
+fn search_delete_conn(conn: &Connection, sql: &str, arg: &str) -> Result<()> {
+    if conn
+        .query_row("SELECT 1 FROM search_index LIMIT 1", [], |_| Ok(()))
+        .is_err()
+    {
+        return Ok(());
+    }
+    conn.execute(sql, params![arg])?;
     Ok(())
 }
 

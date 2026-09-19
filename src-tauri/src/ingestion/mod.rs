@@ -126,30 +126,68 @@ pub fn ingest_and_sync_session_nb(
     Ok((stored, applied))
 }
 
-/// Ensure a session row exists for a discovered session.
-/// Returns the internal id and whether this session is NEW to us — new
-/// sessions are the only ones allowed to claim a pending LaunchIntent.
+/// Ensure a session row exists for a discovered session, attaching its
+/// WorkspacePath through the app-wide seam (see
+/// [`crate::workspace::session::workspace_attacher`]).
 pub fn ensure_session_row(
     db: &Db,
     d: &crate::adapters::DiscoveredSession,
+) -> Result<(Session, bool)> {
+    let attacher = crate::workspace::session::workspace_attacher();
+    ensure_session_row_with(db, d, attacher.as_ref())
+}
+
+/// Ensure a session row exists for a discovered session, resolving its cwd
+/// against the injected [`WorkspaceAttaching`] seam.
+///
+/// Returns the internal row and whether this session is NEW to us — new
+/// sessions are the only ones allowed to claim a pending LaunchIntent.
+///
+/// The Session→WorkspacePath attach is discovery's only piece of workspace
+/// work, and it is deliberately not per-event: `workspace_path_id` is re-resolved
+/// only when the row is created, when its cwd moved, or when a Session with a cwd
+/// has never been attached. Ordinary ingestion performs none of it (§1.11).
+pub fn ensure_session_row_with(
+    db: &Db,
+    d: &crate::adapters::DiscoveredSession,
+    attacher: &dyn crate::workspace::WorkspaceAttaching,
 ) -> Result<(Session, bool)> {
     let title = d
         .first_user_text
         .as_deref()
         .and_then(crate::adapters::title_from_text);
     let existing = db.find_session_by_agent_id(d.agent, &d.agent_session_id)?;
+    let raw_path = d.path.to_string_lossy().to_string();
     if let Some(s) = existing {
         // Discovery just read the transcript, so it is the source of truth
         // for source-derived fields; refresh the row when it learned
         // something new (e.g. cwd read from file content after an older
-        // ingestion stored a different value). id/project_id stay as-is.
-        let raw_path = d.path.to_string_lossy().to_string();
+        // ingestion stored a different value). id stays as-is, and so does
+        // project_id — it is derived from the WorkspacePath inside the
+        // statement, never taken from here (§42.3-M3).
         let dirty = title.is_some() && s.title.is_none()
             || d.cwd.is_some() && s.cwd != d.cwd
             || s.raw_path != raw_path
             || d.started_at.is_some() && s.started_at.is_none()
             || d.last_activity_at.is_some() && s.last_activity_at != d.last_activity_at;
-        if dirty {
+        // §42.3-M2 — cwd is authoritative, so the WorkspacePath it names follows
+        // it. Re-resolve only when the cwd moved or the row has never been
+        // attached: a steady-state scan performs no workspace work at all, so
+        // the seam (which may create a WorkspacePath row) is not called per
+        // session per pass (§1.11).
+        let observed_cwd = d.cwd.as_deref().map(str::trim).filter(|p| !p.is_empty());
+        let needs_path =
+            observed_cwd.is_some() && (d.cwd != s.cwd || s.workspace_path_id.is_none());
+        let path_id = if needs_path {
+            crate::workspace::session::resolve_session_path(db.conn(), attacher, observed_cwd)?
+        } else {
+            None
+        };
+        let moved: Option<String> = match (&path_id, &s.workspace_path_id) {
+            (Some(p), current) if Some(p.as_str()) != current.as_deref() => Some(p.clone()),
+            _ => None,
+        };
+        if dirty || moved.is_some() {
             let mut updated = s;
             if updated.title.is_none() {
                 updated.title = title;
@@ -162,8 +200,23 @@ pub fn ensure_session_row(
                 updated.started_at = d.started_at.clone();
             }
             updated.last_activity_at = d.last_activity_at.clone().or(updated.last_activity_at);
+            // The path itself is deliberately NOT handed to upsert here: the
+            // attachment and the binding claims that read through it move
+            // together in the one transaction below, so an interrupted pass can
+            // never leave a claim pointing at a path the Session no longer has —
+            // and `moved` stays true until both are done, which makes the retry
+            // converge instead of double-applying.
             db.upsert_session(&updated)?;
-            return Ok((updated, false));
+            if let Some(new_path) = moved {
+                let session_id = updated.id.clone();
+                db.tx(|tx| {
+                    crate::workspace::session::move_session_to_path_conn(tx, &session_id, &new_path)
+                })?;
+            }
+            // Re-read: the cached Project is whatever the path says it is now,
+            // which is not necessarily what the caller handed us.
+            let stored = db.get_session(&updated.id)?.unwrap_or(updated);
+            return Ok((stored, false));
         }
         return Ok((s, false));
     }
@@ -173,17 +226,25 @@ pub fn ensure_session_row(
         agent_session_id: d.agent_session_id.clone(),
         title,
         cwd: d.cwd.clone(),
-        // Resolved by the caller layer that owns workspace paths; a Session
-        // discovered with no cwd keeps None and gets no fabricated path (§5.5).
-        workspace_path_id: None,
+        // §19-1/2 — resolved from the observed cwd by the seam. A Session
+        // discovered with no cwd keeps None and gets no fabricated path, and
+        // neither does one whose cwd resolves to nothing (§5.5, §7.2).
+        workspace_path_id: crate::workspace::session::resolve_session_path(
+            db.conn(),
+            attacher,
+            d.cwd.as_deref(),
+        )?,
+        // Never taken from the caller: `upsert_session` derives it from that
+        // WorkspacePath in the same statement (§42.3-M3).
         project_id: None,
-        raw_path: d.path.to_string_lossy().to_string(),
+        raw_path,
         parent_agent_session_id: d.parent_agent_session_id.clone(),
         started_at: d.started_at.clone(),
         last_activity_at: d.last_activity_at.clone(),
     };
     db.upsert_session(&s)?;
-    Ok((s, true))
+    let stored = db.get_session(&s.id)?.unwrap_or(s);
+    Ok((stored, true))
 }
 
 /// Full reconcile over every agent's enabled sources. The DB lock is taken
@@ -250,7 +311,10 @@ where
                         Ok(false) => {}
                         Err(e) => eprintln!("[reconcile] intent match failed: {}", e),
                     }
-                    record_session_project_evidence(&guard, &s);
+                    // §42.2-E11 — no name-substring Project evidence is recorded
+                    // any more. A Project is derived from the Session's
+                    // WorkspacePath (§1.10), which `ensure_session_row` has just
+                    // resolved, so this hot path does no Project work.
                 }
             }
             on_session(&s);
@@ -330,9 +394,18 @@ where
     Ok((discovered_count, total_events))
 }
 
-/// Record Project affinity *evidence* for a session. cwd / repo paths are
-/// never the Project identity itself — they are scored evidence the
-/// resolver (and the user) may act on.
+/// RETIRED (方案 §42.2-E11) — the name-substring affinity matcher.
+///
+/// It used to run on every newly discovered Session and write `cwd_match`
+/// evidence by matching `session.cwd` against a lowercased substring of
+/// `Project.name`. Once a Project name is itself derived from a path, that turns
+/// two path facts into a third, invented membership relation — and it is the
+/// amplifier behind the `~/.git` dotfiles mis-classification in §1.4. No product
+/// path calls it any more.
+///
+/// Kept, with the `project_affinity_evidence` rows it wrote, as read-only
+/// history: evidence rows are audit provenance for decisions already taken, and
+/// deleting them would rewrite why an old suggestion looked the way it did.
 pub fn record_session_project_evidence(db: &Db, session: &Session) {
     let Some(cwd) = &session.cwd else { return };
     let Ok(projects) = db.list_projects() else {
@@ -362,8 +435,11 @@ pub fn record_session_project_evidence(db: &Db, session: &Session) {
     }
 }
 
-/// Score-based project suggestion for a session (from recorded evidence).
-/// Suggests only — nothing is auto-assigned.
+/// RETIRED (方案 §11, §42.2-E11) — score-based Project suggestion built on the
+/// affinity evidence above. It already had no caller in the product; it stays
+/// compilable so old read paths keep resolving recorded history, and it still
+/// only ever *suggests*. Membership itself is derived from the Session's
+/// WorkspacePath now (§1.10).
 pub fn suggest_project_for_session(db: &Db, session: &Session) -> Option<(String, f32)> {
     db.resolve_project_affinity(&session.id).ok().flatten()
 }

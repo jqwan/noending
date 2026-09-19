@@ -54,6 +54,11 @@ pub struct NormalizeOpts<'a> {
     /// Base for relative paths. `None` means a relative input is rejected
     /// rather than guessed against `$HOME` or the process cwd — a wrong guess
     /// here would create a real WorkspacePath in the wrong place.
+    ///
+    /// Note that `..` is clamped *into* the base (`"../other"` becomes
+    /// `"<base>/other"`), which is right for user input and wrong for evidence
+    /// a tool handed you relative to some directory. Resolve those by joining
+    /// first and normalizing after — do not widen this field's meaning.
     pub base: Option<&'a str>,
     /// Home directory used to expand `~` / `~\`. `None` disables expansion.
     pub home: Option<&'a str>,
@@ -90,7 +95,14 @@ pub fn normalize_path_with(raw: &str, opts: NormalizeOpts<'_>) -> Option<String>
 /// The separator-insensitive form used to derive `path_identity`. Backslashes
 /// become `/`; nothing else changes (no case folding — see module docs).
 pub fn path_key(canonical: &str) -> String {
-    canonical.replace('\\', "/")
+    // Trailing separators are trimmed so a hand-written or externally-supplied
+    // `/repo/x/` cannot hash to a second identity for `/repo/x`. `join` already
+    // refuses to produce one; this covers anything that bypasses it, because a
+    // split identity would give one directory two Projects. The bare root is
+    // left alone — trimming it would give `""`.
+    let trimmed = canonical.trim_end_matches(['/', '\\']);
+    let base = if trimmed.is_empty() { canonical } else { trimmed };
+    base.replace('\\', "/")
 }
 
 /// Deterministic WorkspacePath id for a canonical path.
@@ -298,6 +310,18 @@ fn split_root(input: &str, style: PathStyle, base: Option<&str>) -> Option<(Stri
 fn join(root: &str, segments: &[String], style: PathStyle) -> String {
     let sep = if style.is_windows() { '\\' } else { '/' };
     let mut out = root.to_string();
+    if segments.is_empty() {
+        // `.` / `..` can collapse a path back onto its root. Return the root
+        // alone: a trailing separator would give one directory two spellings in
+        // a UNIQUE column — and therefore two WorkspacePaths and two Projects.
+        // A bare drive root is the exception: `C:` alone is drive-*relative*,
+        // a different directory than `C:\` whenever that drive's cwd is not its
+        // root, so the separator is part of what makes it the root.
+        if out.len() == 2 && out.ends_with(':') {
+            out.push(sep);
+        }
+        return out;
+    }
     if !out.ends_with('/') && !out.ends_with('\\') {
         out.push(sep);
     }
@@ -377,6 +401,34 @@ mod tests {
                 home: Some("C:\\Users\\tester"),
             },
         )
+    }
+
+    #[test]
+    fn a_collapsed_path_never_grows_a_trailing_separator() {
+        // `canonical_path` is a UNIQUE identity column, so `/repo/x` and
+        // `/repo/x/` must never both be produced — otherwise one directory gets
+        // two WorkspacePaths, and (through Project ownership) two homes.
+        let base = NormalizeOpts {
+            style: Some(PathStyle::Unix),
+            base: Some("/repo/x"),
+            home: Some("/Users/tester"),
+        };
+        assert_eq!(normalize_path_with(".", base).as_deref(), Some("/repo/x"));
+        assert_eq!(
+            normalize_path_with("./", base).as_deref(),
+            Some("/repo/x")
+        );
+        assert_eq!(
+            normalize_path_with("sub/..", base).as_deref(),
+            Some("/repo/x")
+        );
+        let collapsed = normalize_path_with(".", base).map(|c| path_identity(&c));
+        assert_eq!(collapsed.as_deref(), path_identity_of("/repo/x").as_deref());
+        assert_eq!(
+            collapsed.as_deref(),
+            path_identity_of("/repo/x/").as_deref(),
+            "the same directory resolves to the same id from either spelling"
+        );
     }
 
     #[test]
