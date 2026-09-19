@@ -85,77 +85,92 @@ export default function SourceDetailModal({
             </div>
           )}
 
-          {detail.session_id && (
+          {/* 来源会话已永久删除（Session Lifecycle & Deletion §28）：这不是
+              tombstone，只是「来源已不存在」的事实陈述。后端此时不再返回
+              Session / 事件 / 证据等字段，UI 也不该再尝试渲染它们。 */}
+          {detail.source_type === "deleted_session" ? (
             <div className="row-line">
               <div>
-                <div className="settings-row-label">所属 Session</div>
-                <div className="settings-row-hint">
-                  {detail.session_title ?? detail.session_id}
+                <div className="settings-row-label">来源会话</div>
+                <div className="settings-row-hint">产生该修订版本的原始 Session</div>
+              </div>
+              <span className="muted small">来源会话已被永久删除</span>
+            </div>
+          ) : (
+            <>
+              {detail.session_id && (
+                <div className="row-line">
+                  <div>
+                    <div className="settings-row-label">所属 Session</div>
+                    <div className="settings-row-hint">
+                      {detail.session_title ?? detail.session_id}
+                    </div>
+                  </div>
+                  {onNavigateSession && (
+                    <button
+                      className="btn small ghost"
+                      onClick={() => {
+                        onClose();
+                        onNavigateSession(detail.session_id!);
+                      }}
+                    >
+                      查看 Session
+                    </button>
+                  )}
                 </div>
-              </div>
-              {onNavigateSession && (
-                <button
-                  className="btn small ghost"
-                  onClick={() => {
-                    onClose();
-                    onNavigateSession(detail.session_id!);
-                  }}
-                >
-                  查看 Session
-                </button>
               )}
-            </div>
-          )}
 
-          {detail.event_sequence !== null && detail.event_sequence !== undefined && (
-            <div className="row-line">
-              <div>
-                <div className="settings-row-label">消息序号</div>
-                <div className="settings-row-hint">在原始转录记录中的事件序号</div>
-              </div>
-              <span className="mono small">#{detail.event_sequence}</span>
-            </div>
-          )}
+              {detail.event_sequence !== null && detail.event_sequence !== undefined && (
+                <div className="row-line">
+                  <div>
+                    <div className="settings-row-label">消息序号</div>
+                    <div className="settings-row-hint">在原始转录记录中的事件序号</div>
+                  </div>
+                  <span className="mono small">#{detail.event_sequence}</span>
+                </div>
+              )}
 
-          {detail.event_ts && (
-            <div className="row-line">
-              <div>
-                <div className="settings-row-label">观测时间</div>
-                <div className="settings-row-hint">{detail.event_ts}</div>
-              </div>
-              <span className="small muted">{timeAgo(detail.event_ts)}</span>
-            </div>
-          )}
+              {detail.event_ts && (
+                <div className="row-line">
+                  <div>
+                    <div className="settings-row-label">观测时间</div>
+                    <div className="settings-row-hint">{detail.event_ts}</div>
+                  </div>
+                  <span className="small muted">{timeAgo(detail.event_ts)}</span>
+                </div>
+              )}
 
-          {detail.evidence && (
-            <div style={{ marginTop: 6 }}>
-              <div className="section-label" style={{ margin: "0 0 6px" }}>原文证据</div>
-              <div
-                style={{
-                  padding: "10px 12px",
-                  background: "var(--bg-panel)",
-                  borderRadius: "var(--radius-sm)",
-                  borderLeft: "3px solid var(--accent)",
-                  fontSize: 13,
-                  lineHeight: 1.5,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  fontFamily: "var(--font-mono, monospace)",
-                }}
-              >
-                {detail.evidence}
-              </div>
-            </div>
-          )}
+              {detail.evidence && (
+                <div style={{ marginTop: 6 }}>
+                  <div className="section-label" style={{ margin: "0 0 6px" }}>原文证据</div>
+                  <div
+                    style={{
+                      padding: "10px 12px",
+                      background: "var(--bg-panel)",
+                      borderRadius: "var(--radius-sm)",
+                      borderLeft: "3px solid var(--accent)",
+                      fontSize: 13,
+                      lineHeight: 1.5,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      fontFamily: "var(--font-mono, monospace)",
+                    }}
+                  >
+                    {detail.evidence}
+                  </div>
+                </div>
+              )}
 
-          {detail.sync_run_id && (
-            <div className="row-line">
-              <div>
-                <div className="settings-row-label">Sync Run ID</div>
-                <div className="settings-row-hint">原子合并提交批次</div>
-              </div>
-              <span className="mono small">{detail.sync_run_id}</span>
-            </div>
+              {detail.sync_run_id && (
+                <div className="row-line">
+                  <div>
+                    <div className="settings-row-label">Sync Run ID</div>
+                    <div className="settings-row-hint">原子合并提交批次</div>
+                  </div>
+                  <span className="mono small">{detail.sync_run_id}</span>
+                </div>
+              )}
+            </>
           )}
 
           {detail.source_ref && (

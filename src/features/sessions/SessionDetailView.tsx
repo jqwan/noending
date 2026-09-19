@@ -6,6 +6,7 @@ import { Modal, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { type SessionMessageData } from "./SessionMessage";
 import ResumeSessionModal from "./ResumeSessionModal";
+import PermanentDeleteModal from "./PermanentDeleteModal";
 import {
   agentDisplayLabel,
   bindingRoleLabel,
@@ -42,6 +43,11 @@ export default function SessionDetailView({ sessionId, navigate }: {
   const [bindingOpen, setBindingOpen] = useState(false);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // 回收站动作（Session Lifecycle & Deletion §36）：确认弹窗、执行中的 busy、
+  // 以及从详情页直接发起的永久删除 Modal。
+  const [confirmTrash, setConfirmTrash] = useState(false);
+  const [trashBusy, setTrashBusy] = useState(false);
+  const [purgeOpen, setPurgeOpen] = useState(false);
   /**
    * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字——
    * 那是 v0.2 之前手工指派留下的历史标签（§43.4-2）。派生链自带名字，
@@ -115,6 +121,44 @@ export default function SessionDetailView({ sessionId, navigate }: {
   const untitled = title === UNTITLED_SESSION;
   const cwd = (session.cwd ?? "").trim();
   const ordered = primaryFirst(bindings, ([b]) => b.role);
+  /** 单一生命周期权威（v13）：null = 正常，时间戳 = 在回收站（§3）。 */
+  const trashed = session.trashed_at !== null;
+
+  /**
+   * 移入回收站（§36）：全局隐藏，不删任何数据。成功后回到 Sessions 列表——
+   * 这个页面展示的执行事实仍然有效，但入口动作（继续 / 刷新）已经不适用。
+   */
+  const doTrash = async () => {
+    if (trashBusy) return;
+    setTrashBusy(true);
+    try {
+      await api.trashSession(sessionId);
+      showToast("已移入回收站");
+      setConfirmTrash(false);
+      navigate({ view: "sessions" });
+    } catch (e) {
+      console.error(e);
+      showToast(`移入回收站失败：${String(e)}`);
+      setTrashBusy(false);
+    }
+  };
+
+  /** 从回收站恢复：trashed_at 清空后本页就地回到正常形态。 */
+  const doRestore = async () => {
+    if (trashBusy) return;
+    setTrashBusy(true);
+    try {
+      await api.restoreSession(sessionId);
+      showToast("已恢复");
+      refresh();
+    } catch (e) {
+      // 后端可能拒绝：例如还有未取消的永久删除任务（须先取消任务）。
+      console.error(e);
+      showToast(String(e));
+    } finally {
+      setTrashBusy(false);
+    }
+  };
   /** 派生链自带的路径与 Project（§43.3-M29：详情只承认这一种真相）。 */
   const workspacePath = detail.workspace_path;
   const legacyProjectCell = projectCellFor(session, projectNameById);
@@ -136,12 +180,18 @@ export default function SessionDetailView({ sessionId, navigate }: {
         back="Sessions"
         onBack={() => navigate({ view: "sessions" })}
         title={title}
-        actions={
+        actions={trashed ? (
+          // 回收站中的会话：摄入已停止、后端拒绝 Resume——两个入口都如实呈现为不可用。
+          <button className="btn primary" disabled
+            title="回收站中的会话不能继续；先在上面的横幅里恢复它。">
+            继续
+          </button>
+        ) : (
           <>
             <button className="btn ghost" onClick={doSync} disabled={syncing}>刷新</button>
             <button className="btn primary" onClick={() => setResumeOpen(true)}>继续</button>
           </>
-        }
+        )}
       >
         <div className="ws-detail-head-meta">
           <span className="row" style={{ gap: 6 }}>
@@ -149,10 +199,30 @@ export default function SessionDetailView({ sessionId, navigate }: {
             {agentDisplayLabel(session.agent)}
           </span>
           {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
+          {trashed && <span className="badge warn">回收站</span>}
           <span className="dot-sep" />
           <span>{messages.length > 0 ? `${messages.length} 条消息` : "尚无消息"}</span>
         </div>
       </PageHeader>
+
+      {/* 回收站横幅（§36）：替代正常动作区，恢复 / 永久删除都在这里。 */}
+      {trashed && (
+        <div className="session-trash-banner">
+          <div style={{ minWidth: 0 }}>
+            <b>该会话在回收站中</b>
+            <div className="small muted" style={{ marginTop: 2 }}>
+              移入回收站：{formatDateTime(session.trashed_at)}。NoEnding 已停止摄入这个会话；
+              Agent 原始会话不会被删除，随时可以恢复。
+            </div>
+          </div>
+          <div className="row" style={{ flex: "none", gap: 8 }}>
+            <button className="btn small" disabled={trashBusy} onClick={doRestore}>恢复</button>
+            <button className="btn small" disabled={trashBusy} onClick={() => setPurgeOpen(true)}>
+              永久删除…
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 执行事实：一次会话「在什么时候、哪个目录、叫什么 ID」。值可整段选中并复制。 */}
       <div style={{
@@ -290,6 +360,52 @@ export default function SessionDetailView({ sessionId, navigate }: {
             <button className="btn small" onClick={doSync} disabled={syncing}>刷新</button>
           </div>
         </div>
+      )}
+
+      {/* 危险操作（§36）：只在正常状态下出现；回收站里的动作在顶部横幅。 */}
+      {!trashed && (
+        <section className="rail-section" style={{ marginTop: 34 }}>
+          <div className="section-label">危险操作</div>
+          <p className="muted small" style={{ margin: "4px 0 10px", maxWidth: "72ch" }}>
+            移入回收站 = 在 NoEnding 中全局隐藏该 Session：不再出现在列表、搜索与继续入口里，
+            摄入也会停止。Agent 原始会话不会被删除，随时可以从 Sessions 页的「回收站」恢复。
+          </p>
+          <button className="btn small" disabled={trashBusy} onClick={() => setConfirmTrash(true)}>
+            移入回收站…
+          </button>
+        </section>
+      )}
+
+      {confirmTrash && (
+        <Modal title="移入回收站" onClose={() => { if (!trashBusy) setConfirmTrash(false); }}>
+          <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
+            <b>{title}</b> 会从 Sessions 列表、搜索与继续入口中消失，出现在 Sessions 页的「回收站」里。
+          </p>
+          {/* §36 要求把两个概念摆在同一处明确区分：「从 Workstream 移除」只改
+              Workstream 成员关系（在「编辑关联」弹窗里），这里是全局回收站。 */}
+          <div className="card hairline" style={{ marginBottom: 12 }}>
+            <p style={{ margin: "0 0 6px" }}>
+              <b>从 Workstream 移除</b> = 只修改这个 Workstream 的成员关系。
+            </p>
+            <p style={{ margin: 0 }}>
+              <b>移入回收站</b> = 在 NoEnding 中全局隐藏该 Session。Agent 原始会话不会被删除。
+            </p>
+          </div>
+          <div className="row" style={{ justifyContent: "flex-end" }}>
+            <button className="btn" onClick={() => setConfirmTrash(false)} disabled={trashBusy}>取消</button>
+            <button className="btn primary" onClick={doTrash} disabled={trashBusy}>
+              {trashBusy ? "处理中…" : "移入回收站"}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {purgeOpen && (
+        <PermanentDeleteModal
+          sessionId={sessionId}
+          onClose={() => { setPurgeOpen(false); refresh(); }}
+          onDeleted={() => { setPurgeOpen(false); navigate({ view: "sessions" }); }}
+        />
       )}
 
       {bindingOpen && (

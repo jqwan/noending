@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
-  ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project,
-  ProjectDetailData, ProjectWorkstreamRow, WorkspaceSettings,
+  ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult,
+  PermanentDeletionPreview, PermanentDeletionResult, Project,
+  ProjectDetailData, ProjectWorkstreamRow, SessionDeletionJob, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
@@ -120,9 +121,25 @@ export const api = {
       includeClosed: includeClosed ?? false,
     }),
 
-  listSessions: (projectId?: string, agent?: Agent) =>
-    invoke<Session[]>("list_sessions", { projectId: projectId ?? null, agent: agent ?? null }),
+  listSessions: (projectId?: string, agent?: Agent, scope?: "active" | "trash" | "all") =>
+    invoke<Session[]>("list_sessions", {
+      projectId: projectId ?? null,
+      agent: agent ?? null,
+      scope: scope ?? null,
+    }),
   listAllSessions: () => invoke<Session[]>("list_sessions", { projectId: null, agent: null }),
+  // Session Lifecycle & Deletion v0.1: the UI submits ids only — the
+  // deletion plan and its targets never travel from the frontend.
+  trashSession: (sessionId: string) => invoke<Session>("trash_session", { sessionId }),
+  restoreSession: (sessionId: string) => invoke<Session>("restore_session", { sessionId }),
+  prepareSessionPermanentDelete: (sessionId: string) =>
+    invoke<PermanentDeletionPreview>("prepare_session_permanent_delete", { sessionId }),
+  executeSessionPermanentDelete: (jobId: string) =>
+    invoke<PermanentDeletionResult>("execute_session_permanent_delete", { jobId }),
+  cancelSessionPermanentDelete: (jobId: string) =>
+    invoke<void>("cancel_session_permanent_delete", { jobId }),
+  getSessionDeletionJob: (sessionId: string) =>
+    invoke<SessionDeletionJob | null>("get_session_deletion_job", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   bindSessionWorkstream: (sessionId: string, workstreamId: string, role: string) =>
     invoke<void>("bind_session_workstream", { sessionId, workstreamId, role }),

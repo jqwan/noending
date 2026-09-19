@@ -287,6 +287,22 @@
 .event.system { opacity: 0.65; }
 .event.system .body { font-size: 12px; color: var(--text-muted); }
 
+/* ---------- Session trash / permanent delete (Session Lifecycle & Deletion §35-§38) ---------- */
+.session-trash-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid var(--warning);
+  background: var(--warning-wash);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  margin-top: 20px;
+}
+/* 永久删除预览里的「将永久删除 / 保留」清单（§20）。 */
+.purge-list { margin: 6px 0 0; padding-left: 18px; }
+.purge-list li { margin: 3px 0; font-size: 13px; overflow-wrap: anywhere; }
+
 /* ---------- Chat (Assistant) ---------- */
 .chat-log { display: flex; flex-direction: column; gap: 16px; margin: 14px 0; }
 .chat-msg { max-width: min(76%, 860px); }

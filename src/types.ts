@@ -151,6 +151,53 @@ export interface Session {
   parent_agent_session_id: string | null;
   started_at: string | null;
   last_activity_at: string | null;
+  /** Single lifecycle authority: null = Normal, timestamp = 回收站 (v13). */
+  trashed_at: string | null;
+}
+
+/** session_deletion_jobs row — transient coordination, never a tombstone. */
+export interface SessionDeletionJob {
+  id: string;
+  session_id: string;
+  /** prepared | deleting_source | failed | stale */
+  state: "prepared" | "deleting_source" | "failed" | "stale";
+  plan_json: string;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One file the permanent deletion will remove (frozen by the adapter). */
+export interface SourceDeletionTarget {
+  path: string;
+  kind: string;
+  file_identity: string;
+  size: number;
+  sha256: string;
+}
+
+/** §20 preview returned by prepare_session_permanent_delete. */
+export interface PermanentDeletionPreview {
+  job_id: string;
+  session_id: string;
+  session_title: string | null;
+  agent: Agent;
+  agent_session_id: string;
+  source_targets: SourceDeletionTarget[];
+  event_count: number;
+  binding_count: number;
+  sync_run_count: number;
+  context_delivery_count: number;
+  launch_intent_count: number;
+  context_revision_redaction_count: number;
+}
+
+/** §21/§22 outcome of execute_session_permanent_delete. */
+export interface PermanentDeletionResult {
+  purged: boolean;
+  redacted_revisions: number;
+  job: SessionDeletionJob | null;
+  error: string | null;
 }
 
 export interface SessionEvent {
