@@ -3334,3 +3334,130 @@ discovered 8 · failed 0 · GC 0。Git 家族合并确实发生了（一个 Proj
 折叠成一个“其他”；
 (c) Projects 列表按 Session 数排序 + 默认隐藏 1-Session Project。
 Main 的建议：先做 (a)（零风险、纯展示），(b) 需要用户点头，(c) 属于 Wave 2 之后。
+
+## 43.7 Wave 2 — E / F1 / F2 交付与 Main 集成
+
+各 agent 的交付（base 均为派发时记录的 HEAD，已用 `git diff --stat` 核对越界）：
+
+```text
+F1 agent/ui-projects-workstreams  7ff2d79 a875daa ac4cb71 19ee6b6   projects/** workstreams/**
+F2 agent/ui-sessions-settings     d5f2857 3bb9863                   sessions/** settings/**
+E  agent/launcher-workspace        8d2c168  (base 7a207e9)           launcher/** + 3 个测试文件
+```
+
+合入顺序 F2 → F1 → E，**零冲突**（三者文件集互不相交，这条纪律第二次生效）。Main
+补三个 commit：
+
+```text
+65cef68 把 NoEnding Home 注入所有启动/同步入口（E 的 §21-2/3 在生产里此前是惰性的）
+18bcff4 兜底目录不得进入 Workstream 路径列表（M30）
+35c8c98 前端桥接收尾 + 预览显示启动目录来源
+```
+
+**WAVE2_SHA = `35c8c98`**。Wave 2 gate：`cargo fmt --check` 通过、`cargo check
+--all-targets` **0 warning**、`cargo test --all-targets` **359 passed / 0 failed**、
+`pnpm build` 通过。
+
+集成期核查出的三处“报告与代码不符”（这就是 Main 必须自己跑一遍的理由）：
+
+1. **E 说 `latest_session_cwd_for_workstreams` 零调用者**——生产路径确实为零，但
+   `tests/workstream_cards_test.rs` 有 3 处，而且那个测试钉的正是被 §13 废除的旧
+   authority（“Workstream 的默认目录 = 最近 Session 的 cwd”）。函数与测试一起删除；
+   留着它等于留第二个 cwd authority 的活证据。
+2. **E 说 `CwdResolution` 已实现**——后端属实，且已进指纹；但**没有任何 UI 读它**，
+   所以 §13「发生 fallback 必须在 UI 明确显示」在 E 交付时仍然只是名义成立。Main 在
+   `LaunchPreviewRows.tsx` 补 `CwdRow`：显示“启动来源：哪一层”，并把后端的 `note`
+   以 warning 色渲染。用户看到 `~/.noending/workspace` 时不可能自己推断出那是降级。
+3. **F1 说 Rust 已经在发 `path_count`**——核实为真（`commands/workstream.rs:189,265`），
+   已补进 `WorkstreamCardData`。
+
+顺带发现并修掉的桥接谎言（不属于任何 agent 的错，是 Wave 0/1 拆分留下的）：
+`ContextMutation` 的 TS 镜像把 Rust 的 `source_refs: Vec<String>` 写成了
+`source_ref: string`（5 个 variant 全错），`create_workstream.project_id` 写成非空；
+`LaunchResult` 少了 `launch_intent_id`。另外 `get_app_info` 与
+`get_workspace_settings` 都在报同一个 Home，只有前者读的是**真正打开的那个 db**——
+把那个优点并进 settings，`get_app_info` / `AppInfo` 整体退役（§29 单一 authority）。
+
+## 43.8 对 agent「方案有错」论点的裁决
+
+**E-(a)「每个新输入都必须写明谁注入它」— 采纳，写成 M31。** §21 只说“launcher 要用
+默认工作目录”，没说 Home 怎么进到 launcher；结果就是 E 只能做成“带兼容入口的显式参数”，
+在它的 lane 里永远无法闭环，表现为“半完成但全绿”。这不是 E 的实现问题，是方案的派发模板
+问题：以后凡是往指纹/Launch 里加输入，条目必须写成
+`输入 → 数据来源 → 由哪个 Main-owned 文件注入`，缺最后一环视为未派发。
+
+**E-(b)「兜底目录会被洗进 Workstream 路径列表」— 采纳，已实现为 M30。** 这是 Wave 2
+最重要的产品发现。落法：`record_user_binding_growing(..., grow_path_list)`，
+launcher 在 `source == DefaultWorkspace` 时传 `false`；`apply_match` 多收一个
+`&LaunchWorkspace`，比较 `sessions.workspace_path_id` 与默认工作目录的 identity，
+相同则不增长。绑定本身照旧是用户强写（`explicit_launch_selection`，不动 §42.3 的
+tombstone / strong-set 判据——新增一个 source 常量要改 4 处 authority 判断，漏一处
+就把用户绑定降级，风险更大）。回归测试：
+`a_default_workspace_fallback_binds_without_teaching_the_workstream_that_path`，
+含一个“用户手打的目录仍然增长列表”的反向对照。
+
+**E-(c)「M15 的措辞和它引用的代码互相矛盾」— E 对，代码错，已按方案的句子实现。**
+`§42.3-M15` 写“双双 AMBIGUOUS”，分支却只标 `scored[0]`，等于把另一个候选藏进
+PENDING。保留 E 的版本（所有并列候选都标 AMBIGUOUS），并把它当作 §42.3-M15 的正式
+语义：这条不再回头。测试 `concurrent_default_workspace_launches_stay_ambiguous` 是锚。
+
+**E-(d)「§12 该哈希的是“解析结果”，不是 cwd 字符串」— 采纳，写成 M32。** 目录字符串
+不变但已不可用（被删、挂载点消失）是最关心的失效模式，只哈希 `cwd` 永远不会发现。
+现在进指纹的是 `cwd` + `source` + `workstream_id` + `path_position` + `fallback`，
+外加 `session_path` / `claim`。§12 的文字按这个口径理解，不再单独改（历史条目）。
+
+**E-(e)「explicit 层的目录不存在时该怎么办」— 不采纳硬拒绝，维持“照办 + note”。**
+用户亲手打的目录被 NoEnding 换掉，比在一个不存在的目录里启动更糟（那是替用户做决定）。
+`platform/` 已经知道 macOS `cd` 失败会静默落回 `$HOME`（M21），所以这里的诚实做法是
+预览就说“这个目录不存在”，Launch 不追加解释。真要硬拒绝，那是命令层的产品决定，
+需要 §22 文案一起改，归到 Wave 3 之后。
+
+**E-(f)「删掉无后缀兼容变体，让编译器禁止没有 Home 的 launcher」— 推迟，理由记录。**
+集成后生产路径对无后缀变体的调用为 **0**（已核），剩下的调用全在测试里（≈50 处，
+`prepare_new` / `launch_prepared` / `apply_match` 等）。它们的风险是“将来有人误用”，
+不是“现在错”。删它要一次性动 4 个测试文件，收益是编译期防呆——值得做，但不该塞在
+Wave 2 收尾里做，因为它会掩盖同一轮里真正需要看的 diff。列入 §43.9 Wave 3 之后的收尾项。
+
+**F2-1「§43.4-2 与 M29 冲突：派生链没有 Project 的 Session 该显示什么」— F2 对，取“弱化显示旧标签”。**
+§43.4-2 说“不显示 Project”，M29 说详情页只走权威链。但列表里一个 legacy Session 身上
+带着 v11 时期手工挂的标签，直接抹掉等于让用户以为数据丢了（§41 的失败模式）。折中：
+标签保留但 dimmed + 标注为旧数据，不做任何可点击的 Project 归属；派生链一旦有值就替换它。
+这条替换 §43.4-2 的口径。
+
+**F2-2「NoEnding Home 与产品里的“首页”撞名」— 采纳 F2 的担忧，但不改词。**
+UI 里“首页”= Home view，Settings 里“NoEnding Home”= 数据主目录，两个 “Home” 撞在
+一次会话里确实会误读。裁决：保留 **NoEnding Home** 作为领域词的英文原名（§2 词表、
+`~/.noending`、bootstrap pointer 都用它），Settings 里紧跟一句“NoEnding 存放数据的
+主目录”，与“首页”并列出现时以中文说明为准。改名（“数据主目录”）会牵动
+`workspace/home.rs` 的文档、迁移注释和用户已见过的路径，收益不及成本；若 §33 dogfood
+里真的读到歧义反馈，再改。
+
+**F1-1「§22 的删除警告过度承诺」— 采纳。** §22 的措辞暗示“删除路径会带走它的
+Session”，实际语义是：只有**通过这条路径进来**的绑定会被带走（`workstream_path_id`
+claim 命中的那些），无 claim 的绑定不动。文案改为“由这条路径带来的 N 个 Session”，
+并且 N 必须由后端算，不在前端猜。M30 之后这个数字还多了一类兜底 Session。
+
+**F1-2「§11 的 `get_project_detail.sessions[]` 没有上限」— 属实，Wave 3 之后处理。**
+核实：`workspace/project.rs:1008-1013` 的 `ProjectDetail.sessions: Vec<Session>` 无
+LIMIT。§43.6 的真实语料里 “Tmp” 一个 Project 就挂 393 个 Session，整个 `Session` 行
+（含 `raw_path`、`title`）一次进 IPC。v0.2 阶段先接受（详情页可用，只是胖），但
+§33 dogfood 若在 Windows 上表现明显，就改成 `sessions(limit, offset)`。不允许的解法是
+前端截断——那会让“Project 有多少 Session”这个数自己撒谎。
+
+## 43.9 Wave 3（Agent G）派发时必须带上
+
+1. base = **`35c8c98`**（WAVE2_SHA）。G 只做 §24 / §25 / §26 的审计与跨平台，
+   不新增智能（§40）、不改 Context Intelligence / Delivery（§31）。
+2. 已生效的新规则：**M30**（兜底目录不进路径列表）、**M31**（新输入必须写明注入者）、
+   **M32**（指纹哈希解析结果而非 cwd 字符串）、§42.3-M15 的“全部并列候选 AMBIGUOUS”。
+3. 必查项（Main 自己没查完的）：
+   * `list_sessions(projectId)` 仍在按 `sessions.project_id` **缓存**过滤
+     （`storage/mod.rs:1277-1286`：`AND project_id = ?{}`，Main 已核实）。这是把派生列
+     当 authority 用。§28 的 grep 名单里没有它，所以没人负责；G 要给出结论：要么改成
+     走 `workspace_path_id → project_id` 的权威链，要么删参数。
+   * 无后缀 launcher 变体的删除（E-(f)），以及删除后 4 个测试文件的等价性。
+   * §42.5 T1–T4 落进 `.github/workflows/ci.yml`：T1 数 `generate_handler!` 的条目
+     （不是注释里的提及），T2 必须和 `UPDATE sessions` 配对，否则正则会把注释也算进去。
+   * §28 全量 grep 时，`default_cwd` 允许出现在 legacy schema / migration / 冻结列的
+     guard 测试里；`project_resources` 表本身保留（legacy 读），命令不注册。
+4. G 不改 UI 文案；文案问题按 §43.8 的口径报给 Main。

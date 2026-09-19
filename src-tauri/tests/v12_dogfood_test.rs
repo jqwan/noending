@@ -225,7 +225,10 @@ fn v12_migration_rehearsal_on_a_real_copy() {
 fn v12_reconcile_rehearsal_on_a_real_copy() {
     let Some(path) = target() else { return };
     let home = noending::workspace::home::NoEndingHome::new(
-        &std::env::temp_dir().join("noending-rehearsal-home").display().to_string(),
+        &std::env::temp_dir()
+            .join("noending-rehearsal-home")
+            .display()
+            .to_string(),
         std::env::var("HOME").ok().as_deref(),
     )
     .expect("synthetic home");
@@ -252,9 +255,8 @@ fn v12_reconcile_rehearsal_on_a_real_copy() {
     }
 
     let db = db.into_inner().unwrap();
-    let mut st = db
-        .0
-        .prepare(
+    let mut st =
+        db.0.prepare(
             "SELECT p.name, p.git_id IS NOT NULL,
                     (SELECT COUNT(*) FROM workspace_paths w WHERE w.project_id = p.id),
                     (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id)

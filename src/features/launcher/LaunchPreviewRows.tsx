@@ -6,6 +6,8 @@ import {
   type Agent,
   type AgentRuntimeOverrides,
   type ContextDeliveryLevel,
+  type CwdResolution,
+  type CwdSource,
 } from "../../types";
 
 /**
@@ -103,33 +105,63 @@ export function AgentRow({
   );
 }
 
+/** §13 每一层的中文名。「用户选择的目录」而非「explicit」——词表 §2 说中文。 */
+const CWD_SOURCE_LABELS: Record<CwdSource, string> = {
+  explicit: "你指定的目录",
+  session_cwd: "Session 上次的目录",
+  workstream_path: "Workstream 的工作路径",
+  default_workspace: "NoEnding 默认工作区",
+  unresolved: "未解析",
+};
+
+export function cwdSourceLabel(resolution: CwdResolution): string {
+  const base = CWD_SOURCE_LABELS[resolution.source];
+  if (resolution.source === "workstream_path" && resolution.path_position) {
+    return `${base} · 第 ${resolution.path_position + 1} 条`;
+  }
+  return base;
+}
+
 /**
- * 工作目录：显示 `resolve_new_session_cwd` 的解析结果，不在前端重算优先级，
- * 第一版只读（开放编辑需要后端新增入参，见 §15 默认处理第 4 条）。
+ * 工作目录：显示 `resolve_new_cwd` / `resolve_resume_cwd` 的解析结果，不在前端
+ * 重算优先级，第一版只读（开放编辑需要后端新增入参，见 §15 默认处理第 4 条）。
  * `pending` 表示 Prepare 还没回来——此时不许把"还没算出来"说成"没有目录"。
+ *
+ * 发生 fallback 时必须说出来（§13）：来源标签 + 后端的 `note`，而不是只显示一个
+ * 目录字符串——用户看到 `/Users/me/.noending/workspace` 猜不出那是降级结果。
  */
 export function CwdRow({
   cwd,
   pending,
+  resolution,
 }: {
   cwd: string | null | undefined;
   pending?: boolean;
+  resolution?: CwdResolution | null;
 }) {
+  const hint = pending
+    ? "准备中…"
+    : resolution
+      ? `启动来源：${cwdSourceLabel(resolution)}；它不决定 Workstream 身份`
+      : cwd
+        ? "Session 的启动目录；它不决定 Workstream 身份"
+        : "未解析出目录，Session 从 Agent 自身的默认位置开始";
   return (
-    <PreviewRow
-      label="工作目录"
-      hint={
-        pending
-          ? "准备中…"
-          : cwd
-          ? "Session 的启动目录；它不决定 Workstream 身份"
-          : "未解析出目录，Session 从 Agent 自身的默认位置开始"
-      }
-    >
-      <span className="badge" style={{ maxWidth: 240, overflowWrap: "anywhere" }}>
-        {pending && !cwd ? "—" : cwd || "未指定"}
-      </span>
-    </PreviewRow>
+    <>
+      <PreviewRow label="工作目录" hint={hint}>
+        <span className="badge" style={{ maxWidth: 240, overflowWrap: "anywhere" }}>
+          {pending && !cwd ? "—" : cwd || "未指定"}
+        </span>
+      </PreviewRow>
+      {resolution?.fallback && (
+        <div
+          className="settings-row-hint"
+          style={{ color: "var(--warning)", marginTop: -8, paddingLeft: 2 }}
+        >
+          {resolution.note || "本次没有从这条流程通常的目录启动"}
+        </div>
+      )}
+    </>
   );
 }
 

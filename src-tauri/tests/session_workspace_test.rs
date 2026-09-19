@@ -28,6 +28,7 @@ use noending::domain::{
 };
 use noending::error::Result;
 use noending::ingestion::{ensure_session_row_with, ingest_session, reconcile_with_engine};
+use noending::launcher::LaunchWorkspace;
 use noending::storage::session_paths::{
     attach_session_workspace_path_conn, reconcile_binding_paths_conn,
     refresh_sessions_project_for_path_conn,
@@ -1164,7 +1165,7 @@ fn reconcile_discovers_attaches_and_records_no_affinity_evidence() {
         SyncEngine::from_settings(&guard)
     };
     let seen = AtomicUsize::new(0);
-    reconcile_with_engine(&db, &engine, &|_| {
+    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {
         seen.fetch_add(1, Ordering::SeqCst);
     })
     .unwrap();

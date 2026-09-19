@@ -249,9 +249,14 @@ pub fn ensure_session_row_with(
 
 /// Full reconcile over every agent's enabled sources. The DB lock is taken
 /// per session; `on_session` observes each session being processed.
+///
+/// `workspace` is §13's tier-3 fact, needed because a freshly discovered
+/// Session may claim a pending LaunchIntent: matching it asks whether that
+/// Session's cwd is just the shared default workspace, which is not in the DB.
 pub fn reconcile_with_engine<F>(
     db_lock: &Mutex<Db>,
     engine: &SyncEngine,
+    workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
@@ -304,7 +309,7 @@ where
                 // LaunchIntent (crash recovery included).
                 {
                     let guard = crate::sync::lock_db(db_lock)?;
-                    match crate::launcher::try_match_launch_intents(&guard, &s) {
+                    match crate::launcher::try_match_launch_intents_in(&guard, &s, workspace) {
                         Ok(true) => {
                             eprintln!("[reconcile] launch intent matched to session {}", s.id)
                         }

@@ -334,9 +334,38 @@ pub fn record_user_binding(
     source: &str,
     confidence: f64,
 ) -> Result<()> {
+    record_user_binding_growing(
+        db,
+        session_id,
+        workstream_id,
+        role,
+        source,
+        confidence,
+        true,
+    )
+}
+
+/// [`record_user_binding`] with §1.7's path-list gate made explicit.
+///
+/// `grow_path_list = false` records the same user-strong binding but refuses to
+/// add the Session's directory to the Workstream's ordered list. The launcher
+/// passes `false` when the directory it launched into was NoEnding's own default
+/// workspace: the user chose the *Workstream*, never that directory, so letting
+/// it into the list would turn an app-invented fallback into durable Workstream
+/// state — one the user then has to notice and remove, and whose removal (§1.6)
+/// takes the Sessions under it with it.
+pub fn record_user_binding_growing(
+    db: &Db,
+    session_id: &str,
+    workstream_id: &str,
+    role: &str,
+    source: &str,
+    confidence: f64,
+    grow_path_list: bool,
+) -> Result<()> {
     check_role(role)?;
-    let append =
-        source == binding_source::EXPLICIT_LAUNCH || source == binding_source::USER_ASSIGNED;
+    let append = grow_path_list
+        && (source == binding_source::EXPLICIT_LAUNCH || source == binding_source::USER_ASSIGNED);
     db.tx(|tx| {
         let claim = resolve_binding_path_conn(tx, session_id, workstream_id, None, append)?;
         insert_binding_conn(

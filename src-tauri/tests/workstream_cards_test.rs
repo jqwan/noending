@@ -185,68 +185,6 @@ fn installation(agent: Agent) -> noending::platform::exec_resolver::AgentInstall
 }
 
 #[test]
-fn latest_session_cwd_follows_most_recent_activity() {
-    let database = db("launch-cwd");
-    let w = workstream(&database, "Context Integrity");
-
-    // Two bound sessions: the older one bound first, but the NEWER one's
-    // cwd is where the work actually left off.
-    let older = ensure_session_row(
-        &database,
-        &DiscoveredSession {
-            agent: Agent::Codex,
-            agent_session_id: "cwd-old".into(),
-            path: PathBuf::from("/tmp/fake/cwd-old.jsonl"),
-            cwd: Some("/tmp/old-dir".into()),
-            started_at: Some("2026-09-10T08:00:00Z".into()),
-            last_activity_at: Some("2026-09-10T09:00:00Z".into()),
-            first_user_text: Some("old".into()),
-            parent_agent_session_id: None,
-        },
-    )
-    .unwrap()
-    .0;
-    let newer = ensure_session_row(
-        &database,
-        &DiscoveredSession {
-            agent: Agent::Codex,
-            agent_session_id: "cwd-new".into(),
-            path: PathBuf::from("/tmp/fake/cwd-new.jsonl"),
-            cwd: Some("/tmp/new-dir".into()),
-            started_at: Some("2026-09-12T08:00:00Z".into()),
-            last_activity_at: Some("2026-09-12T09:00:00Z".into()),
-            first_user_text: Some("new".into()),
-            parent_agent_session_id: None,
-        },
-    )
-    .unwrap()
-    .0;
-    bind(&database, &older.id, &w.id);
-    bind(&database, &newer.id, &w.id);
-
-    assert_eq!(
-        database
-            .latest_session_cwd_for_workstreams(&[w.id.clone()])
-            .unwrap()
-            .as_deref(),
-        Some("/tmp/new-dir"),
-        "the launcher's default cwd = most recent activity's directory"
-    );
-
-    // a workstream with no bound sessions suggests nothing
-    assert_eq!(
-        database
-            .latest_session_cwd_for_workstreams(&["does-not-exist".into()])
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        database.latest_session_cwd_for_workstreams(&[]).unwrap(),
-        None
-    );
-}
-
-#[test]
 fn resolved_state_items_no_longer_feed_the_card() {
     let database = db("resolved");
     let w = workstream(&database, "Initial UI Redesign");

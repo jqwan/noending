@@ -16,39 +16,54 @@
 //! The process-spawn step is injected through
 //! [`SessionLauncher::launch_prepared_with`] so no real Terminal opens.
 
+use rusqlite::Connection;
+
 use noending::adapters::AgentCommand;
 use noending::context::{self, ContextDeliveryLevel};
-use noending::domain::{Agent, LaunchIntent};
+use noending::domain::{Agent, LaunchIntent, Project};
 use noending::error::Result;
-use noending::launcher::{PreparedLaunch, SessionLauncher};
+use noending::launcher::{CwdSource, LaunchWorkspace, PreparedLaunch, SessionLauncher};
 use noending::platform::exec_resolver::AgentInstallation;
 use noending::platform::launcher::LaunchOutcome;
 use noending::settings;
+use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
+use noending::workspace::{normalize_path, WorkspaceAttaching};
+
+const PROJECT: &str = "p-base-launch";
 
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-base-launch-{}-{}", tag, new_id()));
-    Db::open(&dir.join("test.db")).unwrap()
+    let db = Db::open(&dir.join("test.db")).unwrap();
+    db.upsert_project(&Project::new(PROJECT.into(), "P"))
+        .unwrap();
+    db
 }
 
-fn workstream_with_cwd(
-    db: &Db,
-    title: &str,
-    default_cwd: Option<&str>,
-) -> noending::domain::Workstream {
-    let w = noending::domain::Workstream {
-        id: new_id(),
-        project_id: None,
-        title: title.into(),
-        description: String::new(),
-        lifecycle: "active".into(),
-        visibility: "normal".into(),
-        default_cwd: default_cwd.map(|s| s.to_string()),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.upsert_workstream(&w).unwrap();
-    w
+/// A directory that exists — §13 only launches into a usable one, and
+/// §42.3-M8 note 7 says never compare a canonical path against a literal.
+fn real_dir(tag: &str, name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("noending-base-launch-{}-{}", tag, new_id()));
+    let dir = dir.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    normalize_path(&dir.to_string_lossy()).expect("fixture path normalizes")
+}
+
+/// Stand-in for `workspace::project`: lexical, no Git, writes through the
+/// caller's connection (`WorkspaceAttaching`'s contract).
+struct LexicalPaths;
+
+impl WorkspaceAttaching for LexicalPaths {
+    fn ensure_path(&self, conn: &Connection, raw: &str) -> Result<Option<String>> {
+        Ok(match normalize_path(raw) {
+            Some(canonical) => Some(insert_workspace_path_conn(conn, &canonical, PROJECT)?),
+            None => None,
+        })
+    }
+}
+
+fn workstream(db: &Db, title: &str) -> noending::domain::Workstream {
+    noending::workspace::workstream::create_workstream(db, &LexicalPaths, title, "", None).unwrap()
 }
 
 /// A real Context item, so an "injected" launch would have something to deliver.
@@ -181,7 +196,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
 fn off_launch_with_bound_workstream_injects_nothing() {
     let db = open_db("off-with-workstream");
     seed_installation(&db, Agent::Codex);
-    let ws = workstream_with_cwd(&db, "injected ws", None);
+    let ws = workstream(&db, "injected ws");
     seed_context(&db, &ws.id, &["约束 A", "约束 B"]);
     let launcher = launcher_in("off-with-workstream");
     let bundle_dir = launcher.runtime_dir.join("context-bundles");
@@ -214,7 +229,7 @@ fn off_launch_with_bound_workstream_injects_nothing() {
 fn prepared_launch_goes_stale_when_delivery_level_leaves_off() {
     let db = open_db("stale-level-off-to-balanced");
     seed_installation(&db, Agent::Codex);
-    let ws = workstream_with_cwd(&db, "stale ws", None);
+    let ws = workstream(&db, "stale ws");
     seed_context(&db, &ws.id, &["初始约束"]);
     let launcher = launcher_in("stale-level");
 
@@ -262,7 +277,7 @@ fn prepared_launch_goes_stale_when_delivery_level_is_turned_off() {
     let db = open_db("stale-level-balanced-to-off");
     seed_installation(&db, Agent::Codex);
     settings::set_context_delivery_level(&db, ContextDeliveryLevel::Balanced).unwrap();
-    let ws = workstream_with_cwd(&db, "stale ws 2", None);
+    let ws = workstream(&db, "stale ws 2");
     seed_context(&db, &ws.id, &["约束 A"]);
     let launcher = launcher_in("stale-level-reverse");
 
@@ -307,12 +322,21 @@ fn prepared_launch_capability_is_single_use() {
 }
 
 /// The cwd the New Session form shows is the backend's resolution, not a
-/// frontend guess: Workstream `default_cwd` is what `prepare_new` reports.
+/// frontend guess: the selected Workstream's primary `WorkstreamPath` is what
+/// `prepare_new` reports (§13), together with the tier that produced it.
 #[test]
 fn prepared_launch_reports_the_resolved_working_directory() {
     let db = open_db("prepared-cwd");
     seed_installation(&db, Agent::Codex);
-    let ws = workstream_with_cwd(&db, "cwd ws", Some("/tmp/noending-example-cwd"));
+    let primary = real_dir("prepared-cwd", "primary");
+    let ws = noending::workspace::workstream::create_workstream(
+        &db,
+        &LexicalPaths,
+        "cwd ws",
+        "",
+        Some(&primary),
+    )
+    .unwrap();
     let launcher = launcher_in("prepared-cwd");
 
     let with_ws = launcher
@@ -320,14 +344,51 @@ fn prepared_launch_reports_the_resolved_working_directory() {
         .unwrap();
     assert_eq!(
         with_ws.cwd.as_deref(),
-        Some("/tmp/noending-example-cwd"),
+        Some(primary.as_str()),
         "the form displays exactly what prepare resolved"
     );
+    assert_eq!(with_ws.cwd_resolution.source, CwdSource::WorkstreamPath);
+    assert_eq!(with_ws.cwd_resolution.path_position, Some(0));
+    assert!(!with_ws.cwd_resolution.fallback);
 
     let standalone = launcher.prepare_new(&db, Agent::Codex, &[], None).unwrap();
     assert_eq!(
         standalone.cwd, None,
-        "no Workstream and no history means no suggested directory"
+        "a launcher that was not given a Home knows no default workspace, so it \
+         reports no directory rather than an implied one"
+    );
+    assert_eq!(standalone.cwd_resolution.source, CwdSource::Unresolved);
+}
+
+/// §21-2 — the same flow against a real Home: a standalone New Session starts in
+/// NoEnding's default workspace, and the payload says so (§13, §42.3-M21).
+#[test]
+fn standalone_prepared_launch_reports_the_default_workspace() {
+    let db = open_db("prepared-default-ws");
+    seed_installation(&db, Agent::Codex);
+    let default_ws = std::env::temp_dir().join(format!("noending-default-ws-{}", new_id()));
+    let default_ws = noending::workspace::normalize_path(&default_ws.to_string_lossy())
+        .expect("temp path normalizes");
+    let launcher = launcher_in("prepared-default-ws");
+
+    let prepared = launcher
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[],
+            None,
+            &LaunchWorkspace {
+                default_workspace: Some(default_ws.clone()),
+            },
+        )
+        .unwrap();
+    assert_eq!(prepared.cwd.as_deref(), Some(default_ws.as_str()));
+    assert_eq!(prepared.cwd_resolution.source, CwdSource::DefaultWorkspace,);
+    assert!(
+        std::fs::metadata(&default_ws)
+            .map(|m| m.is_dir())
+            .unwrap_or(false),
+        "the default workspace is created rather than handed over missing"
     );
 }
 
@@ -337,7 +398,7 @@ fn prepared_launch_reports_the_resolved_working_directory() {
 #[test]
 fn off_bundle_is_literally_empty_even_with_context_items() {
     let db = open_db("off-empty-bundle");
-    let ws = workstream_with_cwd(&db, "bundle ws", None);
+    let ws = workstream(&db, "bundle ws");
     seed_context(&db, &ws.id, &["约束 A"]);
     let bundle = context::build_bundle(
         &db,

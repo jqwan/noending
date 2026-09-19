@@ -27,8 +27,16 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   const activeCards = cards.filter(
     (c) => c.lifecycle === "active" && c.visibility === "normal",
   );
-  // 卡片全是归档：和「真的什么都没有」是两种边界，得告诉用户东西去哪了。
-  const archivedOnly = activeCards.length === 0 && cards.length > 0;
+  // 卡片一个都不剩：和「真的什么都没有」是两种边界，得告诉用户东西去哪了。
+  // 成因有两种，不能混着说——归档是进了回收站，完成只是不再活跃。
+  const everythingHidden = activeCards.length === 0 && cards.length > 0;
+  const archivedCount = cards.filter((c) => c.visibility === "archived").length;
+  const hiddenReason =
+    archivedCount === 0
+      ? "已完成的 Workstream 不会出现在首页。"
+      : cards.length - archivedCount === 0
+        ? "已归档的 Workstream 不会出现在首页。"
+        : "已归档或已完成的 Workstream 不会出现在首页。";
 
   const modals = (
     <>
@@ -72,9 +80,9 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
               )}
             </button>
           </div>
-          {archivedOnly && (
+          {everythingHidden && (
             <p className="muted small" style={{ marginTop: 18 }}>
-              已归档的 Workstream 不会出现在首页。{" "}
+              {hiddenReason}{" "}
               <button className="link small"
                 onClick={() => navigate({ view: "workstreams" })}>
                 Workstreams →

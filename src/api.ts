@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings, AppInfo,
+  Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
   ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project,
-  ProjectDetailData, ProjectResource, ProjectWorkstreamRow, WorkspaceSettings,
+  ProjectDetailData, ProjectWorkstreamRow, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
@@ -24,20 +24,6 @@ export const api = {
     invoke<ProjectWorkstreamRow[]>("list_project_workstreams", { projectId }),
   renameProject: (projectId: string, name: string) =>
     invoke<Project>("rename_project", { projectId, name }),
-
-  /** @deprecated un-registered in v0.2; kept only until its call site is gone. */
-  createProject: (name: string, description: string) =>
-    invoke<Project>("create_project", { name, description }),
-  /** @deprecated un-registered in v0.2. */
-  deleteProject: (projectId: string) => invoke<void>("delete_project", { projectId }),
-  /** @deprecated un-registered in v0.2 (§7.5: users no longer manage a Project's resources). */
-  addResource: (projectId: string, kind: string, uri: string) =>
-    invoke<ProjectResource>("add_project_resource", { projectId, kind, uri: uri || null }),
-  /** @deprecated un-registered in v0.2. */
-  listResources: (projectId: string) =>
-    invoke<ProjectResource[]>("list_project_resources", { projectId }),
-  /** @deprecated un-registered in v0.2. */
-  removeResource: (resourceId: string) => invoke<void>("remove_project_resource", { resourceId }),
 
   // ---------------- NoEnding Home (方案 §11, §22) ----------------
   getWorkspaceSettings: () => invoke<WorkspaceSettings>("get_workspace_settings"),
@@ -85,9 +71,6 @@ export const api = {
   /** Only reachable for an archived Workstream; Sessions survive it. */
   deleteWorkstreamPermanently: (workstreamId: string) =>
     invoke<void>("delete_workstream_permanently", { workstreamId }),
-  /** @deprecated un-registered in v0.2 (§42.2-E17: it moved Context without a Revision). */
-  mergeWorkstreams: (sourceId: string, targetId: string) =>
-    invoke<void>("merge_workstreams", { sourceId, targetId }),
 
   getWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamContext>("get_workstream_context", { workstreamId }),
@@ -142,8 +125,6 @@ export const api = {
     invoke<Session[]>("list_sessions", { projectId: projectId ?? null, agent: agent ?? null }),
   listAllSessions: () => invoke<Session[]>("list_sessions", { projectId: null, agent: null }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
-  assignSessionProject: (sessionId: string, projectId: string | null) =>
-    invoke<void>("assign_session_project", { sessionId, projectId }),
   bindSessionWorkstream: (sessionId: string, workstreamId: string, role: string) =>
     invoke<void>("bind_session_workstream", { sessionId, workstreamId, role }),
   unbindSessionWorkstream: (sessionId: string, workstreamId: string) =>
@@ -151,7 +132,6 @@ export const api = {
   replaceSessionBindings: (sessionId: string, bindings: { workstream_id: string; role: string }[]) =>
     invoke<void>("replace_session_bindings", { sessionId, bindings }),
   listSessionBindings: () => invoke<SessionBindingRow[]>("list_session_bindings"),
-  getAppInfo: () => invoke<AppInfo>("get_app_info"),
 
   syncAll: () => invoke<{ started: boolean }>("sync_all"),
   syncSource: (sourceId: string) => invoke<{ started: boolean }>("sync_source", { sourceId }),

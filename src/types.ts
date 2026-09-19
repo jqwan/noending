@@ -86,15 +86,6 @@ export interface ProjectWorkstreamRow {
   is_primary: boolean;
 }
 
-export interface ProjectResource {
-  id: string;
-  project_id: string;
-  kind: string;
-  uri: string | null;
-  metadata: Record<string, unknown>;
-  created_at: string;
-}
-
 export interface Workstream {
   /** Derived projection of the primary path's Project; never assigned directly. */
   project_id: string | null;
@@ -124,15 +115,6 @@ export interface SessionBindingRow {
   workstream_path_id: string | null;
 }
 
-/** Paths for Settings → Data & Advanced (backend: get_app_info). */
-export interface AppInfo {
-  /** The database actually open — `<noending_home>/data/noending.db`. */
-  db_path: string;
-  /** v0.2 replaced the app-data directory with NoEnding Home (§2). */
-  noending_home: string;
-  default_workspace: string;
-}
-
 /** Card view for Home / Workstreams pages (backend: list_workstream_cards). */
 export interface WorkstreamCardData {
   id: string;
@@ -151,6 +133,8 @@ export interface WorkstreamCardData {
   last_activity_at: string | null;
   session_count: number;
   latest_session: LatestSessionInfo | null;
+  /** How many working paths the Workstream has. `0` is a normal state. */
+  path_count: number;
 }
 
 export interface Session {
@@ -236,13 +220,15 @@ export interface SyncRun {
   runtime: string;
 }
 
+/** Mirror of `sync::ContextMutation` (`#[serde(tag = "op")]`). */
 export type ContextMutation =
-  | { op: "add"; workstream_id: string; item_kind: string; title: string; content: string; source_ref: string; authority: string }
-  | { op: "update"; item_id: string; title: string; content: string; source_ref: string; authority: string }
-  | { op: "supersede"; item_id: string; title: string; content: string; source_ref: string; authority: string }
-  | { op: "resolve"; item_id: string; source_ref: string }
-  | { op: "create_workstream"; project_id: string; title: string; reason: string }
-  | { op: "conflict"; workstream_id: string; item_id: string; title: string; content: string; source_ref: string; reason: string };
+  | { op: "add"; workstream_id: string; item_kind: string; title: string; content: string; source_refs: string[]; authority: string }
+  | { op: "update"; item_id: string; title: string; content: string; source_refs: string[]; authority: string }
+  | { op: "supersede"; item_id: string; title: string; content: string; source_refs: string[]; authority: string }
+  | { op: "resolve"; item_id: string; source_refs: string[] }
+  /** A Project is derived from paths in v0.2, so a discovered Workstream may legitimately have none. */
+  | { op: "create_workstream"; project_id: string | null; title: string; reason: string }
+  | { op: "conflict"; workstream_id: string; item_id: string; title: string; content: string; source_refs: string[]; reason: string };
 
 export interface ContextSection {
   kind: string;
@@ -450,6 +436,35 @@ export interface SessionContextBundle {
   approx_tokens: number;
 }
 
+/**
+ * §13 的解析层级——Agent 的启动目录是**谁**决定的。后端 `CwdSource`，
+ * `rename_all = "snake_case"`。
+ */
+export type CwdSource =
+  | "explicit"
+  | "session_cwd"
+  | "workstream_path"
+  | "default_workspace"
+  | "unresolved";
+
+/**
+ * `PreparedLaunch.cwd` 的来源说明。它是预览的一部分，也是 Launch 指纹的一部分，
+ * 所以 UI 显示的就是 Agent 真正会拿到的那个决定（Preview-Launch Identity）。
+ * `note` 已由 Rust 写成中文，可直接渲染；它不进哈希，改文案不会让预览失效。
+ */
+export interface CwdResolution {
+  source: CwdSource;
+  /** 与 `PreparedLaunch.cwd` 恒等；null 表示没有解析出目录。 */
+  cwd: string | null;
+  /** 不是这条流程通常的起点——必须以可见方式提示，不能静默。 */
+  fallback: boolean;
+  /** 由哪个 Workstream 提供的目录（若有）。 */
+  workstream_id: string | null;
+  /** 它在该 Workstream 有序路径列表中的位置；0 = 主路径。 */
+  path_position: number | null;
+  note: string | null;
+}
+
 export interface PreparedLaunch {
   id: string;
   mode: "new" | "resume";
@@ -458,6 +473,8 @@ export interface PreparedLaunch {
   workstream_ids: string[];
   extra_workstream_ids: string[];
   cwd?: string | null;
+  /** `cwd` 由哪一层决定，以及发生 fallback 时的说明（§13）。 */
+  cwd_resolution: CwdResolution;
   delivery_level: ContextDeliveryLevel;
   bundle: SessionContextBundle;
   /** NoEnding 的 override 意图（null = Agent default），与 Launch 完全一致。 */
@@ -472,6 +489,8 @@ export interface LaunchResult {
   context_file: string;
   bundle: SessionContextBundle;
   note: string;
+  /** 本次启动留下的 LaunchIntent 行；crash recovery 与人工配对都靠它。 */
+  launch_intent_id: string | null;
 }
 
 export interface AssistantMessage {

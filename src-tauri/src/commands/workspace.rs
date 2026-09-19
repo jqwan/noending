@@ -18,14 +18,28 @@ use crate::error::{other, Result};
 use crate::workspace::home::{self, BootstrapPointer, HomeSource, NoEndingHome, WorkspaceSettings};
 
 /// §11 `get_workspace_settings`.
+///
+/// Also the one place the UI learns which database file it is looking at, so
+/// `get_app_info` retired into it (v0.2 had two commands reporting the same
+/// Home, and only one of them was reading the live handle).
 #[tauri::command]
-pub fn get_workspace_settings(app: AppHandle) -> Result<WorkspaceSettings> {
+pub fn get_workspace_settings(
+    app: AppHandle,
+    state: tauri::State<super::AppState>,
+) -> Result<WorkspaceSettings> {
     let home = app
         .try_state::<NoEndingHome>()
         .ok_or_else(|| other("NoEnding Home 尚未初始化"))?
         .inner()
         .clone();
-    Ok(read_settings(&home))
+    let mut settings = read_settings(&home);
+    // §42.3-M5: a failed relocation still starts the app, on the OLD Home, so
+    // "where the Home thinks the database is" can differ from "which file writes
+    // are landing in". The user gets the latter.
+    if let Ok(Some(path)) = super::with_db(&state, |db| Ok(db.0.path().map(str::to_string))) {
+        settings.db_path = path;
+    }
+    Ok(settings)
 }
 
 /// §11 `set_noending_home`: request a relocation for the next launch.

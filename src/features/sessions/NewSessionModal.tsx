@@ -204,7 +204,7 @@ export default function NewSessionModal({
             <span className="badge">{agentResolved ? "未检测" : "—"}</span>
           </div>
         )}
-        <CwdRow cwd={prepared?.cwd} pending={preparing} />
+        <CwdRow cwd={prepared?.cwd} pending={preparing} resolution={prepared?.cwd_resolution} />
         {prepared && (
           <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
         )}

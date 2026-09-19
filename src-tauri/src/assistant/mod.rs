@@ -214,14 +214,17 @@ impl AssistantService {
     }
 
     /// Execute a user-confirmed action proposal via the Session Launcher.
+    ///
+    /// The launcher and the §13 tier-3 [`crate::launcher::LaunchWorkspace`] are
+    /// injected rather than built here: an Assistant launch must resolve its
+    /// directory through the same Home the New Session modal previewed, and
+    /// `NoEnding Home` is a fact only the command layer holds.
     pub fn execute_action(
         db: &Db,
         action: &ActionProposal,
-        runtime_dir: &std::path::Path,
+        launcher: &crate::launcher::SessionLauncher,
+        workspace: &crate::launcher::LaunchWorkspace,
     ) -> Result<serde_json::Value> {
-        let launcher = crate::launcher::SessionLauncher {
-            runtime_dir: runtime_dir.to_path_buf(),
-        };
         match action.action.as_str() {
             "launch_new_session" => {
                 let agent = action
@@ -229,11 +232,12 @@ impl AssistantService {
                     .as_deref()
                     .and_then(crate::domain::Agent::parse)
                     .ok_or_else(|| other("动作缺少有效 agent"))?;
-                let r = launcher.new_session(
+                let r = launcher.new_session_in(
                     db,
                     agent,
                     &action.workstream_ids,
                     action.cwd.as_deref(),
+                    workspace,
                 )?;
                 Ok(
                     serde_json::json!({ "ok": true, "kind": "launch", "launched_via": r.launched_via, "note": r.note }),
@@ -244,7 +248,8 @@ impl AssistantService {
                     .session_id
                     .as_deref()
                     .ok_or_else(|| other("动作缺少 session_id"))?;
-                let r = launcher.resume_session(db, sid, &action.extra_workstream_ids)?;
+                let r =
+                    launcher.resume_session_in(db, sid, &action.extra_workstream_ids, workspace)?;
                 Ok(
                     serde_json::json!({ "ok": true, "kind": "resume", "launched_via": r.launched_via, "note": r.note }),
                 )

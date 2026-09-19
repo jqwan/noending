@@ -171,7 +171,11 @@ export default function ResumeSessionModal({
           hint="这个 Session 原本使用的 Agent"
           first
         />
-        <CwdRow cwd={prepared?.cwd ?? session.cwd} pending={preparing && !prepared} />
+        <CwdRow
+          cwd={prepared?.cwd ?? session.cwd}
+          pending={preparing && !prepared}
+          resolution={prepared?.cwd_resolution}
+        />
 
         <PreviewRow
           label="Workstream"

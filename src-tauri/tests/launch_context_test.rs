@@ -183,7 +183,13 @@ fn ambiguous_candidates_wait_for_the_user() {
     );
 
     // user resolves manually
-    launcher::apply_match(&db, &ambiguous[0], &session).unwrap();
+    launcher::apply_match(
+        &db,
+        &ambiguous[0],
+        &session,
+        &launcher::LaunchWorkspace::default(),
+    )
+    .unwrap();
     let resolved = db.get_launch_intent(&ambiguous[0].id).unwrap().unwrap();
     assert_eq!(resolved.status, launch_status::MATCHED);
     assert_eq!(db.bindings_for_session(&session.id).unwrap().len(), 1);
@@ -854,7 +860,7 @@ fn launch_intent_match_records_delivery_snapshot() {
     };
     db.insert_launch_intent(&intent).unwrap();
 
-    assert!(launcher::apply_match(&db, &intent, &s).is_ok());
+    assert!(launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).is_ok());
 
     // binding established explicitly…
     let bound = db.bindings_for_session(&s.id).unwrap();
@@ -1203,7 +1209,7 @@ fn launch_intent_with_off_creates_bindings_but_no_delivery() {
     };
     db.insert_launch_intent(&intent).unwrap();
 
-    assert!(launcher::apply_match(&db, &intent, &s).is_ok());
+    assert!(launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).is_ok());
 
     // Explicit binding is preserved!
     let bound = db.bindings_for_session(&s.id).unwrap();
@@ -2070,7 +2076,7 @@ fn apply_match_handles_conflict_only_workstream() {
     };
     db.insert_launch_intent(&intent).unwrap();
 
-    launcher::apply_match(&db, &intent, &s).unwrap();
+    launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).unwrap();
 
     let deliveries = db.latest_deliveries(&s.id).unwrap();
     let d_b = deliveries

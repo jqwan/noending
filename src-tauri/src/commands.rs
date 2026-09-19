@@ -92,6 +92,18 @@ fn noending_home(app: &AppHandle) -> Option<crate::workspace::home::NoEndingHome
         .map(|h| h.inner().clone())
 }
 
+/// §13 tier 3 — the non-database fact a launch needs.
+///
+/// Prepare and Launch must resolve this from the *same* Home, so both go through
+/// here rather than one of them defaulting. `None` (Home never initialized)
+/// removes the default-workspace tier from the chain instead of guessing a
+/// directory, per [`crate::launcher::LaunchWorkspace`].
+pub(crate) fn launch_workspace(app: &AppHandle) -> crate::launcher::LaunchWorkspace {
+    noending_home(app)
+        .map(|h| crate::launcher::LaunchWorkspace::from_home(&h))
+        .unwrap_or_default()
+}
+
 // ---------------- Default Agent (Settings → Default Agent) ----------------
 
 const DEFAULT_AGENT_KEY: &str = "launcher.default_agent";
@@ -464,12 +476,13 @@ pub fn resolve_conflict(
 /// 同步全部启用的数据源（后台执行，不阻塞前端）。
 #[tauri::command]
 pub fn sync_all(app: AppHandle, state: State<AppState>) -> Result<serde_json::Value> {
-    spawn_sync_job(&app, &state, |db_lock, notify| {
+    let workspace = launch_workspace(&app);
+    spawn_sync_job(&app, &state, move |db_lock, notify| {
         let engine = {
             let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
             crate::sync::SyncEngine::from_settings(&guard)
         };
-        crate::ingestion::reconcile_with_engine(db_lock, &engine, &|s| {
+        crate::ingestion::reconcile_with_engine(db_lock, &engine, &workspace, &|s| {
             notify(serde_json::json!({
                 "agent": s.agent.as_str(),
                 "title": s.title,
@@ -580,10 +593,12 @@ pub fn list_launch_intents(
 /// discovered session the launch actually produced.
 #[tauri::command]
 pub fn resolve_launch_intent(
+    app: AppHandle,
     state: State<AppState>,
     intent_id: String,
     session_id: String,
 ) -> Result<()> {
+    let workspace = launch_workspace(&app);
     with_db(&state, |db| {
         let intent = db
             .get_launch_intent(&intent_id)?
@@ -591,7 +606,7 @@ pub fn resolve_launch_intent(
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        crate::launcher::apply_match(db, &intent, &session)
+        crate::launcher::apply_match(db, &intent, &session, &workspace)
     })
 }
 
@@ -607,8 +622,9 @@ pub fn launch_new_session(
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
     let launcher = launcher_for(&app);
+    let workspace = launch_workspace(&app);
     with_db(&state, |db| {
-        launcher.new_session(db, agent, &workstream_ids, cwd.as_deref())
+        launcher.new_session_in(db, agent, &workstream_ids, cwd.as_deref(), &workspace)
     })
 }
 
@@ -620,8 +636,9 @@ pub fn launch_resume_session(
     extra_workstream_ids: Vec<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let launcher = launcher_for(&app);
+    let workspace = launch_workspace(&app);
     with_db(&state, |db| {
-        launcher.resume_session(db, &session_id, &extra_workstream_ids)
+        launcher.resume_session_in(db, &session_id, &extra_workstream_ids, &workspace)
     })
 }
 
@@ -670,8 +687,9 @@ pub fn prepare_new_session(
 ) -> Result<crate::launcher::PreparedLaunch> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
     let launcher = launcher_for(&app);
+    let workspace = launch_workspace(&app);
     let prepared = with_db(&state, |db| {
-        launcher.prepare_new(db, agent, &workstream_ids, cwd.as_deref())
+        launcher.prepare_new_in(db, agent, &workstream_ids, cwd.as_deref(), &workspace)
     })?;
     let mut map = state
         .prepared_launches
@@ -690,8 +708,9 @@ pub fn prepare_resume_session(
     extra_workstream_ids: Vec<String>,
 ) -> Result<crate::launcher::PreparedLaunch> {
     let launcher = launcher_for(&app);
+    let workspace = launch_workspace(&app);
     let prepared = with_db(&state, |db| {
-        launcher.prepare_resume(db, &session_id, &extra_workstream_ids)
+        launcher.prepare_resume_in(db, &session_id, &extra_workstream_ids, &workspace)
     })?;
     let mut map = state
         .prepared_launches
@@ -711,7 +730,10 @@ pub fn launch_prepared(
     let prepared = consume_prepared_launch(&state.prepared_launches, &prepared_id)?;
 
     let launcher = launcher_for(&app);
-    with_db(&state, |db| launcher.launch_prepared(db, &prepared))
+    let workspace = launch_workspace(&app);
+    with_db(&state, |db| {
+        launcher.launch_prepared_in(db, &prepared, &workspace)
+    })
 }
 
 #[tauri::command]
@@ -961,39 +983,8 @@ pub fn assistant_execute_action(
     let action: crate::assistant::ActionProposal =
         serde_json::from_str(&action_json).map_err(|e| other(format!("动作解析失败: {}", e)))?;
     let launcher = launcher_for(&app);
+    let workspace = launch_workspace(&app);
     with_db(&state, |db| {
-        crate::assistant::AssistantService::execute_action(db, &action, &launcher.runtime_dir)
-    })
-}
-
-// ---------------- App info ----------------
-
-/// App info for Settings → Data & Advanced (paths only, no secrets).
-///
-/// `db_path` is the database actually open, not a guess from a directory: after
-/// v0.2 the file lives under NoEnding Home (`<home>/data/noending.db`), and a
-/// relocation that failed at start-up leaves the app running on the OLD Home —
-/// the Settings page must not claim the new one (§42.3-M14).
-#[derive(Serialize)]
-pub struct AppInfo {
-    pub db_path: String,
-    pub noending_home: String,
-    pub default_workspace: String,
-}
-
-#[tauri::command]
-pub fn get_app_info(app: AppHandle, state: State<AppState>) -> Result<AppInfo> {
-    let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 尚未初始化"))?;
-    let db_path = with_db(&state, |db| {
-        Ok(db
-            .0
-            .path()
-            .map(str::to_string)
-            .unwrap_or_else(|| home.db_path_str()))
-    })?;
-    Ok(AppInfo {
-        db_path,
-        noending_home: home.root_str(),
-        default_workspace: home.default_workspace_str(),
+        crate::assistant::AssistantService::execute_action(db, &action, &launcher, &workspace)
     })
 }

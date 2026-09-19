@@ -114,12 +114,17 @@ pub fn run() {
                             let guard = crate::sync::lock_db(&state.db)?;
                             sync::SyncEngine::from_settings(&guard)
                         };
-                        ingestion::reconcile_with_engine(&state.db, &engine, &|s| {
-                            eprintln!(
-                                "[reconcile] processing: {}",
-                                s.title.as_deref().unwrap_or("(untitled)")
-                            );
-                        })
+                        ingestion::reconcile_with_engine(
+                            &state.db,
+                            &engine,
+                            &crate::commands::launch_workspace(&handle),
+                            &|s| {
+                                eprintln!(
+                                    "[reconcile] processing: {}",
+                                    s.title.as_deref().unwrap_or("(untitled)")
+                                );
+                            },
+                        )
                     })();
                     state.sync_in_progress.store(false, Ordering::SeqCst);
                     match result {
@@ -222,7 +227,6 @@ pub fn run() {
             commands::session_workspace::unbind_session_workstream,
             commands::session_workspace::replace_session_bindings,
             commands::session_workspace::list_session_bindings,
-            commands::get_app_info,
             commands::sync_all,
             commands::sync_source,
             commands::reingest_source,
