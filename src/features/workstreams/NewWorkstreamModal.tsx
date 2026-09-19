@@ -10,8 +10,8 @@ import type { Workstream } from "../../types";
  * 用户既不能挑也不能造（§0）。这里唯一和物理世界有关的输入就是那条初始路径：
  * 它成为 WorkstreamPath 列表的 position 0，Project 由它自动出现。
  *
- * `api.createWorkstream` 的第一个参数仍是 projectId，那是 bridge 留的过渡形参，
- * 这里恒为 `null`。
+ * `api.createWorkstream` 只接受 title / description / initialPath：没有 Project
+ * 形参，也不存在为旧 bridge 留的过渡位。
  */
 export default function NewWorkstreamModal({ onClose, onCreated }: {
   onClose: () => void;
