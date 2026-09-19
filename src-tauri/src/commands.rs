@@ -621,6 +621,12 @@ pub fn resolve_launch_intent(
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
+        // §43 — binding/delivery writes are Session write paths: a trashed
+        // session must not claim an intent. (Reconcile-side matching only
+        // ever fires for brand-new sessions, which are never trashed.)
+        if session.is_trashed() {
+            return Err(other("会话已在回收站，无法关联启动记录"));
+        }
         crate::launcher::apply_match(db, &intent, &session, &workspace)
     })
 }
