@@ -1104,13 +1104,16 @@ impl Db {
 
     /// Card stats for one Workstream: (session_count, latest session as
     /// (id, agent), that session's activity timestamp). "Latest" follows the
-    /// transcript, not the binding: most recent activity wins.
+    /// transcript, not the binding: most recent activity wins. Trashed
+    /// sessions are inactive (方案 §11) and count for nothing here.
     pub fn workstream_session_stats(
         &self,
         workstream_id: &str,
     ) -> Result<(i64, Option<(String, String)>, Option<String>)> {
         let count: i64 = self.0.query_row(
-            "SELECT COUNT(*) FROM session_workstream_bindings WHERE workstream_id = ?1",
+            "SELECT COUNT(*) FROM session_workstream_bindings b
+             JOIN sessions s ON s.id = b.session_id AND s.trashed_at IS NULL
+             WHERE b.workstream_id = ?1",
             params![workstream_id],
             |r| r.get(0),
         )?;
@@ -1120,7 +1123,7 @@ impl Db {
                 "SELECT s.id, s.agent, COALESCE(s.last_activity_at, s.started_at) AS act
                  FROM session_workstream_bindings b
                  JOIN sessions s ON s.id = b.session_id
-                 WHERE b.workstream_id = ?1
+                 WHERE b.workstream_id = ?1 AND s.trashed_at IS NULL
                  ORDER BY act DESC
                  LIMIT 1",
                 params![workstream_id],
@@ -1287,9 +1290,13 @@ impl Db {
     /// Sessions discovered but not yet seen by us. Used by LaunchIntent
     /// matching: only genuinely new sessions may claim a pending intent.
     /// The SQL has no created_at column, so the since-filter runs in Rust.
+    /// Trashed rows can never be "genuinely new" (matching only fires for
+    /// fresh discoveries), but the predicate keeps that invariant explicit
+    /// and safe against future callers.
     pub fn recently_created_sessions(&self, agent: Agent, since: &str) -> Result<Vec<Session>> {
         let mut st = self.0.prepare(
-            "SELECT * FROM sessions WHERE agent = ?1 ORDER BY COALESCE(started_at, last_activity_at) DESC LIMIT 200",
+            "SELECT * FROM sessions WHERE agent = ?1 AND trashed_at IS NULL \
+             ORDER BY COALESCE(started_at, last_activity_at) DESC LIMIT 200",
         )?;
         let rows = st
             .query_map(params![agent.as_str()], row_session)?
@@ -1377,6 +1384,16 @@ impl Db {
         raw_path: &str,
     ) -> Result<Vec<SessionEvent>> {
         self.tx(|tx| {
+            // §9 — commit-time trash guard (方案 §43). Ingestion is staged
+            // outside the write transaction, so a Trash racing a multi-stage
+            // ingest would otherwise still land events + cursor advance on a
+            // session the user just hid. The re-check inside the transaction
+            // makes the no-op atomic with the write it skips: a trashed (or
+            // vanished) session takes NOTHING — no events, no cursor move —
+            // and the next Restore resumes from the untouched cursor.
+            if !session_jobs::session_is_writable_conn(tx, session_id)? {
+                return Ok(Vec::new());
+            }
             let max_seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE session_id = ?1",
                 params![session_id],
@@ -1854,6 +1871,26 @@ impl Db {
         // Read authority strictly from the immutable revision metadata and frozen lineage!
         // Never let subsequent item edits pollute historical revision authority.
         let authority = resolve_revision_authority(&rev);
+
+        // §28 — a redacted revision's session is GONE. This is not a
+        // tombstone: return only the fact that the source no longer exists.
+        // No session id, agent session id, title or path may resolve, and
+        // nothing may redirect to a future rediscovered session (§34).
+        if rev.source_type.as_deref() == Some("deleted_session") {
+            return Ok(Some(ContextSourceDetail {
+                revision_id: rev.id,
+                authority,
+                source_type: rev.source_type,
+                source_ref: None,
+                sync_run_id: None,
+                session_id: None,
+                session_title: None,
+                agent: None,
+                event_sequence: None,
+                event_ts: None,
+                evidence: None,
+            }));
+        }
 
         let mut session_id = None;
         let mut session_title = None;

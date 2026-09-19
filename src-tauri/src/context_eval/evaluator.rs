@@ -238,6 +238,7 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
         parent_agent_session_id: None,
         started_at: Some(now()),
         last_activity_at: Some(now()),
+        trashed_at: None,
     };
     db.upsert_session(&session)
         .map_err(|e| other(format!("fixture {name}: upsert session failed: {e}")))?;

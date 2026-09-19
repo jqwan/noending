@@ -321,6 +321,12 @@ impl SessionLauncher {
         let session = db
             .get_session(session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
+        // §10 — a trashed session is inactive and must not resume. All resume
+        // entries (command layer, Assistant, legacy one-shot) funnel through
+        // here, so this is the single prepare-side gate.
+        if session.is_trashed() {
+            return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+        }
 
         let engine = crate::sync::SyncEngine::from_settings(db);
         sync_one_session_with_engine(db, &engine, &session)?;
@@ -561,6 +567,14 @@ impl SessionLauncher {
             let session = db
                 .get_session(session_id)?
                 .ok_or_else(|| other("Session 不存在"))?;
+            // §10 — belt and braces beside the fingerprint term: a trashed
+            // session never launches, even if every other input managed to
+            // match a stale-but-legal fingerprint.
+            if session.is_trashed() {
+                return Err(other(
+                    "Prepared launch is stale: 会话已移入回收站，无法继续。请恢复会话后重新预览。",
+                ));
+            }
 
             let install = resolve_install(db, session.agent)?;
             let adapter = crate::adapters::adapter_for(session.agent);
@@ -831,6 +845,14 @@ pub fn compute_state_fingerprint_in(
             hasher.update(b":");
             if let Some(s) = db.get_session(sid)? {
                 hasher.update(b"session_exists:1:");
+                // §10 — the lifecycle state is part of the launch state: a
+                // Prepare → Trash → launch_prepared sequence must fail as
+                // stale even when nothing else about the row moved.
+                if s.is_trashed() {
+                    hasher.update(b"session_trashed:1:");
+                } else {
+                    hasher.update(b"session_trashed:0:");
+                }
                 if let Some(la) = &s.last_activity_at {
                     hasher.update(la.as_bytes());
                     hasher.update(b"|");

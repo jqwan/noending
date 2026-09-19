@@ -675,6 +675,7 @@ mod tests {
             parent_agent_session_id: None,
             started_at: None,
             last_activity_at: None,
+            trashed_at: None,
         }
     }
 

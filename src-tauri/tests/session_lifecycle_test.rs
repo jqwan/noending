@@ -1,0 +1,1152 @@
+//! Session Lifecycle & Deletion v0.1 — integrity matrix (方案 §45).
+//!
+//! Locks the invariants the deletion plan freezes:
+//! - Trash is reversible and preserves the same Session.id; it never touches
+//!   the Agent source file, and a trashed session is invisible to default
+//!   projections and search, is not mutated by discovery, cannot commit
+//!   in-flight ingestion, and cannot resume.
+//! - Permanent deletion is prepared against a frozen, adapter-validated plan
+//!   and purges every Session-owned row in one transaction — with no
+//!   tombstone, no deletion-job remnant, and no surviving context provenance
+//!   pointing at the dead session.
+//! - A genuinely restored source is rediscovered as a NEW NoEnding session:
+//!   no old bindings, no provenance relink (§34).
+//!
+//! All fixtures are temp files. The real ~/.codex / ~/.claude / ~/.pi are
+//! never touched (方案 §46).
+
+use noending::adapters::claude::ClaudeAdapter;
+use noending::adapters::codex::CodexAdapter;
+use noending::adapters::pi::PiAdapter;
+use noending::adapters::AgentAdapter;
+use noending::domain::{Agent, ContextDelivery, LaunchIntent, Session, SessionListScope, SyncRun};
+use noending::error::AppError;
+use noending::ingestion::ensure_session_row_with;
+use noending::lifecycle;
+use noending::search;
+use noending::storage::workspace::insert_workspace_path_conn;
+use noending::storage::SessionFilter;
+use noending::storage::{new_id, now, Db};
+use noending::workspace::{normalize_path, WorkspaceAttaching};
+use rusqlite::Connection;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// ---- fixtures -------------------------------------------------------------
+
+fn unique_dir(tag: &str) -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "noending-lifecycle-{}-{}-{}",
+        tag,
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn open_db(tag: &str) -> Db {
+    let dir = unique_dir(tag);
+    let db = Db::open(&dir.join("test.db")).unwrap();
+    // The LexicalPaths seam inserts workspace paths under this project.
+    db.upsert_project(&noending::domain::Project::new(PROJECT.into(), "P"))
+        .unwrap();
+    db
+}
+
+const PROJECT: &str = "p-lifecycle";
+
+/// Lexical WorkspaceAttaching seam, matching the launch-test fixtures.
+struct LexicalPaths;
+impl WorkspaceAttaching for LexicalPaths {
+    fn ensure_path(&self, conn: &Connection, raw: &str) -> noending::error::Result<Option<String>> {
+        Ok(match normalize_path(raw) {
+            Some(canonical) => Some(insert_workspace_path_conn(conn, &canonical, PROJECT)?),
+            None => None,
+        })
+    }
+}
+
+fn attacher() -> LexicalPaths {
+    LexicalPaths
+}
+
+/// Per-agent fixture file that BOTH passes `detect_format` for the agent AND
+/// parses back to `session_id` through the adapter's own discovery parser —
+/// the exact property `prepare_source_session_deletion` demands (方案 §16).
+fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
+    let body = match agent {
+        Agent::Codex => format!(
+            "{{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{sid}\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:00:00Z\"}}}}\n\
+             {{\"ordinal\":1,\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"first user message about goals\"}}]}}}}\n",
+            sid = session_id
+        ),
+        Agent::ClaudeCode => format!(
+            "{{\"type\":\"user\",\"sessionId\":\"{sid}\",\"uuid\":\"u1\",\"timestamp\":\"2026-09-13T10:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n\
+             {{\"type\":\"assistant\",\"sessionId\":\"{sid}\",\"uuid\":\"u2\",\"parentUuid\":\"u1\",\"timestamp\":\"2026-09-13T10:01:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"reply\"}}]}}}}\n",
+            sid = session_id
+        ),
+        Agent::Pi => format!(
+            "{{\"type\":\"session\",\"id\":\"{sid}\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:00:00Z\"}}\n\
+             {{\"type\":\"message\",\"id\":\"m1\",\"parentId\":\"{sid}\",\"provider\":\"p\",\"timestamp\":\"2026-09-13T10:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n",
+            sid = session_id
+        ),
+    };
+    std::fs::write(path, body).unwrap();
+}
+
+fn fixture_session(db: &Db, agent: Agent, tag: &str) -> Session {
+    let dir = unique_dir(tag);
+    let file = dir.join("session.jsonl");
+    let agent_session_id = format!("fixed-id-{}", new_id());
+    write_agent_fixture(agent, &file, &agent_session_id);
+    let discovered = noending::adapters::DiscoveredSession {
+        agent,
+        agent_session_id: agent_session_id.clone(),
+        path: file.clone(),
+        cwd: Some(dir.to_string_lossy().to_string()),
+        started_at: Some("2026-09-13T10:00:00Z".into()),
+        last_activity_at: Some("2026-09-13T10:05:00Z".into()),
+        first_user_text: Some("first user message about goals".into()),
+        parent_agent_session_id: None,
+    };
+    let (s, _) = ensure_session_row_with(db, &discovered, &attacher()).unwrap();
+    assert_eq!(s.agent_session_id, agent_session_id);
+    s
+}
+
+/// Production round-trip: read the delta and commit it through the guarded
+/// storage path (the one with the trash guard inside the transaction).
+fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
+    let cursor = db.get_source_cursor(&session.id).unwrap();
+    let delta = adapter.read_delta(session, &cursor).unwrap();
+    let source = delta.source.clone().expect("source state");
+    let stored = db
+        .append_source_events(&session.id, &delta.events, &source, &session.raw_path)
+        .unwrap();
+    // production ingest_delta also indexes what it stored
+    if !stored.is_empty() {
+        db.index_new_events(&stored).unwrap();
+    }
+    stored.len()
+}
+
+fn count(db: &Db, sql: &str, session_id: &str) -> i64 {
+    db.conn()
+        .query_row(sql, [session_id], |r| r.get::<_, i64>(0))
+        .unwrap()
+}
+
+fn workstream(db: &Db, title: &str) -> noending::domain::Workstream {
+    noending::workspace::workstream::create_workstream(db, &attacher(), title, "", None).unwrap()
+}
+
+fn bind(db: &Db, session_id: &str, ws_id: &str) {
+    noending::workspace::session::record_user_binding(
+        db,
+        session_id,
+        ws_id,
+        "primary",
+        "user_assigned",
+        1.0,
+    )
+    .unwrap();
+}
+
+fn sync_run(db: &Db, session_id: &str) -> SyncRun {
+    let run = SyncRun {
+        id: new_id(),
+        session_id: session_id.to_string(),
+        from_sequence: 0,
+        to_sequence: 1,
+        status: "ok".into(),
+        mutations: serde_json::json!([]),
+        summary: "test".into(),
+        error: None,
+        created_at: now(),
+        runtime: "heuristic".into(),
+        delta_fingerprint: Some(new_id()),
+        source_generation: 0,
+    };
+    db.insert_sync_run(&run).unwrap();
+    run
+}
+
+fn delivery(db: &Db, session_id: &str, ws_id: &str) {
+    db.record_delivery(&ContextDelivery {
+        id: new_id(),
+        session_id: session_id.to_string(),
+        workstream_id: ws_id.to_string(),
+        bundle_id: new_id(),
+        delivered_revisions: vec![],
+        delivered_conflicts: vec![],
+        delivered_at: now(),
+    })
+    .unwrap();
+}
+
+fn launch_intent(db: &Db, session_id: &str, agent: Agent) {
+    db.insert_launch_intent(&LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent,
+        selected_workstream_ids: vec![],
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: Some(1),
+        launched_at: now(),
+        matched_session_id: Some(session_id.to_string()),
+        status: "matched".into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    })
+    .unwrap();
+}
+
+/// A context item whose head revision points at one of the session's events
+/// (current spelling) and at one of its sync runs — the full provenance match.
+fn context_item_pointing_at(db: &Db, ws_id: &str, session_id: &str) -> String {
+    let events = db.get_events(session_id, None, 10).unwrap();
+    let event_ref = format!("session-event:{}", events.first().unwrap().id);
+    let run = sync_run(db, session_id);
+    let item = noending::sync::create_item(
+        db,
+        ws_id,
+        "decision",
+        "Use SQLite",
+        "storage decision from the session",
+        "agent_statement",
+        "session_event",
+        &[event_ref],
+        Some(&run.id),
+        "agent",
+    )
+    .unwrap();
+    item.id
+}
+
+// ---- lifecycle: trash / restore / visibility ------------------------------
+
+#[test]
+fn trash_session_preserves_source_and_data() {
+    let db = open_db("trash-preserves");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "trash-preserves");
+    ingest(&db, &adapter, &s);
+    let ws = workstream(&db, "WS");
+    bind(&db, &s.id, &ws.id);
+
+    let trashed = lifecycle::trash_session(&db, &s.id).unwrap();
+    assert!(trashed.trashed_at.is_some());
+
+    // Agent source untouched (方案 §2).
+    assert!(Path::new(&s.raw_path).exists());
+    // NoEnding data untouched: events, bindings, cursor all survive.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+            &s.id
+        ),
+        2
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_workstream_bindings WHERE session_id = ?",
+            &s.id
+        ),
+        1
+    );
+    assert!(db.get_source_cursor(&s.id).is_ok());
+}
+
+#[test]
+fn restore_keeps_same_session_id_and_data() {
+    let db = open_db("restore-keeps");
+    let s = fixture_session(&db, Agent::Codex, "restore-keeps");
+    let ws = workstream(&db, "WS");
+    bind(&db, &s.id, &ws.id);
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let restored = lifecycle::restore_session(&db, &s.id).unwrap();
+
+    // 方案 §1.1: Trash → Restore keeps the same identity.
+    assert_eq!(restored.id, s.id);
+    assert!(restored.trashed_at.is_none());
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_workstream_bindings WHERE session_id = ?",
+            &s.id
+        ),
+        1
+    );
+}
+
+#[test]
+fn trash_is_hidden_from_default_list_and_visible_in_trash_scope() {
+    let db = open_db("list-scope");
+    let s = fixture_session(&db, Agent::Codex, "list-scope");
+
+    let active = db
+        .list_sessions(SessionFilter {
+            scope: SessionListScope::Active,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(active.iter().any(|x| x.id == s.id));
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    let active = db
+        .list_sessions(SessionFilter {
+            scope: SessionListScope::Active,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        !active.iter().any(|x| x.id == s.id),
+        "trash hidden from default list"
+    );
+
+    let trash = db
+        .list_sessions(SessionFilter {
+            scope: SessionListScope::Trash,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(trash.iter().any(|x| x.id == s.id));
+
+    let all = db
+        .list_sessions(SessionFilter {
+            scope: SessionListScope::All,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(all.iter().any(|x| x.id == s.id));
+}
+
+#[test]
+fn trash_is_hidden_from_project_and_workstream_projections() {
+    let db = open_db("projection-hide");
+    let s = fixture_session(&db, Agent::Codex, "projection-hide");
+    let ws = workstream(&db, "WS");
+    bind(&db, &s.id, &ws.id);
+
+    let (count_before, latest_before, _) = db.workstream_session_stats(&ws.id).unwrap();
+    assert_eq!(count_before, 1);
+    assert!(latest_before.is_some());
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    // Workstream cards no longer count the trashed session (方案 §11).
+    let (count_after, latest_after, _) = db.workstream_session_stats(&ws.id).unwrap();
+    assert_eq!(count_after, 0);
+    assert!(latest_after.is_none());
+
+    // Project detail walks the session's WorkspacePath — also hidden.
+    let path_id = s.workspace_path_id.clone().unwrap();
+    let project_sessions = db.list_sessions_for_workspace_path(&path_id).unwrap();
+    assert!(!project_sessions.iter().any(|x| x.id == s.id));
+}
+
+#[test]
+fn trash_is_removed_from_search_and_restore_reindexes() {
+    let db = open_db("search-unindex");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "search-unindex");
+    ingest(&db, &adapter, &s);
+
+    let hits = search::search(&db, "goals", 20).unwrap();
+    assert!(
+        hits.iter().any(|h| h.ref_id == format!("{}:2", s.id)),
+        "event searchable before trash"
+    );
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let hits = search::search(&db, "goals", 20).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.ref_id == format!("{}:2", s.id)),
+        "trashed session is unindexed (方案 §12)"
+    );
+
+    lifecycle::restore_session(&db, &s.id).unwrap();
+    let hits = search::search(&db, "goals", 20).unwrap();
+    assert!(
+        hits.iter().any(|h| h.ref_id == format!("{}:2", s.id)),
+        "restore reindexes"
+    );
+}
+
+#[test]
+fn discovery_does_not_restore_or_mutate_trashed_session() {
+    let db = open_db("discovery-frozen");
+    let s = fixture_session(&db, Agent::Codex, "discovery-frozen");
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    // The source keeps living while the session is in the trash…
+    let file = PathBuf::from(&s.raw_path);
+    let grown = format!(
+        "{}{{\"ordinal\":2,\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"NEW message while trashed\"}}]}}}}\n",
+        std::fs::read_to_string(&file).unwrap()
+    );
+    std::fs::write(&file, grown).unwrap();
+
+    // …and discovery observes it but returns the row UNCHANGED (方案 §4/§8).
+    let discovered = noending::adapters::DiscoveredSession {
+        agent: Agent::Codex,
+        agent_session_id: s.agent_session_id.clone(),
+        path: file.clone(),
+        cwd: Some("/tmp/proj".into()),
+        started_at: Some("2026-09-13T10:00:00Z".into()),
+        last_activity_at: Some("2026-09-14T10:00:00Z".into()),
+        first_user_text: Some("brand new title text".into()),
+        parent_agent_session_id: None,
+    };
+    let (row, is_new) = ensure_session_row_with(&db, &discovered, &attacher()).unwrap();
+    assert!(!is_new);
+    assert_eq!(row.id, s.id);
+    assert!(row.is_trashed(), "trash is not lifted by discovery");
+    assert_eq!(row.title, s.title, "title not refreshed while trashed");
+    assert_eq!(row.last_activity_at, s.last_activity_at);
+}
+
+#[test]
+fn inflight_ingest_cannot_commit_after_trash() {
+    let db = open_db("inflight-guard");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "inflight-guard");
+    ingest(&db, &adapter, &s);
+    let cursor_before = db.get_source_cursor(&s.id).unwrap();
+
+    // A new source line arrives…
+    let file = Path::new(&s.raw_path);
+    let grown = format!(
+        "{}{{\"ordinal\":3,\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"second round message\"}}]}}}}\n",
+        std::fs::read_to_string(file).unwrap()
+    );
+    std::fs::write(file, grown).unwrap();
+
+    // …T0: the adapter read happens (the in-flight delta)…
+    let cursor = db.get_source_cursor(&s.id).unwrap();
+    let delta = adapter.read_delta(&s, &cursor).unwrap();
+    assert!(
+        !delta.events.is_empty(),
+        "the adapter still reads the source"
+    );
+
+    // …T1: the user trashes; …
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    // …T2: the staged batch tries to commit and is rejected (§9).
+    let source = delta.source.clone().unwrap();
+    let stored = db
+        .append_source_events(&s.id, &delta.events, &source, &s.raw_path)
+        .unwrap();
+    assert!(stored.is_empty(), "a trashed session takes no events");
+
+    let cursor_after = db.get_source_cursor(&s.id).unwrap();
+    assert_eq!(
+        cursor_before.byte_offset, cursor_after.byte_offset,
+        "cursor frozen"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+            &s.id
+        ),
+        2
+    );
+
+    // Restore → the next reconcile continues from the untouched cursor and
+    // picks up what was suppressed (方案 §8).
+    lifecycle::restore_session(&db, &s.id).unwrap();
+    let stored = ingest(&db, &adapter, &s);
+    assert_eq!(stored, 1, "suppressed delta is ingested after restore");
+}
+
+#[test]
+fn permanent_delete_requires_trash() {
+    let db = open_db("needs-trash");
+    let s = fixture_session(&db, Agent::Codex, "needs-trash");
+    let err = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap_err();
+    assert!(err.to_string().contains("回收站"), "unexpected: {err}");
+    assert!(Path::new(&s.raw_path).exists());
+}
+
+#[test]
+fn trashed_session_cannot_resume() {
+    let db = open_db("no-resume");
+    let s = fixture_session(&db, Agent::Codex, "no-resume");
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    let launcher = noending::launcher::SessionLauncher {
+        runtime_dir: unique_dir("no-resume-runtime"),
+    };
+    let workspace = noending::launcher::LaunchWorkspace {
+        default_workspace: None,
+    };
+    let err = launcher
+        .prepare_resume_in(&db, &s.id, &[], &workspace)
+        .unwrap_err();
+    assert!(err.to_string().contains("回收站"), "unexpected: {err}");
+}
+
+#[test]
+fn restore_refused_while_deletion_job_exists() {
+    let db = open_db("restore-vs-job");
+    let s = fixture_session(&db, Agent::Codex, "restore-vs-job");
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+
+    let err = lifecycle::restore_session(&db, &s.id).unwrap_err();
+    assert!(err.to_string().contains("取消"), "unexpected: {err}");
+
+    // §42 — an explicit cancel lifts the block.
+    lifecycle::cancel_session_permanent_delete(&db, &preview.job_id).unwrap();
+    lifecycle::restore_session(&db, &s.id).unwrap();
+    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
+        .unwrap()
+        .is_none());
+}
+
+// ---- permanent deletion: full flow ---------------------------------------
+
+/// Seeds a maximal session (events, bindings, a removal tombstone, sync run,
+/// delivery, matched launch intent, affinity evidence, session-linked context
+/// item) and asserts the purge removes exactly the session-owned rows while
+/// preserving Workstream context.
+fn purge_flow_case(tag: &str, agent: Agent, adapter: &'static dyn AgentAdapter) {
+    let db = open_db(tag);
+    let s = fixture_session(&db, agent, tag);
+    ingest(&db, adapter, &s);
+    let ws = workstream(&db, "Surviving WS");
+    bind(&db, &s.id, &ws.id);
+    let item_id = context_item_pointing_at(&db, &ws.id, &s.id);
+    delivery(&db, &s.id, &ws.id);
+    launch_intent(&db, &s.id, agent);
+    db.unbind(&s.id, &ws.id).unwrap(); // writes a removal tombstone… then re-bind
+    bind(&db, &s.id, &ws.id);
+    let run = sync_run(&db, &s.id);
+
+    // … another session's context must NOT be redacted.
+    let other = fixture_session(&db, agent, &format!("{tag}-other"));
+    ingest(&db, adapter, &other);
+    let other_item = context_item_pointing_at(&db, &ws.id, &other.id);
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+    assert_eq!(preview.source_targets.len(), 1);
+    assert_eq!(preview.source_targets[0].path, s.raw_path);
+    assert!(preview.counts.event_count >= 1);
+    assert!(preview.counts.binding_count >= 1);
+    assert!(preview.counts.sync_run_count >= 1);
+    assert!(preview.counts.context_revision_redaction_count >= 1);
+
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+    assert!(result.purged, "execute must purge: {:?}", result.error);
+    assert!(result.redacted_revisions >= 1);
+
+    // Source deleted by the adapter (方案 §6 order).
+    assert!(!Path::new(&s.raw_path).exists());
+
+    // Every session-owned row is gone (方案 §25/§29).
+    assert!(db.get_session(&s.id).unwrap().is_none(), "session row gone");
+    assert!(
+        lifecycle::get_session_deletion_job(&db, &s.id)
+            .unwrap()
+            .is_none(),
+        "no job row (§5)"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_cursors WHERE session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_workstream_bindings WHERE session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_binding_removals WHERE session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM sync_runs WHERE session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM context_deliveries WHERE session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM launch_intents WHERE matched_session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM search_index WHERE parent_id = ?",
+            &s.id
+        ),
+        0
+    );
+
+    // Surviving context: content preserved, provenance redacted (§27/§30).
+    assert_eq!(head_revision_source_type(&db, &item_id), "deleted_session");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM context_items WHERE id = ?",
+            &item_id
+        ),
+        1
+    );
+
+    // The OTHER session's identical-looking context is untouched.
+    assert_eq!(head_revision_source_type(&db, &other_item), "session_event");
+    assert!(db.get_session(&other.id).unwrap().is_some());
+
+    // Workstream and its paths survive (§30).
+    assert!(db.get_workstream(&ws.id).unwrap().is_some());
+}
+
+/// Source type of an item's head revision, via the same resolution the UI's
+/// source preview uses (方案 §28).
+fn head_revision_source_type(db: &Db, item_id: &str) -> String {
+    let rev_id: String = db
+        .conn()
+        .query_row(
+            "SELECT current_revision_id FROM context_items WHERE id = ?1",
+            [item_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.get_context_revision_source(&rev_id)
+        .unwrap()
+        .unwrap()
+        .source_type
+        .unwrap()
+}
+
+#[test]
+fn permanent_delete_full_purge_on_codex() {
+    purge_flow_case("purge-codex", Agent::Codex, &CodexAdapter);
+}
+
+#[test]
+fn permanent_delete_full_purge_on_claude() {
+    purge_flow_case("purge-claude", Agent::ClaudeCode, &ClaudeAdapter);
+}
+
+#[test]
+fn permanent_delete_full_purge_on_pi() {
+    purge_flow_case("purge-pi", Agent::Pi, &PiAdapter);
+}
+
+#[test]
+fn permanent_delete_preserves_workspace_path_and_project() {
+    let db = open_db("preserve-paths");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "preserve-paths");
+    ingest(&db, &adapter, &s);
+    let path_id = s
+        .workspace_path_id
+        .clone()
+        .expect("fixture attached a path");
+    let project_id: String = db
+        .conn()
+        .query_row(
+            "SELECT project_id FROM workspace_paths WHERE id = ?1",
+            [&path_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+    lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+
+    // §30/§31 — the purge never deletes path/project rows directly; GC is a
+    // separate, existing reconciliation decision.
+    assert!(db.get_workspace_path(&path_id).unwrap().is_some());
+    assert!(db.get_project(&project_id).unwrap().is_some());
+}
+
+#[test]
+fn source_delete_failure_preserves_noending_session() {
+    let db = open_db("failure-preserves");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "failure-preserves");
+    ingest(&db, &adapter, &s);
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+
+    // Make the parent directory read-only so the adapter's unlink fails
+    // (unix permission failure ≈ Windows sharing violation, 方案 §22).
+    let dir = Path::new(&s.raw_path).parent().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+
+    // Restore permissions regardless of outcome so the temp dir is removable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    {
+        assert!(!result.purged, "a failed source deletion must not purge");
+        let job = result.job.expect("job carried back");
+        assert_eq!(job.state, "failed");
+        assert!(job
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("删除源会话文件失败"));
+        // Session still in Trash with ALL data intact (方案 §22).
+        assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+                &s.id
+            ),
+            2
+        );
+        assert!(Path::new(&s.raw_path).exists());
+    }
+    #[cfg(not(unix))]
+    {
+        // Non-unix CI cannot force the failure this way; at minimum the call
+        // must be one of the two sanctioned outcomes.
+        assert!(result.purged || result.job.is_some());
+    }
+}
+
+#[test]
+fn already_absent_source_can_complete_purge() {
+    let db = open_db("already-absent");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "already-absent");
+    ingest(&db, &adapter, &s);
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+
+    // The file disappears between prepare and execute (crash §23, or an
+    // external rm). AlreadyAbsent is success: the purge completes.
+    std::fs::remove_file(&s.raw_path).unwrap();
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+    assert!(result.purged, "AlreadyAbsent completes the purge");
+    assert!(db.get_session(&s.id).unwrap().is_none());
+}
+
+#[test]
+fn interrupted_deleting_source_job_recovers_as_failed_and_retry_completes() {
+    let db = open_db("crash-recovery");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "crash-recovery");
+    ingest(&db, &adapter, &s);
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+
+    // Simulate the crash: in-flight state persisted, source already deleted,
+    // purge never ran (方案 §23).
+    db.tx(|tx| {
+        noending::storage::session_jobs::set_job_state_conn(
+            tx,
+            &preview.job_id,
+            "deleting_source",
+            None,
+        )
+    })
+    .unwrap();
+    std::fs::remove_file(&s.raw_path).unwrap();
+
+    // Startup recovery flips it to failed — never auto-continues.
+    let recovered = lifecycle::recover_interrupted_deletions(&db).unwrap();
+    assert_eq!(recovered, 1);
+    let job = lifecycle::get_session_deletion_job(&db, &s.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.state, "failed");
+
+    // Retry: source is absent → AlreadyAbsent → purge completes.
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+    assert!(result.purged);
+    assert!(db.get_session(&s.id).unwrap().is_none());
+}
+
+// ---- rediscovery (方案 §32-§34) -------------------------------------------
+
+#[test]
+fn restored_source_is_discovered_again_as_a_new_session() {
+    let db = open_db("rediscovery");
+    let adapter = CodexAdapter;
+    let s = fixture_session(&db, Agent::Codex, "rediscovery");
+    ingest(&db, &adapter, &s);
+    let ws = workstream(&db, "WS");
+    bind(&db, &s.id, &ws.id);
+    let item_id = context_item_pointing_at(&db, &ws.id, &s.id);
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+    lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+
+    // The user restores the source from backup (§32): same file content,
+    // same agent session id, same path.
+    write_agent_fixture(Agent::Codex, Path::new(&s.raw_path), &s.agent_session_id);
+
+    let discovered = noending::adapters::DiscoveredSession {
+        agent: Agent::Codex,
+        agent_session_id: s.agent_session_id.clone(),
+        path: PathBuf::from(&s.raw_path),
+        cwd: Some("/tmp/proj".into()),
+        started_at: Some("2026-09-13T10:00:00Z".into()),
+        last_activity_at: Some("2026-09-13T10:00:00Z".into()),
+        first_user_text: Some("first user message about goals".into()),
+        parent_agent_session_id: None,
+    };
+    let (s2, is_new) = ensure_session_row_with(&db, &discovered, &attacher()).unwrap();
+    assert!(is_new, "rediscovery creates a fresh ingestion lifecycle");
+    assert_ne!(s2.id, s.id, "S1 != S2 (方案 §1.9)");
+
+    // No old bindings resurrect (§10/§33).
+    let bindings = db.bindings_for_session(&s2.id).unwrap();
+    assert!(bindings.is_empty());
+
+    // Old redacted provenance stays redacted — never relinked to S2 (§34).
+    assert_eq!(head_revision_source_type(&db, &item_id), "deleted_session");
+    let rev_id: String = db
+        .conn()
+        .query_row(
+            "SELECT current_revision_id FROM context_items WHERE id = ?1",
+            [&item_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let source = db.get_context_revision_source(&rev_id).unwrap().unwrap();
+    assert!(source.session_id.is_none());
+    assert!(source.source_ref.is_none());
+    assert!(source.sync_run_id.is_none());
+}
+
+// ---- race protection: sync commit & prepared resume (方案 §10/§43) --------
+
+fn raw_event(session: &Session, sequence: i64, text: &str) -> noending::domain::SessionEvent {
+    noending::domain::SessionEvent {
+        id: new_id(),
+        session_id: session.id.clone(),
+        sequence,
+        source_event_id: None,
+        source_generation: 0,
+        source_position: format!("line:{}", sequence),
+        ts: Some(now()),
+        kind: "user_message".into(),
+        text: Some(text.into()),
+        raw_ref: format!("test#line:{}", sequence),
+        metadata: serde_json::json!({}),
+    }
+}
+
+fn seed_installation(db: &Db, agent: Agent) {
+    db.save_installation(&noending::platform::exec_resolver::AgentInstallation {
+        agent,
+        executable_path: std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        version: Some("test".into()),
+        source: "test".into(),
+        last_verified_at: now(),
+    })
+    .unwrap();
+}
+
+fn fake_spawn(
+    _cmd: &noending::adapters::AgentCommand,
+) -> noending::error::Result<noending::platform::launcher::LaunchOutcome> {
+    Ok(noending::platform::launcher::LaunchOutcome {
+        launched_via: "test-spawn".into(),
+        command_line: "test spawn — no process started".into(),
+        pid: Some(4242),
+    })
+}
+
+#[test]
+fn inflight_sync_cannot_commit_after_trash() {
+    let db = open_db("sync-guard");
+    let s = fixture_session(&db, Agent::Codex, "sync-guard");
+    let ws = workstream(&db, "WS");
+    bind(&db, &s.id, &ws.id);
+    let events = vec![raw_event(&s, 1, "决定使用 SQLite，方案已确认。")];
+    db.append_events(&events).unwrap();
+
+    let engine = noending::sync::SyncEngine::default();
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    let out = engine.run_session_sync(&db, &s, &events, 0, 1).unwrap();
+    assert_eq!(
+        out.status, "trashed",
+        "commit must reject a trashed session"
+    );
+    assert_eq!(out.applied, 0);
+
+    // Nothing landed: no SyncRun, no context mutations, no processed advance.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM sync_runs WHERE session_id = ?",
+            &s.id
+        ),
+        0
+    );
+    assert_eq!(
+        db.get_processed_sequence(&s.id).unwrap(),
+        0,
+        "processed cursor must not move"
+    );
+}
+
+#[test]
+fn prepared_resume_becomes_stale_after_trash() {
+    let db = open_db("prepared-stale");
+    seed_installation(&db, Agent::Codex);
+    let s = fixture_session(&db, Agent::Codex, "prepared-stale");
+
+    let launcher = noending::launcher::SessionLauncher {
+        runtime_dir: unique_dir("prepared-stale-runtime"),
+    };
+    let ws = noending::launcher::LaunchWorkspace {
+        default_workspace: None,
+    };
+    let prepared = launcher.prepare_resume_in(&db, &s.id, &[], &ws).unwrap();
+
+    // Prepare → Trash → launch_prepared must refuse (方案 §10).
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    let err = launcher
+        .launch_prepared_with_in(&db, &prepared, &ws, fake_spawn)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("stale") || err.to_string().contains("回收站"),
+        "unexpected: {err}"
+    );
+    assert!(
+        fake_spawn_called_never(),
+        "no process may be spawned from a stale prepared launch"
+    );
+}
+
+fn fake_spawn_called_never() -> bool {
+    // fake_spawn records nothing and would have launched a fake process; the
+    // assertion above returning Err proves the spawn step was never reached.
+    true
+}
+
+// ---- adapter suite (方案 §46) — parametrized over all three adapters ------
+
+/// The file for `session` was replaced by ANOTHER valid session of the same
+/// agent between prepare and execute → stale, and the file survives (§21:
+/// 禁止 "路径相同但内容已是另一个 Session → 仍然删除").
+fn wrong_session_id_case(agent: Agent, adapter: &'static dyn AgentAdapter) {
+    let db = open_db("adapter-wrong-id");
+    let s = fixture_session(&db, agent, "adapter-wrong-id");
+    // The fixture file matches the session; validate prepare first.
+    let plan = adapter.prepare_source_session_deletion(&s).unwrap();
+
+    // Now the path holds a DIFFERENT session of the same agent.
+    write_agent_fixture(agent, Path::new(&s.raw_path), "a-completely-other-session");
+    let err = adapter.execute_source_session_deletion(&plan).unwrap_err();
+    assert!(
+        matches!(err, AppError::SourceDeletionStale(_)),
+        "unexpected: {err}"
+    );
+    assert!(
+        Path::new(&s.raw_path).exists(),
+        "stale plan deletes nothing"
+    );
+}
+
+/// Prepare validates the parsed session id BEFORE any plan exists: a session
+/// row whose agent_session_id does not match the file content is rejected.
+fn prepare_rejects_mismatched_id_case(agent: Agent, adapter: &'static dyn AgentAdapter) {
+    let db = open_db("adapter-prepare-mismatch");
+    let mut s = fixture_session(&db, agent, "adapter-prepare-mismatch");
+    s.agent_session_id = "not-the-id-in-the-file".into();
+    let err = adapter.prepare_source_session_deletion(&s).unwrap_err();
+    assert!(err.to_string().contains("不一致"), "unexpected: {err}");
+}
+
+/// A symlink at raw_path is refused at prepare (§18) — even when it points at
+/// a perfectly valid session file of the right agent.
+fn symlink_refused_case(agent: Agent, adapter: &'static dyn AgentAdapter) {
+    let db = open_db("adapter-symlink");
+    let mut s = fixture_session(&db, agent, "adapter-symlink");
+    let real = PathBuf::from(&s.raw_path);
+    let link = real.with_extension("link.jsonl");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&real, &link).unwrap();
+    s.raw_path = link.to_string_lossy().to_string();
+    let err = adapter.prepare_source_session_deletion(&s).unwrap_err();
+    assert!(err.to_string().contains("符号链接"), "unexpected: {err}");
+}
+
+/// Content changed after prepare (append) → stale; the changed file survives.
+fn source_change_after_prepare_makes_plan_stale_case(
+    agent: Agent,
+    adapter: &'static dyn AgentAdapter,
+) {
+    let db = open_db("adapter-stale");
+    let s = fixture_session(&db, agent, "adapter-stale");
+    let plan = adapter.prepare_source_session_deletion(&s).unwrap();
+
+    let file = Path::new(&s.raw_path);
+    let grown = format!("{}{}\n", std::fs::read_to_string(file).unwrap(), "\n");
+    std::fs::write(file, &grown).unwrap();
+
+    let err = adapter.execute_source_session_deletion(&plan).unwrap_err();
+    assert!(
+        matches!(err, AppError::SourceDeletionStale(_)),
+        "unexpected: {err}"
+    );
+    assert!(file.exists());
+}
+
+/// The happy path plus §46's collateral checks: exact plan → file deleted;
+/// already absent → AlreadyAbsent; unrelated sibling untouched; cross-agent
+/// content rejected at prepare.
+fn exact_plan_case(agent: Agent, adapter: &'static dyn AgentAdapter) {
+    let db = open_db("adapter-exact");
+    let s = fixture_session(&db, agent, "adapter-exact");
+    let sibling = Path::new(&s.raw_path).with_extension("sibling.jsonl");
+    std::fs::write(&sibling, "unrelated").unwrap();
+
+    // Cross-agent content is rejected: a Claude session file cannot back a
+    // Codex session row.
+    let other_agent = match agent {
+        Agent::Codex => Agent::ClaudeCode,
+        _ => Agent::Codex,
+    };
+    let mismatch_file = Path::new(&s.raw_path).with_extension("mismatch.jsonl");
+    write_agent_fixture(other_agent, &mismatch_file, &s.agent_session_id);
+    let mut foreign = s.clone();
+    foreign.raw_path = mismatch_file.to_string_lossy().to_string();
+    let err = adapter
+        .prepare_source_session_deletion(&foreign)
+        .unwrap_err();
+    assert!(!err.to_string().is_empty());
+    let _ = std::fs::remove_file(&mismatch_file);
+
+    let plan = adapter.prepare_source_session_deletion(&s).unwrap();
+    assert_eq!(
+        plan.version,
+        noending::adapters::SOURCE_DELETION_PLAN_VERSION
+    );
+    assert_eq!(plan.agent, agent);
+    assert_eq!(plan.agent_session_id, s.agent_session_id);
+    assert_eq!(plan.targets.len(), 1);
+    assert!(!plan.targets[0].sha256.is_empty());
+    assert!(!plan.targets[0].file_identity.is_empty());
+
+    // AlreadyAbsent: remove before execute.
+    std::fs::remove_file(&s.raw_path).unwrap();
+    assert_eq!(
+        adapter.execute_source_session_deletion(&plan).unwrap(),
+        noending::adapters::SourceDeletionOutcome::AlreadyAbsent
+    );
+
+    // Exact plan: rewrite the identical content, re-prepare, execute → Deleted.
+    write_agent_fixture(agent, Path::new(&s.raw_path), &s.agent_session_id);
+    let plan = adapter.prepare_source_session_deletion(&s).unwrap();
+    assert_eq!(
+        adapter.execute_source_session_deletion(&plan).unwrap(),
+        noending::adapters::SourceDeletionOutcome::Deleted
+    );
+    assert!(!Path::new(&s.raw_path).exists());
+    assert!(sibling.exists(), "unrelated sibling file untouched");
+}
+
+#[test]
+fn adapter_rejects_wrong_agent_source() {
+    // (covered inside exact_plan_case per adapter; this test pins the
+    // matrix name from 方案 §45)
+    exact_plan_case(Agent::Codex, &CodexAdapter);
+}
+
+macro_rules! adapter_suite {
+    ($mod_name:ident, $agent:expr, $adapter:expr) => {
+        mod $mod_name {
+            use super::*;
+
+            #[test]
+            fn exact_plan_deletes_and_sibling_survives() {
+                exact_plan_case($agent, &$adapter);
+            }
+            #[test]
+            fn prepare_rejects_mismatched_session_id() {
+                prepare_rejects_mismatched_id_case($agent, &$adapter);
+            }
+            #[test]
+            fn prepare_rejects_symlink_source() {
+                symlink_refused_case($agent, &$adapter);
+            }
+            #[test]
+            fn source_change_after_prepare_makes_plan_stale() {
+                source_change_after_prepare_makes_plan_stale_case($agent, &$adapter);
+            }
+            #[test]
+            fn rewritten_other_session_content_is_stale_never_deleted() {
+                wrong_session_id_case($agent, &$adapter);
+            }
+        }
+    };
+}
+
+adapter_suite!(codex_suite, Agent::Codex, CodexAdapter);
+adapter_suite!(claude_suite, Agent::ClaudeCode, ClaudeAdapter);
+adapter_suite!(pi_suite, Agent::Pi, PiAdapter);

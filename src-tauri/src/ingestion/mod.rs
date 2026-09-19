@@ -67,6 +67,17 @@ pub fn ingest_and_sync_session(
     engine: &SyncEngine,
     session: &Session,
 ) -> Result<(i64, usize)> {
+    // §9 — re-read the lifecycle state: the caller's struct may predate a
+    // concurrent Trash. The authoritative guard lives inside
+    // `append_source_events` anyway; this just avoids preparing work that
+    // cannot commit.
+    if !db
+        .get_session(&session.id)?
+        .map(|s| !s.is_trashed())
+        .unwrap_or(false)
+    {
+        return Ok((0, 0));
+    }
     let adapter = crate::adapters::adapter_for(session.agent);
     let stored = ingest_delta(db, adapter, session)?;
     if !crate::settings::context_intelligence_enabled(db)? {
@@ -93,6 +104,14 @@ pub fn ingest_and_sync_session_nb(
     // Phase 1 (lock): ingest the file delta + prepare the run.
     let (stored, pre) = {
         let guard = crate::sync::lock_db(db_lock)?;
+        // §9 — re-read lifecycle state before preparing any writes.
+        if !guard
+            .get_session(&session.id)?
+            .map(|s| !s.is_trashed())
+            .unwrap_or(false)
+        {
+            return Ok((0, 0));
+        }
         let adapter = crate::adapters::adapter_for(session.agent);
         let stored = ingest_delta(&guard, adapter, session)?;
         let pre = if !crate::settings::context_intelligence_enabled(&guard)? {
@@ -159,6 +178,13 @@ pub fn ensure_session_row_with(
     let existing = db.find_session_by_agent_id(d.agent, &d.agent_session_id)?;
     let raw_path = d.path.to_string_lossy().to_string();
     if let Some(s) = existing {
+        // §8 — a trashed Session is inactive: discovery may observe it, but it
+        // MUST NOT refresh metadata, re-attach paths, ingest or sync it. The
+        // row is returned unchanged so the caller can skip it; after a
+        // Restore, the next reconcile continues from the untouched cursor.
+        if s.is_trashed() {
+            return Ok((s, false));
+        }
         // Discovery just read the transcript, so it is the source of truth
         // for source-derived fields; refresh the row when it learned
         // something new (e.g. cwd read from file content after an older
@@ -241,6 +267,8 @@ pub fn ensure_session_row_with(
         parent_agent_session_id: d.parent_agent_session_id.clone(),
         started_at: d.started_at.clone(),
         last_activity_at: d.last_activity_at.clone(),
+        // A freshly discovered Session always starts Normal.
+        trashed_at: None,
     };
     db.upsert_session(&s)?;
     let stored = db.get_session(&s.id)?.unwrap_or(s);
@@ -322,6 +350,10 @@ where
                     // resolved, so this hot path does no Project work.
                 }
             }
+            // §8 — trashed sessions are skipped entirely: no ingest, no sync.
+            if s.is_trashed() {
+                continue;
+            }
             on_session(&s);
             match ingest_and_sync_session_nb(db_lock, engine, &s) {
                 Ok((events, _applied)) => total_events += events,
@@ -353,6 +385,10 @@ where
             let guard = crate::sync::lock_db(db_lock)?;
             ensure_session_row(&guard, d)?.0
         };
+        // §8 — trashed sessions are skipped entirely.
+        if s.is_trashed() {
+            continue;
+        }
         on_session(&s);
         match ingest_and_sync_session_nb(db_lock, engine, &s) {
             Ok((events, _)) => total_events += events,
@@ -386,6 +422,12 @@ where
         let s = {
             let guard = crate::sync::lock_db(db_lock)?;
             let (s, _is_new) = ensure_session_row(&guard, d)?;
+            // §8 — a trashed session keeps its cursor untouched: no rewind,
+            // no re-scan. (Its source file is also invisible to discovery
+            // updates, so a rewind would be a mutation with no consumer.)
+            if s.is_trashed() {
+                continue;
+            }
             // overwrite/refresh: re-read the source from position 0
             guard.reset_session_source_cursor(&s.id)?;
             s

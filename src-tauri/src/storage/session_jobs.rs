@@ -55,11 +55,14 @@ pub fn restore_session_conn(conn: &Connection, session_id: &str) -> Result<bool>
 /// must exist AND be Normal, otherwise work prepared against it (events,
 /// cursors, sync runs, context mutations) must not be committed.
 pub fn session_is_writable_conn(conn: &Connection, session_id: &str) -> Result<bool> {
+    // The turbofish pins the column reader to `Option<String>` so
+    // `.optional()`'s outer Option means ROW PRESENCE: `Some(None)` is an
+    // existing, Normal session; `None` is a vanished row.
     let trashed: Option<Option<String>> = conn
         .query_row(
             "SELECT trashed_at FROM sessions WHERE id = ?1",
             params![session_id],
-            |r| r.get(0),
+            |r| r.get::<_, Option<String>>(0),
         )
         .optional()?;
     Ok(matches!(trashed, Some(None)))

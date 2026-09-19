@@ -24,6 +24,7 @@ pub mod extractor;
 pub mod merge;
 pub mod policy;
 
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::sync::{Mutex, MutexGuard};
@@ -358,6 +359,38 @@ impl SyncEngine {
             runtime: runtime.to_string(),
         };
         db.tx(|tx| {
+            // §43 — commit-time trash guard, FIRST of the re-checks: a run
+            // prepared against a session that was trashed while its
+            // extraction ran must not write events-derived context, a
+            // SyncRun, or a processed-cursor advance. The session keeps its
+            // data frozen at the moment of trashing; a Restore re-syncs from
+            // the unchanged processed cursor.
+            //
+            // Type note: the turbofish pins the column reader to Option<String>
+            // so `.optional()`'s outer Option means ROW PRESENCE — Some(None)
+            // is an existing, Normal session; None is a vanished row.
+            let trashed: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT trashed_at FROM sessions WHERE id = ?1",
+                    rusqlite::params![session.id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            if !matches!(trashed, Some(None)) {
+                eprintln!(
+                    "[sync] run {} rejected: session {} is trashed or gone, discarding",
+                    pre.run_id, session.id
+                );
+                return Ok(SyncJobOutput {
+                    run_id: pre.run_id.clone(),
+                    status: "trashed".into(),
+                    applied: 0,
+                    skipped: 0,
+                    unclassified: 0,
+                    summary: "该会话已移入回收站，本次同步结果作废。".into(),
+                });
+            }
+
             let current_processed: i64 = tx.query_row(
                 "SELECT COALESCE((SELECT processed_sequence FROM session_cursors WHERE session_id = ?1), 0)",
                 rusqlite::params![session.id],

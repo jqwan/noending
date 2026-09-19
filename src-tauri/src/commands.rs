@@ -335,6 +335,9 @@ pub fn get_workstream_context(
             .bindings_for_workstream(&workstream_id)?
             .into_iter()
             .filter_map(|b| db.get_session(&b.session_id).ok().flatten())
+            // §11 — the Workstream context view is a default projection: a
+            // trashed session keeps its bindings but is not shown here.
+            .filter(|s| !s.is_trashed())
             .collect();
         let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
         let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
@@ -562,6 +565,11 @@ pub fn sync_session(state: State<AppState>, session_id: String) -> Result<serde_
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
+        // §3/§10 — a trashed session is inactive: sync is an explicit user
+        // action here, so reject with a reason instead of silently no-op'ing.
+        if session.is_trashed() {
+            return Err(other("会话已在回收站，无法同步；请先恢复会话"));
+        }
         let engine = crate::sync::SyncEngine::from_settings(db);
         let (ingested, applied) = crate::launcher::ingest_and_sync_session(db, &engine, &session)?;
         Ok(serde_json::json!({

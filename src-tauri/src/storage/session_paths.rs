@@ -42,13 +42,15 @@ use super::Db;
 
 impl Db {
     /// §24 — standalone Sessions belong to a Project too, straight from their
-    /// own path, with no Workstream involved.
+    /// own path, with no Workstream involved. Active sessions only: the
+    /// Project detail is a default projection and hides the recycle bin
+    /// (方案 §11).
     pub fn list_sessions_for_workspace_path(
         &self,
         path_id: &str,
     ) -> Result<Vec<crate::domain::Session>> {
         let mut st = self.0.prepare(
-            "SELECT * FROM sessions WHERE workspace_path_id = ?1
+            "SELECT * FROM sessions WHERE workspace_path_id = ?1 AND trashed_at IS NULL
               ORDER BY COALESCE(last_activity_at, started_at) DESC",
         )?;
         let mapped = st.query_map(params![path_id], super::row_session)?;
