@@ -19,10 +19,13 @@ The core product invariant is:
 
 When changing the system, preserve these rules:
 
-* **Workstream is the continuity unit.** Project is only an optional organization layer.
+* **Workstream is the continuity unit.** Project is an app-managed organization layer, never a lifecycle owner.
 * A Session may have **zero, one, or multiple Workstreams**.
-* Never equate Project with repository, cwd, workspace, or filesystem path.
-* A Workstream may carry an optional **default working directory** (`default_cwd`) as a launch convenience: it suggests where New Sessions start. It is never identity — a Workstream is not a path, Sessions keep their own authoritative cwd, and a Workstream without one stays fully valid.
+* **Project is derived, never assigned.** A Project is the app-maintained physical *workspace family*: it exists because a `WorkspacePath` exists, it is renamed only by `name_customized`, and it disappears when its last path goes. It is still not a synonym for a repository — one Project may hold N paths, and some of them are not repos. Users never hand-create a Project or attach a Workstream to one.
+* **A Workstream carries an ordered list of `WorkstreamPath`s**, not a single directory. Position 0 is primary. The list is a *launch and membership* anchor, not the Workstream's identity — a Workstream is still not a path, Sessions keep their own authoritative cwd, and a Workstream with zero paths stays fully valid.
+* **Path identity is pure lexical.** `workspace_paths.id = "path-" + sha256(path_key(canonical_path))`, computed by `workspace::identity` with no filesystem access: no `fs::canonicalize`, no symlink resolution, no "does it exist" input. Existence and Git state are *observations* on the row, never part of the key.
+* **`sessions.project_id` is a derived cache with exactly three writers**: the in-statement derivation inside `upsert_session`, the bulk refresh when a WorkspacePath changes Project, and the v12 migration. Any other `UPDATE sessions SET project_id` is a violation.
+* **Session cwd drift does not grow a Workstream's path list.** A binding whose `workstream_path_id` stops matching is set to `NULL` (meaning "not brought in by any path"); it is never silently re-pointed or appended. Path lists grow only through a user action or an explicit binding.
 * Raw Agent session files are **read-only**. Never modify or delete them.
 * Ingested Session Events are **append-only history**. Never overwrite historical events.
 * Event identity is app-owned and stable. Source file position is metadata, not identity.
@@ -67,10 +70,13 @@ Keep responsibilities separated:
 * `src-tauri/src/sync/` — extraction, classification, policy and deterministic merge.
 * `src-tauri/src/context/` — Core Context projection and Session Context bundles.
 * `src-tauri/src/launcher/` — New / Resume flows, LaunchIntent and delivery tracking.
+* `src-tauri/src/workspace/` — path identity (pure lexical normalization), Home resolution, Project/Workstream/Session path rules. `workspace::identity` is the **only** place a path key may be computed.
 * `src-tauri/src/storage/` — SQLite schema, transactions and persistence.
 * `src/` — UI only; domain invariants belong in Rust.
 
 Do not move OS-specific behavior into Agent adapters.
+
+Observing the filesystem (existence, git dirs, symlinks) belongs to `platform/`; deciding *what a path is* belongs to `workspace/` and must stay filesystem-free.
 
 Do not let LLM output directly mutate storage. LLMs propose changes; deterministic Rust code validates and applies them.
 

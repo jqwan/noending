@@ -1,26 +1,71 @@
 //! Platform-agnostic domain model.
 //!
-//! Nothing here may depend on a specific Agent's data format, a filesystem
-//! path, a repository or a cwd. Environment data (cwd etc.) is optional
-//! metadata carried by Session, never a structural requirement.
+//! Nothing here may depend on a specific Agent's data format.
+//!
+//! Workspace Domain v0.2 changed one long-standing rule deliberately: a
+//! physical working path IS now domain state (`WorkspacePath`, and the
+//! `workstream_paths` ordered list that replaced `default_cwd`). What did not
+//! change: an Agent's raw transcript layout, and the fact that a Workstream is
+//! not a path — it *has* an ordered list of paths, and a Session keeps its own
+//! authoritative cwd.
+//!
+//! Environment data (cwd etc.) is still optional metadata carried by Session:
+//! a Session with no cwd is legal and gets no WorkspacePath (v0.2 never
+//! fabricates one from a default).
 
 use serde::{Deserialize, Serialize};
 
 pub type Id = String;
 
+/// A physical workspace family, maintained entirely by the app.
+///
+/// Users never create, delete, or pick a Project — they may only rename it
+/// (`name_customized`). A Project exists exactly while it owns at least one
+/// [`WorkspacePath`]; the last path being deleted or reassigned deletes it.
+/// `git_id` is the optional Git anchor; `None` means the Project is currently
+/// only anchored by its path(s), which is a normal state, not a degraded one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: Id,
     pub name: String,
     pub description: String,
+    /// Compatibility column, no longer domain semantics: v0.2 has no Project
+    /// lifecycle, so nothing writes 1 and `list_projects` does not filter on it.
     pub archived: bool,
+    /// References `git_identities.id`. UNIQUE across Projects when set.
+    #[serde(default)]
+    pub git_id: Option<Id>,
+    /// A user renamed this Project: automatic naming must stop overwriting it,
+    /// including after a Project merge or worktree discovery.
+    #[serde(default)]
+    pub name_customized: bool,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// Optional resource attached to a Project. A Project with zero resources
-/// is a perfectly valid state: repositories / workspaces are conveniences,
-/// not identity.
+impl Project {
+    /// Legacy / test constructor: path-backed, app-named.
+    pub fn new(id: Id, name: impl Into<String>) -> Self {
+        let ts = crate::storage::now();
+        Self {
+            id,
+            name: name.into(),
+            description: String::new(),
+            archived: false,
+            git_id: None,
+            name_customized: false,
+            created_at: ts.clone(),
+            updated_at: ts,
+        }
+    }
+}
+
+/// Optional resource attached to a Project.
+///
+/// Since v0.2 this table carries NO workspace identity: `repository` /
+/// `workspace` rows are plain user notes, and the WorkspacePath registry is
+/// the only path authority. The commands that let users add or remove rows
+/// left the product API, so this is read-only legacy data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectResource {
     pub id: Id,
@@ -31,24 +76,197 @@ pub struct ProjectResource {
     pub created_at: String,
 }
 
+/// One observed physical working path — the bridge between the filesystem and
+/// every Project fact in the system.
+///
+/// Identity: `id` IS the path identity, derived deterministically from
+/// `canonical_path` (see `workspace::path_identity`) rather than being a random
+/// UUID, so re-ensuring the same path is idempotent by construction and the
+/// v12 migration can be replayed safely. Git presence does not affect it: the
+/// same directory stays the same WorkspacePath across `.git` appearing,
+/// disappearing, or `git init` running again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePath {
+    pub id: Id,
+    pub canonical_path: String,
+    /// NOT NULL by design: a WorkspacePath always belongs to exactly one Project.
+    pub project_id: Id,
+    pub git_state: String,        // none | detected | missing
+    pub git_kind: Option<String>, // main | linked | unknown
+    pub exists: bool,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+}
+
+impl WorkspacePath {
+    /// Shared constructor for fixtures and migration code. The id is computed by
+    /// the same identity function production uses, so a fixture can never
+    /// disagree with the real `path-<sha>` rule.
+    pub fn new(canonical_path: impl Into<String>, project_id: Id) -> Self {
+        let canonical_path = canonical_path.into();
+        let id = crate::workspace::path_identity(&canonical_path);
+        Self {
+            id,
+            canonical_path,
+            project_id,
+            git_state: git_state::NONE.into(),
+            git_kind: None,
+            exists: true,
+            first_seen_at: String::new(),
+            last_seen_at: String::new(),
+        }
+    }
+}
+
+pub mod git_state {
+    /// No Git evidence at this path.
+    pub const NONE: &str = "none";
+    /// `.git` detected and resolvable.
+    pub const DETECTED: &str = "detected";
+    /// This path used to be Git-backed and the evidence is gone. Distinct from
+    /// `none` on purpose: losing `.git` must never detach the path from its
+    /// Project (§1.3), and `missing` is how we remember that.
+    pub const MISSING: &str = "missing";
+}
+
+/// A recognized Git family, keyed by `common_dir`.
+///
+/// `id` is app-assigned (not a hash of the directory) because a repository can
+/// move; v0.2 only promises "same recognized common dir → same git_id".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitIdentity {
+    pub id: Id,
+    pub common_dir: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub metadata: serde_json::Value,
+}
+
+/// One entry of a Workstream's ordered working-path list.
+///
+/// `position` is the whole role: 0 is the primary path, > 0 are secondary.
+/// There is deliberately no `is_primary` / `role` column — two authorities for
+/// one fact is how `default_cwd` and `workstreams.project_id` drifted apart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkstreamPath {
+    pub id: Id,
+    pub workstream_id: Id,
+    pub workspace_path_id: Id,
+    pub position: i64,
+    pub source: String, // user | session | launch | migration
+    pub created_at: String,
+}
+
+pub mod workstream_path_source {
+    pub const USER: &str = "user";
+    pub const SESSION: &str = "session";
+    pub const LAUNCH: &str = "launch";
+    pub const MIGRATION: &str = "migration";
+}
+
+/// What the WorkspaceResolver reports about a filesystem path. Purely
+/// observational: it never creates or reassigns anything by itself.
+#[derive(Debug, Clone)]
+pub struct WorkspaceObservation {
+    pub canonical_path: String,
+    /// Deterministic WorkspacePath id for `canonical_path`.
+    pub path_id: Id,
+    pub exists: bool,
+    pub git: GitDetection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GitDetection {
+    /// Nothing Git-like found, or the only evidence was the excluded Home-level
+    /// repository (§1.4) / a reserved app path (§2).
+    None,
+    Detected {
+        common_dir: String,
+        toplevel: Option<String>,
+        kind: GitWorktreeKind,
+        /// `git worktree list --porcelain` result. Discovery of a worktree
+        /// never adds a WorkstreamPath (§9).
+        worktrees: Vec<String>,
+    },
+    /// A path that was previously detected now has no `.git`. Not a resolver
+    /// output: it is derived by `workspace::project` from the stored
+    /// `git_state` plus the latest observation, because "was detected before"
+    /// is prior state the resolver does not have.
+    Missing,
+    /// Git could not be consulted at all (binary missing, timeout, unsafe
+    /// directory). Treated exactly like [`GitDetection::None`] for ownership
+    /// purposes, but kept distinct so it is never mistaken for a real
+    /// "this is not a repository" answer.
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitWorktreeKind {
+    Main,
+    Linked,
+    Unknown,
+}
+
+impl GitWorktreeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GitWorktreeKind::Main => "main",
+            GitWorktreeKind::Linked => "linked",
+            GitWorktreeKind::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workstream {
     pub id: Id,
-    /// A Workstream may exist standalone before being attached to a Project
-    /// (UX rule: New Workstream is a primary action, Project is optional).
+    /// Deprecated since v0.2: Workstream→Project membership comes from
+    /// `workstream_paths → workspace_paths.project_id`. Kept as a frozen
+    /// compatibility read — `upsert_workstream_conn` no longer writes it.
     pub project_id: Option<Id>,
     pub title: String,
     pub description: String,
-    pub lifecycle: String,  // open | completed | abandoned
+    pub lifecycle: String,  // active | completed
     pub visibility: String, // normal | archived
-    /// Optional launch-directory suggestion for New Sessions on this
-    /// Workstream ("continue where you left off", made explicit by the
-    /// user). Same class as ProjectResource.uri: convenience, not identity —
-    /// a Workstream is not a path, and Sessions keep their own cwd.
+    /// Deprecated since v0.2: replaced by the ordered `workstream_paths` list.
+    /// Now only a v12 migration input and a compatibility read.
     #[serde(default)]
     pub default_cwd: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+pub mod workstream_lifecycle {
+    /// Basic status classification. No behavioral difference from `COMPLETED`,
+    /// and the user may switch freely (§1.13).
+    pub const ACTIVE: &str = "active";
+    pub const COMPLETED: &str = "completed";
+}
+
+pub mod workstream_visibility {
+    pub const NORMAL: &str = "normal";
+    /// The recycle bin. Restoring flips back to `normal` and nothing else —
+    /// which is why lifecycle / paths / bindings survive a round trip.
+    pub const ARCHIVED: &str = "archived";
+}
+
+impl Workstream {
+    /// Legacy / test constructor: no paths, active, visible.
+    pub fn new(id: Id, title: impl Into<String>) -> Self {
+        let ts = crate::storage::now();
+        Self {
+            id,
+            project_id: None,
+            title: title.into(),
+            description: String::new(),
+            lifecycle: workstream_lifecycle::ACTIVE.into(),
+            visibility: workstream_visibility::NORMAL.into(),
+            default_cwd: None,
+            created_at: ts.clone(),
+            updated_at: ts,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +310,16 @@ impl Agent {
 
 /// A normalized, agent-agnostic record of one external Session.
 /// Session may have no cwd / repository / workspace at all.
+///
+/// Workspace facts on a Session (v0.2):
+/// - `workspace_path_id` is the authoritative link to the physical workspace;
+///   it is set only when the Session really has a cwd. A Session without one
+///   stays `None` — the default workspace is a *launch* convenience and is
+///   never retrofitted onto historical Sessions.
+/// - `project_id` is a **derived cache** of
+///   `workspace_path_id → workspace_paths.project_id`. It is written by exactly
+///   two code paths (see `storage::session_paths`); a manual write into it is a
+///   domain violation, not a convenience.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
@@ -99,11 +327,37 @@ pub struct Session {
     pub agent_session_id: String,
     pub title: Option<String>,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
     pub raw_path: String,
     pub parent_agent_session_id: Option<String>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
+}
+
+impl Session {
+    /// Legacy / test constructor: an agent-owned Session with no workspace facts.
+    pub fn new(
+        id: Id,
+        agent: Agent,
+        agent_session_id: impl Into<String>,
+        raw_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            agent,
+            agent_session_id: agent_session_id.into(),
+            title: None,
+            cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            raw_path: raw_path.into(),
+            parent_agent_session_id: None,
+            started_at: None,
+            last_activity_at: None,
+        }
+    }
 }
 
 /// Normalized session event — the only shape Ingestion/Sync may consume.
@@ -200,6 +454,13 @@ pub struct SourceCursorUpdate {
 /// `source` records who established the binding. Bindings created from an
 /// explicit launch selection (`explicit_launch_selection`, confidence 1.0)
 /// must never be replaced by automatic classification.
+///
+/// `workstream_path_id` (v0.2) records *which WorkstreamPath brought this
+/// Session in*: the Session's own `workspace_path_id`, which must be one of
+/// the Workstream's `workstream_paths` rows (exact match, never prefix
+/// matching). `None` means "unknown / legacy / drifted", and such a binding is
+/// deliberately NOT removed when a WorkstreamPath is deleted — deleting a path
+/// may not silently unbind Sessions we cannot prove came from it.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionWorkstreamBinding {
     pub session_id: Id,
@@ -207,6 +468,8 @@ pub struct SessionWorkstreamBinding {
     pub role: String,   // primary | related
     pub source: String, // explicit_launch_selection | user_assigned | automatic_classification
     pub confidence: f64,
+    #[serde(default)]
+    pub workstream_path_id: Option<Id>,
     pub last_seen_revision: Option<String>,
     pub last_sync_cursor: i64,
     pub created_at: String,

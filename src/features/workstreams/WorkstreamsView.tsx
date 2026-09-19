@@ -40,7 +40,7 @@ export default function WorkstreamsView({ navigate, action, actionSeq }: {
   const list = useMemo(() => {
     if (!cards) return null;
     const isOpen = (c: WorkstreamCardData) =>
-      c.lifecycle === "open" && c.visibility === "normal";
+      c.lifecycle === "active" && c.visibility === "normal";
     const q = query.trim().toLowerCase();
     return cards
       .filter((c) =>

@@ -41,7 +41,7 @@ fn workstream_with_cwd(
         project_id: None,
         title: title.into(),
         description: String::new(),
-        lifecycle: "open".into(),
+        lifecycle: "active".into(),
         visibility: "normal".into(),
         default_cwd: default_cwd.map(|s| s.to_string()),
         created_at: now(),

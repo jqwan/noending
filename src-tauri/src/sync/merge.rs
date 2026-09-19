@@ -178,7 +178,7 @@ impl MergeEngine {
                     project_id: project_id.clone(),
                     title: title.clone(),
                     description: format!("由同步自动识别：{}", reason),
-                    lifecycle: "open".into(),
+                    lifecycle: crate::domain::workstream_lifecycle::ACTIVE.into(),
                     visibility: "normal".into(),
                     // sync-created workstreams carry no launch directory;
                     // the launcher falls back to the latest session cwd

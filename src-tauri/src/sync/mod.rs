@@ -659,6 +659,7 @@ pub fn persist_auto_classification(
                 role: "related".into(),
                 source: binding_source::AUTO.into(),
                 confidence: 0.6,
+                workstream_path_id: None,
                 last_seen_revision: None,
                 last_sync_cursor: 0,
                 created_at: now(),

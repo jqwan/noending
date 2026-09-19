@@ -46,7 +46,7 @@ fn workstream(database: &Db, title: &str) -> String {
         project_id: None,
         title: title.into(),
         description: String::new(),
-        lifecycle: "open".into(),
+        lifecycle: "active".into(),
         visibility: "normal".into(),
         default_cwd: None,
         created_at: now(),

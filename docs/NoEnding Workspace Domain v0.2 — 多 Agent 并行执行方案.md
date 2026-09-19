@@ -1,0 +1,3226 @@
+# NoEnding Workspace Domain v0.2 — 多 Agent 并行执行方案
+
+## 0. 阶段目标
+
+本阶段实现已经冻结的 Workspace Domain v0.2，不扩展 Context / Assistant / 智能分类。
+
+最终用户模型：
+
+```text
+NoEnding Home
+└── default workspace
+
+Project
+    1
+    │
+    N
+WorkspacePath
+    │
+    ├──────── Session
+    │
+    └──────── WorkstreamPath
+                   │
+                   N
+                   │
+                   1
+              Workstream
+```
+
+核心定义：
+
+```text
+Project
+= NoEnding 自动维护的物理 workspace family
+
+WorkspacePath
+= 一个稳定识别的物理工作路径
+
+Workstream
+= 用户持续推进的一件工作
+
+Session
+= Agent 的一次真实执行
+```
+
+Project 完全由应用管理。
+
+用户：
+
+```text
+不能创建 Project
+不能删除 Project
+不能手工选择 Session → Project
+不能手工选择 Workstream → Project
+
+只能重命名 Project
+```
+
+Project 在最后一个 WorkspacePath 消失时自动删除。
+
+---
+
+# 1. 本阶段不可修改的领域契约
+
+所有 Agent 开工前必须阅读并接受以下 invariant。
+
+## 1.1 WorkspacePath
+
+```text
+Every WorkspacePath belongs to exactly one Project.
+```
+
+一个 WorkspacePath 任意时刻只能属于一个 Project。
+
+WorkspacePath 必须具有：
+
+```text
+path_id
+canonical_path
+project_id
+git_state
+exists
+```
+
+`path_id` 永远存在。
+
+---
+
+## 1.2 Project
+
+```text
+Every Project owns >= 1 WorkspacePath.
+```
+
+Project 不能空存在。
+
+最后一个 WorkspacePath：
+
+```text
+被删除
+或
+被迁移到另一个 Project
+```
+
+后：
+
+```text
+Project 自动删除
+```
+
+Project 不存在：
+
+```text
+archived
+completed
+trashed
+orphan
+```
+
+等生命周期。
+
+---
+
+## 1.3 Git
+
+```text
+Project owns Git identity.
+WorkspacePath owns Git detectability.
+```
+
+即：
+
+```text
+Project.git_id
+```
+
+表示 Project 的 Git workspace family identity。
+
+而：
+
+```text
+WorkspacePath.git_state
+```
+
+表示这个具体路径当前是否能检测到 Git。
+
+`.git` 从某个 WorkspacePath 消失：
+
+```text
+detected → missing
+```
+
+不得自动：
+
+```text
+清除 Project.git_id
+改变 WorkspacePath.project_id
+拆分 Project
+创建新 Project
+```
+
+---
+
+## 1.4 ~/.git
+
+如果：
+
+```text
+git root == user home
+```
+
+或：
+
+```text
+git common dir == ~/.git
+```
+
+则忽略该 Git evidence。
+
+该 WorkspacePath 退化为普通 path identity。
+
+不得因为 dotfiles Git repository 将整个用户 Home 归为一个 Project。
+
+---
+
+## 1.5 Workstream Paths
+
+Workstream 的工作路径是：
+
+```text
+有序列表
+```
+
+不是 primary / secondary 两套集合。
+
+例如：
+
+```text
+0 /repo/main
+1 /repo/docs
+2 /repo/service
+```
+
+天然定义：
+
+```text
+position 0 = 主工作路径
+position > 0 = 次工作路径
+```
+
+必须满足：
+
+```text
+paths.length == 0
+OR
+paths[0] exists
+```
+
+不存在：
+
+```text
+无主路径 + 有次路径
+```
+
+---
+
+## 1.6 Workstream 删除路径
+
+删除：
+
+```text
+0 /A
+1 /B
+2 /C
+```
+
+中的 `/A` 后：
+
+```text
+0 /B
+1 /C
+```
+
+`/B` 自然成为主路径。
+
+不要求用户重新选择主路径。
+
+删除 WorkstreamPath：
+
+```text
+同时移除该 Workstream 中属于这条 WorkstreamPath 的 Session bindings
+```
+
+但：
+
+```text
+不删除 Session 本身
+不删除 Session Events
+```
+
+---
+
+## 1.7 Workstream 添加路径
+
+添加 WorkstreamPath：
+
+```text
+只增加路径
+```
+
+绝不自动扫描并导入这个路径下的历史 Sessions。
+
+---
+
+## 1.8 Session 加入 Workstream
+
+Session 加入 Workstream 时：
+
+```text
+Session path 已在 WorkstreamPaths
+→ 仅建立 binding
+
+Session path 不在 WorkstreamPaths
+且 Workstream 无路径
+→ append，成为 position 0
+
+Session path 不在 WorkstreamPaths
+且已有路径
+→ append 到末尾
+```
+
+---
+
+## 1.9 Session 从 Workstream 移除
+
+只移除：
+
+```text
+Session ↔ Workstream binding
+```
+
+不自动删除 WorkstreamPath。
+
+---
+
+## 1.10 Session → Project
+
+Session 的 Project 唯一事实链：
+
+```text
+Session.workspace_path_id
+        ↓
+WorkspacePath.project_id
+        ↓
+Project
+```
+
+当前：
+
+```text
+sessions.project_id
+```
+
+可以继续存在，但只能作为 derived cache。
+
+禁止手工赋值。
+
+---
+
+## 1.11 Session Project Refresh
+
+只在：
+
+```text
+Session.workspace_path_id changed
+```
+
+或者：
+
+```text
+WorkspacePath.project_id changed
+```
+
+时刷新：
+
+```text
+Session.project_id
+```
+
+普通 Session event ingestion 不触发 Project 计算。
+
+---
+
+## 1.12 Workstream → Project
+
+Workstream 不再直接拥有单一 Project。
+
+其 Project projection：
+
+```text
+WorkstreamPath
+    ↓
+WorkspacePath
+    ↓
+Project
+```
+
+一个 Workstream 可以因为不同路径出现在多个 Project 中。
+
+如果某 Project 包含 Workstream 的 `position=0` 路径：
+
+```text
+Project Detail 可显示“主关联”
+```
+
+否则：
+
+```text
+关联
+```
+
+不新增 `workstream_project_bindings` 表。
+
+---
+
+## 1.13 Workstream lifecycle
+
+继续利用现有两个正交字段，避免无意义 schema 扩张：
+
+```text
+lifecycle
+= active | completed
+
+visibility
+= normal | archived
+```
+
+语义：
+
+```text
+active / completed
+只是基础状态分类
+没有行为差异
+可以随时切换
+
+archived
+= 回收站
+```
+
+恢复 archived Workstream：
+
+```text
+visibility → normal
+```
+
+不改变：
+
+```text
+lifecycle
+paths
+Session bindings
+其他配置
+```
+
+因此自然恢复之前状态。
+
+永久删除只能从 archived 状态执行。
+
+---
+
+# 2. NoEnding Home 契约
+
+默认：
+
+```text
+~/.noending/
+```
+
+Windows：
+
+```text
+%USERPROFILE%\.noending\
+```
+
+结构：
+
+```text
+~/.noending/
+├─ data/
+│  └─ noending.db
+├─ runtime/
+├─ logs/
+└─ workspace/
+```
+
+其中：
+
+```text
+data/
+runtime/
+logs/
+```
+
+属于 reserved app paths，不进入 WorkspaceResolver。
+
+只有：
+
+```text
+workspace/
+```
+
+是正常 WorkspacePath。
+
+默认工作目录：
+
+```text
+<NoEnding Home>/workspace
+```
+
+---
+
+# 3. NoEnding Home bootstrap
+
+因为数据库本身位于 NoEnding Home 内，所以 Home 位置不能只记录在数据库中。
+
+使用一个极小的 OS-native bootstrap config：
+
+```text
+current_home
+pending_home?
+```
+
+解析优先级：
+
+```text
+NOENDING_HOME
+    ↓
+bootstrap.current_home
+    ↓
+~/.noending
+```
+
+用户修改 NoEnding Home 时：
+
+```text
+不在当前进程直接切数据库
+```
+
+而是：
+
+```text
+写 pending_home
+→ UI 提示重启生效
+→ 下次启动、打开 DB 前执行迁移
+→ 成功后 current_home = pending_home
+→ clear pending_home
+```
+
+这样避免复制数据库后当前进程继续向旧 DB 写入产生分叉。
+
+---
+
+# 4. 修改 NoEnding Home 时 workspace 处理
+
+只迁移应用拥有的数据：
+
+```text
+data/
+runtime/
+logs/
+```
+
+不能静默搬迁旧：
+
+```text
+<old-home>/workspace
+```
+
+中的用户文件。
+
+新默认工作目录变成：
+
+```text
+<new-home>/workspace
+```
+
+旧 workspace 如果仍存在：
+
+```text
+继续作为普通 WorkspacePath 存在
+```
+
+---
+
+# 5. Schema v12
+
+当前 schema 为 v11。
+
+Workspace Domain v0.2 使用：
+
+```text
+SCHEMA_VERSION = 12
+```
+
+## 5.1 projects
+
+保留稳定：
+
+```text
+id
+name
+created_at
+updated_at
+```
+
+新增：
+
+```text
+git_id TEXT NULL
+name_customized INTEGER NOT NULL DEFAULT 0
+```
+
+旧：
+
+```text
+description
+archived
+```
+
+暂时物理保留兼容，但退出新的产品语义。
+
+要求：
+
+```text
+UNIQUE git_id WHERE git_id IS NOT NULL
+```
+
+---
+
+## 5.2 git_identities
+
+建议新增：
+
+```text
+git_identities
+
+id               TEXT PRIMARY KEY
+common_dir       TEXT NOT NULL UNIQUE
+first_seen_at    TEXT NOT NULL
+last_seen_at     TEXT NOT NULL
+metadata         TEXT NOT NULL DEFAULT '{}'
+```
+
+其中：
+
+```text
+id
+= NoEnding 生成的 Git family UUID
+```
+
+Project：
+
+```text
+projects.git_id
+```
+
+引用它。
+
+v0.2 不追求完美解决“repository 移动后身份恢复”，只要求：
+
+```text
+同一个已识别 git common dir
+→ 同一个 git_id
+```
+
+以后可以增加 remote / object fingerprint evidence。
+
+---
+
+## 5.3 workspace_paths
+
+新增：
+
+```text
+workspace_paths
+
+id                 TEXT PRIMARY KEY
+canonical_path     TEXT NOT NULL UNIQUE
+project_id         TEXT NOT NULL
+git_state          TEXT NOT NULL
+git_kind           TEXT NULL
+exists             INTEGER NOT NULL
+first_seen_at      TEXT NOT NULL
+last_seen_at       TEXT NOT NULL
+```
+
+其中：
+
+```text
+id
+= path identity 本身
+= 由 canonical_path 确定性派生：path-<sha256(canonical_path) 前 32 hex>
+```
+
+> ⚠️ v0.2.1 修正（§42.2-E1）：原稿在这里同时要求 `id`、`path_id`、`canonical_path` 三个唯一键，
+> 而 §1.1 把 `path_id` 定义为 “canonical path 的稳定身份” —— 那是同一事实的第三份副本。
+> `path_id` 列删除；`id` 就是它，且必须确定性派生，因为 `migrate()` 全程 autocommit、
+> v12 回填必须可重入（`storage/mod.rs:131-479`）。
+> 下游引用（`sessions.workspace_path_id`、`workstream_paths.workspace_path_id`、
+> 设计文档 §23 的 `Session.path_id`）指向的都是这个 `id`。
+
+```text
+git_state
+= none | detected | missing
+
+git_kind
+= main | linked | unknown | null
+```
+
+`project_id`：
+
+```text
+NOT NULL
+```
+
+一个 WorkspacePath 必须属于一个 Project。
+
+`git_state=none` 的取值时机（§42.3-M9）：`git` 二进制缺失、超时、非零退出、
+dubious ownership 一律记为 `none`，不得冒泡成用户可见错误。
+
+---
+
+## 5.4 workstream_paths
+
+新增：
+
+```text
+workstream_paths
+
+id                   TEXT PRIMARY KEY
+workstream_id        TEXT NOT NULL
+workspace_path_id    TEXT NOT NULL
+position             INTEGER NOT NULL
+source               TEXT NOT NULL
+created_at           TEXT NOT NULL
+```
+
+约束：
+
+```text
+UNIQUE(workstream_id, workspace_path_id)
+UNIQUE(workstream_id, position)
+```
+
+source：
+
+```text
+user
+session
+launch
+migration
+```
+
+---
+
+## 5.5 sessions
+
+新增：
+
+```text
+workspace_path_id TEXT NULL
+```
+
+迁移完成后的产品 invariant：
+
+```text
+所有新发现且拥有 cwd 的 Session
+必须具有 workspace_path_id
+```
+
+旧历史 Session 如果确实没有 cwd，v12 migration 可以暂时：
+
+```text
+workspace_path_id = NULL
+```
+
+不得伪造为默认 workspace。
+
+后台后续重新发现真实 cwd 时再修复。
+
+现有：
+
+```text
+project_id
+```
+
+继续作为 cache。
+
+---
+
+## 5.6 session_workstream_bindings
+
+新增：
+
+```text
+workstream_path_id TEXT NULL
+```
+
+新 binding：
+
+```text
+Session 有 WorkspacePath
+→ 必须明确对应 WorkstreamPath
+```
+
+旧 binding migration 无法可靠推断时可以为 NULL。
+
+后续重新绑定或路径 reconcile 时逐步 repair。
+
+> ⚠️ v0.2.1 补充（§42.3-M1）：这张表的 PK 是 `(session_id, workstream_id)`
+> （`storage/mod.rs:223`），所以一个 Session 对一个 Workstream 只有一行，
+> `workstream_path_id` 的含义是“这行绑定由哪条 WorkstreamPath 带来”，
+> 匹配是**精确相等**，不是前缀 / 最长匹配。不变式：
+> `workstream_path_id IS NULL OR 它命中该 Workstream 的某条 workstream_paths`。
+> Session 的 cwd 后来漂移出列表时置 NULL，不自动往用户 Workstream 里追加路径（§42.3-M2）。
+
+---
+
+## 5.7 Workstream
+
+不增加新的 status / trashed_at 字段。
+
+重新规范现有：
+
+```text
+lifecycle:
+open       → active
+completed  → completed
+abandoned  → completed
+
+visibility:
+normal     → normal
+archived   → archived
+```
+
+`visibility=archived` 即回收站。
+
+> ⚠️ v0.2.1 修正（§42.2-E2）：`workstreams.lifecycle` 的列默认值是
+> `DEFAULT 'open'`（`storage/mod.rs:166`），SQLite 无法用 ALTER 改列默认值，
+> 本文件也没有 rebuild-and-copy 先例。因此：**只迁移数据、只改规范 DDL**，
+> 升级库的历史列默认值保留为 `'open'`，产品写入路径一律显式带 lifecycle
+> （现状已如此）。裸 `INSERT INTO workstreams` 不带 lifecycle 算违例，
+> 由 §42.5-T3 的 CI grep 守住。
+> `abandoned → completed` 是有损折叠；它的唯一生产者 `merge_workstreams`
+> 同步退出注册（§42.2-E10），且它总是同时写 `visibility='archived'`，
+> 所以回收站事实仍然保留。
+
+---
+
+# 6. v12 migration 原则
+
+SQL migration 不调用 Git，不运行外部命令。
+
+migration 只建立新结构和已有关系。
+
+> ⚠️ v0.2.1 补充（§42.3-M4/M5）：这条原则带来两个必须写死的后果。
+> 1. **迁移结束时 `workspace_paths.project_id` 必须已经非空**（§5.3 NOT NULL），
+>    而 Git 还完全没看过。所以迁移建立的 Project 全部是 `git_id=NULL` 的
+>    path-backed Project，之后由 Workspace Reconcile 升级或合并——这是设计意图，
+>    不是待补的洞；但它意味着**升级后第一次启动会看到比最终态更多的 Project**。
+>    UI 上不要在这一次启动里承诺“这就是你的 Project 集合”。
+> 2. **迁移不持事务**（`migrate()` 全程 autocommit），且 §7.4 会自动删 Project、
+>    连带删用户手工录入的 `project_resources`。所以破坏性分支执行前必须
+>    先做整库文件备份（§42.3-M5）。
+
+Git detection 在数据库成功打开后的：
+
+```text
+Workspace Reconcile
+```
+
+中执行。
+
+---
+
+# 7. v12 数据迁移顺序
+
+## 7.1 保留 legacy Project identity
+
+旧 Project：
+
+```text
+id 保留
+name 保留
+name_customized = true
+```
+
+因为旧 Project 都是用户主动创建/命名的，升级后不得被自动命名覆盖。
+
+---
+
+## 7.2 Session cwd
+
+对所有：
+
+```text
+session.cwd != null
+```
+
+建立 WorkspacePath。
+
+如果旧：
+
+```text
+session.project_id != null
+```
+
+且没有 identity 冲突：
+
+```text
+优先用旧 Project 作为该 WorkspacePath 初始 Project
+```
+
+然后：
+
+```text
+session.workspace_path_id = path.id
+```
+
+---
+
+## 7.3 Workstream.default_cwd
+
+对所有：
+
+```text
+default_cwd != null
+```
+
+建立 WorkspacePath，并创建：
+
+```text
+WorkstreamPath position=0
+source=migration
+```
+
+如果旧：
+
+```text
+workstream.project_id != null
+```
+
+且 path 尚未归属其他更强 identity：
+
+```text
+用旧 Project 作为初始 Project
+```
+
+---
+
+## 7.4 legacy Project without path
+
+如果一个旧 Project 最终没有任何 WorkspacePath：
+
+```text
+它不符合 v0.2 Project invariant
+```
+
+自动删除。
+
+不要为保存旧 Project 而制造虚假路径。
+
+---
+
+## 7.5 Project Resources
+
+`project_resources` 不再承载 workspace identity。
+
+migration 可以把：
+
+```text
+kind=workspace
+kind=repository
+```
+
+且 URI 明确为本地路径的记录作为 path migration evidence。
+
+HTTP URL / Git URL / document 等不得伪造成 WorkspacePath。
+
+`project_resources` 本阶段暂时保留表结构，但 UI 不再允许用户通过它管理 Project。
+
+---
+
+# 8. Project 自动生成算法
+
+统一入口：
+
+```text
+ensure_workspace_path(path)
+```
+
+流程：
+
+```text
+path
+ ↓
+canonicalize
+ ↓
+path_id
+ ↓
+lookup WorkspacePath
+ ↓
+detect Git
+ ↓
+resolve Project
+ ↓
+persist
+```
+
+---
+
+## 8.1 已知 Path + 本次无 Git
+
+```text
+WorkspacePath 已存在
+Git detection = none / failed
+```
+
+保持：
+
+```text
+WorkspacePath.project_id
+Project.git_id
+```
+
+不变。
+
+如果此前：
+
+```text
+git_state=detected
+```
+
+改为：
+
+```text
+git_state=missing
+```
+
+---
+
+## 8.2 新 Path + 无 Git
+
+创建：
+
+```text
+Project
+git_id=null
+```
+
+然后：
+
+```text
+WorkspacePath → Project
+```
+
+非 Git Project 在正常情况下只有一条 WorkspacePath。
+
+---
+
+## 8.3 新 Path + Git
+
+解析：
+
+```text
+git common dir
+→ git identity
+```
+
+如果已有：
+
+```text
+Project.git_id = G
+```
+
+则：
+
+```text
+WorkspacePath → existing Project
+```
+
+否则：
+
+```text
+create git identity
+create Project(git_id=G)
+WorkspacePath → Project
+```
+
+---
+
+## 8.4 已知 Path 从无 Git 升级为 Git
+
+如果当前 Project：
+
+```text
+git_id=null
+```
+
+且 G 尚未属于其他 Project：
+
+```text
+current Project.git_id = G
+```
+
+Project.id 不变。
+
+如果 G 已属于 Project B：
+
+```text
+将当前 WorkspacePath / Project 合并进 B 或选定 canonical Project
+```
+
+合并后零 WorkspacePath Project 自动删除。
+
+---
+
+## 8.5 已知 Path 检测到不同 Git family
+
+例如：
+
+```text
+WorkspacePath → Project A
+A.git_id = G1
+
+当前检测 = G2
+```
+
+则这是强 identity change。
+
+WorkspacePath：
+
+```text
+迁移到 G2 Project
+```
+
+如果 G2 Project 不存在：
+
+```text
+创建
+```
+
+然后：
+
+```text
+批量刷新引用该 WorkspacePath 的 Session.project_id
+```
+
+旧 Project 若无路径：
+
+```text
+自动删除
+```
+
+---
+
+# 9. Git worktree discovery
+
+有效 Git Project：
+
+```text
+git worktree list --porcelain
+```
+
+发现全部 worktree。
+
+每条：
+
+```text
+ensure WorkspacePath
+```
+
+并归入同一 Project。
+
+但：
+
+```text
+发现 WorkspacePath
+≠
+添加 WorkstreamPath
+```
+
+不得自动修改 Workstream 的路径列表。
+
+---
+
+# 10. WorkspacePath GC
+
+WorkspacePath 不因：
+
+```text
+路径暂时不存在
+.git 丢失
+```
+
+立即物理删除。
+
+只有：
+
+```text
+不存在 Session reference
+AND
+不存在 WorkstreamPath reference
+AND
+已经不再是当前有效/发现的 Project worktree path
+```
+
+时允许 GC。
+
+WorkspacePath 删除后：
+
+```text
+check Project.workspace_path_count
+```
+
+为 0：
+
+```text
+DELETE Project
+```
+
+---
+
+# 11. Backend API 冻结
+
+主 Agent Commit 0 后，所有 Agent 按以下接口工作。
+
+## Project
+
+保留：
+
+```text
+list_projects
+get_project_detail
+rename_project
+```
+
+> ⚠️ v0.2.1 修正（§42.2-E4/E5）：这份清单不完整。
+> - `get_project_detail` **今天不存在**（`commands.rs` 里没有，
+>   `ProjectDetail.tsx:56-58` 是拉全量列表再 `.find()`），它是新增。冻结形状：
+>   `{ project, workspace_paths[], workstreams[{ workstream, is_primary }], sessions[] }`
+> - `rename_project` 今天也不存在，实际是整对象写的 `update_project`
+>   （`commands.rs:84-91`，且前端零调用点）。`rename_project` 是新增窄命令。
+> - **`list_workstreams(project_id)` 必须一起冻结**：它是今天唯一的
+>   Workstream→Project 成员查询（`storage/mod.rs:629-647`），前端 4 处在用。
+>   它的 `project_id` 参数语义改为路径派生投影（含 position>0），
+>   并新增 `list_project_workstreams(project_id)` 提供 §36 的“主关联/关联”。
+> - `list_workstream_cards` 的 `project_id` / `project_name` 两列
+>   冻结为“position-0 路径所属 Project 的投影”（§42.3-M19），列名列型不变。
+
+退出产品 API：
+
+```text
+create_project
+delete_project
+assign_session_project
+suggest_session_project
+merge_workstreams
+```
+
+可以暂时保留内部 Rust helper，但不得再注册为正常 UI command。
+
+> ⚠️ v0.2.1 补充（§42.2-E10/E11）：
+> - `merge_workstreams` 原稿未提及。它是 `abandoned` 的唯一生产者
+>   （`commands.rs:440-444`），也是还会写 `workstreams.project_id` 的用户路径，
+>   前端零调用点 → 同样退出注册。
+> - `record_session_project_evidence`（`ingestion/mod.rs:333-360`）不是 command，
+>   但它跑在**每次发现新 Session** 的热路径上（`:250`），用 `Project.name`
+>   子串匹配 cwd 写 affinity 证据。v0.2 之后它是假权威，必须停止调用
+>   （表与函数保留为只读历史）。`ingestion::suggest_project_for_session`
+>   （`:362-366`）已是死代码，一并退出。
+> - `project_resources` 的三个 command（add/list/remove）本阶段一并退出注册：
+>   §7.5 说 “UI 不再允许用户通过它管理 Project”，而 `ProjectDetail.tsx:189-241`
+>   正是那个 UI。表保留，Rust helper 保留。
+
+---
+
+## Workspace settings
+
+新增：
+
+```text
+get_workspace_settings
+set_noending_home
+```
+
+返回至少：
+
+```text
+noending_home
+default_workspace
+pending_home
+restart_required
+db_path
+```
+
+---
+
+## Workstream
+
+`create_workstream` 新签名：
+
+```text
+title
+description
+initial_path?
+```
+
+不再接受：
+
+```text
+project_id
+default_cwd
+```
+
+新增：
+
+```text
+list_workstream_paths
+add_workstream_path
+remove_workstream_path
+reorder_workstream_paths
+
+set_workstream_lifecycle
+archive_workstream
+restore_workstream
+delete_workstream_permanently
+```
+
+---
+
+## Session
+
+保留：
+
+```text
+replace_session_bindings
+```
+
+但后端行为升级：
+
+```text
+新增 binding
+→ ensure WorkstreamPath when necessary
+
+删除 binding
+→ 不删除 WorkstreamPath
+```
+
+移除：
+
+```text
+assign_session_project
+suggest_session_project
+```
+
+---
+
+# 12. PreparedLaunch 契约
+
+现有：
+
+```text
+Prepare
+→ Preview
+→ launch_prepared
+```
+
+不能破坏。
+
+Workspace v0.2 增加 stale inputs：
+
+```text
+Workstream ordered paths
+resolved primary path
+NoEnding default workspace
+Session workspace path
+```
+
+以下任一变化必须使未消费 PreparedLaunch stale：
+
+```text
+主路径变化
+路径 reorder 导致 position 0 变化
+路径删除
+Session cwd/path 变化
+默认 workspace 变化
+```
+
+不能在 launch_prepared 时偷偷吸收变化。
+
+> ⚠️ v0.2.1 补充（§42.3-M16/M17）：今天 `PreparedLaunch.cwd` **完全不在指纹里**，
+> 而且 resume 分支更糟——`prepare_resume` 存 `cwd: session.cwd`
+> （`launcher/mod.rs:189`），但真正 spawn 用的目录是在 `:368` **重新读库**拿的
+> `session.cwd`，而 `session.cwd` 也不是指纹输入（`:526-563` 只哈希
+> `last_activity_at` + cursor）。也就是说后台 discovery 在 Preview 与 Launch 之间
+> 改写 cwd，就会在用户没看到的情况下换掉启动目录——这是一条**既存的
+> Preview-Launch Identity 违例**，不是本阶段新引入的。
+> §13/§30 把 fallback 链变成用户可见事实之后必须一起修：
+> 1. resume 用 `prepared.cwd` spawn（不再回读库）；
+> 2. `cwd` 作为指纹输入，new 与 resume 两种 mode 都进；
+> 3. 新增的有序路径列表 / 主路径 / 默认 workspace 三项各自带标签参与哈希
+>    （`b"ws_paths:"` / `b"primary:"` / `b"default_ws:"`），**列表保持顺序、不排序**，
+>    每个值后加分隔符（现有实现相邻字段直接拼接，无分隔）；
+> 4. 默认 workspace 来自 `NoEndingHome`（不在 DB 里），DB-only 的指纹看不见它的变化，
+>    所以必须显式把它作为参数传进 `compute_state_fingerprint`。
+
+---
+
+# 13. Launcher cwd resolution
+
+> ⚠️ v0.2.1 补充（§42.3-M21）：`NoEnding default workspace` 这一档在 bootstrap 时
+> 必须真的 `create_dir_all` 出来。否则命中既存的跨平台不对称：macOS 的启动脚本
+> `cd` 失败会**打印一句提示后回退 `$HOME`**（`platform/launcher.rs:42-53`），
+> Linux 直接 spawn 失败（`:268-276`）——“你以为在默认 workspace，实际在 $HOME”，
+> 而 `$HOME` 正是 §1.4 要排除的 dotfiles repo。
+> 另外 §42.3-M15：共享默认 workspace 会削弱 LaunchIntent 的 cwd 匹配证据，
+> 并发独立启动会合理地落入 `AMBIGUOUS` + 人工裁决，不得为此引入猜测。
+
+## Workstream New Session
+
+```text
+explicit cwd
+    ↓
+WorkstreamPaths[0]
+    ↓
+NoEnding default workspace
+```
+
+## Standalone New Session
+
+```text
+explicit cwd
+    ↓
+NoEnding default workspace
+```
+
+## Resume
+
+优先：
+
+```text
+原 Session.cwd
+```
+
+不可用时：
+
+```text
+目标 Workstream primary path
+    ↓
+NoEnding default workspace
+```
+
+发生 fallback 必须在 UI 明确显示。
+
+---
+
+# 14. 多 Agent 执行结构
+
+整个阶段分三轮。
+
+```text
+Wave 0
+Main Foundation
+
+Wave 1
+A + B + C + D 并行
+
+Wave 2
+E + F 并行
+
+Wave 3
+G Integrity Audit
+
+Main Final Integration
+```
+
+> ⚠️ **所有 Agent（含 Main）开工前必读 §42。** §1–§41 是原始设计意图，
+> §42 是 Main 对着 `1da873e` 逐条核对后的勘误（E）、缺失规则（M）、
+> 执行结构修正和机械断言（T）。两处冲突时以 §42 为准，因为它有 file:line 依据。
+> Wave 2 的前端拆分见 §42.4——§22 里“Agent F 独占全部前端”的写法已作废。
+
+---
+
+# 15. Main Agent — Wave 0 Foundation
+
+Main 不把这一阶段一开始就分出去。
+
+Main 先完成一个 foundation commit。
+
+建议：
+
+```text
+refactor(workspace): establish workspace domain v0.2 contracts
+```
+
+职责：
+
+1. 将本方案写入 docs。
+2. `SCHEMA_VERSION 11 → 12`。
+3. 建立新表 / 新 columns。
+4. 写纯数据库 migration。
+5. 在 `domain.rs` 定义所有新领域类型。
+6. 建立模块骨架。
+7. 冻结 Rust service/API signatures。
+8. 冻结 TS shapes，但暂不做 UI。
+9. 建立共享测试 fixture/helper。
+10. 确保旧代码仍能编译。
+11. **改写 `AGENTS.md` 的 Core Invariants**，让 Project/WorkspacePath/WorkstreamPath
+    成为文档化的唯一权威（§42.1）。AGENTS.md 是本仓库每个 Agent 的第一份输入，
+    它若还写着 “Never equate Project with … filesystem path” 和
+    “default_cwd 永不是身份”，下一个 Agent 会用旧 invariant 否决新代码。
+12. 加**迁移前整库文件备份**（§42.3-M5）。
+13. 结构性切断旧列写入：`upsert_workstream_conn` 的 `ON CONFLICT DO UPDATE`
+    去掉 `project_id` / `default_cwd`（§42.2-E6）。
+14. 给 `Workstream` / `Session` / `WorkspacePath` 提供共享测试构造 helper，
+    并机械修完 18 个集成测试文件的 struct literal（§42.3-M20）。
+
+建议模块结构：
+
+```text
+src-tauri/src/workspace/
+├─ mod.rs
+├─ home.rs
+├─ resolver.rs
+├─ project.rs
+├─ workstream.rs
+└─ session.rs
+
+src-tauri/src/storage/
+├─ workspace.rs
+├─ workstream_paths.rs
+└─ session_paths.rs
+
+src-tauri/src/commands/
+├─ project.rs
+├─ workspace.rs
+├─ workstream.rs
+└─ session_workspace.rs
+```
+
+Main 独占共享 wiring 文件：
+
+```text
+src-tauri/src/storage/mod.rs
+src-tauri/src/domain.rs
+src-tauri/src/commands.rs
+src-tauri/src/lib.rs
+```
+
+子 Agent 不修改这些文件，除非 Main 明确授权。
+
+Foundation 完成后：
+
+```text
+cargo fmt --check
+cargo check
+cargo test
+pnpm build
+```
+
+全部通过。
+
+记录：
+
+```text
+FOUNDATION_SHA=<exact sha>
+```
+
+随后所有 Wave 1 Agent 必须从这个 SHA 建 worktree。
+
+不得从旧 HEAD 自行开分支。
+
+---
+
+# 16. Agent A — NoEnding Home + WorkspaceResolver
+
+分支：
+
+```text
+agent/workspace-home-resolver
+```
+
+所有权：
+
+```text
+workspace/home.rs
+workspace/resolver.rs
+platform/paths.rs
+相关 resolver unit tests
+```
+
+不负责 Project DB mutation。
+
+输入：
+
+```text
+filesystem path
+```
+
+输出：
+
+```text
+WorkspaceObservation {
+  canonical_path,
+  path_id,
+  exists,
+  git_detection,
+}
+```
+
+GitDetection 至少：
+
+```text
+none
+detected {
+  common_dir,
+  worktree_kind,
+  worktrees[]
+}
+missing
+```
+
+任务：
+
+1. 实现 `~/.noending` 默认 Home。
+2. 实现 bootstrap current/pending home。
+3. 实现启动前 data-root migration helper。
+4. reserved app paths 排除。
+5. default workspace resolution。
+6. path canonicalization / path_id。
+7. Windows/macOS path normalization。
+8. Git common-dir detection。
+9. `~/.git` 排除。
+10. `git worktree list --porcelain` parsing。
+11. `.git` disappeared → missing observation。
+12. 不直接创建 Project。
+
+必须测试：
+
+```text
+~ expansion
+relative → absolute
+same path normalization
+Windows separator/case behavior
+home .git exclusion
+normal git repo
+linked worktree
+.git missing
+reserved ~/.noending/data exclusion
+~/.noending/workspace allowed
+```
+
+提交：
+
+```text
+feat(workspace): add noending home and workspace resolver
+```
+
+交付 Main：
+
+```text
+commit SHA
+public interfaces
+tests run
+known edge cases
+```
+
+---
+
+# 17. Agent B — Project Projection + WorkspacePath Registry
+
+分支：
+
+```text
+agent/project-projection
+```
+
+所有权：
+
+```text
+workspace/project.rs
+storage/workspace.rs
+commands/project.rs
+```
+
+只消费 Agent A 已冻结的 `WorkspaceObservation` interface，不修改 resolver。
+
+任务：
+
+1. `ensure_workspace_path()`。
+2. WorkspacePath persistence。
+3. Project auto-create。
+4. Project.git_id ownership。
+5. git identity persistence。
+6. path-backed → git-backed upgrade。
+7. Project merge。
+8. WorkspacePath reassignment。
+9. `.git missing` continuity。
+10. zero-path Project auto-delete。
+11. WorkspacePath GC。
+12. `list_projects`。
+13. `get_project_detail` projection。
+14. `rename_project`。
+15. user rename → `name_customized=true`。
+16. default workspace 自动命名 `NoEnding Workspace`。
+17. Project merge 时 custom name precedence。
+
+不得实现：
+
+```text
+create_project UI semantics
+manual Project assignment
+Workstream paths
+Session bindings
+```
+
+必须测试：
+
+```text
+new non-git path → one Project
+same path ensure idempotent
+new git path → git Project
+two worktrees → same Project
+path project upgrades to git Project without changing Project.id
+.git missing does not detach path
+different git family moves path
+merge deletes zero-path Project
+customized Project name survives merge/reconcile
+one WorkspacePath never belongs to two Projects
+zero-path Project cannot survive
+```
+
+提交：
+
+```text
+feat(projects): derive projects from workspace identities
+```
+
+---
+
+# 18. Agent C — Workstream Paths + Lifecycle + Trash
+
+分支：
+
+```text
+agent/workstream-domain
+```
+
+所有权：
+
+```text
+workspace/workstream.rs
+storage/workstream_paths.rs
+commands/workstream.rs
+相关 Workstream integration tests
+```
+
+任务：
+
+1. ordered WorkstreamPaths。
+2. position invariant。
+3. add path。
+4. remove path。
+5. reorder path。
+6. 删除第一个 → 第二个自动成为 position 0。
+7. `create_workstream(initial_path?)`。
+8. lifecycle：
+
+   ```text
+   active | completed
+   ```
+9. archived 作为 recycle bin。
+10. restore。
+11. permanent delete。
+12. permanent delete 不删除 Session。
+13. permanent delete 清理：
+
+    ```text
+    workstream_paths
+    session bindings
+    Workstream-owned Context/Review data
+    ```
+14. 更新受影响 PreparedLaunch fingerprint input interface。
+15. Workstream Project projection 从 paths 派生，不写 `workstreams.project_id`。
+
+`default_cwd`：
+
+```text
+只作为 v12 migration 输入
+```
+
+新代码不再作为 authority 使用。
+
+必须测试：
+
+```text
+empty paths valid
+first path automatically primary
+append secondary
+remove first promotes second
+remove middle compacts positions
+reorder is deterministic
+duplicate path rejected/idempotent
+active ↔ completed changes no other data
+archive preserves lifecycle/paths/bindings
+restore preserves previous lifecycle
+permanent delete only allowed archived
+permanent delete preserves Sessions
+```
+
+提交：
+
+```text
+feat(workstreams): add ordered paths and recycle lifecycle
+```
+
+---
+
+# 19. Agent D — Session Workspace + Binding Semantics
+
+分支：
+
+```text
+agent/session-workspace
+```
+
+所有权：
+
+```text
+workspace/session.rs
+storage/session_paths.rs
+commands/session_workspace.rs
+ingestion 中 Session discovery/path attach 的最小必要区域
+replace bindings 相关实现
+相关 Session integration tests
+```
+
+任务：
+
+1. Session discovery：
+
+   ```text
+   cwd → WorkspacePath
+   ```
+2. 写：
+
+   ```text
+   session.workspace_path_id
+   ```
+3. 从 WorkspacePath 派生：
+
+   ```text
+   session.project_id
+   ```
+4. WorkspacePath.project_id 变化时支持批量刷新 Session cache。
+5. 普通 event ingestion 不重复 resolve Project。
+6. `replace_session_bindings` 新语义。
+7. Session 加入 Workstream：
+
+   * path 已存在 → 使用现有 WorkstreamPath。
+   * 无路径 → append position 0。
+   * 已有路径 → append last。
+8. binding 记录：
+
+   ```text
+   workstream_path_id
+   ```
+9. Session unbind 不删除 WorkstreamPath。
+10. 兼容 legacy `workstream_path_id=NULL`。
+11. 旧 Session 无 cwd 不制造假 WorkspacePath。
+12. 去除 manual Session Project assignment 的生产依赖。
+
+必须测试：
+
+```text
+discovered Session gets WorkspacePath
+Session gets derived Project
+standalone Session still gets Project
+WorkspacePath Project change refreshes all Sessions
+event ingestion alone does not change Project
+bind Session adds missing WorkstreamPath
+first Session path becomes primary
+later Session path appends secondary
+unbind Session preserves path
+binding records exact workstream_path_id
+legacy cwd-less Session remains unresolved instead of default-workspace fabrication
+```
+
+提交：
+
+```text
+feat(sessions): derive workspace and project membership from paths
+```
+
+---
+
+# 20. Wave 1 集成
+
+Main 按顺序：
+
+```text
+A
+→ B
+→ C
+→ D
+```
+
+cherry-pick。
+
+原因：
+
+```text
+A 提供 physical resolver
+B 提供 WorkspacePath / Project authority
+C/D 消费这两层
+```
+
+Main 负责所有共享 wiring：
+
+```text
+lib.rs
+commands.rs
+domain.rs
+storage/mod.rs
+```
+
+以及因 API freeze 导致的少量 glue。
+
+Wave 1 完成后必须：
+
+```text
+cargo fmt --check
+cargo check
+cargo test
+```
+
+全部通过。
+
+记录：
+
+```text
+WAVE1_SHA=<exact sha>
+```
+
+Agent E / F 必须从 `WAVE1_SHA` 新建 worktree。
+
+---
+
+# 21. Agent E — Launcher + PreparedLaunch Integration
+
+分支：
+
+```text
+agent/workspace-launcher
+```
+
+所有权：
+
+```text
+launcher/mod.rs
+launch cwd helpers
+PreparedLaunch fingerprint logic
+launch_cwd_test.rs
+base_launch_flow_test.rs
+相关 launcher tests
+```
+
+任务：
+
+1. New Workstream Session cwd：
+
+   ```text
+   explicit cwd
+   → primary WorkstreamPath
+   → default workspace
+   ```
+2. Standalone：
+
+   ```text
+   explicit cwd
+   → default workspace
+   ```
+3. Resume：
+
+   ```text
+   Session.cwd
+   → Workstream primary
+   → default workspace
+   ```
+4. fallback 明确进入 PreparedLaunch 数据，供 UI 显示。
+5. path reorder / primary change stale PreparedLaunch。
+6. path deletion stale。
+7. default workspace change stale。
+8. Session workspace path change stale Resume plan。
+9. launch 成功后不要提前制造 Session。
+10. 真实 Session 被 ingestion / LaunchIntent 匹配后：
+
+    ```text
+    bind Workstream
+    ensure WorkstreamPath
+    derive Project
+    ```
+11. 保持：
+
+    ```text
+    Preview content = exact Agent content
+    ```
+
+    现有 integrity contract 不变。
+
+不得：
+
+```text
+恢复旧 launchNewSession frontend path
+绕过 prepare → launch_prepared
+```
+
+必须测试：
+
+```text
+primary path wins
+no Workstream path → default workspace
+standalone → default workspace
+explicit cwd wins
+reorder primary makes plan stale
+remove primary makes plan stale
+resume uses original cwd
+resume fallback visible
+launch does not create phantom Session/path before discovery
+matched real Session creates binding/path correctly
+```
+
+提交：
+
+```text
+feat(launcher): resolve sessions through workspace paths
+```
+
+---
+
+# 22. Agent F — Frontend Workspace UX
+
+分支：
+
+```text
+agent/workspace-ui
+```
+
+Agent F 独占：
+
+```text
+src/api.ts
+src/types.ts
+src/features/projects/**
+src/features/workstreams/**
+相关 Sessions UI
+Settings workspace/data UI
+```
+
+本 Agent 不改 Rust。
+
+## Project UI
+
+Projects：
+
+```text
+无“新建 Project”
+```
+
+Project Detail：
+
+```text
+名称
+Git 状态（派生展示）
+Workspace Paths
+Workstreams
+Sessions
+```
+
+用户唯一 Project edit：
+
+```text
+重命名
+```
+
+移除：
+
+```text
+新建 Project
+删除 Project
+手工加 Project Resource
+手工移动 Workstream
+手工移动 Session
+```
+
+---
+
+## Workstream UI
+
+Workstream Detail 增加：
+
+```text
+工作路径
+```
+
+表现为 ordered list：
+
+```text
+主工作路径
+/path/A
+
+其他工作路径
+/path/B
+/path/C
+```
+
+支持：
+
+```text
+添加
+移除
+设为主路径 / reorder
+```
+
+删除路径前明确提示：
+
+```text
+将同时把该路径对应的 N 个 Session 从当前 Workstream 移除。
+Session 历史不会删除。
+```
+
+Workstream 状态：
+
+```text
+进行中
+已完成
+```
+
+菜单：
+
+```text
+移入回收站
+```
+
+回收站：
+
+```text
+恢复
+永久删除
+```
+
+---
+
+## New Workstream
+
+移除：
+
+```text
+Project selector
+```
+
+改为：
+
+```text
+标题
+描述
+初始工作路径（可选）
+```
+
+---
+
+## Sessions
+
+Session Detail：
+
+```text
+显示 WorkspacePath
+显示 Project
+```
+
+Project 只读。
+
+绑定 Workstream 时：
+
+```text
+不让用户操作 Project
+```
+
+---
+
+## Settings
+
+增加：
+
+```text
+NoEnding Home
+默认 Workspace
+数据库路径
+```
+
+修改 Home：
+
+```text
+选择新路径
+→ 显示“重启后迁移并生效”
+```
+
+明确提示：
+
+```text
+旧 workspace 中的用户文件不会被移动。
+```
+
+---
+
+## UI copy
+
+继续：
+
+```text
+简体中文为主
+Project / Workstream / Session / Agent 等领域词保留英文
+```
+
+提交：
+
+```text
+feat(ui): make workspace projects automatic
+```
+
+---
+
+# 23. Wave 2 集成
+
+Main：
+
+```text
+E
+→ F
+```
+
+E 先合，因为 Launcher 是业务 contract。
+
+F 只消费最终 API。
+
+之后运行：
+
+```text
+cargo fmt --check
+cargo check
+cargo test
+pnpm build
+```
+
+记录：
+
+```text
+WAVE2_SHA=<exact sha>
+```
+
+---
+
+# 24. Agent G — Integrity / Migration / Cross-platform Audit
+
+Agent G 必须从：
+
+```text
+WAVE2_SHA
+```
+
+开始。
+
+分支：
+
+```text
+agent/workspace-integrity
+```
+
+Agent G 不是功能开发 Agent。
+
+职责：
+
+```text
+找 invariant 违例
+补测试
+只修明确 bug
+不扩大产品范围
+```
+
+新增建议：
+
+```text
+src-tauri/tests/workspace_identity_test.rs
+src-tauri/tests/project_projection_test.rs
+src-tauri/tests/workstream_paths_test.rs
+src-tauri/tests/workspace_migration_test.rs
+src-tauri/tests/session_workspace_test.rs
+src-tauri/tests/workspace_launch_flow_test.rs
+```
+
+---
+
+# 25. Agent G 必测矩阵
+
+## Project
+
+```text
+WorkspacePath exactly one Project
+Project always >=1 WorkspacePath
+zero-path Project auto-deleted
+non-null git_id unique
+path-backed → git-backed keeps Project.id
+worktrees converge into one Project
+```
+
+## Git
+
+```text
+.git deletion only changes WorkspacePath git_state
+Project.git_id survives
+WorkspacePath.project_id survives
+.git recovery restores detected
+different new Git family can reassign path
+~/.git ignored
+```
+
+## Workstream Paths
+
+```text
+ordered
+position 0 primary
+remove first promotes second
+no secondary-without-primary state
+add path does not import Sessions
+remove path removes only matching bindings
+```
+
+## Sessions
+
+```text
+Session Project derived from WorkspacePath
+standalone Session has Project
+WorkspacePath reassignment batch-refreshes Sessions
+manual project assignment impossible
+```
+
+## Lifecycle
+
+```text
+active ↔ completed no functional mutation
+archive retains lifecycle
+restore retains lifecycle
+permanent delete only archived
+Session history survives
+```
+
+## Launcher
+
+```text
+primary path resolution
+default workspace fallback
+PreparedLaunch stale correctness
+```
+
+## Home migration
+
+```text
+legacy app-data DB → ~/.noending/data
+migration occurs before DB open
+pending home applies on restart
+old workspace not moved
+new workspace becomes default
+failed migration does not switch bootstrap pointer
+```
+
+## v11 → v12
+
+构造真实 v11 fixture。
+
+验证：
+
+```text
+old Project ids/names preserved where paths exist
+legacy names marked customized
+default_cwd → WorkstreamPaths[0]
+session cwd → WorkspacePath
+legacy project_id used only as initial migration evidence
+Git reconcile can subsequently merge Projects
+pathless legacy Project removed
+archived Workstream still restores previous lifecycle
+```
+
+---
+
+# 26. Migration 必须具有可证伪性
+
+至少实现以下 regression：
+
+```text
+migration_is_idempotent
+
+git_loss_does_not_split_project
+
+path_to_git_upgrade_preserves_project_id
+
+worktrees_merge_path_backed_projects
+
+removing_primary_promotes_second_path
+
+removing_workstream_path_unbinds_only_sessions_owned_by_that_path
+
+workspace_project_change_refreshes_session_cache
+
+archive_restore_preserves_workstream_state
+
+permanent_delete_preserves_session_history
+
+changing_noending_home_does_not_move_old_workspace
+```
+
+---
+
+# 27. Agent G 输出格式
+
+Agent G 最终必须提交：
+
+```text
+commit SHA
+
+P0
+P1
+P2
+
+tests added
+tests passed
+remaining known issues
+```
+
+若发现 P0/P1：
+
+```text
+直接修复 + test
+```
+
+若只是 P2 polish：
+
+```text
+报告 Main
+不要扩大实现
+```
+
+建议提交：
+
+```text
+test(workspace): lock workspace domain v0.2 invariants
+```
+
+---
+
+# 28. Main 最终集成任务
+
+Main 合入 G 后进行最终代码审查。
+
+重点 grep / 搜索：
+
+```text
+create_project
+delete_project
+assign_session_project
+suggest_session_project
+merge_workstreams
+update_project
+record_session_project_evidence
+resolve_project_affinity
+project_affinity_evidence
+add_project_resource
+list_project_resources
+remove_project_resource
+
+workstream.project_id
+default_cwd
+
+current manual Project select UI
+```
+
+要求：
+
+```text
+不再出现在新的生产业务路径
+```
+
+Legacy schema / migration code中出现允许。
+
+> ⚠️ v0.2.1 补充：上面新增的 8 个搜索词都来自 §42.2-E4/E5/E10/E11 的实测——
+> `update_project` 是整对象写（`commands.rs:84-91`），`record_session_project_evidence`
+> 在 ingestion 热路径上（`ingestion/mod.rs:250`），`project_resources` 三个命令
+> 是唯一还让用户手工挂路径的入口（`ProjectDetail.tsx:189-241`）。
+> 机械断言见 §42.5（T1–T4），不只靠人眼 grep。
+
+另外必须确认的三条“结构性防漂移”（§42.2-E6、§42.3-M3）：
+
+```text
+upsert_workstream_conn 的 ON CONFLICT DO UPDATE 集合里没有 project_id / default_cwd
+UPDATE sessions SET project_id 只出现在派生与批量刷新两处
+lib.rs 的 generate_handler! 里没有已退出注册的命令
+```
+
+---
+
+# 29. 旧 authority 清理
+
+Main 必须确认新的唯一 authority：
+
+```text
+Physical path
+→ WorkspacePath
+
+Project identity
+→ Project.git_id + owned WorkspacePaths
+
+Workstream cwd
+→ ordered WorkstreamPaths
+
+Session workspace
+→ Session.workspace_path_id
+
+Session Project
+→ WorkspacePath.project_id
+```
+
+禁止出现：
+
+```text
+Session.project_id 与 WorkspacePath.project_id 各自独立写入
+
+Workstream.project_id 与 WorkstreamPaths 各自独立写入
+
+default_cwd 与 WorkstreamPaths 双 authority
+```
+
+---
+
+# 30. 允许暂时保留的 legacy 字段
+
+v0.2 可以物理保留：
+
+```text
+projects.archived
+projects.description
+workstreams.project_id
+workstreams.default_cwd
+```
+
+但只能：
+
+```text
+migration read
+compatibility read
+```
+
+禁止新业务写入。
+
+未来 schema v13+ 再物理删除。
+
+`sessions.project_id` 例外：
+
+```text
+允许写
+但只能由 WorkspacePath projection 自动维护
+```
+
+---
+
+# 31. Context / Assistant 兼容要求
+
+本阶段：
+
+```text
+Context Intelligence default Off
+Context Delivery default Off
+Assistant hidden/experimental
+```
+
+全部保持。
+
+不得重新设计：
+
+```text
+Context extraction
+Context review
+Context delivery
+Assistant scope
+```
+
+如果 Context frozen code 依赖：
+
+```text
+workstream.project_id
+default_cwd
+visibility/lifecycle
+```
+
+Main 只做最薄 compatibility adapter。
+
+不要为了本阶段重构 Context Domain。
+
+---
+
+# 32. CI Gate
+
+最终必须通过：
+
+```text
+cargo fmt --check
+cargo check
+cargo test
+
+pnpm build
+```
+
+> ⚠️ v0.2.1 修正（§42.2-E9）：`pnpm lint` **在本仓库不存在**——
+> `package.json` 只有 `dev` / `build` / `tauri` 三个脚本，仓库里没有 eslint
+> 配置。CI（`.github/workflows/ci.yml`）只有一个 job，矩阵为
+> `macos-latest + windows-latest`，步骤是 `cargo check --all-targets`、
+> `cargo test --all-targets`、`pnpm install --frozen-lockfile`、`pnpm build`；
+> 没有 clippy，也没有 fmt。所以：`cargo fmt --check` 由 Main 每轮集成本地跑；
+> **任何会调用 `git` 的测试必须在 Windows runner 上真的通过**（见 §42.3-M8/M9），
+> 不能只在 macOS 上验证。
+
+必须验证 GitHub Actions：
+
+```text
+run head_sha == final HEAD
+status = completed
+conclusion = success
+```
+
+不能用旧 commit 的绿色 CI 代替。
+
+---
+
+# 33. 手工 Dogfood Gate
+
+Main 最终至少手工验证以下路径：
+
+### Case A — 普通目录
+
+```text
+新建 Workstream
+→ 选普通目录
+→ 自动出现 Project
+→ Workstream 出现在 Project
+```
+
+### Case B — Git repo
+
+```text
+新建 Workstream
+→ 选择 repo
+→ 自动 Project
+```
+
+### Case C — Git worktree
+
+```text
+另一个 Workstream
+→ 选择同 repo worktree
+→ 不产生第二个 Project
+```
+
+### Case D — Standalone Session
+
+```text
+New Session
+无 Workstream
+→ 默认 ~/.noending/workspace
+→ Session 有 Project
+```
+
+### Case E — Workstream 无路径
+
+```text
+Workstream paths=[]
+→ New Session
+→ 默认 workspace
+→ Session 真正出现后
+→ 默认 workspace 成为 Workstream position 0
+```
+
+### Case F — Session 手工加入 Workstream
+
+```text
+Session cwd 不在 Workstream
+→ bind
+→ path append
+→ Project projection 更新
+```
+
+### Case G — 删除主路径
+
+```text
+A / B / C
+→ 删除 A
+→ B 自动主路径
+→ A Sessions 从 Workstream unbind
+→ B/C Sessions 不受影响
+```
+
+### Case H — Trash
+
+```text
+active → archived → restore
+→ active
+
+completed → archived → restore
+→ completed
+```
+
+### Case I — .git disappearing
+
+```text
+Git Project
+→ 删除一个 worktree .git
+→ Project 不拆
+→ path 不换 Project
+```
+
+---
+
+# 34. 建议最终 commit 序列
+
+最终历史建议保持类似：
+
+```text
+1. docs(workspace): freeze workspace domain v0.2
+2. refactor(workspace): establish workspace domain v0.2 contracts
+3. feat(workspace): add noending home and workspace resolver
+4. feat(projects): derive projects from workspace identities
+5. feat(workstreams): add ordered paths and recycle lifecycle
+6. feat(sessions): derive workspace and project membership from paths
+7. feat(launcher): resolve sessions through workspace paths
+8. feat(ui): make workspace projects automatic
+9. test(workspace): lock workspace domain v0.2 invariants
+10. fix(workspace): integration audit fixes        // only if needed
+11. docs(workspace): record workspace domain v0.2 final state
+```
+
+不要为了追求 commit 数量强行 squash 各 Agent 的独立完整提交。
+
+---
+
+# 35. Worktree / Agent 执行纪律
+
+上一阶段曾发生子 Agent 从旧 base 建 worktree 的问题，本阶段明确禁止。
+
+Main：
+
+```text
+git rev-parse HEAD
+```
+
+保存 foundation SHA。
+
+每个 Agent 的 worktree 必须：
+
+```text
+git worktree add \
+  -b agent/<name> \
+  <worktree-path> \
+  <EXACT_BASE_SHA>
+```
+
+Agent 开工第一条检查：
+
+```text
+git rev-parse HEAD
+```
+
+必须等于 Main 给出的 SHA。
+
+不等：
+
+```text
+立即停止
+```
+
+不得自己“猜正确 base”。
+
+---
+
+# 36. Agent 不自行同步 Main
+
+Agent 工作期间：
+
+```text
+不 merge main
+不 rebase main
+不 cherry-pick 其他 Agent
+```
+
+跨 Agent dependency：
+
+```text
+由 Main 在 Wave 边界集成
+```
+
+这样每个提交的变更范围可审计。
+
+---
+
+# 37. Agent 交付格式统一
+
+每个 Agent 最终回复 Main：
+
+```text
+Agent:
+Base SHA:
+Commit SHA:
+
+Changed files:
+- ...
+
+Implemented:
+- ...
+
+Tests:
+- command
+- result
+
+Known issues:
+- ...
+
+Out-of-scope observations:
+- ...
+```
+
+禁止只回复：
+
+```text
+“完成了”
+```
+
+Main 必须根据 commit 实际 diff 独立复核。
+
+---
+
+# 38. 文件 ownership 原则
+
+共享高冲突文件由 Main 独占：
+
+```text
+storage/mod.rs
+domain.rs
+commands.rs
+lib.rs
+Cargo.toml / lockfile
+```
+
+Agent 必须优先新增：
+
+```text
+独立 module
+独立 storage impl
+独立 command submodule
+```
+
+而不是不断向 monolith 追加。
+
+前端由 Agent F 一次性负责，以避免多个 Agent 同时修改：
+
+```text
+api.ts
+types.ts
+shared modal
+Project / Workstream / Session UX
+```
+
+---
+
+# 39. 阶段完成定义
+
+只有全部满足才可标记：
+
+```text
+Workspace Domain v0.2 — SEALED
+```
+
+完成条件：
+
+```text
+NoEnding Home                      ✅
+Default workspace                  ✅
+WorkspacePath registry             ✅
+Path identity                      ✅
+Git identity                       ✅
+~/.git exclusion                   ✅
+Git worktree discovery             ✅
+.git loss continuity               ✅
+Project auto generation            ✅
+Project auto merge                 ✅
+Zero-path Project auto deletion    ✅
+Project rename only                ✅
+
+Ordered Workstream Paths           ✅
+Primary = position 0               ✅
+Path reorder/remove semantics      ✅
+Active / Completed                 ✅
+Recycle bin / Restore              ✅
+Permanent Workstream deletion      ✅
+
+Session → WorkspacePath            ✅
+Session → Project projection       ✅
+Standalone Session Project         ✅
+Binding path ownership             ✅
+
+Launcher cwd resolution            ✅
+PreparedLaunch integrity           ✅
+
+v11 → v12 migration                ✅
+Old user data preserved            ✅
+
+macOS                              ✅
+Windows                            ✅
+
+cargo tests                        ✅
+frontend build                     ✅
+exact-head remote CI               ✅
+```
+
+---
+
+# 40. 明确不进入本阶段
+
+以下全部留到以后：
+
+```text
+Context Intelligence v0.2
+Context injection redesign
+Assistant
+自动语义 Workstream 分类
+用户自定义 Workstream Collection / Category
+智能 Collection 推荐
+自动把路径历史 Sessions 导入 Workstream
+复杂 Git remote identity
+跨机器 Project identity
+GitHub integration
+Project-level semantic context
+```
+
+尤其不能因为已经有 Git identity 就顺手扩成：
+
+```text
+GitHub Project manager
+repository browser
+branch manager
+worktree manager
+```
+
+本阶段只负责：
+
+```text
+识别
+归纳
+关联
+保持完整性
+```
+
+---
+
+# 41. 主 Agent 最终执行原则
+
+优先级：
+
+```text
+1. Data integrity
+2. Single source of truth
+3. Migration safety
+4. Deterministic behavior
+5. Cross-platform correctness
+6. UX
+7. Polish
+```
+
+遇到歧义时不得用启发式智能猜测。
+
+基础规则：
+
+```text
+可以确定
+→ 自动处理
+
+不能确定
+→ 保持已有关系 / 不做破坏性变化
+
+永远不要为了“看起来更智能”
+破坏路径、Project、Session 的历史连续性
+```
+
+本阶段完成后，NoEnding 的基础数据链应稳定为：
+
+```text
+Filesystem
+    ↓
+WorkspacePath
+    ↓
+Project
+
+User intent
+    ↓
+Workstream
+    ↓
+Session
+
+WorkstreamPath
+负责把用户工作语义映射到物理 Workspace。
+```
+
+这套模型完成并经过实际 dogfood 后，再进入用户自定义 Workstream 分类以及后续智能化阶段。
+
+---
+
+# 42. 勘误、补漏与执行修正（v0.2.1，Main 对代码逐条核对后写回）
+
+核对基线：`main@1da873e`（Core Workspace Experience v0.1 封板 HEAD）。
+所有 file:line 都按该 HEAD 实测，不是推测。
+
+## 42.1 优先级裁定：本方案 > AGENTS.md
+
+**本方案与 `AGENTS.md` 的 Core Invariants 有两条正面冲突，用户 2026-09-19 明确裁定：以本方案为准。**
+
+| AGENTS.md 原文 | 本方案 | 裁定 |
+| --- | --- | --- |
+| “Never equate Project with repository, cwd, workspace, or filesystem path” | §0 `Project = NoEnding 自动维护的物理 workspace family`；§1.1 WorkspacePath→Project 唯一事实链 | Project 的物理锚点就是 WorkspacePath。AGENTS.md 该条改写为：Project 是**应用派生**的物理 workspace family，用户不得手工赋值；它仍然不是 repository 的同义词（一个 Project 可以有 N 条路径，其中部分不是 repo） |
+| “A Workstream may carry an optional **default working directory** (`default_cwd`) … It is never identity” | §1.5/§5.7/§7.3：`default_cwd` 只作 v12 迁移输入，被有序 `workstream_paths` 取代 | `default_cwd` 退出。`AGENTS.md:25` 整段替换为有序 WorkstreamPath 契约，并保留原句仍然成立的部分：**Workstream 本身仍然不是路径**，Session 仍然保留自己的权威 cwd |
+
+执行要求：**Wave 0 foundation commit 必须同时改 `AGENTS.md`**。不允许出现“代码已经是 WorkspacePath 派生 Project，而 AGENTS.md 还写着 Project 与路径无关”的状态——那会让下一个 Agent 按旧 invariant 否决新代码。
+
+不冲突、本阶段原样保留的 invariant：raw Agent session 文件只读；ingested events append-only；事件身份 app-owned；`processed_cursor` 只在原子 Sync 提交后前进；Sync 全有或全无；`user_explicit`/`user_edit` 不被静默覆盖；Context Delivery 只管出口；Launch Preparation Integrity；Preview-Launch Identity；Home 不推进 ReviewState；macOS/Windows first-class。
+
+## 42.2 与代码现状不符的陈述（就地已修正的原文见括注）
+
+**E1｜§5.3 同一行三个唯一键。** `workspace_paths` 同时要 `id` UNIQUE、`path_id` UNIQUE、`canonical_path` UNIQUE，而 §3 定义 `path_id = canonical path 的稳定身份`——`canonical_path` 本身已经是唯一键，`path_id` 是第三份同一事实。
+修正：**删掉 `path_id` 列**，`workspace_paths.id` 直接就是 path identity，由 `canonical_path` **确定性派生**（`path-<sha256(canonical_path) 前 32 hex>`）。这不是省列，是为了 §42.3-M5 的可重入性：`migrate()` 全程 autocommit（`storage/mod.rs:131-479` 无任何事务），确定性主键让 `ensure_workspace_path` 和 v12 回填的重复执行天然幂等。
+`sessions.workspace_path_id` / `workstream_paths.workspace_path_id` 引用的就是这个 `id`。
+`git_identities.id` 反过来**不**做确定性派生（设计文档 §8 明确 “Git ID 不是 path hash”），它的幂等靠 `git_identities.common_dir UNIQUE` + `INSERT OR IGNORE` 后回查。
+
+**E2｜§5.7 `open → active` 改不了 DDL 默认值。** `workstreams.lifecycle TEXT NOT NULL DEFAULT 'open'`（`storage/mod.rs:166`）。SQLite 无法用 ALTER 改列默认值，`CREATE TABLE IF NOT EXISTS` 对已存在的表无效，而 `storage/mod.rs` **没有任何 rebuild-and-copy 先例**（v1–v11 全部是 `CREATE TABLE IF NOT EXISTS` + 幂等 ALTER 列表 + `IF current_version < N` 回填）。重建 `workstreams` 会牵动 `session_workstream_bindings`、`context_items`、`context_conflicts`、`context_deliveries`、`workstream_review_state` 五个 FK 引用方，在 `PRAGMA foreign_keys=ON`（`:111`）下是一次高危手术。
+修正：**不做表重建**。`UPDATE workstreams SET lifecycle='active' WHERE lifecycle='open'` 迁移数据；所有 Rust 写入点显式带 lifecycle（现状已经如此：`create_workstream` `commands.rs:157`、`upsert_workstream_conn` `:2134-2139` 都显式列出该列）；把**规范 DDL 里的 DEFAULT 改为 `'active'`**（新库正确），并在 `migrate()` 上方注释里写清“升级库的列默认值仍是历史 `'open'`，任何绕过 Rust 写入层的裸 INSERT 必须显式带 lifecycle”。补一条回归测试断言：裸 INSERT 不带 lifecycle 的老写法不会在产品路径中出现（用 §42.5-T3 的 grep 断言而非 schema 断言）。
+
+**E3｜§5.1 `archived` “物理保留兼容”仍然被读。** `list_projects` 有 `WHERE archived = 0`（`storage/mod.rs:535`），`stats()` 有 `COUNT(*) … WHERE archived = 0`（`:2099`）。v0.2 之后没有任何生产者再写 `archived=1`，于是历史 `archived=1` 的 Project 会变成“仍然拥有 WorkspacePath、但永远不出现在列表里”的幽灵。
+修正：v12 迁移执行 `UPDATE projects SET archived = 0`（Project 没有生命周期，§1.2），并且 `list_projects` / `stats()` **去掉 archived 过滤**。用户会看到自己从前归档过的 Project 重新出现——这是本方案的必然结果（它的路径还在），必须在 §43 落地记录里作为**可见行为变化**写明。
+
+**E4｜§11 Project API 冻结清单漏了成员查询。** `list_workstreams(project_id)`（`storage/mod.rs:629-647`，`WHERE project_id = ?1` 在 `:632`）是当前**唯一**的 Workstream→Project 成员查询，前端 4 处在用（`ProjectsView.tsx:25`、`ProjectDetail.tsx:61`、`SessionDetailView.tsx:306`、`NewSessionModal.tsx:81`、`CommandPalette.tsx:43`）。§11 只冻结了 `list_projects` / `get_project_detail` / `rename_project`。
+修正：§11 增加两行——`list_workstreams` 的 `project_id` 参数语义改为**路径派生投影**（`workstream_paths → workspace_paths.project_id`，含 position>0），并新增 `list_project_workstreams(project_id)` 返回 `(workstream, is_primary)`，供 §36 Project Detail 的“主关联/关联”用。
+
+**E5｜`get_project_detail` 从来没有存在过。** §11 把它列为“保留”，但 `commands.rs` 里没有这个命令，`ProjectDetail.tsx:56-58` 是**拉全量 Project 列表再 `.find()`**。
+修正：§11 标注 `get_project_detail` 为**新增**，并冻结形状：`{ project, workspace_paths[], workstreams[{workstream, is_primary}], sessions[] }`。前端仍然自己拉列表的写法由 F 换掉。
+
+**E6｜§18-15 “不写 `workstreams.project_id`”缺机制。** `upsert_workstream_conn`（`storage/mod.rs:2134-2139`）无条件写 `project_id = ?2 … default_cwd = ?7`，而 `update_workstream`（`commands.rs:173-180`）是**整对象写**，`WorkstreamDetailView.tsx:123-135` 对每次改名/改描述都重发 `{...workstream, ...patch}`。所以旧列不会“stale-but-harmless”，它会被持续重新提交——正是 §29 禁止的双权威。
+修正：**在存储层结构性切断**——`upsert_workstream_conn` 的 INSERT 列保留、`ON CONFLICT DO UPDATE` 集合里**移除** `project_id` 与 `default_cwd`，两列变成“创建时写入、之后不可变”的兼容读列。`Domain` 上 `Workstream::project_id` / `default_cwd` 保留为只读投影，任何新写入点在类型上就不存在。同理 `create_workstream` 新签名不再接收它们。
+
+**E7｜§22 单个前端 Agent 的规模超上限。** 上一阶段同量级的全量前端 Agent 在 150 turn 上限处死掉，留下 21 个已 stage 未 commit 的文件由 Main 代劳。`src/` 现在 7849 行，§22 把 Projects / Workstreams / Sessions / Settings / api.ts / types.ts 全给了 F。
+修正：见 §42.4 的 Wave 2 重划。**Main 先落一个 TS bridge commit 独占 `api.ts` + `types.ts`**，F1/F2 只在互不相交的目录里工作。
+
+**E8｜§14/§35 worktree 由谁建没有说。** 上一阶段 5 个 Agent 的 worktree **全部**从 `b1b8efe`（陈旧 base）建出来。§35 只写了“Agent 开工第一条检查 `git rev-parse HEAD`”，但 `isolation: worktree` 的 base 由 harness 决定，Agent 无法控制。
+修正：**所有 worktree 由 Main 亲手 `git worktree add -b agent/<name> .qoder/worktrees/<name> <EXACT_SHA>` 建好**，Agent 不再使用 `isolation`，改为直接在给定的绝对路径里工作；开工检查变成“路径下 `git rev-parse HEAD` 必须等于 Main 在 brief 里写死的 SHA，不等立即停止并回报”。`.gitignore` 已含 `.qoder/`（`1da873e` 前已加）。
+
+**E9｜§32 的 CI 现实。** `.github/workflows/ci.yml` 只有一个 job、矩阵 `macos-latest + windows-latest`、步骤只有 `cargo check --all-targets` / `cargo test --all-targets` / `pnpm install --frozen-lockfile` / `pnpm build`。**没有 clippy，没有 `pnpm lint`（`package.json` 只有 dev/build/tauri 三个脚本，仓库无 eslint 配置）**。
+修正：§32 的 “如果仓库存在 lint” 一句判定为不存在，删除该分支要求；`cargo fmt --check` 由 Main 在每轮集成本地跑（AGENTS.md 已要求），不进 CI。所有会调用 `git` 的测试必须在 **Windows runner 上通过**，见 §42.3-M8/M9。
+
+**E10｜§11 没有处置 `merge_workstreams`。** 它是 `abandoned` 的**唯一**生产者（`commands.rs:440-444` 同时写 `lifecycle="abandoned"` + `visibility="archived"`），也是唯一还会写 `workstreams.project_id` 的用户路径之一，而前端**零调用点**（`api.ts:34-35` 无组件引用）。§11 的冻结清单和 §28 的 grep 清单都没有它。
+修正：`merge_workstreams` 按 §11 “退出产品 API” 的同一处理——**从 `lib.rs` 反注册，保留 Rust helper 不删**，`api.ts` 的 wrapper 由 F1 删掉。这样 §5.7 的 `abandoned → completed` 折叠没有残留生产者，M2 的数据损失也不会继续发生。
+
+**E11｜§28 的 grep 清单漏了真正危险的那条假权威路径。** `record_session_project_evidence`（`ingestion/mod.rs:333-360`）在**每一次发现新 Session 时**（`:250`，reconcile 热路径）用 `session.cwd` 与 **`Project.name` 的小写子串**匹配并写 `cwd_match` 证据。v0.2 之后 Project 名由路径 basename 派生，这个匹配会变成“从两份路径事实里推导出第三份成员关系”，而且它正是 §1.4 描述的 `~/.git` dotfiles 误归类的放大器。
+修正：§28 的搜索清单加入 `record_session_project_evidence`、`project_affinity_evidence`、`insert_evidence`、`resolve_project_affinity`。产品路径要求：停止调用（`:250` 删调用点，函数与表保留为只读历史）。`suggest_session_project` / `assign_session_project` / `ingestion::suggest_project_for_session`（后者 `:362-366` 已经是死代码）一并退出注册。
+
+**E12｜§1.13 与设计文档 §16 是两套字段。** 设计文档用 `status` + `trashed_at`，本方案 §1.13/§5.7 复用 `lifecycle` + `visibility`。
+修正：本方案为准（零 schema 扩张优先）。设计文档 §15/§16/§17 就地改名，并在文末加对齐说明。
+
+**E13｜§5.2 的 `workspace_paths.exists` 列名在 SQLite 里是语法错误。** `exists` 是保留关键字，`CREATE TABLE … (exists INTEGER NOT NULL)` 直接 parse 失败（实现期实测）。
+修正：列名用 `exists_on_disk`，Rust 领域字段仍叫 `exists`（`WorkspaceObservation.exists` / `WorkspacePath.exists_on_disk` 在 `row_workspace_path` 处映射）。§5.2、§5.3 与 §32 的 grep 清单凡出现 `workspace_paths.exists` 之处，读取时都按 `exists_on_disk` 理解。Wave 1 任何写 SQL 的 agent 都必须用后者。
+
+## 42.3 方案未规定、但实现必须有规则（M1…M24）
+
+**M1｜`workstream_path_id` 是精确相等，不是前缀匹配。** §32（设计文档）用 `/repo` 与 `/repo/frontend` 举例，容易被读成“删除 `/repo/frontend` 要按最长前缀归属”。实际语义：一个 Session 只有一个 `workspace_path_id`（它自己 cwd 的那一行），binding 记录的就是这个 id，**精确等于**某条 `workstream_paths.workspace_path_id` 才叫“已在列表中”（§1.8 第一分支）。§1.8 第三分支（已有路径则 append）就是嵌套路径的真实结局：`/repo` 和 `/repo/frontend` 会**同时**在列表里。
+锁死的不变式：`binding.workstream_path_id IS NULL OR EXISTS (workstream_paths WHERE workstream_id = b.workstream_id AND workspace_path_id = b.workstream_path_id)`。没有任何前缀/包含逻辑。
+
+**M2｜Session cwd 漂移不改变 Workstream 的路径列表。** 重新发现会让 `sessions.cwd` 变化（`ingestion/mod.rs:144-158` 把 discovery 当 cwd 的 source of truth）。此时该 Session 的 binding.workstream_path_id 可能不再命中列表。规则：**不把新路径静默 append 进用户的 Workstream**（§1.7 “添加路径只增加路径”的对偶：路径列表只由用户动作或显式绑定增长）；若新 cwd 恰好已在列表里则改指过去，否则置 `NULL`（含义“该绑定不再由任何路径带来”），于是它不会被 §1.6 的删路径操作带走。这符合 §41 “不能确定 → 不做破坏性变化”。
+
+**M3｜`sessions.project_id` 只能有一种写法。** 为了 §29 “禁止 Session.project_id 与 WorkspacePath.project_id 各自独立写入”落到实现上：该列**只在两处**被写——(a) `upsert_session` 内的一条 SQL，用 `project_id = (SELECT project_id FROM workspace_paths WHERE id = ?workspace_path_id)` 同语句派生；(b) WorkspacePath 改归属时的批量刷新。除此之外任何 `UPDATE sessions SET project_id` 都算违例（今天 `commands.rs:786-789` 就是这种写法，随 `assign_session_project` 一起退出）。
+配套：`upsert_session` 的 `ON CONFLICT(agent, agent_session_id) DO UPDATE` 集合（`storage/mod.rs:803-808`）今天**故意不含** `project_id`；新列 `workspace_path_id` 要按 `COALESCE(excluded, 现值)` 加入，且当 `workspace_path_id` 变化时派生 `project_id` 必须同事务重算。
+
+**M4｜零路径 Project 自动删除的 FK 顺序。** `project_resources.project_id` 与 `project_affinity_evidence.project_id` 都是 `NOT NULL REFERENCES projects(id)` 且**无 cascade**（`storage/mod.rs:155`、`:316`）。直接 `DELETE FROM projects` 在有资源的 Project 上必然 FK 失败，而 §7.4 要删的 legacy Project 恰恰大概率有资源。
+修正：删除顺序固定为 `project_resources` → `project_affinity_evidence` → `projects`，并且 `projects` 的 `unindex("project", id)` 必须在事务提交之后（现有 `delete_project:581` 已是这个形状，照抄）。
+附带修一个既存 bug：今天 `delete_project`（`:564-583`）**完全没碰 `project_affinity_evidence`**，所以删过 affinity 证据的 Project 现在就会 FK 失败——现有测试没插证据才没暴露（`launch_context_test.rs:546-569`）。v12 顺手补上并加回归。
+
+**M5｜迁移前整库备份。** §7.4 会自动删 Project、连带删用户手工录入的 `project_resources`；§5.7 会把 `abandoned` 折进 `completed`（不可逆）。同时 `migrate()` 没有事务，中途失败会留下半迁移的库、`user_version` 停在旧值。
+修正：`migrate()` 进入 v12 分支前，若 `user_version < 12` 且 `noending.db.pre-v12.bak` 不存在，则 `PRAGMA wal_checkpoint(TRUNCATE)` 后把主库文件复制为 `<db>.pre-v12.bak`（同目录；该目录已有 `*.legacy-20260913-*.bak` 的人肉搬迁先例）。备份失败 → **不执行**破坏性分支，直接返回错误让用户先处理。这是“宁可不开动也不丢数据”，符合 §41 优先级 1。
+
+**M6｜永久删除的完整清单。** §18-13 的 “Workstream-owned Context/Review data” 必须展开，否则 `PRAGMA foreign_keys=ON` 下第一次真删就报错。固定顺序：
+`context_conflict_events` → `context_conflicts`（含 `left_item_id`/`right_item_id` 引用）→ `context_item_revisions` → `context_items` → `context_deliveries` → `session_workstream_bindings` → `workstream_paths` → `session_binding_removals`（**无 FK**，`:228-233`，不删就是永久垃圾）→ `workstream_review_state`（唯一 `ON DELETE CASCADE`）→ `workstreams`。
+不得触碰：`sessions`、`session_events`、`session_cursors`、`launch_intents`、`workspace_paths`、Agent 原始文件。
+今天 `Db::delete_workstream`（`:781-786`）是一句裸 `DELETE FROM workstreams`，**零调用点**，一旦有引用就 FK 失败——由 C 替换成上述事务。
+
+**M7｜Workspace Reconcile 的触发点与锁纪律。** §6 规定 Git detection 在“数据库成功打开后的 Workspace Reconcile”里跑，但没说谁触发、多久跑一次、能不能持锁。
+规则：
+- 触发点：(a) 启动后一次全量扫描（`lib.rs` setup 里的后台线程，紧挨现有 reconcile 线程，见 `lib.rs:82-117`）；(b) `ensure_workspace_path` 内部；(c) Project Detail 与 Settings 的显式刷新。
+- **绝不持 DB mutex 跨 `git` 子进程**（AGENTS.md:79，且 ingestion 已示范逐次 lock/unlock：`ingestion/mod.rs:200-252`）。每个路径一次独立加锁读、解锁跑 git、再加锁写。
+- 只对 `exists = true` 的路径跑 git；`exists=false` 只 stat 一次目录。
+- 全量扫描要有总量上限与顺序稳定性（按 `path_id` 排序），避免每次启动顺序抖动导致 `last_seen_at` 大面积变化。
+- **Reconcile 不得写 `workstream_paths`**（§9：发现 WorkspacePath ≠ 添加 WorkstreamPath），也不得推进任何 cursor。
+
+**M8｜`canonical_path` 的跨平台规范必须写死——而且必须是纯词法的。** §16-7 只说了“Windows/macOS path normalization”，太薄；这是本阶段最容易在 CI 上翻车的地方，而且 `canonical_path` 是 UNIQUE 身份键。
+
+**先纠正一个直觉方案**：设计文档 §4 写的是“canonicalize when possible”，即优先 `std::fs::canonicalize()`。**这条路不能作为身份键**，因为它对同一个输入目录会在不同时刻给出不同结果：
+- 目录还不存在时 `canonicalize` 失败 → 退化成词法形式；目录后来被创建 → 身份翻转成解析后的形式。一个 UNIQUE 身份列在生命周期里变值，是这条链上最坏的 bug。
+- 符号链接可以在任何时候被第三方创建（macOS `/tmp` 本来就是），同样让身份漂移。
+
+规则（Wave 0 已实现为 `workspace::path_identity` / `workspace::normalize_path`，A/B/D/G 全部复用它，禁止第二份实现）：
+1. **纯函数**：不碰文件系统、不看 symlink、不问 OS。输入字符串 → 输出 `canonical_path` 与派生 `id`，任何时候都一样。
+2. 展开 `~` / `~\`（M23 之后全仓库只有这一个展开器）；相对路径以传入的 `base` 解析（无 base 则拒绝，不猜 `$HOME`）；折叠 `.` 与 `..`（词法，且在越过根时停住而不是抛错）；连续分隔符并一；去尾部分隔符（根除外）。
+3. 分隔符：身份键内部统一用 `/`；`canonical_path` 列存**平台原生**形式（Windows `\`，类 Unix `/`）。
+4. Windows：剥掉 `\\?\` 与 `\\?\UNC\` verbatim 前缀（后者还原为 `\\server\share\…`），盘符大写；大小写折叠**只**用于身份比较，展示保留原大小写。macOS **不折叠**（APFS 默认大小写不敏感但保留大小写；折叠会让展示变错，而且身份已经由词法形式定义，折叠只带来歧义）。
+5. 符号链接的代价是**明知故犯、且可自愈**：`/tmp/x` 与 `/private/tmp/x` 会是两条 WorkspacePath。它们各自的 Git 检测会给出同一个 `common_dir`（git 自己解析符号链接），于是 §8.3 的 git identity 收敛会把两条路径归进同一个 Project。**这条兜底成立的前提是 Git 收敛真的跑过**，所以 §33 的 dogfood Case 要包含“同一目录的符号链接拼法出现两次”。
+6. `fs::canonicalize` 仍然允许用于**读 git 输出之后**（git 返回的 `common_dir` / worktree 路径要再过一遍本函数），但**不得**用它产生 `canonical_path`。
+7. **测试**：macOS 上 `std::env::temp_dir()` 是 `/tmp`（符号链接），CI 的 macos runner 一定撞上。所有 resolver 测试断言 `canonical_path` 时禁止硬编码 temp 前缀，必须先过 `normalize_path` 再比。
+
+
+**M9｜`git` 调用的加固。** 在用户目录里跑 git 有已知坑：
+- 环境变量：`GIT_OPTIONAL_LOCKS=0`（不碰 index.lock）、`GIT_TERMINAL_PROMPT=0`（绝不等凭据）、`GIT_CONFIG_NOSYSTEM=1` 不设（尊重用户配置），`HOME`/`USERPROFILE` 保留。
+- 非零退出、超时、找不到二进制、**dubious ownership（CVE-2022-24765 的 `safe.directory` 拒绝）** 全部归一为 `GitDetection::None` 或 `Missing`，**不得**冒泡成用户可见错误。`AppError` 序列化成纯字符串（`error.rs`），前端无法区分错误种类，所以“不是 repo”和“git 不存在”必须是 enum 变体而不是 `Err`。
+- 只允许两条命令：`git rev-parse --git-common-dir`（+ `--show-toplevel`，用于 §1.4 的 home 判定）和 `git worktree list --porcelain`。任何写操作（`git init`/`fetch`/`config`）禁止。
+
+**M10｜git 二进制定位复用 `exec_resolver`，不要 `Command::new("git")`。** `platform/exec_resolver.rs` 的 `candidate_dirs()`（`:27`，含 `/opt/homebrew/bin`、`~/.cargo/bin`、NVM/fnm/volta、Windows `AppData/Roaming/npm` + `PATHEXT`）、`candidate_file_names()`（`:65`）、`is_executable_unix()`（`:179`）存在的理由就是**从 Finder 启动的 macOS 应用不继承 shell PATH**——git 通常恰好只在 Homebrew PATH 里。现在这些是私有的且 `resolve()` 硬绑 `Agent` 枚举（`:145-149`）。
+修正：A 抽出 `pub fn resolve_executable(name: &str) -> Option<PathBuf>`，`resolve(agent)` 改调它。这是本阶段唯一允许的既存 API 重构。
+
+**M11｜进程 runner 同样复用。** `platform/exec_runner.rs:33 run_headless(&AgentCommand, timeout)` 已经做了双线程排空 + 硬超时 + `kill()`，形状正确；两个障碍：参数类型是 adapter 命名空间的 `AgentCommand`，以及 `:36-40` 在 `cwd=None` 时**硬编码回退 `/tmp`**（Windows 上错，对必须在指定目录里跑 git 的 resolver 更错）。
+修正：抽出 `pub fn run(program, args, cwd: Option<&Path>, timeout_secs) -> Result<HeadlessOutput>`，`run_headless` 委托它；resolver 永远显式传 cwd。
+
+**M12｜bootstrap config 的确切落点。** §3 只说“极小的 OS-native bootstrap config”。仓库无 toml/yaml 依赖，`dirs = "5"` 已在（`Cargo.toml:29`），`serde_json` 已在。
+定死：`<dirs::config_dir()>/app.noending.desktop/home.json`（macOS = `~/Library/Application Support/app.noending.desktop/home.json`，Windows = `%APPDATA%\app.noending.desktop\home.json`，Linux = `~/.config/…`）。内容 `{"current_home": "...", "pending_home": "..."?}`。它在 NoEnding Home **之外**且与 Home 无关，所以不会因为搬迁而自我依赖。写失败/解析失败 → 回退 `~/.noending`，但必须在日志里显式报告，不得静默。
+
+**M13｜Home 解析必须可注入，测试不得碰真实 `~/.noending`。** `NOENDING_HOME` 读取点只能有**一个**函数（`home::resolve_explicit_override()`），其余全部接收显式 `&Path`。原因：Rust 测试同进程并行，`std::env::set_var` 互相污染（且新版 Rust 里是 unsafe）。
+硬要求：任何测试都不允许解析出真实用户 Home 下的路径；`home.rs` 的公共入口接受一个 `HomeRequest { explicit: Option<PathBuf>, bootstrap: Option<PathBuf>, home: PathBuf }`，测试自己传三件套。
+
+**M14｜NoEnding Home 的搬迁范围比 §2 列的广。** 现在 `app_data_dir()` 里实际有：`noending.db`（本机实测 95 MB）、`noending.db-wal`/`-shm`、`context-bundles/`（launcher 写，`launcher/mod.rs:66-71`）、以及历史 `.bak`。`app_data_dir` 在 **7 个地方**被独立重新推导：`commands.rs:929-939`（`get_app_info` 报给 Settings 的 `db_path`）、`:1090`、`:1109`、`:1165`、`:1191`、`:1218`、`:1474`（后者经 `assistant/mod.rs:223`）。
+修正：这些点全改成读一份启动时解析并 `app.manage()` 的 `NoEndingHome` 结构，不允许再各自 `app.path().app_data_dir()`。`context-bundles/` 归入 `<home>/runtime/context-bundles`。搬迁时 `-wal`/`-shm` 必须先 checkpoint 再随主库一起移动。**`get_app_info` 的 `db_path` 在搬迁完成前不能报新路径**（否则 UI 说谎）。
+
+**M15｜共享默认 workspace 会打断 LaunchIntent 自动匹配。** §13/§33 Case E 让 `~/.noending/workspace` 成为所有“无 Workstream 路径”的启动的共同 cwd。而 `launcher/mod.rs:944-961` 的匹配打分是：`intent.cwd` 与 `session.cwd` 互为前缀 `+3.0`，`<60s` `+2.0`，判定要求 `best - second >= 2.0`（`:967-995`）。两个并发独立启动 → 两个 intent 的 cwd 完全相同 → 各 +3.0+2.0 → 差值 0 → 双双 `AMBIGUOUS`。
+处理（§41：不确定时不做破坏性变化）：接受 `AMBIGUOUS` + 现有 `resolve_launch_intent` 人工裁决是**正确**行为，不引入猜测。两条改进进实现：(1) 打分时若 `intent.cwd == 默认 workspace`，cwd 证据降为 `+1.0`（共同目录不携带区分度，不该拿满分）；(2) 平分时优先 `selected_workstream_ids` 非空的 intent（用户明确选过 Workstream 是更强证据，符合 AGENTS.md “用户绑定强于自动分类”）。必须加测试锁死“两个并发 standalone 启动 → 两个 AMBIGUOUS → 人工裁决后各自绑定正确 Workstream 且互不串”。
+
+**M16｜Resume 的 `prepared.cwd` 今天根本不用于 spawn——这是既存的 Preview-Launch Identity 违例。** `prepare_resume` 存 `cwd: session.cwd.clone()`（`launcher/mod.rs:189`），但 `launch_prepared_with` 的 resume 分支在 `:368` **重新读库** `session.cwd` 并忽略 `prepared.cwd`；而 `session.cwd` 不在指纹输入里（`:526-563` 只哈希 `last_activity_at` + cursor）。也就是说：后台 discovery 在 Preview 与 Launch 之间改写 cwd，就会在用户没看到的情况下换启动目录。
+本阶段 §13/§30 把 fallback 链变成用户可见事实，所以这条必须一起修：resume 用 `prepared.cwd` 启动，`cwd` 进入指纹（两种 mode 都进）。这是 §12 “以下任一变化必须使未消费 PreparedLaunch stale” 的真正前提。
+
+**M17｜指纹哈希缺字段分隔。** `compute_state_fingerprint`（`launcher/mod.rs:459-568`）在多处直接相邻 `update()` 字符串（如 `:504-512` 的 item/revision 六连），字段边界可移位的理论碰撞既存。新增输入必须自带标签：`b"ws_paths:"`、`b"primary:"`、`b"default_ws:"`、`b"cwd:"`，并在每个值后 `update(b"|")`。有序路径列表**保持列表顺序参与哈希、不排序**（与 `:490` 对 `effective_workstream_ids` 的既有处理一致；顺序本身就是语义）。
+
+**M18｜搜索索引跟着换权威。** `index_workstream`（`storage/mod.rs:2007-2014`）把 `w.project_id` 写进 `search_index.parent_id`，`index_project`（`:1998-2005`）产 `kind='project'` 行；`SearchView.tsx:45` 与 `CommandPalette.tsx:81` 按 `parent_id`/`kind` 路由。E6 之后 `w.project_id` 冻结在创建值，搜索结果会指向过期成员关系。
+修正：`index_workstream` 的 `parent_id` 改取 **position-0 路径的 Project**（可空）；Project 自动创建/改名/合并/删除时分别 `index_project` / `unindex`；v12 迁移末尾对全部 workstream 与 project 重新索引（`backfill_search_index` 已有幂等先例，`lib.rs:74`）。
+
+**M19｜卡片 `project_name` 在多 Project 下的定义要冻结（§8.1.1 式契约）。** 一个 Workstream 现在可能属于多个 Project，而 `WorkstreamCardData.project_id/project_name`（`types.ts:58,66`）被 Home、Sidebar、卡片、ContextUpdates 等约 10 个界面消费（`commands.rs:270-274`、`:583-587`）。
+冻结：两列含义变为 **“position-0 路径所属 Project” 的投影**，无路径或路径无 Project 时为 `null`；列名与类型不变，只改文档注释和 `commands.rs` 的取数 SQL。Project Detail 里的“主关联/关联”由 M4/E4 的 `is_primary` 提供，不用卡片字段。
+
+**M20｜新字段的机械 fixture 改动归 Main。** `Workstream`/`Session` 结构体新增字段会让全部 18 个集成测试文件的 struct literal 编译失败（Rust literal 必须列全字段；`project_id: None, default_cwd: None, lifecycle:"open"` 的字面量散落在 `base_experience_test.rs:71-89`、`context_review_test.rs:12-24,381-461`、`launch_cwd_test.rs:20-34`、`launch_context_test.rs:16-43`、`sync_integrity_test.rs`、`llm_cli_test.rs`、`workstream_cards_test.rs:44-61`、`replace_bindings_test.rs:46-51` 等处）。
+要求：foundation commit 内一并改完，并给 `Workstream`/`Session`/`WorkspacePath` 各加一个测试友好构造 helper（沿用现有 `ws_row(...)` 风格，放 `storage` 或一个 `tests` 可复用的 `pub fn` in crate），否则四个 Agent 会各自再造一套 fixture 工厂——上一阶段 `useWorkstreamCards` 的教训。
+特别注意 `context_review_test.rs:66-67` 的裸 `INSERT INTO workstreams (id, title, description, lifecycle, visibility, created_at, updated_at)`（不含 `default_cwd`）：它同时是 E2 说的“绕过 Rust 写入层”的唯一实例，加列不会破坏它，但改列默认值后它写入的是 `'open'` → 迁移前构造 v11 fixture 时**这是特性**，v12 迁移测试正好用它。
+
+**M21｜默认 workspace 必须真实存在。** `~/.noending/workspace` 在 bootstrap 时 `create_dir_all`。若不建就交给 §13 当 cwd，会命中既存的不对称：macOS 的 bash 脚本 `cd` 失败会**打印一句提示后回退 `$HOME`**（`platform/launcher.rs:42-53`），Linux 直接 spawn 失败（`:268-276`）——即“你以为在默认 workspace，实际在 $HOME”，而 `$HOME` 正是 §1.4 要防的 dotfiles repo。这条要在 A 的实现注释里写明。
+
+**M22｜取消 “新建 Project” 之后的空态与导航文案。** §22 要求 Projects 无“新建 Project”，但入口有两个：`ProjectsView.tsx:68` 页头按钮 + `:77` EmptyState action + `:99-116` Modal，以及 `Sidebar.tsx:121` 的 “+” + `:143-166` Modal，还有 `Sidebar.tsx:123` 的 “尚未创建”。Project 现在永远是自动派生的，空态文案必须改成“还没有 Project——打开一个 Session 或给 Workstream 选一个工作目录后会自动出现”，并且**不提供任何创建按钮**。`ProjectDetail.tsx:196-198` 的 “Project 不依赖任何路径” 与 `:82-83` 的 “Project 只是可选的组织层” 两句在新模型下是错的，F1 一起改。
+
+**M23｜两个波浪号展开器只能留一个。** `platform/paths.rs:60 expand_tilde(&str) -> PathBuf`（不处理 `~\`）与 `launcher/mod.rs:762 expand_tilde(&str) -> String`（处理 `~\`，且自称“唯一权威展开点”）。§16-1 把 `platform/paths.rs` 给了 A，而 launcher 归 E。
+修正：A 合并为 `platform::paths::expand_tilde`（取 launcher 版本的语义，即支持 `~\`）+ 让 `launcher` 调用它；E 不得再引入第三份。归 Wave 1 集成时 Main 处理，避免 A/E 同时改 launcher。
+
+**M24｜不给 `launch_intents` 加 `workspace_path_id`。** §12 把 “Session workspace path” 列为 stale 输入，容易顺手在 intent 上再加一份路径事实。intent 已经有 `cwd`（`storage/mod.rs:287`），它就是启动时刻的原始证据；WorkspacePath 由 discovery 之后的 Session 行承载。**第四个路径存储列在本阶段禁止出现**。
+
+## 42.4 执行结构修正
+
+Wave 0 / Wave 1 / Wave 3 与 §14、§15、§24 一致。改动只有两处：
+
+**（1）Wave 2 拆成 bridge + 两个前端 Agent。**
+
+```text
+Main: refactor(ui): bind workspace domain types to the frontend   ← 独占 api.ts / types.ts / routes.ts
+  │
+  ├── E  launcher + PreparedLaunch（纯 Rust，见 §21）
+  ├── F1 projects/** + workstreams/**（含 NewWorkstreamModal、回收站、有序路径 UI）
+  └── F2 sessions/** + settings/** + layout/Sidebar.tsx
+```
+
+bridge commit 由 Main 落：所有新命令的 `api.ts` wrapper、`types.ts` 新类型、`Project`/`Workstream`/`Session` 字段调整，以及 `src/app/routes.ts` 的路由变更。F1/F2 之后**不允许**再改这三个文件；需要新接口时在交付报告里向 Main 提出。
+F1/F2 可能同时需要 `src/components/`（Modal、EmptyState）：只读复用，改公共组件的需求回报 Main。
+
+**（2）worktree 与 build 缓存。**
+worktree 由 Main 建（E8）。四个/三个 Agent 并发跑 `cargo` 时共享 `CARGO_TARGET_DIR=<repo>/.qoder/shared-target`（依赖只编一次；cargo 自己的目录锁会把并发 build 排队，这是可接受的等待，比各自冷编译 4 遍快一个量级）。前端各自 `pnpm install --frozen-lockfile`（pnpm store 硬链接，代价低）。
+
+**（3）Agent 交付报告增加一节硬性内容。** §37 模板基础上，每个 Agent 必须回答 §28/§29 的五个问题（能否丢历史 / 能否重试两次生效 / 能否破坏 SourceReference 或 Audit / 能否让推断覆盖用户意图 / macOS+Windows 是否都正确）。上一阶段的经验：不写出来的 Agent 不会检查。
+
+## 42.5 封板前的机械断言（T1…T4）
+
+Main 在最终集成时加进 `.github/workflows/ci.yml`（只动 CI，不碰 `src/`）：
+
+- **T1**：`create_project|delete_project|assign_session_project|suggest_session_project|merge_workstreams` 在 `src-tauri/src/lib.rs` 的 `generate_handler!` 中出现次数为 0；`src/` 中 `api.createProject|api.deleteProject|api.assignSessionProject|api.mergeWorkstreams` 调用点为 0。
+- **T2**：`UPDATE sessions SET project_id` 与 `SET project_id = ?` 只允许出现在 `storage/session_paths.rs`（M3）与迁移代码里。
+- **T3**：`workstreams` 的裸 `INSERT`（不含列 `lifecycle`）在产品代码中出现次数为 0；`lifecycle = "open"`/`'open'` 在产品写入点出现次数为 0。
+- **T4**：`Command::new("git")` 字面量为 0（必须走 M10 的 resolver）；`src-tauri/src/workspace/` 之外不出现 `--git-common-dir` / `worktree list`。
+
+## 42.6 明确不做（本阶段发现的既存问题，只记录不修）
+
+**N1｜launcher 持 DB mutex 跨子进程 spawn，违反 `AGENTS.md:79`。** `commands.rs:1223` 的 `with_db` 把整个 `launch_prepared`（含 `:324`/`:376` 的 `spawn`）包在一个 `MutexGuard<Db>` 里；签名 `launch_prepared_with(&self, db: &Db, …, spawn)` 强制借用跨过 spawn。macOS 上这意味着 Terminal 打开窗口期间所有 DB 命令阻塞。
+现状是**安全但不合理**：指纹复检（`:236`）与 spawn 同锁，天然无竞态。要修就得在 spawn 前后释放锁，那会把指纹复检变成真正的 TOCTOU 边界，需要在 `insert_launch_intent`（`:312`）之前重新加锁复检。**本阶段不动**（§40 精神：不顺手扩大范围）；v12 的 launcher 改动全部保持在同一锁内。
+
+**N2｜`ContextMutation::CreateWorkstream` 的 TS 类型是谎。** `types.ts:159` 把 `project_id` 写成必填 `string`，而 Rust 侧是 `Option<String>`（`sync/mod.rs:72`）且 `extractor.rs:595` 永远发 `None`。渲染路径为零，不影响行为。F1 顺手改类型即可，不单独开工。
+
+**N3｜`delete_workstream` 零调用点 + FK 必炸**，见 M6，由 C 替换而不是“保留观察”。
+
+**N4｜`projects.name` 至今无任何 UNIQUE**，§37 自动命名（repo basename / `NoEnding Workspace`）会产生同名 Project。这是**允许**的：v0.2 的 Project 身份是 `git_id` + 拥有的路径，名字只是展示。不给 `name` 加约束。
+
+---
+
+# 43. 执行记录（Main 逐 Wave 追加，Agent 不写）
+
+## 43.1 Wave 0 — Foundation
+
+```text
+FOUNDATION_SHA=eb930432cf66f392cafd7f85175fc1ebcfe75150
+commit: refactor(workspace): establish workspace domain v0.2 contracts
+gates : cargo fmt --check / cargo check --all-targets / cargo test --all-targets (221 passed, 0 failed, 5 ignored) / pnpm build
+```
+
+`FOUNDATION_SHA` 是**契约锚点**（代码从这里开始可编译、可测）。Wave 1 的 worktree 实际 base
+是派发那一刻的 main HEAD（至少包含本节文档，agent 才能读到 §42/§43），Main 必须把**该
+base 的完整 SHA 写进每个 agent 的 prompt 并在交付报告里回显**（§42.2-E8）。
+
+落地范围＝§15 的 14 项 + §42.3-M5/M8 + §42.2-E13。与方案的偏差（后续 Wave 必须按此口径，不要按原稿）：
+
+1. **`workspace_paths.exists` 列名改为 `exists_on_disk`**（E13）。领域字段仍叫 `exists`。
+2. **`workstreams.lifecycle` 的列默认值仍是历史 `'open'`**。`CREATE TABLE IF NOT EXISTS`
+   无法改已存在表的默认值（E2 预言成立）：新建库拿到 `DEFAULT 'active'`，升级库拿到
+   `DEFAULT 'open'`。因此**任何写 `workstreams` 的 SQL 必须显式给 lifecycle**，
+   §42.5-T3 就是这条的机械守卫。
+3. **结构性冻结比 §15-13 更严**：`upsert_workstream_conn` 的 `DO UPDATE` 集合只剩
+   `title / description / lifecycle / visibility / updated_at`，`INSERT` 侧仍写
+   `project_id`、`default_cwd`（只为新建库留初始值），所以**升级后的旧行不可能被
+   整对象写回污染**，而新建 Workstream 的这两列在 v0.2 里恒为 `NULL`。
+   `upsert_workstream_cannot_move_between_projects_or_retarget_cwd` 与
+   `default_cwd_is_frozen_after_creation` 是两个反向断言测试。
+4. **`sessions.project_id` 有 FK 到 `projects(id)`**，所以派生语句天然不可能指向不存在的
+   Project；测试 `session_without_cwd_gets_no_workspace_path` 因此用一个真实 Project 表达
+   “无 cwd 的 Session 只是缓存值，不是派生值”。
+5. **`list_session_bindings` 多了 `workstream_path_id` 一列**（§11 未列，但 §5.6 的语义要求
+   前端能区分“由哪条路径带来”）。TS 形状已同步冻结。
+6. **`delete_project` 顺带修了既存 FK bug**（M4 附带项）：以前不删
+   `project_affinity_evidence`，任何有证据的 Project 都删不掉。
+7. **Wave 0 契约测试**在 `src-tauri/tests/workspace_v12_test.rs`（9 个）：身份确定性、
+   position 稠密性、派生缓存单向性、迁移折叠 + 重放 + 备份、binding 精确解析失败→NULL。
+   Wave 1+ 不得删这些测试来“让实现通过”。

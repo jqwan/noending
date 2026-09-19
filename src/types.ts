@@ -1,14 +1,78 @@
 // Mirror of the Rust domain API shapes (commands.rs).
+//
+// Workspace Domain v0.2: these shapes are FROZEN by the foundation commit so
+// the parallel agents could build against them before the UI caught up. Change
+// them only together with the Rust struct they mirror (方案 §11, §15-8).
 
 export type Agent = "codex" | "claude_code" | "pi";
+
+/** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
+export type WorkstreamLifecycle = "active" | "completed";
+/** `archived` is the recycle bin; there is no other non-normal state. */
+export type WorkstreamVisibility = "normal" | "archived";
+/** `missing` = used to be Git-backed; it never detaches the path from its Project. */
+export type WorkspaceGitState = "none" | "detected" | "missing";
+export type WorkstreamPathSource = "user" | "session" | "launch" | "migration";
 
 export interface Project {
   id: string;
   name: string;
   description: string;
+  /** Legacy column, no domain semantics: v0.2 Projects have no lifecycle. */
   archived: boolean;
+  /** Optional Git anchor (`git_identities.id`); `null` is a normal state. */
+  git_id: string | null;
+  /** The user renamed it — automatic naming must stop overwriting the name. */
+  name_customized: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/** A normalized physical working directory. Identity is `id`, a pure lexical
+ *  hash of `canonical_path` — never the path string itself. */
+export interface WorkspacePath {
+  id: string;
+  canonical_path: string;
+  /** NOT NULL by design: every path belongs to exactly one Project. */
+  project_id: string;
+  git_state: WorkspaceGitState;
+  git_kind: string | null;
+  exists: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+/** One entry of a Workstream's ordered working-path list; position 0 is primary. */
+export interface WorkstreamPath {
+  id: string;
+  workstream_id: string;
+  workspace_path_id: string;
+  position: number;
+  source: WorkstreamPathSource;
+  created_at: string;
+}
+
+/** 方案 §11 Workspace settings surface (backend: get_workspace_settings). */
+export interface WorkspaceSettings {
+  noending_home: string;
+  default_workspace: string;
+  pending_home: string | null;
+  restart_required: boolean;
+  db_path: string;
+}
+
+/** 方案 §11 Project detail (backend: get_project_detail). */
+export interface ProjectDetailData {
+  project: Project;
+  workspace_paths: WorkspacePath[];
+  workstreams: ProjectWorkstreamRow[];
+  sessions: Session[];
+}
+
+/** `is_primary` = the Workstream reaches the Project through its position-0 path. */
+export interface ProjectWorkstreamRow {
+  workstream: Workstream;
+  is_primary: boolean;
 }
 
 export interface ProjectResource {
@@ -21,13 +85,14 @@ export interface ProjectResource {
 }
 
 export interface Workstream {
-  id: string;
+  /** Derived projection of the primary path's Project; never assigned directly. */
   project_id: string | null;
+  id: string;
   title: string;
   description: string;
-  lifecycle: "open" | "completed" | "abandoned";
-  visibility: "normal" | "archived";
-  /** 该 Workstream 的 New Session 默认启动目录（启动建议，非身份）。 */
+  lifecycle: WorkstreamLifecycle;
+  visibility: WorkstreamVisibility;
+  /** Frozen at creation (v12 migration input only). Use `workstream_paths`. */
   default_cwd: string | null;
   created_at: string;
   updated_at: string;
@@ -44,6 +109,8 @@ export interface SessionBindingRow {
   workstream_id: string;
   role: string;
   workstream_title: string;
+  /** Which path brought the Session in; null once it no longer matches the list. */
+  workstream_path_id: string | null;
 }
 
 /** Paths for Settings → Data & Advanced (backend: get_app_info). */
@@ -55,11 +122,12 @@ export interface AppInfo {
 /** Card view for Home / Workstreams pages (backend: list_workstream_cards). */
 export interface WorkstreamCardData {
   id: string;
+  /** Position-0 path projection, not a user assignment (方案 §42.3-M19). */
   project_id: string | null;
   title: string;
   description: string;
-  lifecycle: "open" | "completed" | "abandoned";
-  visibility: "normal" | "archived";
+  lifecycle: WorkstreamLifecycle;
+  visibility: WorkstreamVisibility;
   default_cwd: string | null;
   created_at: string;
   updated_at: string;
@@ -77,7 +145,10 @@ export interface Session {
   agent_session_id: string;
   title: string | null;
   cwd: string | null;
+  /** Derived cache of `workspace_path_id → workspace_paths.project_id`. */
   project_id: string | null;
+  /** Null for a Session with no cwd — v0.2 never fabricates a path. */
+  workspace_path_id: string | null;
   raw_path: string;
   parent_agent_session_id: string | null;
   started_at: string | null;

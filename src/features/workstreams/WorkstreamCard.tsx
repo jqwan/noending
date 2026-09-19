@@ -7,11 +7,10 @@ import NewSessionModal from "../sessions/NewSessionModal";
 import ResumeSessionModal from "../sessions/ResumeSessionModal";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
 
-// §2.1 / §2.2 词表：open → 进行中，completed → 已完成，abandoned → 已放弃。
+// 词表：active → 进行中，completed → 已完成。v0.2 折叠了 abandoned。
 const LIFECYCLE_LABELS: Record<string, string> = {
-  open: "进行中",
+  active: "进行中",
   completed: "已完成",
-  abandoned: "已放弃",
 };
 
 /**
@@ -79,7 +78,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
               把完整内容留给用户，否则长标题在窄窗口里就永久丢了。 */}
           <h3 className="ws-card-title" title={card.title}>{card.title}</h3>
           <div className="ws-card-side">
-            {card.lifecycle !== "open" && (
+            {card.lifecycle !== "active" && (
               <span className="badge">{LIFECYCLE_LABELS[card.lifecycle] ?? card.lifecycle}</span>
             )}
             {/* Project 是可选组织层：未归属时不显示任何占位。

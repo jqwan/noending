@@ -173,6 +173,9 @@ pub fn ensure_session_row(
         agent_session_id: d.agent_session_id.clone(),
         title,
         cwd: d.cwd.clone(),
+        // Resolved by the caller layer that owns workspace paths; a Session
+        // discovered with no cwd keeps None and gets no fabricated path (§5.5).
+        workspace_path_id: None,
         project_id: None,
         raw_path: d.path.to_string_lossy().to_string(),
         parent_agent_session_id: d.parent_agent_session_id.clone(),

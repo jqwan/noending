@@ -267,7 +267,7 @@ export default function WorkstreamDetailView({
               <span className="dot-sep" />
             </>
           )}
-          <span className={`badge ${!archived && workstream.lifecycle === "open" ? "success" : ""}`}>
+          <span className={`badge ${!archived && workstream.lifecycle === "active" ? "success" : ""}`}>
             {lifecycleLabel(workstream)}
           </span>
           {workstream.default_cwd && (
@@ -360,7 +360,7 @@ export default function WorkstreamDetailView({
         <section className="rail-section">
           <div className="section-label">状态</div>
           <div className="row" style={{ gap: 8 }}>
-            <span className={`badge ${workstream.lifecycle === "open" ? "success" : ""}`}>
+            <span className={`badge ${workstream.lifecycle === "active" ? "success" : ""}`}>
               {LIFECYCLE_LABELS[workstream.lifecycle] ?? workstream.lifecycle}
             </span>
             {archived && <span className="badge">已归档</span>}
@@ -606,11 +606,10 @@ function IntelligenceSections({
   );
 }
 
-// §2.1 / §2.2 词表：Workstream 的 open → 进行中，archived → 已归档。
+// 词表：Workstream 的 active → 进行中，archived → 已归档。
 const LIFECYCLE_LABELS: Record<Workstream["lifecycle"], string> = {
-  open: "进行中",
+  active: "进行中",
   completed: "已完成",
-  abandoned: "已放弃",
 };
 
 /**

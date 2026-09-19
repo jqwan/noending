@@ -25,7 +25,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   if (cards === null) return <div className="main narrow">加载中…</div>;
 
   const activeCards = cards.filter(
-    (c) => c.lifecycle === "open" && c.visibility === "normal",
+    (c) => c.lifecycle === "active" && c.visibility === "normal",
   );
   // 卡片全是归档：和「真的什么都没有」是两种边界，得告诉用户东西去哪了。
   const archivedOnly = activeCards.length === 0 && cards.length > 0;

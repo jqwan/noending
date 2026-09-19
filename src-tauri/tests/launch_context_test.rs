@@ -19,7 +19,7 @@ fn ws_row(db: &Db, title: &str, project_id: Option<&str>) -> noending::domain::W
         project_id: project_id.map(|s| s.to_string()),
         title: title.into(),
         description: String::new(),
-        lifecycle: "open".into(),
+        lifecycle: "active".into(),
         visibility: "normal".into(),
         default_cwd: None,
         created_at: now(),
@@ -35,6 +35,8 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
         name: name.into(),
         description: String::new(),
         archived: false,
+        git_id: None,
+        name_customized: false,
         created_at: now(),
         updated_at: now(),
     };
@@ -51,6 +53,7 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
         agent_session_id: format!("as-{}", new_id()),
         title: None,
         cwd,
+        workspace_path_id: None,
         project_id: None,
         raw_path: raw.to_string_lossy().to_string(),
         parent_agent_session_id: None,
@@ -242,6 +245,7 @@ fn resume_does_not_reguess_bindings() {
         role: "primary".into(),
         source: binding_source::EXPLICIT_LAUNCH.into(),
         confidence: 1.0,
+        workstream_path_id: None,
         last_seen_revision: None,
         last_sync_cursor: 0,
         created_at: now(),
@@ -512,27 +516,68 @@ fn multi_workstream_bundle_dedups_and_labels_primary_related() {
 // Issue #8: storage / domain consistency
 // ---------------------------------------------------------------------------
 
+/// Workspace Domain v0.2 (方案 §42.2-E6): `workstreams.project_id` and
+/// `default_cwd` are written at creation and then frozen, because
+/// `update_workstream` is a whole-object write — if the DO UPDATE set still
+/// carried them, every unrelated title/description edit would re-commit retired
+/// values and the new path authority would silently compete with them.
+///
+/// This replaces the pre-v0.2 test that asserted the opposite (`upsert` moving a
+/// Workstream A → B → standalone), which was the double-authority entry point.
 #[test]
-fn upsert_workstream_moves_between_projects_and_to_standalone() {
-    let db = open_db("ws-move");
+fn upsert_workstream_cannot_move_between_projects_or_retarget_cwd() {
+    let db = open_db("ws-frozen");
     let pa = project_row(&db, "Project A");
     let pb = project_row(&db, "Project B");
-    let mut w = ws_row(&db, "移动的 Workstream", Some(&pa.id));
+    // Created with both retired fields populated, the only moment upsert still
+    // writes them.
+    let mut w = noending::domain::Workstream {
+        id: new_id(),
+        project_id: Some(pa.id.clone()),
+        title: "冻结的 Workstream".into(),
+        description: String::new(),
+        lifecycle: "active".into(),
+        visibility: "normal".into(),
+        default_cwd: Some("/tmp/noending-frozen-cwd".into()),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.upsert_workstream(&w).unwrap();
 
-    // A → B
+    let read = || db.get_workstream(&w.id).unwrap().unwrap();
+
+    // A plain edit that *claims* to reparent and re-target: both retired
+    // fields keep their creation values.
     w.project_id = Some(pb.id.clone());
+    w.default_cwd = Some("/tmp/noending-somewhere-else".into());
+    w.title = "改过标题".into();
     w.updated_at = now();
     db.upsert_workstream(&w).unwrap();
+    let after = read();
+    assert_eq!(after.title, "改过标题", "the edit that was meant to happen");
     assert_eq!(
-        db.get_workstream(&w.id).unwrap().unwrap().project_id,
-        Some(pb.id.clone())
+        after.project_id.as_deref(),
+        Some(pa.id.as_str()),
+        "project_id is a compatibility read, not a writable field"
+    );
+    assert_eq!(
+        after.default_cwd.as_deref(),
+        Some("/tmp/noending-frozen-cwd"),
+        "default_cwd is only a v12 migration input"
     );
 
-    // B → NULL (standalone)
+    // Detaching to standalone is likewise impossible through upsert.
     w.project_id = None;
-    w.updated_at = now();
     db.upsert_workstream(&w).unwrap();
-    assert_eq!(db.get_workstream(&w.id).unwrap().unwrap().project_id, None);
+    assert_eq!(read().project_id.as_deref(), Some(pa.id.as_str()));
+
+    // Membership is the path chain, so a Workstream with no WorkstreamPath is
+    // in no Project at all — even while the frozen column still names one.
+    assert!(db
+        .list_workstreams(Some(&pa.id))
+        .unwrap()
+        .iter()
+        .all(|x| x.id != w.id));
     assert!(db
         .list_workstreams(None)
         .unwrap()
@@ -563,7 +608,7 @@ fn delete_project_detaches_without_archiving() {
         .expect("workstream survives");
     assert_eq!(w.project_id, None, "workstream detached");
     assert_eq!(w.visibility, "normal", "workstream NOT archived");
-    assert_eq!(w.lifecycle, "open", "workstream lifecycle untouched");
+    assert_eq!(w.lifecycle, "active", "workstream lifecycle untouched");
     let s = db.get_session(&s.id).unwrap().expect("session survives");
     assert_eq!(s.project_id, None, "session detached");
 }

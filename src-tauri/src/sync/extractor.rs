@@ -669,6 +669,7 @@ mod tests {
             agent_session_id: "a1".into(),
             title: None,
             cwd: None,
+            workspace_path_id: None,
             project_id: None,
             raw_path: "/tmp/x".into(),
             parent_agent_session_id: None,

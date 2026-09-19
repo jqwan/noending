@@ -55,19 +55,47 @@ pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
     resolve_home().map(|home| home.join(agent_default_dir(agent)))
 }
 
-/// Expand a leading `~` / `~/…` to the user's home directory (UI input is
+/// Expand a leading `~` / `~\` / `~/…` to the user's home directory (UI input is
 /// plain text; no shell is involved anywhere else).
+///
+/// This is the platform-facing wrapper over
+/// [`crate::workspace::identity::expand_tilde`], which is the repository's only
+/// expander (方案 §42.3-M23): the previous copy here ignored `~\`, so a Windows
+/// user typing `~\.noending` got a literal `~` directory, and `launcher` had a
+/// *third* expander. One semantics, two spellings (Unix `PathBuf`, domain
+/// `String`), because that is all the type systems allow.
 pub fn expand_tilde(path: &str) -> PathBuf {
-    let p = path.trim();
-    if p == "~" {
-        return resolve_home().unwrap_or_else(|| PathBuf::from(p));
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = resolve_home() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(p)
+    PathBuf::from(crate::workspace::identity::expand_tilde(path))
+}
+
+/// Identifier used for both the Tauri bundle and the OS-native app folder.
+pub const APP_IDENTIFIER: &str = "app.noending.desktop";
+
+/// The OS-native per-app folder that lives OUTSIDE NoEnding Home:
+/// `~/Library/Application Support/app.noending.desktop` on macOS,
+/// `%APPDATA%\app.noending.desktop` on Windows,
+/// `~/.config/app.noending.desktop` on Linux.
+///
+/// Two things live here and nothing else may:
+/// * `home.json`, the bootstrap pointer that tells us where NoEnding Home is
+///   (方案 §42.3-M12) — it must be outside the Home, since the database inside
+///   the Home is precisely what it locates;
+/// * the pre-Home data directory, i.e. `noending.db` as written by every build
+///   before v0.2 (see `workspace::home::adopt_legacy_data_dir`).
+///
+/// macOS/Windows differ because `dirs` maps the two concepts onto different
+/// known folders: we want *Application Support* on macOS and *Roaming AppData*
+/// on Windows, which is what Tauri's own `app_data_dir()` resolves to today.
+/// Keeping that branch here is the point of the layer — `workspace/` must stay
+/// filesystem- and OS-free.
+pub fn resolve_app_support_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = dirs::data_dir();
+    #[cfg(target_os = "windows")]
+    let base = dirs::config_dir();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let base = dirs::config_dir();
+    base.map(|d| d.join(APP_IDENTIFIER))
 }
 
 #[cfg(test)]
@@ -78,5 +106,52 @@ mod tests {
     fn agent_override_env() {
         assert_eq!(agent_env_override(Agent::Codex), "CODEX_HOME");
         assert_eq!(agent_env_override(Agent::ClaudeCode), "CLAUDE_CONFIG_DIR");
+    }
+
+    /// 必须测试-adjacent (§42.3-M23): the expander merged here must keep every
+    /// spelling the two predecessors handled, and the one only `launcher` handled.
+    #[test]
+    fn tilde_expansion_covers_both_separators() {
+        // No shell is involved, so these are pure string operations except for
+        // the ambient home — hence only the shapes, never the user's real paths.
+        assert_eq!(
+            expand_tilde("/already/absolute"),
+            PathBuf::from("/already/absolute")
+        );
+        assert_eq!(expand_tilde("relative/x"), PathBuf::from("relative/x"));
+        assert_eq!(expand_tilde(""), PathBuf::from(""));
+        assert_eq!(
+            expand_tilde("~user/x"),
+            PathBuf::from("~user/x"),
+            "~user needs a passwd lookup, i.e. ambient state"
+        );
+        // A `~` that is not leading is data, not an instruction.
+        assert_eq!(expand_tilde("/opt/a~b"), PathBuf::from("/opt/a~b"));
+        if cfg!(windows) {
+            assert_ne!(expand_tilde("~"), PathBuf::from("~"));
+            assert!(expand_tilde("~\\.noending")
+                .to_string_lossy()
+                .ends_with(".noending"));
+        }
+    }
+
+    #[test]
+    fn app_support_dir_is_outside_noending_home() {
+        // §42.3-M12: the bootstrap pointer's folder must be resolvable without
+        // knowing the NoEnding Home, so it can never be inside it.
+        let Some(dir) = resolve_app_support_dir() else {
+            return; // no known folder: the caller falls back to `~/.noending`
+        };
+        assert_eq!(dir.file_name().unwrap(), APP_IDENTIFIER);
+        if let Some(home) = resolve_home() {
+            let noending_home = home.join(crate::workspace::home::APP_DIR_NAME);
+            assert!(
+                !crate::workspace::identity::is_within(
+                    &dir.to_string_lossy(),
+                    &noending_home.to_string_lossy()
+                ),
+                "{dir:?} must not live inside {noending_home:?}"
+            );
+        }
     }
 }

@@ -12,7 +12,7 @@ export default function ContextUpdatesSection({ cards, summaries, navigate }: Pr
   const [expanded, setExpanded] = useState(false);
 
   const activeCards = cards.filter(
-    (c) => c.lifecycle === "open" && c.visibility === "normal"
+    (c) => c.lifecycle === "active" && c.visibility === "normal"
   );
   const summaryById = new Map(summaries.map((s) => [s.workstream_id, s]));
 

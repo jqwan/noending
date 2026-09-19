@@ -742,6 +742,10 @@ pub fn record_binding(
         role: role.to_string(),
         source: source.to_string(),
         confidence,
+        // Resolved by the workspace layer when the Session has a WorkspacePath
+        // that is one of this Workstream's paths; NULL means "not path-owned"
+        // and keeps the binding out of a path deletion's reach (§42.3-M1).
+        workstream_path_id: None,
         last_seen_revision: None,
         last_sync_cursor: 0,
         created_at: now(),
@@ -889,6 +893,7 @@ pub fn replace_session_bindings(
                         role: role.clone(),
                         source: binding_source::USER_ASSIGNED.into(),
                         confidence: 1.0,
+                        workstream_path_id: None,
                         last_seen_revision: None,
                         last_sync_cursor: 0,
                         created_at: now(),

@@ -107,7 +107,7 @@ export default function AssistantView({ scope, navigate }: {
   useEffect(() => {
     api.assistantConfigGet().then(setCfg).catch(console.error);
     api.listSyncRuns(12).then(setRuns).catch(console.error);
-    api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "open" && c.visibility === "normal"))).catch(console.error);
+    api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "active" && c.visibility === "normal"))).catch(console.error);
     api.listProjects().then(setProjects).catch(console.error);
   }, []);
   // Runtime 是只读视图：真正的编辑发生在「设置 → Agent」，这里只显示

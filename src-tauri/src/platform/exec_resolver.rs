@@ -5,7 +5,7 @@
 //! We resolve concrete executable paths once, cache them in
 //! `agent_installations`, and re-verify on every app start.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -141,6 +141,49 @@ fn probe_version(exec: &PathBuf) -> Option<String> {
     }
 }
 
+/// Locate an executable by bare name, outside the inherited PATH.
+///
+/// Extracted out of [`resolve`] because the candidate-dir logic exists for a
+/// reason that has nothing to do with Agents: a GUI app started by Finder /
+/// Explorer does not inherit the shell PATH, so `Command::new("git")` fails
+/// even when git is installed (方案 §42.3-M10). The WorkspaceResolver needs
+/// the same guarantee for `git`, so the locator is generic and `resolve`
+/// becomes one of its callers.
+///
+/// A `name` that already contains a separator, or is absolute, is used as
+/// given — a caller that knows where its binary lives must not be second-guessed.
+/// Returns `None` when nothing executable is found; never an error, because
+/// every caller treats "no binary" as an observation rather than a failure.
+pub fn resolve_executable(name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let explicit = Path::new(name);
+    if explicit.is_absolute() || name.contains('/') || name.contains('\\') {
+        return is_executable_file(explicit).then(|| explicit.to_path_buf());
+    }
+    for dir in candidate_dirs() {
+        for file in candidate_file_names(name) {
+            let candidate = dir.join(&file);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The directory a resolved executable came from, for `AgentInstallation::source`.
+fn resolution_source(candidate: &Path) -> String {
+    let dir = candidate.parent().unwrap_or(candidate);
+    format!("resolved:{}", dir.display())
+}
+
+fn is_executable_file(p: &Path) -> bool {
+    p.is_file() && (cfg!(target_os = "windows") || is_executable_unix(p))
+}
+
 pub fn resolve(agent: Agent) -> Result<AgentInstallation> {
     let names: Vec<&str> = match agent {
         Agent::Codex => vec!["codex"],
@@ -148,30 +191,21 @@ pub fn resolve(agent: Agent) -> Result<AgentInstallation> {
         Agent::Pi => vec!["pi"],
     };
     let now = chrono::Utc::now().to_rfc3339();
-    let mut tried = Vec::new();
     for name in names {
-        for dir in candidate_dirs() {
-            for file in candidate_file_names(name) {
-                let candidate = dir.join(&file);
-                let is_exec = candidate.is_file()
-                    && (cfg!(target_os = "windows") || is_executable_unix(&candidate));
-                if is_exec {
-                    return Ok(AgentInstallation {
-                        agent,
-                        executable_path: candidate.to_string_lossy().to_string(),
-                        version: probe_version(&candidate),
-                        source: format!("resolved:{}", dir.display()),
-                        last_verified_at: now,
-                    });
-                }
-                tried.push(candidate.display().to_string());
-            }
+        if let Some(candidate) = resolve_executable(name) {
+            return Ok(AgentInstallation {
+                agent,
+                executable_path: candidate.to_string_lossy().to_string(),
+                version: probe_version(&candidate),
+                source: resolution_source(&candidate),
+                last_verified_at: now,
+            });
         }
     }
     Err(other(format!(
-        "未找到 {} CLI，请先安装或将其加入 PATH（尝试过 {} 个候选路径）",
+        "未找到 {} CLI，请先安装或将其加入 PATH（尝试过 {} 个候选目录）",
         agent.display_name(),
-        tried.len()
+        candidate_dirs().len()
     )))
 }
 
@@ -205,4 +239,55 @@ fn tracing_ok(agent: Agent, elapsed: std::time::Duration) {
         agent.display_name(),
         elapsed.as_millis()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resolve_executable` is what lets `git` be found at all from a
+    /// Finder-launched app (方案 §42.3-M10), so its own contract is pinned here
+    /// without depending on what happens to be installed: an empty name and a
+    /// missing explicit path resolve to nothing, and an explicit path that *is*
+    /// executable is used verbatim rather than re-searched.
+    #[test]
+    fn explicit_paths_are_used_as_given() {
+        assert!(resolve_executable("").is_none());
+        assert!(resolve_executable("   ").is_none());
+        let absent = std::env::temp_dir().join("noending-not-an-executable-9f3c1a");
+        assert!(resolve_executable(&absent.to_string_lossy()).is_none());
+        // A bare name that cannot exist anywhere: no candidate, no panic.
+        assert!(resolve_executable("noending-definitely-not-installed-9f3c1a").is_none());
+
+        let dir = std::env::temp_dir().join(format!("noending-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("noending-fake-git");
+        std::fs::write(&fake, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(
+                resolve_executable(&fake.to_string_lossy()).as_deref(),
+                Some(fake.as_path())
+            );
+            // Not executable ⇒ not a candidate.
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(resolve_executable(&fake.to_string_lossy()).is_none());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn candidate_names_cover_the_platform_suffixes() {
+        let names = candidate_file_names("git");
+        if cfg!(target_os = "windows") {
+            // `.exe` must be spelled out: we hand the resolved path to
+            // `Command::new` ourselves, and a bare `git` would not resolve.
+            assert!(names.contains(&"git.exe".to_string()), "{names:?}");
+            assert!(names.contains(&"git.cmd".to_string()), "{names:?}");
+        } else {
+            assert_eq!(names, vec!["git".to_string()]);
+        }
+    }
 }

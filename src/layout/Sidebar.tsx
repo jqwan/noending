@@ -30,7 +30,7 @@ export default function Sidebar({ route, navigate, onSearch }: {
       .then((cards) =>
         setRecent(
           cards
-            .filter((c) => c.lifecycle === "open" && c.visibility === "normal")
+            .filter((c) => c.lifecycle === "active" && c.visibility === "normal")
             .sort((a, b) =>
               (b.last_activity_at ?? b.updated_at).localeCompare(a.last_activity_at ?? a.updated_at),
             )

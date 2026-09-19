@@ -15,7 +15,7 @@ export function ContinueSection({ navigate, defaultAgent, cards }: {
   cards: NonNullable<ReturnType<typeof useWorkstreamCards>["cards"]>;
 }) {
   const active = cards
-    .filter((c) => c.lifecycle === "open" && c.visibility === "normal")
+    .filter((c) => c.lifecycle === "active" && c.visibility === "normal")
     .slice(0, 6);
 
   if (active.length === 0) return null;

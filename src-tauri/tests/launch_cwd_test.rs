@@ -23,7 +23,7 @@ fn workstream(database: &Db, title: &str, default_cwd: Option<&str>) -> String {
         project_id: None,
         title: title.into(),
         description: String::new(),
-        lifecycle: "open".into(),
+        lifecycle: "active".into(),
         visibility: "normal".into(),
         default_cwd: default_cwd.map(|s| s.to_string()),
         created_at: now(),
@@ -140,21 +140,44 @@ fn falls_back_to_latest_session_cwd_then_none() {
     );
 }
 
+/// `default_cwd` is written at creation and then frozen (方案 §42.2-E6): under
+/// Workspace Domain v0.2 the launch directory comes from the ordered
+/// `workstream_paths` list, and this column is only a v12 migration input plus a
+/// compatibility read. Because `update_workstream` is a whole-object write,
+/// leaving it in the DO UPDATE set would keep re-committing it from unrelated
+/// title edits — so neither setting nor clearing is possible after creation.
 #[test]
-fn default_cwd_roundtrips_through_storage() {
+fn default_cwd_is_frozen_after_creation() {
     let database = db("roundtrip");
     let w = workstream(&database, "W", Some("/some/dir"));
 
     let stored = database.get_workstream(&w).unwrap().unwrap();
     assert_eq!(stored.default_cwd.as_deref(), Some("/some/dir"));
 
-    // clearing persists too
-    let mut cleared = stored;
-    cleared.default_cwd = None;
-    database.upsert_workstream(&cleared).unwrap();
+    let mut changed = stored.clone();
+    changed.default_cwd = Some("/somewhere/else".into());
+    database.upsert_workstream(&changed).unwrap();
     assert_eq!(
-        database.get_workstream(&w).unwrap().unwrap().default_cwd,
-        None
+        database
+            .get_workstream(&w)
+            .unwrap()
+            .unwrap()
+            .default_cwd
+            .as_deref(),
+        Some("/some/dir"),
+        "an after-the-fact retarget must not stick"
+    );
+
+    let mut cleared = database.get_workstream(&w).unwrap().unwrap();
+    cleared.default_cwd = None;
+    cleared.title = "改名".into();
+    database.upsert_workstream(&cleared).unwrap();
+    let after = database.get_workstream(&w).unwrap().unwrap();
+    assert_eq!(after.title, "改名", "the intended edit still goes through");
+    assert_eq!(
+        after.default_cwd.as_deref(),
+        Some("/some/dir"),
+        "and clearing the retired column through an edit is not possible either"
     );
 }
 

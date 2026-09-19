@@ -1,5 +1,11 @@
 //! Tauri command surface — the Application Domain API the UI talks to.
 //! The Assistant (LLM runtime, later phase) consumes the same functions.
+//!
+//! Workspace Domain v0.2 split the Project / Workstream / Session-command areas
+//! into sibling modules (`project`, `workstream`, `session_workspace`,
+//! `workspace`) so the parallel agents in 方案 §16-§22 never edit the same file.
+//! Everything else is still here, unchanged; this file owns the shared state and
+//! helpers the submodules borrow.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
@@ -8,6 +14,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
+
+pub mod project;
+pub mod session_workspace;
+pub mod workspace;
+pub mod workstream;
+
+pub use workstream::workstream_cards;
 
 pub struct AppState {
     pub db: std::sync::Mutex<Db>,
@@ -55,241 +68,9 @@ where
     Ok(())
 }
 
-fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
+pub(crate) fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
     let guard = state.db.lock().map_err(|_| other("db lock poisoned"))?;
     f(&guard)
-}
-
-// ---------------- Projects ----------------
-
-#[tauri::command]
-pub fn create_project(
-    state: State<AppState>,
-    name: String,
-    description: String,
-) -> Result<Project> {
-    crate::storage::ensure_not_empty("项目名称", &name)?;
-    let p = Project {
-        id: new_id(),
-        name: name.trim().to_string(),
-        description: description.trim().to_string(),
-        archived: false,
-        created_at: now(),
-        updated_at: now(),
-    };
-    with_db(&state, |db| db.upsert_project(&p))?;
-    Ok(p)
-}
-
-#[tauri::command]
-pub fn update_project(state: State<AppState>, project: Project) -> Result<()> {
-    with_db(&state, |db| {
-        let mut p = project;
-        p.updated_at = now();
-        db.upsert_project(&p)
-    })
-}
-
-#[tauri::command]
-pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>> {
-    with_db(&state, |db| db.list_projects())
-}
-
-/// Deleting a Project only detaches: Workstreams and Sessions survive with
-/// `project_id = NULL`. A Project is an optional organization layer, never
-/// the lifecycle owner of a Workstream — nothing is archived or deleted.
-#[tauri::command]
-pub fn delete_project(state: State<AppState>, project_id: String) -> Result<()> {
-    with_db(&state, |db| db.delete_project(&project_id))
-}
-
-#[tauri::command]
-pub fn add_project_resource(
-    state: State<AppState>,
-    project_id: String,
-    kind: String,
-    uri: Option<String>,
-) -> Result<ProjectResource> {
-    let r = ProjectResource {
-        id: new_id(),
-        project_id,
-        kind,
-        uri,
-        metadata: serde_json::json!({}),
-        created_at: now(),
-    };
-    with_db(&state, |db| db.add_resource(&r))?;
-    Ok(r)
-}
-
-#[tauri::command]
-pub fn list_project_resources(
-    state: State<AppState>,
-    project_id: String,
-) -> Result<Vec<ProjectResource>> {
-    with_db(&state, |db| db.list_resources(&project_id))
-}
-
-#[tauri::command]
-pub fn remove_project_resource(state: State<AppState>, resource_id: String) -> Result<()> {
-    with_db(&state, |db| db.remove_resource(&resource_id))
-}
-
-// ---------------- Workstreams ----------------
-
-#[tauri::command]
-pub fn create_workstream(
-    state: State<AppState>,
-    project_id: Option<String>,
-    title: String,
-    description: String,
-    default_cwd: Option<String>,
-) -> Result<Workstream> {
-    crate::storage::ensure_not_empty("Workstream 标题", &title)?;
-    let default_cwd = default_cwd
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let w = Workstream {
-        id: new_id(),
-        project_id,
-        title: title.trim().to_string(),
-        description: description.trim().to_string(),
-        lifecycle: "open".into(),
-        visibility: "normal".into(),
-        default_cwd,
-        created_at: now(),
-        updated_at: now(),
-    };
-    with_db(&state, |db| {
-        db.upsert_workstream(&w)?;
-        if let Some(pid) = &w.project_id {
-            db.touch_project(pid)?;
-        }
-        Ok(())
-    })?;
-    Ok(w)
-}
-
-#[tauri::command]
-pub fn update_workstream(state: State<AppState>, workstream: Workstream) -> Result<()> {
-    with_db(&state, |db| {
-        let mut w = workstream;
-        w.updated_at = now();
-        db.upsert_workstream(&w)
-    })
-}
-
-#[tauri::command]
-pub fn list_workstreams(
-    state: State<AppState>,
-    project_id: Option<String>,
-) -> Result<Vec<Workstream>> {
-    with_db(&state, |db| db.list_workstreams(project_id.as_deref()))
-}
-
-/// Card view for Home / Workstreams pages: everything a "continue working"
-/// card needs, computed server-side so the UI stays a thin projection.
-#[derive(Serialize)]
-pub struct LatestSessionInfo {
-    pub id: String,
-    pub agent: String,
-}
-
-#[derive(Serialize)]
-pub struct WorkstreamCardView {
-    #[serde(flatten)]
-    pub workstream: Workstream,
-    pub project_name: Option<String>,
-    /// L1 Current State text (content, falling back to its title).
-    pub current_state: Option<String>,
-    /// L1 Goal text — the card's last content fallback.
-    pub goal: Option<String>,
-    /// max(session activity, context edit, workstream update).
-    pub last_activity_at: Option<String>,
-    pub session_count: i64,
-    /// Most recent bound session — the Resume button's agent + target.
-    pub latest_session: Option<LatestSessionInfo>,
-}
-
-fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
-    let key = |s: &String| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .map(|t| t.with_timezone(&chrono::Utc))
-            .ok()
-    };
-    match (a, b) {
-        (None, x) | (x, None) => x.clone(),
-        (Some(x), Some(y)) => {
-            let (xt, yt) = (key(x), key(y));
-            match (xt, yt) {
-                (Some(xt), Some(yt)) => {
-                    if yt > xt {
-                        Some(y.clone())
-                    } else {
-                        Some(x.clone())
-                    }
-                }
-                // unparseable timestamps fall back to string order
-                _ => {
-                    if y.as_str() > x.as_str() {
-                        Some(y.clone())
-                    } else {
-                        Some(x.clone())
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[tauri::command]
-pub fn list_workstream_cards(state: State<AppState>) -> Result<Vec<WorkstreamCardView>> {
-    with_db(&state, workstream_cards)
-}
-
-/// Compose card views from the real sources (bindings, items, workstreams).
-/// Also the testable core of `list_workstream_cards`.
-pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
-    let project_names: std::collections::HashMap<String, String> = db
-        .list_projects()?
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
-    let mut cards = Vec::new();
-    for w in db.list_workstreams(None)? {
-        let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
-        let items_activity = db.workstream_items_last_update(&w.id)?;
-        // "Last active" only follows real work signals (session activity,
-        // context edits) — renames or metadata touches must not make a
-        // Workstream look freshly active. Sorting still falls back to
-        // updated_at so a brand-new Workstream surfaces at the top.
-        let mut last_activity_at = None;
-        for candidate in [&session_activity, &items_activity] {
-            last_activity_at = later_ts(&last_activity_at, candidate);
-        }
-        cards.push(WorkstreamCardView {
-            project_name: w
-                .project_id
-                .as_ref()
-                .and_then(|pid| project_names.get(pid).cloned()),
-            current_state: db.workstream_state_text(&w.id, "current_state")?,
-            goal: db.workstream_state_text(&w.id, "goal")?,
-            last_activity_at,
-            session_count,
-            latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),
-            workstream: w,
-        });
-    }
-    cards.sort_by(|a, b| {
-        let key = |c: &WorkstreamCardView| {
-            c.last_activity_at
-                .as_deref()
-                .or(Some(c.workstream.updated_at.as_str()))
-                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        };
-        key(b).cmp(&key(a))
-    });
-    Ok(cards)
 }
 
 // ---------------- Default Agent (Settings → Default Agent) ----------------
@@ -384,65 +165,6 @@ pub fn get_context_intelligence_enabled(state: State<AppState>) -> Result<bool> 
 pub fn set_context_intelligence_enabled(state: State<AppState>, enabled: bool) -> Result<()> {
     with_db(&state, |db| {
         crate::settings::set_context_intelligence_enabled(db, enabled)
-    })
-}
-
-#[tauri::command]
-pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Result<()> {
-    with_db(&state, |db| {
-        let mut w = db
-            .get_workstream(&workstream_id)?
-            .ok_or_else(|| other("Workstream 不存在"))?;
-        w.visibility = if w.visibility == "archived" {
-            "normal"
-        } else {
-            "archived"
-        }
-        .into();
-        w.updated_at = now();
-        db.upsert_workstream(&w)
-    })
-}
-
-#[tauri::command]
-pub fn merge_workstreams(
-    state: State<AppState>,
-    source_id: String,
-    target_id: String,
-) -> Result<()> {
-    with_db(&state, |db| {
-        let source = db
-            .get_workstream(&source_id)?
-            .ok_or_else(|| other("源 Workstream 不存在"))?;
-        let _target = db
-            .get_workstream(&target_id)?
-            .ok_or_else(|| other("目标 Workstream 不存在"))?;
-        // move items + bindings, mark source abandoned
-        let items = db.items_for_workstream(&source_id, true)?;
-        for (mut item, rev) in items {
-            item.workstream_id = target_id.clone();
-            item.updated_at = now();
-            db.index_item(&item, &rev)?;
-            db.0.execute(
-                "UPDATE context_items SET workstream_id = ?2, updated_at = ?3 WHERE id = ?1",
-                rusqlite::params![item.id, target_id, now()],
-            )?;
-        }
-        let bindings = db.bindings_for_workstream(&source_id)?;
-        for b in bindings {
-            db.0.execute(
-                "INSERT OR IGNORE INTO session_workstream_bindings
-                 (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![b.session_id, target_id, b.role, b.source, b.confidence, b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at],
-            )?;
-        }
-        let mut src = source;
-        src.lifecycle = "abandoned".into();
-        src.visibility = "archived".into();
-        src.updated_at = now();
-        db.upsert_workstream(&src)?;
-        Ok(())
     })
 }
 
@@ -717,225 +439,6 @@ pub fn resolve_conflict(
     with_db(&state, |db| {
         db.resolve_conflict_with_edit(&conflict_id, &status, resolution.as_deref(), None, "user")
     })
-}
-
-// ---------------- Sessions ----------------
-
-#[derive(Serialize)]
-pub struct SessionDetail {
-    pub session: Session,
-    pub events: Vec<SessionEvent>,
-    pub bindings: Vec<(SessionWorkstreamBinding, Option<WorkstreamTitle>)>,
-    pub cursor: i64,
-    pub processed_cursor: i64,
-    pub classification: String,
-}
-
-pub type WorkstreamTitle = String;
-
-#[tauri::command]
-pub fn list_sessions(
-    state: State<AppState>,
-    project_id: Option<String>,
-    agent: Option<String>,
-) -> Result<Vec<Session>> {
-    let agent = agent.and_then(|a| Agent::parse(&a));
-    with_db(&state, |db| {
-        db.list_sessions(crate::storage::SessionFilter { project_id, agent })
-    })
-}
-
-#[tauri::command]
-pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<SessionDetail> {
-    with_db(&state, |db| {
-        let session = db
-            .get_session(&session_id)?
-            .ok_or_else(|| other("Session 不存在"))?;
-        let events = db.get_events(&session_id, None, 500)?;
-        let cursor = db.get_cursor(&session_id)?;
-        let processed_cursor = db.get_processed_sequence(&session_id)?;
-        let bindings = db
-            .bindings_for_session(&session_id)?
-            .into_iter()
-            .map(|b| {
-                let title = db.get_workstream(&b.workstream_id)?.map(|w| w.title);
-                Ok((b, title))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let classification = SessionClassificationState::derive(&{
-            bindings.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>()
-        });
-        Ok(SessionDetail {
-            session,
-            events,
-            bindings,
-            cursor,
-            processed_cursor,
-            classification: classification.as_str().to_string(),
-        })
-    })
-}
-
-#[tauri::command]
-pub fn assign_session_project(
-    state: State<AppState>,
-    session_id: String,
-    project_id: Option<String>,
-) -> Result<()> {
-    with_db(&state, |db| {
-        db.0.execute(
-            "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
-            rusqlite::params![session_id, project_id],
-        )?;
-        // a user correction is itself the strongest kind of evidence
-        if let Some(pid) = project_id {
-            db.insert_evidence(&ProjectAffinityEvidence {
-                id: new_id(),
-                session_id: Some(session_id),
-                workstream_id: None,
-                project_id: pid,
-                evidence_type: "user_correction".into(),
-                source: "manual assignment".into(),
-                score: 10.0,
-                created_at: now(),
-            })?;
-        }
-        Ok(())
-    })
-}
-
-/// cwd/repo only ever *suggest*: return the scored suggestion from recorded
-/// evidence, never assign anything.
-#[tauri::command]
-pub fn suggest_session_project(
-    state: State<AppState>,
-    session_id: String,
-) -> Result<serde_json::Value> {
-    with_db(&state, |db| {
-        let session = db
-            .get_session(&session_id)?
-            .ok_or_else(|| other("Session 不存在"))?;
-        // record fresh evidence for the current cwd, then resolve
-        crate::ingestion::record_session_project_evidence(db, &session);
-        match db.resolve_project_affinity(&session_id)? {
-            Some((project_id, score)) => {
-                let name = db
-                    .get_project(&project_id)?
-                    .map(|p| p.name)
-                    .unwrap_or_default();
-                Ok(
-                    serde_json::json!({ "project_id": project_id, "project_name": name, "score": score }),
-                )
-            }
-            None => Ok(serde_json::json!({ "project_id": null, "score": 0.0 })),
-        }
-    })
-}
-
-#[tauri::command]
-pub fn bind_session_workstream(
-    state: State<AppState>,
-    session_id: String,
-    workstream_id: String,
-    role: String,
-) -> Result<()> {
-    with_db(&state, |db| {
-        crate::launcher::record_binding(
-            db,
-            &session_id,
-            &workstream_id,
-            &role,
-            binding_source::USER_ASSIGNED,
-            1.0,
-        )
-    })
-}
-
-/// Remove a Session ↔ Workstream binding (user edit via Session Detail).
-#[tauri::command]
-pub fn unbind_session_workstream(
-    state: State<AppState>,
-    session_id: String,
-    workstream_id: String,
-) -> Result<()> {
-    with_db(&state, |db| db.unbind(&session_id, &workstream_id))
-}
-
-#[derive(Deserialize)]
-pub struct DesiredBinding {
-    pub workstream_id: String,
-    pub role: String,
-}
-
-/// Atomic replace of a Session's Workstream bindings (Binding Modal save):
-/// the backend diffs desired vs. current inside one transaction — unchanged
-/// rows keep their provenance/created_at/cursors, role edits update only the
-/// role, removed rows are deleted, and only newly added rows become
-/// user_assigned. The frontend never orchestrates unbind+bind itself.
-#[tauri::command]
-pub fn replace_session_bindings(
-    state: State<AppState>,
-    session_id: String,
-    bindings: Vec<DesiredBinding>,
-) -> Result<()> {
-    let desired = bindings
-        .into_iter()
-        .map(|b| (b.workstream_id, b.role))
-        .collect::<Vec<_>>();
-    with_db(&state, |db| {
-        crate::launcher::replace_session_bindings(db, &session_id, &desired)
-    })
-}
-
-/// Binding rows with workstream titles — lets the Sessions table show a
-/// Workstream column and Assigned filters without N queries.
-#[derive(Serialize)]
-pub struct SessionBindingRow {
-    pub session_id: String,
-    pub workstream_id: String,
-    pub role: String,
-    pub workstream_title: String,
-}
-
-#[tauri::command]
-pub fn list_session_bindings(state: State<AppState>) -> Result<Vec<SessionBindingRow>> {
-    with_db(&state, |db| {
-        let mut st = db.0.prepare(
-            "SELECT b.session_id, b.workstream_id, b.role, COALESCE(w.title, b.workstream_id)
-                 FROM session_workstream_bindings b
-                 LEFT JOIN workstreams w ON w.id = b.workstream_id",
-        )?;
-        let rows = st
-            .query_map([], |r| {
-                Ok(SessionBindingRow {
-                    session_id: r.get(0)?,
-                    workstream_id: r.get(1)?,
-                    role: r.get(2)?,
-                    workstream_title: r.get(3)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    })
-}
-
-/// App info for Settings → Data & Advanced (paths only, no secrets).
-#[derive(Serialize)]
-pub struct AppInfo {
-    pub db_path: String,
-    pub app_data_dir: String,
-}
-
-#[tauri::command]
-pub fn get_app_info(app: AppHandle) -> AppInfo {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    AppInfo {
-        db_path: dir.join("noending.db").to_string_lossy().to_string(),
-        app_data_dir: dir.to_string_lossy().to_string(),
-    }
 }
 
 // ---------------- Sync ----------------
@@ -1476,4 +979,25 @@ pub fn assistant_execute_action(
     with_db(&state, |db| {
         crate::assistant::AssistantService::execute_action(db, &action, &app_data)
     })
+}
+
+// ---------------- App info ----------------
+
+/// App info for Settings → Data & Advanced (paths only, no secrets).
+#[derive(Serialize)]
+pub struct AppInfo {
+    pub db_path: String,
+    pub app_data_dir: String,
+}
+
+#[tauri::command]
+pub fn get_app_info(app: AppHandle) -> AppInfo {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    AppInfo {
+        db_path: dir.join("noending.db").to_string_lossy().to_string(),
+        app_data_dir: dir.to_string_lossy().to_string(),
+    }
 }
