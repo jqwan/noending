@@ -17,9 +17,12 @@ use crate::error::{other, Result};
 // Session→path attach each get their own impl file rather than growing this one
 // further (方案 §38: prefer an independent storage impl over appending to the
 // monolith).
+pub mod session_jobs;
 pub mod session_paths;
 pub mod workspace;
 pub mod workstream_paths;
+
+pub use session_jobs::PermanentDeletionCounts;
 
 pub struct Db(pub Connection);
 
@@ -45,8 +48,12 @@ pub struct Db(pub Connection);
 /// v12 is Workspace Domain v0.2: the `workspace_paths` / `workstream_paths` /
 /// `git_identities` registry, `sessions.workspace_path_id`,
 /// `session_workstream_bindings.workstream_path_id`, `projects.git_id` +
-/// `name_customized`, and the `lifecycle` collapse to `active | completed`.
-pub const SCHEMA_VERSION: i64 = 12;
+/// `name_customized`, and the `lifecycle` collapse to `active | completed`;
+/// v13 is Session Lifecycle & Deletion v0.1: `sessions.trashed_at` (single
+/// Trash authority — NULL is Normal) and the transient `session_deletion_jobs`
+/// coordination table for prepared permanent deletions (never a tombstone:
+/// the row is deleted in the same transaction that purges the Session).
+pub const SCHEMA_VERSION: i64 = 13;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -195,6 +202,8 @@ impl Db {
               parent_agent_session_id TEXT,
               started_at TEXT,
               last_activity_at TEXT,
+              -- v13 lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339).
+              trashed_at TEXT,
               UNIQUE(agent, agent_session_id)
             );
             CREATE TABLE IF NOT EXISTS session_events (
@@ -446,6 +455,27 @@ impl Db {
             "#,
         )?;
 
+        // ---- v13: Session Lifecycle & Deletion v0.1 -------------------------
+        // Transient coordination table for prepared permanent deletions. It
+        // spans SQLite + filesystem, which no single transaction can cover, so
+        // the plan is frozen here first and revalidated at execute time.
+        // This is NOT deletion history / tombstone / blacklist: the row is
+        // deleted in the same transaction that purges the Session, so a
+        // completed permanent deletion leaves nothing behind.
+        self.0.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS session_deletion_jobs (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id),
+              state TEXT NOT NULL,          -- prepared | deleting_source | failed | stale
+              plan_json TEXT NOT NULL,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+
         // FTS5 search index (external-content style: we manage rows manually).
         // If the bundled build lacks FTS5, search falls back to LIKE at query time.
         let fts_ok = self
@@ -487,6 +517,8 @@ impl Db {
             "ALTER TABLE projects ADD COLUMN name_customized INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sessions ADD COLUMN workspace_path_id TEXT",
             "ALTER TABLE session_workstream_bindings ADD COLUMN workstream_path_id TEXT",
+            // v13 — Session Lifecycle & Deletion v0.1 (additive only).
+            "ALTER TABLE sessions ADD COLUMN trashed_at TEXT",
         ] {
             if let Err(e) = self.0.execute_batch(stmt) {
                 if !e.to_string().contains("duplicate column name") {
@@ -1301,6 +1333,11 @@ impl Db {
         if let Some(a) = &filter.agent {
             values.push(Box::new(a.as_str().to_string()));
             sql.push_str(&format!(" AND agent = ?{}", values.len()));
+        }
+        match filter.scope {
+            SessionListScope::Active => sql.push_str(" AND trashed_at IS NULL"),
+            SessionListScope::Trash => sql.push_str(" AND trashed_at IS NOT NULL"),
+            SessionListScope::All => {}
         }
         sql.push_str(" ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 500");
         let mut st = self.0.prepare(&sql)?;
@@ -3205,6 +3242,7 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
         parent_agent_session_id: r.get("parent_agent_session_id")?,
         started_at: r.get("started_at")?,
         last_activity_at: r.get("last_activity_at")?,
+        trashed_at: r.get("trashed_at")?,
     })
 }
 
@@ -3383,6 +3421,9 @@ pub struct AssistantMessageRow {
 pub struct SessionFilter {
     pub project_id: Option<String>,
     pub agent: Option<Agent>,
+    /// Defaults to Active: trashed Sessions are hidden from every default
+    /// projection (方案 §11). The recycle bin passes Trash explicitly.
+    pub scope: SessionListScope,
 }
 
 pub fn ensure_not_empty(name: &str, v: &str) -> Result<()> {

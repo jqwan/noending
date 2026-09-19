@@ -334,6 +334,12 @@ pub struct Session {
     pub parent_agent_session_id: Option<String>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
+    /// v13 lifecycle. `None` = Normal; `Some(ts)` = Trash. This is the single
+    /// lifecycle authority — there is no separate visibility flag. Trashing is
+    /// reversible (Restore keeps the same Session id) and never touches the
+    /// Agent source file; permanent deletion removes the row entirely.
+    #[serde(default)]
+    pub trashed_at: Option<String>,
 }
 
 impl Session {
@@ -356,8 +362,71 @@ impl Session {
             parent_agent_session_id: None,
             started_at: None,
             last_activity_at: None,
+            trashed_at: None,
         }
     }
+
+    /// A trashed Session is inactive inside NoEnding: hidden from default
+    /// lists and search, not resumable, and not ingested or synced.
+    pub fn is_trashed(&self) -> bool {
+        self.trashed_at.is_some()
+    }
+}
+
+/// Listing scope for Sessions (方案 §11). Default projections (Sessions page,
+/// Project / Workstream / Home) show Active only; the recycle bin queries
+/// Trash directly from the DB, not through FTS.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SessionListScope {
+    #[default]
+    Active,
+    Trash,
+    All,
+}
+
+impl SessionListScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionListScope::Active => "active",
+            SessionListScope::Trash => "trash",
+            SessionListScope::All => "all",
+        }
+    }
+
+    pub fn parse(s: &str) -> SessionListScope {
+        match s {
+            "trash" => SessionListScope::Trash,
+            "all" => SessionListScope::All,
+            _ => SessionListScope::Active,
+        }
+    }
+}
+
+/// Transient coordination row for a prepared permanent Session deletion
+/// (方案 §4). Permanent deletion spans SQLite + the filesystem, so the frozen
+/// `SourceDeletionPlan` is stored here between prepare and execute.
+///
+/// This is NOT a tombstone / deletion history / blacklist: on success the job
+/// row is deleted in the same transaction that purges the Session, so
+/// NoEnding retains no record that the Agent session ever existed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDeletionJob {
+    pub id: Id,
+    pub session_id: Id,
+    /// prepared | deleting_source | failed | stale
+    pub state: String,
+    /// Frozen `adapters::SourceDeletionPlan` (serde JSON).
+    pub plan_json: String,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl SessionDeletionJob {
+    pub const STATE_PREPARED: &'static str = "prepared";
+    pub const STATE_DELETING_SOURCE: &'static str = "deleting_source";
+    pub const STATE_FAILED: &'static str = "failed";
+    pub const STATE_STALE: &'static str = "stale";
 }
 
 /// Normalized session event — the only shape Ingestion/Sync may consume.

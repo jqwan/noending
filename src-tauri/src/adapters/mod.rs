@@ -21,7 +21,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::domain::{Agent, ParsedEvent, Session, SourceCursor};
-use crate::error::{other, Result};
+use crate::error::{other, AppError, Result};
 use crate::platform::exec_resolver::AgentInstallation;
 
 // Re-export so adapter submodules and callers can share one import site.
@@ -408,6 +408,48 @@ pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a s
     v.get(key).and_then(|s| s.as_str())
 }
 
+// Source session deletion contract (方案 §13–§18) ------------------------
+
+/// Current frozen-plan format. A stored job whose version differs is stale.
+pub const SOURCE_DELETION_PLAN_VERSION: u32 = 1;
+
+/// One file that a permanent deletion will remove from disk.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourceDeletionTarget {
+    pub path: String,
+    /// Adapter-owned descriptor of what this file is (e.g. "codex_rollout").
+    pub kind: String,
+    /// Identity of the file itself (see [`file_identity`]), frozen at prepare.
+    pub file_identity: String,
+    pub size: u64,
+    /// Full-file SHA-256 frozen at prepare time. Permanent deletion is a
+    /// low-frequency operation: completeness beats the saved milliseconds.
+    pub sha256: String,
+}
+
+/// Frozen deletion plan — "what you confirm is what gets deleted" (方案 §19).
+/// Built only by the owning adapter, stored as JSON in `session_deletion_jobs`,
+/// and revalidated against the live file before anything is removed. The
+/// frontend only ever submits the job id; paths never travel from the UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourceDeletionPlan {
+    pub version: u32,
+    pub agent: Agent,
+    pub agent_session_id: String,
+    pub targets: Vec<SourceDeletionTarget>,
+}
+
+/// Outcome of the adapter-owned source deletion (方案 §24). Only these two
+/// allow the NoEnding purge to proceed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceDeletionOutcome {
+    /// The file existed, validated exactly, and was removed.
+    Deleted,
+    /// The file was already gone (crash between remove and purge, or a
+    /// concurrent deletion). Treated as success — the purge may proceed.
+    AlreadyAbsent,
+}
+
 pub trait AgentAdapter: Send + Sync {
     fn agent(&self) -> Agent;
 
@@ -456,6 +498,38 @@ pub trait AgentAdapter: Send + Sync {
         opts: &ExecOptions,
         prompt: &str,
     ) -> Result<AgentCommand>;
+
+    /// Freeze a verifiable plan for permanently deleting this session's raw
+    /// Agent source (方案 §13). The adapter must fully prove the source before
+    /// returning a plan (§16): regular file, not a symlink, content
+    /// fingerprint belongs to this agent, parsed session id equals
+    /// `session.agent_session_id`, and the file is exactly what discovery
+    /// would recognize. Any doubt is an error, never a best guess.
+    fn prepare_source_session_deletion(&self, session: &Session) -> Result<SourceDeletionPlan> {
+        let _ = session;
+        Err(other(format!(
+            "{} 暂不支持安全的源会话删除",
+            self.agent().display_name()
+        )))
+    }
+
+    /// Execute a previously frozen plan. Must revalidate identity, size,
+    /// sha256 and the parsed session id against the live file first (§21):
+    /// exact match → delete; already absent → [`SourceDeletionOutcome::
+    /// AlreadyAbsent`]; anything else → stale error WITHOUT deleting (a same
+    /// path holding different content must never be removed). Only adapter
+    /// code may remove raw Agent files — Core never calls `remove_file` on a
+    /// session's `raw_path`.
+    fn execute_source_session_deletion(
+        &self,
+        plan: &SourceDeletionPlan,
+    ) -> Result<SourceDeletionOutcome> {
+        let _ = plan;
+        Err(other(format!(
+            "{} 暂不支持安全的源会话删除",
+            self.agent().display_name()
+        )))
+    }
 }
 
 pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
@@ -514,6 +588,143 @@ pub fn title_from_text(text: &str) -> Option<String> {
         None
     } else {
         Some(truncate_text(&t, 80))
+    }
+}
+
+// Shared single-file source-deletion machinery (方案 §15) ----------------
+//
+// All three current adapters model a session as ONE JSONL transcript, so
+// v0.1 shares the freeze / validate / delete logic below. It is still
+// INVOKED BY each adapter with its own parser — Core never assumes every
+// Agent is single-file JSONL, and Core never removes a file itself. The
+// safety boundary is "the adapter can strictly prove this file IS that
+// Agent session", not "the file happens to live under ~/.codex" (§17), so
+// custom ingest sources are deletable too.
+
+/// Freeze a one-file deletion plan after full §16 validation.
+///
+/// `parse_session_id` must be the adapter's own discovery parser (by
+/// construction: a file whose parsed id matches is a file discovery would
+/// identify — §16.5).
+pub(crate) fn prepare_single_file_source_deletion(
+    session: &Session,
+    expected_agent: Agent,
+    kind: &str,
+    parse_session_id: &dyn Fn(&Path) -> Result<Option<String>>,
+) -> Result<SourceDeletionPlan> {
+    if session.agent != expected_agent {
+        return Err(other("源会话文件所属 Agent 与该会话不一致"));
+    }
+    let path = PathBuf::from(&session.raw_path);
+
+    // §16.1/§16.2 + §18: regular file only, never a symlink. symlink_metadata
+    // does not follow the link, so a link pointing at a regular file is
+    // still refused — v0.1 does not guess "link or target?".
+    let link_meta = std::fs::symlink_metadata(&path)
+        .map_err(|e| other(format!("源会话文件不可访问 {}: {}", path.display(), e)))?;
+    if link_meta.file_type().is_symlink() {
+        return Err(other("源会话文件是符号链接，永久删除暂不支持"));
+    }
+    if !link_meta.is_file() {
+        return Err(other("源会话路径不是常规文件，拒绝永久删除"));
+    }
+
+    // §16.3: the content fingerprint must belong to the session's agent.
+    let detected = detect_format(&path).ok_or_else(|| other("无法识别源会话文件格式"))?;
+    if detected != expected_agent {
+        return Err(other("源会话文件内容不属于该 Agent，拒绝永久删除"));
+    }
+
+    // §16.4: the file must parse to the very session being deleted.
+    let parsed_id =
+        parse_session_id(&path)?.ok_or_else(|| other("无法从源会话文件解析出会话 id"))?;
+    if parsed_id != session.agent_session_id {
+        return Err(other("源会话文件解析出的会话 id 不一致，拒绝永久删除"));
+    }
+
+    let data = std::fs::read(&path)?;
+    let meta = std::fs::metadata(&path)?;
+    let size = meta.len();
+    if size != data.len() as u64 {
+        return Err(other("源会话文件在校验期间发生变化，请重试"));
+    }
+
+    Ok(SourceDeletionPlan {
+        version: SOURCE_DELETION_PLAN_VERSION,
+        agent: expected_agent,
+        agent_session_id: session.agent_session_id.clone(),
+        targets: vec![SourceDeletionTarget {
+            path: path.to_string_lossy().to_string(),
+            kind: kind.to_string(),
+            file_identity: file_identity(&path),
+            size,
+            sha256: sha256_hex(&data),
+        }],
+    })
+}
+
+/// Revalidate a frozen one-file plan against the live file (§21) and remove
+/// it. Classification:
+/// - absent at any check point → [`SourceDeletionOutcome::AlreadyAbsent`];
+/// - present but identity / size / sha256 / session id diverge → stale error
+///   (file type changed to something else counts as divergence — never
+///   delete a path that no longer holds the confirmed bytes);
+/// - exact match → remove and report [`SourceDeletionOutcome::Deleted`].
+pub(crate) fn execute_single_file_source_deletion(
+    plan: &SourceDeletionPlan,
+    expected_agent: Agent,
+    parse_session_id: &dyn Fn(&Path) -> Result<Option<String>>,
+) -> Result<SourceDeletionOutcome> {
+    if plan.version != SOURCE_DELETION_PLAN_VERSION {
+        return Err(other("源删除计划版本不受支持，请重新准备"));
+    }
+    if plan.agent != expected_agent || plan.targets.len() != 1 {
+        return Err(other("源删除计划与适配器能力不一致，请重新准备"));
+    }
+    let target = &plan.targets[0];
+    let path = PathBuf::from(&target.path);
+
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SourceDeletionOutcome::AlreadyAbsent)
+        }
+        Err(e) => return Err(other(format!("源会话文件不可访问: {}", e))),
+    };
+    let link_meta = std::fs::symlink_metadata(&path)
+        .map_err(|e| other(format!("源会话文件不可访问: {}", e)))?;
+    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
+        return Err(AppError::SourceDeletionStale(
+            "源会话路径的文件类型已改变".to_string(),
+        ));
+    }
+
+    let stale = |why: String| AppError::SourceDeletionStale(why);
+    if file_identity(&path) != target.file_identity {
+        return Err(stale("源会话文件已被替换（文件身份不一致）".to_string()));
+    }
+    if data.len() as u64 != target.size {
+        return Err(stale("源会话文件大小已改变".to_string()));
+    }
+    if sha256_hex(&data) != target.sha256 {
+        return Err(stale("源会话文件内容已改变".to_string()));
+    }
+    let parsed_id = parse_session_id(&path)?
+        .ok_or_else(|| stale("源会话文件已无法解析出会话 id".to_string()))?;
+    if parsed_id != plan.agent_session_id {
+        return Err(stale("源会话文件内容已是另一个会话".to_string()));
+    }
+
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(SourceDeletionOutcome::Deleted),
+        // Raced with an external removal between validation and unlink —
+        // the confirmed bytes are gone, which is the goal.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(SourceDeletionOutcome::AlreadyAbsent)
+        }
+        // Windows sharing violation, read-only/permission failure, …: the
+        // caller keeps the Session in Trash with NoEnding data intact.
+        Err(e) => Err(other(format!("删除源会话文件失败: {}", e))),
     }
 }
 

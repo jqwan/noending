@@ -1526,6 +1526,7 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
 
     let in_project = db
         .list_sessions(noending::storage::SessionFilter {
+            scope: Default::default(),
             project_id: Some("p-real".into()),
             agent: None,
         })

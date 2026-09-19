@@ -326,6 +326,7 @@ fn another_sessions_cwd_is_not_a_launch_authority() {
             parent_agent_session_id: None,
             started_at: Some("2026-09-01T08:00:00Z".into()),
             last_activity_at: Some("2026-09-12T09:00:00Z".into()),
+            trashed_at: None,
         })
         .unwrap();
     record_binding(

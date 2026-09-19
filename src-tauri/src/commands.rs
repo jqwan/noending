@@ -16,6 +16,7 @@ use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 
 pub mod project;
+pub mod session_lifecycle;
 pub mod session_workspace;
 pub mod workspace;
 pub mod workstream;

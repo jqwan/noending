@@ -51,15 +51,25 @@ pub struct SessionWorkspacePath {
 
 pub type WorkstreamTitle = String;
 
+// scope: active (default) | trash | all — 方案 §11; the recycle bin passes "trash".
 #[tauri::command]
 pub fn list_sessions(
     state: State<AppState>,
     project_id: Option<String>,
     agent: Option<String>,
+    scope: Option<String>,
 ) -> Result<Vec<Session>> {
     let agent = agent.and_then(|a| Agent::parse(&a));
+    let scope = scope
+        .as_deref()
+        .map(SessionListScope::parse)
+        .unwrap_or_default();
     with_db(&state, |db| {
-        db.list_sessions(crate::storage::SessionFilter { project_id, agent })
+        db.list_sessions(crate::storage::SessionFilter {
+            project_id,
+            agent,
+            scope,
+        })
     })
 }
 

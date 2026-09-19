@@ -180,6 +180,7 @@ fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> S
         parent_agent_session_id: None,
         started_at: Some(now()),
         last_activity_at: Some(now()),
+        trashed_at: None,
     };
     db.upsert_session(&s).unwrap();
     db.get_session(&s.id).unwrap().unwrap()

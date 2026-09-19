@@ -60,6 +60,7 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
         parent_agent_session_id: None,
         started_at: started_at.clone(),
         last_activity_at: started_at,
+        trashed_at: None,
     };
     db.upsert_session(&s).unwrap();
     s
@@ -659,6 +660,7 @@ fn list_sessions_all_filter_combinations() {
 
     let agent_only = db
         .list_sessions(noending::storage::SessionFilter {
+            scope: Default::default(),
             project_id: None,
             agent: Some(Agent::Codex),
         })
@@ -668,6 +670,7 @@ fn list_sessions_all_filter_combinations() {
 
     let project_only = db
         .list_sessions(noending::storage::SessionFilter {
+            scope: Default::default(),
             project_id: Some(p.id.clone()),
             agent: None,
         })
@@ -676,6 +679,7 @@ fn list_sessions_all_filter_combinations() {
 
     let both = db
         .list_sessions(noending::storage::SessionFilter {
+            scope: Default::default(),
             project_id: Some(p.id.clone()),
             agent: Some(Agent::Codex),
         })

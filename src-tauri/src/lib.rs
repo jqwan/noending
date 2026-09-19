@@ -11,6 +11,7 @@ pub mod domain;
 pub mod error;
 pub mod ingestion;
 pub mod launcher;
+pub mod lifecycle;
 pub mod platform;
 pub mod search;
 pub mod settings;
@@ -95,6 +96,15 @@ pub fn run() {
                 let guard = state.db.lock().expect("db lock");
                 if let Err(e) = guard.backfill_search_index() {
                     eprintln!("[noending] search backfill failed: {}", e);
+                }
+                // §23 deletion crash recovery: an interrupted permanent
+                // deletion never auto-continues — it becomes a failed job the
+                // user retries (source already absent → purge completes) or
+                // cancels (session stays in Trash).
+                match lifecycle::recover_interrupted_deletions(&guard) {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("[noending] recovered {n} interrupted deletion job(s)"),
+                    Err(e) => eprintln!("[noending] deletion recovery failed: {}", e),
                 }
             }
 
@@ -227,6 +237,14 @@ pub fn run() {
             commands::session_workspace::unbind_session_workstream,
             commands::session_workspace::replace_session_bindings,
             commands::session_workspace::list_session_bindings,
+            // Session Lifecycle & Deletion v0.1: Trash / Restore and the
+            // prepared permanent deletion flow. The UI submits ids only.
+            commands::session_lifecycle::trash_session,
+            commands::session_lifecycle::restore_session,
+            commands::session_lifecycle::prepare_session_permanent_delete,
+            commands::session_lifecycle::execute_session_permanent_delete,
+            commands::session_lifecycle::cancel_session_permanent_delete,
+            commands::session_lifecycle::get_session_deletion_job,
             commands::sync_all,
             commands::sync_source,
             commands::reingest_source,

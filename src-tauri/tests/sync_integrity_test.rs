@@ -31,6 +31,7 @@ fn session_row(db: &Db) -> Session {
         parent_agent_session_id: None,
         started_at: Some(now()),
         last_activity_at: Some(now()),
+        trashed_at: None,
     };
     db.upsert_session(&s).unwrap();
     s
