@@ -454,13 +454,14 @@ impl Db {
             )?;
         }
 
-        // v10 → v11: Base Experience becomes the shipped default. Context
-        // Delivery never had a stored default — a missing row silently fell
-        // through to `balanced` in code, so every existing database was running
-        // Balanced without anyone choosing it. Pin the level as a real,
-        // editable row instead of flipping a constant nobody can see: the
-        // pre-migration behavior (implicit balanced) is recorded here, and the
-        // user can turn delivery back on from Settings → 数据与高级.
+        // v10 → v11: Base Experience becomes the shipped default. Before this
+        // there was no stored default at all: a missing row fell through to
+        // `balanced` in code, so every existing database was injecting context
+        // without anyone having chosen it. This migration intentionally converts
+        // that implicit default into an explicit `off` row — a real, editable,
+        // auditable setting — and leaves any row the user already chose alone.
+        // A database that ends up with no row (key deleted later) still reads
+        // as Off, because `settings::context_delivery_level_of` defaults there.
         //
         // `context.intelligence_enabled` is deliberately NOT seeded: it is a
         // brand-new key, so "missing row" means OFF for old and new databases
