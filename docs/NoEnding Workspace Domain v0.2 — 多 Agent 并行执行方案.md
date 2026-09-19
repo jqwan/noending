@@ -3784,12 +3784,23 @@ windows-latest 上跑到并通过（该 binary 29 passed = 26 + 1 + 2）。红�
 `--lib` 一红，cargo 就停在第一个 target 上，后面的 binary 根本没轮到。
 也就是说 §44 修完才把下一层露出来，这是 CI 顺序的产物而不是新引入的 bug。
 
-真正的 bug 是第二个 Windows-only 洞，与 identity 折叠无关：Git for Windows 把
-verbatim 前缀用**正斜杠**打印出来（`//?/C:/Users/…`），而
-`strip_verbatim_prefix` 原来只字面匹配 `\\?\`。`//?/C:` 到了 `split_root` 的 UNC
-分支里被读成"server 叫 `?`、share 叫 `C:`"，于是同一个仓库的 `toplevel` /
-`common_dir` 与我们询问的那个目录算出**不同的键**——§8.3 的家庭识别在真机上根本不
-成立。修法按 §6 归位：前缀判断改成对分隔符不敏感，两种拼法都先还原再算身份；
-`windows_normalization` 补了正反两种斜杠的 verbatim 断言和一条"与朴素拼法同身份"
-的断言。同时按 §44.5 给 CI 的两个 frontend step 加了 `if: always()`——`395066e`
-两次运行的"绿灯缺什么"就是因为这两步被跳过而无人知晓。
+`e64a0ce` 把成因归给了 git-for-windows，那是**错的**，在这里更正而不是删掉：
+重跑之后同样的 5 条红一条没变，读代码才发现 verbatim 拼法是测试自己造出来的。
+`tests/workspace_resolver_test.rs::scratch` 里
+`identity::normalize_path(&real.to_string_lossy()).expect(...)` 是个**丢弃返回值的
+表达式语句**（`.expect` 把 `Option` 变成 `String`，`String` 不 `must_use`，所以编译器
+不响），函数返回的仍是 `fs::canonicalize` 的原始答案。macOS 上无害
+（`/private/var/…` 本来就是词法形式），Windows 上它是 `\\?\C:\Users\…`——于是每个
+fixture 都拿一个 NoEnding 从不会存的拼法去比 production 的正确输出。修法是把归一化
+结果真的返回出去（§44 的两条 commit 里，这是唯一真正的修复）。
+
+`strip_verbatim_prefix` 改成对分隔符不敏感仍然保留，但它的理由按事实收窄：
+`\\?\` 反斜杠形式是 `fs::canonicalize` 的真答案（原来已处理），正斜杠
+`//?/C:` 则是任何把它按分隔符归一后拿去比较的形式，字面匹配会被
+`split_root` 的 UNC 分支读成"server 叫 `?`、share 叫 `C:`"——同目录两个键、§8.3 认
+不出一个仓库。按 §6"verbatim 由 normalization 还原"的口径，两种拼法都还原，
+`windows_normalization` 里正反两种斜杠各有一条断言，加一条"与朴素拼法同身份"。
+
+同时按 §44.5 给 CI 的两个 frontend step 加了 `if: always()`，这条已经生效：
+`35449618519` 的 Windows job 里 `frontend install` 与 `frontend build` 都真跑了并
+通过，Rust 那一步仍然正确地红。

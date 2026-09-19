@@ -424,12 +424,13 @@ fn join(root: &str, segments: &[String], style: PathStyle) -> String {
 /// it disables the very normalization we need and breaks `exists` checks. UNC
 /// comes back as `\\server\share`.
 ///
-/// The test is separator-insensitive because Git for Windows prints this prefix
-/// with forward slashes (`//?/C:/Users/…`). Matched literally, the spelling is
-/// not merely ugly: `//?/C:` reads as a UNC root whose "server" is `?` and whose
-/// "share" is `C:`, so a repository's own `toplevel` and `common_dir` land on a
-/// different key than the directory we asked about, and §8.3 stops recognizing
-/// them as one family.
+/// The test is separator-insensitive because the prefix reaches this module in
+/// both spellings: `std::fs::canonicalize` answers `\\?\C:\Users\…`, and the
+/// forward-slash form is what any separator-normalized comparison of it looks
+/// like. Matched literally, the spelling is not merely ugly — `//?/C:` reads as
+/// a UNC root whose "server" is `?` and whose "share" is `C:`, so the same
+/// directory lands on a different key than the plain spelling and §8.3 stops
+/// recognizing one repository as one family.
 fn strip_verbatim_prefix(input: &str, style: PathStyle) -> String {
     if !style.is_windows() {
         return input.to_string();

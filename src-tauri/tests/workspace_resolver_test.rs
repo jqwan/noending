@@ -43,8 +43,15 @@ fn scratch(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&raw).unwrap();
     let real = std::fs::canonicalize(&raw).unwrap_or(raw);
     // §42.3-M8 rule 7: never assert on a temp prefix without normalizing it.
-    identity::normalize_path(&real.to_string_lossy()).expect("temp path normalizes");
-    real
+    // The call below used to compute the normalized string and discard it, so
+    // every fixture handed the resolver — and compared against — the raw
+    // `fs::canonicalize` answer. On macOS that is harmless (`/private/var/…` is
+    // already lexical); on Windows it is `\\?\C:\Users\…`, a verbatim API
+    // spelling no NoEnding row ever carries, which is why five of these tests
+    // were red on the Windows runner and none on the macOS one.
+    let normalized =
+        identity::normalize_path(&real.to_string_lossy()).expect("temp path normalizes");
+    PathBuf::from(normalized)
 }
 
 fn git() -> Option<PathBuf> {
