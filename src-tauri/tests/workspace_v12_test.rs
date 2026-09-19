@@ -445,6 +445,34 @@ fn editing_a_workstream_cannot_move_it_or_retarget_its_path() {
 }
 
 #[test]
+fn a_whole_object_project_write_can_neither_clear_nor_retarget_git_identity() {
+    // §1.3 in its other direction: losing `.git` must not detach a Project, and
+    // `update_project`-style whole-object writes must not point a Project at a
+    // different Git family either. Adopting a family is a policy decision with
+    // its own first-set-only door.
+    let (_d, db) = temp_db();
+    let mut p = Project::new("p-git".into(), "alpha");
+    p.git_id = Some("g-one".into());
+    db.upsert_project(&p).unwrap();
+
+    let mut cleared = p.clone();
+    cleared.git_id = None;
+    db.upsert_project(&cleared).unwrap();
+    assert_eq!(
+        db.get_project("p-git").unwrap().unwrap().git_id.as_deref(),
+        Some("g-one")
+    );
+
+    let mut retargeted = p.clone();
+    retargeted.git_id = Some("g-two".into());
+    db.upsert_project(&retargeted).unwrap();
+    assert_eq!(
+        db.get_project("p-git").unwrap().unwrap().git_id.as_deref(),
+        Some("g-one")
+    );
+}
+
+#[test]
 fn listing_workstreams_by_project_is_a_path_projection() {
     // E4: `list_workstreams(project_id)` keeps its signature but its meaning is
     // now "any Workstream that reaches this Project through any of its paths".

@@ -73,6 +73,25 @@ pub(crate) fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> 
     f(&guard)
 }
 
+/// The launcher, pointed at NoEnding Home's `runtime/` (§42.3-M14).
+///
+/// The temp-dir fallback is deliberate: a context bundle is a launch artifact,
+/// and failing a launch because the Home could not be resolved would trade a
+/// cosmetic path for a broken primary action.
+fn launcher_for(app: &AppHandle) -> crate::launcher::SessionLauncher {
+    let runtime_dir = app
+        .try_state::<crate::workspace::home::NoEndingHome>()
+        .map(|h| h.inner().runtime_dir.clone())
+        .unwrap_or_else(std::env::temp_dir);
+    crate::launcher::SessionLauncher { runtime_dir }
+}
+
+/// The Home the app is actually running on, for the few commands that need it.
+fn noending_home(app: &AppHandle) -> Option<crate::workspace::home::NoEndingHome> {
+    app.try_state::<crate::workspace::home::NoEndingHome>()
+        .map(|h| h.inner().clone())
+}
+
 // ---------------- Default Agent (Settings → Default Agent) ----------------
 
 const DEFAULT_AGENT_KEY: &str = "launcher.default_agent";
@@ -302,11 +321,10 @@ pub fn get_workstream_context(
         let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
         let relations = db.item_relations_for_workstream(&workstream_id)?;
         let recent_changes = db.list_workstream_context_changes(&workstream_id, 20)?;
-        let project_name = workstream
-            .project_id
-            .as_deref()
-            .map(|pid| db.get_project(pid).ok().flatten().map(|p| p.name))
-            .flatten();
+        // §42.3-M19: the name shown beside a Workstream is its position-0 path's
+        // Project, not the retired `workstreams.project_id` column.
+        let (_, project_name) =
+            crate::workspace::workstream::primary_project_for_workstream(db, &workstream_id)?;
         Ok(WorkstreamContext {
             workstream,
             project_name,
@@ -588,13 +606,7 @@ pub fn launch_new_session(
     cwd: Option<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let launcher = crate::launcher::SessionLauncher {
-        app_data_dir: app_data,
-    };
+    let launcher = launcher_for(&app);
     with_db(&state, |db| {
         launcher.new_session(db, agent, &workstream_ids, cwd.as_deref())
     })
@@ -607,13 +619,7 @@ pub fn launch_resume_session(
     session_id: String,
     extra_workstream_ids: Vec<String>,
 ) -> Result<crate::launcher::LaunchResult> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let launcher = crate::launcher::SessionLauncher {
-        app_data_dir: app_data,
-    };
+    let launcher = launcher_for(&app);
     with_db(&state, |db| {
         launcher.resume_session(db, &session_id, &extra_workstream_ids)
     })
@@ -663,13 +669,7 @@ pub fn prepare_new_session(
     cwd: Option<String>,
 ) -> Result<crate::launcher::PreparedLaunch> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let launcher = crate::launcher::SessionLauncher {
-        app_data_dir: app_data,
-    };
+    let launcher = launcher_for(&app);
     let prepared = with_db(&state, |db| {
         launcher.prepare_new(db, agent, &workstream_ids, cwd.as_deref())
     })?;
@@ -689,13 +689,7 @@ pub fn prepare_resume_session(
     session_id: String,
     extra_workstream_ids: Vec<String>,
 ) -> Result<crate::launcher::PreparedLaunch> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let launcher = crate::launcher::SessionLauncher {
-        app_data_dir: app_data,
-    };
+    let launcher = launcher_for(&app);
     let prepared = with_db(&state, |db| {
         launcher.prepare_resume(db, &session_id, &extra_workstream_ids)
     })?;
@@ -716,13 +710,7 @@ pub fn launch_prepared(
 ) -> Result<crate::launcher::LaunchResult> {
     let prepared = consume_prepared_launch(&state.prepared_launches, &prepared_id)?;
 
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let launcher = crate::launcher::SessionLauncher {
-        app_data_dir: app_data,
-    };
+    let launcher = launcher_for(&app);
     with_db(&state, |db| launcher.launch_prepared(db, &prepared))
 }
 
@@ -972,32 +960,40 @@ pub fn assistant_execute_action(
 ) -> Result<serde_json::Value> {
     let action: crate::assistant::ActionProposal =
         serde_json::from_str(&action_json).map_err(|e| other(format!("动作解析失败: {}", e)))?;
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
+    let launcher = launcher_for(&app);
     with_db(&state, |db| {
-        crate::assistant::AssistantService::execute_action(db, &action, &app_data)
+        crate::assistant::AssistantService::execute_action(db, &action, &launcher.runtime_dir)
     })
 }
 
 // ---------------- App info ----------------
 
 /// App info for Settings → Data & Advanced (paths only, no secrets).
+///
+/// `db_path` is the database actually open, not a guess from a directory: after
+/// v0.2 the file lives under NoEnding Home (`<home>/data/noending.db`), and a
+/// relocation that failed at start-up leaves the app running on the OLD Home —
+/// the Settings page must not claim the new one (§42.3-M14).
 #[derive(Serialize)]
 pub struct AppInfo {
     pub db_path: String,
-    pub app_data_dir: String,
+    pub noending_home: String,
+    pub default_workspace: String,
 }
 
 #[tauri::command]
-pub fn get_app_info(app: AppHandle) -> AppInfo {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    AppInfo {
-        db_path: dir.join("noending.db").to_string_lossy().to_string(),
-        app_data_dir: dir.to_string_lossy().to_string(),
-    }
+pub fn get_app_info(app: AppHandle, state: State<AppState>) -> Result<AppInfo> {
+    let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 尚未初始化"))?;
+    let db_path = with_db(&state, |db| {
+        Ok(db
+            .0
+            .path()
+            .map(str::to_string)
+            .unwrap_or_else(|| home.db_path_str()))
+    })?;
+    Ok(AppInfo {
+        db_path,
+        noending_home: home.root_str(),
+        default_workspace: home.default_workspace_str(),
+    })
 }

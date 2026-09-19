@@ -1191,9 +1191,16 @@ impl Db {
         Ok(())
     }
 
+    /// Delete a Workstream and everything it owns — in the full FK order of
+    /// §42.3-M6, which a bare `DELETE FROM workstreams` violates under
+    /// `PRAGMA foreign_keys = ON` (it fails the moment the Workstream has ever
+    /// had a Context item, a binding or a path).
+    ///
+    /// This is the mechanical half only. The *product* door is
+    /// `workspace::workstream::delete_workstream_permanently`, which additionally
+    /// requires `visibility = archived` and preserves Sessions.
     pub fn delete_workstream(&self, id: &str) -> Result<()> {
-        self.0
-            .execute("DELETE FROM workstreams WHERE id = ?1", params![id])?;
+        self.tx(|tx| workstream_paths::purge_workstream_data_conn(tx, id))?;
         self.unindex("workstream", id);
         Ok(())
     }
@@ -2560,9 +2567,12 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
            name = CASE WHEN name_customized = 1 THEN name ELSE ?2 END,
            description = ?3,
            archived = ?4,
-           -- Git identity is never cleared by a write: losing `.git` on one path
-           -- must not detach a Project (§1.3).
-           git_id = COALESCE(?5, git_id),
+           -- Git identity is never cleared *or re-targeted* by a whole-object
+           -- write: losing `.git` on one path must not detach a Project (§1.3),
+           -- and pointing an existing Project at a different family is a Policy
+           -- decision, not a save side effect. The one legitimate writer is
+           -- `workspace::project::adopt_git_identity_conn` (first-set-only).
+           git_id = COALESCE(git_id, ?5),
            name_customized = MAX(name_customized, ?6),
            updated_at = ?8",
         params![

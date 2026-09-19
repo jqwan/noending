@@ -59,6 +59,8 @@ export interface WorkspaceSettings {
   pending_home: string | null;
   restart_required: boolean;
   db_path: string;
+  /** "explicit_env" | "bootstrap" | "default_home" — why it is there (§11). */
+  home_source: string;
 }
 
 /** 方案 §11 Project detail (backend: get_project_detail). */
@@ -115,8 +117,11 @@ export interface SessionBindingRow {
 
 /** Paths for Settings → Data & Advanced (backend: get_app_info). */
 export interface AppInfo {
+  /** The database actually open — `<noending_home>/data/noending.db`. */
   db_path: string;
-  app_data_dir: string;
+  /** v0.2 replaced the app-data directory with NoEnding Home (§2). */
+  noending_home: string;
+  default_workspace: string;
 }
 
 /** Card view for Home / Workstreams pages (backend: list_workstream_cards). */

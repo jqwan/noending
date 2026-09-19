@@ -25,10 +25,31 @@ use tauri::{Emitter, Manager};
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
-            let db_path = data_dir.join("noending.db");
+            // NoEnding Home first, always before the database opens (§2, §3):
+            // it resolves $NOENDING_HOME → bootstrap.current_home → ~/.noending,
+            // applies any pending relocation, adopts a pre-v0.2 data directory,
+            // and creates data/ runtime/ logs/ workspace/. A *migration* failure
+            // is not fatal here — it returns the old Home with the reason in
+            // `notes` — because "no database found" would look like data loss.
+            let startup = workspace::home::prepare_home(&workspace::home::StartupInputs::from_environment())?;
+            for note in &startup.notes {
+                eprintln!("[noending] {note}");
+            }
+            let home = startup.home.clone();
+            eprintln!("[noending] home at {} ({})", home.root.display(), home.root_str());
+            let db_path = home.db_path.clone();
             let db = storage::Db::open(&db_path)?;
             eprintln!("[noending] db at {}", db_path.display());
+
+            // The physical layer: Agent A's resolver + Agent B's Project policy,
+            // behind the one `WorkspaceAttaching` door. Managed as state for the
+            // commands, and registered for ingestion, which keeps a plain
+            // `ensure_session_row` signature (§19).
+            app.manage(home.clone());
+            let layer = std::sync::Arc::new(workspace::wiring::WorkspaceLayer::new(&home));
+            app.manage(layer.clone());
+            let _ = workspace::session::register_workspace_attacher(layer.clone());
+            app.manage(workspace::workstream::PathService::new(layer));
 
             // One-shot migration of the pre-runtime-Assistant model keys into
             // Agent runtime overrides. Reads, writes, then clears the legacy
@@ -114,31 +135,66 @@ pub fn run() {
                         }
                         Err(e) => eprintln!("[reconcile] failed: {}", e),
                     }
+
+                    // Workspace Reconcile (§8, §26, §42.3-M7): Git detection on
+                    // the paths the v12 migration could only see lexically. It
+                    // runs after ingestion because a Session's cwd is what tells
+                    // us a directory is real, and it re-observes per path instead
+                    // of holding the DB lock across a `git` call.
+                    {
+                        let layer: tauri::State<std::sync::Arc<workspace::wiring::WorkspaceLayer>> =
+                            handle.state();
+                        match workspace::project::reconcile_workspace_paths(
+                            &state.db,
+                            &layer.projection(),
+                            usize::MAX,
+                        ) {
+                            Ok(report) => eprintln!(
+                                "[workspace] reconciled {} paths, {} moved, {} discovered, {} failed",
+                                report.scanned,
+                                report.moved_paths,
+                                report.discovered_paths.len(),
+                                report.failed.len(),
+                            ),
+                            Err(e) => eprintln!("[workspace] reconcile skipped: {e}"),
+                        }
+                    }
                 });
             }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::project::create_project,
-            commands::project::update_project,
+            // Projects are derived from WorkspacePaths in v0.2, so the only
+            // Project surface the UI gets is read + rename. `create_project`,
+            // `update_project`, `delete_project` and the resource commands stay
+            // as Rust helpers but are deliberately NOT registered (§11, T1).
             commands::project::list_projects,
-            commands::project::delete_project,
-            commands::project::add_project_resource,
-            commands::project::list_project_resources,
-            commands::project::remove_project_resource,
+            commands::project::get_project_detail,
+            commands::project::list_project_workstreams,
+            commands::project::rename_project,
+            commands::workspace::get_workspace_settings,
+            commands::workspace::set_noending_home,
             commands::workstream::create_workstream,
             commands::workstream::update_workstream,
             commands::workstream::list_workstreams,
             commands::workstream::list_workstream_cards,
+            commands::workstream::list_workstream_paths,
+            commands::workstream::add_workstream_path,
+            commands::workstream::remove_workstream_path,
+            commands::workstream::reorder_workstream_paths,
+            commands::workstream::set_workstream_lifecycle,
+            commands::workstream::archive_workstream,
+            commands::workstream::restore_workstream,
+            commands::workstream::delete_workstream_permanently,
+            // `merge_workstreams` left the API: it moved Context items between
+            // Workstreams without leaving a Revision (§42.2-E10).
             commands::get_default_agent,
             commands::set_default_agent,
             commands::get_context_delivery_level,
             commands::set_context_delivery_level,
             commands::get_context_intelligence_enabled,
             commands::set_context_intelligence_enabled,
-            commands::workstream::archive_workstream,
-            commands::workstream::merge_workstreams,
             commands::add_context_item,
             commands::edit_context_item,
             commands::set_item_status,
@@ -158,8 +214,10 @@ pub fn run() {
             commands::resolve_conflict_with_edit,
             commands::session_workspace::list_sessions,
             commands::session_workspace::get_session_detail,
-            commands::session_workspace::assign_session_project,
-            commands::session_workspace::suggest_session_project,
+            // `assign_session_project` / `suggest_session_project` left the API:
+            // Session→Project is derived from the Session's own path in v0.2, and
+            // the old heuristic matched `Project.name` against cwd substrings
+            // (§42.2-E11). The Rust helpers stay for history only.
             commands::session_workspace::bind_session_workstream,
             commands::session_workspace::unbind_session_workstream,
             commands::session_workspace::replace_session_bindings,

@@ -217,10 +217,10 @@ impl AssistantService {
     pub fn execute_action(
         db: &Db,
         action: &ActionProposal,
-        app_data: &std::path::Path,
+        runtime_dir: &std::path::Path,
     ) -> Result<serde_json::Value> {
         let launcher = crate::launcher::SessionLauncher {
-            app_data_dir: app_data.to_path_buf(),
+            runtime_dir: runtime_dir.to_path_buf(),
         };
         match action.action.as_str() {
             "launch_new_session" => {

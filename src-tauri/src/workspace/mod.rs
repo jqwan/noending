@@ -45,6 +45,7 @@ pub mod identity;
 pub mod project;
 pub mod resolver;
 pub mod session;
+pub mod wiring;
 pub mod workstream;
 
 pub use identity::{

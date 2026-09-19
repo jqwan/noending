@@ -2093,7 +2093,7 @@ fn prepare_new_does_not_create_intent_or_delivery_or_file() {
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
-        app_data_dir: tmp_dir.clone(),
+        runtime_dir: tmp_dir.clone(),
     };
 
     let prepared = launcher
@@ -2147,7 +2147,7 @@ fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
-        app_data_dir: tmp_dir.clone(),
+        runtime_dir: tmp_dir.clone(),
     };
 
     // User chooses to add ws2 during resume preparation
@@ -2185,7 +2185,7 @@ fn state_fingerprint_stale_detection_on_context_change() {
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
-        app_data_dir: tmp_dir,
+        runtime_dir: tmp_dir,
     };
 
     let prepared = launcher
@@ -2214,7 +2214,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
     seed_context(&db, &ws.id, &["初始约束"]);
 
     let launcher = launcher::SessionLauncher {
-        app_data_dir: std::env::temp_dir(),
+        runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
         .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
@@ -2295,7 +2295,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
     .unwrap();
 
     let launcher = launcher::SessionLauncher {
-        app_data_dir: std::env::temp_dir(),
+        runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
         .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
@@ -2354,7 +2354,7 @@ fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
-        app_data_dir: tmp_dir,
+        runtime_dir: tmp_dir,
     };
 
     let prepared = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
@@ -2391,7 +2391,7 @@ fn state_fingerprint_stale_detection_on_delivery_level_change() {
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
-        app_data_dir: tmp_dir,
+        runtime_dir: tmp_dir,
     };
 
     let prepared = launcher
@@ -2422,7 +2422,7 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
-        app_data_dir: tmp_dir,
+        runtime_dir: tmp_dir,
     };
 
     let p1 = launcher
@@ -2461,7 +2461,7 @@ fn prepared_launch_single_use_atomic_consumption() {
     let db = open_db("single-use-prep");
     let ws = ws_row(&db, "test ws", None);
     let launcher = launcher::SessionLauncher {
-        app_data_dir: std::env::temp_dir(),
+        runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
         .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
@@ -2496,7 +2496,7 @@ fn prepared_launch_concurrent_consumption_is_exclusive() {
     let db = open_db("concurrent-prep");
     let ws = ws_row(&db, "test ws", None);
     let launcher = launcher::SessionLauncher {
-        app_data_dir: std::env::temp_dir(),
+        runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
         .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
@@ -2535,7 +2535,7 @@ fn prepared_launch_lazy_ttl_cleanup() {
     let db = open_db("ttl-cleanup-prep");
     let ws = ws_row(&db, "test ws", None);
     let launcher = launcher::SessionLauncher {
-        app_data_dir: std::env::temp_dir(),
+        runtime_dir: std::env::temp_dir(),
     };
     let mut stale_prepared = launcher
         .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)

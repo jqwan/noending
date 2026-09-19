@@ -17,10 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::adapters::AgentCommand;
 use crate::agent_runtime::AgentRuntimeOverrides;
 use crate::context::ContextDeliveryLevel;
-use crate::domain::{
-    binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, Session,
-    SessionWorkstreamBinding,
-};
+use crate::domain::{binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, Session};
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 
@@ -63,12 +60,16 @@ pub struct LaunchResult {
 }
 
 pub struct SessionLauncher {
-    pub app_data_dir: PathBuf,
+    /// Where launch artifacts go. Since v0.2 that is NoEnding Home's `runtime/`
+    /// rather than the pre-Home `app_data_dir()`: a context bundle is an app
+    /// artifact, and the Home is the one place that says where app data lives
+    /// (§42.3-M14).
+    pub runtime_dir: PathBuf,
 }
 
 impl SessionLauncher {
     fn write_context_file(&self, name_hint: &str, markdown: &str) -> Result<PathBuf> {
-        let dir = self.app_data_dir.join("context-bundles");
+        let dir = self.runtime_dir.join("context-bundles");
         std::fs::create_dir_all(&dir)?;
         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
         let safe: String = name_hint
@@ -717,6 +718,11 @@ fn resolve_install(
 /// Record (or refresh) a binding. `source`/`confidence` describe how this
 /// binding was established; storage never lets a weaker source overwrite a
 /// stronger one.
+///
+/// It defers to the workspace layer because in v0.2 a binding is more than a
+/// row: an explicit launch must also ensure the WorkstreamPath its Session
+/// started in (§1.8). Whether a provenance may grow a Workstream's list is
+/// decided there — an automatic binding never does (§42.3-M2).
 pub fn record_binding(
     db: &Db,
     session_id: &str,
@@ -725,65 +731,28 @@ pub fn record_binding(
     source: &str,
     confidence: f64,
 ) -> Result<()> {
-    let existing = db.bindings_for_session(session_id)?;
-    if let Some(b) = existing.iter().find(|b| b.workstream_id == workstream_id) {
-        let mut b = b.clone();
-        b.last_used_at = now();
-        if source == binding_source::EXPLICIT_LAUNCH || source == binding_source::USER_ASSIGNED {
-            b.source = source.to_string();
-            b.confidence = confidence;
-        }
-        db.bind(&b)?;
-        return Ok(());
-    }
-    let b = SessionWorkstreamBinding {
-        session_id: session_id.to_string(),
-        workstream_id: workstream_id.to_string(),
-        role: role.to_string(),
-        source: source.to_string(),
+    crate::workspace::session::record_user_binding(
+        db,
+        session_id,
+        workstream_id,
+        role,
+        source,
         confidence,
-        // Resolved by the workspace layer when the Session has a WorkspacePath
-        // that is one of this Workstream's paths; NULL means "not path-owned"
-        // and keeps the binding out of a path deletion's reach (§42.3-M1).
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    };
-    db.bind(&b)?;
-    Ok(())
+    )
 }
 
 /// Expand a leading `~` / `~/` / `~\` to the user's home directory.
-/// Users type `~/projects/x` into default_cwd; passing the tilde through to
-/// the rendered terminal script would break it — POSIX single quotes and
-/// PowerShell `-LiteralPath` both treat `~` literally, so the cd silently
-/// falls back to $HOME. Absolute paths (and `~` anywhere but the leading
-/// position) pass through untouched; `~user` is intentionally unsupported.
-/// The stored default_cwd keeps the user's original text — this is the one
-/// canonical expansion point, so LaunchIntent records the absolute path.
+///
+/// Users type `~/projects/x` into a working-directory field, and the rendered
+/// terminal script must receive an absolute path — POSIX single quotes and
+/// PowerShell `-LiteralPath` both treat `~` literally, so an unexpanded value
+/// silently cds to $HOME. `~user` is intentionally unsupported.
+///
+/// A thin alias on purpose: the rules live in `workspace::identity`, which is
+/// the only tilde expander in the crate (§42.3-M23). Two expanders means two
+/// answers for one path.
 pub fn expand_tilde(p: &str) -> String {
-    let trimmed = p.trim();
-    let rest = if trimmed == "~" {
-        Some("")
-    } else if let Some(r) = trimmed
-        .strip_prefix("~/")
-        .or_else(|| trimmed.strip_prefix("~\\"))
-    {
-        Some(r)
-    } else {
-        None
-    };
-    match rest {
-        Some(r) => match dirs::home_dir() {
-            // join("") would append a trailing separator to a bare `~`
-            Some(home) if r.is_empty() => home.to_string_lossy().into_owned(),
-            Some(home) => home.join(r).to_string_lossy().into_owned(),
-            None => p.to_string(),
-        },
-        None => p.to_string(),
-    }
+    crate::workspace::expand_tilde(p)
 }
 
 /// Launch directory for a New Session, in priority order:
@@ -813,98 +782,36 @@ pub fn resolve_new_session_cwd(
     db.latest_session_cwd_for_workstreams(workstream_ids)
 }
 
-/// Apply the user's edited binding set for a Session as ONE atomic diff.
 /// Unchanged rows are kept verbatim (provenance, created_at, cursors and
-/// last_used_at survive — a metadata edit is not a "use"). A role edit on
-/// an AUTOMATIC binding upgrades it to user_assigned: sync replaces AUTO
-/// rows wholesale (role reset to "related"), so without the upgrade the
-/// user's role choice would be silently undone by the next classification;
-/// as a strong binding it also arms the binding-decision CAS. Role edits on
-/// explicit/user bindings keep their provenance. Every removed row — any
-/// provenance — leaves a durable removal tombstone: a user rejection must
-/// survive even the loss of the session's last strong binding (which would
-/// make the session auto-classifiable again). Only genuinely new rows are
-/// inserted as user_assigned. This replaces the old unbind-all → rebind-all
-/// edit flow, which reset provenance and cursors and could leave partial
-/// state on failure.
+/// last_used_at survive — a metadata edit is not a "use"). A role edit on an
+/// AUTOMATIC binding upgrades it to user_assigned, because sync replaces AUTO
+/// rows wholesale and the user's role choice would otherwise be silently undone
+/// by the next classification. Every removed row — any provenance — leaves a
+/// durable removal tombstone.
+///
+/// The diff itself lives in the workspace layer since v0.2: a row the user just
+/// added also ensures the WorkstreamPath its Session started in and records
+/// which one (§1.8). Two engines — one growing path lists, one not — is the
+/// split authority 方案 §29 forbids, so this is a typed entry point into
+/// `crate::workspace::session::replace_session_bindings`.
 pub fn replace_session_bindings(
     db: &Db,
     session_id: &str,
     desired: &[(String, String)], // (workstream_id, role)
 ) -> Result<()> {
-    // Validate before touching anything so a bad row cannot produce a
-    // half-applied edit.
-    for (_, role) in desired {
-        if role != "primary" && role != "related" {
-            return Err(other(&format!("未知绑定角色: {role}")));
-        }
-    }
-    // De-duplicate repeated workstreams (last entry wins, order preserved).
-    let mut desired: Vec<(String, String)> =
-        desired
-            .iter()
-            .rev()
-            .fold(Vec::new(), |mut acc, (ws, role)| {
-                if !acc.iter().any(|(w, _)| w == ws) {
-                    acc.push((ws.clone(), role.clone()));
-                }
-                acc
-            });
-    desired.reverse();
-
-    let existing = db.bindings_for_session(session_id)?;
-    db.tx(|tx| {
-        use rusqlite::params;
-        for b in &existing {
-            if !desired.iter().any(|(ws, _)| *ws == b.workstream_id) {
-                // a user rejection is durable for ANY provenance: tombstone
-                // the pair so classification cannot re-propose it
-                crate::storage::remove_binding_by_user_conn(tx, session_id, &b.workstream_id)?;
-            }
-        }
-        for (workstream_id, role) in &desired {
-            match existing.iter().find(|b| b.workstream_id == *workstream_id) {
-                Some(b) if b.role != *role => {
-                    // role-only edit: created_at, cursors and last_used_at
-                    // stay; an auto provenance becomes user_assigned so the
-                    // decision survives the next auto-classification.
-                    tx.execute(
-                        "UPDATE session_workstream_bindings
-                         SET role = ?3,
-                             source = CASE WHEN source = ?4 THEN ?5 ELSE source END,
-                             confidence = CASE WHEN source = ?4 THEN 1.0 ELSE confidence END
-                         WHERE session_id = ?1 AND workstream_id = ?2",
-                        params![
-                            session_id,
-                            workstream_id,
-                            role,
-                            binding_source::AUTO,
-                            binding_source::USER_ASSIGNED
-                        ],
-                    )?;
-                }
-                Some(_) => {} // unchanged: the row is kept exactly as-is
-                None => {
-                    // only a binding the user just added is user_assigned;
-                    // bind_conn also lifts any removal tombstone for the pair
-                    let b = SessionWorkstreamBinding {
-                        session_id: session_id.to_string(),
-                        workstream_id: workstream_id.clone(),
-                        role: role.clone(),
-                        source: binding_source::USER_ASSIGNED.into(),
-                        confidence: 1.0,
-                        workstream_path_id: None,
-                        last_seen_revision: None,
-                        last_sync_cursor: 0,
-                        created_at: now(),
-                        last_used_at: now(),
-                    };
-                    crate::storage::bind_conn(tx, &b)?;
-                }
-            }
-        }
-        Ok(())
-    })
+    let desired: Vec<crate::workspace::session::DesiredBinding> = desired
+        .iter()
+        .map(
+            |(workstream_id, role)| crate::workspace::session::DesiredBinding {
+                workstream_id: workstream_id.clone(),
+                role: role.clone(),
+                // Which path brought it in is derived from the Session's own
+                // WorkspacePath, never accepted from a caller (§42.3-M1).
+                workstream_path_id: None,
+            },
+        )
+        .collect();
+    crate::workspace::session::replace_session_bindings(db, session_id, &desired)
 }
 
 // ---------------------------------------------------------------------------

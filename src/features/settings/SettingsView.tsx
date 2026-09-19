@@ -379,9 +379,17 @@ function AdvancedSettings() {
         </div>
         <div className="row-line">
           <div>
-            <div className="settings-row-label">数据目录</div>
+            <div className="settings-row-label">NoEnding Home</div>
             <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
-              {info?.app_data_dir ?? "…"}
+              {info?.noending_home ?? "…"}
+            </div>
+          </div>
+        </div>
+        <div className="row-line">
+          <div>
+            <div className="settings-row-label">默认工作目录</div>
+            <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
+              {info?.default_workspace ?? "…"}
             </div>
           </div>
         </div>

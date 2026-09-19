@@ -90,24 +90,27 @@ use super::WorkspaceAttaching;
 /// Managed Tauri state carrying the one runtime implementation of
 /// [`WorkspaceAttaching`].
 ///
-/// The concrete type is `workspace::project`'s (方案 §17), which does not exist
-/// on this branch — that is exactly why every policy function below takes
-/// `&dyn WorkspaceAttaching` explicitly and stays testable with a scripted
-/// stand-in. Main wires this in `lib.rs` setup:
+/// The concrete type is `workspace::wiring::WorkspaceLayer` (Agent B's Project
+/// policy over Agent A's resolver) — which is why every policy function below
+/// takes `&dyn WorkspaceAttaching` explicitly and stays testable with a scripted
+/// stand-in. Main wires it in `lib.rs` setup:
 ///
 /// ```text
-/// app.manage(workspace::workstream::PathService {
-///     attaching: Box::new(workspace::project::<the attacher>::new()),
-/// });
+/// let layer = Arc::new(workspace::wiring::WorkspaceLayer::new(&home));
+/// app.manage(workspace::workstream::PathService::new(layer));
 /// ```
 ///
 /// and registers the commands in `generate_handler!`. Nothing else may
 /// implement or construct it.
 pub struct PathService {
-    pub attaching: Box<dyn WorkspaceAttaching + Send + Sync>,
+    attaching: std::sync::Arc<dyn WorkspaceAttaching + Send + Sync>,
 }
 
 impl PathService {
+    pub fn new(attaching: std::sync::Arc<dyn WorkspaceAttaching + Send + Sync>) -> Self {
+        Self { attaching }
+    }
+
     pub fn attaching(&self) -> &dyn WorkspaceAttaching {
         &*self.attaching
     }

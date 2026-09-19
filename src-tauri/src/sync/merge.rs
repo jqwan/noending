@@ -175,7 +175,14 @@ impl MergeEngine {
                 // project home is explicitly allowed.
                 let w = crate::domain::Workstream {
                     id: new_id(),
-                    project_id: project_id.clone(),
+                    // Ignored since v0.2: Workstream→Project is a projection
+                    // through `workstream_paths`, and the extractor never had a
+                    // real Project to offer anyway. The mutation field stays for
+                    // the frozen Context API (§31); the write does not (§18-15).
+                    project_id: {
+                        let _ = project_id;
+                        None
+                    },
                     title: title.clone(),
                     description: format!("由同步自动识别：{}", reason),
                     lifecycle: crate::domain::workstream_lifecycle::ACTIVE.into(),

@@ -101,7 +101,11 @@ pub fn path_key(canonical: &str) -> String {
     // split identity would give one directory two Projects. The bare root is
     // left alone — trimming it would give `""`.
     let trimmed = canonical.trim_end_matches(['/', '\\']);
-    let base = if trimmed.is_empty() { canonical } else { trimmed };
+    let base = if trimmed.is_empty() {
+        canonical
+    } else {
+        trimmed
+    };
     base.replace('\\', "/")
 }
 
@@ -414,10 +418,7 @@ mod tests {
             home: Some("/Users/tester"),
         };
         assert_eq!(normalize_path_with(".", base).as_deref(), Some("/repo/x"));
-        assert_eq!(
-            normalize_path_with("./", base).as_deref(),
-            Some("/repo/x")
-        );
+        assert_eq!(normalize_path_with("./", base).as_deref(), Some("/repo/x"));
         assert_eq!(
             normalize_path_with("sub/..", base).as_deref(),
             Some("/repo/x")

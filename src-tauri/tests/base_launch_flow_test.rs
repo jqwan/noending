@@ -108,8 +108,7 @@ const FAKE_SPAWN_TAG: &str = "test-spawn";
 
 fn launcher_in(dir_tag: &str) -> SessionLauncher {
     SessionLauncher {
-        app_data_dir: std::env::temp_dir()
-            .join(format!("noending-base-launch-appdata-{}", dir_tag)),
+        runtime_dir: std::env::temp_dir().join(format!("noending-base-launch-appdata-{}", dir_tag)),
     }
 }
 
@@ -131,7 +130,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     );
     seed_installation(&db, Agent::Codex);
     let launcher = launcher_in("standalone-new");
-    let bundle_dir = launcher.app_data_dir.join("context-bundles");
+    let bundle_dir = launcher.runtime_dir.join("context-bundles");
     let _ = std::fs::remove_dir_all(&bundle_dir);
 
     let prepared = launcher
@@ -185,7 +184,7 @@ fn off_launch_with_bound_workstream_injects_nothing() {
     let ws = workstream_with_cwd(&db, "injected ws", None);
     seed_context(&db, &ws.id, &["约束 A", "约束 B"]);
     let launcher = launcher_in("off-with-workstream");
-    let bundle_dir = launcher.app_data_dir.join("context-bundles");
+    let bundle_dir = launcher.runtime_dir.join("context-bundles");
     let _ = std::fs::remove_dir_all(&bundle_dir);
 
     let prepared = launcher
