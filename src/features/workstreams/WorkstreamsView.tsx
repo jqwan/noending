@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
-import WorkstreamCard from "./WorkstreamCard";
+import WorkstreamCard, { cardSearchFields, searchFieldHint } from "./WorkstreamCard";
 import NewWorkstreamModal from "./NewWorkstreamModal";
 import { useWorkstreamCards } from "./useWorkstreamCards";
+import { useBaseExperience } from "../../app/experience";
 import type { WorkstreamCardData } from "../../types";
 import type { Route, ViewAction } from "../../app/routes";
 
@@ -24,6 +25,7 @@ export default function WorkstreamsView({ navigate, action, actionSeq }: {
   actionSeq: number;
 }) {
   const { cards, defaultAgent, refresh } = useWorkstreamCards();
+  const { intelligenceEnabled } = useBaseExperience();
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("recent");
   const [filter, setFilter] = useState<FilterKey>("active");
@@ -47,12 +49,12 @@ export default function WorkstreamsView({ navigate, action, actionSeq }: {
       .filter((c) =>
         q === ""
           ? true
-          : [c.title, c.description, c.current_state, c.project_name]
+          : cardSearchFields(c, intelligenceEnabled)
               .filter(Boolean)
-              .some((s) => (s as string).toLowerCase().includes(q)),
+              .some((s) => s!.toLowerCase().includes(q)),
       )
       .sort(SORTERS[sort]);
-  }, [cards, query, sort, filter]);
+  }, [cards, query, sort, filter, intelligenceEnabled]);
 
   return (
     <div className="main">
@@ -67,7 +69,7 @@ export default function WorkstreamsView({ navigate, action, actionSeq }: {
       <input
         type="text"
         className="ws-search"
-        placeholder="搜索 Workstream…（标题、描述、Project）"
+        placeholder={searchFieldHint(intelligenceEnabled)}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />

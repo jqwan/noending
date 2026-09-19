@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import type { Route } from "../../app/routes";
+import { useBaseExperience } from "../../app/experience";
 import NewSessionModal from "../sessions/NewSessionModal";
 import ResumeSessionModal from "../sessions/ResumeSessionModal";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
@@ -12,6 +13,37 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   completed: "已完成",
   abandoned: "已放弃",
 };
+
+/**
+ * Base Experience 下，Workstream 由用户显式组织的信息驱动（§14 的定义），
+ * 不显示冻结期留下的 Agent 摘要（`current_state` / `goal`）。智能重新开启时
+ * 摘要能力原样回来，所以这里是门控而不是删除。
+ */
+export function cardSummaryLine(card: WorkstreamCardData, intelligenceEnabled: boolean): string {
+  return intelligenceEnabled
+    ? card.current_state || card.description || card.goal || ""
+    : card.description || "";
+}
+
+/**
+ * 检索字段必须与 placeholder 声明的一致：命中一个页面上根本看不见的字段，
+ * 等于给用户一个无法解释的结果（搜到了、却看不到命中的是什么）。
+ */
+export function cardSearchFields(
+  card: WorkstreamCardData,
+  intelligenceEnabled: boolean,
+): (string | null | undefined)[] {
+  const userFields = [card.title, card.description, card.project_name];
+  return intelligenceEnabled
+    ? [...userFields, card.current_state, card.goal]
+    : userFields;
+}
+
+export function searchFieldHint(intelligenceEnabled: boolean): string {
+  return intelligenceEnabled
+    ? "搜索 Workstream…（标题、描述、Project、Context 摘要）"
+    : "搜索 Workstream…（标题、描述、Project）";
+}
 
 /**
  * The one Workstream card shared by Home (compact) and Workstreams (full).
@@ -36,8 +68,8 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
 
   const openDetail = () => navigate({ view: "workstream", workstreamId: card.id });
 
-  // Current State → Description → Goal（§4 内容优先级，两行截断）
-  const body = card.current_state || card.description || card.goal || "";
+  const { intelligenceEnabled } = useBaseExperience();
+  const body = cardSummaryLine(card, intelligenceEnabled);
 
   return (
     <>

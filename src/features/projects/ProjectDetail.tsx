@@ -6,8 +6,16 @@ import AgentIcon from "../../components/AgentIcon";
 import NewWorkstreamModal from "../workstreams/NewWorkstreamModal";
 import { sessionDisplayTitle, UNTITLED_SESSION } from "../sessions/SessionTable";
 import type { Route } from "../../app/routes";
-import { IntelligenceOnly } from "../../app/experience";
-import { AGENT_LABELS, type Project, type ProjectResource, type Session, type Workstream } from "../../types";
+import { IntelligenceOnly, useBaseExperience } from "../../app/experience";
+import { cardSummaryLine } from "../workstreams/WorkstreamCard";
+import {
+  AGENT_LABELS,
+  type Project,
+  type ProjectResource,
+  type Session,
+  type Workstream,
+  type WorkstreamCardData,
+} from "../../types";
 
 /**
  * Project 的引用资料类型（`project_resources.kind` 的定义域）。
@@ -31,6 +39,7 @@ export default function ProjectDetail({ projectId, navigate }: {
   projectId: string;
   navigate: (r: Route) => void;
 }) {
+  const { intelligenceEnabled } = useBaseExperience();
   const [project, setProject] = useState<Project | null>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
@@ -139,17 +148,25 @@ export default function ProjectDetail({ projectId, navigate }: {
       {workstreams.length === 0 && (
         <div className="l1-none">这个 Project 下还没有 Workstream。</div>
       )}
-      {workstreams.map((w) => (
-        <div key={w.id} className="list-row" onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
-          <div className="grow">
-            <div className="title" title={w.title}>{w.title}</div>
-            {(w as any).current_state && <div className="meta">{(w as any).current_state}</div>}
+      {workstreams.map((w) => {
+        // 与 Workstream 卡片同一条规则：智能关闭时这里只出现用户自己写的描述，
+        // 不展示冻结期的 Agent 摘要。规则只写在 cardSummaryLine 一处。
+        const summary = cardSummaryLine(
+          w as unknown as WorkstreamCardData,
+          intelligenceEnabled,
+        );
+        return (
+          <div key={w.id} className="list-row" onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
+            <div className="grow">
+              <div className="title" title={w.title}>{w.title}</div>
+              {summary && <div className="meta">{summary}</div>}
+            </div>
+            <div className="side">
+              <span>{timeAgo((w as any).last_activity_at ?? w.updated_at)}</span>
+            </div>
           </div>
-          <div className="side">
-            <span>{timeAgo((w as any).last_activity_at ?? w.updated_at)}</span>
-          </div>
-        </div>
-      ))}
+        );
+      })}
 
       <div className="section-label" style={{ marginTop: 34 }}>最近 Sessions</div>
       {sessions.length === 0 && (
