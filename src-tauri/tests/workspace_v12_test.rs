@@ -22,7 +22,10 @@ use noending::storage::workstream_paths::{
     append_workstream_path_conn, remove_workstream_path_conn, reorder_workstream_paths_conn,
 };
 use noending::storage::{new_id, now, Db, SCHEMA_VERSION};
-use noending::workspace::{normalize_path, path_identity, path_identity_of, path_key};
+use noending::workspace::{
+    normalize_path, normalize_path_with, path_identity, path_identity_of, path_identity_with,
+    path_key, NormalizeOpts, PathStyle,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -63,8 +66,27 @@ fn session(id: &str, cwd: Option<&str>) -> Session {
 
 #[test]
 fn workspace_path_identity_is_deterministic_and_filesystem_free() {
-    let a = path_identity("/Users/dev/projects/app");
-    assert_eq!(a, path_identity("/Users/dev/projects/app"));
+    // 方案 §44.3-C1 — the alias spellings below are Unix-shaped, so the style is
+    // pinned rather than inherited: on a Windows host `/Users/dev/projects/app` is
+    // not an alias of anything, it is a root-relative path with a key of its own,
+    // and the loop would have been comparing three directories instead of one.
+    // What the *host* door stores is pinned separately, as data, by
+    // `unix_v12_path_identity_vectors_are_stable`.
+    let unix = |raw: &str| {
+        normalize_path_with(
+            raw,
+            NormalizeOpts {
+                style: Some(PathStyle::Unix),
+                base: None,
+                home: None,
+            },
+        )
+    };
+    let a = path_identity_with("/Users/dev/projects/app", PathStyle::Unix);
+    assert_eq!(
+        a,
+        path_identity_with("/Users/dev/projects/app", PathStyle::Unix)
+    );
     assert!(a.starts_with("path-"));
     assert_eq!(a.len(), "path-".len() + 32, "id is 'path-' + 32 hex");
 
@@ -77,7 +99,12 @@ fn workspace_path_identity_is_deterministic_and_filesystem_free() {
         "//Users/dev/projects/./app/",
     ];
     for raw in again {
-        assert_eq!(path_identity_of(raw).as_deref(), Some(a.as_str()), "{raw}");
+        let canonical = unix(raw).unwrap_or_else(|| panic!("{raw} is absolute"));
+        assert_eq!(
+            path_identity_with(&canonical, PathStyle::Unix),
+            a.as_str(),
+            "{raw}"
+        );
     }
 
     // Nested directories are distinct WorkspacePaths (方案 §42.3-M1).
@@ -315,7 +342,10 @@ fn v12_migration_folds_the_old_authorities() {
         .get_workspace_path(&paths[0].workspace_path_id)
         .unwrap()
         .expect("workspace path");
-    assert_eq!(wp.canonical_path, "/old/repo");
+    // §42.3-M8 rule 7: the migration stored the host's canonical form of that cwd,
+    // so the expectation has to go through the same normalizer instead of being a
+    // Unix literal — `/old/repo` is `/old\repo` on a Windows runner.
+    assert_eq!(wp.canonical_path, normalize_path("/old/repo").unwrap());
     assert_eq!(wp.project_id, "legacy-alpha");
     assert_eq!(wp.git_state, git_state::NONE);
 

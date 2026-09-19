@@ -3817,3 +3817,12 @@ fixture 都拿一个 NoEnding 从不会存的拼法去比 production 的正确�
 的比较修复。理由是 §44.5 的口径本身就是"红一次才算钉住"：这些 Windows-only 的洞
 只有在真 runner 上一次只露一层的情况下才看得见，把它们压成一个提交只会让提交信息
 说不清哪一条治了哪一个。
+
+**第四轮（`e0fe103`）：resolver 全绿，v12 露出两条同族的。**
+`workspace_path_identity_is_deterministic_and_filesystem_free` 的"同一目录四种拼法"
+表是 Unix 形状的，在 Windows 宿主上 `/Users/dev/app` 谁的 alias 都不是（它是
+root-relative，键完全不同）——按 §44.3-C1 钉成 `PathStyle::Unix`；
+`v12_migration_folds_the_old_authorities` 拿迁移写下的 `canonical_path` 去比字面量
+`"/old/repo"`，而 Windows 上那是 `/old\repo`（§42.3-M8 规则 7）。改完把全测试文件
+按四类模式扫过一遍（stored path 比 Unix 字面量、`assert_ne!(path_identity(..))`、
+`to_string_lossy().replace`、`contains("/")`），剩下的都两头一致。
