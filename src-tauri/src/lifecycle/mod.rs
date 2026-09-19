@@ -146,6 +146,11 @@ pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<Permane
         }
     };
 
+    // Parse the frozen plan BEFORE marking in-flight: a malformed job must
+    // not enter `deleting_source` (it would sit there until the next startup
+    // recovery flips it). From here on the plan is guaranteed well-formed.
+    let plan: SourceDeletionPlan = serde_json::from_str(&job.plan_json)?;
+
     // Mark in-flight BEFORE touching the filesystem, so a crash during the
     // delete is diagnosable (§23 converts it to `failed` on next startup).
     session_jobs::set_job_state_conn(
@@ -155,8 +160,6 @@ pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<Permane
         None,
     )?;
     job.state = SessionDeletionJob::STATE_DELETING_SOURCE.to_string();
-
-    let plan: SourceDeletionPlan = serde_json::from_str(&job.plan_json)?;
 
     // Adapter-owned, revalidated deletion (§21). Core never removes the file.
     if let Err(e) = adapter_for(session.agent).execute_source_session_deletion(&plan) {

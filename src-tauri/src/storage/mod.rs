@@ -2561,7 +2561,10 @@ impl Db {
         )?;
         for e in events {
             if let Some(t) = &e.text {
-                if t.len() < 20 {
+                // Character length, matching backfill_search_index's SQL
+                // `length()` — a byte-based cutoff here silently diverged
+                // from reindex for short CJK events.
+                if t.chars().count() < 20 {
                     continue;
                 }
                 st.execute(params![

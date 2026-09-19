@@ -1648,6 +1648,16 @@ pub fn ingest_and_sync_session(
     engine: &crate::sync::SyncEngine,
     session: &Session,
 ) -> Result<(i64, usize)> {
+    // §9 — same lifecycle re-read as the ingestion twin: the caller's struct
+    // may predate a concurrent Trash. (The commit guards below are the
+    // authoritative no-op; this just skips the doomed work up front.)
+    if !db
+        .get_session(&session.id)?
+        .map(|s| !s.is_trashed())
+        .unwrap_or(false)
+    {
+        return Ok((0, 0));
+    }
     let adapter = crate::adapters::adapter_for(session.agent);
     let cursor = db.get_source_cursor(&session.id)?;
     let delta = adapter.read_delta(session, &cursor)?;
