@@ -196,10 +196,14 @@ export default function SessionsView({ navigate, action, actionSeq }: {
         </label>
         <label className="ws-control">
           <span className="muted small">Project</span>
-          <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+          <select
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+            title="Project 是从工作目录派生出来的分组视图，不是 Session 的所有权：这里不能指派 Project。"
+          >
             <option value="all">全部 Project</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            <option value="none">无 Project</option>
+            <option value="none">还没有 Project（工作目录未派生）</option>
           </select>
         </label>
         <label className="ws-control">
@@ -218,6 +222,13 @@ export default function SessionsView({ navigate, action, actionSeq }: {
             {filtersActive ? `显示 ${shown.length} / 共 ${sessions?.length ?? 0} 条` : `共 ${shown.length} 条`}
           </span>
         )}
+      </div>
+
+      {/* v0.2 起 Session 的 Project 由它自己的工作目录派生（方案 §1.10），
+          所以这一页不再有「设置 Project」这个动作：分组还能筛，归属不能选。 */}
+      <div className="muted small" style={{ marginTop: -10, marginBottom: 14 }}>
+        Project 由 Session 的工作目录自动派生，不需要也不能手工指派；按 Project 筛选只是换一种看法。
+        想长期推进一件事，请关联 Workstream。
       </div>
 
       {shown === null && !loadFailed && <div className="muted">加载中…</div>}

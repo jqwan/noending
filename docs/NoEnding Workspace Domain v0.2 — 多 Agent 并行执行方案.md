@@ -3224,3 +3224,113 @@ base 的完整 SHA 写进每个 agent 的 prompt 并在交付报告里回显**�
 7. **Wave 0 契约测试**在 `src-tauri/tests/workspace_v12_test.rs`（9 个）：身份确定性、
    position 稠密性、派生缓存单向性、迁移折叠 + 重放 + 备份、binding 精确解析失败→NULL。
    Wave 1+ 不得删这些测试来“让实现通过”。
+
+## 43.2 Wave 1 — A / B / C / D 并行交付与 Main 集成
+
+```text
+WAVE1_SHA=9a56649681731327366d8e6f1952eb14a4997782
+base    =7cce6fb0f3ec931ea6ed86036e20fce9a234bea4
+agents  =A 2cf1472 c29c85a 0aac5eb · B 12e2f1f 8471f51 · C 762850c 42c3af4 34e8d8c · D f2ee362
+gates   =cargo fmt --check / cargo check --all-targets (0 warning) / cargo test --all-targets (339 passed, 0 failed, 5 ignored) / pnpm build
+```
+
+九笔 commit **零冲突**（§38 的文件 ownership 生效）。Main 的集成工作在 `9a56649` 一笔里：启动时序、命令注册、launcher 收口、`workspace/wiring.rs` 的唯一 `WorkspaceAttaching` 装配。
+
+集成期发现并已修的两处跨 Agent 不一致：
+
+1. **`sessions.project_id` 出现了第四个写入文件**（B 的零路径 Project 自动删除 vs D 的 §42.5-T2 可执行守卫）。守卫是对的，B 的写法破坏了“缓存只有一个写入者”。修法：Project 消亡时的失效语句收敛进 `storage/session_paths.rs::clear_sessions_project_for_project_conn`，两条删除路径都调它——“谁能写这列”仍然一文件一答案。
+2. **`identity::join` 在路径被 `.`/`..` 折叠回 base 时留下尾分隔符**（A 报告）。`/repo/x` 与 `/repo/x/` 会同时存在于 UNIQUE 的 `canonical_path` 上，即一个目录两个 WorkspacePath、进而两个 Project。`join` 折叠时直接返回 root（裸盘符 `C:` 例外，它必须保留分隔符），并在 `path_key` 里再兜一层，加了契约测试 `a_collapsed_path_never_grows_a_trailing_separator`。
+
+Main 对 agent 提出项的裁定：
+
+| 提出 | 裁定 |
+| --- | --- |
+| B#5(b) `upsert_project_conn` 的 `git_id` 可被整对象写改目标 | **接受**。改为 `COALESCE(git_id, ?5)`：一次写入后不可变更，唯一合法写手是 `adopt_git_identity_conn`（first-set-only）。契约测试 `a_whole_object_project_write_can_neither_clear_nor_retarget_git_identity` |
+| B#5(a) `delete_project_and_children` 委托给 `delete_zero_path_project_conn` | **拒绝**。两者策略不同：legacy 删除要“ detach 并删资源”，零路径删除必须**拒绝**仍拥有路径的 Project。合并会让后者失去守卫 |
+| B#6 / D#4 §42.5-T2 的 grep 写法 | **接受**。`SET project_id = ?` 会误报 `UPDATE workspace_paths SET project_id`；T2 必须与 `UPDATE sessions` 连读（见 §43.3） |
+| D#1 binding diff 归 `workspace::session`，launcher 变 shim | **接受并已落地**（`9a56649`）。两个引擎只有一个会长路径列表，正是 §29 禁止的双 authority |
+| C#2 `Db::delete_workstream` 是裸 `DELETE` | **接受**。改为走 `purge_workstream_data_conn` 的完整 FK 顺序；产品入口仍是 `delete_workstream_permanently`（要求 archived） |
+| C#4 `sync/merge.rs` 仍写 `project_id` | **接受**。写 `None`，`ContextMutation` 的字段形状按 §31 保持不动 |
+| A#c / D#5 `WorkspaceObserving::observe` 无法表达“这不是一个路径” | **本阶段接受 A 的 `is_observable` 哨兵**，因为唯一的写入 door `ensure_path_outcome` 已经拒绝空 canonical 与 path_id 不一致的观察，并有 B 的 `Lying` 测试钉住。改成 `Option<WorkspaceObservation>` 触及 40+ 调用点（含 A/B 各自的测试），收益是防“未来有人忘记检查”。记录为 §43.4 的 Wave 2 待办 |
+| D#4 自动分类是否 repair NULL claim | **维持现状**：sync 写 `workstream_path_id = NULL` 合法（legacy 形状），不自动向上 repair，见 M25 |
+
+## 43.3 对 §42 的增补（实现期新发现的规则，Wave 2/3 必须遵守）
+
+**E14｜§42.3-M12 自相矛盾。** 它把指针文件写成 `<dirs::config_dir()>/app.noending.desktop/home.json`，同一句又说 macOS 在 `~/Library/Application Support/…`——macOS 上 `config_dir()` 是 `~/Library/Preferences`。A 按括号里的路径实现（`platform::paths::resolve_app_support_dir()`：macOS `data_dir()`、Windows `config_dir()`），因为 M14 依赖“pre-v0.2 的库已经在那里”。本条以 A 的实现为准。
+
+**E15｜§42.3-M6 的永久删除清单仍不完整。** `project_affinity_evidence.workstream_id` 是**第六条**指向 `workstreams` 的 FK，且被删 Workstream 的 `context_item` 的 search 行也要清。C 在 `purge_workstream_data_conn` 里补齐，并用 `permanent_delete_clears_every_row_the_workstream_owns` 钉住。注意补法：affinity 行是**置 NULL 保留**（§42.2-E11 说它是只读历史），不是删除。
+
+**E16｜§18-2 高估了 schema 的约束力。** `UNIQUE(workstream_id, position)` 只禁止“两个 position 0”，`{1,2}` 没有 0 在 SQLite 里合法。真正维持稠密性的是 `remove_workstream_path_conn` 同事务里的 recompact。任何绕过该 helper 直接 DELETE 的写法都会造出无 primary 的列表。
+
+**E17｜§42.2-E10 说 `merge_workstreams` 是 `abandoned` 的生产者——v12 之后不再成立**（Wave 0 已把它改写成 `completed`）。它退出注册的真实理由是：它在**不产生 Revision 的情况下**把 Context item 在 Workstream 之间搬走，违反“每一次 Context 变化都必须留下可审计的 Revision”。T1 的 grep 保留它，理由改成本句。
+
+**M25｜NULL claim 只清不修。** 漂移检测可以自动把 `workstream_path_id` 从有值置 NULL（含义“不再由任何路径带来”）；反向——从 NULL 变成有值——**只在用户重新绑定 / 重新保存时**发生。因为向上 repair 会把一条绑定从“路径删除够不着”变成“跟着路径一起被删”，那是用户不可见的损失（D 提出，Main 采纳）。
+
+**M26｜Project merge 按身份分两种。** path-backed（`git_id IS NULL`）Project 在遇到 Git 家族时**整体**并入对方（它的全部路径都是同一家族的成员证据）；git-backed Project 只失去**自己证据变了**的那条路径——它的其余路径按身份属于另一个家族，搬走等于凭空创造成员关系。
+
+**M27｜WorkspacePath GC 是“整轮”决策，不是逐行的。** “不再是任何 live Project 的 worktree”需要本轮所有 worktree 列表的集合；逐行判定会 livelock（删掉一个可 prune 的 worktree，同一份列表下轮又把它建回来，无限循环——B 在测试里撞到了）。实现为 sweep 级：本轮亲自观察到目录不在，且没有任何在册 Project 的 worktree 列表仍声称它，才删。
+
+**M28｜`ensure_workspace_path` 返回 `ProjectionEffect`，由事务的持有者在 commit 之后应用。** `PRAGMA foreign_keys=ON` 下 unindex/index 必须在事务外做（§42.3-M4），而“谁持有事务”只有调用方知道。所以：在别人的事务里请用 `ensure_path_outcome` + `apply_projection_effect`，不要指望写入方顺手把搜索行建好。
+
+**M29｜`get_project_detail` 的 Sessions 走权威链**（`workspace_path_id → path`），不走缓存列。只有一个 legacy 缓存值、没有 cwd 的 Session 因此不出现在 Project 详情里（它仍出现在 `list_sessions(project_id)`）。这是有意的：详情视图不能同时是两种真相。
+
+**N5｜自动命名用“被观察路径”的 basename。** 如果一个仓库的 linked worktree 先被观察到，Project 名就是那个 worktree 目录名而不是仓库名。N4 已说明名字不承载身份，本阶段不改（改成用 `common_dir` 的父目录需要对裸仓库和 worktree 都猜）。
+
+## 43.4 用户可见的行为变化（dogfood 与 §22 文案要按这个口径）
+
+1. **归档变成单向动作。** `archive_workstream` 不再是“翻转”，`restore_workstream` 才是取消归档。现有 `WorkstreamDetailView.tsx` 的“取消归档”按钮调的是 archiveWorkstream，F1 必须改路由。永久删除只在 `visibility === "archived"` 时提供。
+2. **Session→Project 不再能手工指定。** 没有可解析 cwd 的 Session 就不显示 Project（以前手工标签会撑着它）。§7.4 的意图，但用户会先看到“历史里有些 Session 没有 Project 了”。
+3. **`archived = 1` 的 legacy Project 会重新出现**（E3：v0.2 的 Project 没有生命周期，隐藏一个仍拥有路径的 Project 是幽灵不是状态）。
+4. **pre-v0.2 的数据库会被接管。** `noending.db` 原本在 `…/Application Support/app.noending.desktop/`，不在 `~/.noending/data` 里；逐字实现 §16 会让首次 v0.2 启动打开一个空库，用户的 History 看起来被删了——正是 §41 要避免的失败。`adopt_legacy_data_dir` 把它 move（跨卷时 copy 且保留原件）过去，失败时留在旧 Home 并写进 notes。
+5. **上下文 bundle 的位置从 `app_data_dir()/context-bundles` 变成 `<home>/runtime/context-bundles`**，Settings 的“数据目录”一行现在叫 NoEnding Home 并额外显示默认工作目录。
+
+## 43.5 Wave 2 待办（派发时必须带上）
+
+- **E**：§12 指纹必须加入 (a) Workstream 有序路径列表（`workspace::workstream::workstream_launch_paths(db, id).fingerprint_input()`）、(b) `default_ws`（来自 NoEnding Home，不是 DB，必须作为独立带标签输入传入）、(c) Session 侧 `sessions.workspace_path_id`。C 明确警告：**在 E 加进去之前，改路径不会让 PreparedLaunch 变 stale**，§12 的“预览即所得”只是名义成立。另 M16（resume cwd 的既存违约）与 §42.3-M24（intent 不加第四个路径列）同时生效。
+- **F1**：Projects 无“新建”；有序路径 UI；回收站（archive/restore/永久删除）；`WorkstreamPathRow` 形状；删掉 `mergeWorkstreams` / `createProject` / `deleteProject` wrapper。
+- **F2**：Sessions 表去掉 Project 手工选择；Settings 的 Home/默认工作目录 + `set_noending_home` 的“重启后生效”提示。
+- **bridge**：`createWorkstream(title, description, initialPath?)`；`WorkstreamCardData.path_count`；`WorkspaceSettings.home_source`。
+
+## 43.6 真实语料彩排（Main 在 Wave 2 期间做的额外一步）
+
+§26 要求迁移“可证伪”，但 fixture 只能证明 fixture 里想到的分支。于是把用户的
+**真实库复制一份**（95 MB / 475 Sessions / 10 716 events / 396 bindings / 354
+context items / 0 Project / 0 resource / 0 evidence），跑了两轮：
+
+**第一轮（迁移本身）暴露了一个只有真实 v11 库才会暴露的 P0**：`CREATE UNIQUE
+INDEX … ON projects(git_id)` 排在幂等 ALTER 列表**之前**，而
+`CREATE TABLE IF NOT EXISTS` 不能给已存在的表加列——所以任何**升级**的库都在
+`Db::open` 阶段直接失败（`no such column: git_id`）。之前的 10 个迁移测试全部是
+“新建库 + 把 user_version 拨回 11”，库里本来就有 `git_id`，所以一个都没抓到。
+修复＝把索引挪到 ALTER 之后；并把 `workspace_v12_test` 的 legacy fixture 改成
+手写的**真 v11 表结构**（已验证可证伪：把顺序改回去，它以生产环境同一条错误信息
+失败）。落 `8bb4290`。
+
+彩排结果（`tests/v12_dogfood_test.rs`，默认 skip，只有指到临时目录下的副本才跑）：
+§1.1 / §1.2 / §5.7 / §1.10 / §42.3-M1 全部成立，events / bindings / cursors /
+context_items / launch_intents 数量不变，`.pre-v12.bak` 在位。
+
+**第二轮（Workspace Reconcile，真正跑 git）**：scanned 27 · moved 0 ·
+discovered 8 · failed 0 · GC 0。Git 家族合并确实发生了（一个 Project 拿到 8 条
+路径、另一个 2 条；两个同名 `Deepseek-harness` 因为不同家族而**正确地**没被合并）。
+
+但落地的 Project 列表长这样，这是 §33 dogfood 必须先面对的事实：
+
+```text
+393 sessions · 1 path  · Tmp               ← /private/tmp，占绝对多数
+ 27 sessions · 2 paths · Stock_quant (git)
+ 17 sessions · 1 path  · Workspace (git)
+  5 sessions · 1 path  · Testgodot / Deepseek-harness (git)
+  3 sessions · 8 paths · Noending (git)
+  1 session  · 1 path  · ×19 个一次性目录（其中 "Realtime-voice-chat" 同名 4 个、
+                          ".claude" 这种隐藏目录、微信沙盒容器 Data）
+```
+
+模型是**忠实**的（用户确实在那些目录里跑过 Agent），但对话式一次性目录会生成一堆
+单 Session、同名、无信息量的 Project。可选的收敛口径（都属于**产品决策**，本阶段
+§40 不许我顺手加智能）：
+(a) 名字冲突时带上父目录做消歧（纯展示，不动身份）；
+(b) 对 scratch/临时目录（`$TMPDIR`、`/private/tmp`、沙盒容器）不建 Project，或
+折叠成一个“其他”；
+(c) Projects 列表按 Session 数排序 + 默认隐藏 1-Session Project。
+Main 的建议：先做 (a)（零风险、纯展示），(b) 需要用户点头，(c) 属于 Wave 2 之后。

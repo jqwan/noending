@@ -33,6 +33,20 @@ pub struct SessionDetail {
     pub cursor: i64,
     pub processed_cursor: i64,
     pub classification: String,
+    /// §22: Session Detail shows the WorkspacePath and the Project behind it,
+    /// read-only. They travel as display strings because `workspace_path_id`
+    /// alone would make the UI join a table it has no command for — and the
+    /// Project shown here is derived through that path, never picked by a user.
+    pub workspace_path: Option<SessionWorkspacePath>,
+}
+
+#[derive(Serialize)]
+pub struct SessionWorkspacePath {
+    pub id: String,
+    pub canonical_path: String,
+    pub exists: bool,
+    pub project_id: String,
+    pub project_name: String,
 }
 
 pub type WorkstreamTitle = String;
@@ -69,6 +83,21 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let classification = SessionClassificationState::derive(&{
             bindings.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>()
         });
+        let workspace_path = match session.workspace_path_id.as_deref() {
+            Some(id) => db.get_workspace_path(id)?.map(|wp| {
+                Ok::<_, crate::error::AppError>(SessionWorkspacePath {
+                    id: wp.id.clone(),
+                    canonical_path: wp.canonical_path.clone(),
+                    exists: wp.exists,
+                    project_name: db
+                        .get_project(&wp.project_id)?
+                        .map(|p| p.name)
+                        .unwrap_or_default(),
+                    project_id: wp.project_id.clone(),
+                })
+            }),
+            None => None,
+        };
         Ok(SessionDetail {
             session,
             events,
@@ -76,6 +105,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             cursor,
             processed_cursor,
             classification: classification.as_str().to_string(),
+            workspace_path: workspace_path.transpose()?,
         })
     })
 }

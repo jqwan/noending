@@ -23,6 +23,12 @@ export const UNKNOWN_AGENT = "未知 Agent";
 /** Workstream 标题为空串时的兜底（Session 可以零关联，但不能显示成空白格）。 */
 export const UNNAMED_WORKSTREAM = "未命名 Workstream";
 
+/** 有 cwd、但还没被 NoEnding 登记成 WorkspacePath 的 Project 单元格状态。 */
+export const PROJECT_PENDING = "待解析";
+
+/** 连 cwd 都没有的 Project 单元格状态（v0.2：Project 只能从工作目录派生）。 */
+export const PROJECT_NO_PATH = "无工作目录";
+
 export function agentDisplayLabel(agent: Agent | null | undefined): string {
   const key = (agent ?? "") as string;
   return (AGENT_LABELS as Record<string, string>)[key] ?? UNKNOWN_AGENT;
@@ -39,6 +45,60 @@ export function bindingRoleLabel(role: string | null | undefined): string {
   if (role === "primary") return "主关联";
   if (role === "related") return "相关关联";
   return role ?? "相关关联";
+}
+
+/**
+ * Project 单元格（方案 §1.10 / §43.4-2）。
+ *
+ * v0.2 里 Project 只有一条事实链：`workspace_path_id → WorkspacePath.project_id`。
+ * `sessions.project_id` 仍是缓存列，所以表格读它，但**读到什么就要说什么**：
+ *
+ * - 有 WorkspacePath → 名字是派生结果；
+ * - 只有缓存值、没有 WorkspacePath → 那是 v0.2 之前手工指派留下的历史标签，
+ *   弱化显示并说明它已经不决定任何事（历史不删，但也不再冒充事实）；
+ * - 有 cwd、还没有 WorkspacePath → 等目录扫描补上，说「待解析」；
+ * - 什么都没有 → 空缺的原因是「没有记录过工作目录」，不是「没被归属」。
+ */
+export interface ProjectCell {
+  text: string;
+  hint: string;
+  /** 弱化显示：值仍然在场，但它不是派生事实。 */
+  dim: boolean;
+}
+
+export function projectCellFor(
+  session: Pick<Session, "project_id" | "workspace_path_id" | "cwd">,
+  projectNameById: Map<string, string>,
+): ProjectCell {
+  if (session.workspace_path_id) {
+    const name = session.project_id ? projectNameById.get(session.project_id) ?? null : null;
+    return name
+      ? { text: name, hint: `由工作目录自动派生 · ${name}`, dim: false }
+      : {
+        text: PROJECT_PENDING,
+        hint: "工作路径已经登记，但对应的 Project 名称还没读到（正在加载，或 Project 刚刚变化）。",
+        dim: true,
+      };
+  }
+  if (session.project_id) {
+    const name = projectNameById.get(session.project_id);
+    return {
+      text: name ?? "历史 Project 标签",
+      hint: "v0.2 之前手工指派留下的标签；这条 Session 没有可解析的工作路径，Project 已经不由它决定。",
+      dim: true,
+    };
+  }
+  return (session.cwd ?? "").trim() === ""
+    ? {
+      text: PROJECT_NO_PATH,
+      hint: "原始记录里没有工作目录，所以没有可派生的 Project。",
+      dim: true,
+    }
+    : {
+      text: PROJECT_PENDING,
+      hint: "工作目录还没有被登记成工作路径，NoEnding 会在下次目录扫描后自动补上。",
+      dim: true,
+    };
 }
 
 /** 东亚宽字符按 2 个宽度单位计，否则「80 个中文」会把表格撑破。 */
@@ -208,7 +268,7 @@ export default function SessionTable({ sessions, bindings, projectNameById, onOp
         workstream: wsTitle ? ellipsisTail(wsTitle, W_WORKSTREAM) : null,
         extraWorkstreams: Math.max(0, bound.length - 1),
         workstreamFull: wsTitle,
-        project: s.project_id ? projectNameById.get(s.project_id) ?? null : null,
+        project: projectCellFor(s, projectNameById),
       };
     }),
     [sessions, bindings, projectNameById],
@@ -221,7 +281,9 @@ export default function SessionTable({ sessions, bindings, projectNameById, onOp
           <th style={{ width: 96 }}>Agent</th>
           <th style={{ width: 240 }}>Session</th>
           <th style={{ width: 150 }}>Workstream</th>
-          <th style={{ width: 96 }}>Project</th>
+          <th style={{ width: 96 }} title="Project 由 Session 的工作目录自动派生，不能手工指派；这里只是一个分组视图">
+            Project
+          </th>
           <th style={{ width: 200 }}>工作目录</th>
           <th style={{ width: 96 }}>最近活动</th>
           <th style={{ width: 108 }}>操作</th>
@@ -254,8 +316,8 @@ export default function SessionTable({ sessions, bindings, projectNameById, onOp
                   <span className="badge" style={{ marginLeft: 6 }}>+{extraWorkstreams}</span>
                 )}
               </td>
-              <td className={project ? undefined : "muted"} title={project ?? "未归属任何 Project"}>
-                {project ?? "—"}
+              <td className={project.dim ? "muted" : undefined} title={project.hint}>
+                {ellipsisTail(project.text, W_PROJECT)}
               </td>
               <td className={cwd ? "mono" : "muted"} title={cwd || "未设置工作目录"}>
                 {cwdDisplayLabel(cwd, W_CWD)}

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
@@ -11,11 +11,12 @@ import {
   bindingRoleLabel,
   formatDateTime,
   primaryFirst,
+  projectCellFor,
   sessionDisplayTitle,
   NO_CWD,
   UNTITLED_SESSION,
 } from "./SessionTable";
-import { type SessionDetail, type Workstream } from "../../types";
+import { type Project, type SessionDetail, type Workstream } from "../../types";
 import type { Route } from "../../app/routes";
 
 /** 后端 get_session_detail 的 events 上限（commands.rs）——到达上限时如实说明。 */
@@ -26,6 +27,11 @@ const EVENT_PAGE_LIMIT = 500;
  * Execution-oriented 而不是 Context-oriented：Header 回答「哪个 Agent、什么时候开始、
  * 最近什么时候动过、在哪个目录、Session ID 是什么」，正文是标准化消息流。
  * 这里不出现同步提取、Context 变更或自动归类。
+ *
+ * v0.2 增加两行只读事实（方案 §22、§43.3-M29）：Session 的 cwd 解析成的
+ * WorkspacePath，以及从那条路径派生出来的 Project。两者都**没有编辑入口**——
+ * 路径由 NoEnding 从磁盘观察得到，Project 只有「移动路径」这一条改变方式，
+ * 而那属于 Projects 侧，不属于一次已经发生的执行记录。
  */
 export default function SessionDetailView({ sessionId, navigate }: {
   sessionId: string;
@@ -36,6 +42,12 @@ export default function SessionDetailView({ sessionId, navigate }: {
   const [bindingOpen, setBindingOpen] = useState(false);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  /**
+   * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字——
+   * 那是 v0.2 之前手工指派留下的历史标签（§43.4-2）。派生链自带名字，
+   * 所以正常情况下不多这一次读取。
+   */
+  const [projects, setProjects] = useState<Project[] | null>(null);
 
   const refresh = useCallback(() => {
     api.getSessionDetail(sessionId)
@@ -44,6 +56,16 @@ export default function SessionDetailView({ sessionId, navigate }: {
   }, [sessionId]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
+
+  const needsLegacyName = !detail?.workspace_path && !!detail?.session.project_id;
+  useEffect(() => {
+    if (!needsLegacyName || projects) return;
+    api.listProjects().then(setProjects).catch(console.error);
+  }, [needsLegacyName, projects]);
+  const projectNameById = useMemo(
+    () => new Map((projects ?? []).map((p) => [p.id, p.name])),
+    [projects],
+  );
 
   if (failed && !detail) {
     return (
@@ -93,6 +115,12 @@ export default function SessionDetailView({ sessionId, navigate }: {
   const untitled = title === UNTITLED_SESSION;
   const cwd = (session.cwd ?? "").trim();
   const ordered = primaryFirst(bindings, ([b]) => b.role);
+  /** 派生链自带的路径与 Project（§43.3-M29：详情只承认这一种真相）。 */
+  const workspacePath = detail.workspace_path;
+  const legacyProjectCell = projectCellFor(session, projectNameById);
+  const derivedProjectName = workspacePath && workspacePath.project_name.trim() !== ""
+    ? workspacePath.project_name
+    : null;
 
   const messages: SessionMessageData[] = events.map((e) => ({
     sequence: e.sequence,
@@ -149,8 +177,70 @@ export default function SessionDetailView({ sessionId, navigate }: {
         </Field>
         <Field label="工作目录">
           {cwd
-            ? <CopyValue value={cwd} title={cwd} />
+            ? <CopyValue value={cwd} title={`${cwd} · Agent 原始记录里的 cwd，是这条 Session 自己的事实`} />
             : <span className="muted">{NO_CWD}（该 Session 的原始记录里没有目录信息）</span>}
+        </Field>
+        <Field label="工作路径">
+          {workspacePath ? (
+            <>
+              <CopyValue
+                value={workspacePath.canonical_path}
+                mono
+                title={`${workspacePath.canonical_path} · NoEnding 识别工作位置用的规范化路径`}
+              />
+              {cwd !== "" && cwd !== workspacePath.canonical_path && (
+                <div className="muted small" style={{ marginTop: 4 }}>
+                  与上面的「工作目录」写法不同，是因为 NoEnding 按自己的规则把它规范化了。
+                </div>
+              )}
+              {!workspacePath.exists && (
+                <div style={{ marginTop: 4 }}>
+                  <span
+                    className="badge warn"
+                    title="最近一次目录检查时在磁盘上找不到这个目录。工作路径的身份由路径本身决定，不靠目录存在与否；目录回来时仍然对上同一条工作路径。"
+                  >
+                    目录不存在
+                  </span>
+                </div>
+              )}
+            </>
+          ) : cwd ? (
+            <span className="muted small">
+              这个目录还没有被登记成工作路径 —— NoEnding 会在下一次目录扫描后自动补上，不需要手工操作。
+            </span>
+          ) : (
+            <span className="muted small">没有工作目录，也就没有工作路径。</span>
+          )}
+        </Field>
+        <Field label="Project">
+          {workspacePath ? (
+            derivedProjectName ? (
+              <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <button
+                  className="link"
+                  title={`打开 Project：${derivedProjectName}`}
+                  onClick={() => navigate({ view: "project", projectId: workspacePath.project_id })}
+                >
+                  {derivedProjectName}
+                </button>
+                <span className="muted small">由上面的工作路径自动派生，只读</span>
+              </span>
+            ) : (
+              <span className="muted small">这条工作路径所属的 Project 记录暂时读不到。</span>
+            )
+          ) : session.project_id ? (
+            <span className="muted small" style={{ wordBreak: "break-word" }}>
+              {legacyProjectCell.text}
+              {" —— "}
+              {legacyProjectCell.hint}
+            </span>
+          ) : (
+            <span className="muted small">
+              {cwd === ""
+                ? "没有记录过工作目录，所以没有 Project。"
+                : "工作路径还没有登记，所以暂时没有 Project。"}
+            </span>
+          )}
         </Field>
         <Field label="Session ID">
           <CopyValue value={session.id} mono />
@@ -331,6 +421,11 @@ function BindingModal({ sessionId, bindings, onClose, onChanged }: {
 
   return (
     <Modal title="编辑关联 Workstream" onClose={onClose}>
+      {/* v0.2：Session 归类只作用在 Workstream 上（方案 §22「不让用户操作 Project」）。
+          Project 是工作目录的派生结果，在这里出现只会让人以为它可以被指派。 */}
+      <div className="muted small" style={{ marginBottom: 10 }}>
+        这里只操作 Workstream。Project 由这条 Session 自己的工作目录派生，不需要、也不能在这里选。
+      </div>
       {rows.length === 0 && (
         <div className="muted small" style={{ marginBottom: 10 }}>
           还没有关联任何 Workstream。用下面的「添加 Workstream」选择。
@@ -383,6 +478,16 @@ function BindingModal({ sessionId, bindings, onClose, onChanged }: {
             添加
           </button>
         </div>
+      </div>
+
+      {/* 这一侧的效果要说清楚（方案 §1.8 / §1.9）：关联一次会顺带决定
+          Workstream 的工作路径列表，而移除留下的否定决定是持久的。 */}
+      <div className="muted small" style={{ marginTop: 12, wordBreak: "break-word" }}>
+        保存时会发生什么：新加的关联，如果那个 Workstream 的工作路径列表里还没有这条 Session 的工作路径，
+        那条路径会被追加进去（该 Workstream 还没有任何路径时成为主路径）；
+        这条 Session 没有可解析的工作目录时只建立关联，不会编造路径。
+        移除只解除关联，路径会留在列表里；同时这是一次明确的否定决定 ——
+        NoEnding 之后不会再把这条 Session 自动归类回这个 Workstream，除非你在这里重新关联它。
       </div>
 
       {error && <div className="badge warn" style={{ marginTop: 8 }}>{error}</div>}

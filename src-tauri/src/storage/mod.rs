@@ -443,9 +443,6 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_workspace_paths_canonical ON workspace_paths(canonical_path);
             CREATE INDEX IF NOT EXISTS idx_workstream_paths_ws ON workstream_paths(workstream_id, position);
             CREATE INDEX IF NOT EXISTS idx_workstream_paths_path ON workstream_paths(workspace_path_id);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
-              ON projects(git_id)
-              WHERE git_id IS NOT NULL;
             "#,
         )?;
 
@@ -497,6 +494,19 @@ impl Db {
                 }
             }
         }
+
+        // One unique index on a pre-existing table, and therefore deliberately
+        // AFTER the ALTER list: `projects.git_id` does not exist in a v11
+        // database until the loop above adds it, and an index on a missing
+        // column fails the whole open. Fresh databases already have the column
+        // in their canonical DDL, which is why a temp-DB test cannot catch this
+        // ordering — `tests/v12_dogfood_test.rs` and the v11-shaped fixture in
+        // `workspace_v12_test.rs` do.
+        self.0.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
+               ON projects(git_id)
+               WHERE git_id IS NOT NULL;",
+        )?;
 
         register_binding_rank_fn(&self.0)?;
 

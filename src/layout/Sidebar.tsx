@@ -17,11 +17,6 @@ export default function Sidebar({ route, navigate, onSearch }: {
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [recent, setRecent] = useState<WorkstreamCardData[]>([]);
-  const [creatingProject, setCreatingProject] = useState(false);
-  const [name, setName] = useState("");
-  const [desc, setDesc] = useState("");
-  const [projectBusy, setProjectBusy] = useState(false);
-  const [projectError, setProjectError] = useState("");
 
   const refresh = useCallback(() => {
     api.listProjects().then(setProjects).catch(console.error);
@@ -42,26 +37,6 @@ export default function Sidebar({ route, navigate, onSearch }: {
 
   useEffect(refresh, [refresh]);
   useEffect(() => onEvent(EVT_SYNCED, refresh), [refresh]);
-
-  const createProject = async () => {
-    if (!name.trim() || projectBusy) return;
-    setProjectBusy(true);
-    setProjectError("");
-    try {
-      await api.createProject(name, desc);
-      setCreatingProject(false);
-      setName("");
-      setDesc("");
-      refresh();
-    } catch (e) {
-      // 失败时保留弹窗和已输入的内容，把原因写在脸上；静默返回会让用户
-      // 以为这个 Project 已经建好了（§25 错误状态）。
-      console.error(e);
-      setProjectError(String(e));
-    } finally {
-      setProjectBusy(false);
-    }
-  };
 
   const workspaceActive = (v: "workstreams" | "sessions" | "assistant") => {
     if (route.view === v) return "active";
@@ -116,11 +91,11 @@ export default function Sidebar({ route, navigate, onSearch }: {
           </button>
         ))}
 
-        <div className="nav-section">
-          Projects
-          <button className="nav-section-add" title="新建 Project" onClick={() => setCreatingProject(true)}>+</button>
-        </div>
-        {projects.length === 0 && <div className="nav-item muted small">尚未创建</div>}
+        {/* v0.2：Project 由工作目录派生，侧栏没有创建入口（方案 §22、§42.3-M22）。 */}
+        <div className="nav-section">Projects</div>
+        {projects.length === 0 && (
+          <div className="nav-item muted small">打开 Session 或选目录后自动出现</div>
+        )}
         {projects.map((p) => (
           <button key={p.id}
             className={`nav-item ${route.view === "project" && route.projectId === p.id ? "active" : ""}`}
@@ -140,32 +115,6 @@ export default function Sidebar({ route, navigate, onSearch }: {
         </button>
       </div>
 
-      {creatingProject && (
-        <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCreatingProject(false)}>
-          <div className="modal">
-            <h2>新建 Project</h2>
-            <p className="muted small" style={{ marginTop: -6 }}>
-              Project 只是可选的组织层，Workstream 可以独立存在。
-            </p>
-            <label className="field"><span>名称</span>
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} autoFocus
-                placeholder="例如：Agent Workspace / Japan Trip" /></label>
-            <label className="field"><span>描述（可选）</span>
-              <textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
-            {projectError && (
-              <div className="badge warn" style={{ marginBottom: 10, overflowWrap: "anywhere" }}>
-                {projectError}
-              </div>
-            )}
-            <div className="row" style={{ justifyContent: "flex-end" }}>
-              <button className="btn" onClick={() => setCreatingProject(false)} disabled={projectBusy}>取消</button>
-              <button className="btn primary" disabled={projectBusy || !name.trim()} onClick={createProject}>
-                {projectBusy ? "创建中…" : "创建"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -227,51 +227,67 @@ fn session_without_cwd_gets_no_workspace_path() {
 
 // ------------------------------------------------------------- 4. migration
 
-/// Rows shaped the way v0.1 left them, then the version dial turned back.
+/// A database shaped exactly the way v0.1 left it — the four tables written by
+/// hand with their **v11** column sets, not a v12 database with the version
+/// dial turned back.
+///
+/// The distinction is the whole point: `migrate()` runs `CREATE TABLE IF NOT
+/// EXISTS`, which cannot extend an existing table, so on a real upgrade the v12
+/// columns only appear via the idempotent ALTER list. A fixture built on a fresh
+/// v12 file therefore tests the *data* branches and nothing else, and it let a
+/// `CREATE UNIQUE INDEX ON projects(git_id)` that ran before its own ALTER ship
+/// to a real database. Build the old shape, and ordering bugs have somewhere to
+/// show up.
 fn legacy_db(dir: &Path) -> PathBuf {
     let path = dir.join("noending.db");
     {
-        let db = Db::open(&path).expect("v12 schema");
-        let ts = now();
-        db.0.execute(
-            "INSERT INTO projects (id, name, description, archived, created_at, updated_at)
-             VALUES ('legacy-alpha','Alpha','',0,?1,?1)",
-            [&ts],
-        )
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let ts = "2026-01-01T00:00:00Z";
+        conn.execute_batch(&format!(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA user_version = 11;
+            CREATE TABLE projects (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+              archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE workstreams (
+              id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '', lifecycle TEXT NOT NULL DEFAULT 'open',
+              visibility TEXT NOT NULL DEFAULT 'normal', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              default_cwd TEXT
+            );
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY, agent TEXT NOT NULL, agent_session_id TEXT NOT NULL,
+              title TEXT, cwd TEXT, project_id TEXT REFERENCES projects(id), raw_path TEXT NOT NULL,
+              parent_agent_session_id TEXT, started_at TEXT, last_activity_at TEXT,
+              UNIQUE(agent, agent_session_id)
+            );
+            CREATE TABLE session_workstream_bindings (
+              session_id TEXT NOT NULL, workstream_id TEXT NOT NULL, role TEXT NOT NULL,
+              source TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0,
+              last_seen_revision TEXT, last_sync_cursor INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL, last_used_at TEXT NOT NULL,
+              PRIMARY KEY (session_id, workstream_id)
+            );
+            INSERT INTO projects VALUES ('legacy-alpha','Alpha','',0,'{ts}','{ts}');
+            INSERT INTO projects VALUES ('ghost','Ghost','',1,'{ts}','{ts}');
+            INSERT INTO workstreams VALUES ('w-legacy','legacy-alpha','Old','d','abandoned','archived','{ts}','{ts}','/old/repo');
+            INSERT INTO sessions VALUES ('s-legacy','codex','src-1','T','/old/repo','legacy-alpha','/raw/s1.jsonl',NULL,'{ts}','{ts}');
+            INSERT INTO session_workstream_bindings VALUES ('s-legacy','w-legacy','primary','user_explicit',1,NULL,0,'{ts}','{ts}');
+            "#
+        ))
         .unwrap();
-        db.0.execute(
-            "INSERT INTO projects (id, name, description, archived, created_at, updated_at)
-             VALUES ('ghost','', '',1,?1,?1)",
-            [&ts],
-        )
-        .unwrap();
-        db.0.execute(
-            "INSERT INTO workstreams
-               (id, project_id, title, description, lifecycle, visibility, default_cwd, created_at, updated_at)
-             VALUES ('w-legacy','legacy-alpha','Old','d','abandoned','archived','/old/repo',?1,?1)",
-            [&ts],
-        )
-        .unwrap();
-        db.0.execute(
-            "INSERT INTO sessions
-               (id, agent, agent_session_id, title, cwd, project_id, raw_path, started_at, last_activity_at)
-             VALUES ('s-legacy','codex','src-1','T','/old/repo','legacy-alpha','/raw/s1.jsonl',?1,?1)",
-            [&ts],
-        )
-        .unwrap();
-        db.0.execute(
-            "INSERT INTO session_workstream_bindings
-               (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
-             VALUES ('s-legacy','w-legacy','primary','user_explicit',1,0,0,?1,?1)",
-            [&ts],
-        )
-        .unwrap();
-        db.0.execute("PRAGMA user_version = 11", []).unwrap();
         assert_eq!(
-            db.0.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             11
         );
+        // The columns v12 adds really are absent — that is what the ALTER list
+        // is for, and what an index created too early would trip over.
+        assert!(conn
+            .query_row("SELECT git_id FROM projects LIMIT 1", [], |_| Ok(()))
+            .is_err());
     }
     path
 }

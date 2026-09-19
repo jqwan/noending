@@ -79,15 +79,21 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
           <h3 className="ws-card-title" title={card.title}>{card.title}</h3>
           <div className="ws-card-side">
             {card.lifecycle !== "active" && (
-              <span className="badge">{LIFECYCLE_LABELS[card.lifecycle] ?? card.lifecycle}</span>
+              <span className="badge" title="只是分类标签，不改变任何行为">{LIFECYCLE_LABELS[card.lifecycle] ?? card.lifecycle}</span>
             )}
-            {/* Project 是可选组织层：未归属时不显示任何占位。
+            {/* visibility=archived 就是回收站（方案 §1.13）：它和 lifecycle 正交，
+                所以这里单独一个徽标，而不是把 lifecycle 改成第三种值。 */}
+            {card.visibility === "archived" && (
+              <span className="badge warn" title="在回收站里：工作路径、Session 绑定与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
+            )}
+            {/* Project 是主工作路径的派生投影（方案 §42.3-M19），不是用户挑的组织层：
+                没有路径就没有 Project，此时不显示任何占位。
                 .ws-card-side 是 flex:none，长 Project 名会把标题挤没，
                 所以这里就地限宽并把全名留在 title 上。 */}
             {card.project_name && (
               <span
                 className="ws-card-project"
-                title={card.project_name}
+                title={`由主工作路径派生的 Project（只读）：${card.project_name}`}
                 style={{ maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               >
                 {card.project_name}

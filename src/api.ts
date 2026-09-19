@@ -1,36 +1,91 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings, AppInfo,
-  ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project, ProjectResource,
+  ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult, Project,
+  ProjectDetailData, ProjectResource, ProjectWorkstreamRow, WorkspaceSettings,
+  WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
   WorkstreamReviewSummary,
 } from "./types";
 
 export const api = {
+  // ---------------- Projects (方案 §11) ----------------
+  //
+  // v0.2 derives a Project from its WorkspacePaths. The read + rename surface is
+  // the whole API: `create_project` / `update_project` / `delete_project` and the
+  // resource commands are no longer registered in `lib.rs`, so their wrappers
+  // below are dead by construction and only await removal with their last UI
+  // call site. Calling one rejects at runtime — that is the point.
   listProjects: () => invoke<Project[]>("list_projects"),
+  getProjectDetail: (projectId: string) =>
+    invoke<ProjectDetailData>("get_project_detail", { projectId }),
+  listProjectWorkstreams: (projectId: string) =>
+    invoke<ProjectWorkstreamRow[]>("list_project_workstreams", { projectId }),
+  renameProject: (projectId: string, name: string) =>
+    invoke<Project>("rename_project", { projectId, name }),
+
+  /** @deprecated un-registered in v0.2; kept only until its call site is gone. */
   createProject: (name: string, description: string) =>
     invoke<Project>("create_project", { name, description }),
+  /** @deprecated un-registered in v0.2. */
   deleteProject: (projectId: string) => invoke<void>("delete_project", { projectId }),
+  /** @deprecated un-registered in v0.2 (§7.5: users no longer manage a Project's resources). */
   addResource: (projectId: string, kind: string, uri: string) =>
     invoke<ProjectResource>("add_project_resource", { projectId, kind, uri: uri || null }),
+  /** @deprecated un-registered in v0.2. */
   listResources: (projectId: string) =>
     invoke<ProjectResource[]>("list_project_resources", { projectId }),
+  /** @deprecated un-registered in v0.2. */
   removeResource: (resourceId: string) => invoke<void>("remove_project_resource", { resourceId }),
+
+  // ---------------- NoEnding Home (方案 §11, §22) ----------------
+  getWorkspaceSettings: () => invoke<WorkspaceSettings>("get_workspace_settings"),
+  /** Requests a relocation for the NEXT launch; `restart_required` says so. */
+  setNoendingHome: (newHome: string) =>
+    invoke<WorkspaceSettings>("set_noending_home", { newHome }),
 
   listWorkstreams: (projectId?: string) =>
     invoke<Workstream[]>("list_workstreams", { projectId: projectId ?? null }),
   listWorkstreamCards: () => invoke<WorkstreamCardData[]>("list_workstream_cards"),
+  /**
+   * `create_workstream(title, description, initialPath?)`.
+   *
+   * The `projectId` parameter is a transition shim so the existing modal keeps
+   * compiling: v0.2 has no manual Workstream→Project assignment, so it is
+   * dropped here rather than sent. `defaultCwd` is no longer a hint — the path
+   * the user types becomes the Workstream's position-0 path, or nothing at all
+   * if the workspace layer cannot resolve it (F1 replaces both with a path picker).
+   */
   createWorkstream: (projectId: string | null, title: string, description: string, defaultCwd?: string) =>
     invoke<Workstream>("create_workstream", {
-      projectId,
       title,
       description,
-      defaultCwd: defaultCwd?.trim() ? defaultCwd : null,
+      initialPath: defaultCwd?.trim() ? defaultCwd : null,
     }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
+
+  // ---------------- Workstream paths, lifecycle, recycle bin (方案 §11, §18) ----------------
+  listWorkstreamPaths: (workstreamId: string) =>
+    invoke<WorkstreamPathRow[]>("list_workstream_paths", { workstreamId }),
+  addWorkstreamPath: (workstreamId: string, path: string) =>
+    invoke<WorkstreamPath>("add_workstream_path", { workstreamId, path }),
+  removeWorkstreamPath: (workstreamId: string, workstreamPathId: string) =>
+    invoke<number>("remove_workstream_path", { workstreamId, workstreamPathId }),
+  /** `orderedWorkspacePathIds` must be the complete current list. */
+  reorderWorkstreamPaths: (workstreamId: string, orderedWorkspacePathIds: string[]) =>
+    invoke<WorkstreamPath[]>("reorder_workstream_paths", { workstreamId, orderedWorkspacePathIds }),
+  setWorkstreamLifecycle: (workstreamId: string, lifecycle: "active" | "completed") =>
+    invoke<Workstream>("set_workstream_lifecycle", { workstreamId, lifecycle }),
+  /** Archive is absolute in v0.2: it only moves the card into the recycle bin. */
   archiveWorkstream: (workstreamId: string) =>
-    invoke<void>("archive_workstream", { workstreamId }),
+    invoke<Workstream>("archive_workstream", { workstreamId }),
+  restoreWorkstream: (workstreamId: string) =>
+    invoke<Workstream>("restore_workstream", { workstreamId }),
+  /** Only reachable for an archived Workstream; Sessions survive it. */
+  deleteWorkstreamPermanently: (workstreamId: string) =>
+    invoke<void>("delete_workstream_permanently", { workstreamId }),
+  /** @deprecated un-registered in v0.2 (§42.2-E17: it moved Context without a Revision). */
   mergeWorkstreams: (sourceId: string, targetId: string) =>
     invoke<void>("merge_workstreams", { sourceId, targetId }),
 

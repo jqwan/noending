@@ -42,6 +42,15 @@ export interface WorkspacePath {
   last_seen_at: string;
 }
 
+/** `list_workstream_paths` row: the entry plus the facts the UI shows beside it. */
+export interface WorkstreamPathRow extends WorkstreamPath {
+  canonical_path: string;
+  project_id: string;
+  project_name: string | null;
+  exists: boolean;
+  bound_session_count: number;
+}
+
 /** One entry of a Workstream's ordered working-path list; position 0 is primary. */
 export interface WorkstreamPath {
   id: string;
@@ -397,11 +406,23 @@ export interface WorkstreamReviewSummary {
   needs_attention: boolean;
 }
 
+/** `get_session_detail.workspace_path` — the derived, read-only facts (§22). */
+export interface SessionWorkspacePath {
+  id: string;
+  canonical_path: string;
+  exists: boolean;
+  project_id: string;
+  project_name: string;
+}
+
 export interface SessionDetail {
   session: Session;
   events: SessionEvent[];
   bindings: [SessionWorkstreamBinding, string | null][];
   cursor: number;
+  processed_cursor: number;
+  classification: string;
+  workspace_path: SessionWorkspacePath | null;
 }
 
 export interface SearchHit {
