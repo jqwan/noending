@@ -149,7 +149,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     let _ = std::fs::remove_dir_all(&bundle_dir);
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[], None)
+        .prepare_new_in(&db, Agent::Codex, &[], None, &LaunchWorkspace::default())
         .expect("standalone prepare");
     assert_eq!(prepared.mode, "new");
     assert!(prepared.workstream_ids.is_empty());
@@ -162,7 +162,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     );
 
     let result = launcher
-        .launch_prepared_with(&db, &prepared, fake_spawn)
+        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
         .expect("standalone prepared launch must succeed");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
     assert_eq!(result.context_file, "");
@@ -203,7 +203,13 @@ fn off_launch_with_bound_workstream_injects_nothing() {
     let _ = std::fs::remove_dir_all(&bundle_dir);
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .expect("prepare with workstream while off");
     assert!(
         prepared.bundle.sections.is_empty(),
@@ -211,7 +217,7 @@ fn off_launch_with_bound_workstream_injects_nothing() {
     );
 
     let result = launcher
-        .launch_prepared_with(&db, &prepared, fake_spawn)
+        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
         .expect("off launch must succeed");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
     assert_eq!(result.context_file, "");
@@ -234,14 +240,20 @@ fn prepared_launch_goes_stale_when_delivery_level_leaves_off() {
     let launcher = launcher_in("stale-level");
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(prepared.delivery_level, ContextDeliveryLevel::Off);
 
     settings::set_context_delivery_level(&db, ContextDeliveryLevel::Balanced).unwrap();
 
     let err = launcher
-        .launch_prepared(&db, &prepared)
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
         .expect_err("off → balanced must abort the prepared launch");
     assert!(
         err.to_string().contains("stale"),
@@ -257,11 +269,17 @@ fn prepared_launch_goes_stale_when_delivery_level_leaves_off() {
 
     // Re-preparing under the new level works again.
     let fresh = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(fresh.delivery_level, ContextDeliveryLevel::Balanced);
     let relaunch = launcher
-        .launch_prepared_with(&db, &fresh, fake_spawn)
+        .launch_prepared_with_in(&db, &fresh, &LaunchWorkspace::default(), fake_spawn)
         .expect("a launch previewed at the current level proceeds");
     assert_eq!(relaunch.launched_via, FAKE_SPAWN_TAG);
     assert!(
@@ -282,13 +300,19 @@ fn prepared_launch_goes_stale_when_delivery_level_is_turned_off() {
     let launcher = launcher_in("stale-level-reverse");
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert!(!prepared.bundle.sections.is_empty());
 
     settings::set_context_delivery_level(&db, ContextDeliveryLevel::Off).unwrap();
     let err = launcher
-        .launch_prepared(&db, &prepared)
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
         .expect_err("balanced → off must abort too");
     assert!(err.to_string().contains("stale"), "got: {}", err);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 0);
@@ -302,7 +326,9 @@ fn prepared_launch_capability_is_single_use() {
     seed_installation(&db, Agent::Codex);
     let launcher = launcher_in("single-use");
 
-    let prepared = launcher.prepare_new(&db, Agent::Codex, &[], None).unwrap();
+    let prepared = launcher
+        .prepare_new_in(&db, Agent::Codex, &[], None, &LaunchWorkspace::default())
+        .unwrap();
     let id = prepared.id.clone();
     let map: std::sync::Mutex<std::collections::HashMap<String, PreparedLaunch>> =
         Default::default();
@@ -310,7 +336,7 @@ fn prepared_launch_capability_is_single_use() {
 
     let held = consume_once(&map, &id).expect("first consume");
     let held_launch = launcher
-        .launch_prepared_with(&db, &held, fake_spawn)
+        .launch_prepared_with_in(&db, &held, &LaunchWorkspace::default(), fake_spawn)
         .expect("launch with the consumed token");
     assert_eq!(held_launch.launched_via, FAKE_SPAWN_TAG);
 
@@ -340,7 +366,13 @@ fn prepared_launch_reports_the_resolved_working_directory() {
     let launcher = launcher_in("prepared-cwd");
 
     let with_ws = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(
         with_ws.cwd.as_deref(),
@@ -351,7 +383,9 @@ fn prepared_launch_reports_the_resolved_working_directory() {
     assert_eq!(with_ws.cwd_resolution.path_position, Some(0));
     assert!(!with_ws.cwd_resolution.fallback);
 
-    let standalone = launcher.prepare_new(&db, Agent::Codex, &[], None).unwrap();
+    let standalone = launcher
+        .prepare_new_in(&db, Agent::Codex, &[], None, &LaunchWorkspace::default())
+        .unwrap();
     assert_eq!(
         standalone.cwd, None,
         "a launcher that was not given a Home knows no default workspace, so it \

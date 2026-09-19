@@ -95,7 +95,12 @@ export default function SessionsView({ navigate, action, actionSeq }: {
     const q = query.trim().toLowerCase();
     return sessions
       .filter((s) => (agent === "all" ? true : s.agent === agent))
-      .filter((s) => (projectId === "all" ? true : (s.project_id ?? "none") === projectId))
+      // 和 Project 徽章同一个判据：只有存在物理锚点的行才算这个 Project 的成员。
+      // 缓存列单方面说"是"、而徽章说"历史标签，已不决定任何事"的行，不能一边
+      // 显示成无归属、一边又被筛进列表（M34 / §42.3-M29：一个视图不能两个真相）。
+      .filter((s) =>
+        projectId === "all" ? true : !!s.workspace_path_id && s.project_id === projectId
+      )
       .filter((s) => {
         if (wsFilter === "all") return true;
         const rows = bindings.get(s.id) ?? [];

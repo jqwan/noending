@@ -203,7 +203,13 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
 
     let launcher = launcher_in("reorder");
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[w.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[w.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(first.as_str()));
 
@@ -211,7 +217,7 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
     reorder_workstream_paths(&db, &w, &[path_id(&db, &second), path_id(&db, &first)]).unwrap();
 
     let err = launcher
-        .launch_prepared(&db, &prepared)
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
         .expect_err("a reordered primary must not launch the old preview");
     assert!(is_stale(&err.to_string()), "got: {err}");
     assert_eq!(
@@ -221,10 +227,12 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
     );
 
     // Re-previewing under the new order works and follows the new primary.
-    let fresh = launcher.prepare_new(&db, Agent::Codex, &[w], None).unwrap();
+    let fresh = launcher
+        .prepare_new_in(&db, Agent::Codex, &[w], None, &LaunchWorkspace::default())
+        .unwrap();
     assert_eq!(fresh.cwd.as_deref(), Some(second.as_str()));
     let launched = launcher
-        .launch_prepared_with(&db, &fresh, fake_spawn)
+        .launch_prepared_with_in(&db, &fresh, &LaunchWorkspace::default(), fake_spawn)
         .expect("a preview made after the reorder is launchable");
     assert!(
         launched.command_line.ends_with(&second),
@@ -245,7 +253,13 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
     let launcher = launcher_in("remove");
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[w.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[w.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(primary.as_str()));
 
@@ -258,29 +272,37 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
         .unwrap();
     remove_workstream_path(&db, &w, &other_row.id).unwrap();
     let err = launcher
-        .launch_prepared(&db, &prepared)
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
         .expect_err("a removed path must invalidate the preview");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
     // Re-previewed: only `primary` is left, and removing *it* must invalidate
     // the plan as well.
     let after_removal = launcher
-        .prepare_new(&db, Agent::Codex, &[w.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[w.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(after_removal.cwd.as_deref(), Some(primary.as_str()));
     let primary_row = db.list_workstream_paths(&w).unwrap().remove(0);
     remove_workstream_path(&db, &w, &primary_row.id).unwrap();
     let err = launcher
-        .launch_prepared(&db, &after_removal)
+        .launch_prepared_in(&db, &after_removal, &LaunchWorkspace::default())
         .expect_err("removing the primary path must invalidate the preview");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
     // A Workstream with zero paths and no Home previewed here: nothing to launch.
-    let empty = launcher.prepare_new(&db, Agent::Codex, &[w], None).unwrap();
+    let empty = launcher
+        .prepare_new_in(&db, Agent::Codex, &[w], None, &LaunchWorkspace::default())
+        .unwrap();
     assert_eq!(empty.cwd, None);
     add_workstream_path(&db, &LexicalPaths, &empty.workstream_ids[0], &primary).unwrap();
     let err = launcher
-        .launch_prepared(&db, &empty)
+        .launch_prepared_in(&db, &empty, &LaunchWorkspace::default())
         .expect_err("an added path must invalidate the preview too");
     assert!(is_stale(&err.to_string()), "got: {err}");
 }
@@ -340,14 +362,16 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
     .unwrap();
 
     let launcher = launcher_in("resume-cwd");
-    let prepared = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
+    let prepared = launcher
+        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(home_dir.as_str()));
     assert_eq!(prepared.cwd_resolution.source, CwdSource::SessionCwd);
     assert!(!prepared.cwd_resolution.fallback);
     assert!(prepared.cwd_resolution.note.is_none());
 
     let result = launcher
-        .launch_prepared_with(&db, &prepared, fake_spawn)
+        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
         .expect("a resume with its own directory launches");
     assert!(
         result.command_line.ends_with(&home_dir),
@@ -367,7 +391,9 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     let s = session_row(&db, Some(&original), None);
 
     let launcher = launcher_in("resume-drift");
-    let prepared = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
+    let prepared = launcher
+        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .unwrap();
 
     // Discovery rewrites the cwd (§7.2: the transcript is the source of truth).
     let moved = real_dir("resume-drift", "moved");
@@ -376,14 +402,16 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     db.upsert_session(&drifted).unwrap();
 
     let err = launcher
-        .launch_prepared(&db, &prepared)
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
         .expect_err("a moved Session directory must abort, not silently follow");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
-    let fresh = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
+    let fresh = launcher
+        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .unwrap();
     assert_eq!(fresh.cwd.as_deref(), Some(moved.as_str()));
     let result = launcher
-        .launch_prepared_with(&db, &fresh, fake_spawn)
+        .launch_prepared_with_in(&db, &fresh, &LaunchWorkspace::default(), fake_spawn)
         .expect("re-previewed under the new cwd the launch proceeds");
     assert!(result.command_line.ends_with(&moved));
 }
@@ -410,7 +438,9 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
     .unwrap();
 
     let launcher = launcher_in("resume-fallback");
-    let prepared = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
+    let prepared = launcher
+        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .unwrap();
 
     assert_eq!(prepared.cwd.as_deref(), Some(primary.as_str()));
     let resolution = &prepared.cwd_resolution;
@@ -429,7 +459,7 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
 
     // And the Agent really starts there — `prepared.cwd`, not a re-read value.
     let result = launcher
-        .launch_prepared_with(&db, &prepared, fake_spawn)
+        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
         .expect("a fallback is a legitimate launch");
     assert!(result.command_line.ends_with(&primary));
 }
@@ -475,7 +505,9 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
     let s = session_row(&db, Some(&dir), Some(&first));
 
     let launcher = launcher_in("session-path");
-    let prepared = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
+    let prepared = launcher
+        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(dir.as_str()));
 
     // Re-point the Session at a *different row*. Nothing about the cwd string
@@ -489,7 +521,7 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
         .unwrap();
 
     let err = launcher
-        .launch_prepared(&db, &prepared)
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
         .expect_err("a Session that now names a different WorkspacePath is a different launch");
     assert!(is_stale(&err.to_string()), "got: {err}");
 }
@@ -510,7 +542,13 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
 
     let launcher = launcher_in("phantom");
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[w.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[w.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 0);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM sessions"), 0);
@@ -521,7 +559,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     );
 
     let result = launcher
-        .launch_prepared_with(&db, &prepared, fake_spawn)
+        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
         .expect("the launch proceeds");
     assert_eq!(result.launched_via, "test-spawn");
 

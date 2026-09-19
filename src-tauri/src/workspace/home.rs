@@ -370,21 +370,34 @@ impl ReservedPaths {
     /// `candidate` must already be a `canonical_path` (produced by
     /// [`identity::normalize_path`]); this does no normalization of its own.
     pub fn contains(&self, canonical: &str) -> bool {
+        self.contains_with(canonical, identity::PathStyle::current())
+    }
+
+    /// [`Self::contains`] with the separator/case conventions injected, so
+    /// Windows reservation can be proven from a macOS test (§42.3-M8).
+    ///
+    /// The comparison is [`identity::identity_key`], not [`identity::path_key`]:
+    /// on a Windows volume `C:\Users\me\.noending\DATA` IS the `data/` directory
+    /// this set exists to reserve. §2's reservation is a gate rather than a
+    /// membership, so a case-variant miss does not converge later the way two
+    /// spellings of a repository do — it lets the app's own database directory
+    /// become a WorkspacePath and then a Project.
+    pub fn contains_with(&self, canonical: &str, style: identity::PathStyle) -> bool {
         let canonical = canonical.trim();
         if canonical.is_empty() {
             return false;
         }
-        let key = identity::path_key(canonical);
+        let key = identity::identity_key(canonical, style);
         if self
             .home_root
             .as_deref()
-            .is_some_and(|root| identity::path_key(root.trim()) == key)
+            .is_some_and(|root| identity::identity_key(root.trim(), style) == key)
         {
             return true;
         }
         self.app_dirs
             .iter()
-            .any(|dir| identity::is_within(canonical, dir))
+            .any(|dir| identity::is_within_with(canonical, dir, style))
     }
 
     /// Everything this set reserves, for logs and the Settings screen.
@@ -417,7 +430,8 @@ pub fn is_reserved_app_path_with(raw: &str, home: &NoEndingHome, opts: Normalize
         // Not normalizable ⇒ not a WorkspacePath ⇒ reservation is moot.
         return false;
     };
-    home.reserved().contains(&canonical)
+    let style = opts.style.unwrap_or_else(identity::PathStyle::current);
+    home.reserved().contains_with(&canonical, style)
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +520,9 @@ pub fn request_relocation(
     let target = NoEndingHome::new(new_home, user_home)
         .ok_or_else(|| other(format!("无法规范化新的 NoEnding Home 路径: {new_home}")))?;
     if let Some(current) = pointer.current_home.as_deref() {
-        if identity::path_key(&target.root_str()) == identity::path_key(current.trim()) {
+        // Same *location*, not same spelling: a case-variant on a Windows volume
+        // would pass for a relocation and then move `data/` onto itself.
+        if identity::same_location(&target.root_str(), current.trim()) {
             return Err(other("新位置与当前 NoEnding Home 相同，无需迁移"));
         }
     }
@@ -602,7 +618,7 @@ pub fn migrate_data_root(migration: &PendingMigration) -> Result<MigrationReport
     let to_home = NoEndingHome::new(&to, None)
         .ok_or_else(|| other(format!("目标 NoEnding Home 路径无法规范化，迁移取消: {to}")))?;
 
-    if identity::path_key(&from) == identity::path_key(&to) {
+    if identity::same_location(&from, &to) {
         // Nothing to move, but the stale pointer must still be cleaned or every
         // later start would re-run this branch.
         apply_relocation(migration)?;
@@ -917,7 +933,7 @@ pub fn prepare_home(inputs: &StartupInputs) -> Result<StartupOutcome> {
     // then loses it on restart.
     if resolution.source == HomeSource::ExplicitEnv {
         if let Some(recorded) = loaded.current_home.as_deref() {
-            if identity::path_key(&home.root_str()) != identity::path_key(recorded.trim()) {
+            if !identity::same_location(&home.root_str(), recorded.trim()) {
                 notes.push(format!(
                     "本次启动使用 $NOENDING_HOME={}，指针记录的 {recorded} 未改写；下次启动会回到指针位置（需要长期搬迁请在设置里修改 NoEnding Home）",
                     home.root.display()
@@ -1164,11 +1180,17 @@ mod tests {
         assert!(!reserved.contains("D:\\Users\\me\\.noending\\data"));
         assert!(!reserved.contains("C:\\Users\\me\\.noending\\workspace"));
         assert!(!reserved.contains("C:\\Users\\me\\.noending\\datax"));
-        // Case is *not* folded, and that is a documented alias rather than a
-        // silently rewritten path (identity module docs): the lowercase spelling
-        // is therefore not covered by the reservation, which is why every entry
-        // point normalizes through `identity` first.
-        assert!(!reserved.contains("c:\\Users\\me\\.noending\\data"));
+        // Case: on a Windows volume the spelling is not the location, so a
+        // case-variant of `data/` IS `data/` and §2 reserves it. Compared with
+        // `path_key` this leaked — the app's own database directory could become
+        // a WorkspacePath, and §2's reservation cannot self-heal afterwards the
+        // way two spellings of one repository do (Git convergence).
+        assert!(reserved.contains_with("c:\\Users\\me\\.noending\\data", PathStyle::Windows));
+        assert!(reserved.contains_with("C:\\Users\\ME\\.noending\\DATA", PathStyle::Windows));
+        assert!(reserved.contains_with("C:\\Users\\me\\.NOENDING", PathStyle::Windows));
+        // Segment-wise even when folded: `datax` is a different directory.
+        assert!(!reserved.contains_with("C:\\Users\\ME\\.noending\\DATAX", PathStyle::Windows));
+        assert!(!reserved.contains_with("C:\\Users\\ME\\.noending\\workspace", PathStyle::Windows));
         let opts = NormalizeOpts {
             style: Some(PathStyle::Windows),
             base: None,
@@ -1187,6 +1209,16 @@ mod tests {
             &home,
             opts
         ));
+        // The raw-string gate normalizes first and reserves on the *location*,
+        // so a mid-path case variant of a reserved directory is still reserved
+        // (`normalize_path` uppercases the drive and preserves the rest, which is
+        // exactly why the comparison has to fold).
+        assert!(is_reserved_app_path_with(
+            "C:/Users/me/.NOENDING/Logs",
+            &home,
+            opts
+        ));
+        assert!(is_reserved_app_path_with("~\\.NOENDING\\data", &home, opts));
         // A case-variant input normalizes to the same canonical path the Home
         // was built from, so it *is* caught: identity folds the drive, not the
         // rest, and here the differing part is the drive.
@@ -1199,6 +1231,38 @@ mod tests {
             "~\\..\\..\\Windows\\System32",
             &home,
             opts
+        ));
+    }
+
+    /// The counter-check for the fold above: on a Unix-style Home case is *not*
+    /// folded, so a differently-spelled directory stays an ordinary directory.
+    /// A real APFS volume may resolve both to one inode, but NoEnding's
+    /// reservation is defined over `canonical_path`, and folding it there would
+    /// make the gate disagree with the path stored beside it (§42.3-M8.4).
+    #[test]
+    fn reserved_paths_unix_keeps_case() {
+        let home =
+            NoEndingHome::new_with_style("/Users/me/.noending", Some("/Users/me"), PathStyle::Unix)
+                .unwrap();
+        let reserved = home.reserved();
+        assert!(reserved.contains_with("/Users/me/.noending/data", PathStyle::Unix));
+        assert!(reserved.contains_with("/Users/me/.noending", PathStyle::Unix));
+        assert!(reserved.contains_with("/Users/me/.noending/data/noending.db", PathStyle::Unix));
+        assert!(!reserved.contains_with("/Users/me/.noending/DATA", PathStyle::Unix));
+        assert!(!reserved.contains_with("/Users/ME/.noending/data", PathStyle::Unix));
+        assert!(!reserved.contains_with("/Users/me/.noending/workspace", PathStyle::Unix));
+        assert!(!reserved.contains_with("/Users/me/.noending/datax", PathStyle::Unix));
+        let unix = NormalizeOpts {
+            style: Some(PathStyle::Unix),
+            base: None,
+            home: Some("/Users/me"),
+        };
+        assert!(is_reserved_app_path_with("~/.noending/logs", &home, unix));
+        assert!(!is_reserved_app_path_with("~/.noending/LOGS", &home, unix));
+        assert!(!is_reserved_app_path_with(
+            "~/.noending/workspace",
+            &home,
+            unix
         ));
     }
 

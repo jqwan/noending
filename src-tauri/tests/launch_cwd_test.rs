@@ -21,9 +21,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use noending::domain::{binding_source, Agent, Project};
-use noending::launcher::{
-    record_binding, resolve_new_cwd, resolve_new_session_cwd, CwdSource, LaunchWorkspace,
-};
+use noending::launcher::{record_binding, resolve_new_cwd, CwdSource, LaunchWorkspace};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::workstream::{add_workstream_path, create_workstream};
@@ -434,8 +432,9 @@ fn bare_tilde_expands_to_home_root() {
     let home = dirs::home_dir().unwrap();
 
     assert_eq!(
-        resolve_new_session_cwd(&database, &[], Some("~"))
+        resolve_new_cwd(&database, &[], Some("~"), &LaunchWorkspace::default())
             .unwrap()
+            .cwd
             .as_deref(),
         Some(home.to_string_lossy().as_ref())
     );
@@ -448,9 +447,15 @@ fn tilde_expands_only_at_leading_position() {
     let database = db("tilde-mid");
 
     assert_eq!(
-        resolve_new_session_cwd(&database, &[], Some("/opt/a~b/dir"))
-            .unwrap()
-            .as_deref(),
+        resolve_new_cwd(
+            &database,
+            &[],
+            Some("/opt/a~b/dir"),
+            &LaunchWorkspace::default(),
+        )
+        .unwrap()
+        .cwd
+        .as_deref(),
         Some("/opt/a~b/dir")
     );
 }

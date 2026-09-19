@@ -49,6 +49,10 @@ impl WorkspacePolicy for HomePolicy {
     fn default_workspace(&self) -> Option<String> {
         self.default_workspace.clone()
     }
+
+    fn exists_on_disk(&self, canonical_path: &str) -> bool {
+        super::resolver::exists_on_disk(canonical_path)
+    }
 }
 
 /// The owned, shareable handle to the physical layer.

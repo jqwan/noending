@@ -83,6 +83,17 @@ pub fn is_observable(obs: &WorkspaceObservation) -> bool {
     !obs.canonical_path.trim().is_empty() && !obs.path_id.trim().is_empty()
 }
 
+/// Existence, observed in the one layer allowed to read the filesystem.
+///
+/// `workspace::project` never touches disk, but §9 worktree adoption has to
+/// record whether the directory it just learned about is actually present —
+/// otherwise the Projects page says "目录不存在" about a directory that exists
+/// until some later sweep corrects the row. It asks through
+/// [`WorkspacePolicy::exists_on_disk`], and every real policy delegates here.
+pub fn exists_on_disk(canonical_path: &str) -> bool {
+    std::path::Path::new(canonical_path).is_dir()
+}
+
 /// How long a single `git` call may take. A hung credential prompt or a stalled
 /// network mount must not stall Workspace Reconcile (§42.3-M7): the answer is
 /// `Unavailable`, which is also what a missing binary produces.
@@ -352,6 +363,19 @@ impl ResolverContext {
         self.normalize_rooted(&format!("{base}{sep}{raw}"), None)
     }
 
+    /// Are these two `canonical_path`s the *same location*?
+    ///
+    /// Not `==`, and not `path_key`: on a Windows volume case is not part of
+    /// location, and §1.4's two exclusions are gates rather than memberships. A
+    /// case-sensitive read there lets a dotfiles repository whose `toplevel`
+    /// git spelled as `C:\Users\ME` slip past, which then makes the entire user
+    /// Home one Project — the exact outcome §1.4 exists to forbid. There is no
+    /// later convergence to save it, because the Home is not in a Git family.
+    pub fn same_location(&self, a: &str, b: &str) -> bool {
+        let style = self.style();
+        identity::identity_key(a, style) == identity::identity_key(b, style)
+    }
+
     fn normalize_rooted(&self, raw: &str, base: Option<&str>) -> Option<String> {
         tidy(identity::normalize_path_with(
             raw,
@@ -414,7 +438,7 @@ impl WorkspaceResolver {
         if self
             .ctx
             .user_home_canonical()
-            .is_some_and(|home| home == canonical)
+            .is_some_and(|home| self.ctx.same_location(&home, &canonical))
         {
             return None;
         }
@@ -473,7 +497,7 @@ pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> 
 
             // §1.4 — a repository rooted at the user's Home is not evidence.
             if let Some(home) = ctx.user_home_canonical() {
-                let same = |a: &str, b: &str| identity::path_key(a) == identity::path_key(b);
+                let same = |a: &str, b: &str| ctx.same_location(a, b);
                 if toplevel.as_deref().is_some_and(|t| same(&t, &home)) {
                     return GitDetection::None;
                 }
@@ -526,13 +550,17 @@ pub fn worktree_kind(
     common_dir: &str,
     entries: &[WorktreeEntry],
 ) -> GitWorktreeKind {
-    let key = |s: &str| identity::path_key(s);
+    // A location comparison, not a spelling comparison: `git worktree list`
+    // re-prints paths in its own casing, and on a Windows volume a case variant
+    // of the observed root IS the observed root. Answering "no match" there
+    // mislabels `git_kind`, which is an observation the user sees.
+    let key = |s: &str| identity::identity_key(s, ctx.style());
     let root = toplevel.unwrap_or(observed);
     let matching_index = entries.iter().position(|e| {
         e.path
             .as_deref()
             .and_then(|p| ctx.canonicalize_from(p, observed))
-            .is_some_and(|p| key(&p) == key(root))
+            .is_some_and(|p| ctx.same_location(&p, root))
     });
     let matching = matching_index.and_then(|i| entries.get(i));
     if let Some(e) = matching {

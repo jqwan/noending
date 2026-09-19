@@ -109,6 +109,49 @@ pub fn path_key(canonical: &str) -> String {
     base.replace('\\', "/")
 }
 
+/// The form used when two paths are compared *as the same location*.
+///
+/// [`path_key`] normalizes separators only, because it also feeds display
+/// strings (`basename`, automatic Project naming) and folding those would
+/// mis-render a user's directory. This adds the one comparison rule that
+/// display cannot provide: on a Windows-style path, case is not part of
+/// location, so `C:\Users\me\.noending\data` and
+/// `C:\USERS\me\.noending\DATA` are the same directory (方案 §42.3-M8.4:
+/// "大小写折叠只用于身份比较，展示保留原大小写").
+///
+/// Deliberately **not** applied to [`path_identity`]: `workspace_paths.id` is
+/// already stored for every macOS database, and widening the fold there would
+/// change existing identities, which is a data migration (§42.3-M8 aliasing is
+/// the accepted cost there). This function exists for the gates where aliasing
+/// is not a cosmetic cost but a hole — 方案 §2's reserved app paths and §1.4's
+/// Home-level Git exclusion — where a case-variant spelling of the *same*
+/// directory must not be allowed to slip past.
+///
+/// Unix is returned unchanged: APFS is case-insensitive by default but
+/// case-preserving, and folding there would make this module's output differ
+/// from the `canonical_path` the same code stores, which is worse than the
+/// alias it prevents.
+pub fn identity_key(canonical: &str, style: PathStyle) -> String {
+    let key = path_key(canonical);
+    if style.is_windows() {
+        key.to_lowercase()
+    } else {
+        key
+    }
+}
+
+/// Do two `canonical_path`s name the **same location** on this host?
+///
+/// Use this, not `==` and not `path_key(a) == path_key(b)`, for every question
+/// of the form "is this the directory I already have?" — Home relocation, the
+/// §2 reserved set, §1.4's Home exclusion, sibling worktrees. `path_key` alone
+/// is the *display* comparison: it converges separators but keeps case, which
+/// is right for naming and wrong for location on a Windows volume.
+pub fn same_location(a: &str, b: &str) -> bool {
+    let style = PathStyle::current();
+    identity_key(a, style) == identity_key(b, style)
+}
+
 /// Deterministic WorkspacePath id for a canonical path.
 ///
 /// A content id, not a uuid: `ensure_workspace_path` and the v12 backfill must
@@ -171,7 +214,10 @@ pub fn basename(canonical: &str) -> String {
 pub fn auto_project_name(canonical: &str, default_workspace: Option<&str>) -> String {
     let key = path_key(canonical);
     if let Some(dw) = default_workspace {
-        if !dw.trim().is_empty() && path_key(dw.trim()) == key {
+        // "Is this THE default workspace" is a location question, so it folds
+        // case the same way §2's reservations do; on a Windows volume
+        // `~\.NOENDING\workspace` is the directory this names.
+        if !dw.trim().is_empty() && same_location(canonical, dw.trim()) {
             return "NoEnding Workspace".to_string();
         }
     }
@@ -195,9 +241,23 @@ fn capitalize_first(s: &str) -> String {
 /// `is_within("/a/bc", "/a/b")` is false. A plain `str::starts_with` gets
 /// exactly that second case wrong, and this predicate guards both the reserved
 /// app paths (§2) and the Home-level Git exclusion (§1.4).
+///
+/// Compares through [`identity_key`], so on a Windows-style path a case variant
+/// of a guarded directory is still guarded. That matters because §2's reserved
+/// paths and §1.4's Home exclusion are *gates*: unlike a Project membership, a
+/// missed reservation cannot self-heal later, and a missed Home exclusion
+/// classifies the whole user Home as one dotfiles Project.
 pub fn is_within(child: &str, ancestor: &str) -> bool {
-    let child = path_key(child).trim_end_matches('/').to_string();
-    let ancestor = path_key(ancestor).trim_end_matches('/').to_string();
+    is_within_with(child, ancestor, PathStyle::current())
+}
+
+/// Fully injected form of [`is_within`], so Windows containment can be proven
+/// from a macOS test (§42.3-M8, §16-7).
+pub fn is_within_with(child: &str, ancestor: &str, style: PathStyle) -> bool {
+    let child = identity_key(child, style);
+    let child = child.trim_end_matches('/').to_string();
+    let ancestor = identity_key(ancestor, style);
+    let ancestor = ancestor.trim_end_matches('/').to_string();
     if child == ancestor {
         return true;
     }
@@ -541,6 +601,76 @@ mod tests {
         assert!(is_within("/a/b", "/"));
         assert!(is_within("C:\\a\\b", "C:"));
         assert!(!is_within("C:\\ab", "C:\\a"));
+    }
+
+    /// Windows treats case as part of the spelling, not the location. Both
+    /// separators and both cases must land on one containment answer, or §2's
+    /// reserved app paths and §1.4's Home-level Git exclusion leak for the
+    /// directories they exist to guard.
+    #[test]
+    fn windows_containment_folds_case_and_separators() {
+        let w = PathStyle::Windows;
+        assert!(is_within_with(
+            "C:\\Users\\me\\.noending\\data",
+            "C:\\Users\\me\\.noending",
+            w
+        ));
+        assert!(is_within_with(
+            "C:\\Users\\ME\\.NoEnding\\DATA\\noending.db",
+            "c:\\users\\me\\.noending\\data",
+            w
+        ));
+        assert!(is_within_with("C:/Users/me/x", "C:\\Users\\me", w));
+        // Folding is not prefix-matching: `datax` is a sibling, not a child.
+        assert!(!is_within_with(
+            "C:\\Users\\me\\.noending\\datax",
+            "C:\\Users\\me\\.noending\\data",
+            w
+        ));
+        assert!(!is_within_with(
+            "D:\\Users\\me\\.noending",
+            "C:\\Users\\me\\.noending",
+            w
+        ));
+        // A bare drive root still bounds its own children after folding.
+        assert!(is_within_with("C:\\Windows", "c:", w));
+        // UNC keeps server+share as part of the location, case-insensitively.
+        assert!(is_within_with(
+            "\\\\FILE\\share\\Work\\repo",
+            "\\\\file\\share\\work",
+            w
+        ));
+        assert!(!is_within_with(
+            "\\\\other\\share\\work",
+            "\\\\file\\share\\work",
+            w
+        ));
+    }
+
+    /// The fold is a Windows rule only. macOS is case-insensitive by default
+    /// but case-preserving, and folding there would make the comparison
+    /// disagree with the `canonical_path` stored beside it — while `path_key`,
+    /// which feeds display strings, must keep folding out of both platforms.
+    #[test]
+    fn unix_containment_keeps_case_and_display_never_folds() {
+        let u = PathStyle::Unix;
+        assert!(!is_within_with("/Users/me/Data", "/Users/me/data", u));
+        assert!(is_within_with("/Users/me/data", "/Users/me/data", u));
+        assert_eq!(path_key("C:\\Users\\ME\\Data"), "C:/Users/ME/Data");
+        assert_eq!(
+            identity_key("C:\\Users\\ME\\Data", PathStyle::Windows),
+            "c:/users/me/data"
+        );
+        assert_eq!(basename("C:\\Users\\ME\\Data"), "Data");
+        assert_eq!(auto_project_name("C:\\Users\\ME\\Data", None), "Data");
+        // Identity is unchanged by the new comparison key: two case variants
+        // remain two WorkspacePaths on Windows, which is 方案 §42.3-M8's
+        // accepted, Git-convergeable alias and NOT something to widen here
+        // (widening it changes stored `workspace_paths.id`, i.e. a migration).
+        assert_ne!(
+            path_identity(&win("C:\\A\\b").unwrap()),
+            path_identity(&win("C:\\a\\b").unwrap())
+        );
     }
 
     #[test]

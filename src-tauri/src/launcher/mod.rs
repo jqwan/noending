@@ -250,19 +250,6 @@ impl SessionLauncher {
     /// INVARIANT: Zero premature side effects. Does NOT insert LaunchIntent,
     /// does NOT write context files, and does NOT record delivery snapshots.
     ///
-    /// The unsuffixed form knows no default workspace, so §13's third tier is
-    /// absent from its chain. Production calls it only until Main wires the
-    /// managed Home into the commands; see [`Self::prepare_new_in`].
-    pub fn prepare_new(
-        &self,
-        db: &Db,
-        agent: Agent,
-        workstream_ids: &[String],
-        cwd: Option<&str>,
-    ) -> Result<PreparedLaunch> {
-        self.prepare_new_in(db, agent, workstream_ids, cwd, &LaunchWorkspace::default())
-    }
-
     /// §21-1/2 — Prepare New Session against an explicit [`LaunchWorkspace`].
     ///
     /// `cwd` is the caller's explicit directory: when present it IS the launch
@@ -318,20 +305,6 @@ impl SessionLauncher {
     ///
     /// INVARIANT: Zero premature side effects. Does NOT commit extra workstream bindings,
     /// does NOT write context files, and does NOT advance delivery snapshots.
-    pub fn prepare_resume(
-        &self,
-        db: &Db,
-        session_id: &str,
-        extra_workstream_ids: &[String],
-    ) -> Result<PreparedLaunch> {
-        self.prepare_resume_in(
-            db,
-            session_id,
-            extra_workstream_ids,
-            &LaunchWorkspace::default(),
-        )
-    }
-
     /// §21-3 — Prepare Resume against an explicit [`LaunchWorkspace`].
     ///
     /// The Session's own cwd wins while it is a real directory; when it is gone
@@ -410,10 +383,6 @@ impl SessionLauncher {
     ///    re-resolving — §42.3-M16).
     /// 3. Commits LaunchIntent (new) or extra bindings & cumulative delivery snapshots (resume)
     ///    only upon actual launch.
-    pub fn launch_prepared(&self, db: &Db, prepared: &PreparedLaunch) -> Result<LaunchResult> {
-        self.launch_prepared_in(db, prepared, &LaunchWorkspace::default())
-    }
-
     /// `launch_prepared` with the current [`LaunchWorkspace`].
     ///
     /// The default workspace is a Home fact the fingerprint has to re-read from
@@ -439,15 +408,6 @@ impl SessionLauncher {
     /// Exists so integration tests can drive the whole
     /// prepare → launch_prepared chain without opening a real Terminal window
     /// on the developer's machine. Production callers use `launch_prepared`.
-    pub fn launch_prepared_with(
-        &self,
-        db: &Db,
-        prepared: &PreparedLaunch,
-        spawn: fn(&AgentCommand) -> Result<crate::platform::launcher::LaunchOutcome>,
-    ) -> Result<LaunchResult> {
-        self.launch_prepared_with_in(db, prepared, &LaunchWorkspace::default(), spawn)
-    }
-
     /// The one real launch path: prepared launch + current workspace +
     /// injectable spawn. See [`Self::launch_prepared_with`] for why the spawn
     /// is a parameter.
@@ -684,18 +644,6 @@ impl SessionLauncher {
         }
     }
 
-    pub fn new_session(
-        &self,
-        db: &Db,
-        agent: Agent,
-        workstream_ids: &[String],
-        cwd: Option<&str>,
-    ) -> Result<LaunchResult> {
-        self.new_session_in(db, agent, workstream_ids, cwd, &LaunchWorkspace::default())
-    }
-
-    /// The prepare → launch pair the New Session command uses once the managed
-    /// Home is threaded through (see [`Self::prepare_new_in`]).
     pub fn new_session_in(
         &self,
         db: &Db,
@@ -708,21 +656,6 @@ impl SessionLauncher {
         self.launch_prepared_in(db, &prepared, workspace)
     }
 
-    pub fn resume_session(
-        &self,
-        db: &Db,
-        session_id: &str,
-        extra_workstream_ids: &[String],
-    ) -> Result<LaunchResult> {
-        self.resume_session_in(
-            db,
-            session_id,
-            extra_workstream_ids,
-            &LaunchWorkspace::default(),
-        )
-    }
-
-    /// See [`Self::resume_session`].
     pub fn resume_session_in(
         &self,
         db: &Db,
@@ -735,18 +668,18 @@ impl SessionLauncher {
     }
 }
 
-/// Compute a deterministic SHA-256 fingerprint representing the exact context inputs
-/// and backing DB state (workstream metadata, active context items & current revisions,
-/// conflicts, the Agent's runtime override intent, and for resume mode: session
-/// cursor, bindings, and delivery snapshots).
+/// Recompute the fingerprint of a launch **from the database as it is now**,
+/// resolving the §13 chain the same way `prepare_*` does.
 ///
-/// The unsuffixed form describes a launch whose §13 chain has no default
-/// workspace and no explicit caller directory — which is exactly what
-/// [`SessionLauncher::prepare_new`] and `prepare_resume` capture, so those two
-/// stay comparable with it. A caller that supplied an explicit directory, or
-/// that runs against a real Home, must use
-/// [`compute_state_fingerprint_in`] with the same [`CwdResolution`] the prepare
-/// step produced, or the comparison is between two different statements.
+/// This is the "has anything the user saw moved?" question. It takes the same
+/// [`LaunchWorkspace`] the prepare step used: `None` in `default_workspace`
+/// means "this launcher has no Home", which drops §13's third tier from the
+/// chain, so the answer is a different statement than the one a real Home
+/// produces (§42.3-M31).
+///
+/// A caller that already holds a `PreparedLaunch` — where the resolved tier is
+/// a recorded fact, not something to re-derive — uses
+/// [`compute_state_fingerprint_in`] with that same [`CwdResolution`].
 pub fn compute_state_fingerprint(
     db: &Db,
     mode: &str,
@@ -754,24 +687,15 @@ pub fn compute_state_fingerprint(
     effective_workstream_ids: &[String],
     delivery_level: ContextDeliveryLevel,
     agent: Agent,
+    workspace: &LaunchWorkspace,
 ) -> Result<String> {
     let resolution = if mode == "resume" {
         match session_id {
-            Some(sid) => resolve_resume_cwd(
-                db,
-                sid,
-                effective_workstream_ids,
-                &LaunchWorkspace::default(),
-            )?,
+            Some(sid) => resolve_resume_cwd(db, sid, effective_workstream_ids, workspace)?,
             None => CwdResolution::default(),
         }
     } else {
-        resolve_new_cwd(
-            db,
-            effective_workstream_ids,
-            None,
-            &LaunchWorkspace::default(),
-        )?
+        resolve_new_cwd(db, effective_workstream_ids, None, workspace)?
     };
     compute_state_fingerprint_in(
         db,
@@ -780,7 +704,7 @@ pub fn compute_state_fingerprint(
         effective_workstream_ids,
         delivery_level,
         agent,
-        &LaunchWorkspace::default(),
+        workspace,
         &resolution,
     )
 }
@@ -1398,20 +1322,6 @@ fn recompute_launch_cwd(
     resolve_new_cwd(db, &prepared.workstream_ids, None, workspace)
 }
 
-/// Launch directory for a New Session, in §13's order — the directory only.
-///
-/// Kept as the narrow accessor for callers that do not care which tier produced
-/// the answer. It resolves without a default workspace, i.e. with
-/// [`LaunchWorkspace::default()`]; the full chain (and the reason) is
-/// [`resolve_new_cwd`].
-pub fn resolve_new_session_cwd(
-    db: &Db,
-    workstream_ids: &[String],
-    explicit: Option<&str>,
-) -> Result<Option<String>> {
-    Ok(resolve_new_cwd(db, workstream_ids, explicit, &LaunchWorkspace::default())?.cwd)
-}
-
 /// Unchanged rows are kept verbatim (provenance, created_at, cursors and
 /// last_used_at survive — a metadata edit is not a "use"). A role edit on an
 /// AUTOMATIC binding upgrades it to user_assigned, because sync replaces AUTO
@@ -1454,12 +1364,9 @@ pub fn replace_session_bindings(
 /// silently guess); nothing → stays pending for a later reconcile.
 ///
 /// Run against the real Home so §42.3-M15's shared-default-workspace rule can
-/// be applied; see [`try_match_launch_intents_in`].
-pub fn try_match_launch_intents(db: &Db, session: &Session) -> Result<bool> {
-    try_match_launch_intents_in(db, session, &LaunchWorkspace::default())
-}
-
-/// The matcher, told which directory every "no Workstream path" launch shares.
+/// be applied.
+///
+/// The matcher is told which directory every "no Workstream path" launch shares.
 ///
 /// §42.3-M15: §13's third tier routes several independent launches into the
 /// *same* cwd, and cwd was worth `+3.0` — enough on its own to look decisive.

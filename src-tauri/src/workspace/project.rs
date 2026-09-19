@@ -99,7 +99,8 @@ use crate::storage::workspace::{
 };
 use crate::storage::{new_id, now, upsert_project_conn, Db};
 use crate::workspace::identity::{
-    auto_project_name, normalize_path, normalize_path_with, path_identity, path_key, NormalizeOpts,
+    auto_project_name, normalize_path, normalize_path_with, path_identity, same_location,
+    NormalizeOpts,
 };
 use crate::workspace::resolver::WorkspaceObserving;
 use crate::workspace::WorkspaceAttaching;
@@ -121,6 +122,13 @@ pub trait WorkspacePolicy {
     fn default_workspace(&self) -> Option<String> {
         None
     }
+    /// Is this directory actually on this machine right now?
+    ///
+    /// Existence is an *observation* (§1.3), and this layer never reads the
+    /// filesystem, so it asks rather than computing. Deliberately no default
+    /// body: an implementor that has not been wired to a real host must choose
+    /// an answer out loud, not inherit a guess about the user's disk.
+    fn exists_on_disk(&self, canonical_path: &str) -> bool;
 }
 
 /// The policy for a registry that has no NoEnding Home in play yet (tests, and
@@ -128,7 +136,11 @@ pub trait WorkspacePolicy {
 /// the special name.
 pub struct UnrestrictedWorkspace;
 
-impl WorkspacePolicy for UnrestrictedWorkspace {}
+impl WorkspacePolicy for UnrestrictedWorkspace {
+    fn exists_on_disk(&self, canonical_path: &str) -> bool {
+        super::resolver::exists_on_disk(canonical_path)
+    }
+}
 
 /// The WorkspacePath registry for one database. Holds the two things §8 needs
 /// beyond SQL: who observes paths, and what the surrounding Home forbids.
@@ -652,7 +664,11 @@ fn adopt_sibling_worktrees(
         let Some(canonical) = normalize_path(worktree) else {
             continue;
         };
-        if path_key(&canonical) == path_key(&path.canonical_path) {
+        // Same location, not same spelling: `git worktree list` and the row we
+        // are holding may differ only in case on a Windows volume, and adopting
+        // the "other" spelling would add a second WorkspacePath — and therefore
+        // a second path to this Project — for one directory.
+        if same_location(&canonical, &path.canonical_path) {
             continue;
         }
         if policy.is_reserved(&canonical) {
@@ -666,7 +682,12 @@ fn adopt_sibling_worktrees(
         update_workspace_path_observation_conn(
             conn,
             &sibling_id,
-            false,
+            // Observed, not assumed. `git worktree list` reports registrations for
+            // directories that may or may not still be on this machine, and a
+            // hardcoded `false` here made the Projects page say "目录不存在"
+            // about worktrees that were sitting right there until a later sweep
+            // corrected the row.
+            policy.exists_on_disk(&canonical),
             git_state::DETECTED,
             // Git listed this worktree of the same family; whether it is the main
             // one is not derivable from a sibling list, and guessing would be a
@@ -1093,14 +1114,45 @@ pub fn registry_is_consistent(db: &Db) -> std::result::Result<(), String> {
             SELECT 1 FROM workspace_paths wp WHERE wp.project_id = p.id)",
         "zero-path project",
     )?;
-    check(
-        "SELECT COUNT(*) FROM (SELECT id FROM workspace_paths GROUP BY id HAVING COUNT(DISTINCT project_id) > 1)",
-        "path owned by two projects",
-    )?;
+    // Structural through `idx_projects_git_id` (a partial UNIQUE index), so this
+    // can only fire if that index is ever dropped or made conditional — which is
+    // precisely the §25 row "non-null git_id unique", and the reason §8.3's
+    // worktree convergence works at all.
     check(
         "SELECT COUNT(*) FROM (SELECT git_id FROM projects WHERE git_id IS NOT NULL GROUP BY git_id HAVING COUNT(*) > 1)",
         "git family owned by two projects",
     )?;
+    // §1.1 is "every WorkspacePath belongs to exactly one Project". The obvious
+    // SQL for that (`GROUP BY id HAVING COUNT(DISTINCT project_id) > 1`) is
+    // vacuous and used to sit here: `id` is the PRIMARY KEY, so no group can
+    // ever hold two values. What is *not* structural is that the key is the one
+    // this path derives to. A row carrying an id its own `canonical_path` does
+    // not hash to is a second identity for one directory, and every join in the
+    // app would keep agreeing with it, because joins go through `id`.
+    // `workspace::identity` is the only place a path key may be computed, so
+    // this is the only place that can prove nobody computed it elsewhere.
+    let rows: std::result::Result<Vec<(String, String)>, String> = conn
+        .prepare("SELECT id, canonical_path FROM workspace_paths ORDER BY id")
+        .map_err(|e| format!("workspace path id check: {e}"))
+        .and_then(|mut st| {
+            st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| format!("workspace path id check: {e}"))
+                .and_then(|rows| {
+                    rows.collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| format!("workspace path id check: {e}"))
+                })
+        });
+    let mut lying_id: Vec<String> = rows?
+        .into_iter()
+        .filter(|(id, canonical)| path_identity(canonical) != *id)
+        .map(|(id, canonical)| format!("{id} <- {canonical}"))
+        .collect();
+    if !lying_id.is_empty() {
+        lying_id.truncate(5);
+        return Err(format!(
+            "workspace path id not derived from its canonical_path: {lying_id:?}"
+        ));
+    }
     check(
         "SELECT COUNT(*) FROM sessions s JOIN workspace_paths wp ON wp.id = s.workspace_path_id WHERE s.project_id IS NOT wp.project_id",
         "session project cache out of sync with its path",

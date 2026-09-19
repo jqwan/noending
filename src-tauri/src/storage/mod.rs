@@ -1274,6 +1274,16 @@ impl Db {
             .collect())
     }
 
+    /// §1.10 — a `project_id` filter reads the **authoritative chain**
+    /// (`sessions.workspace_path_id → workspace_paths.project_id`), never the
+    /// `sessions.project_id` cache.
+    ///
+    /// The cache is derived for every row the app writes, so the two agree in
+    /// normal operation; they diverge exactly where v0.2 intends to diverge —
+    /// a legacy row still carrying a hand-attached v11 label while having no
+    /// resolvable cwd. Listing those under a Project would make the retired
+    /// column an authority again, and would disagree with `get_project_detail`,
+    /// which already walks the chain (§42.3-M29: one view may not be two truths).
     pub fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<Session>> {
         // Dynamic SQL: placeholders are appended together with the bind
         // values, so the numbering can never drift out of sync.
@@ -1281,7 +1291,12 @@ impl Db {
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         if let Some(p) = &filter.project_id {
             values.push(Box::new(p.clone()));
-            sql.push_str(&format!(" AND project_id = ?{}", values.len()));
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM workspace_paths wp \
+                                WHERE wp.id = sessions.workspace_path_id \
+                                  AND wp.project_id = ?{})",
+                values.len()
+            ));
         }
         if let Some(a) = &filter.agent {
             values.push(Box::new(a.as_str().to_string()));

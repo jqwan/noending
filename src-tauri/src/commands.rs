@@ -225,10 +225,16 @@ pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<Con
             None,
             "user",
         )?;
-        if let Some(ws) = db.get_workstream(&args.workstream_id)? {
-            if let Some(pid) = &ws.project_id {
-                db.touch_project(pid)?;
-            }
+        // §42.3-M19 — the Project this activity belongs to is its position-0
+        // path's Project. Reading the frozen `workstreams.project_id` column
+        // here was the last live consumer of a retired authority: for a
+        // migrated Workstream it can name a Project §7.4 deleted or §8.3
+        // merged away, which would reorder `list_projects` (ORDER BY
+        // updated_at) by a membership that no longer exists.
+        let (pid, _) =
+            crate::workspace::workstream::primary_project_for_workstream(db, &args.workstream_id)?;
+        if let Some(pid) = pid {
+            db.touch_project(&pid)?;
         }
         Ok(item)
     })

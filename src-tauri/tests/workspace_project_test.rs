@@ -249,6 +249,13 @@ impl WorkspacePolicy for Home {
     fn default_workspace(&self) -> Option<String> {
         self.default_workspace.clone()
     }
+
+    fn exists_on_disk(&self, canonical_path: &str) -> bool {
+        // Same rule the production policy uses: existence is read from the real
+        // host, never assumed. Tests that hand in a non-existent path therefore
+        // get `false`, which is what §9 adoption must record.
+        noending::workspace::resolver::exists_on_disk(canonical_path)
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -351,6 +358,56 @@ fn new_git_path_creates_a_git_backed_project() {
     );
     assert_eq!(db.list_projects().unwrap().len(), 1);
     assert_eq!(project_of(&db, &path).git_id, Some(git_id));
+}
+
+/// §9 + §1.3 — an adopted worktree's existence is observed, never assumed.
+///
+/// `git worktree list` reports registrations whether or not the directory is
+/// still on this machine. Adoption used to hardcode `false`, so the Projects
+/// page claimed "目录不存在" about worktrees that were sitting right there until
+/// some later sweep corrected the row. Both answers must come from the disk.
+#[test]
+fn adopted_worktrees_report_the_existence_that_was_observed() {
+    let (_d, db) = temp_db();
+    let root = unique_dir("wt-exists");
+    let main = root.join("repo");
+    let sibling = root.join("repo-feature");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+    let ghost = root.join("removed-long-ago"); // never created
+
+    let row = ensure(
+        &db,
+        &repo(
+            &main.to_string_lossy(),
+            &main.join(".git").to_string_lossy(),
+            GitWorktreeKind::Main,
+            &[
+                &main.to_string_lossy(),
+                &sibling.to_string_lossy(),
+                &ghost.to_string_lossy(),
+            ],
+        ),
+    );
+
+    let family = paths_of(&db, &row.project_id);
+    assert_eq!(family.len(), 3, "§9: the list becomes WorkspacePaths");
+
+    let by_path = |p: &std::path::Path| {
+        family
+            .iter()
+            .find(|w| w.canonical_path == canon(&p.to_string_lossy()))
+            .unwrap_or_else(|| panic!("no row for {}", p.display()))
+    };
+    assert!(
+        by_path(&sibling).exists,
+        "a worktree that is on disk must be adopted as existing"
+    );
+    assert!(
+        !by_path(&ghost).exists,
+        "a registration whose directory is gone stays a legal exists=false \
+         observation (§42.3-M8), it is not silently dropped or asserted present"
+    );
 }
 
 #[test]

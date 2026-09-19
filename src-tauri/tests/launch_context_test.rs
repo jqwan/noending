@@ -5,6 +5,7 @@ use noending::domain::{
     binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, ProjectAffinityEvidence,
     Session, SessionClassificationState, SessionWorkstreamBinding, SourceCursor,
 };
+use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
 use noending::{context, launcher};
 
@@ -111,7 +112,7 @@ fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
     // the agent CLI creates its session; we discover it afterwards
     let session = session_row(&db, Agent::Codex, Some(now()), None);
     assert!(
-        launcher::try_match_launch_intents(&db, &session).unwrap(),
+        launcher::try_match_launch_intents_in(&db, &session, &LaunchWorkspace::default()).unwrap(),
         "the fresh session must claim the pending intent"
     );
 
@@ -147,7 +148,9 @@ fn contextless_launch_matches_but_stays_zero_binding() {
     let intent = pending_intent(&db, Agent::Pi, vec![], None);
 
     let session = session_row(&db, Agent::Pi, Some(now()), None);
-    assert!(launcher::try_match_launch_intents(&db, &session).unwrap());
+    assert!(
+        launcher::try_match_launch_intents_in(&db, &session, &LaunchWorkspace::default()).unwrap()
+    );
     assert!(db.bindings_for_session(&session.id).unwrap().is_empty());
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
@@ -167,7 +170,7 @@ fn ambiguous_candidates_wait_for_the_user() {
 
     let session = session_row(&db, Agent::ClaudeCode, Some(now()), None);
     assert!(
-        !launcher::try_match_launch_intents(&db, &session).unwrap(),
+        !launcher::try_match_launch_intents_in(&db, &session, &LaunchWorkspace::default()).unwrap(),
         "must not silently pick one"
     );
     let ambiguous = db
@@ -204,7 +207,12 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
 
     // a Claude session cannot claim a Codex intent
     let claude_session = session_row(&db, Agent::ClaudeCode, Some(now()), None);
-    assert!(!launcher::try_match_launch_intents(&db, &claude_session).unwrap());
+    assert!(!launcher::try_match_launch_intents_in(
+        &db,
+        &claude_session,
+        &LaunchWorkspace::default()
+    )
+    .unwrap());
 
     // expire pending intents that are older than the TTL
     db.update_launch_intent(&intent.id, launch_status::PENDING, None, "")
@@ -232,7 +240,10 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
         None,
     );
     let fresh = pending_intent(&db, Agent::Codex, vec![ws.id.clone()], None);
-    assert!(!launcher::try_match_launch_intents(&db, &old_session).unwrap());
+    assert!(
+        !launcher::try_match_launch_intents_in(&db, &old_session, &LaunchWorkspace::default())
+            .unwrap()
+    );
     assert_eq!(
         db.get_launch_intent(&fresh.id).unwrap().unwrap().status,
         launch_status::PENDING
@@ -621,15 +632,28 @@ fn delete_project_detaches_without_archiving() {
 
 /// The list_sessions parameter bug: filtering by agent ONLY used to bind
 /// ?2 with a single parameter and fail. All four filter combinations work.
+///
+/// The Project half goes through the authoritative chain (§1.10): the Session is
+/// a member because its `workspace_path_id` says so, not because the derived
+/// cache happens to hold a value.
 #[test]
 fn list_sessions_all_filter_combinations() {
     let db = open_db("session-filter");
     let p = project_row(&db, "P");
     let s_codex = session_row(&db, Agent::Codex, Some(now()), None);
     let _s_pi = session_row(&db, Agent::Pi, Some(now()), None);
+    let path_id = db
+        .tx(|tx| {
+            noending::storage::workspace::insert_workspace_path_conn(
+                tx,
+                &noending::workspace::normalize_path("/list-filter/p").unwrap(),
+                &p.id,
+            )
+        })
+        .unwrap();
     db.0.execute(
-        "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
-        rusqlite::params![s_codex.id, p.id],
+        "UPDATE sessions SET workspace_path_id = ?2 WHERE id = ?1",
+        rusqlite::params![s_codex.id, path_id],
     )
     .unwrap();
 
@@ -2103,7 +2127,13 @@ fn prepare_new_does_not_create_intent_or_delivery_or_file() {
     };
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
 
     // 1. PreparedLaunch captures the exact bundle & fingerprint
@@ -2158,7 +2188,7 @@ fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
 
     // User chooses to add ws2 during resume preparation
     let prepared = launcher
-        .prepare_resume(&db, &s.id, &[ws2.id.clone()])
+        .prepare_resume_in(&db, &s.id, &[ws2.id.clone()], &LaunchWorkspace::default())
         .unwrap();
 
     assert_eq!(prepared.mode, "resume");
@@ -2195,14 +2225,22 @@ fn state_fingerprint_stale_detection_on_context_change() {
     };
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
 
     // Context changes in the background (e.g. new item added)
     seed_context(&db, &ws.id, &["新插入的约束"]);
 
     // Attempting to launch with stale prepared launch MUST fail with stale error
-    let err = launcher.launch_prepared(&db, &prepared).unwrap_err();
+    let err = launcher
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .unwrap_err();
     assert!(
         err.to_string().contains("stale"),
         "expected stale error, got: {}",
@@ -2223,7 +2261,13 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
         runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert!(prepared.runtime.is_default());
 
@@ -2235,6 +2279,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             &prepared.workstream_ids,
             prepared.delivery_level,
             Agent::Codex,
+            &LaunchWorkspace::default(),
         )
         .unwrap()
     };
@@ -2276,6 +2321,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             &prepared.workstream_ids,
             prepared.delivery_level,
             Agent::Codex,
+            &LaunchWorkspace::default()
         )
         .unwrap()
     );
@@ -2304,7 +2350,13 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
         runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(prepared.runtime.model.as_deref(), Some("gpt-5.6-sol"));
     assert_eq!(prepared.runtime.effort.as_deref(), Some("high"));
@@ -2363,7 +2415,9 @@ fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
         runtime_dir: tmp_dir,
     };
 
-    let prepared = launcher.prepare_resume(&db, &s.id, &[]).unwrap();
+    let prepared = launcher
+        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .unwrap();
 
     // Background process advances delivery snapshot
     let delivery = ContextDelivery {
@@ -2377,7 +2431,9 @@ fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
     };
     db.record_delivery(&delivery).unwrap();
 
-    let err = launcher.launch_prepared(&db, &prepared).unwrap_err();
+    let err = launcher
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .unwrap_err();
     assert!(
         err.to_string().contains("stale"),
         "expected stale error, got: {}",
@@ -2401,7 +2457,13 @@ fn state_fingerprint_stale_detection_on_delivery_level_change() {
     };
 
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(
         prepared.delivery_level,
@@ -2412,7 +2474,9 @@ fn state_fingerprint_stale_detection_on_delivery_level_change() {
     noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Off)
         .unwrap();
 
-    let err = launcher.launch_prepared(&db, &prepared).unwrap_err();
+    let err = launcher
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .unwrap_err();
     assert!(
         err.to_string().contains("stale"),
         "expected stale error on delivery level change, got: {}",
@@ -2432,7 +2496,13 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
     };
 
     let p1 = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
 
     // Fingerprint recomputed against unchanged state is identical
@@ -2443,6 +2513,7 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
         &p1.workstream_ids,
         p1.delivery_level,
         p1.agent,
+        &LaunchWorkspace::default(),
     )
     .unwrap();
     assert_eq!(p1.state_fingerprint, current_fp);
@@ -2454,7 +2525,13 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
     noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Off)
         .unwrap();
     let p_off = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(p_off.delivery_level, context::ContextDeliveryLevel::Off);
     assert!(p_off.bundle.sections.is_empty());
@@ -2470,7 +2547,13 @@ fn prepared_launch_single_use_atomic_consumption() {
         runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
 
     let map = std::sync::Mutex::new(std::collections::HashMap::new());
@@ -2505,7 +2588,13 @@ fn prepared_launch_concurrent_consumption_is_exclusive() {
         runtime_dir: std::env::temp_dir(),
     };
     let prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
 
     let map = Arc::new(Mutex::new(HashMap::new()));
@@ -2544,14 +2633,26 @@ fn prepared_launch_lazy_ttl_cleanup() {
         runtime_dir: std::env::temp_dir(),
     };
     let mut stale_prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     // Simulate an old timestamp: 35 minutes ago
     let old_ts = chrono::Utc::now() - chrono::Duration::seconds(35 * 60);
     stale_prepared.prepared_at = old_ts.to_rfc3339();
 
     let fresh_prepared = launcher
-        .prepare_new(&db, Agent::Codex, &[ws.id.clone()], None)
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            &[ws.id.clone()],
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
 
     let map = Mutex::new(HashMap::new());

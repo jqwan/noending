@@ -23,9 +23,10 @@ type Field = keyof AgentRuntimeOverrides;
 
 /** 该 Agent 真正被 override 的字段（unsupported 字段永远为 null）。 */
 function overriddenFields(agent: Agent, runtime: AgentRuntimeOverrides): Field[] {
-  return (Object.keys(FIELD_LABELS[agent]) as Field[]).filter(
-    (f) => runtime[f] !== null
-  );
+  // `!= null`, not `!== null`: a field the backend ever omits is "Agent
+  // default", not "overridden with the value undefined" — the looser compare is
+  // what keeps the preview from rendering `Provider undefined`.
+  return (Object.keys(FIELD_LABELS[agent]) as Field[]).filter((f) => runtime[f] != null);
 }
 
 /** 「Agent 默认值」，或 override 的显式意图。 */

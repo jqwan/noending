@@ -3335,6 +3335,19 @@ discovered 8 · failed 0 · GC 0。Git 家族合并确实发生了（一个 Proj
 (c) Projects 列表按 Session 数排序 + 默认隐藏 1-Session Project。
 Main 的建议：先做 (a)（零风险、纯展示），(b) 需要用户点头，(c) 属于 Wave 2 之后。
 
+**用户裁定（2026-09-19，真机看过侧栏之后）：三个选项都不做，同名就同名。**
+所以 §43.6 的 (a)/(b)/(c) 到此关闭，不要再提议。真界面上看到的形状就是最终口径：
+`Realtime-voice-chat` 出现 4 次、`Deepseek-harness` 出现 2 次（不同 Git 家族，
+§8.3 正确地没合并），以及 `To` / `Nin` / `Ke` / `Jian` 这类两三字母的名字——
+它们是 `~/Documents/Codex/<日期>/<slug>` 里真实的目录 basename，不是命名截断。
+Project 列表**忠实反映"用户在哪些目录跑过 Agent"**，噪声由用户自己承担，
+不换取消歧、也不换隐藏。
+
+（Main 曾按"同名加数字后缀"实现过一版 `display_names`：库里 `name` 不动，
+读时按整个集合派生标签，`name_customized` 的 Project 永不参与编号。该实现**未提交、
+已完整还原**，记录在此只为说明：这条路的正确形状是"派生显示标签"而不是
+"写回名字"——写回会让删掉一个兄弟 Project 时偷偷重命名其余的。）
+
 ## 43.7 Wave 2 — E / F1 / F2 交付与 Main 集成
 
 各 agent 的交付（base 均为派发时记录的 HEAD，已用 `git diff --stat` 核对越界）：
@@ -3461,3 +3474,144 @@ LIMIT。§43.6 的真实语料里 “Tmp” 一个 Project 就挂 393 个 Sessio
    * §28 全量 grep 时，`default_cwd` 允许出现在 legacy schema / migration / 冻结列的
      guard 测试里；`project_resources` 表本身保留（legacy 读），命令不注册。
 4. G 不改 UI 文案；文案问题按 §43.8 的口径报给 Main。
+
+## 43.10 Wave 3 — Agent G：中途断线，Main 接手收尾
+
+**G 没有交付 §27 报告。** 它在 150 turn 上限处被强制中断，最后一句是"One more
+falsifiability check…"。所以本节全部结论由 Main 从 diff 与自己的复核重推，
+**不接受任何未验证的转述**——包括 G 自己的 commit message。
+
+断线时的现场：
+
+```text
+f9f2912 fix(workspace): stop reading derived caches and spellings as authorities   ← 完好
+2b33ed0 test(workspace): lock the §25 matrix rows that had no assertion behind them ← 完好
+未提交: src-tauri/src/launcher/mod.rs  1674 行 → 447 行，
+        prepare_new / apply_match / resolve_new_cwd / try_match_launch_intents_in /
+        compute_state_fingerprint_in 等核心函数全部消失
+```
+
+那是第二次"字符串手术边界过贪吞掉整段函数"（Main 自己在 Wave 1 也犯过一次，见
+§43.2 的 `try_match_launch_intents` 事故）。处理方式：先把未提交 diff 存成补丁
+（`/tmp/g-launcher-wip.patch`，2047 行，没丢东西），再 `git checkout --` 从 HEAD 还原，
+然后才动任何别的东西。**注意 `2b33ed0` 里的 launcher 删除是完整且正确的**——断掉的
+是它之后一次更进一步的未提交尝试。
+
+合入：cherry-pick `f9f2912` `2b33ed0` → `ea1d8b5` `4da541d`，零冲突。
+**WAVE3_SHA = `4da541d`**。
+
+## 43.11 G 抓到的三个 invariant 违例（其中一个 Main 漏了）
+
+1. **`add_context_item` 读冻结列 `workstreams.project_id` 并 `touch_project`**
+   —— 这条在 §28 的 grep 名单里，**是 Main 的失职**：我把名单交给 G 跑，却没有自己
+   先跑。它让一次 Context 编辑去按一个可能已被 §7.4 删除、§8.3 合并掉的成员关系
+   重排 `list_projects`。现在改用 §42.3-M19 的 position-0 投影，这也清掉了那个退役列
+   在 production 里的最后一个读者。
+2. **`list_sessions(project_id)` 以派生缓存为查询谓词**（§43.9-1）—— 与
+   `get_project_detail` 走的权威链不一致，正是 M29 判定"一个视图不能有两个真相"的那个
+   形状：一条 legacy 行身上挂着 v11 手工标签但没有可解析 cwd 时，列表说它属于这个
+   Project，详情页否认。改成 `EXISTS (… workspace_paths …)` 走链。
+3. **"同一个位置吗"这类比较用了 `path_key`**（折叠分隔符但**保留大小写**）—— 在
+   Windows 卷上是错的关系，而且有三处一旦判错就**无法自愈**：§2 的 reserved 集合
+   （`data/` 的大小写变体会变成 WorkspacePath，进而变成围着 App 自己数据库的
+   Project）、§1.4 的 Home 级 Git 排除（一个 toplevel 拼成 `C:\Users\ME` 的 dotfiles
+   仓库会把整个用户 Home 变成一个 Project）、Home 迁移（大小写变体通过"和当前相同"
+   的守卫，然后把 `data/` 搬到它自己身上）。新增 `identity::identity_key` /
+   `same_location` / `ReservedPaths::contains_with`，遵守 M8.4：**只为比较折叠，
+   从不为显示折叠**。非 Windows 逐字节不变 → 不动任何已存 identity，不触发迁移。
+
+  `path_identity` **仍然不折叠**——改它会改已存的 `workspace_paths.id`，那是数据
+  迁移，G 正确地报告而没有擅自做。→ 记为 **M33**。
+
+顺带：`registry_is_consistent` 里一条恒真断言（`GROUP BY id HAVING
+COUNT(DISTINCT project_id) > 1`，而 `id` 是主键，永远不可能 >1）换成了 §1.1 真正
+要查的东西——每行的 id 是否就是它自己的 `canonical_path` 推导出来的那个。
+
+新增机械守卫（§42.5 T1–T4，落在 `session_workspace_test.rs` 里 T2 的旁边）：T1 数
+`generate_handler!` 的**条目**（Main 亲证可证伪：把 `create_project` 塞回注册表，
+`retired_commands_are_not_registered` 立刻失败）；T3 用配对括号取 INSERT 列表；T4
+对注释盲。G 还报告它对每条新断言做了 mutation 测试，**两条怎么改都不红的断言被删掉
+而不是留着凑数**——这正是 §26 要的可证伪性，也是我在 brief 里要求的东西。
+
+## 43.12 §28 / §29 最终核查（Main 亲自跑，2026-09-19）
+
+退役命令在生产业务路径中的残留：**全部为注释或已退役定义**，且不再有注册。
+`suggest_session_project` / `record_session_project_evidence` /
+`suggest_project_for_session` / `merge_workstreams` 保留为只读历史入口，
+且 T1 现在机器保证它们回不到 `generate_handler!`。
+
+`UPDATE sessions SET project_id` 的写者集合**闭合**：src/ 里只剩
+`session_paths.rs:161`（Project 失去最后一条路径时清成 NULL）这一条显式语句，
+加上 `upsert_session` 语句内派生与 v12 迁移——正是 AGENTS.md 说的三个写者，
+其余命中全是文档注释。前端已无手工 Project **指派** UI。
+
+**遗留一条，记为 M34（Main 发现，未在本阶段修）**：
+`sessions/SessionsView.tsx:98` 在**客户端**用 `s.project_id`（派生缓存）过滤，
+第 200 行的下拉是筛选器不是指派器（合法），但它把 G 刚在服务端消掉的"两个真相"
+在前端重新引入了：列表会按缓存把一个 Session 归到某个 Project，而详情页按链否认。
+不在本阶段顺手修的理由要说清楚：正确的修法是**删掉客户端过滤**、把 `projectId`
+交给已经走链的 `listSessions` 服务端查询，这会改变筛选的取数时机（每次切 Project
+要重取），属于 UX 决策而不是不变量修复——半成品式地在客户端再拼一份链投影才是
+更糟的选择。留到 §33 dogfood 之后与 Project 噪声口径（§43.6 的 a/b/c）一起定。
+
+Wave 3 gate：`cargo fmt --check` 通过、`cargo check --all-targets` **0 warning**、
+`cargo test --all-targets` **379 passed / 0 failed / 6 ignored**、`pnpm build` 通过。
+CI（`.github/workflows/ci.yml`，已存在）在 **macOS + Windows 双平台**跑
+`cargo test --all-targets`，因此 T1–T4 作为测试即被 CI 强制，**不需要改 CI 文件**。
+
+## 43.13 真机可视化验证（Main，2026-09-19 20:00–20:18）
+
+前面所有结论都是"测试通过 + 人眼读码"。这一节是**第一次真的把应用跑起来看**。
+
+安全前提：`NOENDING_HOME=/tmp/noending-ui-verify` + 真实库的**副本**（db+wal+shm
+三件套一起，M14）。原件全程未动（验证后确认 95084544 字节 / mtime 02:05 不变），
+临时 Home 与副本用完即删。原生窗口驱动被系统权限挡住（`screencapture` 需屏幕录制、
+`osascript` 需辅助访问），所以页面级验证走的是"临时把 invoke 打到
+`public/ne-preview.json`（数据来自那份已迁移的副本）+ 浏览器渲染"，
+用完 `git checkout index.html` 并删除 `public/`。
+
+**端到端确实成立**：应用启动 → v11→v12 迁移 → Application Reconcile
+（521 sessions discovered）→ Workspace Reconcile（`reconciled 27 paths, 9 discovered`）
+→ 派生出 **27 个 Project / 36 条 WorkspacePath / 475 个 Session 全部有锚点**。
+第二次启动报 `36 paths, 0 moved, 0 discovered` —— 真实数据上的重放幂等。
+
+首页、Project 详情、Sessions、Settings、新建 Session 模态框都正常渲染，
+产品语义也对：Project 详情页明说"你能改的只有名字；目录、成员 Workstream 与
+Session 都由工作路径决定"；Sessions 页明说"按 Project 筛选只是换一种看法"。
+`CwdRow` 的降级提示肉眼确认生效。
+
+### 修掉的
+
+**M34**（`SessionsView` 客户端按缓存过滤）：改为要求物理锚点
+`!!s.workspace_path_id && s.project_id === projectId`，与 Project 徽章同一判据。
+行为验证：筛 `Tmp` → 表格 393 行，与"有锚点的 Session 数"精确相等，
+计数行正确显示"显示 393 / 共 400 条"。
+
+### 新发现
+
+- **M35｜§9 worktree 发现时没有做存在性观察 —— 已修。** `adopt_sibling_worktrees`
+  原来把 `false` 当 `exists` 写死进去，于是首次渲染会对一个**就在盘上**的目录显示
+  "目录不存在"，要等下一次 reconcile 才纠正。修法守住分层：`workspace/` 不自己碰文件
+  系统，而是经 `WorkspacePolicy::exists_on_disk` **问**；观察实现放在 resolver
+  （唯一被允许读盘的层），`HomePolicy` 与 `UnrestrictedWorkspace` 都委托过去。
+  该方法是**故意没有默认实现**的——没接到真实主机的策略必须自己明说答案，
+  不能继承一个关于用户磁盘的猜测。回归测试
+  `adopted_worktrees_report_the_existence_that_was_observed` 两侧都断言（在盘上的
+  兄弟工作树必须报存在；目录已消失的注册仍然是合法的 `exists=false` 观察，
+  既不丢弃也不谎报存在），并已证伪：把 `false` 写回去，它以生产环境同一条断言失败。
+  （Main 一度怀疑是前端 bug，查下来 UI 忠实渲染了后端的假数据，责任在后端。）
+- **`runtime[f] !== null` 应为 `!= null`（`LaunchPreviewRows.tsx`）—— 已修。** 字段缺失
+  （`undefined`）时会被当成"已 override"，界面上就打出
+  `Provider undefined · Reasoning undefined`。真实后端总是把 `Option` 序列化成
+  `null`，所以这是脆弱性而非现役 bug——但一个字符就能封掉。
+- **Settings 右栏在 ~1440px 宽度下塌陷**：值徽章节（"首页"/"关闭"）被挤成一字一行
+  竖排，提示文字断成"继 续最近的"。原生窗口更宽时未见此现象，属于窄视口下的
+  响应式缺陷。
+- **§43.6 的 Project 噪声在真界面上比数字更刺眼**：侧栏出现 4 个
+  `Realtime-voice-chat`、2 个 `Deepseek-harness`（不同 Git 家族，按 §8.3 **正确地**
+  没合并），以及 `To` / `Nin` / `Ke` / `Jian` / `She` / `Gei` 这类两三个字母的名字。
+  查过库：这些是 `~/Documents/Codex/<日期>/<slug>` 里**真实的目录 basename**，
+  不是命名截断——`auto_project_name` 是忠实的，脏的是数据本身。这把 §43.6 的
+  选项 (b)（临时/一次性目录不建 Project）从"可选优化"变成了"界面可用性问题"。
+- **4 个 Workstream 里 3 个是零路径**——M30 保护的那个状态在你的真实语料里
+  是常态而不是边角。
