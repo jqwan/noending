@@ -36,13 +36,14 @@ const SORTERS: Record<SortKey, (a: ProjectCardData, b: ProjectCardData) => numbe
   paths: (a, b) => b.path_count - a.path_count || a.name.localeCompare(b.name, "zh-Hans"),
 };
 
-/** §5 — 搜索面：Project name + WorkspacePath canonical path。 */
+/** §5 — 搜索面：Project name + WorkspacePath canonical path。
+ *  Review P2-1：搜的是 search_paths（全部路径），不限于展示用的前两条。 */
 function cardMatches(c: ProjectCardData, q: string): boolean {
   const needle = q.trim().toLowerCase();
   if (needle === "") return true;
   return (
     c.name.toLowerCase().includes(needle) ||
-    c.representative_paths.some((p) => p.toLowerCase().includes(needle))
+    c.search_paths.some((p) => p.toLowerCase().includes(needle))
   );
 }
 
@@ -71,11 +72,12 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   useRefreshSignal(refresh);
 
   // §12/§13 — 刷新在后台执行，事件回报。卡片在整个期间保持可见，
-  // 不清空页面、不进 Loading。
+  // 不清空页面、不进 Loading。Review P2-2：这里只负责恢复按钮与提示——
+  // 数据读取统一走 AppShell 的 EVT_SYNCED 失效信号，避免同一次刷新触发
+  // 两次 listProjectCards。
   useEffect(() => {
     const unCompleted = listen("workspace-reconcile-completed", (e) => {
       setWorkspaceRefreshing(false);
-      refresh();
       const p = e.payload as {
         missing?: number;
         deleted_paths?: number;

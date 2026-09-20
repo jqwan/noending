@@ -68,6 +68,10 @@ pub struct ProjectCardData {
     /// Up to two canonical paths in canonical order (方案 §4: primary +
     /// "另有 N 个目录").
     pub representative_paths: Vec<String>,
+    /// Every canonical path of the project, canonical order. Review P2-1:
+    /// the board's path search covers ALL paths, while
+    /// `representative_paths` stays a display-only truncation.
+    pub search_paths: Vec<String>,
     /// max(session activity, workstream update) — the Board's default sort.
     pub last_activity_at: Option<String>,
     pub updated_at: String,
@@ -102,8 +106,10 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
         }
     }
 
-    // Representative paths: first two canonical paths per project (方案 §4).
+    // Representative paths (first two, display) + the full search list
+    // (review P2-1) from one ordered scan.
     let mut representative: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut search_paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
     {
         let mut st = conn.prepare(
             "SELECT project_id, canonical_path FROM workspace_paths
@@ -112,6 +118,10 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (pid, path) = row?;
+            search_paths
+                .entry(pid.clone())
+                .or_default()
+                .push(path.clone());
             let slot = representative.entry(pid).or_default();
             if slot.len() < 2 {
                 slot.push(path);
@@ -216,6 +226,7 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
                 },
                 session_count: *session_count.get(&p.id).unwrap_or(&0),
                 representative_paths: representative.get(&p.id).cloned().unwrap_or_default(),
+                search_paths: search_paths.get(&p.id).cloned().unwrap_or_default(),
                 last_activity_at: later_ts(&session_activity, &workstream_activity),
                 id: p.id,
                 name: p.name,

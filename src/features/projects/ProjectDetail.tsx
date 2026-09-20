@@ -64,14 +64,14 @@ export default function ProjectDetail({ projectId, navigate }: {
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  // §16 — 定点刷新在后台执行；完成/失败事件把按钮恢复，并重读 detail。
+  // §16 — 定点刷新在后台执行；完成/失败事件把按钮恢复。Review P2-2：
+  // detail 重读统一走 useRefreshSignal（AppShell 扇出），这里不再直接读。
   // §18 — 刷新可能让 Project 自己消失（最后一条路径被 GC）：
   // get_project_detail 的「Project <id> 不存在」会把页面切到 gone 视图。
   const [refreshingWorkspace, setRefreshingWorkspace] = useState(false);
   useEffect(() => {
     const unCompleted = listen("workspace-reconcile-completed", () => {
       setRefreshingWorkspace(false);
-      refresh();
     });
     const unFailed = listen("workspace-reconcile-failed", (e) => {
       setRefreshingWorkspace(false);
@@ -81,7 +81,8 @@ export default function ProjectDetail({ projectId, navigate }: {
       unCompleted.then((f) => f());
       unFailed.then((f) => f());
     };
-  }, [refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- listeners are static
+  }, []);
 
   const refreshWorkspace = useCallback(() => {
     setRefreshingWorkspace(true);

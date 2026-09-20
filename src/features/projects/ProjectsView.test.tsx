@@ -46,6 +46,7 @@ function card(over: Partial<ProjectCardData> = {}): ProjectCardData {
     related_workstream_count: 1,
     session_count: 18,
     representative_paths: ["/Users/me/code/noending"],
+    search_paths: ["/Users/me/code/noending"],
     last_activity_at: "2026-09-20T10:00:00Z",
     updated_at: "2026-09-20T09:00:00Z",
     ...over,
@@ -70,6 +71,7 @@ describe("Projects Board", () => {
         name: "My App",
         has_git_identity: false,
         representative_paths: ["/Users/me/dev/my-app"],
+        search_paths: ["/Users/me/dev/my-app"],
       }),
     ]);
     render(<ProjectsView navigate={navigate} />);
@@ -85,19 +87,29 @@ describe("Projects Board", () => {
 
   it("projects_search_matches_workspace_path", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      card({ id: "p-1", name: "NoEnding", representative_paths: ["/Users/me/code/noending"] }),
-      card({ id: "p-2", name: "My App", representative_paths: ["/Users/me/dev/my-app"] }),
+      card({
+        id: "p-1",
+        name: "NoEnding",
+        representative_paths: ["/Users/me/code/noending"],
+        search_paths: [
+          "/Users/me/code/noending",
+          "/Users/me/code/noending-docs",
+          "/Users/me/worktrees/noending-ui",
+        ],
+      }),
+      card({ id: "p-2", name: "My App", search_paths: ["/Users/me/dev/my-app"] }),
     ]);
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("My App");
 
-    // 输入目录名的一部分：按 canonical path 命中，而不是 Project 名。
+    // Review P2-1 — 第三个 worktree 不在展示用的 representative_paths 里，
+    // 但路径搜索覆盖全部 search_paths。
     fireEvent.change(screen.getByPlaceholderText(/搜索 Projects/), {
-      target: { value: "my-app" },
+      target: { value: "worktrees/noending-ui" },
     });
 
-    expect(screen.getByText("My App")).toBeTruthy();
-    expect(screen.queryByText("NoEnding")).toBeNull();
+    expect(screen.getByText("NoEnding")).toBeTruthy();
+    expect(screen.queryByText("My App")).toBeNull();
   });
 
   it("missing_filter_only_shows_projects_with_missing_paths", async () => {

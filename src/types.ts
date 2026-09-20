@@ -43,6 +43,8 @@ export interface ProjectCardData {
   related_workstream_count: number;
   session_count: number;
   representative_paths: string[];
+  /** 全部 canonical 路径（搜索面），与展示用的 representative_paths 分开。 */
+  search_paths: string[];
   last_activity_at: string | null;
   updated_at: string;
 }
