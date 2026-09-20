@@ -50,8 +50,8 @@ impl Db {
     /// Workstream's paths" reads it here, so ordering can not be forgotten at a
     /// call site.
     pub fn list_workstream_paths(&self, workstream_id: &str) -> Result<Vec<WorkstreamPath>> {
-        let mut st = self
-            .0
+        let conn = self.read();
+        let mut st = conn
             .prepare("SELECT * FROM workstream_paths WHERE workstream_id = ?1 ORDER BY position")?;
         let mapped = st.query_map(params![workstream_id], row_workstream_path)?;
         Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -59,8 +59,8 @@ impl Db {
 
     /// §13 tier 2 — the launch directory for a New Session on this Workstream.
     pub fn primary_workspace_path_id(&self, workstream_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT workspace_path_id FROM workstream_paths
                   WHERE workstream_id = ?1 AND position = 0",

@@ -9,13 +9,14 @@
 //! - the read cursor only advances in the same transaction that durably
 //!   stored the events.
 //!
-//! Locking model: reconcile functions take `&Mutex<Db>` and acquire the
-//! lock per session / per phase, so concurrent UI commands interleave while
-//! a (possibly minutes-long, LLM-backed) sync runs in the background.
+//! Concurrency: the storage layer owns it (`Db` = one writer + a WAL reader),
+//! so ingestion just reads files and calls the store; a (possibly minutes-long,
+//! LLM-backed) sync cannot stall UI commands. Discovery skips transcripts
+//! whose stored cursor still matches the file on disk, so a reconcile pass
+//! costs O(changed files), not O(all history).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use crate::adapters::AgentAdapter;
 use crate::domain::{IngestSource, Session};
@@ -55,9 +56,10 @@ pub(crate) fn ingest_delta(
     Ok(stored)
 }
 
-/// Ingest + sync one session while the caller holds the DB lock — used by
-/// interactive single-session flows (resume, per-session sync), which are
-/// heuristic-speed. Background reconcile uses the non-blocking twin below.
+/// Ingest + sync one session: read the file delta, then extract and commit
+/// the pending events. Shared by interactive single-session flows (resume,
+/// per-session sync) and background reconcile alike — file parsing needs no
+/// database lock, and the storage layer serializes the writes itself.
 ///
 /// With Context Intelligence off this stops after ingestion: events are stored
 /// and indexed, the read cursor advances, and nothing is prepared, extracted
@@ -92,57 +94,6 @@ pub fn ingest_and_sync_session(
         applied = out.applied;
     }
     Ok((stored.len() as i64, applied))
-}
-
-/// Non-blocking twin: takes the DB lock per phase so the UI never stalls
-/// behind extraction. Returns (events_ingested, mutations_applied).
-pub fn ingest_and_sync_session_nb(
-    db_lock: &Mutex<Db>,
-    engine: &SyncEngine,
-    session: &Session,
-) -> Result<(i64, usize)> {
-    // Phase 1 (lock): ingest the file delta + prepare the run.
-    let (stored, pre) = {
-        let guard = crate::sync::lock_db(db_lock)?;
-        // §9 — re-read lifecycle state before preparing any writes.
-        if !guard
-            .get_session(&session.id)?
-            .map(|s| !s.is_trashed())
-            .unwrap_or(false)
-        {
-            return Ok((0, 0));
-        }
-        let adapter = crate::adapters::adapter_for(session.agent);
-        let stored = ingest_delta(&guard, adapter, session)?;
-        let pre = if !crate::settings::context_intelligence_enabled(&guard)? {
-            None
-        } else {
-            let processed = guard.get_processed_sequence(&session.id)?;
-            let pending = guard.get_events(&session.id, Some(processed), 10_000)?;
-            if pending.is_empty() {
-                None
-            } else {
-                let to = pending.last().map(|e| e.sequence).unwrap_or(processed);
-                engine.prepare(&guard, session, &pending, processed, to)?
-            }
-        };
-        (stored.len() as i64, pre)
-    }; // lock released
-
-    let Some(pre) = pre else {
-        return Ok((stored, 0));
-    };
-
-    // Phase 2 (NO lock): extraction — may run the agent CLI for minutes.
-    let (mutations, runtime, diagnostics) = engine.extract(session, &pre)?;
-
-    // Phase 3 (lock): atomic commit.
-    let applied = {
-        let guard = crate::sync::lock_db(db_lock)?;
-        let out = engine.commit(&guard, session, &pre, mutations, &runtime, diagnostics)?;
-        out.applied
-    };
-    Ok((stored, applied))
 }
 
 /// Ensure a session row exists for a discovered session, attaching its
@@ -205,7 +156,7 @@ pub fn ensure_session_row_with(
         let needs_path =
             observed_cwd.is_some() && (d.cwd != s.cwd || s.workspace_path_id.is_none());
         let path_id = if needs_path {
-            crate::workspace::session::resolve_session_path(db.conn(), attacher, observed_cwd)?
+            crate::workspace::session::resolve_session_path(&db.write(), attacher, observed_cwd)?
         } else {
             None
         };
@@ -256,7 +207,7 @@ pub fn ensure_session_row_with(
         // discovered with no cwd keeps None and gets no fabricated path, and
         // neither does one whose cwd resolves to nothing (§5.5, §7.2).
         workspace_path_id: crate::workspace::session::resolve_session_path(
-            db.conn(),
+            &db.write(),
             attacher,
             d.cwd.as_deref(),
         )?,
@@ -275,14 +226,44 @@ pub fn ensure_session_row_with(
     Ok((stored, true))
 }
 
-/// Full reconcile over every agent's enabled sources. The DB lock is taken
-/// per session; `on_session` observes each session being processed.
+/// The "file is unchanged since its last ingest" predicate discovery uses to
+/// skip re-parsing transcripts whose facts are already fully stored. A file
+/// counts as unchanged when its stored cursor identity, size and mtime all
+/// still match the file on disk; anything else (new file, grown, touched,
+/// replaced) fails the check and gets parsed.
+fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> {
+    let skipset = db.discovery_skipset()?;
+    Ok(move |path: &std::path::Path| {
+        let Some((identity, size, mtime)) = skipset.get(&path.to_string_lossy().to_string()) else {
+            return false;
+        };
+        let meta = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if *size != meta.len() as i64 {
+            return false;
+        }
+        let Some(stored) = mtime else { return false };
+        let same_mtime = match crate::adapters::mtime_secs(&meta) {
+            // Same 1e-6 tolerance the delta reader uses: a touch without a
+            // byte change must not force a full re-parse.
+            Some(observed) => (observed - stored).abs() <= 1e-6,
+            None => false,
+        };
+        same_mtime && crate::adapters::file_identity(path) == *identity
+    })
+}
+
+/// Full reconcile over every agent's enabled sources. Discovery skips
+/// transcripts the stored cursors say are unchanged; the store itself
+/// serializes writes. `on_session` observes each session being processed.
 ///
 /// `workspace` is §13's tier-3 fact, needed because a freshly discovered
 /// Session may claim a pending LaunchIntent: matching it asks whether that
 /// Session's cwd is just the shared default workspace, which is not in the DB.
 pub fn reconcile_with_engine<F>(
-    db_lock: &Mutex<Db>,
+    db: &Db,
     engine: &SyncEngine,
     workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
@@ -291,25 +272,20 @@ where
     F: Fn(&Session),
 {
     let adapters = crate::adapters::all_adapters();
+    let unchanged = unchanged_since_cursor(db)?;
     let mut total_discovered = 0usize;
     let mut total_events = 0i64;
 
     // housekeeping: expire launch intents that never got a session
-    {
-        let guard = crate::sync::lock_db(db_lock)?;
-        let _ = crate::launcher::expire_stale_launch_intents(&guard);
-    }
+    let _ = crate::launcher::expire_stale_launch_intents(db);
 
     for adapter in &adapters {
-        let roots: Vec<String> = {
-            let guard = crate::sync::lock_db(db_lock)?;
-            guard.enabled_roots(adapter.agent())?
-        };
+        let roots: Vec<String> = db.enabled_roots(adapter.agent())?;
         if roots.is_empty() {
             continue;
         }
         let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
-        let discovered = match adapter.discover_sessions_in(&roots) {
+        let discovered = match adapter.discover_sessions_in(&roots, &unchanged) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!(
@@ -322,40 +298,32 @@ where
         };
         total_discovered += discovered.len();
         for d in discovered {
-            let (s, is_new) = {
-                let guard = crate::sync::lock_db(db_lock)?;
-                match ensure_session_row(&guard, &d) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("[reconcile] ensure row failed: {}", e);
-                        continue;
-                    }
+            let (s, is_new) = match ensure_session_row(db, &d) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[reconcile] ensure row failed: {}", e);
+                    continue;
                 }
             };
             if is_new {
                 // A brand-new external session may claim a pending
                 // LaunchIntent (crash recovery included).
-                {
-                    let guard = crate::sync::lock_db(db_lock)?;
-                    match crate::launcher::try_match_launch_intents_in(&guard, &s, workspace) {
-                        Ok(true) => {
-                            eprintln!("[reconcile] launch intent matched to session {}", s.id)
-                        }
-                        Ok(false) => {}
-                        Err(e) => eprintln!("[reconcile] intent match failed: {}", e),
-                    }
-                    // §42.2-E11 — no name-substring Project evidence is recorded
-                    // any more. A Project is derived from the Session's
-                    // WorkspacePath (§1.10), which `ensure_session_row` has just
-                    // resolved, so this hot path does no Project work.
+                match crate::launcher::try_match_launch_intents_in(db, &s, workspace) {
+                    Ok(true) => eprintln!("[reconcile] launch intent matched to session {}", s.id),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[reconcile] intent match failed: {}", e),
                 }
+                // §42.2-E11 — no name-substring Project evidence is recorded
+                // any more. A Project is derived from the Session's
+                // WorkspacePath (§1.10), which `ensure_session_row` has just
+                // resolved, so this hot path does no Project work.
             }
             // §8 — trashed sessions are skipped entirely: no ingest, no sync.
             if s.is_trashed() {
                 continue;
             }
             on_session(&s);
-            match ingest_and_sync_session_nb(db_lock, engine, &s) {
+            match ingest_and_sync_session(db, engine, &s) {
                 Ok((events, _applied)) => total_events += events,
                 Err(e) => eprintln!("[reconcile] ingest {} failed: {}", s.id, e),
             }
@@ -367,7 +335,7 @@ where
 /// Sync one specific ingest source: discover sessions under that source's
 /// own path only, ingest + sync them.
 pub fn reconcile_source<F>(
-    db_lock: &Mutex<Db>,
+    db: &Db,
     engine: &SyncEngine,
     source: &IngestSource,
     on_session: &F,
@@ -376,21 +344,19 @@ where
     F: Fn(&Session),
 {
     let adapter = crate::adapters::adapter_for(source.agent);
+    let unchanged = unchanged_since_cursor(db)?;
     let roots = vec![PathBuf::from(&source.path)];
-    let discovered = adapter.discover_sessions_in(&roots)?;
+    let discovered = adapter.discover_sessions_in(&roots, &unchanged)?;
     let discovered_count = discovered.len();
     let mut total_events = 0i64;
     for d in &discovered {
-        let s = {
-            let guard = crate::sync::lock_db(db_lock)?;
-            ensure_session_row(&guard, d)?.0
-        };
+        let s = ensure_session_row(db, d)?.0;
         // §8 — trashed sessions are skipped entirely.
         if s.is_trashed() {
             continue;
         }
         on_session(&s);
-        match ingest_and_sync_session_nb(db_lock, engine, &s) {
+        match ingest_and_sync_session(db, engine, &s) {
             Ok((events, _)) => total_events += events,
             Err(e) => eprintln!("[reconcile] ingest {} failed: {}", s.id, e),
         }
@@ -404,8 +370,11 @@ where
 /// in context revisions stay valid, because unchanged content dedups by
 /// identity and only genuinely new/changed source content appends.
 /// Bindings, context items and audit history are untouched.
+///
+/// Deliberately passes the all-false "unchanged" predicate: a re-ingest
+/// WANTS to re-read every file, cursor match or not.
 pub fn reingest_source<F>(
-    db_lock: &Mutex<Db>,
+    db: &Db,
     engine: &SyncEngine,
     source: &IngestSource,
     on_session: &F,
@@ -415,25 +384,21 @@ where
 {
     let adapter = crate::adapters::adapter_for(source.agent);
     let roots = vec![PathBuf::from(&source.path)];
-    let discovered = adapter.discover_sessions_in(&roots)?;
+    let discovered = adapter.discover_sessions_in(&roots, &|_| false)?;
     let discovered_count = discovered.len();
     let mut total_events = 0i64;
     for d in &discovered {
-        let s = {
-            let guard = crate::sync::lock_db(db_lock)?;
-            let (s, _is_new) = ensure_session_row(&guard, d)?;
-            // §8 — a trashed session keeps its cursor untouched: no rewind,
-            // no re-scan. (Its source file is also invisible to discovery
-            // updates, so a rewind would be a mutation with no consumer.)
-            if s.is_trashed() {
-                continue;
-            }
-            // overwrite/refresh: re-read the source from position 0
-            guard.reset_session_source_cursor(&s.id)?;
-            s
-        };
+        let (s, _is_new) = ensure_session_row(db, d)?;
+        // §8 — a trashed session keeps its cursor untouched: no rewind,
+        // no re-scan. (Its source file is also invisible to discovery
+        // updates, so a rewind would be a mutation with no consumer.)
+        if s.is_trashed() {
+            continue;
+        }
+        // overwrite/refresh: re-read the source from position 0
+        db.reset_session_source_cursor(&s.id)?;
         on_session(&s);
-        match ingest_and_sync_session_nb(db_lock, engine, &s) {
+        match ingest_and_sync_session(db, engine, &s) {
             Ok((events, _)) => total_events += events,
             Err(e) => eprintln!("[reingest] ingest {} failed: {}", s.id, e),
         }

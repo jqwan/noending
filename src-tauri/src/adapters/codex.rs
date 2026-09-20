@@ -144,7 +144,11 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         exec_resolver::resolve_quiet(Agent::Codex)
     }
 
-    fn discover_sessions_in(&self, roots: &[PathBuf]) -> Result<Vec<DiscoveredSession>> {
+    fn discover_sessions_in(
+        &self,
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+    ) -> Result<Vec<DiscoveredSession>> {
         let mut out = Vec::new();
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
@@ -164,6 +168,11 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                         .map(|n| n.starts_with("rollout-"))
                         .unwrap_or(false);
                 if !is_rollout_jsonl {
+                    continue;
+                }
+                // Fully ingested and stat-identical since the last pass: the
+                // stored cursor is the source of truth, skip the parse.
+                if unchanged(&p) {
                     continue;
                 }
                 // The filename only pre-filters; the content decides. One

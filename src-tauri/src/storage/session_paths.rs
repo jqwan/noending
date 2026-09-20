@@ -47,7 +47,8 @@ impl Db {
         &self,
         path_id: &str,
     ) -> Result<Vec<crate::domain::Session>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT * FROM sessions WHERE workspace_path_id = ?1 AND trashed_at IS NULL
               ORDER BY COALESCE(last_activity_at, started_at) DESC",
         )?;

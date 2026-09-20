@@ -36,7 +36,7 @@ pub fn get_workspace_settings(
     // §42.3-M5: a failed relocation still starts the app, on the OLD Home, so
     // "where the Home thinks the database is" can differ from "which file writes
     // are landing in". The user gets the latter.
-    if let Ok(Some(path)) = super::with_db(&state, |db| Ok(db.0.path().map(str::to_string))) {
+    if let Ok(Some(path)) = super::with_db(&state, |db| Ok(db.read().path().map(str::to_string))) {
         settings.db_path = path;
     }
     Ok(settings)

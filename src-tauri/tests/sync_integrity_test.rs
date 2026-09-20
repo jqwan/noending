@@ -316,13 +316,23 @@ fn read_cursor_and_processed_cursor_are_separate() {
     );
 }
 
-/// The background sync entry processes pending events through the
-/// phase-split (lock / no-lock / lock) path and advances the processed
-/// cursor exactly like the blocking path.
+/// The background sync entry processes pending events and advances the
+/// processed cursor exactly like the interactive path. (The phase-split nb
+/// twin is gone: `ingest_and_sync_session` is the one reconcile path.)
 #[test]
 fn nonblocking_sync_path_processes_pending_events() {
     let db = open_db("nb-path");
-    let s = session_row(&db);
+    let s = {
+        // The unified path reads the file delta first, so the session needs a
+        // real (empty) source file behind its cursor.
+        let mut s = session_row(&db);
+        let dir = std::env::temp_dir().join(format!("noending-nb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        s.raw_path = dir.join(format!("{}.jsonl", new_id())).to_string_lossy().to_string();
+        std::fs::write(&s.raw_path, "").unwrap();
+        db.upsert_session(&s).unwrap();
+        s
+    };
     let ws = ws_row(&db, "nb ws");
     db.bind(&SessionWorkstreamBinding {
         session_id: s.id.clone(),
@@ -368,13 +378,18 @@ fn nonblocking_sync_path_processes_pending_events() {
     assert_eq!(stored.len(), 1);
     assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0);
 
-    // hand the DB to the shared Mutex<Db> exactly like the app does
-    let db_lock = std::sync::Mutex::new(db);
+    // The nb twin is gone: the reconcile path IS ingest_and_sync_session.
+    // Intelligence gates it, so the switch is part of the setup now.
+    noending::settings::set_context_intelligence_enabled(&db, true).unwrap();
     let engine = noending::sync::SyncEngine::default();
-    let applied = engine.run_pending_sync_nonblocking(&db_lock, &s).unwrap();
-    assert!(applied > 0, "pending events processed through the nb path");
+    let (_ingested, applied) =
+        noending::ingestion::ingest_and_sync_session(&db, &engine, &s).unwrap();
+    assert!(
+        applied > 0,
+        "pending events processed through the sync path"
+    );
 
-    let guard = db_lock.lock().unwrap();
+    let guard = &db;
     assert_eq!(
         guard.get_processed_sequence(&s.id).unwrap(),
         1,
@@ -706,7 +721,7 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
         source_refs: vec!["session-event:a".into()],
         authority: "agent_inferred".into(),
     };
-    MergeEngine.apply(&db.0, &add, &ctx).unwrap();
+    MergeEngine.apply(&db.write(), &add, &ctx).unwrap();
 
     let items = db.items_for_workstream(&ws.id, true).unwrap();
     let item_id = items[0].0.id.clone();
@@ -719,7 +734,7 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
         source_refs: vec!["session-event:b".into()],
         authority: "agent_inferred".into(),
     };
-    assert!(MergeEngine.apply(&db.0, &update, &ctx).unwrap());
+    assert!(MergeEngine.apply(&db.write(), &update, &ctx).unwrap());
 
     // The new revision must exist AND be the stored head.
     let history = db.item_history(&item_id).unwrap();
@@ -755,7 +770,7 @@ fn dedup_update_path_also_persists_revision() {
         source_refs: vec![],
         authority: "agent_inferred".into(),
     };
-    MergeEngine.apply(&db.0, &add, &ctx).unwrap();
+    MergeEngine.apply(&db.write(), &add, &ctx).unwrap();
     let item_id = db.items_for_workstream(&ws.id, true).unwrap()[0]
         .0
         .id
@@ -771,7 +786,7 @@ fn dedup_update_path_also_persists_revision() {
         source_refs: vec!["session-event:c".into()],
         authority: "agent_inferred".into(),
     };
-    assert!(MergeEngine.apply(&db.0, &add_again, &ctx).unwrap());
+    assert!(MergeEngine.apply(&db.write(), &add_again, &ctx).unwrap());
 
     assert_eq!(
         db.items_for_workstream(&ws.id, true).unwrap().len(),

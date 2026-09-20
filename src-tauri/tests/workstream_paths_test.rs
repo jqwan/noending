@@ -192,7 +192,7 @@ fn bind(db: &Db, session_id: &str, workstream_id: &str, via: Option<&str>) {
 }
 
 fn search_parent(db: &Db, workstream_id: &str) -> Option<String> {
-    db.conn()
+    db.read()
         .query_row(
             "SELECT parent_id FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
             params![workstream_id],
@@ -294,7 +294,7 @@ fn create_rolls_back_when_the_attach_fails() {
     assert!(db.list_workstreams(None).unwrap().is_empty());
     assert!(db.list_workspace_paths().unwrap().is_empty());
     assert_eq!(
-        db.conn()
+        db.read()
             .query_row("SELECT COUNT(*) FROM workstreams", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
@@ -513,11 +513,11 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
     let w = &f.workstream;
     let rows = f.db.list_workstream_paths(&w.id).unwrap();
     // A fourth, real WorkspacePath that is not in this Workstream's list yet.
-    let spare = insert_workspace_path_conn(f.db.conn(), &canonical("/repo/spare"), "p1").unwrap();
+    let spare = insert_workspace_path_conn(&f.db.write(), &canonical("/repo/spare"), "p1").unwrap();
 
     // Two entries cannot both claim position 0 — that is the whole of §1.5's
     // "no primary + has secondary" impossibility.
-    let clash = f.db.conn().execute(
+    let clash = f.db.write().execute(
         "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, source, created_at)
          VALUES ('dup-zero', ?1, ?2, 0, 'user', ?3)",
         params![w.id, spare, now()],
@@ -528,7 +528,7 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
     );
 
     // …and one path cannot be listed twice, even at a free position.
-    let dupe = f.db.conn().execute(
+    let dupe = f.db.write().execute(
         "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, source, created_at)
          VALUES ('dupe', ?1, ?2, 9, 'user', ?3)",
         params![w.id, rows[0].workspace_path_id, now()],

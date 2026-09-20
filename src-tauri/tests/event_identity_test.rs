@@ -513,7 +513,7 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
     assert_eq!(ingest(&db, adapter, &s), 0, "compacted prefix dedups");
 
     let hash_of = |t: &str| -> String {
-        db.conn()
+        db.read()
             .query_row(
                 "SELECT source_identity_hash FROM session_events WHERE session_id = ?1 AND text = ?2",
                 rusqlite::params![s.id, t],

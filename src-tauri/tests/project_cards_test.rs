@@ -65,7 +65,7 @@ fn session_at(db: &Db, id: &str, path_id: &str, trashed: bool) {
     if trashed {
         // upsert_session 刻意不写生命周期列；回收站状态要显式落库（v13）。
         let sid = s.id.clone();
-        db.conn()
+        db.write()
             .execute(
                 "UPDATE sessions SET trashed_at = ?1 WHERE id = ?2",
                 [now(), sid],
@@ -88,7 +88,7 @@ fn board_card_projection_counts_and_paths() {
     // 纯注册写入 exists_on_disk = 0（观察属于 reconcile）。a/b 已被观察到存在，
     // gamma 从磁盘上消失：missing 计数来自注册表观察，不是身份变化。
     for id in [&a, &b] {
-        db.conn()
+        db.write()
             .execute(
                 "UPDATE workspace_paths SET exists_on_disk = 1 WHERE id = ?1",
                 [id],
@@ -96,7 +96,7 @@ fn board_card_projection_counts_and_paths() {
             .unwrap();
     }
     let other = add_path(&db, "p-2", "/work/elsewhere");
-    db.conn()
+    db.write()
         .execute(
             "UPDATE workspace_paths SET exists_on_disk = 1 WHERE id = ?1",
             [&other],

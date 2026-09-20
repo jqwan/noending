@@ -38,33 +38,37 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
                    AND {ACTIVE_EVENT_GUARD}
                    ORDER BY bm25(search_index) LIMIT ?2"
         );
-        match db.conn().prepare(&sql) {
-            Ok(mut st) => {
-                let rows = st.query_map(params![fts_q, limit], |r| {
-                    Ok(SearchHit {
-                        kind: r.get(0)?,
-                        ref_id: r.get(1)?,
-                        parent_id: r.get(2)?,
-                        title: r.get(3)?,
-                        snippet: r.get(4)?,
-                        rank: r.get::<_, f64>(5)?,
-                    })
-                })?;
-                let hits: Vec<SearchHit> = rows.filter_map(|r| r.ok()).collect();
-                if !hits.is_empty() || looks_indexed(db, q) {
-                    return Ok(hits);
-                }
-                // fall through to LIKE when FTS finds nothing (e.g. tokenization)
-                return like_search(db, q, limit);
-            }
-            Err(_) => return like_search(db, q, limit),
+        // Scoped via the closure: the reader guard must drop before
+        // `looks_indexed` / `like_search` run — they take their own read
+        // lock, and re-entry on it deadlocks just like the writer's would.
+        let hits: Option<Vec<SearchHit>> = (|| {
+            let conn = db.read();
+            let mut st = conn.prepare(&sql).ok()?;
+            let rows = st.query_map(params![fts_q, limit], |r| {
+                Ok(SearchHit {
+                    kind: r.get(0)?,
+                    ref_id: r.get(1)?,
+                    parent_id: r.get(2)?,
+                    title: r.get(3)?,
+                    snippet: r.get(4)?,
+                    rank: r.get::<_, f64>(5)?,
+                })
+            });
+            let collected: Vec<SearchHit> = rows.ok()?.filter_map(|r| r.ok()).collect();
+            Some(collected)
+        })();
+        match hits {
+            Some(hits) if !hits.is_empty() || looks_indexed(db, q) => return Ok(hits),
+            // fall through to LIKE when FTS finds nothing (e.g. tokenization)
+            _ => {}
         }
+        return like_search(db, q, limit);
     }
     like_search(db, q, limit)
 }
 
 fn looks_indexed(db: &Db, _q: &str) -> bool {
-    db.conn()
+    db.read()
         .query_row("SELECT COUNT(*) > 0 FROM search_index", [], |r| {
             r.get::<_, bool>(0)
         })
@@ -78,7 +82,8 @@ fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
                WHERE (title LIKE ?1 OR body LIKE ?1) AND {ACTIVE_EVENT_GUARD}
                LIMIT ?2"
     );
-    let mut st = db.conn().prepare(&sql)?;
+    let conn = db.read();
+    let mut st = conn.prepare(&sql)?;
     let rows = st.query_map(params![pattern, limit], |r| {
         Ok(SearchHit {
             kind: r.get(0)?,

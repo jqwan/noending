@@ -76,7 +76,7 @@ pub struct ProjectCardData {
 /// `list_project_cards`, mirroring `workstream_cards`.
 pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
     let projects = db.list_projects()?;
-    let conn = db.conn();
+    let conn = db.read();
 
     // Path totals + missing counts, one grouped query.
     let mut path_count: BTreeMap<String, i64> = BTreeMap::new();
@@ -341,9 +341,8 @@ pub fn refresh_project_workspace(
     project_id: String,
 ) -> Result<serde_json::Value> {
     let path_ids = {
-        let guard = crate::sync::lock_db(&state.db)?;
-        let exists: Option<String> = guard
-            .conn()
+        let conn = state.db.read();
+        let exists: Option<String> = conn
             .query_row(
                 "SELECT id FROM projects WHERE id = ?1",
                 rusqlite::params![project_id],
@@ -351,8 +350,7 @@ pub fn refresh_project_workspace(
             )
             .optional()?;
         exists.ok_or_else(|| other(format!("Project {project_id} 不存在")))?;
-        let ids: Vec<String> = guard
-            .conn()
+        let ids: Vec<String> = conn
             .prepare(
                 "SELECT id FROM workspace_paths WHERE project_id = ?1 ORDER BY canonical_path",
             )?

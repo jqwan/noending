@@ -156,7 +156,11 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         exec_resolver::resolve_quiet(Agent::Pi)
     }
 
-    fn discover_sessions_in(&self, roots: &[PathBuf]) -> Result<Vec<DiscoveredSession>> {
+    fn discover_sessions_in(
+        &self,
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+    ) -> Result<Vec<DiscoveredSession>> {
         let mut out = Vec::new();
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
@@ -171,6 +175,11 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                     continue;
                 }
                 if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                // Fully ingested and stat-identical since the last pass: the
+                // stored cursor is the source of truth, skip the parse.
+                if unchanged(&p) {
                     continue;
                 }
                 // Any .jsonl is a candidate; only the content fingerprint

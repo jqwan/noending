@@ -891,7 +891,9 @@ fn test_fts_failure_rolls_back_entire_conflict_transaction() {
     db.insert_conflict(&conflict).unwrap();
 
     // Drop the search_index table to force an FTS indexing error inside the transaction
-    db.0.execute_batch("DROP TABLE search_index;").unwrap();
+    db.write()
+        .execute_batch("DROP TABLE search_index;")
+        .unwrap();
 
     let edit_payload = ContextItemEditPayload {
         title: "Attempted Fix".into(),
@@ -939,14 +941,14 @@ fn test_legacy_revision_authority_never_polluted_by_item_authority() {
     let rev1_id = new_id();
     let ts = now();
 
-    db.0.execute(
+    db.write().execute(
         "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, created_at, updated_at)
          VALUES (?1, ?2, 'goal', 'active', 'agent_statement', 'sync:codex', ?3, ?4, ?4)",
         params![item_id, ws.id, rev1_id, ts],
     ).unwrap();
 
     // Revision metadata is completely empty (no provenance object)
-    db.0.execute(
+    db.write().execute(
         "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
          VALUES (?1, ?2, 'Legacy Agent Goal', 'Extracted by agent', '{}', 'session_event', 'sync-run-1', ?3)",
         params![rev1_id, item_id, ts],
@@ -971,7 +973,7 @@ fn test_legacy_revision_authority_never_polluted_by_item_authority() {
 
     // 5. Test completely un-inferrable revision falls back to legacy_unknown, NOT item.authority
     let rev_unknown_id = new_id();
-    db.0.execute(
+    db.write().execute(
         "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
          VALUES (?1, ?2, 'Unknown Legacy', 'No source', '{}', NULL, NULL, ?3)",
         params![rev_unknown_id, item_id, ts],

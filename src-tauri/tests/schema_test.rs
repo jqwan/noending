@@ -46,14 +46,15 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
 fn fresh_database_is_already_in_the_current_shape() {
     let path = db_path("current");
     let db = Db::open(path.path()).unwrap();
-    let conn = db.conn();
-    let version: i64 = conn
+    let version: i64 = db
+        .read()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
 
     for table in ["project_resources", "project_affinity_evidence"] {
-        let exists: i64 = conn
+        let exists: i64 = db
+            .read()
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
                 [table],
@@ -69,28 +70,29 @@ fn fresh_database_is_already_in_the_current_shape() {
         ("session_events", "legacy_identity_hash"),
     ] {
         assert!(
-            !has_column(conn, table, column),
+            !has_column(&db.read(), table, column),
             "retired column remains: {table}.{column}"
         );
     }
 
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES ('schema-test', 'persists')",
-        [],
-    )
-    .unwrap();
+    db.write()
+        .execute(
+            "INSERT INTO settings (key, value) VALUES ('schema-test', 'persists')",
+            [],
+        )
+        .unwrap();
     drop(db);
     let reopened = Db::open(path.path()).unwrap();
     assert_eq!(
         reopened
-            .conn()
+            .read()
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         SCHEMA_VERSION
     );
     assert_eq!(
         reopened
-            .conn()
+            .read()
             .query_row(
                 "SELECT value FROM settings WHERE key = 'schema-test'",
                 [],

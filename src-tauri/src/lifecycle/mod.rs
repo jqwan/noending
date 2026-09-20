@@ -111,7 +111,10 @@ pub fn prepare_session_permanent_delete(
     if !session.is_trashed() {
         return Err(other("只有回收站中的会话才能永久删除"));
     }
-    if let Some(job) = session_jobs::get_job_for_session_conn(db.conn(), session_id)? {
+    // Bound, not in the `if let` scrutinee: a scrutinee temporary would hold
+    // the reader lock across the whole branch body.
+    let existing = session_jobs::get_job_for_session_conn(&db.read(), session_id)?;
+    if let Some(job) = existing {
         if job.state == SessionDeletionJob::STATE_DELETING_SOURCE {
             return Err(other("永久删除正在执行中，请等待完成或重启应用后重试"));
         }
@@ -130,9 +133,8 @@ pub fn prepare_session_permanent_delete(
     // silently reappears when the drive comes back.
     if plan.source == crate::adapters::SourceDeletionState::ConfirmedAbsent {
         let roots: Vec<String> = {
-            let mut st = db
-                .conn()
-                .prepare("SELECT path FROM ingest_sources WHERE agent = ?1")?;
+            let conn = db.read();
+            let mut st = conn.prepare("SELECT path FROM ingest_sources WHERE agent = ?1")?;
             let rows = st.query_map(rusqlite::params![session.agent.as_str()], |r| {
                 r.get::<_, String>(0)
             })?;
@@ -141,7 +143,7 @@ pub fn prepare_session_permanent_delete(
         crate::adapters::corroborate_source_absent(&session.raw_path, &roots)?;
     }
 
-    let counts = PermanentDeletionCounts::collect(db.conn(), session_id)?;
+    let counts = PermanentDeletionCounts::collect(&db.read(), session_id)?;
 
     let job = SessionDeletionJob {
         id: crate::storage::new_id(),
@@ -173,7 +175,7 @@ pub fn prepare_session_permanent_delete(
 /// the result with the updated job. `Err` is reserved for broken transitions
 /// (unknown job, wrong state).
 pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<PermanentDeletionResult> {
-    let mut job = session_jobs::get_deletion_job_conn(db.conn(), job_id)?
+    let mut job = session_jobs::get_deletion_job_conn(&db.read(), job_id)?
         .ok_or_else(|| other("永久删除任务不存在"))?;
     match job.state.as_str() {
         SessionDeletionJob::STATE_PREPARED | SessionDeletionJob::STATE_FAILED => {}
@@ -187,7 +189,7 @@ pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<Permane
         None => {
             // Purge and job row die in one transaction, so a job without its
             // session means a foreign row — clean it up.
-            session_jobs::delete_deletion_job_conn(db.conn(), &job.id)?;
+            session_jobs::delete_deletion_job_conn(&db.write(), &job.id)?;
             return Err(other("Session 不存在"));
         }
     };
@@ -200,7 +202,7 @@ pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<Permane
     // Mark in-flight BEFORE touching the filesystem, so a crash during the
     // delete is diagnosable (§23 converts it to `failed` on next startup).
     session_jobs::set_job_state_conn(
-        db.conn(),
+        &db.write(),
         &job.id,
         SessionDeletionJob::STATE_DELETING_SOURCE,
         None,
@@ -215,7 +217,7 @@ pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<Permane
             _ => SessionDeletionJob::STATE_FAILED,
         };
         let msg = e.to_string();
-        session_jobs::set_job_state_conn(db.conn(), &job.id, state, Some(&msg))?;
+        session_jobs::set_job_state_conn(&db.write(), &job.id, state, Some(&msg))?;
         job.state = state.to_string();
         job.last_error = Some(msg.clone());
         return Ok(PermanentDeletionResult {
@@ -243,22 +245,22 @@ pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<Permane
 /// the Session stays in Trash. Refused only while the deletion is actually
 /// in flight (after a crash, startup recovery has already flipped the state).
 pub fn cancel_session_permanent_delete(db: &Db, job_id: &str) -> Result<()> {
-    let job = session_jobs::get_deletion_job_conn(db.conn(), job_id)?
+    let job = session_jobs::get_deletion_job_conn(&db.read(), job_id)?
         .ok_or_else(|| other("永久删除任务不存在"))?;
     if job.state == SessionDeletionJob::STATE_DELETING_SOURCE {
         return Err(other("永久删除正在执行中，无法取消"));
     }
-    session_jobs::delete_deletion_job_conn(db.conn(), job_id)
+    session_jobs::delete_deletion_job_conn(&db.write(), job_id)
 }
 
 /// Current coordination row for a session, if any (UI state source).
 pub fn get_session_deletion_job(db: &Db, session_id: &str) -> Result<Option<SessionDeletionJob>> {
-    session_jobs::get_job_for_session_conn(db.conn(), session_id)
+    session_jobs::get_job_for_session_conn(&db.read(), session_id)
 }
 
 /// §23 startup recovery: `deleting_source` jobs from a previous process are
 /// flipped to `failed` with a clear message — deletion is never silently
 /// continued, the user decides (retry → AlreadyAbsent → purge completes).
 pub fn recover_interrupted_deletions(db: &Db) -> Result<usize> {
-    session_jobs::recover_interrupted_deletion_jobs(db.conn())
+    session_jobs::recover_interrupted_deletion_jobs(&db.write())
 }

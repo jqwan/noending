@@ -16,7 +16,6 @@ use noending::storage::{new_id, now, Db};
 use noending::{ingestion, launcher, search, settings, sync};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 fn unique_dir(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -97,7 +96,7 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
 /// (context_items, revisions, conflicts, sync_runs) — everything Intelligence writes.
 fn context_footprint(db: &Db) -> (i64, i64, i64, i64) {
     let c = |sql: &str| {
-        db.conn()
+        db.read()
             .query_row(sql, [], |r| r.get::<_, i64>(0))
             .unwrap()
     };
@@ -195,27 +194,23 @@ fn off_stops_after_ingestion_on_the_launch_and_refresh_path() {
     );
 }
 
-/// Background reconcile uses the non-blocking twin of the same path — a gate
+/// Background reconcile runs the same path as the interactive flow — a gate
 /// on only one of them would leave extraction running on every launch.
 #[test]
 fn off_stops_after_ingestion_on_the_reconcile_path() {
     let dir = unique_dir("off-reconcile");
     let file = write_transcript(&dir, 3);
-    let db = Mutex::new(open_db("off-reconcile"));
-    let s = {
-        let guard = db.lock().unwrap();
-        session_row(&guard, &file)
-    };
+    let db = open_db("off-reconcile");
+    let s = session_row(&db, &file);
 
     let (ingested, applied) =
-        ingestion::ingest_and_sync_session_nb(&db, &sync::SyncEngine::default(), &s).unwrap();
+        ingestion::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
     assert_eq!(ingested, 3);
     assert_eq!(applied, 0, "reconcile must stop before SyncEngine::prepare");
 
-    let guard = db.lock().unwrap();
-    assert_eq!(guard.get_events(&s.id, None, 100).unwrap().len(), 3);
-    assert_eq!(guard.get_processed_sequence(&s.id).unwrap(), 0);
-    assert_eq!(context_footprint(&guard), (0, 0, 0, 0));
+    assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 3);
+    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0);
+    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 }
 
 /// §11.1: delivery level and intelligence are two independent switches.

@@ -8,6 +8,8 @@
 //! - Cursors distinguish the *read* position (events durably ingested) from
 //!   the *processed* position (events consumed by a committed SyncRun).
 
+use std::sync::{Mutex, MutexGuard};
+
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use crate::domain::*;
@@ -22,7 +24,16 @@ pub mod workstream_paths;
 
 pub use session_jobs::PermanentDeletionCounts;
 
-pub struct Db(pub Connection);
+/// Two connections to one SQLite file, so the UI's reads never queue behind a
+/// background sync's writes: WAL allows one writer plus concurrent readers,
+/// every mutation goes through `writer` (serialized by its mutex), and query
+/// work goes through `reader`. Splitting at the storage layer means callers
+/// never see a database lock — there is no `Mutex<Db>` to hold across a file
+/// scan, and a long write transaction cannot freeze a list query.
+pub struct Db {
+    writer: Mutex<Connection>,
+    reader: Mutex<Connection>,
+}
 
 /// Current database shape. New databases are created directly; an older or
 /// newer version must be rebuilt with the current application.
@@ -85,33 +96,58 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        let db = Db(conn);
+        let writer = Connection::open(path)?;
+        writer.pragma_update(None, "journal_mode", "WAL")?;
+        let db = Db {
+            writer: Mutex::new(writer),
+            reader: Mutex::new(Connection::open(path)?),
+        };
+        for half in [&db.writer, &db.reader] {
+            let conn = half.lock().map_err(|_| other("db lock poisoned"))?;
+            // synchronous + foreign_keys are per-connection; journal_mode is
+            // persistent and was set once above.
+            conn.pragma_update(None, "synchronous", "NORMAL")?;
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            // A generous busy timeout: the reader never competes with the
+            // writer under WAL, but an external process touching the file
+            // should cause a wait, not an error.
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            register_binding_rank_fn(&conn)?;
+        }
         db.initialize_schema()?;
         Ok(db)
     }
 
-    pub fn conn(&self) -> &Connection {
-        &self.0
+    /// A WAL snapshot for query-only work. UI commands run here: a long write
+    /// transaction on the writer half (sync commit, ingestion batch) blocks
+    /// other writers, never this reader.
+    pub fn read(&self) -> MutexGuard<'_, Connection> {
+        self.reader.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The single writer. All mutations and every `tx` go through here.
+    pub fn write(&self) -> MutexGuard<'_, Connection> {
+        self.writer.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Run `f` inside a single SQLite transaction: all writes commit together
     /// or not at all. This is the only sanctioned way to persist multi-step
-    /// domain changes (sync mutations, ingest batches, …).
+    /// domain changes (sync mutations, ingest batches, …). The closure must
+    /// use the `&Transaction` (or the `*_conn` helpers) — calling further `Db`
+    /// methods inside would deadlock on the writer mutex.
     pub fn tx<T>(&self, f: impl FnOnce(&Transaction) -> Result<T>) -> Result<T> {
-        let tx = self.0.unchecked_transaction()?;
+        let conn = self.write();
+        let tx = conn.unchecked_transaction()?;
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
     }
 
     fn initialize_schema(&self) -> Result<()> {
+        let conn = self.write();
         // There is intentionally no in-place migration path. A versioned
         // database must already have this exact application's schema.
-        let current_version: i64 = self.0.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if current_version != 0 && current_version != SCHEMA_VERSION {
             return Err(other(format!(
                 "数据库 schema 版本为 v{}，当前应用只支持 v{}；请备份后重建数据库。",
@@ -119,7 +155,7 @@ impl Db {
             )));
         }
         if current_version == 0
-            && self.0.query_row(
+            && conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'sessions', 'workstreams'))",
                 [],
                 |r| r.get::<_, i64>(0),
@@ -128,8 +164,7 @@ impl Db {
             return Err(other("未标记版本的旧数据库不受支持，请备份后重建数据库。"));
         }
 
-        register_binding_rank_fn(&self.0)?;
-        let tx = self.0.unchecked_transaction()?;
+        let tx = conn.unchecked_transaction()?;
 
         tx.execute_batch(
             r#"
@@ -487,9 +522,8 @@ impl Db {
 
     /// Every Project currently derived from at least one WorkspacePath.
     pub fn list_projects(&self) -> Result<Vec<Project>> {
-        let mut st = self
-            .0
-            .prepare("SELECT * FROM projects ORDER BY updated_at DESC")?;
+        let conn = self.read();
+        let mut st = conn.prepare("SELECT * FROM projects ORDER BY updated_at DESC")?;
         let rows = st
             .query_map([], row_project)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -497,8 +531,8 @@ impl Db {
     }
 
     pub fn get_project(&self, id: &str) -> Result<Option<Project>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT * FROM projects WHERE id = ?1",
                 params![id],
@@ -508,9 +542,11 @@ impl Db {
     }
 
     pub fn upsert_project(&self, p: &Project) -> Result<()> {
-        upsert_project_conn(&self.0, p)?;
-        self.index_project(p)?;
-        Ok(())
+        {
+            let conn = self.write();
+            upsert_project_conn(&conn, p)?;
+        }
+        self.index_project(p)
     }
 
     // ---------------- Workstreams ----------------
@@ -520,6 +556,7 @@ impl Db {
     /// membership; `workspace::project` decides the primary/related distinction
     /// from `position = 0` when it renders a Project page.
     pub fn list_workstreams(&self, project_id: Option<&str>) -> Result<Vec<Workstream>> {
+        let conn = self.read();
         let (sql, has_filter): (&str, bool) = if project_id.is_some() {
             (
                 "SELECT w.* FROM workstreams w
@@ -533,7 +570,7 @@ impl Db {
         } else {
             ("SELECT * FROM workstreams ORDER BY updated_at DESC", false)
         };
-        let mut st = self.0.prepare(sql)?;
+        let mut st = conn.prepare(sql)?;
         let map = |r: &Row| row_workstream(r);
         let rows = if has_filter {
             st.query_map(params![project_id.unwrap()], map)?
@@ -553,15 +590,15 @@ impl Db {
         &self,
         workstream_id: &str,
     ) -> Result<(i64, Option<(String, String)>, Option<String>)> {
-        let count: i64 = self.0.query_row(
+        let conn = self.read();
+        let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM session_workstream_bindings b
              JOIN sessions s ON s.id = b.session_id AND s.trashed_at IS NULL
              WHERE b.workstream_id = ?1",
             params![workstream_id],
             |r| r.get(0),
         )?;
-        let latest = self
-            .0
+        let latest = conn
             .query_row(
                 "SELECT s.id, s.agent, COALESCE(s.last_activity_at, s.started_at) AS act
                  FROM session_workstream_bindings b
@@ -591,8 +628,8 @@ impl Db {
     /// Text of the most recently updated active item of `kind`, content
     /// first, falling back to its title. Returns None when absent or empty.
     pub fn workstream_state_text(&self, workstream_id: &str, kind: &str) -> Result<Option<String>> {
-        let row = self
-            .0
+        let conn = self.read();
+        let row = conn
             .query_row(
                 "SELECT r.content, r.title
                  FROM context_items i
@@ -617,8 +654,8 @@ impl Db {
 
     /// Latest context edit inside a Workstream (card "last active" signal).
     pub fn workstream_items_last_update(&self, workstream_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT MAX(updated_at) FROM context_items WHERE workstream_id = ?1",
                 params![workstream_id],
@@ -629,8 +666,8 @@ impl Db {
     }
 
     pub fn get_workstream(&self, id: &str) -> Result<Option<Workstream>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT * FROM workstreams WHERE id = ?1",
                 params![id],
@@ -640,9 +677,11 @@ impl Db {
     }
 
     pub fn upsert_workstream(&self, w: &Workstream) -> Result<()> {
-        upsert_workstream_conn(&self.0, w)?;
-        self.index_workstream(w)?;
-        Ok(())
+        {
+            let conn = self.write();
+            upsert_workstream_conn(&conn, w)?;
+        }
+        self.index_workstream(w)
     }
 
     /// Delete a Workstream and everything it owns — in the full FK order of
@@ -669,8 +708,8 @@ impl Db {
     /// (方案 §42.3-M3). The caller's value is only honored for a Session with no
     /// path at all. No other caller may write the cache independently.
     pub fn upsert_session(&self, s: &Session) -> Result<bool> {
-        let existed = self
-            .0
+        let conn = self.write();
+        let existed = conn
             .query_row(
                 "SELECT 1 FROM sessions WHERE id = ?1",
                 params![s.id],
@@ -678,7 +717,7 @@ impl Db {
             )
             .optional()?
             .is_some();
-        self.0.execute(
+        conn.execute(
             "INSERT INTO sessions (id, agent, agent_session_id, title, cwd, workspace_path_id, project_id, raw_path, parent_agent_session_id, started_at, last_activity_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?11,
                      COALESCE((SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = ?11), ?6),
@@ -703,8 +742,8 @@ impl Db {
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT * FROM sessions WHERE id = ?1",
                 params![id],
@@ -718,8 +757,8 @@ impl Db {
         agent: Agent,
         agent_session_id: &str,
     ) -> Result<Option<Session>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT * FROM sessions WHERE agent = ?1 AND agent_session_id = ?2",
                 params![agent.as_str(), agent_session_id],
@@ -735,7 +774,8 @@ impl Db {
     /// fresh discoveries), but the predicate keeps that invariant explicit
     /// and safe against future callers.
     pub fn recently_created_sessions(&self, agent: Agent, since: &str) -> Result<Vec<Session>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT * FROM sessions WHERE agent = ?1 AND trashed_at IS NULL \
              ORDER BY COALESCE(started_at, last_activity_at) DESC LIMIT 200",
         )?;
@@ -762,6 +802,7 @@ impl Db {
     /// resolvable path are not members of a Project. Listing follows the chain
     /// so every view uses the same authority.
     pub fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<Session>> {
+        let conn = self.read();
         // Dynamic SQL: placeholders are appended together with the bind
         // values, so the numbering can never drift out of sync.
         let mut sql = "SELECT * FROM sessions WHERE 1=1".to_string();
@@ -785,7 +826,7 @@ impl Db {
             SessionListScope::All => {}
         }
         sql.push_str(" ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 500");
-        let mut st = self.0.prepare(&sql)?;
+        let mut st = conn.prepare(&sql)?;
         let refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         let rows = st
             .query_map(refs.as_slice(), row_session)?
@@ -962,7 +1003,8 @@ impl Db {
         after: Option<i64>,
         limit: i64,
     ) -> Result<Vec<SessionEvent>> {
-        get_events_conn(&self.0, session_id, after, limit)
+        let conn = self.read();
+        get_events_conn(&conn, session_id, after, limit)
     }
 
     pub fn get_event_by_ref(&self, source_ref: &str) -> Result<Option<SessionEvent>> {
@@ -976,11 +1018,13 @@ impl Db {
     }
 
     fn query_event(&self, sql: &str, p: impl rusqlite::Params) -> Result<Option<SessionEvent>> {
-        Ok(self.0.query_row(sql, p, row_event).optional()?)
+        let conn = self.read();
+        Ok(conn.query_row(sql, p, row_event).optional()?)
     }
 
     pub fn event_count(&self, session_id: &str) -> Result<i64> {
-        Ok(self.0.query_row(
+        let conn = self.read();
+        Ok(conn.query_row(
             "SELECT COUNT(*) FROM session_events WHERE session_id = ?1",
             params![session_id],
             |r| r.get(0),
@@ -990,8 +1034,8 @@ impl Db {
     // ---------------- Cursors ----------------
 
     pub fn get_source_cursor(&self, session_id: &str) -> Result<SourceCursor> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT session_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash, last_sequence
                  FROM session_cursors WHERE session_id = ?1",
@@ -1024,8 +1068,8 @@ impl Db {
     }
 
     pub fn get_processed_sequence(&self, session_id: &str) -> Result<i64> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT processed_sequence FROM session_cursors WHERE session_id = ?1",
                 params![session_id],
@@ -1036,7 +1080,8 @@ impl Db {
     }
 
     pub fn set_processed_sequence(&self, session_id: &str, seq: i64) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "INSERT INTO session_cursors (session_id, processed_sequence) VALUES (?1, ?2)
              ON CONFLICT(session_id) DO UPDATE SET processed_sequence = ?2",
             params![session_id, seq],
@@ -1047,7 +1092,8 @@ impl Db {
     // ---------------- Bindings ----------------
 
     pub fn bind(&self, b: &SessionWorkstreamBinding) -> Result<()> {
-        bind_conn(&self.0, b)
+        let conn = self.write();
+        bind_conn(&conn, b)
     }
 
     /// User-initiated removal — leaves a durable tombstone so
@@ -1059,7 +1105,8 @@ impl Db {
 
     /// Durable negative override lookup: has the user removed this binding?
     pub fn binding_removal_exists(&self, session_id: &str, workstream_id: &str) -> Result<bool> {
-        Ok(self.0.query_row(
+        let conn = self.read();
+        Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_binding_removals WHERE session_id = ?1 AND workstream_id = ?2)",
             params![session_id, workstream_id],
             |r| r.get(0),
@@ -1067,9 +1114,9 @@ impl Db {
     }
 
     pub fn bindings_for_session(&self, session_id: &str) -> Result<Vec<SessionWorkstreamBinding>> {
-        let mut st = self
-            .0
-            .prepare("SELECT * FROM session_workstream_bindings WHERE session_id = ?1")?;
+        let conn = self.read();
+        let mut st =
+            conn.prepare("SELECT * FROM session_workstream_bindings WHERE session_id = ?1")?;
         let rows = st
             .query_map(params![session_id], row_binding)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1080,9 +1127,9 @@ impl Db {
         &self,
         workstream_id: &str,
     ) -> Result<Vec<SessionWorkstreamBinding>> {
-        let mut st = self
-            .0
-            .prepare("SELECT * FROM session_workstream_bindings WHERE workstream_id = ?1")?;
+        let conn = self.read();
+        let mut st =
+            conn.prepare("SELECT * FROM session_workstream_bindings WHERE workstream_id = ?1")?;
         let rows = st
             .query_map(params![workstream_id], row_binding)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1096,7 +1143,8 @@ impl Db {
         cursor: i64,
         last_seen_revision: Option<&str>,
     ) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "UPDATE session_workstream_bindings
              SET last_sync_cursor = ?3, last_seen_revision = COALESCE(?4, last_seen_revision)
              WHERE session_id = ?1 AND workstream_id = ?2",
@@ -1108,12 +1156,16 @@ impl Db {
     // ---------------- Context Items ----------------
 
     pub fn insert_item(&self, item: &ContextItem, revision: &ContextItemRevision) -> Result<()> {
-        insert_item_conn(&self.0, item, revision)?;
+        {
+            let conn = self.write();
+            insert_item_conn(&conn, item, revision)?;
+        }
         self.index_item(item, revision)
     }
 
     pub fn insert_revision(&self, r: &ContextItemRevision) -> Result<()> {
-        insert_revision_conn(&self.0, r)
+        let conn = self.write();
+        insert_revision_conn(&conn, r)
     }
 
     pub fn set_item_head(
@@ -1122,13 +1174,14 @@ impl Db {
         revision_id: &str,
         status: Option<&str>,
     ) -> Result<()> {
+        let conn = self.write();
         if let Some(s) = status {
-            self.0.execute(
+            conn.execute(
                 "UPDATE context_items SET current_revision_id = ?2, status = ?3, updated_at = ?4 WHERE id = ?1",
                 params![item_id, revision_id, s, now()],
             )?;
         } else {
-            self.0.execute(
+            conn.execute(
                 "UPDATE context_items SET current_revision_id = ?2, updated_at = ?3 WHERE id = ?1",
                 params![item_id, revision_id, now()],
             )?;
@@ -1137,7 +1190,8 @@ impl Db {
     }
 
     pub fn set_item_status(&self, item_id: &str, status: &str) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "UPDATE context_items SET status = ?2, updated_at = ?3 WHERE id = ?1",
             params![item_id, status, now()],
         )?;
@@ -1162,15 +1216,18 @@ impl Db {
     }
 
     pub fn set_item_authority(&self, item_id: &str, authority: &str) -> Result<()> {
-        set_item_authority_conn(&self.0, item_id, authority)
+        let conn = self.write();
+        set_item_authority_conn(&conn, item_id, authority)
     }
 
     pub fn get_item(&self, id: &str) -> Result<Option<ContextItem>> {
-        get_item_conn(&self.0, id)
+        let conn = self.read();
+        get_item_conn(&conn, id)
     }
 
     pub fn get_revision(&self, id: &str) -> Result<Option<ContextItemRevision>> {
-        get_revision_conn(&self.0, id)
+        let conn = self.read();
+        get_revision_conn(&conn, id)
     }
 
     pub fn items_for_workstream(
@@ -1178,11 +1235,13 @@ impl Db {
         workstream_id: &str,
         include_inactive: bool,
     ) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
-        items_for_workstream_conn(&self.0, workstream_id, include_inactive)
+        let conn = self.read();
+        items_for_workstream_conn(&conn, workstream_id, include_inactive)
     }
 
     pub fn item_history(&self, item_id: &str) -> Result<Vec<ContextItemRevision>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at
              FROM context_item_revisions WHERE item_id = ?1 ORDER BY created_at",
         )?;
@@ -1197,7 +1256,8 @@ impl Db {
         workstream_id: &str,
         since: &str,
     ) -> Result<Vec<(ContextItem, ContextItemRevision)>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.created_by, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
                     r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
              FROM context_items i JOIN context_item_revisions r ON r.id = i.current_revision_id
@@ -1218,7 +1278,8 @@ impl Db {
         &self,
         workstream_id: &str,
     ) -> Result<Vec<ContextItemRelation>> {
-        item_relations_for_workstream_conn(&self.0, workstream_id)
+        let conn = self.read();
+        item_relations_for_workstream_conn(&conn, workstream_id)
     }
 
     pub fn get_context_revision_source(
@@ -1294,21 +1355,24 @@ impl Db {
         workstream_id: &str,
         limit: usize,
     ) -> Result<Vec<ContextChange>> {
-        list_workstream_context_changes_conn(&self.0, workstream_id, limit)
+        let conn = self.read();
+        list_workstream_context_changes_conn(&conn, workstream_id, limit)
     }
 
     pub fn get_workstream_review_state(
         &self,
         workstream_id: &str,
     ) -> Result<Option<WorkstreamReviewState>> {
-        get_workstream_review_state_conn(&self.0, workstream_id)
+        let conn = self.read();
+        get_workstream_review_state_conn(&conn, workstream_id)
     }
 
     pub fn get_workstream_review_window(
         &self,
         workstream_id: &str,
     ) -> Result<WorkstreamReviewWindow> {
-        get_workstream_review_window_conn(&self.0, workstream_id)
+        let conn = self.read();
+        get_workstream_review_window_conn(&conn, workstream_id)
     }
 
     pub fn mark_workstream_reviewed(
@@ -1316,24 +1380,28 @@ impl Db {
         workstream_id: &str,
         frontier: &ReviewFrontier,
     ) -> Result<WorkstreamReviewState> {
-        mark_workstream_reviewed_conn(&self.0, workstream_id, frontier)
+        let conn = self.write();
+        mark_workstream_reviewed_conn(&conn, workstream_id, frontier)
     }
 
     pub fn get_workstream_review_summary(
         &self,
         workstream_id: &str,
     ) -> Result<WorkstreamReviewSummary> {
-        get_workstream_review_summary_conn(&self.0, workstream_id)
+        let conn = self.read();
+        get_workstream_review_summary_conn(&conn, workstream_id)
     }
 
     pub fn list_workstream_review_summaries(&self) -> Result<Vec<WorkstreamReviewSummary>> {
-        list_workstream_review_summaries_conn(&self.0)
+        let conn = self.read();
+        list_workstream_review_summaries_conn(&conn)
     }
 
     // ---------------- Conflicts ----------------
 
     pub fn insert_conflict(&self, c: &ContextConflict) -> Result<()> {
-        insert_conflict_conn(&self.0, c)
+        let conn = self.write();
+        insert_conflict_conn(&conn, c)
     }
 
     pub fn conflicts_for_workstream(
@@ -1341,11 +1409,13 @@ impl Db {
         workstream_id: &str,
         include_closed: bool,
     ) -> Result<Vec<ContextConflict>> {
-        conflicts_for_workstream_conn(&self.0, workstream_id, include_closed)
+        let conn = self.read();
+        conflicts_for_workstream_conn(&conn, workstream_id, include_closed)
     }
 
     pub fn open_conflicts_for_item(&self, item_id: &str) -> Result<Vec<ContextConflict>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT id, workstream_id, left_item_id, right_item_id, conflict_type, status, resolution, created_at, updated_at,
                     left_revision_id, right_revision_id, candidate_snapshot_json
              FROM context_conflicts WHERE (left_item_id = ?1 OR right_item_id = ?1) AND status = 'open'",
@@ -1389,7 +1459,8 @@ impl Db {
     }
 
     pub fn conflict_history(&self, conflict_id: &str) -> Result<Vec<ContextConflictEvent>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT id, conflict_id, previous_status, new_status, resolution, actor, created_at, snapshot_json
              FROM context_conflict_events WHERE conflict_id = ?1 ORDER BY created_at ASC",
         )?;
@@ -1400,14 +1471,16 @@ impl Db {
     }
 
     pub fn get_conflict(&self, conflict_id: &str) -> Result<Option<ContextConflict>> {
-        get_conflict_conn(&self.0, conflict_id)
+        let conn = self.read();
+        get_conflict_conn(&conn, conflict_id)
     }
 
     pub fn get_conflict_review_case(
         &self,
         conflict_id: &str,
     ) -> Result<Option<ConflictReviewCase>> {
-        get_conflict_review_case_conn(&self.0, conflict_id)
+        let conn = self.read();
+        get_conflict_review_case_conn(&conn, conflict_id)
     }
 
     pub fn list_conflict_review_cases(
@@ -1415,20 +1488,22 @@ impl Db {
         workstream_id: &str,
         include_closed: bool,
     ) -> Result<Vec<ConflictReviewCase>> {
-        list_conflict_review_cases_conn(&self.0, workstream_id, include_closed)
+        let conn = self.read();
+        list_conflict_review_cases_conn(&conn, workstream_id, include_closed)
     }
 
     // ---------------- Sync runs ----------------
 
     pub fn insert_sync_run(&self, run: &SyncRun) -> Result<()> {
-        insert_sync_run_conn(&self.0, run)
+        let conn = self.write();
+        insert_sync_run_conn(&conn, run)
     }
 
     /// True when an already-committed run processed exactly this delta —
     /// retries after a crash must not re-apply the same mutations.
     pub fn has_completed_run(&self, session_id: &str, delta_fingerprint: &str) -> Result<bool> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT 1 FROM sync_runs WHERE session_id = ?1 AND delta_fingerprint = ?2 AND status = 'ok' LIMIT 1",
                 params![session_id, delta_fingerprint],
@@ -1439,7 +1514,8 @@ impl Db {
     }
 
     pub fn list_sync_runs(&self, limit: i64) -> Result<Vec<SyncRun>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint, source_generation
              FROM sync_runs ORDER BY created_at DESC LIMIT ?1",
         )?;
@@ -1452,7 +1528,8 @@ impl Db {
     // ---------------- Launch intents ----------------
 
     pub fn insert_launch_intent(&self, i: &LaunchIntent) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "INSERT INTO launch_intents
              (id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, context_bundle_revisions, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
@@ -1473,7 +1550,8 @@ impl Db {
         matched_session_id: Option<&str>,
         note: &str,
     ) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "UPDATE launch_intents SET status = ?2, matched_session_id = COALESCE(?3, matched_session_id), note = ?4, updated_at = ?5 WHERE id = ?1",
             params![id, status, matched_session_id, note, now()],
         )?;
@@ -1481,8 +1559,8 @@ impl Db {
     }
 
     pub fn get_launch_intent(&self, id: &str) -> Result<Option<LaunchIntent>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
                  FROM launch_intents WHERE id = ?1",
@@ -1493,6 +1571,7 @@ impl Db {
     }
 
     pub fn list_launch_intents(&self, statuses: &[&str], limit: i64) -> Result<Vec<LaunchIntent>> {
+        let conn = self.read();
         let filter = if statuses.is_empty() {
             String::new()
         } else {
@@ -1504,7 +1583,7 @@ impl Db {
              FROM launch_intents{} ORDER BY created_at DESC LIMIT {}",
             filter, limit
         );
-        let mut st = self.0.prepare(&sql)?;
+        let mut st = conn.prepare(&sql)?;
         let statuses: Vec<String> = statuses.iter().map(|s| s.to_string()).collect();
         let rows = st
             .query_map(
@@ -1518,7 +1597,8 @@ impl Db {
     // ---------------- Context deliveries ----------------
 
     pub fn record_delivery(&self, d: &ContextDelivery) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "INSERT INTO context_deliveries (id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
@@ -1536,7 +1616,8 @@ impl Db {
 
     /// Latest successful delivery per workstream for a session.
     pub fn latest_deliveries(&self, session_id: &str) -> Result<Vec<ContextDelivery>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at
              FROM context_deliveries WHERE session_id = ?1 ORDER BY delivered_at",
         )?;
@@ -1553,7 +1634,8 @@ impl Db {
     // ---------------- Ingest sources ----------------
 
     pub fn list_ingest_sources(&self) -> Result<Vec<IngestSource>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT id, agent, path, enabled, origin, created_at FROM ingest_sources ORDER BY agent, path",
         )?;
         let rows = st
@@ -1568,6 +1650,7 @@ impl Db {
         path: &str,
         enabled: bool,
     ) -> Result<IngestSource> {
+        let conn = self.write();
         let src = IngestSource {
             id: new_id(),
             agent,
@@ -1576,32 +1659,31 @@ impl Db {
             origin: "user".into(),
             created_at: now(),
         };
-        self.0
-            .execute(
-                "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
+        conn.execute(
+            "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    src.id,
-                    src.agent.as_str(),
-                    src.path,
-                    src.enabled as i64,
-                    src.origin,
-                    src.created_at
-                ],
-            )
-            .map_err(|e| {
-                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
-                    crate::error::other("该数据源已存在")
-                } else {
-                    crate::error::AppError::from(e)
-                }
-            })?;
+            params![
+                src.id,
+                src.agent.as_str(),
+                src.path,
+                src.enabled as i64,
+                src.origin,
+                src.created_at
+            ],
+        )
+        .map_err(|e| {
+            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+                crate::error::other("该数据源已存在")
+            } else {
+                crate::error::AppError::from(e)
+            }
+        })?;
         Ok(src)
     }
 
     pub fn get_ingest_source(&self, id: &str) -> Result<Option<IngestSource>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT id, agent, path, enabled, origin, created_at FROM ingest_sources WHERE id = ?1",
                 params![id],
@@ -1617,7 +1699,8 @@ impl Db {
     /// the re-scan; only genuinely new/changed source content appends.
     /// The processed (sync) cursor is preserved for the same reason.
     pub fn reset_session_source_cursor(&self, session_id: &str) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "UPDATE session_cursors
              SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = ''
              WHERE session_id = ?1",
@@ -1627,7 +1710,8 @@ impl Db {
     }
 
     pub fn set_ingest_source_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "UPDATE ingest_sources SET enabled = ?2 WHERE id = ?1",
             params![id, enabled as i64],
         )?;
@@ -1636,7 +1720,8 @@ impl Db {
 
     /// Only user-added sources may be removed; defaults are toggled instead.
     pub fn remove_ingest_source(&self, id: &str) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "DELETE FROM ingest_sources WHERE id = ?1 AND origin = 'user'",
             params![id],
         )?;
@@ -1645,7 +1730,8 @@ impl Db {
 
     /// The directories reconcile is allowed to scan for this agent.
     pub fn enabled_roots(&self, agent: Agent) -> Result<Vec<String>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT path FROM ingest_sources WHERE agent = ?1 AND enabled = 1 ORDER BY created_at",
         )?;
         let rows = st
@@ -1657,8 +1743,8 @@ impl Db {
     // ---------------- Settings ----------------
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT value FROM settings WHERE key = ?1",
                 params![key],
@@ -1668,7 +1754,8 @@ impl Db {
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = ?2",
             params![key, value],
@@ -1677,17 +1764,17 @@ impl Db {
     }
 
     pub fn delete_setting(&self, key: &str) -> Result<()> {
-        self.0
-            .execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        let conn = self.write();
+        conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
         Ok(())
     }
 
     // ---------------- Assistant ----------------
 
     pub fn ensure_assistant_session(&self, session_id: Option<&str>) -> Result<String> {
+        let conn = self.write();
         if let Some(id) = session_id {
-            let exists = self
-                .0
+            let exists = conn
                 .query_row(
                     "SELECT 1 FROM assistant_sessions WHERE id = ?1",
                     params![id],
@@ -1699,7 +1786,7 @@ impl Db {
             }
         }
         let id = new_id();
-        self.0.execute(
+        conn.execute(
             "INSERT INTO assistant_sessions (id, title, created_at) VALUES (?1, ?2, ?3)",
             params![id, "Assistant", now()],
         )?;
@@ -1715,9 +1802,10 @@ impl Db {
         action_json: Option<&str>,
         runtime: Option<&str>,
     ) -> Result<(String, String)> {
+        let conn = self.write();
         let id = new_id();
         let ts = now();
-        self.0.execute(
+        conn.execute(
             "INSERT INTO assistant_messages (id, session_id, role, content, action_json, runtime, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![id, session_id, role, content, action_json, runtime, ts],
@@ -1730,7 +1818,8 @@ impl Db {
         session_id: &str,
         limit: i64,
     ) -> Result<Vec<AssistantMessageRow>> {
-        let mut st = self.0.prepare(
+        let conn = self.read();
+        let mut st = conn.prepare(
             "SELECT id, session_id, role, content, action_json, runtime, created_at
              FROM assistant_messages WHERE session_id = ?1 ORDER BY created_at LIMIT ?2",
         )?;
@@ -1756,7 +1845,8 @@ impl Db {
         &self,
         i: &crate::platform::exec_resolver::AgentInstallation,
     ) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "INSERT INTO agent_installations (agent, executable_path, version, source, last_verified_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(agent) DO UPDATE SET executable_path = ?2, version = ?3, source = ?4, last_verified_at = ?5",
@@ -1769,8 +1859,8 @@ impl Db {
         &self,
         agent: Agent,
     ) -> Result<Option<crate::platform::exec_resolver::AgentInstallation>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT agent, executable_path, version, source, last_verified_at
                  FROM agent_installations WHERE agent = ?1",
@@ -1792,7 +1882,8 @@ impl Db {
     /// means the CLI is gone; keeping the row would keep reporting it as
     /// detected and let it be chosen as default agent).
     pub fn delete_installation(&self, agent: Agent) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "DELETE FROM agent_installations WHERE agent = ?1",
             params![agent.as_str()],
         )?;
@@ -1802,24 +1893,26 @@ impl Db {
     // ---------------- FTS ----------------
 
     pub fn fts_available(&self) -> bool {
-        self.0
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE name = 'search_index'",
-                [],
-                |_| Ok(()),
-            )
-            .optional()
-            .unwrap_or(None)
-            .is_some()
+        let conn = self.read();
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE name = 'search_index'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .unwrap_or(None)
+        .is_some()
     }
 
     pub fn unindex(&self, kind: &str, ref_id: &str) {
-        unindex_conn(&self.0, kind, ref_id);
+        let conn = self.write();
+        unindex_conn(&conn, kind, ref_id);
     }
 
     pub fn index_project(&self, p: &Project) -> Result<()> {
-        self.unindex("project", &p.id);
-        self.0.execute(
+        let conn = self.write();
+        unindex_conn(&conn, "project", &p.id);
+        conn.execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('project', ?1, '', ?2, ?3)",
             params![p.id, p.name, p.description],
         )?;
@@ -1830,8 +1923,9 @@ impl Db {
     /// (`workstream_paths` at position 0 → `workspace_paths.project_id`), read
     /// at index time. Any path-list mutation therefore has to re-index this row.
     pub fn index_workstream(&self, w: &Workstream) -> Result<()> {
-        self.unindex("workstream", &w.id);
-        self.0.execute(
+        let conn = self.write();
+        unindex_conn(&conn, "workstream", &w.id);
+        conn.execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
              VALUES ('workstream', ?1,
                      (SELECT wp.project_id FROM workstream_paths wsp
@@ -1844,7 +1938,8 @@ impl Db {
     }
 
     pub fn index_item(&self, item: &ContextItem, rev: &ContextItemRevision) -> Result<()> {
-        index_item_conn(&self.0, item, rev)
+        let conn = self.write();
+        index_item_conn(&conn, item, rev)
     }
 }
 
@@ -1873,10 +1968,11 @@ impl Db {
     /// identity dedup happens at the event layer, incremental batches never
     /// need to wipe the session's earlier index rows.
     pub fn index_new_events(&self, events: &[SessionEvent]) -> Result<()> {
+        let conn = self.write();
         for e in events {
-            self.unindex("event", &format!("{}:{}", e.session_id, e.sequence));
+            unindex_conn(&conn, "event", &format!("{}:{}", e.session_id, e.sequence));
         }
-        let mut st = self.0.prepare(
+        let mut st = conn.prepare(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('event', ?1, ?2, ?3, ?4)",
         )?;
         for e in events {
@@ -1907,10 +2003,11 @@ impl Db {
     /// every restart. `session_jobs::unindex_session_conn` and this WHERE
     /// clause are two halves of one lifecycle invariant.
     pub fn backfill_search_index(&self) -> Result<()> {
+        let conn = self.write();
         if !self.fts_available() {
             return Ok(());
         }
-        self.0.execute(
+        conn.execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
              SELECT 'event', session_id || ':' || sequence, session_id, '', text
              FROM session_events
@@ -1926,11 +2023,44 @@ impl Db {
     // ---------------- helpers ----------------
 
     pub fn touch_project(&self, project_id: &str) -> Result<()> {
-        self.0.execute(
+        let conn = self.write();
+        conn.execute(
             "UPDATE projects SET updated_at = ?2 WHERE id = ?1",
             params![project_id, now()],
         )?;
         Ok(())
+    }
+
+    /// Files whose discovery facts are already fully stored: raw_path →
+    /// (source_file_identity, last_seen_size, mtime) for sessions that have a
+    /// cursor AND a title. Discovery uses this to skip re-parsing transcripts
+    /// that cannot have changed since the last pass, so a reconcile pass costs
+    /// O(changed files), not O(all history). Only titled sessions are listed:
+    /// an untitled row may just predate the adapters' title extraction, and
+    /// re-parsing its (unchanged) file is exactly what heals it.
+    pub fn discovery_skipset(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (String, i64, Option<f64>)>> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT s.raw_path, c.source_file_identity, c.last_seen_size, c.mtime
+             FROM sessions s
+             JOIN session_cursors c ON c.session_id = s.id
+             WHERE s.title IS NOT NULL AND c.source_file_identity != ''",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Option<f64>>(3)?,
+                    ),
+                ))
+            })?
+            .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()?;
+        Ok(rows)
     }
 }
 

@@ -27,13 +27,12 @@ pub mod policy;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::sync::{Mutex, MutexGuard};
 
 use crate::domain::{
     binding_source, ContextItem, ContextItemRevision, Session, SessionEvent,
     SessionWorkstreamBinding, SyncRun,
 };
-use crate::error::{other, Result};
+use crate::error::Result;
 use crate::storage::{new_id, now, Db};
 
 /// A proposed change to a workstream's context, produced by the Assistant.
@@ -177,12 +176,6 @@ impl Default for SyncEngine {
     }
 }
 
-/// Lock a shared Db handle, tolerating poisoning (a panicked command must
-/// not take the whole app down with it).
-pub fn lock_db(db_lock: &Mutex<Db>) -> Result<MutexGuard<'_, Db>> {
-    db_lock.lock().map_err(|_| other("db lock poisoned"))
-}
-
 impl SyncEngine {
     /// Build an engine using the assistant configuration stored in settings.
     /// Falls back to heuristic-only when the configured agent CLI is missing.
@@ -274,7 +267,7 @@ impl SyncEngine {
 
         // 3. snapshot everything extraction needs while the lock is held.
         // The binding decision hash rides along as the commit-phase CAS.
-        let binding_decision = binding_decision_hash(&db.0, &session.id)?;
+        let binding_decision = binding_decision_hash(&db.read(), &session.id)?;
         let inputs = if self.llm.is_some() {
             extractor::collect_prompt_inputs(db, &candidates)?
         } else {
@@ -538,36 +531,6 @@ impl SyncEngine {
         };
         let (mutations, runtime, diagnostics) = self.extract(session, &pre)?;
         self.commit(db, session, &pre, mutations, &runtime, diagnostics)
-    }
-
-    /// Non-blocking path used by background reconcile: takes the DB lock
-    /// per phase, so concurrent UI commands interleave. Processes every
-    /// pending event (sequence > processed cursor) of this session.
-    pub fn run_pending_sync_nonblocking(
-        &self,
-        db_lock: &Mutex<Db>,
-        session: &Session,
-    ) -> Result<usize> {
-        let pre = {
-            let guard = lock_db(db_lock)?;
-            let processed = guard.get_processed_sequence(&session.id)?;
-            let pending = guard.get_events(&session.id, Some(processed), 10_000)?;
-            if pending.is_empty() {
-                return Ok(0);
-            }
-            let to = pending.last().map(|e| e.sequence).unwrap_or(processed);
-            self.prepare(&guard, session, &pending, processed, to)?
-        };
-        let Some(pre) = pre else { return Ok(0) };
-
-        // extraction runs WITHOUT the lock (may take minutes)
-        let (mutations, runtime, diagnostics) = self.extract(session, &pre)?;
-
-        let out = {
-            let guard = lock_db(db_lock)?;
-            self.commit(&guard, session, &pre, mutations, &runtime, diagnostics)?
-        };
-        Ok(out.applied)
     }
 
     /// Keyword-based workstream classification.

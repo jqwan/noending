@@ -215,14 +215,15 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
     // expire pending intents that are older than the TTL
     db.update_launch_intent(&intent.id, launch_status::PENDING, None, "")
         .unwrap();
-    db.0.execute(
-        "UPDATE launch_intents SET launched_at = ?2 WHERE id = ?1",
-        rusqlite::params![
-            intent.id,
-            (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339()
-        ],
-    )
-    .unwrap();
+    db.write()
+        .execute(
+            "UPDATE launch_intents SET launched_at = ?2 WHERE id = ?1",
+            rusqlite::params![
+                intent.id,
+                (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339()
+            ],
+        )
+        .unwrap();
     let expired = launcher::expire_stale_launch_intents(&db).unwrap();
     assert_eq!(expired, 1);
     assert_eq!(
@@ -552,11 +553,12 @@ fn list_sessions_all_filter_combinations() {
             )
         })
         .unwrap();
-    db.0.execute(
-        "UPDATE sessions SET workspace_path_id = ?2 WHERE id = ?1",
-        rusqlite::params![s_codex.id, path_id],
-    )
-    .unwrap();
+    db.write()
+        .execute(
+            "UPDATE sessions SET workspace_path_id = ?2 WHERE id = ?1",
+            rusqlite::params![s_codex.id, path_id],
+        )
+        .unwrap();
 
     let agent_only = db
         .list_sessions(noending::storage::SessionFilter {

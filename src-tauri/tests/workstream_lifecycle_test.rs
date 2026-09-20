@@ -83,7 +83,7 @@ fn bind(db: &Db, session_id: &str, workstream_id: &str) {
 }
 
 fn count(db: &Db, sql: &str, arg: &str) -> i64 {
-    db.conn()
+    db.read()
         .query_row(sql, params![arg], |r| r.get::<_, i64>(0))
         .unwrap()
 }

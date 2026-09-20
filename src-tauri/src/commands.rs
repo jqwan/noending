@@ -23,7 +23,9 @@ pub mod workstream;
 pub use workstream::workstream_cards;
 
 pub struct AppState {
-    pub db: std::sync::Mutex<Db>,
+    /// The store owns its own concurrency (one writer + a WAL reader), so the
+    /// UI's reads never queue behind a background sync's writes.
+    pub db: Db,
     /// Guards against concurrent background sync jobs.
     pub sync_in_progress: std::sync::atomic::AtomicBool,
     /// Guards against concurrent workspace reconciles (global AND targeted —
@@ -35,14 +37,11 @@ pub struct AppState {
 }
 
 /// Spawn a background sync job: returns immediately, emits `sync-started`,
-/// `sync-progress` (per session), `sync-completed` / `sync-failed`. A job
-/// must never hold the DB lock across long operations — ingestion locks per
-/// session and extraction runs lock-free.
+/// `sync-progress` (per session), `sync-completed` / `sync-failed`. The store
+/// serializes writes internally, so the job and the UI interleave freely.
 fn spawn_sync_job<F>(app: &AppHandle, state: &State<AppState>, job: F) -> Result<()>
 where
-    F: FnOnce(&std::sync::Mutex<Db>, &dyn Fn(serde_json::Value)) -> Result<(usize, i64)>
-        + Send
-        + 'static,
+    F: FnOnce(&Db, &dyn Fn(serde_json::Value)) -> Result<(usize, i64)> + Send + 'static,
 {
     if state.sync_in_progress.swap(true, Ordering::SeqCst) {
         return Err(other("已有同步任务在进行中，请等待完成"));
@@ -72,8 +71,7 @@ where
 }
 
 pub(crate) fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
-    let guard = state.db.lock().map_err(|_| other("db lock poisoned"))?;
-    f(&guard)
+    f(&state.db)
 }
 
 /// The launcher, pointed at NoEnding Home's `runtime/` (§42.3-M14).
@@ -489,12 +487,9 @@ pub fn resolve_conflict(
 #[tauri::command]
 pub fn sync_all(app: AppHandle, state: State<AppState>) -> Result<serde_json::Value> {
     let workspace = launch_workspace(&app);
-    spawn_sync_job(&app, &state, move |db_lock, notify| {
-        let engine = {
-            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
-            crate::sync::SyncEngine::from_settings(&guard)
-        };
-        crate::ingestion::reconcile_with_engine(db_lock, &engine, &workspace, &|s| {
+    spawn_sync_job(&app, &state, move |db, notify| {
+        let engine = crate::sync::SyncEngine::from_settings(db);
+        crate::ingestion::reconcile_with_engine(db, &engine, &workspace, &|s| {
             notify(serde_json::json!({
                 "agent": s.agent.as_str(),
                 "title": s.title,
@@ -511,18 +506,12 @@ pub fn sync_source(
     state: State<AppState>,
     source_id: String,
 ) -> Result<serde_json::Value> {
-    spawn_sync_job(&app, &state, move |db_lock, notify| {
-        let source = {
-            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
-            guard
-                .get_ingest_source(&source_id)?
-                .ok_or_else(|| other("数据源不存在"))?
-        };
-        let engine = {
-            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
-            crate::sync::SyncEngine::from_settings(&guard)
-        };
-        crate::ingestion::reconcile_source(db_lock, &engine, &source, &|s| {
+    spawn_sync_job(&app, &state, move |db, notify| {
+        let source = db
+            .get_ingest_source(&source_id)?
+            .ok_or_else(|| other("数据源不存在"))?;
+        let engine = crate::sync::SyncEngine::from_settings(db);
+        crate::ingestion::reconcile_source(db, &engine, &source, &|s| {
             notify(serde_json::json!({
                 "agent": s.agent.as_str(),
                 "title": s.title,
@@ -540,18 +529,12 @@ pub fn reingest_source(
     state: State<AppState>,
     source_id: String,
 ) -> Result<serde_json::Value> {
-    spawn_sync_job(&app, &state, move |db_lock, notify| {
-        let source = {
-            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
-            guard
-                .get_ingest_source(&source_id)?
-                .ok_or_else(|| other("数据源不存在"))?
-        };
-        let engine = {
-            let guard = db_lock.lock().map_err(|_| other("db lock poisoned"))?;
-            crate::sync::SyncEngine::from_settings(&guard)
-        };
-        crate::ingestion::reingest_source(db_lock, &engine, &source, &|s| {
+    spawn_sync_job(&app, &state, move |db, notify| {
+        let source = db
+            .get_ingest_source(&source_id)?
+            .ok_or_else(|| other("数据源不存在"))?;
+        let engine = crate::sync::SyncEngine::from_settings(db);
+        crate::ingestion::reingest_source(db, &engine, &source, &|s| {
             notify(serde_json::json!({
                 "agent": s.agent.as_str(),
                 "title": s.title,

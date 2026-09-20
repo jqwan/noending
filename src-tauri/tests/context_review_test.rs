@@ -68,7 +68,7 @@ fn session_row(db: &TestDb, agent: Agent) -> Session {
 }
 
 fn set_item_time(db: &Db, item_id: &str, timestamp: &str) {
-    let conn = db.conn();
+    let conn = db.write();
     conn.execute(
         "UPDATE context_items SET created_at = ?2, updated_at = ?2 WHERE id = ?1",
         params![item_id, timestamp],
@@ -82,7 +82,7 @@ fn set_item_time(db: &Db, item_id: &str, timestamp: &str) {
 }
 
 fn set_revision_time(db: &Db, item_id: &str, revision_id: &str, timestamp: &str) {
-    let conn = db.conn();
+    let conn = db.write();
     conn.execute(
         "UPDATE context_item_revisions SET created_at = ?2 WHERE id = ?1",
         params![revision_id, timestamp],
@@ -96,7 +96,7 @@ fn set_revision_time(db: &Db, item_id: &str, revision_id: &str, timestamp: &str)
 }
 
 fn set_conflict_time(db: &Db, conflict_id: &str, timestamp: &str) {
-    db.conn()
+    db.write()
         .execute(
             "UPDATE context_conflicts SET created_at = ?2, updated_at = ?2 WHERE id = ?1",
             params![conflict_id, timestamp],
@@ -384,32 +384,36 @@ fn same_timestamp_boundary_is_lossless() {
     let item_b_id = new_id();
     let rev_b_id = new_id();
 
-    let conn = db.conn();
-    conn.execute(
-        "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, created_at, updated_at)
-         VALUES (?1, ?2, 'goal', 'active', 'agent_inferred', 'agent', ?3, ?4, ?4)",
-        params![item_a_id, ws.id, rev_a_id, ts],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
-         VALUES (?1, ?2, 'Goal A', 'Same timestamp A', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_event', ?3)",
-        params![rev_a_id, item_a_id, ts],
-    )
-    .unwrap();
+    // Scoped: the writer guard must drop before any further `Db` method —
+    // the writer mutex is not re-entrant (see Db::tx's contract note).
+    {
+        let conn = db.write();
+        conn.execute(
+            "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, created_at, updated_at)
+             VALUES (?1, ?2, 'goal', 'active', 'agent_inferred', 'agent', ?3, ?4, ?4)",
+            params![item_a_id, ws.id, rev_a_id, ts],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
+             VALUES (?1, ?2, 'Goal A', 'Same timestamp A', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_event', ?3)",
+            params![rev_a_id, item_a_id, ts],
+        )
+        .unwrap();
 
-    conn.execute(
-        "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, created_at, updated_at)
-         VALUES (?1, ?2, 'goal', 'active', 'agent_inferred', 'agent', ?3, ?4, ?4)",
-        params![item_b_id, ws.id, rev_b_id, ts],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
-         VALUES (?1, ?2, 'Goal B', 'Same timestamp B', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_event', ?3)",
-        params![rev_b_id, item_b_id, ts],
-    )
-    .unwrap();
+        conn.execute(
+            "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, created_at, updated_at)
+             VALUES (?1, ?2, 'goal', 'active', 'agent_inferred', 'agent', ?3, ?4, ?4)",
+            params![item_b_id, ws.id, rev_b_id, ts],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
+             VALUES (?1, ?2, 'Goal B', 'Same timestamp B', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_event', ?3)",
+            params![rev_b_id, item_b_id, ts],
+        )
+        .unwrap();
+    }
 
     // Set review frontier to only have reviewed A at timestamp ts
     let frontier = ReviewFrontier {
@@ -619,7 +623,7 @@ fn sync_status_change_is_review_relevant() {
 
     // Simulate Sync automated resolution: actor = "sync:heuristic"
     noending::storage::apply_status_change_conn(
-        db.conn(),
+        &db.write(),
         &item.id,
         "resolved",
         "sync:heuristic",
@@ -672,7 +676,7 @@ fn conflict_evidence_is_not_double_counted() {
 
     // 1. Production merge engine creates an evidence item with source_type = "conflict"
     let finding = noending::sync::create_item_conn(
-        db.conn(),
+        &db.write(),
         &ws.id,
         "finding",
         "Conflicting constraint claim",
@@ -798,7 +802,7 @@ fn review_summary_category_breakdown() {
     set_item_time(&db, &item3.id, "2100-01-01T00:00:04Z");
 
     noending::storage::apply_status_change_conn(
-        db.conn(),
+        &db.write(),
         &item3.id,
         "resolved",
         "sync:heuristic",
@@ -832,7 +836,7 @@ fn review_summary_category_breakdown() {
     set_item_time(&db, &item4.id, "2100-01-01T00:00:06Z");
 
     noending::storage::apply_status_change_conn(
-        db.conn(),
+        &db.write(),
         &item4.id,
         "superseded",
         "sync:heuristic",

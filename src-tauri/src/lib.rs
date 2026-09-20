@@ -85,7 +85,7 @@ pub fn run() {
             // the reconcile thread resolves handle.state::<AppState>(), which
             // panics when the state has not been managed yet.
             app.manage(commands::AppState {
-                db: Mutex::new(db),
+                db,
                 sync_in_progress: std::sync::atomic::AtomicBool::new(false),
                 workspace_refresh_in_progress: std::sync::atomic::AtomicBool::new(false),
                 prepared_launches: Mutex::new(std::collections::HashMap::new()),
@@ -94,15 +94,14 @@ pub fn run() {
             // make pre-existing events searchable (idempotent)
             {
                 let state: tauri::State<commands::AppState> = app.state();
-                let guard = state.db.lock().expect("db lock");
-                if let Err(e) = guard.backfill_search_index() {
+                if let Err(e) = state.db.backfill_search_index() {
                     eprintln!("[noending] search backfill failed: {}", e);
                 }
                 // §23 deletion crash recovery: an interrupted permanent
                 // deletion never auto-continues — it becomes a failed job the
                 // user retries (source already absent → purge completes) or
                 // cancels (session stays in Trash).
-                match lifecycle::recover_interrupted_deletions(&guard) {
+                match lifecycle::recover_interrupted_deletions(&state.db) {
                     Ok(0) => {}
                     Ok(n) => eprintln!("[noending] recovered {n} interrupted deletion job(s)"),
                     Err(e) => eprintln!("[noending] deletion recovery failed: {}", e),
@@ -110,8 +109,8 @@ pub fn run() {
             }
 
             // Application Reconcile: ingest what happened while we were away.
-            // Runs on a worker thread with per-session locking so the UI
-            // stays responsive; UI is notified on completion.
+            // Runs on a worker thread; the store serializes writes itself, so
+            // the UI stays responsive. UI is notified on completion.
             {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -121,10 +120,7 @@ pub fn run() {
                         return; // a user-triggered sync is already running
                     }
                     let result = (|| -> error::Result<(usize, i64)> {
-                        let engine = {
-                            let guard = crate::sync::lock_db(&state.db)?;
-                            sync::SyncEngine::from_settings(&guard)
-                        };
+                        let engine = sync::SyncEngine::from_settings(&state.db);
                         ingestion::reconcile_with_engine(
                             &state.db,
                             &engine,

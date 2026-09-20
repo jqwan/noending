@@ -209,7 +209,8 @@ pub struct SessionBindingRow {
 #[tauri::command]
 pub fn list_session_bindings(state: State<AppState>) -> Result<Vec<SessionBindingRow>> {
     with_db(&state, |db| {
-        let mut st = db.0.prepare(
+        let conn = db.read();
+        let mut st = conn.prepare(
             "SELECT b.session_id, b.workstream_id, b.role, COALESCE(w.title, b.workstream_id),
                     b.workstream_path_id
              FROM session_workstream_bindings b

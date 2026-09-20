@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use noending::adapters::{adapter_for, DiscoveredSession};
 use noending::domain::{
@@ -775,21 +775,21 @@ fn a_claim_must_be_a_path_of_that_workstream_and_of_that_session() {
 
     // Naming a WorkstreamPath that is not in this Workstream's list is refused…
     let err =
-        resolve_binding_path_conn(db.conn(), &s.id, "w-empty", Some(&own.id), false).unwrap_err();
+        resolve_binding_path_conn(&db.read(), &s.id, "w-empty", Some(&own.id), false).unwrap_err();
     assert!(!err.to_string().is_empty());
     // …and so is a row that is in the list but belongs to another Session.
     let err =
-        resolve_binding_path_conn(db.conn(), &s.id, &w, Some(&others_row.id), false).unwrap_err();
+        resolve_binding_path_conn(&db.read(), &s.id, &w, Some(&others_row.id), false).unwrap_err();
     assert!(!err.to_string().is_empty());
     // The honest answer for the Session's own path:
     assert_eq!(
-        resolve_binding_path_conn(db.conn(), &s.id, &w, Some(&own.id), false).unwrap(),
+        resolve_binding_path_conn(&db.read(), &s.id, &w, Some(&own.id), false).unwrap(),
         Some(own.id.clone())
     );
     // And a path already in the list needs no append to be claimed, even when
     // appending is disallowed.
     assert_eq!(
-        resolve_binding_path_conn(db.conn(), &other.id, &w, None, false).unwrap(),
+        resolve_binding_path_conn(&db.read(), &other.id, &w, None, false).unwrap(),
         Some(others_row.id)
     );
 }
@@ -1106,30 +1106,22 @@ fn reconcile_discovers_and_attaches_sessions_to_workspace_paths() {
     )
     .unwrap();
 
-    let db = Mutex::new(Db::open(&dir.join("noending.db")).unwrap());
-    {
-        let guard = db.lock().unwrap();
-        project(&guard, "p-repo", "repo");
-        guard
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
-            .unwrap();
-    }
+    let db = Db::open(&dir.join("noending.db")).unwrap();
+    project(&db, "p-repo", "repo");
+    db.add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+        .unwrap();
     let attacher = Arc::new(Scripted::new("p-repo"));
     // The one test that needs the app-wide seam; every other test injects one.
     let _ = register_workspace_attacher(attacher.clone());
 
-    let engine = {
-        let guard = db.lock().unwrap();
-        SyncEngine::from_settings(&guard)
-    };
+    let engine = SyncEngine::from_settings(&db);
     let seen = AtomicUsize::new(0);
     reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {
         seen.fetch_add(1, Ordering::SeqCst);
     })
     .unwrap();
 
-    let guard = db.lock().unwrap();
-    let s = guard
+    let s = db
         .find_session_by_agent_id(Agent::Codex, "reconciled-1")
         .unwrap()
         .expect("discovered through the real adapter");
@@ -1138,6 +1130,75 @@ fn reconcile_discovers_and_attaches_sessions_to_workspace_paths() {
     assert_eq!(s.cwd.as_deref(), Some("/repo/app"));
     assert!(seen.load(Ordering::SeqCst) > 0);
     assert!(attacher.calls() >= 1);
+}
+
+/// Discovery skips transcripts whose stored cursor still matches the file on
+/// disk: a skipped file produces no DiscoveredSession at all, so nothing may
+/// refresh the row — observable by a sentinel `last_activity_at` surviving a
+/// second pass. A row WITHOUT a title is deliberately never in the skipset:
+/// re-parsing its (unchanged) file is what heals titles written by older
+/// builds that stopped scanning at session_meta.
+#[test]
+fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
+    let dir = unique_dir("skip-unchanged");
+    let root = dir.join("sessions");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("rollout-2026-09-13-a-b-c-d.jsonl"),
+        format!(
+            "{}\n{}\n",
+            codex_meta_line("skip-1", "/repo/app"),
+            codex_user_line("first user message")
+        ),
+    )
+    .unwrap();
+
+    let db = Db::open(&dir.join("noending.db")).unwrap();
+    // The global attacher is process state another test in this binary may
+    // have registered; "p-repo" existing keeps that seam working here too.
+    project(&db, "p-repo", "repo");
+    db.add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+        .unwrap();
+    let engine = SyncEngine::from_settings(&db);
+    let reconcile = || reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {});
+
+    reconcile().unwrap();
+    let s = db
+        .find_session_by_agent_id(Agent::Codex, "skip-1")
+        .unwrap()
+        .expect("ingested on the first pass");
+    assert!(s.title.is_some(), "the fixture yields a title");
+
+    // Pass 2 over the unchanged file: discovery must skip the parse entirely,
+    // so nothing overwrites the sentinel.
+    db.write()
+        .execute(
+            "UPDATE sessions SET last_activity_at = 'sentinel' WHERE id = ?1",
+            rusqlite::params![s.id],
+        )
+        .unwrap();
+    reconcile().unwrap();
+    let after = stored(&db, &s.id);
+    assert_eq!(
+        after.last_activity_at.as_deref(),
+        Some("sentinel"),
+        "an unchanged file is skipped: no discovery refresh may touch the row"
+    );
+
+    // Untitled rows are outside the skipset — the pass re-parses and heals
+    // the title even though the file did not change.
+    db.write()
+        .execute(
+            "UPDATE sessions SET title = NULL WHERE id = ?1",
+            rusqlite::params![s.id],
+        )
+        .unwrap();
+    reconcile().unwrap();
+    let healed = stored(&db, &s.id);
+    assert!(
+        healed.title.is_some(),
+        "untitled rows are re-parsed and healed"
+    );
 }
 
 // ───────────────────────────────────────────────────────── 方案 §42.5 T1–T4
@@ -1436,11 +1497,12 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     // way the v11 data already had it.
     db.tx(|tx| attach_session_workspace_path_conn(tx, &ghost.id, None))
         .unwrap();
-    db.0.execute(
-        "UPDATE sessions SET project_id = 'p-real' WHERE id = ?1",
-        rusqlite::params![ghost.id],
-    )
-    .unwrap();
+    db.write()
+        .execute(
+            "UPDATE sessions SET project_id = 'p-real' WHERE id = ?1",
+            rusqlite::params![ghost.id],
+        )
+        .unwrap();
     assert_eq!(
         stored(&db, &ghost.id).workspace_path_id,
         None,

@@ -73,8 +73,6 @@
 //!   (§17-17). A name that changed every time a sibling appeared is a second
 //!   authority for one fact.
 
-use std::sync::Mutex;
-
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -932,7 +930,7 @@ impl ProjectProjection<'_> {
 ///   parents, nothing else. It never writes `workstream_paths` (§9) and never
 ///   advances a cursor.
 pub fn reconcile_workspace_paths(
-    db: &Mutex<Db>,
+    db: &Db,
     projection: &ProjectProjection<'_>,
     limit: usize,
 ) -> Result<ReconcileReport> {
@@ -943,15 +941,12 @@ pub fn reconcile_workspace_paths(
 /// after every path with (scanned, total) so a refresh UI can show movement
 /// without any Git internals leaving the backend.
 pub fn reconcile_workspace_paths_with_progress(
-    db: &Mutex<Db>,
+    db: &Db,
     projection: &ProjectProjection<'_>,
     limit: usize,
     progress: &dyn Fn(usize, usize),
 ) -> Result<ReconcileReport> {
-    let targets = {
-        let guard = db.lock().map_err(|_| other("db lock poisoned"))?;
-        scan_workspace_paths_conn(guard.conn(), limit)?
-    };
+    let targets = scan_workspace_paths_conn(&db.read(), limit)?;
     reconcile_workspace_path_targets(db, projection, targets, progress)
 }
 
@@ -963,14 +958,13 @@ pub fn reconcile_workspace_paths_with_progress(
 /// Unknown ids are skipped quietly (a GC'd path between listing and sweeping
 /// is simply no longer a target), never an error.
 pub fn reconcile_workspace_path_ids(
-    db: &Mutex<Db>,
+    db: &Db,
     projection: &ProjectProjection<'_>,
     path_ids: &[String],
     progress: &dyn Fn(usize, usize),
 ) -> Result<ReconcileReport> {
     let targets = {
-        let guard = db.lock().map_err(|_| other("db lock poisoned"))?;
-        let conn = guard.conn();
+        let conn = db.read();
         let mut targets = Vec::with_capacity(path_ids.len());
         for id in path_ids {
             if let Some(row) = conn
@@ -990,7 +984,7 @@ pub fn reconcile_workspace_path_ids(
 }
 
 fn reconcile_workspace_path_targets(
-    db: &Mutex<Db>,
+    db: &Db,
     projection: &ProjectProjection<'_>,
     targets: Vec<(String, String)>,
     progress: &dyn Fn(usize, usize),
@@ -1022,16 +1016,14 @@ fn reconcile_workspace_path_targets(
         // One short transaction, and the index work in the same lock step: the
         // commit already happened inside `tx`, so this is post-commit, not
         // in-transaction.
-        let committed = {
-            let guard = db.lock().map_err(|_| other("db lock poisoned"))?;
-            match guard.tx(|tx| ensure_workspace_path_conn(tx, &observation, projection.policy())) {
+        let committed =
+            match db.tx(|tx| ensure_workspace_path_conn(tx, &observation, projection.policy())) {
                 Ok(outcome) => {
-                    apply_projection_effect(&guard, &outcome.effect);
+                    apply_projection_effect(db, &outcome.effect);
                     Ok(outcome)
                 }
                 Err(e) => Err(e.to_string()),
-            }
-        };
+            };
         match committed {
             Ok(outcome) => {
                 if outcome.path.id != *path_id {
@@ -1058,10 +1050,7 @@ fn reconcile_workspace_path_targets(
         .into_iter()
         .filter(|id| !live_worktrees.contains(id))
         .collect();
-    let gc = {
-        let guard = db.lock().map_err(|_| other("db lock poisoned"))?;
-        gc_gone_workspace_paths(&guard, &gone)?
-    };
+    let gc = gc_gone_workspace_paths(db, &gone)?;
     report.outcome = gc;
     Ok(report)
 }
@@ -1100,7 +1089,7 @@ pub fn project_detail(db: &Db, project_id: &str) -> Result<Option<ProjectDetail>
     };
     let workspace_paths = db.list_workspace_paths_for_project(project_id)?;
     let workstreams =
-        crate::storage::workstream_paths::workstreams_for_project(db.conn(), project_id)?
+        crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
             .into_iter()
             .map(|(workstream, is_primary)| ProjectWorkstream {
                 workstream,
@@ -1122,7 +1111,7 @@ pub fn project_detail(db: &Db, project_id: &str) -> Result<Option<ProjectDetail>
 /// §11/E4 — the Workstreams of one Project with the 主关联/关联 distinction.
 pub fn project_workstreams(db: &Db, project_id: &str) -> Result<Vec<ProjectWorkstream>> {
     Ok(
-        crate::storage::workstream_paths::workstreams_for_project(db.conn(), project_id)?
+        crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
             .into_iter()
             .map(|(workstream, is_primary)| ProjectWorkstream {
                 workstream,
@@ -1139,7 +1128,7 @@ pub fn list_projects_with_paths(db: &Db) -> Result<Vec<(Project, Vec<WorkspacePa
     for project in db.list_projects()? {
         out.push((
             project.clone(),
-            list_workspace_paths_for_project_conn(db.conn(), &project.id)?,
+            list_workspace_paths_for_project_conn(&db.read(), &project.id)?,
         ));
     }
     Ok(out)
@@ -1148,7 +1137,7 @@ pub fn list_projects_with_paths(db: &Db) -> Result<Vec<(Project, Vec<WorkspacePa
 /// §42.5-style mechanical check, available to tests and to the integrity audit:
 /// no WorkspacePath is shared, no Project is empty, no path is unparented.
 pub fn registry_is_consistent(db: &Db) -> std::result::Result<(), String> {
-    let conn = db.conn();
+    let conn = db.read();
     let check = |sql: &str, label: &str| -> std::result::Result<(), String> {
         let bad: i64 = conn
             .query_row(sql, [], |r| r.get(0))

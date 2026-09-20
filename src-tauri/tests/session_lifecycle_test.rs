@@ -133,7 +133,7 @@ fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
 }
 
 fn count(db: &Db, sql: &str, session_id: &str) -> i64 {
-    db.conn()
+    db.read()
         .query_row(sql, [session_id], |r| r.get::<_, i64>(0))
         .unwrap()
 }
@@ -651,7 +651,7 @@ fn purge_flow_case(tag: &str, agent: Agent, adapter: &'static dyn AgentAdapter) 
 /// source preview uses (方案 §28).
 fn head_revision_source_type(db: &Db, item_id: &str) -> String {
     let rev_id: String = db
-        .conn()
+        .read()
         .query_row(
             "SELECT current_revision_id FROM context_items WHERE id = ?1",
             [item_id],
@@ -691,7 +691,7 @@ fn permanent_delete_preserves_workspace_path_and_project() {
         .clone()
         .expect("fixture attached a path");
     let project_id: String = db
-        .conn()
+        .read()
         .query_row(
             "SELECT project_id FROM workspace_paths WHERE id = ?1",
             [&path_id],
@@ -861,7 +861,7 @@ fn restored_source_is_discovered_again_as_a_new_session() {
     // Old redacted provenance stays redacted — never relinked to S2 (§34).
     assert_eq!(head_revision_source_type(&db, &item_id), "deleted_session");
     let rev_id: String = db
-        .conn()
+        .read()
         .query_row(
             "SELECT current_revision_id FROM context_items WHERE id = ?1",
             [&item_id],
@@ -1163,7 +1163,7 @@ adapter_suite!(pi_suite, Agent::Pi, PiAdapter);
 /// Register an ingest source root (review P1-2: confirmed-absent verdicts
 /// are corroborated against these).
 fn register_source(db: &Db, agent: Agent, root: &std::path::Path) {
-    db.conn()
+    db.write()
         .execute(
             "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
              VALUES (?1, ?2, ?3, 1, 'user', '2026-01-01T00:00:00Z')",
@@ -1346,7 +1346,7 @@ fn search_filters_stale_trashed_rows() {
     let db = open_db("stale-rows");
     // 一行陈旧的 event 索引：可能来自旧版本构建或崩溃窗口 —— 它的
     // session 不存在（更不必说 active）。读侧守卫必须把它滤掉。
-    db.conn()
+    db.write()
         .execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
              VALUES ('event', 'stale:1', 'sess-gone', '', 'unique stale marker text')",
@@ -1394,7 +1394,9 @@ fn confirmed_absent_requires_accessible_source_root() {
     lifecycle::cancel_session_permanent_delete(&db, &preview.job_id).unwrap();
 
     // Step 2 — 路径不被任何已注册来源包含：无法佐证，拒绝。
-    db.conn().execute("DELETE FROM ingest_sources", []).unwrap();
+    db.write()
+        .execute("DELETE FROM ingest_sources", [])
+        .unwrap();
     let err = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap_err();
     assert!(
         err.to_string().contains("不在任何已注册"),

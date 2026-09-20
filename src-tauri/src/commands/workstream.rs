@@ -293,23 +293,28 @@ pub fn merge_workstreams(
             .ok_or_else(|| other("目标 Workstream 不存在"))?;
         // move items + bindings, mark source abandoned
         let items = db.items_for_workstream(&source_id, true)?;
-        for (mut item, rev) in items {
-            item.workstream_id = target_id.clone();
-            item.updated_at = now();
-            db.index_item(&item, &rev)?;
-            db.0.execute(
-                "UPDATE context_items SET workstream_id = ?2, updated_at = ?3 WHERE id = ?1",
-                rusqlite::params![item.id, target_id, now()],
-            )?;
-        }
         let bindings = db.bindings_for_workstream(&source_id)?;
-        for b in bindings {
-            db.0.execute(
-                "INSERT OR IGNORE INTO session_workstream_bindings
-                 (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![b.session_id, target_id, b.role, b.source, b.confidence, b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at],
-            )?;
+        {
+            // One writer guard for the batch; conn-level helpers only —
+            // a `Db` method here would re-lock the writer and deadlock.
+            let conn = db.write();
+            for (mut item, rev) in items {
+                item.workstream_id = target_id.clone();
+                item.updated_at = now();
+                crate::storage::index_item_conn(&conn, &item, &rev)?;
+                conn.execute(
+                    "UPDATE context_items SET workstream_id = ?2, updated_at = ?3 WHERE id = ?1",
+                    rusqlite::params![item.id, target_id, now()],
+                )?;
+            }
+            for b in bindings {
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_workstream_bindings
+                     (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![b.session_id, target_id, b.role, b.source, b.confidence, b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at],
+                )?;
+            }
         }
         let mut src = source;
         src.lifecycle = workstream_lifecycle::COMPLETED.into();

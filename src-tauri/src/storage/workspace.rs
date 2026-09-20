@@ -116,19 +116,23 @@ pub fn project_by_git_id_conn(conn: &Connection, git_id: &str) -> Result<Option<
 
 impl Db {
     pub fn get_workspace_path(&self, id: &str) -> Result<Option<WorkspacePath>> {
-        get_workspace_path_conn(&self.0, id)
+        let conn = self.read();
+        get_workspace_path_conn(&conn, id)
     }
 
     pub fn list_workspace_paths(&self) -> Result<Vec<WorkspacePath>> {
-        list_workspace_paths_conn(&self.0)
+        let conn = self.read();
+        list_workspace_paths_conn(&conn)
     }
 
     pub fn list_workspace_paths_for_project(&self, project_id: &str) -> Result<Vec<WorkspacePath>> {
-        list_workspace_paths_for_project_conn(&self.0, project_id)
+        let conn = self.read();
+        list_workspace_paths_for_project_conn(&conn, project_id)
     }
 
     pub fn count_workspace_paths_for_project(&self, project_id: &str) -> Result<i64> {
-        Ok(self.0.query_row(
+        let conn = self.read();
+        Ok(conn.query_row(
             "SELECT COUNT(*) FROM workspace_paths WHERE project_id = ?1",
             params![project_id],
             |r| r.get(0),
@@ -241,8 +245,8 @@ fn row_git_identity(r: &Row) -> rusqlite::Result<GitIdentity> {
 
 impl Db {
     pub fn get_git_identity(&self, id: &str) -> Result<Option<GitIdentity>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT * FROM git_identities WHERE id = ?1",
                 params![id],
@@ -252,8 +256,8 @@ impl Db {
     }
 
     pub fn find_git_identity_by_common_dir(&self, common_dir: &str) -> Result<Option<GitIdentity>> {
-        Ok(self
-            .0
+        let conn = self.read();
+        Ok(conn
             .query_row(
                 "SELECT * FROM git_identities WHERE common_dir = ?1",
                 params![common_dir],

@@ -86,7 +86,7 @@ fn seed_context(db: &Db, ws_id: &str, titles: &[&str]) {
 }
 
 fn count(db: &Db, sql: &str) -> i64 {
-    db.conn()
+    db.read()
         .query_row(sql, [], |r| r.get::<_, i64>(0))
         .unwrap()
 }

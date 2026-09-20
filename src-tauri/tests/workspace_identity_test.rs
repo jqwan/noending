@@ -89,7 +89,7 @@ fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
     registry_is_consistent(&db).expect("a derived id is consistent");
 
     // The same shape of row, under an id that is not its own derivation.
-    db.conn()
+    db.write()
         .execute(
             "INSERT INTO workspace_paths
                (id, canonical_path, project_id, git_state, git_kind, exists_on_disk,
@@ -111,7 +111,7 @@ fn one_git_family_cannot_be_claimed_by_two_projects() {
     db.upsert_project(&Project::new("fb".to_string(), "B"))
         .unwrap();
     let err = db
-        .conn()
+        .write()
         .execute(
             "UPDATE projects SET git_id = 'git-shared' WHERE id IN ('fa','fb')",
             [],

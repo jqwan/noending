@@ -163,7 +163,7 @@ pub fn file_identity(path: &Path) -> String {
     }
 }
 
-fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
+pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
     let t: chrono::DateTime<chrono::Utc> = meta.modified().ok()?.into();
     Some(t.timestamp() as f64 + t.timestamp_subsec_nanos() as f64 / 1e9)
 }
@@ -542,7 +542,16 @@ pub trait AgentAdapter: Send + Sync {
     /// Discover external sessions under the given roots (the user-enabled
     /// ingest sources). Each root is scanned recursively with the adapter's
     /// own file-matching rules; missing directories are skipped quietly.
-    fn discover_sessions_in(&self, roots: &[PathBuf]) -> Result<Vec<DiscoveredSession>>;
+    ///
+    /// `unchanged` is the store's "this transcript is already fully ingested
+    /// and its cursor still matches the file on disk" verdict: a candidate
+    /// that passes it is skipped WITHOUT being read or parsed, so a steady-
+    /// state reconcile pass touches only files that actually changed.
+    fn discover_sessions_in(
+        &self,
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+    ) -> Result<Vec<DiscoveredSession>>;
 
     /// Read only the delta since `cursor`, detecting append / truncate /
     /// rewrite / file-replacement. The returned events carry no sequence —

@@ -247,7 +247,7 @@ pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<Wo
         let project_name = db.get_project(&wp.project_id)?.map(|p| p.name);
         views.push(WorkstreamPathView {
             bound_session_count: count_bindings_for_workstream_path_conn(
-                &db.0,
+                &db.read(),
                 workstream_id,
                 &path.id,
             )?,
@@ -362,7 +362,7 @@ pub fn primary_project_for_workstream(
     db: &Db,
     workstream_id: &str,
 ) -> Result<(Option<Id>, Option<String>)> {
-    let Some(wp) = primary_workspace_path(&db.0, workstream_id)? else {
+    let Some(wp) = primary_workspace_path(&db.read(), workstream_id)? else {
         return Ok((None, None));
     };
     let name = db.get_project(&wp.project_id)?.map(|p| p.name);
@@ -418,7 +418,7 @@ impl WorkstreamLaunchPaths {
 
 pub fn workstream_launch_paths(db: &Db, workstream_id: &str) -> Result<WorkstreamLaunchPaths> {
     Ok(WorkstreamLaunchPaths {
-        ordered_paths: ordered_canonical_paths_for_workstream(&db.0, workstream_id)?,
+        ordered_paths: ordered_canonical_paths_for_workstream(&db.read(), workstream_id)?,
     })
 }
 

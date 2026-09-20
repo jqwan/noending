@@ -143,7 +143,7 @@ fn workspace(default_workspace: Option<&str>) -> LaunchWorkspace {
 }
 
 fn count(db: &Db, sql: &str) -> i64 {
-    db.conn()
+    db.read()
         .query_row(sql, [], |r| r.get::<_, i64>(0))
         .unwrap()
 }
@@ -818,7 +818,7 @@ fn a_default_workspace_fallback_binds_without_teaching_the_workstream_that_path(
 }
 
 fn path_count(db: &Db, workstream_id: &str) -> i64 {
-    db.conn()
+    db.read()
         .query_row(
             "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1",
             rusqlite::params![workstream_id],
@@ -828,7 +828,7 @@ fn path_count(db: &Db, workstream_id: &str) -> i64 {
 }
 
 fn primary_titles(db: &Db, workstream_id: &str) -> Vec<String> {
-    db.conn()
+    db.read()
         .prepare(
             "SELECT wp.canonical_path FROM workstream_paths p
              JOIN workspace_paths wp ON wp.id = p.workspace_path_id
