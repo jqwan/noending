@@ -45,7 +45,8 @@ impl CodexAdapter {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if v.get("type").and_then(|t| t.as_str()) == Some("session_meta") {
+            let vtype = v.get("type").and_then(|t| t.as_str());
+            if vtype == Some("session_meta") {
                 let p = v.get("payload").unwrap_or(&v);
                 session_id = p
                     .get("session_id")
@@ -61,12 +62,7 @@ impl CodexAdapter {
                     .get("parent_thread_id")
                     .and_then(|t| t.as_str())
                     .map(|t| t.to_string());
-                if session_id.is_some() {
-                    break;
-                }
-            } else if first_user_text.is_none()
-                && v.get("type").and_then(|t| t.as_str()) == Some("response_item")
-            {
+            } else if first_user_text.is_none() && vtype == Some("response_item") {
                 let p = v.get("payload").unwrap_or(&v);
                 if p.get("type").and_then(|t| t.as_str()) == Some("message")
                     && p.get("role").and_then(|r| r.as_str()) == Some("user")
@@ -77,6 +73,13 @@ impl CodexAdapter {
                         first_user_text = Some(truncate_text(&text, 400));
                     }
                 }
+            }
+            // session_meta opens a rollout file, so stopping at the meta
+            // line itself would leave first_user_text — and every title —
+            // unset. Stop only once both meta and first user text are in
+            // hand; a meta-only session (no user turn yet) scans to EOF.
+            if session_id.is_some() && first_user_text.is_some() {
+                break;
             }
         }
 
@@ -338,4 +341,96 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
 pub fn extract_title(d: &DiscoveredSession) -> Option<String> {
     d.first_user_text.as_deref().and_then(title_from_text)
+}
+
+#[cfg(test)]
+mod rollout_tests {
+    use super::*;
+
+    const SESSION_ID: &str = "01a0bee7-6afb-7622-afcd-e26c61dd545d";
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("noending-codex-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_rollout(dir: &Path, name: &str, lines: &[String]) -> PathBuf {
+        let mut body = lines.join("\n");
+        body.push('\n');
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Line shapes mirror real `~/.codex/sessions` rollout files: meta on
+    /// ordinal 0, then a developer `<app-context>` payload, then user-role
+    /// wrapper payloads before the first real user turn.
+    fn meta_line() -> String {
+        serde_json::json!({
+            "timestamp": "2026-09-20T13:01:47.832Z", "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": SESSION_ID,
+                "id": SESSION_ID,
+                "timestamp": "2026-09-20T13:00:32.388Z",
+                "cwd": "/tmp/proj"
+            }
+        })
+        .to_string()
+    }
+
+    fn message_line(ordinal: usize, role: &str, text: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-09-20T13:01:48.000Z", "ordinal": ordinal,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": format!("m{ordinal}"),
+                "role": role,
+                "content": [{ "type": "input_text", "text": text }]
+            }
+        })
+        .to_string()
+    }
+
+    /// Regression: session_meta opens every rollout file, so the scan must
+    /// continue past it to reach the first user message — stopping at the
+    /// meta line left every Codex session ingesting untitled.
+    #[test]
+    fn title_survives_meta_on_line_zero() {
+        let dir = temp_dir("titled");
+        let path = write_rollout(
+            &dir,
+            "rollout-titled.jsonl",
+            &[
+                meta_line(),
+                message_line(2, "developer", "<app-context>\n# Codex desktop context"),
+                message_line(5, "user", "<recommended_plugins>\nDro is available…"),
+                message_line(8, "user", "我想对整体工程进行代码瘦身，请给出优化方案"),
+            ],
+        );
+        let d = CodexAdapter::parse_rollout(&path).unwrap().unwrap();
+        assert_eq!(d.agent_session_id, SESSION_ID);
+        assert_eq!(d.cwd.as_deref(), Some("/tmp/proj"));
+        assert_eq!(
+            extract_title(&d).as_deref(),
+            Some("我想对整体工程进行代码瘦身，请给出优化方案")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A just-started session has a meta line but no user turn yet: parse
+    /// still succeeds (scanning to EOF) and simply yields no title.
+    #[test]
+    fn meta_only_file_parses_without_title() {
+        let dir = temp_dir("meta-only");
+        let path = write_rollout(&dir, "rollout-meta-only.jsonl", &[meta_line()]);
+        let d = CodexAdapter::parse_rollout(&path).unwrap().unwrap();
+        assert_eq!(d.agent_session_id, SESSION_ID);
+        assert_eq!(d.cwd.as_deref(), Some("/tmp/proj"));
+        assert_eq!(extract_title(&d), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
