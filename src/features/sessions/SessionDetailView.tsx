@@ -29,10 +29,12 @@ const EVENT_PAGE_LIMIT = 500;
  * 最近什么时候动过、在哪个目录、Session ID 是什么」，正文是标准化消息流。
  * 这里不出现同步提取、Context 变更或自动归类。
  *
- * v0.2 增加两行只读事实（方案 §22、§43.3-M29）：Session 的 cwd 解析成的
+ * v0.2 增加只读事实（方案 §22、§43.3-M29）：Session 的 cwd 解析成的
  * WorkspacePath，以及从那条路径派生出来的 Project。两者都**没有编辑入口**——
  * 路径由 NoEnding 从磁盘观察得到，Project 只有「移动路径」这一条改变方式，
  * 而那属于 Projects 侧，不属于一次已经发生的执行记录。
+ * 界面上两者合并为一行「工作目录」：主值是规范化路径，原始 cwd 只在写法
+ * 不同时以小字副行出现——两套拼写只在真的不同时才值得同时可见。
  */
 export default function SessionDetailView({ sessionId, navigate }: {
   sessionId: string;
@@ -245,43 +247,6 @@ export default function SessionDetailView({ sessionId, navigate }: {
             </span>
           ) : <span className="muted">未知</span>}
         </Field>
-        <Field label="工作目录">
-          {cwd
-            ? <CopyValue value={cwd} title={`${cwd} · Agent 原始记录里的 cwd，是这条 Session 自己的事实`} />
-            : <span className="muted">{NO_CWD}（该 Session 的原始记录里没有目录信息）</span>}
-        </Field>
-        <Field label="工作路径">
-          {workspacePath ? (
-            <>
-              <CopyValue
-                value={workspacePath.canonical_path}
-                mono
-                title={`${workspacePath.canonical_path} · NoEnding 识别工作位置用的规范化路径`}
-              />
-              {cwd !== "" && cwd !== workspacePath.canonical_path && (
-                <div className="muted small" style={{ marginTop: 4 }}>
-                  与上面的「工作目录」写法不同，是因为 NoEnding 按自己的规则把它规范化了。
-                </div>
-              )}
-              {!workspacePath.exists && (
-                <div style={{ marginTop: 4 }}>
-                  <span
-                    className="badge warn"
-                    title="最近一次目录检查时在磁盘上找不到这个目录。工作路径的身份由路径本身决定，不靠目录存在与否；目录回来时仍然对上同一条工作路径。"
-                  >
-                    目录不存在
-                  </span>
-                </div>
-              )}
-            </>
-          ) : cwd ? (
-            <span className="muted small">
-              这个目录还没有被登记成工作路径 —— NoEnding 会在下一次目录扫描后自动补上，不需要手工操作。
-            </span>
-          ) : (
-            <span className="muted small">没有工作目录，也就没有工作路径。</span>
-          )}
-        </Field>
         <Field label="Project">
           {workspacePath ? (
             derivedProjectName ? (
@@ -293,7 +258,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
                 >
                   {derivedProjectName}
                 </button>
-                <span className="muted small">由上面的工作路径自动派生，只读</span>
+                <span className="muted small">由下面的工作目录自动派生，只读</span>
               </span>
             ) : (
               <span className="muted small">这条工作路径所属的 Project 记录暂时读不到。</span>
@@ -310,6 +275,41 @@ export default function SessionDetailView({ sessionId, navigate }: {
                 ? "没有记录过工作目录，所以没有 Project。"
                 : "工作路径还没有登记，所以暂时没有 Project。"}
             </span>
+          )}
+        </Field>
+        <Field label="工作目录">
+          {workspacePath ? (
+            <>
+              <CopyValue
+                value={workspacePath.canonical_path}
+                mono
+                title={`${workspacePath.canonical_path} · NoEnding 识别工作位置用的规范化路径`}
+              />
+              {cwd !== "" && cwd !== workspacePath.canonical_path && (
+                <div className="muted small" style={{ marginTop: 4 }}>
+                  Agent 原始记录：{cwd}
+                </div>
+              )}
+              {!workspacePath.exists && (
+                <div style={{ marginTop: 4 }}>
+                  <span
+                    className="badge warn"
+                    title="最近一次目录检查时在磁盘上找不到这个目录。工作路径的身份由路径本身决定，不靠目录存在与否；目录回来时仍然对上同一条工作路径。"
+                  >
+                    目录不存在
+                  </span>
+                </div>
+              )}
+            </>
+          ) : cwd ? (
+            <>
+              <CopyValue value={cwd} title={`${cwd} · Agent 原始记录里的 cwd，是这条 Session 自己的事实`} />
+              <div className="muted small" style={{ marginTop: 4 }}>
+                这个目录还没有被登记成工作路径 —— NoEnding 会在下一次目录扫描后自动补上，不需要手工操作。
+              </div>
+            </>
+          ) : (
+            <span className="muted">{NO_CWD}（该 Session 的原始记录里没有目录信息）</span>
           )}
         </Field>
         <Field label="Session ID">
