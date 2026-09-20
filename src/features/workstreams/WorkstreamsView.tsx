@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import WorkstreamCard, { cardSearchFields, searchFieldHint } from "./WorkstreamCard";
@@ -37,7 +37,7 @@ export default function WorkstreamsView({ navigate, action, actionSeq }: {
   action?: ViewAction;
   actionSeq: number;
 }) {
-  const { cards, defaultAgent, refresh } = useWorkstreamCards();
+  const { cards, defaultAgent } = useWorkstreamCards();
   const { intelligenceEnabled } = useBaseExperience();
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("recent");

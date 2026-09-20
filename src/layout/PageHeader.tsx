@@ -1,4 +1,3 @@
-import React from "react";
 
 /** 页头：面包屑返回 + 标题 + 副标题 + 右侧动作区。 */
 export default function PageHeader({ back, onBack, title, sub, actions, children }: {

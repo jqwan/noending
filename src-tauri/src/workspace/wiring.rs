@@ -1,11 +1,11 @@
 //! Main-owned wiring for the physical layer.
 //!
-//! Each Wave 1 module deliberately depends on a seam instead of a concrete
+//! Each module deliberately depends on a seam instead of a concrete
 //! sibling — `workspace::resolver` knows nothing about Projects,
 //! `workspace::project` knows nothing about the launcher, and both are testable
 //! with a scripted stand-in. That leaves one file in the crate that has to know
-//! everybody, and it is this one: it assembles Agent A's resolver and Agent B's
-//! Project policy behind the single [`WorkspaceAttaching`] door that command,
+//! everybody, and it is this one: it assembles the resolver and Project policy
+//! behind the single [`WorkspaceAttaching`] door that command,
 //! ingestion and launch code call.
 //!
 //! Keeping it here is what preserves 方案 §29: there is exactly one object that

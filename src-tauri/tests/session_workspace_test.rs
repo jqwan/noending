@@ -1,4 +1,4 @@
-//! Agent D — Session workspace + binding semantics (方案 §19).
+//! Session workspace + binding semantics (方案 §19).
 //!
 //! Every test here pins one edge of the fact chain
 //!
@@ -106,15 +106,6 @@ fn project(db: &Db, id: &str, name: &str) {
 fn workstream(db: &Db, id: &str) -> String {
     db.upsert_workstream(&Workstream::new(id.into(), id))
         .unwrap();
-    id.to_string()
-}
-
-/// A Workstream that still carries a legacy `default_cwd` — the thing v0.2 must
-/// never resurrect as a path.
-fn workstream_with_default_cwd(db: &Db, id: &str, default_cwd: &str) -> String {
-    let mut w = Workstream::new(id.into(), id);
-    w.default_cwd = Some(default_cwd.into());
-    db.upsert_workstream(&w).unwrap();
     id.to_string()
 }
 
@@ -803,35 +794,6 @@ fn a_claim_must_be_a_path_of_that_workstream_and_of_that_session() {
     );
 }
 
-// ------------------------- 11. a path-less Session is never fabricated
-
-#[test]
-fn a_cwd_less_session_stays_unresolved_instead_of_becoming_the_default_workspace() {
-    // §5.5, §7.2 — never backfill from a default, not even a legacy
-    // `default_cwd` still sitting on the Workstream the Session is bound to.
-    let (_d, db) = temp_db("no-cwd");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "legacy", None).0;
-    assert_eq!(attacher.calls(), 0, "no cwd means no path is even resolved");
-    let row = stored(&db, &s.id);
-    assert_eq!(row.workspace_path_id, None);
-    assert_eq!(row.project_id, None);
-    assert!(db.list_workspace_paths().unwrap().is_empty());
-
-    let w = workstream_with_default_cwd(&db, "w1", "/legacy/default");
-    bind(&db, &s.id, &w, "primary");
-
-    assert_eq!(binding(&db, &s.id, &w).workstream_path_id, None);
-    assert!(
-        path_list(&db, &w).is_empty(),
-        "the Workstream's path list did not gain its retired default_cwd"
-    );
-    assert!(db.list_workspace_paths().unwrap().is_empty());
-    assert_eq!(attacher.calls(), 0);
-    assert_eq!(stored(&db, &s.id).project_id, None);
-}
-
 #[test]
 fn a_legacy_null_claim_keeps_working_and_is_repaired_by_a_real_rebind() {
     let (_d, db) = temp_db("legacy-null");
@@ -1130,11 +1092,7 @@ fn repeated_binds_are_idempotent_for_the_path_list() {
 // ------------------------------------------------ product-level discovery
 
 #[test]
-fn reconcile_discovers_attaches_and_records_no_affinity_evidence() {
-    // §42.2-E11: the discovery hot path used to write name-substring Project
-    // evidence for every new Session. Membership is derived now, so that table
-    // must stay empty — while the Session still gets its WorkspacePath and its
-    // Project through the registered seam.
+fn reconcile_discovers_and_attaches_sessions_to_workspace_paths() {
     let dir = unique_dir("reconcile");
     let root = dir.join("sessions");
     std::fs::create_dir_all(&root).unwrap();
@@ -1178,16 +1136,6 @@ fn reconcile_discovers_attaches_and_records_no_affinity_evidence() {
     assert_eq!(s.workspace_path_id, path_identity_of("/repo/app"));
     assert_eq!(s.project_id.as_deref(), Some("p-repo"));
     assert_eq!(s.cwd.as_deref(), Some("/repo/app"));
-    let evidence: i64 = guard
-        .0
-        .query_row("SELECT COUNT(*) FROM project_affinity_evidence", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        evidence, 0,
-        "no third path fact may be invented (§42.2-E11)"
-    );
     assert!(seen.load(Ordering::SeqCst) > 0);
     assert!(attacher.calls() >= 1);
 }
@@ -1467,31 +1415,6 @@ fn noending_home_is_resolved_before_the_database_opens() {
     assert!(
         home < db,
         "§3: relocation runs inside prepare_home, so it must precede opening the db ({home} vs {db})"
-    );
-}
-
-/// §28 — `commands.rs` must not read a retired authority column off a domain
-/// object. `workstreams.project_id` is frozen at creation (§42.2-E6) and can
-/// name a Project §7.4 deleted or §8.3 merged away; the position-0 projection
-/// in `workspace::workstream` is the only live answer. Breaks the moment a
-/// `.project_id` field read reappears in the command layer.
-#[test]
-fn the_command_layer_never_reads_a_retired_project_column() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut offenders: Vec<String> = Vec::new();
-    for name in ["src/commands.rs"] {
-        let text =
-            std::fs::read_to_string(manifest.join(name)).unwrap_or_else(|_| panic!("{name}"));
-        let code = code_only(&text);
-        for needle in [".project_id", ".default_cwd"] {
-            if code.contains(needle) {
-                offenders.push(format!("{name}: {needle}"));
-            }
-        }
-    }
-    assert!(
-        offenders.is_empty(),
-        "§28/§42.3-M19: derive it from the path instead: {offenders:?}"
     );
 }
 

@@ -40,12 +40,10 @@ fn session_row(db: &Db) -> Session {
 fn ws_row(db: &Db, title: &str) -> noending::domain::Workstream {
     let w = noending::domain::Workstream {
         id: new_id(),
-        project_id: None,
         title: title.into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };

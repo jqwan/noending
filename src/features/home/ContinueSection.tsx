@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
 import WorkstreamCard from "../workstreams/WorkstreamCard";
@@ -47,7 +47,7 @@ export function RecentSessions({ navigate, onNewSession }: {
 
   const refresh = useMemo(
     () => () => {
-      api.listAllSessions().then((ss) => {
+      api.listSessions().then((ss) => {
         const sorted = [...ss]
           .sort((a, b) =>
             (b.last_activity_at ?? b.started_at ?? "").localeCompare(

@@ -76,12 +76,10 @@ fn real_codex_extracts_mutations() {
     // candidate workstream visible to the model
     let ws = noending::domain::Workstream {
         id: "ws-test-1".into(),
-        project_id: None,
         title: "Context Sync".into(),
         description: "设计 Session 到 Workstream 的上下文同步机制".into(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: String::new(),
         updated_at: String::new(),
     };
@@ -187,12 +185,10 @@ fn real_codex_assistant_chat_roundtrip() {
     let db = temp_db();
     let ws = noending::domain::Workstream {
         id: "ws-chat-1".into(),
-        project_id: None,
         title: "NoEnding 品牌".into(),
         description: "整理品牌视觉与文案".into(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: String::new(),
         updated_at: String::new(),
     };

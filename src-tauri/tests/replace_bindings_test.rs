@@ -43,12 +43,10 @@ fn session(database: &Db, agent_session_id: &str) -> String {
 fn workstream(database: &Db, title: &str) -> String {
     let w = noending::domain::Workstream {
         id: new_id(),
-        project_id: None,
         title: title.into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };

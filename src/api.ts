@@ -5,7 +5,7 @@ import type {
   PermanentDeletionPreview, PermanentDeletionResult, Project, ProjectCardData,
   ProjectDetailData, ProjectWorkstreamRow, SessionDeletionJob, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
-  ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionContextBundle, SessionDetail, SessionWorkstreamBinding,
+  ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
   WorkstreamReviewSummary,
 } from "./types";
@@ -13,11 +13,8 @@ import type {
 export const api = {
   // ---------------- Projects (方案 §11) ----------------
   //
-  // v0.2 derives a Project from its WorkspacePaths. The read + rename surface is
-  // the whole API: `create_project` / `update_project` / `delete_project` and the
-  // resource commands are no longer registered in `lib.rs`, so their wrappers
-  // below are dead by construction and only await removal with their last UI
-  // call site. Calling one rejects at runtime — that is the point.
+  // v0.2 derives Projects from WorkspacePaths; reads and rename are the full
+  // client surface.
   listProjects: () => invoke<Project[]>("list_projects"),
   /** §8 — 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
   listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
@@ -135,7 +132,6 @@ export const api = {
       agent: agent ?? null,
       scope: scope ?? null,
     }),
-  listAllSessions: () => invoke<Session[]>("list_sessions", { projectId: null, agent: null }),
   // Session Lifecycle & Deletion v0.1: the UI submits ids only — the
   // deletion plan and its targets never travel from the frontend.
   trashSession: (sessionId: string) => invoke<Session>("trash_session", { sessionId }),
@@ -168,10 +164,6 @@ export const api = {
     ),
   listSyncRuns: (limit?: number) => invoke<SyncRun[]>("list_sync_runs", { limit: limit ?? 50 }),
 
-  launchNewSession: (agent: Agent, workstreamIds: string[], cwd?: string) =>
-    invoke<LaunchResult>("launch_new_session", { agent, workstreamIds, cwd: cwd ?? null }),
-  launchResumeSession: (sessionId: string, extraWorkstreamIds: string[]) =>
-    invoke<LaunchResult>("launch_resume_session", { sessionId, extraWorkstreamIds }),
   prepareNewSession: (agent: Agent, workstreamIds: string[], cwd?: string) =>
     invoke<import("./types").PreparedLaunch>("prepare_new_session", { agent, workstreamIds, cwd: cwd ?? null }),
   prepareResumeSession: (sessionId: string, extraWorkstreamIds: string[]) =>
@@ -191,7 +183,6 @@ export const api = {
     invoke<void>("remove_ingest_source", { sourceId }),
 
   search: (query: string, limit?: number) => invoke<SearchHit[]>("search", { query, limit: limit ?? 30 }),
-  getStats: () => invoke<Record<string, number>>("get_stats"),
   getAgentStatus: () =>
     invoke<Record<string, { name: string; detected: boolean; executable: string | null; version: string | null }>>("get_agent_status"),
 

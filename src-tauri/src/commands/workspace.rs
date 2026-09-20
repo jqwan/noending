@@ -1,7 +1,7 @@
 //! Workspace settings commands — NoEnding Home, default workspace (§11).
 //!
-//! Owned by Main: this is the wiring surface between Agent A's Home resolution
-//! and the UI. Two rules make it safe to expose at all:
+//! This is the wiring surface between Home resolution and the UI. Two rules
+//! make it safe to expose at all:
 //!
 //! * `get_workspace_settings` reports the Home the app is *actually* running on,
 //!   read from managed state — never a re-resolution, because a re-resolution

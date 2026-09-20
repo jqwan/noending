@@ -4,21 +4,41 @@ use noending::domain::{
 };
 use noending::storage::{new_id, now, Db};
 use rusqlite::params;
+use std::ops::Deref;
 
-fn open_db(tag: &str) -> Db {
+struct TestDb {
+    db: Option<Db>,
+    dir: std::path::PathBuf,
+}
+
+impl Deref for TestDb {
+    type Target = Db;
+
+    fn deref(&self) -> &Self::Target {
+        self.db.as_ref().unwrap()
+    }
+}
+
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        self.db.take();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn open_db(tag: &str) -> TestDb {
     let dir = std::env::temp_dir().join(format!("noending-review-{}-{}", tag, new_id()));
-    Db::open(&dir.join("test.db")).unwrap()
+    let db = Db::open(&dir.join("test.db")).unwrap();
+    TestDb { db: Some(db), dir }
 }
 
 fn ws_row(db: &Db, title: &str) -> Workstream {
     let w = Workstream {
         id: new_id(),
-        project_id: None,
         title: title.into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -26,8 +46,8 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
     w
 }
 
-fn session_row(db: &Db, agent: Agent) -> Session {
-    let raw = std::env::temp_dir().join(format!("noending-raw-{}.jsonl", new_id()));
+fn session_row(db: &TestDb, agent: Agent) -> Session {
+    let raw = db.dir.join(format!("raw-{}.jsonl", new_id()));
     let _ = std::fs::write(&raw, "");
     let s = Session {
         id: new_id(),
@@ -47,80 +67,41 @@ fn session_row(db: &Db, agent: Agent) -> Session {
     s
 }
 
-/// 1. migration_baselines_existing_workstreams
-/// Upgrading a pre-v10 database baselines existing workstreams so historical
-/// context changes are treated as already reviewed.
-#[test]
-fn migration_baselines_existing_workstreams() {
-    let dir = std::env::temp_dir().join(format!("noending-test-v10-mig-{}", new_id()));
-    let db_path = dir.join("test.db");
-
-    let ws_id = new_id();
-    {
-        let db = Db::open(&db_path).unwrap();
-        let conn = db.conn();
-        conn.execute("DROP TABLE IF EXISTS workstream_review_state", [])
-            .unwrap();
-        conn.pragma_update(None, "user_version", 9).unwrap();
-
-        let past_time = "2026-09-01T10:00:00Z";
-        conn.execute(
-            "INSERT INTO workstreams (id, title, description, lifecycle, visibility, created_at, updated_at)
-             VALUES (?1, 'Legacy Workstream', 'Existed before v10', 'open', 'normal', ?2, ?2)",
-            params![ws_id, past_time],
-        )
-        .unwrap();
-
-        let item_id = new_id();
-        let rev_id = new_id();
-        conn.execute(
-            "INSERT INTO context_items (id, workstream_id, kind, status, authority, created_by, current_revision_id, created_at, updated_at)
-             VALUES (?1, ?2, 'goal', 'active', 'agent_inferred', 'agent', ?3, ?4, ?4)",
-            params![item_id, ws_id, rev_id, "2026-09-01T10:05:00Z"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
-             VALUES (?1, ?2, 'Legacy Goal', 'Pre-migration historical context', '{}', 'session_event', ?3)",
-            params![rev_id, item_id, "2026-09-01T10:05:00Z"],
-        )
-        .unwrap();
-    }
-
-    // Reopen database with v10 migration code
-    let db = Db::open(&db_path).unwrap();
-    let version: i64 = db
-        .conn()
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(version, noending::storage::SCHEMA_VERSION);
-
-    // Verify historical changes are NOT unseen
-    let win = db.get_workstream_review_window(&ws_id).unwrap();
-    assert!(
-        win.unseen_changes.is_empty(),
-        "Historical pre-migration changes must be considered already reviewed"
-    );
-
-    // New change created after migration becomes unseen
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let new_item = noending::sync::create_item(
-        &db,
-        &ws_id,
-        "goal",
-        "New Post-Migration Goal",
-        "Should appear as unseen",
-        "agent_inferred",
-        "session_event",
-        &[],
-        None,
-        "agent",
+fn set_item_time(db: &Db, item_id: &str, timestamp: &str) {
+    let conn = db.conn();
+    conn.execute(
+        "UPDATE context_items SET created_at = ?2, updated_at = ?2 WHERE id = ?1",
+        params![item_id, timestamp],
     )
     .unwrap();
+    conn.execute(
+        "UPDATE context_item_revisions SET created_at = ?2 WHERE item_id = ?1",
+        params![item_id, timestamp],
+    )
+    .unwrap();
+}
 
-    let win_after = db.get_workstream_review_window(&ws_id).unwrap();
-    assert_eq!(win_after.unseen_changes.len(), 1);
-    assert_eq!(win_after.unseen_changes[0].item_id, Some(new_item.id));
+fn set_revision_time(db: &Db, item_id: &str, revision_id: &str, timestamp: &str) {
+    let conn = db.conn();
+    conn.execute(
+        "UPDATE context_item_revisions SET created_at = ?2 WHERE id = ?1",
+        params![revision_id, timestamp],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE context_items SET updated_at = ?2 WHERE id = ?1",
+        params![item_id, timestamp],
+    )
+    .unwrap();
+}
+
+fn set_conflict_time(db: &Db, conflict_id: &str, timestamp: &str) {
+    db.conn()
+        .execute(
+            "UPDATE context_conflicts SET created_at = ?2, updated_at = ?2 WHERE id = ?1",
+            params![conflict_id, timestamp],
+        )
+        .unwrap();
 }
 
 /// 2. new_agent_change_is_unseen
@@ -133,7 +114,6 @@ fn new_agent_change_is_unseen() {
     let initial_win = db.get_workstream_review_window(&ws.id).unwrap();
     assert!(initial_win.unseen_changes.is_empty());
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -147,6 +127,7 @@ fn new_agent_change_is_unseen() {
         "sync:agent",
     )
     .unwrap();
+    set_item_time(&db, &item.id, "2100-01-01T00:00:01Z");
 
     let win = db.get_workstream_review_window(&ws.id).unwrap();
     assert_eq!(win.unseen_changes.len(), 1);
@@ -172,7 +153,6 @@ fn user_edit_is_not_review_relevant() {
     let db = open_db("user-edit-relevance");
     let ws = ws_row(&db, "User Relevance WS");
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -186,6 +166,7 @@ fn user_edit_is_not_review_relevant() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item.id, "2100-01-01T00:00:01Z");
 
     // Catch up frontier so initial item is reviewed
     let win = db.get_workstream_review_window(&ws.id).unwrap();
@@ -197,7 +178,6 @@ fn user_edit_is_not_review_relevant() {
     assert!(win_clean.unseen_changes.is_empty());
 
     // 1. User performs an edit on existing item
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let edit_rev = ContextItemRevision {
         id: new_id(),
         item_id: item.id.clone(),
@@ -218,10 +198,10 @@ fn user_edit_is_not_review_relevant() {
     db.insert_revision(&edit_rev).unwrap();
     db.set_item_head(&item.id, &edit_rev.id, None).unwrap();
     db.set_item_authority(&item.id, "user_edit").unwrap();
+    set_revision_time(&db, &item.id, &edit_rev.id, "2100-01-01T00:00:02Z");
 
     // 2. User adds a new item explicitly
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    noending::sync::create_item(
+    let user_item = noending::sync::create_item(
         &db,
         &ws.id,
         "goal",
@@ -234,6 +214,7 @@ fn user_edit_is_not_review_relevant() {
         "user",
     )
     .unwrap();
+    set_item_time(&db, &user_item.id, "2100-01-01T00:00:03Z");
 
     // Query window: user actions must NOT appear in unseen_changes
     let win_after_user = db.get_workstream_review_window(&ws.id).unwrap();
@@ -282,7 +263,6 @@ fn conflict_creation_is_unseen() {
     db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let conflict = ContextConflict {
         id: new_id(),
         workstream_id: ws.id.clone(),
@@ -298,6 +278,7 @@ fn conflict_creation_is_unseen() {
         candidate_snapshot_json: None,
     };
     db.insert_conflict(&conflict).unwrap();
+    set_conflict_time(&db, &conflict.id, "2100-01-01T00:00:01Z");
 
     let win = db.get_workstream_review_window(&ws.id).unwrap();
     assert_eq!(win.unseen_changes.len(), 1);
@@ -314,7 +295,6 @@ fn mark_reviewed_advances_only_observed_frontier() {
     let db = open_db("advances-observed");
     let ws = ws_row(&db, "Observed Frontier WS");
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let item_a = noending::sync::create_item(
         &db,
         &ws.id,
@@ -328,8 +308,8 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item_a.id, "2100-01-01T00:00:01Z");
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let item_b = noending::sync::create_item(
         &db,
         &ws.id,
@@ -343,13 +323,13 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item_b.id, "2100-01-01T00:00:02Z");
 
     let window_ab = db.get_workstream_review_window(&ws.id).unwrap();
     assert_eq!(window_ab.unseen_changes.len(), 2);
     let token_ab = window_ab.mark_through.clone();
 
     // Meanwhile, background sync adds change C
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let item_c = noending::sync::create_item(
         &db,
         &ws.id,
@@ -363,6 +343,7 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item_c.id, "2100-01-01T00:00:03Z");
 
     // User marks reviewed using the token from the observed window
     let advanced_state = db.mark_workstream_reviewed(&ws.id, &token_ab).unwrap();
@@ -387,12 +368,10 @@ fn same_timestamp_boundary_is_lossless() {
     let ws_id = new_id();
     let ws = Workstream {
         id: ws_id.clone(),
-        project_id: None,
         title: "Lossless WS".into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: "2026-09-17T11:00:00Z".into(),
         updated_at: "2026-09-17T11:00:00Z".into(),
     };
@@ -638,7 +617,6 @@ fn sync_status_change_is_review_relevant() {
     db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     // Simulate Sync automated resolution: actor = "sync:heuristic"
     noending::storage::apply_status_change_conn(
         db.conn(),
@@ -650,6 +628,13 @@ fn sync_status_change_is_review_relevant() {
         &[],
     )
     .unwrap();
+    let changed = db.get_item(&item.id).unwrap().unwrap();
+    set_revision_time(
+        &db,
+        &item.id,
+        changed.current_revision_id.as_deref().unwrap(),
+        "2100-01-01T00:00:01Z",
+    );
 
     let win = db.get_workstream_review_window(&ws.id).unwrap();
     assert_eq!(win.unseen_changes.len(), 1);
@@ -685,7 +670,6 @@ fn conflict_evidence_is_not_double_counted() {
     db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     // 1. Production merge engine creates an evidence item with source_type = "conflict"
     let finding = noending::sync::create_item_conn(
         db.conn(),
@@ -700,6 +684,7 @@ fn conflict_evidence_is_not_double_counted() {
         "sync:claude-3-7-sonnet",
     )
     .unwrap();
+    set_item_time(&db, &finding.id, "2100-01-01T00:00:01Z");
 
     // 2. Production merge engine inserts ContextConflict
     let conflict = ContextConflict {
@@ -717,6 +702,7 @@ fn conflict_evidence_is_not_double_counted() {
         candidate_snapshot_json: None,
     };
     db.insert_conflict(&conflict).unwrap();
+    set_conflict_time(&db, &conflict.id, "2100-01-01T00:00:02Z");
 
     // Review window must only contain the conflict_created event, NOT the finding evidence item!
     let win = db.get_workstream_review_window(&ws.id).unwrap();
@@ -742,8 +728,6 @@ fn review_summary_category_breakdown() {
     db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
-
     // 1. Added item (new_facts + 1)
     let item1 = noending::sync::create_item(
         &db,
@@ -758,6 +742,7 @@ fn review_summary_category_breakdown() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item1.id, "2100-01-01T00:00:01Z");
 
     // 2. Added item (new_facts + 1), then edited (updated_facts + 1)
     let item2 = noending::sync::create_item(
@@ -773,6 +758,7 @@ fn review_summary_category_breakdown() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item2.id, "2100-01-01T00:00:02Z");
 
     let edit_rev = ContextItemRevision {
         id: new_id(),
@@ -793,6 +779,7 @@ fn review_summary_category_breakdown() {
     };
     db.insert_revision(&edit_rev).unwrap();
     db.set_item_head(&item2.id, &edit_rev.id, None).unwrap();
+    set_revision_time(&db, &item2.id, &edit_rev.id, "2100-01-01T00:00:03Z");
 
     // 3. Added item (new_facts + 1), then resolved via sync (resolved_items + 1)
     let item3 = noending::sync::create_item(
@@ -808,6 +795,7 @@ fn review_summary_category_breakdown() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item3.id, "2100-01-01T00:00:04Z");
 
     noending::storage::apply_status_change_conn(
         db.conn(),
@@ -819,6 +807,13 @@ fn review_summary_category_breakdown() {
         &[],
     )
     .unwrap();
+    let item3_after = db.get_item(&item3.id).unwrap().unwrap();
+    set_revision_time(
+        &db,
+        &item3.id,
+        item3_after.current_revision_id.as_deref().unwrap(),
+        "2100-01-01T00:00:05Z",
+    );
 
     // 4. Added item (new_facts + 1), then superseded via sync (superseded_items + 1)
     let item4 = noending::sync::create_item(
@@ -834,6 +829,7 @@ fn review_summary_category_breakdown() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &item4.id, "2100-01-01T00:00:06Z");
 
     noending::storage::apply_status_change_conn(
         db.conn(),
@@ -845,6 +841,13 @@ fn review_summary_category_breakdown() {
         &[],
     )
     .unwrap();
+    let item4_after = db.get_item(&item4.id).unwrap().unwrap();
+    set_revision_time(
+        &db,
+        &item4.id,
+        item4_after.current_revision_id.as_deref().unwrap(),
+        "2100-01-01T00:00:07Z",
+    );
 
     // 5. Open conflict (open_conflict_count = 1, conflict_created counts in unseen_change_count only)
     let conflict = ContextConflict {
@@ -862,6 +865,7 @@ fn review_summary_category_breakdown() {
         candidate_snapshot_json: None,
     };
     db.insert_conflict(&conflict).unwrap();
+    set_conflict_time(&db, &conflict.id, "2100-01-01T00:00:08Z");
 
     let summary = db.get_workstream_review_summary(&ws.id).unwrap();
 
@@ -906,8 +910,6 @@ fn review_summary_updates_vs_attention_independence() {
     db.mark_workstream_reviewed(&ws.id, &win0.mark_through)
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
-
     // Create open conflict
     let conflict = ContextConflict {
         id: new_id(),
@@ -924,6 +926,7 @@ fn review_summary_updates_vs_attention_independence() {
         candidate_snapshot_json: None,
     };
     db.insert_conflict(&conflict).unwrap();
+    set_conflict_time(&db, &conflict.id, "2100-01-01T00:00:01Z");
 
     // Before review: has_updates = true, needs_attention = true
     let s0 = db.get_workstream_review_summary(&ws.id).unwrap();
@@ -986,10 +989,8 @@ fn review_summary_batch_list() {
             .unwrap();
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
-
     // ws1 has a new agent item
-    noending::sync::create_item(
+    let ws1_item = noending::sync::create_item(
         &db,
         &ws1.id,
         "todo",
@@ -1002,6 +1003,7 @@ fn review_summary_batch_list() {
         "agent",
     )
     .unwrap();
+    set_item_time(&db, &ws1_item.id, "2100-01-01T00:00:01Z");
 
     // ws2 has an open conflict
     let item2 = noending::sync::create_item(
@@ -1017,6 +1019,7 @@ fn review_summary_batch_list() {
         "user",
     )
     .unwrap();
+    set_item_time(&db, &item2.id, "2100-01-01T00:00:02Z");
     let conflict = ContextConflict {
         id: new_id(),
         workstream_id: ws2.id.clone(),
@@ -1032,6 +1035,7 @@ fn review_summary_batch_list() {
         candidate_snapshot_json: None,
     };
     db.insert_conflict(&conflict).unwrap();
+    set_conflict_time(&db, &conflict.id, "2100-01-01T00:00:03Z");
 
     // ws3 has no new changes
 

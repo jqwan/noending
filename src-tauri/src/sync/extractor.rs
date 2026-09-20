@@ -589,10 +589,7 @@ pub fn parse_mutations(
                 if r.title.trim().is_empty() {
                     continue;
                 }
-                // Workstreams may be discovered without a Project; project_id
-                // stays None unless a candidate mapping exists later.
                 out.push(ContextMutation::CreateWorkstream {
-                    project_id: None,
                     title: r.title.trim().to_string(),
                     reason: r.content.trim().to_string(),
                 });
@@ -767,8 +764,7 @@ mod tests {
         let out = parse(text);
         match &out.mutations[0] {
             ContextMutation::Add { source_refs, .. } => {
-                // "#1" is the first PROMPT event: id e-aaa / sequence 101 —
-                // it must NOT become "session:s1#1".
+                // "#1" is the first PROMPT event: id e-aaa / sequence 101.
                 assert_eq!(source_refs, &vec!["session-event:e-aaa".to_string()]);
             }
             other => panic!("unexpected mutation: {:?}", other),

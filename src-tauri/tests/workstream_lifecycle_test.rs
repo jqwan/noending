@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use noending::domain::{
     workstream_lifecycle, workstream_path_source, workstream_visibility, Agent, ContextConflict,
-    ContextDelivery, Project, ProjectAffinityEvidence, Session, SessionEvent,
-    SessionWorkstreamBinding, Workstream,
+    ContextDelivery, Project, Session, SessionEvent, SessionWorkstreamBinding, Workstream,
 };
 use noending::error::Result;
 use noending::storage::{new_id, now, Db};
@@ -426,7 +425,7 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     db.insert_conflict(&conflict).unwrap();
     db.update_conflict_status(&conflict.id, "resolved", Some("保留用户版"))
         .unwrap();
-    // delivery snapshot, binding, tombstone, review state, affinity evidence
+    // delivery snapshot, binding, tombstone and review state
     db.record_delivery(&ContextDelivery {
         id: new_id(),
         session_id: s.id.clone(),
@@ -442,17 +441,6 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     bind(&db, &rejected.id, &w.id);
     db.unbind(&rejected.id, &w.id).unwrap();
     assert!(db.binding_removal_exists(&rejected.id, &w.id).unwrap());
-    db.insert_evidence(&ProjectAffinityEvidence {
-        id: new_id(),
-        session_id: Some(s.id.clone()),
-        workstream_id: Some(w.id.clone()),
-        project_id: "p1".into(),
-        evidence_type: "cwd_match".into(),
-        source: "test".into(),
-        score: 0.4,
-        created_at: now(),
-    })
-    .unwrap();
     assert!(db.get_workstream_review_state(&w.id).unwrap().is_some());
 
     // Everything is there before the delete…
@@ -519,20 +507,6 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     assert!(db.get_session(&rejected.id).unwrap().is_some());
     assert_eq!(db.list_workspace_paths().unwrap().len(), 2);
     assert!(db.get_project("p1").unwrap().is_some());
-    // `project_affinity_evidence` is a foreign key onto `workstreams` that the
-    // plan's list omits; the row is legacy evidence, so it keeps its record and
-    // loses the attribution that can no longer be resolved.
-    let evidence: Vec<(Option<String>, String)> = db
-        .conn()
-        .prepare("SELECT workstream_id, evidence_type FROM project_affinity_evidence WHERE session_id = ?1")
-        .unwrap()
-        .query_map(params![s.id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<std::result::Result<_, _>>()
-        .unwrap();
-    assert_eq!(evidence.len(), 1);
-    assert_eq!(evidence[0].0, None, "attribution dropped");
-    assert_eq!(evidence[0].1, "cwd_match", "the record itself survived");
     // Sanity: the tombstone we deleted was really this Workstream's.
     assert!(rows.len() == 2);
 }
@@ -666,18 +640,8 @@ fn whole_object_write_cannot_change_lifecycle_or_visibility() {
         .to_string()
         .contains("set_workstream_lifecycle"));
 
-    // The frozen columns come back from the row, never from the payload, so they
-    // cannot reach the upsert's INSERT branch either.
-    let mut stale = db.get_workstream(&w.id).unwrap().unwrap();
-    stale.project_id = Some("p1".into());
-    stale.default_cwd = Some("/repo/hijacked".into());
-    let cleaned = apply_whole_object_edit(&db, &stale).unwrap();
-    assert_eq!(cleaned.project_id, None);
-    assert_eq!(cleaned.default_cwd, None);
-    assert_eq!(cleaned.created_at, stale.created_at);
     // A write of a row that does not exist is refused instead of creating one.
-    let mut ghost = Workstream::new("w-ghost".into(), "ghost");
-    ghost.project_id = Some("p1".into());
+    let ghost = Workstream::new("w-ghost".into(), "ghost");
     assert!(apply_whole_object_edit(&db, &ghost).is_err());
 }
 
@@ -690,8 +654,6 @@ struct Snapshot {
     visibility: String,
     title: String,
     description: String,
-    project_id: Option<String>,
-    default_cwd: Option<String>,
     created_at: String,
     paths: Vec<(String, i64, String)>,
     bindings: Vec<String>,
@@ -711,8 +673,6 @@ impl Snapshot {
             .map(|b| b.session_id)
             .collect();
         Self {
-            project_id: w.project_id,
-            default_cwd: w.default_cwd,
             created_at: w.created_at,
             title: w.title,
             description: w.description,

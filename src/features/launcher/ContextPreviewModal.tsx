@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Modal } from "../../components/common";
 import { api } from "../../api";
 import { useDeliveryOff } from "../../app/experience";
@@ -15,7 +15,7 @@ interface Props {
 }
 
 /**
- * Context 注入预览 —— 实验路径（§24）：只有 Delivery 未关闭时才可能被打开。
+ * Context 注入预览；只有 Delivery 未关闭时才可能被打开。
  *
  * 这里显示的一切都取自 PreparedLaunch 冻结的那份 bundle：预览的就是 Agent
  * 真正会收到的东西。关闭注入时本组件整体不挂载（不是 CSS 隐藏），也不显示
@@ -71,14 +71,10 @@ export default function ContextPreviewModal({
   const handleRefresh = async () => {
     setRefreshing(true);
     setStaleError(null);
-    const oldId = prepared.id;
     try {
       const refreshed = await onRefresh();
       if (refreshed) {
         setPrepared(refreshed);
-        if (oldId !== refreshed.id) {
-          api.cancelPrepared(oldId).catch(console.error);
-        }
       }
     } catch (e: unknown) {
       setStaleError(`刷新失败: ${String(e)}`);

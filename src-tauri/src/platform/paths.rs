@@ -80,9 +80,6 @@ pub const APP_IDENTIFIER: &str = "app.noending.desktop";
 /// * `home.json`, the bootstrap pointer that tells us where NoEnding Home is
 ///   (方案 §42.3-M12) — it must be outside the Home, since the database inside
 ///   the Home is precisely what it locates;
-/// * the pre-Home data directory, i.e. `noending.db` as written by every build
-///   before v0.2 (see `workspace::home::adopt_legacy_data_dir`).
-///
 /// macOS/Windows differ because `dirs` maps the two concepts onto different
 /// known folders: we want *Application Support* on macOS and *Roaming AppData*
 /// on Windows, which is what Tauri's own `app_data_dir()` resolves to today.

@@ -1,7 +1,7 @@
 //! WorkspaceResolver — turns a path string into a [`WorkspaceObservation`].
 //!
-//! Owned by Agent A (方案 §16). Observation only: this module must not create,
-//! reassign or delete anything. Persistence and Project policy live in
+//! Observation only: this module must not create, reassign or delete anything.
+//! Persistence and Project policy live in
 //! `workspace::project`.
 //!
 //! ```text

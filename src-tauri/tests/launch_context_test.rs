@@ -2,8 +2,8 @@
 //! (Issues #5, #6, #8).
 
 use noending::domain::{
-    binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, ProjectAffinityEvidence,
-    Session, SessionClassificationState, SessionWorkstreamBinding, SourceCursor,
+    binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, Session,
+    SessionClassificationState, SessionWorkstreamBinding, SourceCursor,
 };
 use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
@@ -14,15 +14,13 @@ fn open_db(tag: &str) -> Db {
     Db::open(&dir.join("test.db")).unwrap()
 }
 
-fn ws_row(db: &Db, title: &str, project_id: Option<&str>) -> noending::domain::Workstream {
+fn ws_row(db: &Db, title: &str) -> noending::domain::Workstream {
     let w = noending::domain::Workstream {
         id: new_id(),
-        project_id: project_id.map(|s| s.to_string()),
         title: title.into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -35,7 +33,6 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
         id: new_id(),
         name: name.into(),
         description: String::new(),
-        archived: false,
         git_id: None,
         name_customized: false,
         created_at: now(),
@@ -99,8 +96,8 @@ fn pending_intent(db: &Db, agent: Agent, ws_ids: Vec<String>, cwd: Option<String
 #[test]
 fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
     let db = open_db("intent-match");
-    let ws_a = ws_row(&db, "Workstream A", None);
-    let ws_b = ws_row(&db, "Workstream B", None);
+    let ws_a = ws_row(&db, "Workstream A");
+    let ws_b = ws_row(&db, "Workstream B");
 
     // user picks A + B in the New Session dialog, then NoEnding launches
     let intent = pending_intent(
@@ -145,7 +142,7 @@ fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
 #[test]
 fn contextless_launch_matches_but_stays_zero_binding() {
     let db = open_db("intent-zero");
-    let _ws = ws_row(&db, "Unrelated", None);
+    let _ws = ws_row(&db, "Unrelated");
     let intent = pending_intent(&db, Agent::Pi, vec![], None);
 
     let session = session_row(&db, Agent::Pi, Some(now()), None);
@@ -163,7 +160,7 @@ fn contextless_launch_matches_but_stays_zero_binding() {
 #[test]
 fn ambiguous_candidates_wait_for_the_user() {
     let db = open_db("intent-ambiguous");
-    let ws = ws_row(&db, "WS", None);
+    let ws = ws_row(&db, "WS");
     // two intents launched at nearly the same time for the same agent
     let i1 = pending_intent(&db, Agent::ClaudeCode, vec![ws.id.clone()], None);
     let i2 = pending_intent(&db, Agent::ClaudeCode, vec![ws.id.clone()], None);
@@ -203,7 +200,7 @@ fn ambiguous_candidates_wait_for_the_user() {
 #[test]
 fn stale_intents_expire_and_wrong_agent_never_matches() {
     let db = open_db("intent-expire");
-    let ws = ws_row(&db, "WS", None);
+    let ws = ws_row(&db, "WS");
     let intent = pending_intent(&db, Agent::Codex, vec![ws.id.clone()], None);
 
     // a Claude session cannot claim a Codex intent
@@ -255,7 +252,7 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
 #[test]
 fn resume_does_not_reguess_bindings() {
     let db = open_db("resume-no-guess");
-    let ws = ws_row(&db, "WS", None);
+    let ws = ws_row(&db, "WS");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
     db.bind(&SessionWorkstreamBinding {
         session_id: s.id.clone(),
@@ -306,7 +303,7 @@ fn seed_context(db: &Db, ws_id: &str, titles: &[&str]) -> Vec<noending::domain::
 #[test]
 fn resume_requires_session_and_first_delivery_is_full_context() {
     let db = open_db("resume-first");
-    let ws = ws_row(&db, "resume ws", None);
+    let ws = ws_row(&db, "resume ws");
     // a goal makes the "minimal core reminder" meaningful
     noending::sync::create_item(
         &db,
@@ -383,7 +380,7 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
 #[test]
 fn resume_delta_shows_changes_and_disappearances() {
     let db = open_db("resume-delta");
-    let ws = ws_row(&db, "delta ws", None);
+    let ws = ws_row(&db, "delta ws");
     let items = seed_context(&db, &ws.id, &["决策甲", "约束乙"]);
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
@@ -464,8 +461,8 @@ fn resume_delta_shows_changes_and_disappearances() {
 #[test]
 fn multi_workstream_bundle_dedups_and_labels_primary_related() {
     let db = open_db("aggregate");
-    let ws1 = ws_row(&db, "主 Workstream", None);
-    let ws2 = ws_row(&db, "相关 Workstream", None);
+    let ws1 = ws_row(&db, "主 Workstream");
+    let ws2 = ws_row(&db, "相关 Workstream");
 
     // the SAME constraint exists in both workstreams
     for ws in [&ws1, &ws2] {
@@ -533,103 +530,6 @@ fn multi_workstream_bundle_dedups_and_labels_primary_related() {
 // ---------------------------------------------------------------------------
 // Issue #8: storage / domain consistency
 // ---------------------------------------------------------------------------
-
-/// Workspace Domain v0.2 (方案 §42.2-E6): `workstreams.project_id` and
-/// `default_cwd` are written at creation and then frozen, because
-/// `update_workstream` is a whole-object write — if the DO UPDATE set still
-/// carried them, every unrelated title/description edit would re-commit retired
-/// values and the new path authority would silently compete with them.
-///
-/// This replaces the pre-v0.2 test that asserted the opposite (`upsert` moving a
-/// Workstream A → B → standalone), which was the double-authority entry point.
-#[test]
-fn upsert_workstream_cannot_move_between_projects_or_retarget_cwd() {
-    let db = open_db("ws-frozen");
-    let pa = project_row(&db, "Project A");
-    let pb = project_row(&db, "Project B");
-    // Created with both retired fields populated, the only moment upsert still
-    // writes them.
-    let mut w = noending::domain::Workstream {
-        id: new_id(),
-        project_id: Some(pa.id.clone()),
-        title: "冻结的 Workstream".into(),
-        description: String::new(),
-        lifecycle: "active".into(),
-        visibility: "normal".into(),
-        default_cwd: Some("/tmp/noending-frozen-cwd".into()),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.upsert_workstream(&w).unwrap();
-
-    let read = || db.get_workstream(&w.id).unwrap().unwrap();
-
-    // A plain edit that *claims* to reparent and re-target: both retired
-    // fields keep their creation values.
-    w.project_id = Some(pb.id.clone());
-    w.default_cwd = Some("/tmp/noending-somewhere-else".into());
-    w.title = "改过标题".into();
-    w.updated_at = now();
-    db.upsert_workstream(&w).unwrap();
-    let after = read();
-    assert_eq!(after.title, "改过标题", "the edit that was meant to happen");
-    assert_eq!(
-        after.project_id.as_deref(),
-        Some(pa.id.as_str()),
-        "project_id is a compatibility read, not a writable field"
-    );
-    assert_eq!(
-        after.default_cwd.as_deref(),
-        Some("/tmp/noending-frozen-cwd"),
-        "default_cwd is only a v12 migration input"
-    );
-
-    // Detaching to standalone is likewise impossible through upsert.
-    w.project_id = None;
-    db.upsert_workstream(&w).unwrap();
-    assert_eq!(read().project_id.as_deref(), Some(pa.id.as_str()));
-
-    // Membership is the path chain, so a Workstream with no WorkstreamPath is
-    // in no Project at all — even while the frozen column still names one.
-    assert!(db
-        .list_workstreams(Some(&pa.id))
-        .unwrap()
-        .iter()
-        .all(|x| x.id != w.id));
-    assert!(db
-        .list_workstreams(None)
-        .unwrap()
-        .iter()
-        .any(|x| x.id == w.id));
-}
-
-/// Deleting a Project detaches Workstreams and Sessions — it never deletes
-/// or archives them.
-#[test]
-fn delete_project_detaches_without_archiving() {
-    let db = open_db("project-delete");
-    let p = project_row(&db, "Doomed Project");
-    let w = ws_row(&db, "Surviving Workstream", Some(&p.id));
-    let s = session_row(&db, Agent::Codex, Some(now()), None);
-    db.0.execute(
-        "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
-        rusqlite::params![s.id, p.id],
-    )
-    .unwrap();
-
-    db.delete_project(&p.id).unwrap();
-
-    assert!(db.get_project(&p.id).unwrap().is_none(), "project gone");
-    let w = db
-        .get_workstream(&w.id)
-        .unwrap()
-        .expect("workstream survives");
-    assert_eq!(w.project_id, None, "workstream detached");
-    assert_eq!(w.visibility, "normal", "workstream NOT archived");
-    assert_eq!(w.lifecycle, "active", "workstream lifecycle untouched");
-    let s = db.get_session(&s.id).unwrap().expect("session survives");
-    assert_eq!(s.project_id, None, "session detached");
-}
 
 /// The list_sessions parameter bug: filtering by agent ONLY used to bind
 /// ?2 with a single parameter and fail. All four filter combinations work.
@@ -701,7 +601,6 @@ fn auto_created_workstream_may_have_no_project() {
         runtime: "heuristic".into(),
     };
     let m = noending::sync::ContextMutation::CreateWorkstream {
-        project_id: None,
         title: "自动发现的新工作流".into(),
         reason: "会话中出现新的长期主题".into(),
     };
@@ -710,64 +609,13 @@ fn auto_created_workstream_may_have_no_project() {
         .unwrap();
     assert!(applied);
     let all = db.list_workstreams(None).unwrap();
-    let auto = all
+    let _auto = all
         .iter()
         .find(|w| w.title == "自动发现的新工作流")
         .expect("created");
-    assert_eq!(auto.project_id, None, "no project home required");
 }
 
-/// cwd is only evidence: the resolver suggests with a score, the user
-/// correction records the strongest evidence.
-#[test]
-fn project_affinity_evidence_and_resolution() {
-    let db = open_db("affinity");
-    let p = project_row(&db, "noending");
-    let s = session_row(
-        &db,
-        Agent::Codex,
-        Some(now()),
-        Some("/Users/jqk/projects/noending".into()),
-    );
-
-    // evidence recorded from cwd (as reconcile does)
-    let e = ProjectAffinityEvidence {
-        id: new_id(),
-        session_id: Some(s.id.clone()),
-        workstream_id: None,
-        project_id: p.id.clone(),
-        evidence_type: "cwd_match".into(),
-        source: "cwd=/Users/jqk/projects/noending".into(),
-        score: 1.0,
-        created_at: now(),
-    };
-    db.insert_evidence(&e).unwrap();
-    let (suggested, score) = db.resolve_project_affinity(&s.id).unwrap().unwrap();
-    assert_eq!(suggested, p.id);
-    assert!(score > 0.0);
-
-    // user correction dominates (score 10)
-    let p2 = project_row(&db, "other");
-    let correction = ProjectAffinityEvidence {
-        id: new_id(),
-        session_id: Some(s.id.clone()),
-        workstream_id: None,
-        project_id: p2.id.clone(),
-        evidence_type: "user_correction".into(),
-        source: "manual".into(),
-        score: 10.0,
-        created_at: now(),
-    };
-    db.insert_evidence(&correction).unwrap();
-    let (suggested, _) = db.resolve_project_affinity(&s.id).unwrap().unwrap();
-    assert_eq!(suggested, p2.id, "user correction wins over cwd evidence");
-
-    // no evidence at all → no suggestion
-    let s2 = session_row(&db, Agent::Pi, Some(now()), None);
-    assert!(db.resolve_project_affinity(&s2.id).unwrap().is_none());
-}
-
-/// get_event_by_ref resolves both stable ids and legacy positional refs.
+/// get_event_by_ref resolves stable event ids and rejects unknown refs.
 #[test]
 fn event_ref_roundtrip() {
     let db = open_db("event-ref");
@@ -804,12 +652,6 @@ fn event_ref_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(by_id.id, ev.id);
-    // legacy positional reference
-    let legacy = db
-        .get_event_by_ref(&format!("session:{}#{}", s.id, ev.sequence))
-        .unwrap()
-        .unwrap();
-    assert_eq!(legacy.id, ev.id);
     // unknown ref → None, never fabricated
     assert!(db
         .get_event_by_ref("session-event:missing")
@@ -850,7 +692,7 @@ fn source_cursor_roundtrip() {
 #[test]
 fn launch_intent_match_records_delivery_snapshot() {
     let db = open_db("intent-delivery");
-    let ws = ws_row(&db, "delivery ws", None);
+    let ws = ws_row(&db, "delivery ws");
     let items = seed_context(&db, &ws.id, &["已交付约束"]);
     assert!(!items.is_empty());
     // create_item returns the in-memory item; the head revision lives in DB
@@ -930,8 +772,8 @@ fn launch_intent_match_records_delivery_snapshot() {
 #[test]
 fn multi_workstream_delivery_groups_revisions_by_workstream() {
     let db = open_db("delivery-grouping");
-    let ws_a = ws_row(&db, "ws a", None);
-    let ws_b = ws_row(&db, "ws b", None);
+    let ws_a = ws_row(&db, "ws a");
+    let ws_b = ws_row(&db, "ws b");
     let a = &seed_context(&db, &ws_a.id, &["约束A"])[0];
     let b = &seed_context(&db, &ws_b.id, &["约束B"])[0];
     let s = session_row(&db, Agent::Codex, Some(now()), None);
@@ -980,7 +822,7 @@ fn multi_workstream_delivery_groups_revisions_by_workstream() {
 #[test]
 fn token_budget_limits_sections_to_actually_delivered_content() {
     let db = open_db("budget");
-    let ws = ws_row(&db, "budget ws", None);
+    let ws = ws_row(&db, "budget ws");
 
     // two small core items, then a dozen large ones: whatever the exact
     // cut point, some sections must fit and some must not
@@ -1173,7 +1015,7 @@ fn context_delivery_policy_monotonicity() {
 #[test]
 fn context_delivery_off_produces_empty_bundle() {
     let db = open_db("delivery-off-bundle");
-    let ws = ws_row(&db, "off ws", None);
+    let ws = ws_row(&db, "off ws");
     seed_context(&db, &ws.id, &["重要目标", "关键约束"]);
 
     // New bundle with Off
@@ -1214,7 +1056,7 @@ fn context_delivery_off_produces_empty_bundle() {
 #[test]
 fn launch_intent_with_off_creates_bindings_but_no_delivery() {
     let db = open_db("intent-off-delivery");
-    let ws = ws_row(&db, "ws-off", None);
+    let ws = ws_row(&db, "ws-off");
     seed_context(&db, &ws.id, &["约束"]);
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
@@ -1261,7 +1103,7 @@ fn launch_intent_with_off_creates_bindings_but_no_delivery() {
 #[test]
 fn balanced_off_balanced_preserves_revisions_in_delta() {
     let db = open_db("balanced-off-balanced");
-    let ws = ws_row(&db, "ws-lifecycle", None);
+    let ws = ws_row(&db, "ws-lifecycle");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
     let head_rev = |item_id: &str| {
@@ -1346,7 +1188,7 @@ fn balanced_off_balanced_preserves_revisions_in_delta() {
 #[test]
 fn resume_preserves_cumulative_known_state_without_spurious_deltas() {
     let db = open_db("cumulative-state");
-    let ws = ws_row(&db, "cumulative ws", None);
+    let ws = ws_row(&db, "cumulative ws");
 
     let goal = noending::sync::create_item(
         &db,
@@ -1487,7 +1329,7 @@ fn resume_preserves_cumulative_known_state_without_spurious_deltas() {
 #[test]
 fn conflict_not_lost_when_truncated_by_budget() {
     let db = open_db("conflict-budget");
-    let ws = ws_row(&db, "conflict ws", None);
+    let ws = ws_row(&db, "conflict ws");
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -1604,7 +1446,7 @@ fn conflict_not_lost_when_truncated_by_budget() {
 #[test]
 fn extended_items_filtering_order_not_starved_by_core_items() {
     let db = open_db("extended-starve");
-    let ws = ws_row(&db, "starve ws", None);
+    let ws = ws_row(&db, "starve ws");
 
     // Seed 5 core items first
     for kind in [
@@ -1668,7 +1510,7 @@ fn extended_items_filtering_order_not_starved_by_core_items() {
 #[test]
 fn builder_requires_session_in_resume_mode_even_when_off() {
     let db = open_db("resume-off-valid");
-    let ws = ws_row(&db, "off ws", None);
+    let ws = ws_row(&db, "off ws");
 
     let err = context::build_bundle(
         &db,
@@ -1692,7 +1534,7 @@ fn builder_requires_session_in_resume_mode_even_when_off() {
 #[test]
 fn resume_emits_gone_for_deleted_item() {
     let db = open_db("resume-gone-deleted");
-    let ws = ws_row(&db, "deleted ws", None);
+    let ws = ws_row(&db, "deleted ws");
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -1782,7 +1624,7 @@ fn resume_emits_gone_for_deleted_item() {
 #[test]
 fn gone_truncated_by_budget_preserves_revision_in_snapshot() {
     let db = open_db("gone-truncated");
-    let ws = ws_row(&db, "gone trunc ws", None);
+    let ws = ws_row(&db, "gone trunc ws");
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -1867,7 +1709,7 @@ fn gone_truncated_by_budget_preserves_revision_in_snapshot() {
 #[test]
 fn resume_emits_conflict_resolved_when_conflict_closed() {
     let db = open_db("conflict-resolved");
-    let ws = ws_row(&db, "conflict resolved ws", None);
+    let ws = ws_row(&db, "conflict resolved ws");
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -1967,7 +1809,7 @@ fn resume_emits_conflict_resolved_when_conflict_closed() {
 #[test]
 fn conflict_resolved_truncated_by_budget_retains_conflict_id() {
     let db = open_db("conflict-res-trunc");
-    let ws = ws_row(&db, "conflict res trunc ws", None);
+    let ws = ws_row(&db, "conflict res trunc ws");
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -2069,8 +1911,8 @@ fn conflict_resolved_truncated_by_budget_retains_conflict_id() {
 #[test]
 fn apply_match_handles_conflict_only_workstream() {
     let db = open_db("match-conflict-only");
-    let ws_a = ws_row(&db, "WS A", None);
-    let ws_b = ws_row(&db, "WS B", None);
+    let ws_a = ws_row(&db, "WS A");
+    let ws_b = ws_row(&db, "WS B");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
     let conflict_id = new_id();
@@ -2122,7 +1964,7 @@ fn prepare_new_does_not_create_intent_or_delivery_or_file() {
     // to exist: opt into delivery explicitly (Off is the shipped default).
     noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Balanced)
         .unwrap();
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     seed_context(&db, &ws.id, &["约束 A", "约束 B"]);
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
@@ -2168,8 +2010,8 @@ fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
     // Needs a delivered bundle to assert on: opt into delivery explicitly.
     noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Balanced)
         .unwrap();
-    let ws1 = ws_row(&db, "ws1", None);
-    let ws2 = ws_row(&db, "ws2", None);
+    let ws1 = ws_row(&db, "ws1");
+    let ws2 = ws_row(&db, "ws2");
     seed_context(&db, &ws1.id, &["约束 1"]);
     seed_context(&db, &ws2.id, &["约束 2"]);
 
@@ -2220,7 +2062,7 @@ fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
 #[test]
 fn state_fingerprint_stale_detection_on_context_change() {
     let db = open_db("stale-context-detection");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     seed_context(&db, &ws.id, &["初始约束"]);
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
@@ -2258,7 +2100,7 @@ fn state_fingerprint_stale_detection_on_context_change() {
 #[test]
 fn state_fingerprint_stale_detection_on_runtime_override_change() {
     let db = open_db("stale-runtime-detection");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     seed_context(&db, &ws.id, &["初始约束"]);
 
     let launcher = launcher::SessionLauncher {
@@ -2336,7 +2178,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
 #[test]
 fn prepared_launch_freezes_the_runtime_override_intent() {
     let db = open_db("prepared-runtime-intent");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     seed_context(&db, &ws.id, &["约束"]);
 
     noending::agent_runtime::set_runtime_overrides(
@@ -2400,7 +2242,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
 #[test]
 fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
     let db = open_db("stale-delivery-detection");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     seed_context(&db, &ws.id, &["约束"]);
 
     let s = session_row(&db, Agent::Codex, Some(now()), None);
@@ -2452,7 +2294,7 @@ fn state_fingerprint_stale_detection_on_delivery_level_change() {
     // be chosen explicitly now that Off is the default.
     noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Balanced)
         .unwrap();
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     seed_context(&db, &ws.id, &["约束"]);
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
@@ -2491,7 +2333,7 @@ fn state_fingerprint_stale_detection_on_delivery_level_change() {
 #[test]
 fn prepared_bundle_identity_preserved_and_deterministic() {
     let db = open_db("bundle-identity");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     seed_context(&db, &ws.id, &["约束 1", "约束 2"]);
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
@@ -2546,7 +2388,7 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
 #[test]
 fn prepared_launch_single_use_atomic_consumption() {
     let db = open_db("single-use-prep");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     let launcher = launcher::SessionLauncher {
         runtime_dir: std::env::temp_dir(),
     };
@@ -2587,7 +2429,7 @@ fn prepared_launch_concurrent_consumption_is_exclusive() {
     use std::sync::{Arc, Mutex};
 
     let db = open_db("concurrent-prep");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     let launcher = launcher::SessionLauncher {
         runtime_dir: std::env::temp_dir(),
     };
@@ -2632,7 +2474,7 @@ fn prepared_launch_lazy_ttl_cleanup() {
     use std::sync::Mutex;
 
     let db = open_db("ttl-cleanup-prep");
-    let ws = ws_row(&db, "test ws", None);
+    let ws = ws_row(&db, "test ws");
     let launcher = launcher::SessionLauncher {
         runtime_dir: std::env::temp_dir(),
     };

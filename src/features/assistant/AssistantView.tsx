@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { timeAgo } from "../../components/common";
 import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
@@ -98,12 +98,6 @@ export default function AssistantView({ scope, navigate }: {
     setCurrentScope(scope ?? { type: "workspace" });
   }, [scope]);
 
-  const refresh = useCallback(() => {
-    api.listSyncRuns(12).then(setRuns).catch(console.error);
-    if (sessionId) {
-      api.assistantMessages(sessionId).then(setMessages).catch(console.error);
-    }
-  }, [sessionId]);
   useEffect(() => {
     api.assistantConfigGet().then(setCfg).catch(console.error);
     api.listSyncRuns(12).then(setRuns).catch(console.error);

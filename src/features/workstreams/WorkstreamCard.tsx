@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import type { Route } from "../../app/routes";

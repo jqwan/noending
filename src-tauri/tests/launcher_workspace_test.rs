@@ -386,9 +386,8 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
     );
 }
 
-/// §42.3-M16 — the pre-v0.2 resume branch re-read `sessions.cwd` at launch time,
-/// so background discovery could move the Agent between preview and launch.
-/// The preview's directory is now both authoritative and hashed.
+/// The preview's directory is authoritative and hashed, so background
+/// discovery cannot move the Agent between preview and launch.
 #[test]
 fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     let db = open_db("resume-drift");

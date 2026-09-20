@@ -1,6 +1,6 @@
 //! Session commands: listing, detail, and Workstream binding.
 //!
-//! Owned by `Agent D` (方案 §19). These are thin: they take the lock, map the
+//! These are thin: they take the lock, map the
 //! wire shape and hand over to `workspace::session`, which owns the rules.
 //!
 //! Binding a Session now also decides the Workstream's ordered path list — the
@@ -10,11 +10,6 @@
 //! WorkstreamPath brought a Session in is a derived fact, so no command here
 //! accepts it from the UI.
 //!
-//! `assign_session_project` / `suggest_session_project` are retired surface:
-//! the first wrote the derived cache by hand, the second fed the name-substring
-//! affinity heuristic that §42.2-E11 removes. Both stay compilable so nothing
-//! that still references them fails to build, and neither writes any more.
-
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -117,56 +112,6 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             classification: classification.as_str().to_string(),
             workspace_path: workspace_path.transpose()?,
         })
-    })
-}
-
-/// RETIRED (方案 §11, §42.2-E11): Wave 1 un-registers it.
-///
-/// This used to be a raw `UPDATE sessions SET project_id`, i.e. a fourth writer
-/// for a column that v0.2 defines as a derived cache with exactly three (§42.3-M3)
-/// — which is precisely how `project_id` and the WorkspacePath behind it came to
-/// disagree. It refuses instead of writing, so that an old frontend or a
-/// scripted call cannot reintroduce the split authority; Project membership is
-/// now derived from where the Session actually ran.
-#[tauri::command]
-pub fn assign_session_project(
-    state: State<AppState>,
-    session_id: String,
-    project_id: Option<String>,
-) -> Result<()> {
-    let _ = (state, session_id, project_id);
-    Err(other(
-        "Project 由 Session 的工作路径自动派生，不能再手工指派；移动路径归属即移动成员",
-    ))
-}
-
-/// RETIRED (方案 §11, §42.2-E11): Wave 1 un-registers it; no frontend calls it.
-///
-/// It used to record fresh name-substring affinity evidence on every read. That
-/// write is gone: this now only resolves evidence already in the store, so the
-/// history stays readable without growing new inferences.
-#[tauri::command]
-pub fn suggest_session_project(
-    state: State<AppState>,
-    session_id: String,
-) -> Result<serde_json::Value> {
-    with_db(&state, |db| {
-        // existence is still the contract; only the inference is gone
-        if db.get_session(&session_id)?.is_none() {
-            return Err(other("Session 不存在"));
-        }
-        match db.resolve_project_affinity(&session_id)? {
-            Some((project_id, score)) => {
-                let name = db
-                    .get_project(&project_id)?
-                    .map(|p| p.name)
-                    .unwrap_or_default();
-                Ok(
-                    serde_json::json!({ "project_id": project_id, "project_name": name, "score": score }),
-                )
-            }
-            None => Ok(serde_json::json!({ "project_id": null, "score": 0.0 })),
-        }
     })
 }
 

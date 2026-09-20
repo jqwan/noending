@@ -1,6 +1,6 @@
 //! WorkstreamPaths, lifecycle and the recycle bin.
 //!
-//! Owned by Agent C (方案 §18).
+//! This module owns the ordered path list, lifecycle and visibility policy.
 //!
 //! ## The ordered list is the whole model (§1.5)
 //!
@@ -10,9 +10,7 @@
 //!   UNIQUE(workstream_id, position)
 //! ```
 //!
-//! `position = 0` IS the primary path. There is no `is_primary` column and no
-//! primary/secondary pair — two authorities for one fact is precisely how
-//! `default_cwd` and `workstreams.project_id` came to disagree with reality.
+//! `position = 0` IS the primary path. There is no second workspace authority.
 //! Therefore: `paths.is_empty() || paths[0]` exists by construction, and
 //! "secondary without primary" is not representable.
 //!
@@ -20,11 +18,9 @@
 //!   without asking the user (§1.6).
 //! * `reorder_workstream_paths(ordered_workspace_path_ids)` takes the FULL list;
 //!   "make this the primary path" is a reorder to index 0 (§21).
-//! * `create_workstream(title, description, initial_path?)` — no `project_id`,
-//!   no `default_cwd`. `default_cwd` survives only as a v12 migration input.
-//! * Workstream→Project is a projection through the paths. New code must not
-//!   write `workstreams.project_id` (`upsert_workstream_conn` no longer accepts
-//!   it — §42.2-E6).
+//! * `create_workstream(title, description, initial_path?)` creates zero or one
+//!   initial path.
+//! * Workstream→Project is a projection through the paths.
 //!
 //! ## Lifecycle (§1.13 / §5.7)
 //!
@@ -90,10 +86,9 @@ use super::WorkspaceAttaching;
 /// Managed Tauri state carrying the one runtime implementation of
 /// [`WorkspaceAttaching`].
 ///
-/// The concrete type is `workspace::wiring::WorkspaceLayer` (Agent B's Project
-/// policy over Agent A's resolver) — which is why every policy function below
-/// takes `&dyn WorkspaceAttaching` explicitly and stays testable with a scripted
-/// stand-in. Main wires it in `lib.rs` setup:
+/// The concrete type is `workspace::wiring::WorkspaceLayer`, which is why every
+/// policy function below takes `&dyn WorkspaceAttaching` explicitly and stays
+/// testable with a scripted stand-in. Main wires it in `lib.rs` setup:
 ///
 /// ```text
 /// let layer = Arc::new(workspace::wiring::WorkspaceLayer::new(&home));
@@ -120,9 +115,8 @@ impl PathService {
 
 /// `create_workstream(title, description, initial_path?)`.
 ///
-/// No `project_id` and no `default_cwd`: both left the signature with v0.2
-/// (§42.2-E6). A Workstream is created with zero paths or exactly one, and that
-/// one is position 0 by construction — becoming primary needs no special case.
+/// A Workstream is created with zero paths or exactly one, and that one is
+/// position 0 by construction — becoming primary needs no special case.
 ///
 /// Atomic: the row and its first path commit together, so a failed path attach
 /// cannot leave a half-created Workstream.
@@ -136,12 +130,10 @@ pub fn create_workstream(
     crate::storage::ensure_not_empty("Workstream 标题", title)?;
     let w = Workstream {
         id: new_id(),
-        project_id: None,
         title: title.trim().to_string(),
         description: description.trim().to_string(),
         lifecycle: workstream_lifecycle::ACTIVE.into(),
         visibility: workstream_visibility::NORMAL.into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -317,19 +309,12 @@ fn set_visibility(db: &Db, workstream_id: &str, visibility: &str) -> Result<Work
     Ok(w)
 }
 
-/// The rules for the legacy whole-object write (`update_workstream`), which the
+/// The rules for the whole-object write (`update_workstream`), which the
 /// detail page still uses to save a title or a description.
 ///
 /// `lifecycle` and `visibility` may not travel through it: they have commands of
 /// their own, and a stale object from another screen silently reverting an
 /// archive is exactly the double-authority failure v0.2 exists to remove.
-/// `project_id` and `default_cwd` are restored from the stored row instead of
-/// refused, because every client echoes them back — they are frozen reads
-/// (§42.2-E6), and rejecting the whole write for a field nobody can set would
-/// break renaming a Workstream.
-///
-/// Returns the payload with those columns taken from the row, so nothing the
-/// client holds can reach the INSERT branch of the upsert either.
 pub fn apply_whole_object_edit(db: &Db, payload: &Workstream) -> Result<Workstream> {
     let current = require_workstream(db, &payload.id)?;
     if payload.lifecycle != current.lifecycle {
@@ -341,8 +326,6 @@ pub fn apply_whole_object_edit(db: &Db, payload: &Workstream) -> Result<Workstre
         ));
     }
     Ok(Workstream {
-        project_id: current.project_id,
-        default_cwd: current.default_cwd,
         created_at: current.created_at,
         updated_at: now(),
         ..payload.clone()
@@ -371,7 +354,7 @@ pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()>
 // --------------------------------------------------------------- projections
 
 /// §42.3-M19 — the card / detail `project_id` + `project_name`, read through the
-/// position-0 path instead of the frozen `workstreams.project_id` column.
+/// position-0 path.
 ///
 /// Both are `None` for a Workstream with no paths, which is a normal state and
 /// not an error.

@@ -260,10 +260,8 @@ pub fn recover_interrupted_deletion_jobs(conn: &Connection) -> Result<usize> {
 /// Session-linked provenance keys, collected while the event store and sync
 /// history are still readable (方案 §26 step 1).
 struct SessionProvenance {
-    /// Current-spelling event refs: `session-event:<event-id>`.
+    /// Stable event refs: `session-event:<event-id>`.
     event_refs: Vec<String>,
-    /// Legacy display-era refs embed the session id: `session:<id>#<seq>`.
-    legacy_ref_prefix: String,
     sync_run_ids: Vec<String>,
 }
 
@@ -286,7 +284,6 @@ fn collect_session_provenance(conn: &Connection, session_id: &str) -> Result<Ses
     }
     Ok(SessionProvenance {
         event_refs,
-        legacy_ref_prefix: format!("session:{}#", session_id),
         sync_run_ids,
     })
 }
@@ -319,8 +316,8 @@ fn metadata_event_refs(metadata: &serde_json::Value) -> Vec<String> {
 }
 
 /// A revision belongs to the dying session when its `sync_run_id` is one of
-/// the session's SyncRuns, its `source_ref` resolves to one of its events
-/// (either spelling), or its metadata mentions one of those refs (§27).
+/// the session's SyncRuns, its `source_ref` resolves to one of its events, or
+/// its metadata mentions one of those refs (§27).
 fn revision_matches_provenance(
     source_ref: Option<&str>,
     sync_run_id: Option<&str>,
@@ -333,13 +330,13 @@ fn revision_matches_provenance(
         }
     }
     if let Some(r) = source_ref {
-        if prov.event_refs.iter().any(|e| e == r) || r.starts_with(&prov.legacy_ref_prefix) {
+        if prov.event_refs.iter().any(|e| e == r) {
             return true;
         }
     }
     metadata_event_refs(metadata)
         .iter()
-        .any(|m| prov.event_refs.iter().any(|e| e == m) || m.starts_with(&prov.legacy_ref_prefix))
+        .any(|m| prov.event_refs.iter().any(|e| e == m))
 }
 
 /// The scrubbed metadata: session-derived references removed, authority /
@@ -453,12 +450,7 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usi
         "DELETE FROM context_deliveries WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 4. Project affinity evidence (nullable FK).
-    tx.execute(
-        "DELETE FROM project_affinity_evidence WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    // 5. Bindings.
+    // 4. Bindings.
     tx.execute(
         "DELETE FROM session_workstream_bindings WHERE session_id = ?1",
         params![session_id],

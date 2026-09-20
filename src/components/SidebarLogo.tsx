@@ -1,4 +1,3 @@
-import React from "react";
 import markUrl from "../assets/noending-mark.svg";
 
 // Official NoEnding mark from docs/NoEnding-logo.svg (tight-viewBox variant).

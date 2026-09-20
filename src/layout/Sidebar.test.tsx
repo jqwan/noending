@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
 import type { Route } from "../app/routes";
-import type { WorkstreamCardData } from "../types";
 
 vi.mock("../api", () => ({
   api: {
@@ -14,9 +13,6 @@ vi.mock("../api", () => ({
     listProjects: vi.fn(),
   },
 }));
-
-vi.mocked(api.listWorkstreamCards);
-vi.mocked(api.listProjects);
 
 beforeEach(() => {
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
@@ -50,35 +46,9 @@ describe("Sidebar projects navigation", () => {
   });
 
   it("sidebar_does_not_render_individual_projects", async () => {
-    vi.mocked(api.listProjects).mockResolvedValue([
-      {
-        id: "p-alpha",
-        name: "Alpha Project",
-        description: "",
-        archived: false,
-        git_id: null,
-        name_customized: false,
-        created_at: "2026-09-01T00:00:00Z",
-        updated_at: "2026-09-01T00:00:00Z",
-      },
-      {
-        id: "p-beta",
-        name: "Beta Project",
-        description: "",
-        archived: false,
-        git_id: null,
-        name_customized: false,
-        created_at: "2026-09-01T00:00:00Z",
-        updated_at: "2026-09-01T00:00:00Z",
-      },
-    ]);
-
     renderSidebar({ view: "workstreams" });
     await screen.findByText("Projects"); // 导航项在
-    await new Promise((r) => setTimeout(r, 0));
 
     expect(api.listProjects).not.toHaveBeenCalled();
-    expect(screen.queryByText("Alpha Project")).toBeNull();
-    expect(screen.queryByText("Beta Project")).toBeNull();
   });
 });

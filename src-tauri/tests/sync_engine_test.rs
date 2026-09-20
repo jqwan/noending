@@ -17,7 +17,6 @@ fn create_project(db: &Db, name: &str) -> noending::domain::Project {
         id: new_id(),
         name: name.into(),
         description: String::new(),
-        archived: false,
         git_id: None,
         name_customized: false,
         created_at: now(),
@@ -27,20 +26,13 @@ fn create_project(db: &Db, name: &str) -> noending::domain::Project {
     p
 }
 
-fn create_workstream(
-    db: &Db,
-    project_id: &str,
-    title: &str,
-    description: &str,
-) -> noending::domain::Workstream {
+fn create_workstream(db: &Db, title: &str, description: &str) -> noending::domain::Workstream {
     let w = noending::domain::Workstream {
         id: new_id(),
-        project_id: Some(project_id.into()),
         title: title.into(),
         description: description.into(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -103,8 +95,8 @@ fn event(session: &Session, sequence: i64, kind: &str, text: &str) -> SessionEve
 fn sync_engine_extracts_and_merges() {
     let db = open_temp_db();
 
-    let project = create_project(&db, "Test Project");
-    let ws = create_workstream(&db, &project.id, "Context Sync", "同步机制设计");
+    let _project = create_project(&db, "Test Project");
+    let ws = create_workstream(&db, "Context Sync", "同步机制设计");
 
     let session = make_session(&db, Agent::Codex, "fake-session-1");
     bind(&db, &session.id, &ws.id);
@@ -192,8 +184,8 @@ fn sync_engine_extracts_and_merges() {
 #[test]
 fn context_bundle_contains_core_sections() {
     let db = open_temp_db();
-    let project = create_project(&db, "Trip");
-    let ws = create_workstream(&db, &project.id, "行程设计", "");
+    let _project = create_project(&db, "Trip");
+    let ws = create_workstream(&db, "行程设计", "");
 
     sync::create_item(
         &db,
@@ -239,8 +231,8 @@ fn context_bundle_contains_core_sections() {
 #[test]
 fn search_finds_ingested_events() {
     let db = open_temp_db();
-    let project = create_project(&db, "Search Project");
-    let ws = create_workstream(&db, &project.id, "检索", "");
+    let _project = create_project(&db, "Search Project");
+    let ws = create_workstream(&db, "检索", "");
 
     let session = make_session(&db, Agent::ClaudeCode, "search-fixture");
     bind(&db, &session.id, &ws.id);

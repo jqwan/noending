@@ -28,8 +28,8 @@ pub fn run() {
         .setup(|app| {
             // NoEnding Home first, always before the database opens (§2, §3):
             // it resolves $NOENDING_HOME → bootstrap.current_home → ~/.noending,
-            // applies any pending relocation, adopts a pre-v0.2 data directory,
-            // and creates data/ runtime/ logs/ workspace/. A *migration* failure
+            // applies any pending relocation, and creates data/ runtime/ logs/
+            // workspace/. A *migration* failure
             // is not fatal here — it returns the old Home with the reason in
             // `notes` — because "no database found" would look like data loss.
             let startup = workspace::home::prepare_home(&workspace::home::StartupInputs::from_environment())?;
@@ -42,8 +42,8 @@ pub fn run() {
             let db = storage::Db::open(&db_path)?;
             eprintln!("[noending] db at {}", db_path.display());
 
-            // The physical layer: Agent A's resolver + Agent B's Project policy,
-            // behind the one `WorkspaceAttaching` door. Managed as state for the
+            // The physical layer behind the one `WorkspaceAttaching` door.
+            // Managed as state for the
             // commands, and registered for ingestion, which keeps a plain
             // `ensure_session_row` signature (§19).
             app.manage(home.clone());
@@ -181,10 +181,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Projects are derived from WorkspacePaths in v0.2, so the only
-            // Project surface the UI gets is read + rename. `create_project`,
-            // `update_project`, `delete_project` and the resource commands stay
-            // as Rust helpers but are deliberately NOT registered (§11, T1).
+            // Projects are derived from WorkspacePaths; the UI gets read + rename.
             commands::project::list_projects,
             commands::project::list_project_cards,
             commands::project::refresh_workspace_projects,
@@ -233,10 +230,6 @@ pub fn run() {
             commands::resolve_conflict_with_edit,
             commands::session_workspace::list_sessions,
             commands::session_workspace::get_session_detail,
-            // `assign_session_project` / `suggest_session_project` left the API:
-            // Session→Project is derived from the Session's own path in v0.2, and
-            // the old heuristic matched `Project.name` against cwd substrings
-            // (§42.2-E11). The Rust helpers stay for history only.
             commands::session_workspace::bind_session_workstream,
             commands::session_workspace::unbind_session_workstream,
             commands::session_workspace::replace_session_bindings,
@@ -267,7 +260,6 @@ pub fn run() {
             commands::launch_prepared,
             commands::cancel_prepared,
             commands::search,
-            commands::get_stats,
             commands::get_agent_status,
             commands::get_agent_runtime_settings,
             commands::set_agent_runtime_overrides,

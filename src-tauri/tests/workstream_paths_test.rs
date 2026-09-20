@@ -4,8 +4,8 @@
 //! that "position 0 is primary" is a property of the list rather than a second
 //! fact that can disagree with it.
 //!
-//! The attacher is a scripted stand-in, because `workspace::project`'s real one
-//! is Agent B's and the Workstream side must stay testable without Git
+//! The attacher is a scripted stand-in, because the real implementation must
+//! stay separate and the Workstream side must stay testable without Git
 //! (`workspace::WorkspaceAttaching`'s contract: resolve through the caller's
 //! connection, `Ok(None)` for "this string is no path").
 
@@ -213,9 +213,6 @@ fn empty_path_list_is_valid() {
 
     assert_eq!(w.lifecycle, workstream_lifecycle::ACTIVE);
     assert_eq!(w.visibility, workstream_visibility::NORMAL);
-    // §42.2-E6: neither retired column is written by the new signature.
-    assert_eq!(w.project_id, None);
-    assert_eq!(w.default_cwd, None);
     assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
     assert_eq!(db.primary_workspace_path_id(&w.id).unwrap(), None);
     // Zero paths is not an error for any reader either.
@@ -679,30 +676,22 @@ fn the_primary_path_projection_moves_the_search_row_and_the_card() {
         db.upsert_project(&Project::new(id.into(), id.to_uppercase()))
             .unwrap();
     }
-    // A row the way v0.1 left it: `project_id` assigned by hand.
     let w = Workstream::new("w-proj".into(), "Projection");
     db.upsert_workstream(&w).unwrap();
-    db.conn()
-        .execute(
-            "UPDATE workstreams SET project_id = 'p_frozen' WHERE id = 'w-proj'",
-            [],
-        )
-        .unwrap();
     let attacher =
         ScriptedAttacher::for_projects(&[("/real/one", "p_real"), ("/other/two", "p_other")]);
     add_workstream_path(&db, &attacher, &w.id, "/real/one").unwrap();
     add_workstream_path(&db, &attacher, &w.id, "/other/two").unwrap();
 
     let card = work_cards(&db, &w.id);
-    assert_eq!(card.workstream.project_id.as_deref(), Some("p_real"));
+    assert_eq!(card.project_id.as_deref(), Some("p_real"));
     assert_eq!(card.project_name.as_deref(), Some("P_REAL"));
     assert_eq!(card.path_count, 2);
     if db.fts_available() {
         assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_real"));
     }
 
-    // Make the other path primary: the projection moves, the stored column does
-    // not, and the retired authority is never re-committed.
+    // Make the other path primary: the projection moves with the ordered list.
     let rows = db.list_workstream_paths(&w.id).unwrap();
     reorder_workstream_paths(
         &db,
@@ -717,15 +706,6 @@ fn the_primary_path_projection_moves_the_search_row_and_the_card() {
         work_cards(&db, &w.id).project_name.as_deref(),
         Some("P_OTHER")
     );
-    assert_eq!(
-        db.get_workstream(&w.id)
-            .unwrap()
-            .unwrap()
-            .project_id
-            .as_deref(),
-        Some("p_frozen"),
-        "the compatibility column is a read, not a write target"
-    );
     if db.fts_available() {
         assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_other"));
     }
@@ -736,7 +716,7 @@ fn the_primary_path_projection_moves_the_search_row_and_the_card() {
         remove_workstream_path(&db, &w.id, &row.id).unwrap();
     }
     let card = work_cards(&db, &w.id);
-    assert_eq!(card.workstream.project_id, None);
+    assert_eq!(card.project_id, None);
     assert_eq!(card.project_name, None);
     assert_eq!(card.path_count, 0);
     if db.fts_available() {

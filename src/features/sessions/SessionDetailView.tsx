@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
@@ -91,7 +91,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
   const { session, events, bindings } = detail;
 
   /**
-   * 刷新 = 只摄入。Context 提取只在智能开启时才会发生（方案 v0.1 §11.6 + Commit 0 L4），
+   * 刷新 = 只摄入。Context 提取只在智能开启时才会发生（方案 v0.1 §11.6），
    * 所以提取结果只跟随后端的 context_processing_enabled 走：智能关闭时它恒为 false，
    * 这一屏永远不会出现「Context 变更」（§13 移除清单）。
    */
@@ -121,7 +121,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
   const untitled = title === UNTITLED_SESSION;
   const cwd = (session.cwd ?? "").trim();
   const ordered = primaryFirst(bindings, ([b]) => b.role);
-  /** 单一生命周期权威（v13）：null = 正常，时间戳 = 在回收站（§3）。 */
+  /** 单一生命周期权威：null = 正常，时间戳 = 在回收站（§3）。 */
   const trashed = session.trashed_at !== null;
 
   /**

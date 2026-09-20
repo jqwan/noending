@@ -22,11 +22,9 @@
 //!    (`storage::workspace::reassign_workspace_path_project_conn`).
 //!
 //! Plus one referential-cleanup case: [`clear_sessions_project_for_project_conn`]
-//! invalidates the cache for a Project that is going away — both
-//! `Db::delete_project_and_children` and `workspace::project`'s zero-path
-//! auto-delete funnel through it, so the cleanup stays one statement in one
-//! file. Anything else — notably the retired `assign_session_project`, which was
-//! a raw `UPDATE sessions SET project_id = ?` — is a domain violation, guarded by
+//! invalidates the cache for a Project that is going away. The workspace layer's
+//! zero-path auto-delete funnels through it, so the cleanup stays one statement
+//! in one file. Anything else is a domain violation, guarded by
 //! 方案 §42.5-T2 (and executably by
 //! `tests/session_workspace_test::project_id_writers_are_confined_to_the_derived_doors`).
 //!

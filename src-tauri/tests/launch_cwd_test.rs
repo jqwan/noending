@@ -7,10 +7,8 @@
 //!     → NoEnding Home's default workspace
 //! ```
 //!
-//! Two retired authorities are asserted on the way: `workstreams.default_cwd`
-//! (§42.2-E6 — a frozen compatibility column, now only a v12 migration input)
-//! and "the most recent Session cwd across these Workstreams" (the ordered path
-//! list is what records where a Workstream's work happens).
+//! The ordered path list is the only Workstream workspace authority; a bound
+//! Session's cwd is never a suggestion for a new launch.
 //!
 //! Every directory a test expects to be *chosen* is a real temp directory,
 //! because §42.3-M21 forbids handing the terminal a directory that is not there
@@ -23,7 +21,7 @@ use rusqlite::Connection;
 use noending::domain::{binding_source, Agent, Project};
 use noending::launcher::{record_binding, resolve_new_cwd, CwdSource, LaunchWorkspace};
 use noending::storage::workspace::insert_workspace_path_conn;
-use noending::storage::{new_id, now, Db};
+use noending::storage::{new_id, Db};
 use noending::workspace::workstream::{add_workstream_path, create_workstream};
 use noending::workspace::{normalize_path, WorkspaceAttaching};
 
@@ -263,50 +261,7 @@ fn nothing_resolves_to_no_directory_at_all() {
     );
 }
 
-// ------------------------------------------------------- retired authorities
-
-/// §42.2-E6: `default_cwd` is frozen at creation and is NOT a launch authority
-/// any more. A Workstream whose retired column points somewhere real must
-/// still launch from its path list — otherwise the column is a second source of
-/// the same fact, which is exactly what §29 forbids.
-#[test]
-fn the_frozen_default_cwd_column_is_not_a_launch_authority() {
-    let database = db("frozen-column");
-    let retired = real_dir("frozen-column", "retired");
-    let w = {
-        let row = noending::domain::Workstream {
-            id: new_id(),
-            project_id: None,
-            title: "legacy".into(),
-            description: String::new(),
-            lifecycle: "active".into(),
-            visibility: "normal".into(),
-            default_cwd: Some(retired.clone()),
-            created_at: now(),
-            updated_at: now(),
-        };
-        database.upsert_workstream(&row).unwrap();
-        row.id
-    };
-
-    // No paths and no default workspace: the retired column is not consulted.
-    assert_eq!(
-        resolve_new_cwd(&database, &[w.clone()], None, &LaunchWorkspace::default())
-            .unwrap()
-            .cwd,
-        None
-    );
-    // With a path, the path answers.
-    let live = real_dir("frozen-column", "live");
-    add_paths(&database, &w, &[live.clone()]);
-    assert_eq!(
-        new_cwd(&database, &[w], None, None).as_deref(),
-        Some(live.as_str())
-    );
-}
-
-/// The pre-v0.2 "continue where you left off" tier is gone: a bound Session's
-/// cwd is that Session's own fact and never a suggestion for a new one.
+/// A bound Session's cwd is its own fact and never a suggestion for a new one.
 #[test]
 fn another_sessions_cwd_is_not_a_launch_authority() {
     let database = db("session-cwd");
@@ -345,61 +300,6 @@ fn another_sessions_cwd_is_not_a_launch_authority() {
             .cwd,
         None,
         "the bound Session's directory ({elsewhere}) must not leak into a New Session"
-    );
-}
-
-/// `default_cwd` is written at creation and then frozen (方案 §42.2-E6): under
-/// Workspace Domain v0.2 the launch directory comes from the ordered
-/// `workstream_paths` list, and this column is only a v12 migration input plus a
-/// compatibility read. Because `update_workstream` is a whole-object write,
-/// leaving it in the DO UPDATE set would keep re-committing it from unrelated
-/// title edits — so neither setting nor clearing is possible after creation.
-#[test]
-fn default_cwd_is_frozen_after_creation() {
-    let database = db("roundtrip");
-    let w = {
-        let row = noending::domain::Workstream {
-            id: new_id(),
-            project_id: None,
-            title: "W".into(),
-            description: String::new(),
-            lifecycle: "active".into(),
-            visibility: "normal".into(),
-            default_cwd: Some("/some/dir".into()),
-            created_at: now(),
-            updated_at: now(),
-        };
-        database.upsert_workstream(&row).unwrap();
-        row.id
-    };
-
-    let stored = database.get_workstream(&w).unwrap().unwrap();
-    assert_eq!(stored.default_cwd.as_deref(), Some("/some/dir"));
-
-    let mut changed = stored.clone();
-    changed.default_cwd = Some("/somewhere/else".into());
-    database.upsert_workstream(&changed).unwrap();
-    assert_eq!(
-        database
-            .get_workstream(&w)
-            .unwrap()
-            .unwrap()
-            .default_cwd
-            .as_deref(),
-        Some("/some/dir"),
-        "an after-the-fact retarget must not stick"
-    );
-
-    let mut cleared = database.get_workstream(&w).unwrap().unwrap();
-    cleared.default_cwd = None;
-    cleared.title = "改名".into();
-    database.upsert_workstream(&cleared).unwrap();
-    let after = database.get_workstream(&w).unwrap().unwrap();
-    assert_eq!(after.title, "改名", "the intended edit still goes through");
-    assert_eq!(
-        after.default_cwd.as_deref(),
-        Some("/some/dir"),
-        "and clearing the retired column through an edit is not possible either"
     );
 }
 

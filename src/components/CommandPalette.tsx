@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { Route } from "../app/routes";
 import { useBaseExperience } from "../app/experience";
@@ -41,7 +41,7 @@ export default function CommandPalette({ onClose, navigate }: {
   useEffect(() => {
     inputRef.current?.focus();
     api.listWorkstreams().then((ws) => setWorkstreams(ws.filter((w) => w.visibility === "normal"))).catch(() => {});
-    api.listAllSessions().then((s) => setSessions(s.slice(0, 25))).catch(() => {});
+    api.listSessions().then((s) => setSessions(s.slice(0, 25))).catch(() => {});
   }, []);
 
   useEffect(() => {

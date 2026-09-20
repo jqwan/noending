@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import AgentIcon from "../../components/AgentIcon";
 import SidebarLogo from "../../components/SidebarLogo";
 import type { Route } from "../../app/routes";

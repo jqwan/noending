@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { onEvent, EVT_SYNCED, type Route } from "../app/routes";
 import { IntelligenceOnly } from "../app/experience";

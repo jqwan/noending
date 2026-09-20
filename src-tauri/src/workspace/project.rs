@@ -1,8 +1,5 @@
 //! Project projection — the WorkspacePath registry and every ownership rule.
 //!
-//! Owned by Agent B (方案 §17). Consumes `WorkspaceObservation`; never
-//! re-implements path identity or Git detection.
-//!
 //! ## Entry point
 //!
 //! ```text
@@ -29,10 +26,7 @@
 //!   `workspace_paths.project_id` is NOT NULL: a WorkspacePath belongs to
 //!   exactly one Project, a Project owns at least one.
 //! * Deleting the last WorkspacePath deletes the Project — in FK order
-//!   `project_resources` → `project_affinity_evidence` → `projects`, then
-//!   `unindex("project", id)` after commit (§42.3-M4). `foreign_keys` is ON, so
-//!   the naive `DELETE FROM projects` fails on any Project that ever had a
-//!   resource row.
+//!   `projects`, then `unindex("project", id)` after commit.
 //! * A `WorkspacePath` is only physically GC'd with 0 Session references, 0
 //!   WorkstreamPath references and no longer a discovered worktree of any live
 //!   Project (§10). A missing directory or a lost `.git` sets `exists` /
@@ -106,8 +100,8 @@ use crate::workspace::resolver::WorkspaceObserving;
 use crate::workspace::WorkspaceAttaching;
 
 /// What the Project policy may ask about the surrounding world without touching
-/// it. `workspace::home` (Agent A) is the real implementation; this seam exists
-/// so ownership rules are testable with a scripted answer instead of a Home
+/// it. `workspace::home` provides the real implementation; this seam exists so
+/// ownership rules are testable with a scripted answer instead of a Home
 /// directory on disk (§42.3-M13).
 pub trait WorkspacePolicy {
     /// The NoEnding Home itself and its reserved app directories are never a
@@ -636,8 +630,7 @@ fn create_project_row(
         // is "NoEnding Workspace". Never a guess about repositories or remotes.
         name: auto_project_name(canonical_path, policy.default_workspace().as_deref()),
         description: String::new(),
-        // Column compatibility only: v0.2 gives a Project no lifecycle (§1.2).
-        archived: false,
+        // Project lifecycle is not a Project concern; it is derived from paths.
         git_id: git_id.map(|g| g.to_string()),
         // App-named by construction; only `rename_project` may set this (§17-15).
         name_customized: false,
@@ -1100,8 +1093,7 @@ pub struct ProjectDetail {
 ///
 /// Sessions come through their `workspace_path_id`, not through the
 /// `sessions.project_id` cache, so the detail page can never show a Session the
-/// path chain does not support — a legacy row that only carries the cached
-/// Project has no physical anchor to show.
+/// path chain does not support.
 pub fn project_detail(db: &Db, project_id: &str) -> Result<Option<ProjectDetail>> {
     let Some(project) = db.get_project(project_id)? else {
         return Ok(None);
@@ -1294,7 +1286,6 @@ mod tests {
             id: id.into(),
             name: id.into(),
             description: String::new(),
-            archived: false,
             git_id: git.map(Into::into),
             name_customized: customized,
             created_at: created.into(),

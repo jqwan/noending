@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
@@ -10,7 +10,7 @@ import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
  *   重新抓取，绑定与上下文条目保留）；
  * - 摄入在后台执行（不阻塞界面），进度通过 sync-* 事件推送。
  */
-export default function SourcesView({ onSync, embedded }: { onSync?: () => void; embedded?: boolean }) {
+export default function SourcesView() {
   const [sources, setSources] = useState<IngestSource[]>([]);
   const [agent, setAgent] = useState<Agent>("codex");
   const [path, setPath] = useState("");
@@ -43,7 +43,6 @@ export default function SourcesView({ onSync, embedded }: { onSync?: () => void;
         setProgress("");
         setNotice(`摄入完成：发现 ${p.discovered ?? 0} 个 Session，摄入 ${p.events ?? 0} 条新事件。`);
         reload();
-        onSync?.();
       }),
       listen("sync-failed", (e) => {
         const p = e.payload as { error?: string };
@@ -73,7 +72,6 @@ export default function SourcesView({ onSync, embedded }: { onSync?: () => void;
       setPath("");
       setNotice("已添加并启用。点击该行的「同步」开始摄入。");
       reload();
-      onSync?.();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -121,20 +119,10 @@ export default function SourcesView({ onSync, embedded }: { onSync?: () => void;
   const enabledCount = sources.filter((s) => s.enabled).length;
 
   return (
-    <div className={embedded ? "" : "main"}>
-      {!embedded && (
-        <>
-          <h1>Session 来源</h1>
-          <p className="page-sub">
-            只有勾选启用的目录会被扫描摄入。默认 Agent 目录（~/.codex、~/.claude、~/.pi）仅作为候选预置，是否摄入由你决定；也可以添加任意自定义目录，按所选 Agent 的 Session 格式（内容指纹校验）递归扫描。摄入在后台执行，不会阻塞界面。
-          </p>
-        </>
-      )}
-      {embedded && (
-        <p className="muted small" style={{ marginTop: 0 }}>
-          只有勾选启用的目录会被扫描摄入；默认 Agent 目录仅作为候选预置。摄入在后台执行。
-        </p>
-      )}
+    <div>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        只有勾选启用的目录会被扫描摄入；默认 Agent 目录仅作为候选预置。摄入在后台执行。
+      </p>
 
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}>
         <button className="btn primary" disabled={syncing} onClick={syncAll}>

@@ -167,12 +167,10 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
     for ws in &fixture.input.workstreams {
         let w = Workstream {
             id: ws.id.clone(),
-            project_id: None,
             title: ws.title.clone(),
             description: ws.description.clone(),
             lifecycle: crate::domain::workstream_lifecycle::ACTIVE.into(),
             visibility: "normal".into(),
-            default_cwd: None,
             created_at: now(),
             updated_at: now(),
         };

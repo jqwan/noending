@@ -168,10 +168,9 @@ pub fn same_location_with(a: &str, b: &str, style: PathStyle) -> bool {
 
 /// Deterministic WorkspacePath id for a canonical path, under this host's rules.
 ///
-/// A content id, not a uuid: `ensure_workspace_path` and the v12 backfill must
-/// stay idempotent across a replayed migration (`migrate()` has no transaction),
-/// and a random id would make every retry a new row that then has to be
-/// reconciled. `path-` prefix keeps it visibly distinct from uuid v4 rows.
+/// A content id, not a uuid: repeated workspace observation must stay
+/// idempotent, and a random id would make every retry a new row. `path-`
+/// keeps it visibly distinct from uuid v4 rows.
 pub fn path_identity(canonical: &str) -> String {
     path_identity_with(canonical, PathStyle::current())
 }

@@ -1,7 +1,7 @@
 //! Workstream commands and the card projection.
 //!
-//! Owned by `Agent C` (方案 §18): the ordered path list, lifecycle and the
-//! recycle bin land here. `workstream_cards` is the Home/Sidebar projection, and
+//! The ordered path list, lifecycle and recycle bin land here.
+//! `workstream_cards` is the Home/Sidebar projection, and
 //! `commands.rs` re-exports it so existing tests keep their path.
 //!
 //! Every command here is a thin door: it takes the arguments, then calls
@@ -23,9 +23,8 @@ use super::{with_db, AppState};
 
 /// §11 — `create_workstream(title, description, initial_path?)`.
 ///
-/// `project_id` and `default_cwd` are gone from the signature: Project is
-/// derived through the path, and the launch anchor is the ordered path list
-/// (§42.2-E6). `initial_path` is a raw string, resolved by the Workspace
+/// Project is derived through the path, and the launch anchor is the ordered
+/// path list. `initial_path` is a raw string, resolved by the Workspace
 /// attacher; if it does not resolve the Workstream is still created with zero
 /// paths.
 #[tauri::command]
@@ -169,11 +168,9 @@ pub struct LatestSessionInfo {
 
 #[derive(Serialize)]
 pub struct WorkstreamCardView {
-    /// `project_id` inside is the **primary-path Project projection**
-    /// (§42.3-M19), not `workstreams.project_id`: it is rewritten below for the
-    /// response only and must never be written back to storage.
     #[serde(flatten)]
     pub workstream: Workstream,
+    pub project_id: Option<String>,
     pub project_name: Option<String>,
     /// L1 Current State text (content, falling back to its title).
     pub current_state: Option<String>,
@@ -234,19 +231,14 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
         .map(|p| (p.id, p.name))
         .collect();
     let mut cards = Vec::new();
-    for mut w in db.list_workstreams(None)? {
+    for w in db.list_workstreams(None)? {
         let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
         let items_activity = db.workstream_items_last_update(&w.id)?;
-        // §42.3-M19 — the two Project columns a card carries are a PROJECTION of
-        // the position-0 path. `workstreams.project_id` is a frozen
-        // compatibility value; publishing it would advertise a membership nobody
-        // assigned. Rewritten in this local copy only.
         let paths = db.list_workstream_paths(&w.id)?;
         let projected_project = paths
             .first()
             .and_then(|p| db.get_workspace_path(&p.workspace_path_id).ok().flatten())
             .map(|wp| wp.project_id);
-        w.project_id = projected_project.clone();
         // "Last active" only follows real work signals (session activity,
         // context edits) — renames or metadata touches must not make a
         // Workstream look freshly active. Sorting still falls back to
@@ -256,6 +248,7 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
             last_activity_at = later_ts(&last_activity_at, candidate);
         }
         cards.push(WorkstreamCardView {
+            project_id: projected_project.clone(),
             project_name: projected_project.and_then(|pid| project_names.get(&pid).cloned()),
             current_state: db.workstream_state_text(&w.id, "current_state")?,
             goal: db.workstream_state_text(&w.id, "goal")?,

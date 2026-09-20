@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
@@ -39,11 +39,10 @@ import SinceLastReview from "./SinceLastReview";
  * 同一个 Modal（§8.1.1 契约），由它们走 prepare → 状态指纹 → launch_prepared
  * （Preview-Launch Identity / Launch Preparation Integrity）。
  *
- * v0.2 的三条边界（§1.5 / §1.13 / §42.3-M19）：
- *   • 工作目录 = **有序 WorkstreamPath 列表**，`default_cwd` 只作为冻结的迁移输入
- *     留在类型里，本页不再读写它；
+ * v0.2 的边界（§1.5 / §1.13 / §42.3-M19）：
+ *   • 工作目录 = **有序 WorkstreamPath 列表**；
  *   • Project 是**只读投影**（主路径 → WorkspacePath → Project），所以链接取的是
- *     列表第 1 条路径所属 Project，而不是 `workstreams.project_id` 那个兼容列；
+ *     列表第 1 条路径所属 Project；
  *   • 归档 / 恢复 / 永久删除是三个**单向**命令，不是一枚翻转开关。
  */
 export default function WorkstreamDetailView({
@@ -154,8 +153,8 @@ export default function WorkstreamDetailView({
   /**
    * `update_workstream` is a whole-object write, so every edit re-sends the
    * current record with one field replaced — that is why only 标题 / 描述 走这条路：
-   * lifecycle、visibility、project_id、default_cwd 都有自己的命令或被后端冻结
-   * （§42.2-E6：`apply_whole_object_edit` 会直接拒绝携带改动过 lifecycle 的对象）。
+   * lifecycle、visibility 都有自己的命令；`apply_whole_object_edit` 会拒绝
+   * 携带改动过 lifecycle 的对象。
    *
    * title / description / updated_at are part of the launch state fingerprint
    * (launcher/mod.rs:475-478): an edit here intentionally invalidates any
@@ -295,8 +294,7 @@ export default function WorkstreamDetailView({
   };
 
   const archived = workstream.visibility === "archived";
-  // §42.3-M19：Project 只从**主工作路径**投影出来。`workstream.project_id` 是
-  // v0.2 冻结的兼容列，拿它导航会跳到一条没人手工指派过的旧成员关系上。
+  // §42.3-M19：Project 只从**主工作路径**投影出来。
   const primary = paths?.[0] ?? null;
   // §1.12：一个 Workstream 可以因为不同路径同时出现在多个 Project 里；
   // 经由 position 0 那条路径到达的才是「主关联」。

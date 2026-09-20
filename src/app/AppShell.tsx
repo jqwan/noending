@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "../layout/Sidebar";
-import LazyRouter from "../LazyRouter";
+import Router from "./Router";
 import CommandPalette from "../components/CommandPalette";
 import ToastHost from "../components/Toast";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
@@ -59,7 +59,7 @@ export default function AppShell() {
   return (
     <div className="app">
       <Sidebar route={route} navigate={navigate} onSearch={() => setPaletteOpen(true)} />
-      <LazyRouter route={route} navigate={navigate} actionSeq={actionSeq} />
+      <Router route={route} navigate={navigate} actionSeq={actionSeq} />
       {paletteOpen && (
         <CommandPalette onClose={() => setPaletteOpen(false)} navigate={navigate} />
       )}

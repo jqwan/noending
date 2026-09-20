@@ -72,7 +72,7 @@ export function PreviewRow({
 }: {
   label: string;
   hint?: string;
-  children: React.ReactNode;
+  children: ReactNode;
   first?: boolean;
 }) {
   return (

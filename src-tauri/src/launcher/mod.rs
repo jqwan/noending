@@ -12,8 +12,8 @@
 //!
 //! Working directory (方案 §13, Workspace Domain v0.2): every launch resolves
 //! its directory through `resolve_new_cwd` / `resolve_resume_cwd`, which read
-//! the ordered `WorkstreamPath` list and NoEnding Home's default workspace —
-//! never the frozen `workstreams.default_cwd`. The answer, including *which tier*
+//! the ordered `WorkstreamPath` list and NoEnding Home's default workspace. The
+//! answer, including *which tier*
 //! produced it, is carried on the PreparedLaunch and hashed into its state
 //! fingerprint, so Preview-Launch Identity covers the directory as well as the
 //! context (§42.3-M16/M17).
@@ -740,8 +740,8 @@ pub fn compute_state_fingerprint(
 /// cannot be re-read as a different field by shifting a boundary, and the path
 /// list is hashed **in list order** because position 0 is the fact the launch
 /// depends on. A WorkstreamPath mutation does not bump `workstreams.updated_at`
-/// (方案 §18 note by Agent C), so without `ws_paths:` here a reorder, an added
-/// path or a removed primary would leave a stale plan looking fresh.
+/// so without `ws_paths:` here a reorder, an added path or a removed primary
+/// would leave a stale plan looking fresh.
 pub fn compute_state_fingerprint_in(
     db: &Db,
     mode: &str,
@@ -794,7 +794,7 @@ pub fn compute_state_fingerprint_in(
             hasher.update(b"|");
             hasher.update(ws.updated_at.as_bytes());
             hasher.update(b"|");
-            // Agent C's fingerprint input: the ordered list itself.
+            // The ordered list itself is part of the fingerprint.
             hasher.update(
                 crate::workspace::workstream::workstream_launch_paths(db, ws_id)?
                     .fingerprint_input(),
@@ -1199,13 +1199,8 @@ fn default_workspace_resolution(workspace: &LaunchWorkspace) -> Result<Option<Cw
 ///              →  NoEnding Home's default workspace
 /// ```
 ///
-/// `workstreams.default_cwd` left this chain with §42.2-E6: it is a frozen
-/// compatibility column, and the ordered list is what §7.3 migrated it into, so
-/// reading the column again would be a second authority. The pre-v0.2
-/// "most recent Session's cwd across these Workstreams" tier is gone for the
-/// same reason — the Workstream's own path list is now the recorded answer to
-/// "where does this work happen", and an activity-derived guess would outrank
-/// the default workspace while agreeing with nothing.
+/// A Workstream's ordered path list is the recorded answer to "where does this
+/// work happen"; an activity-derived Session cwd is never a launch tier.
 ///
 /// A Workstream's path list is a launch convenience, never identity: the
 /// Workstream is still not a path, and Sessions keep their own cwd.

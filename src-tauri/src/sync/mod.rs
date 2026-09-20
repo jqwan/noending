@@ -69,8 +69,6 @@ pub enum ContextMutation {
         source_refs: Vec<String>,
     },
     CreateWorkstream {
-        /// Workstreams may be discovered without a Project home; None is valid.
-        project_id: Option<String>,
         title: String,
         reason: String,
     },

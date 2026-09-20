@@ -38,7 +38,7 @@
 //! * A Home-level Git repository is not evidence (§1.4), and the reserved app
 //!   paths under NoEnding Home never become a WorkspacePath (§2).
 //! * Git detection runs *after* the database opens, in Workspace Reconcile —
-//!   never inside `migrate()`, and never while holding the DB mutex (§6, §42.3-M7).
+//!   never inside schema initialization, and never while holding the DB mutex (§6, §42.3-M7).
 
 pub mod home;
 pub mod identity;

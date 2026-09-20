@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * 轻量全局 Toast：New / Resume 成功后不再强制弹 LaunchResultModal，

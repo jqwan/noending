@@ -1,4 +1,3 @@
-import React from "react";
 import HomeView from "../features/home/HomeView";
 import WorkstreamsView from "../features/workstreams/WorkstreamsView";
 import WorkstreamDetailView from "../features/workstreams/WorkstreamDetailView";

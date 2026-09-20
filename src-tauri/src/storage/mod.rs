@@ -1,4 +1,4 @@
-//! SQLite storage: schema, migrations and repository helpers.
+//! SQLite storage: current schema and repository helpers.
 //! Owns: domain data, session index, cursors, context items, FTS search.
 //!
 //! History integrity rules:
@@ -13,10 +13,8 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use crate::domain::*;
 use crate::error::{other, Result};
 
-// v12 split: the WorkspacePath registry, the ordered WorkstreamPath list and the
-// Session→path attach each get their own impl file rather than growing this one
-// further (方案 §38: prefer an independent storage impl over appending to the
-// monolith).
+// The WorkspacePath registry, ordered WorkstreamPath list and Session→path
+// attach each live in their own impl file rather than growing this monolith.
 pub mod session_jobs;
 pub mod session_paths;
 pub mod workspace;
@@ -26,34 +24,9 @@ pub use session_jobs::PermanentDeletionCounts;
 
 pub struct Db(pub Connection);
 
-/// Bump on any schema change. Fresh databases are stamped directly; older
-/// (lower-version) databases are brought up by the idempotent ALTERs in
-/// migrate(); higher versions refuse to open.
-///
-/// History: v2 added `prefix_hash` / `context_bundle_revisions`; v3 added
-/// `identity_tail_hash` and (unsound for stores that held superseded history
-/// from pre-upgrade rewrites) recomputed identity hashes in store order; v4
-/// replaced that with a lazy, source-driven migration — legacy events carry
-/// a claimable alias and are re-identified from the REAL source on the next
-/// full re-scan, event ids preserved; v5 added `session_binding_removals`
-/// (durable negative overrides: a user-rejected workstream is never
-/// re-proposed by auto-classification); v6 added `workstreams.default_cwd`
-/// (optional launch-directory suggestion, convenience not identity); v7 added
-/// `context_deliveries.delivered_conflicts` (JSON array of conflict IDs); v8 added
-/// `context_conflict_events` (auditable conflict resolution events); v9 added
-/// conflict creation snapshots (left_revision_id, right_revision_id, candidate_snapshot_json)
-/// and conflict event audit snapshots (snapshot_json); v10 added
-/// `workstream_review_state` (workstream-level review frontier checkpoint); v11
-/// pinned `context.delivery_level` explicitly for Base Experience (see migrate);
-/// v12 is Workspace Domain v0.2: the `workspace_paths` / `workstream_paths` /
-/// `git_identities` registry, `sessions.workspace_path_id`,
-/// `session_workstream_bindings.workstream_path_id`, `projects.git_id` +
-/// `name_customized`, and the `lifecycle` collapse to `active | completed`;
-/// v13 is Session Lifecycle & Deletion v0.1: `sessions.trashed_at` (single
-/// Trash authority — NULL is Normal) and the transient `session_deletion_jobs`
-/// coordination table for prepared permanent deletions (never a tombstone:
-/// the row is deleted in the same transaction that purges the Session).
-pub const SCHEMA_VERSION: i64 = 13;
+/// Current database shape. New databases are created directly; an older or
+/// newer version must be rebuilt with the current application.
+pub const SCHEMA_VERSION: i64 = 14;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -107,18 +80,6 @@ pub fn event_identity_hash(
     out
 }
 
-/// First component of the PRE-chain (≤ v2) fallback identity. Exists only
-/// for the v4 migration alias: legacy rows are claimed onto the chained
-/// identity by reproducing this exact historical hash from their own content.
-pub const LEGACY_IDENTITY_FALLBACK: &str = "-";
-
-/// Identity a fallback event (no native Agent id) carried before the chained
-/// adjacency identity (≤ v2): content-only, position-independent. Byte-exact
-/// historical format — never used for new events.
-pub fn legacy_fallback_identity_hash(kind: &str, ts: Option<&str>, text: Option<&str>) -> String {
-    event_identity_hash(LEGACY_IDENTITY_FALLBACK, None, kind, ts, text)
-}
-
 impl Db {
     pub fn open(path: &std::path::Path) -> Result<Db> {
         if let Some(parent) = path.parent() {
@@ -129,7 +90,7 @@ impl Db {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let db = Db(conn);
-        db.migrate()?;
+        db.initialize_schema()?;
         Ok(db)
     }
 
@@ -147,46 +108,46 @@ impl Db {
         Ok(out)
     }
 
-    fn migrate(&self) -> Result<()> {
-        // Schema version guard: an unknown NEWER database is refused with a
-        // clear message instead of failing later with "no such column".
-        // (v0 = pre-versioning dev database: current-shape tables, so the
-        // idempotent column additions below bring it up to date.)
+    fn initialize_schema(&self) -> Result<()> {
+        // There is intentionally no in-place migration path. A versioned
+        // database must already have this exact application's schema.
         let current_version: i64 = self.0.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current_version > SCHEMA_VERSION {
+        if current_version != 0 && current_version != SCHEMA_VERSION {
             return Err(other(format!(
-                "数据库 schema 版本 (v{}) 高于当前应用支持的 v{}，请先备份数据库文件后重建或降级应用。",
+                "数据库 schema 版本为 v{}，当前应用只支持 v{}；请备份后重建数据库。",
                 current_version, SCHEMA_VERSION
             )));
         }
+        if current_version == 0
+            && self.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'sessions', 'workstreams'))",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? != 0
+        {
+            return Err(other("未标记版本的旧数据库不受支持，请备份后重建数据库。"));
+        }
 
-        self.0.execute_batch(
+        register_binding_rank_fn(&self.0)?;
+        let tx = self.0.unchecked_transaction()?;
+
+        tx.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
               description TEXT NOT NULL DEFAULT '',
-              archived INTEGER NOT NULL DEFAULT 0,
               git_id TEXT,
               name_customized INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
-            );            CREATE TABLE IF NOT EXISTS project_resources (
-              id TEXT PRIMARY KEY,
-              project_id TEXT NOT NULL REFERENCES projects(id),
-              kind TEXT NOT NULL,
-              uri TEXT,
-              metadata TEXT NOT NULL DEFAULT '{}',
-              created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS workstreams (
               id TEXT PRIMARY KEY,
-              project_id TEXT REFERENCES projects(id),
               title TEXT NOT NULL,
               description TEXT NOT NULL DEFAULT '',
               lifecycle TEXT NOT NULL DEFAULT 'active',
               visibility TEXT NOT NULL DEFAULT 'normal',
-              default_cwd TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -202,7 +163,7 @@ impl Db {
               parent_agent_session_id TEXT,
               started_at TEXT,
               last_activity_at TEXT,
-              -- v13 lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339).
+              -- lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339).
               trashed_at TEXT,
               UNIQUE(agent, agent_session_id)
             );
@@ -214,7 +175,6 @@ impl Db {
               source_generation INTEGER NOT NULL DEFAULT 0,
               source_position TEXT NOT NULL DEFAULT '',
               source_identity_hash TEXT NOT NULL,
-              legacy_identity_hash TEXT,
               ts TEXT,
               kind TEXT NOT NULL,
               text TEXT,
@@ -334,16 +294,6 @@ impl Db {
               right_revision_id TEXT,
               candidate_snapshot_json TEXT
             );
-            CREATE TABLE IF NOT EXISTS project_affinity_evidence (
-              id TEXT PRIMARY KEY,
-              session_id TEXT REFERENCES sessions(id),
-              workstream_id TEXT REFERENCES workstreams(id),
-              project_id TEXT NOT NULL REFERENCES projects(id),
-              evidence_type TEXT NOT NULL,
-              source TEXT NOT NULL DEFAULT '',
-              score REAL NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS context_deliveries (
               id TEXT PRIMARY KEY,
               session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -362,7 +312,6 @@ impl Db {
               created_at TEXT NOT NULL,
               UNIQUE(agent, path)
             );
-            CREATE INDEX IF NOT EXISTS idx_workstreams_project ON workstreams(project_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
             CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
             CREATE INDEX IF NOT EXISTS idx_bindings_ws ON session_workstream_bindings(workstream_id);
@@ -374,7 +323,7 @@ impl Db {
             "#,
         )?;
 
-        self.0.execute_batch(
+        tx.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS assistant_sessions (
               id TEXT PRIMARY KEY,
@@ -410,12 +359,11 @@ impl Db {
             "#,
         )?;
 
-        // ---- v12: Workspace Domain v0.2 ------------------------------------
+        // ---- Workspace Domain v0.2 ------------------------------------------
         // `workspace_paths.id` is NOT a random uuid: it is derived from the
         // canonical path by `workspace::path_identity`, which is what makes
-        // `ensure_workspace_path` and the backfill below replayable (migrate()
-        // has no transaction — every statement here is already committed).
-        self.0.execute_batch(
+        // `ensure_workspace_path` replayable when the current schema is opened.
+        tx.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS git_identities (
               id TEXT PRIMARY KEY,
@@ -455,14 +403,14 @@ impl Db {
             "#,
         )?;
 
-        // ---- v13: Session Lifecycle & Deletion v0.1 -------------------------
+        // ---- Session Lifecycle & Deletion v0.1 -------------------------------
         // Transient coordination table for prepared permanent deletions. It
         // spans SQLite + filesystem, which no single transaction can cover, so
         // the plan is frozen here first and revalidated at execute time.
         // This is NOT deletion history / tombstone / blacklist: the row is
         // deleted in the same transaction that purges the Session, so a
         // completed permanent deletion leaves nothing behind.
-        self.0.execute_batch(
+        tx.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS session_deletion_jobs (
               id TEXT PRIMARY KEY,
@@ -478,8 +426,7 @@ impl Db {
 
         // FTS5 search index (external-content style: we manage rows manually).
         // If the bundled build lacks FTS5, search falls back to LIKE at query time.
-        let fts_ok = self
-            .0
+        let fts_ok = tx
             .execute_batch(
                 r#"
                 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
@@ -495,486 +442,38 @@ impl Db {
         // Seed the per-agent default source roots (~/.codex etc., honoring
         // env overrides). They start DISABLED: whether a source is ingested
         // is always the user's decision.
-        self.ensure_default_ingest_sources()?;
+        Self::ensure_default_ingest_sources_conn(&tx)?;
 
-        // Columns added after the first v0 dev databases were created:
-        // CREATE TABLE IF NOT EXISTS cannot extend an existing table, so
-        // add them idempotently (duplicate-column errors are expected and
-        // ignored on already-current databases).
-        for stmt in [
-            "ALTER TABLE session_cursors ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE session_cursors ADD COLUMN identity_tail_hash TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE launch_intents ADD COLUMN context_bundle_revisions TEXT",
-            "ALTER TABLE session_events ADD COLUMN legacy_identity_hash TEXT",
-            "ALTER TABLE workstreams ADD COLUMN default_cwd TEXT",
-            "ALTER TABLE context_deliveries ADD COLUMN delivered_conflicts TEXT NOT NULL DEFAULT '[]'",
-            "ALTER TABLE context_conflicts ADD COLUMN left_revision_id TEXT",
-            "ALTER TABLE context_conflicts ADD COLUMN right_revision_id TEXT",
-            "ALTER TABLE context_conflicts ADD COLUMN candidate_snapshot_json TEXT",
-            "ALTER TABLE context_conflict_events ADD COLUMN snapshot_json TEXT",
-            // v12 — Workspace Domain v0.2.
-            "ALTER TABLE projects ADD COLUMN git_id TEXT",
-            "ALTER TABLE projects ADD COLUMN name_customized INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE sessions ADD COLUMN workspace_path_id TEXT",
-            "ALTER TABLE session_workstream_bindings ADD COLUMN workstream_path_id TEXT",
-            // v13 — Session Lifecycle & Deletion v0.1 (additive only).
-            "ALTER TABLE sessions ADD COLUMN trashed_at TEXT",
-        ] {
-            if let Err(e) = self.0.execute_batch(stmt) {
-                if !e.to_string().contains("duplicate column name") {
-                    return Err(e.into());
-                }
-            }
-        }
-
-        // One unique index on a pre-existing table, and therefore deliberately
-        // AFTER the ALTER list: `projects.git_id` does not exist in a v11
-        // database until the loop above adds it, and an index on a missing
-        // column fails the whole open. Fresh databases already have the column
-        // in their canonical DDL, which is why a temp-DB test cannot catch this
-        // ordering — `tests/v12_dogfood_test.rs` and the v11-shaped fixture in
-        // `workspace_v12_test.rs` do.
-        self.0.execute_batch(
+        tx.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
                ON projects(git_id)
                WHERE git_id IS NOT NULL;",
         )?;
 
-        register_binding_rank_fn(&self.0)?;
-
-        // v2/v3 → v4: pre-chain databases keep legacy event identities. The
-        // append-only store is NOT a linear chain of the current source (a
-        // rewrite/compact leaves superseded history behind), so hashes cannot
-        // be recomputed from the store — they are re-derived LAZILY from the
-        // real source: every legacy fallback event receives a claimable
-        // alias, read cursors are rewound, and the next full re-scan claims
-        // each event onto the new chained identity (event ids — and every
-        // SourceReference to them — never change).
-        if current_version < 4 {
-            self.migrate_legacy_identity_aliases()?;
-        }
-
-        // v9 → v10: baseline existing workstreams so pre-migration context
-        // changes are treated as already reviewed.
-        if current_version < 10 {
-            let ts = now();
-            self.0.execute(
-                "INSERT OR IGNORE INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
-                 SELECT id, ?1, '[]', ?1 FROM workstreams",
-                params![ts],
-            )?;
-        }
-
-        // v10 → v11: Base Experience becomes the shipped default. Before this
-        // there was no stored default at all: a missing row fell through to
-        // `balanced` in code, so every existing database was injecting context
-        // without anyone having chosen it. This migration intentionally converts
-        // that implicit default into an explicit `off` row — a real, editable,
-        // auditable setting — and leaves any row the user already chose alone.
-        // A database that ends up with no row (key deleted later) still reads
-        // as Off, because `settings::context_delivery_level_of` defaults there.
-        //
-        // `context.intelligence_enabled` is deliberately NOT seeded: it is a
-        // brand-new key, so "missing row" means OFF for old and new databases
-        // alike (one accessor, one default — see `settings` module docs).
-        if current_version < 11
-            && self
-                .get_setting(crate::settings::CONTEXT_DELIVERY_LEVEL_KEY)?
-                .is_none()
-        {
-            self.set_setting(crate::settings::CONTEXT_DELIVERY_LEVEL_KEY, "off")?;
-        }
-
-        // v11 → v12: Workspace Domain v0.2.
-        if current_version < 12 {
-            self.migrate_workspace_v12()?;
-        }
-
-        self.0.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(())
-    }
-
-    /// Copy the database file beside itself before a destructive migration
-    /// branch runs (方案 §42.3-M5).
-    ///
-    /// `migrate()` executes in autocommit — there is no rollback — and v12 both
-    /// deletes Projects that end up without a path (§7.4, taking their
-    /// `project_resources` rows with them) and folds `abandoned` into
-    /// `completed` (§5.7). A file copy is the only protection that covers a
-    /// migration failing halfway through, and the app data directory already has
-    /// manual `.bak` precedent.
-    ///
-    /// Failure to back up aborts the migration on purpose: refusing to start is
-    /// better than mutating user data unprotected (§41 priority 1).
-    fn backup_database_file(&self, tag: &str) -> Result<()> {
-        // rusqlite hands back the opened path as a string, not a PathBuf.
-        let Some(path_str) = self.0.path() else {
-            return Ok(()); // unnamed / in-memory connection: nothing on disk to copy
-        };
-        if path_str.is_empty() {
-            return Ok(());
-        }
-        let path = std::path::Path::new(path_str);
-        let mut target_name = path.as_os_str().to_os_string();
-        target_name.push(format!(".{tag}.bak"));
-        let target = std::path::PathBuf::from(target_name);
-        if target.exists() {
-            return Ok(()); // one backup per transition is enough, and keeps replay stable
-        }
-        // Flush the WAL so the copy holds everything already committed, then copy
-        // only the main file (`-wal` / `-shm` must not be moved alongside it).
-        self.0
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .ok();
-        std::fs::copy(path, &target).map_err(|e| {
-            other(format!(
-                "迁移前备份数据库失败（{tag}）：{e}。已停止 v12 迁移，请先手动备份 {path} 再重试。",
-                path = path.display()
-            ))
-        })?;
-        Ok(())
-    }
-
-    /// v11 → v12: give every physical working path the app already knew about a
-    /// WorkspacePath row, and every WorkspacePath a Project.
-    ///
-    /// Pure data work: no Git, no filesystem access, no external command
-    /// (方案 §6). Two consequences to keep in mind:
-    ///
-    /// * Every Project created here is path-backed (`git_id = NULL`). The first
-    ///   Workspace Reconcile is what recognizes a Git family and merges sibling
-    ///   worktrees, so immediately after upgrading the Project list is
-    ///   temporarily finer-grained than the final state (§42.3-M4 note 1).
-    /// * `migrate()` has no transaction, so this must be safe to replay:
-    ///   `workspace_paths.id` is derived from the canonical path rather than
-    ///   random, and every insert is `INSERT OR IGNORE`.
-    fn migrate_workspace_v12(&self) -> Result<()> {
-        // A brand-new database has nothing to lose, so the copy is only taken
-        // when real data is about to be rewritten.
-        let has_data: i64 = self.0.query_row(
-            "SELECT (SELECT COUNT(*) FROM projects)
-                  + (SELECT COUNT(*) FROM workstreams)
-                  + (SELECT COUNT(*) FROM sessions)",
-            [],
-            |r| r.get(0),
-        )?;
-        if has_data > 0 {
-            self.backup_database_file("pre-v12")?;
-        }
-
-        // §5.7 — lifecycle vocabulary. `abandoned` folds into `completed`; its
-        // only producer (merge_workstreams) always set visibility='archived'
-        // too, so the recycle-bin fact that made it distinguishable survives.
-        //
-        // Note on the column default: the canonical DDL above says
-        // `DEFAULT 'active'`, but `CREATE TABLE IF NOT EXISTS` cannot change an
-        // existing table, so upgraded databases keep the historical
-        // `DEFAULT 'open'`. Every product write passes lifecycle explicitly
-        // (`create_workstream`, `upsert_workstream_conn`); a bare INSERT that
-        // omits it is a violation, held by 方案 §42.5-T3.
-        self.0.execute_batch(
-            "UPDATE workstreams SET lifecycle = 'active'    WHERE lifecycle = 'open';
-             UPDATE workstreams SET lifecycle = 'completed' WHERE lifecycle = 'abandoned';",
-        )?;
-
-        // §42.2-E3 — a Project has no lifecycle in v0.2. An `archived = 1` row
-        // would stay invisible while still owning a WorkspacePath, which is a
-        // ghost, not a state. Visible behavior change: previously archived
-        // Projects come back.
-        self.0.execute_batch("UPDATE projects SET archived = 0;")?;
-
-        // §7.1 — every pre-existing Project was created or named by a person,
-        // so automatic naming must not overwrite it afterwards. Set this BEFORE
-        // any new Project is created, or the new ones would be marked too.
-        self.0
-            .execute_batch("UPDATE projects SET name_customized = 1;")?;
-
-        // §7.2 — Session cwd is the strongest path evidence the old model had.
-        // `DISTINCT cwd, MIN(project_id)` makes the choice deterministic: two
-        // Sessions sharing a cwd but claiming different legacy Projects resolve
-        // to the same one, and a replayed migration picks the same one again.
-        let session_cwds: Vec<(String, Option<String>)> = {
-            let mut st = self.0.prepare(
-                "SELECT cwd, MIN(project_id) FROM sessions
-                  WHERE cwd IS NOT NULL AND TRIM(cwd) <> ''
-                  GROUP BY cwd",
-            )?;
-            let rows = st
-                .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-        for (raw_cwd, legacy_project) in &session_cwds {
-            let Some(path_id) =
-                self.ensure_migration_workspace_path(raw_cwd, legacy_project.as_deref())?
-            else {
-                continue; // unresolvable spelling: leave workspace_path_id NULL (§5.5)
-            };
-            self.0.execute(
-                "UPDATE sessions
-                    SET workspace_path_id = ?1,
-                        project_id = COALESCE(
-                          (SELECT project_id FROM workspace_paths WHERE id = ?1), project_id)
-                  WHERE cwd = ?2",
-                params![path_id, raw_cwd],
-            )?;
-        }
-
-        // §7.3 — default_cwd becomes the primary (position 0) WorkstreamPath.
-        let default_cwds: Vec<(String, String, Option<String>)> = {
-            let mut st = self.0.prepare(
-                "SELECT id, default_cwd, project_id FROM workstreams
-                  WHERE default_cwd IS NOT NULL AND TRIM(default_cwd) <> ''",
-            )?;
-            let mapped = st.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            })?;
-            mapped.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        for (workstream_id, raw_cwd, legacy_project) in &default_cwds {
-            let Some(path_id) =
-                self.ensure_migration_workspace_path(raw_cwd, legacy_project.as_deref())?
-            else {
-                continue;
-            };
-            // UNIQUE(workstream_id, workspace_path_id) makes the replay a no-op.
-            self.0.execute(
-                "INSERT OR IGNORE INTO workstream_paths
-                   (id, workstream_id, workspace_path_id, position, source, created_at)
-                 VALUES (?1, ?2, ?3, 0, 'migration', ?4)",
-                params![new_id(), workstream_id, path_id, now()],
-            )?;
-        }
-
-        // §5.6 — record which WorkstreamPath brought each binding in. Exact
-        // WorkspacePath identity only; anything else stays NULL and is therefore
-        // out of reach of a later path deletion (§42.3-M1).
-        self.0.execute(
-            "UPDATE session_workstream_bindings
-                SET workstream_path_id = (
-                  SELECT wsp.id FROM workstream_paths wsp
-                    JOIN sessions s ON s.id = session_workstream_bindings.session_id
-                   WHERE wsp.workstream_id = session_workstream_bindings.workstream_id
-                     AND wsp.workspace_path_id = s.workspace_path_id)
-              WHERE workstream_path_id IS NULL
-                AND EXISTS (
-                  SELECT 1 FROM workstream_paths wsp2
-                    JOIN sessions s2 ON s2.id = session_workstream_bindings.session_id
-                   WHERE wsp2.workstream_id = session_workstream_bindings.workstream_id
-                     AND wsp2.workspace_path_id = s2.workspace_path_id)",
-            [],
-        )?;
-
-        // §7.4 — a legacy Project with no WorkspacePath does not satisfy the
-        // v0.2 invariant. It is deleted rather than kept alive by a fabricated
-        // path. Deletion order is FK-ordered (§42.3-M4): both child tables
-        // reference projects(id) NOT NULL with no cascade.
-        let orphan_projects: Vec<String> = {
-            let mut st = self.0.prepare(
-                "SELECT id FROM projects
-                  WHERE id NOT IN (SELECT project_id FROM workspace_paths)
-                  ORDER BY id",
-            )?;
-            let mapped = st.query_map([], |r| r.get::<_, String>(0))?;
-            mapped.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        for id in &orphan_projects {
-            self.delete_project_and_children(id)?;
-        }
-
-        // §42.3-M18 — the workstream search row's parent is now the primary-path
-        // Project, so the whole projection has to be rebuilt once.
-        self.reindex_workspace_entities()?;
-
-        Ok(())
-    }
-
-    /// §42.3-M4 — the single legal way a Project row disappears.
-    ///
-    /// `foreign_keys` is ON and four tables reference `projects(id)` with no
-    /// cascade, so deletion is FK-ordered or it fails:
-    ///   1. clear the two nullable references (`workstreams.project_id`,
-    ///      `sessions.project_id`) — the old `delete_project` missed
-    ///      `project_affinity_evidence` entirely, which made deleting any
-    ///      Project that had ever held affinity evidence fail;
-    ///   2. delete the NOT NULL children (`project_resources`,
-    ///      `project_affinity_evidence`);
-    ///   3. delete the Project.
-    ///
-    /// Clearing `sessions.project_id` here is referential hygiene, not a write to
-    /// the derived cache: a Project is only ever deleted once it owns no path, so
-    /// no Session can still be projecting onto it.
-    ///
-    /// The FTS row is dropped after the commit, like every other index write.
-    pub fn delete_project_and_children(&self, project_id: &str) -> Result<()> {
-        self.tx(|tx| {
-            tx.execute(
-                "UPDATE workstreams SET project_id = NULL, updated_at = ?2 WHERE project_id = ?1",
-                params![project_id, now()],
-            )?;
-            session_paths::clear_sessions_project_for_project_conn(tx, project_id)?;
-            tx.execute(
-                "DELETE FROM project_resources WHERE project_id = ?1",
-                params![project_id],
-            )?;
-            tx.execute(
-                "DELETE FROM project_affinity_evidence WHERE project_id = ?1",
-                params![project_id],
-            )?;
-            tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
-            Ok(())
-        })?;
-        self.unindex("project", project_id);
-        Ok(())
-    }
-
-    /// Migration-only `ensure_workspace_path`: normalize the legacy string, and
-    /// if the path is new, attach it to the preferred legacy Project or create
-    /// an app-named path-backed one. An existing row keeps whatever Project the
-    /// earlier statement gave it — first decision wins, which is what makes a
-    /// replayed migration converge instead of oscillate.
-    fn ensure_migration_workspace_path(
-        &self,
-        raw_path: &str,
-        preferred_project: Option<&str>,
-    ) -> Result<Option<String>> {
-        let Some(canonical) = crate::workspace::normalize_path(raw_path) else {
-            return Ok(None);
-        };
-        let id = crate::workspace::path_identity(&canonical);
-        let existing: Option<String> = self
-            .0
+        let delivery_level: Option<String> = tx
             .query_row(
-                "SELECT project_id FROM workspace_paths WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
+                "SELECT value FROM settings WHERE key = ?1",
+                params![crate::settings::CONTEXT_DELIVERY_LEVEL_KEY],
+                |row| row.get(0),
             )
             .optional()?;
-        if existing.is_some() {
-            self.0.execute(
-                "UPDATE workspace_paths SET last_seen_at = ?2 WHERE id = ?1",
-                params![id, now()],
-            )?;
-            return Ok(Some(id));
-        }
-
-        let ts = now();
-        let project_id = match preferred_project {
-            Some(p)
-                if self
-                    .0
-                    .query_row("SELECT 1 FROM projects WHERE id = ?1", params![p], |_| {
-                        Ok(())
-                    })
-                    .optional()?
-                    .is_some() =>
-            {
-                self.0.execute(
-                    "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
-                    params![ts, p],
-                )?;
-                p.to_string()
-            }
-            _ => {
-                let name = crate::workspace::auto_project_name(&canonical, None);
-                let new_id = new_id();
-                upsert_project_conn(
-                    &self.0,
-                    &Project {
-                        id: new_id.clone(),
-                        name,
-                        description: String::new(),
-                        // Freshly derived row: `archived` stays 0 for column
-                        // compatibility only, v0.2 gives a Project no lifecycle.
-                        archived: false,
-                        git_id: None,
-                        // App-named on purpose: a later Git upgrade or worktree
-                        // discovery may refine this name (§37).
-                        name_customized: false,
-                        created_at: ts.clone(),
-                        updated_at: ts.clone(),
-                    },
-                )?;
-                new_id
-            }
-        };
-        self.0.execute(
-            "INSERT OR IGNORE INTO workspace_paths
-               (id, canonical_path, project_id, git_state, git_kind, exists_on_disk, first_seen_at, last_seen_at)
-             VALUES (?1, ?2, ?3, 'none', NULL, 0, ?4, ?4)",
-            params![id, canonical, project_id, ts],
-        )?;
-        Ok(Some(id))
-    }
-
-    /// Rebuild the Project / Workstream search rows after the authority change
-    /// (`index_project` is unchanged; a workstream's parent is its primary-path
-    /// Project). No-op when the bundled SQLite has no FTS5.
-    fn reindex_workspace_entities(&self) -> Result<()> {
-        if !self.fts_available() {
-            return Ok(());
-        }
-        self.0.execute_batch(
-            "DELETE FROM search_index WHERE kind IN ('project', 'workstream');
-             INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-               SELECT 'project', id, '', name, description FROM projects;
-             INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-               SELECT 'workstream', w.id,
-                      (SELECT wp.project_id FROM workstream_paths wsp
-                         JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-                        WHERE wsp.workstream_id = w.id AND wsp.position = 0),
-                      w.title, w.description
-               FROM workstreams w;",
-        )?;
-        Ok(())
-    }
-
-    /// v4 migration (from v2 and from the shipped-v3 recompute): stamp every
-    /// fallback event (no native Agent id) with its pre-chain legacy identity
-    /// as a claimable alias, and rewind all read cursors so the next sync
-    /// performs a full re-scan. During that re-scan, storage claims each
-    /// legacy row onto the freshly computed chained identity — id preserved,
-    /// duplicates impossible — and the cursor receives the true source-chain
-    /// tail (v3 databases may carry a tail derived from the store, which the
-    /// source, not the store, defines). Native-id events need no migration:
-    /// their identity is identical under both schemes.
-    fn migrate_legacy_identity_aliases(&self) -> Result<()> {
-        let rows: Vec<(String, String, Option<String>, Option<String>)> = {
-            let mut st = self.0.prepare(
-                "SELECT id, kind, ts, text FROM session_events
-                 WHERE source_event_id IS NULL AND legacy_identity_hash IS NULL",
-            )?;
-            let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-        for (id, kind, ts, text) in rows {
-            let legacy = legacy_fallback_identity_hash(&kind, ts.as_deref(), text.as_deref());
-            self.0.execute(
-                "UPDATE session_events SET legacy_identity_hash = ?2 WHERE id = ?1",
-                params![id, legacy],
+        if delivery_level.is_none() {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+                params![crate::settings::CONTEXT_DELIVERY_LEVEL_KEY, "off"],
             )?;
         }
-        self.0.execute(
-            "UPDATE session_cursors
-             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = ''",
-            [],
-        )?;
+
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Insert the standard agent data roots as disabled defaults. Idempotent.
-    fn ensure_default_ingest_sources(&self) -> Result<()> {
+    fn ensure_default_ingest_sources_conn(conn: &Connection) -> Result<()> {
         for agent in crate::domain::Agent::all() {
             if let Some(root) = crate::platform::paths::resolve_agent_data_dir(agent) {
-                self.0.execute(
+                conn.execute(
                     "INSERT OR IGNORE INTO ingest_sources (id, agent, path, enabled, origin, created_at)
                      VALUES (?1, ?2, ?3, 0, 'default', ?4)",
                     params![new_id(), agent.as_str(), root.to_string_lossy().to_string(), now()],
@@ -986,10 +485,7 @@ impl Db {
 
     // ---------------- Projects ----------------
 
-    /// Every Project the app currently derives. There is no `archived` filter
-    /// any more: v0.2 gives a Project no lifecycle, so a Project exists exactly
-    /// while it owns a WorkspacePath (`workspace::project`). Legacy rows were
-    /// un-archived by the v12 migration.
+    /// Every Project currently derived from at least one WorkspacePath.
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let mut st = self
             .0
@@ -1017,62 +513,9 @@ impl Db {
         Ok(())
     }
 
-    /// Removing a Project. Since v0.2 the only legitimate reason is that it owns
-    /// no WorkspacePath any more (§35), and `delete_project_and_children` is the
-    /// path that does it; this stays as the thin compatibility wrapper.
-    ///
-    /// A Project never owned a Workstream's or Session's existence, so nothing
-    /// here archives or deletes them — their reference is only cleared.
-    pub fn delete_project(&self, id: &str) -> Result<()> {
-        self.delete_project_and_children(id)
-    }
-
-    pub fn add_resource(&self, r: &ProjectResource) -> Result<()> {
-        self.0.execute(
-            "INSERT INTO project_resources (id, project_id, kind, uri, metadata, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                r.id,
-                r.project_id,
-                r.kind,
-                r.uri,
-                r.metadata.to_string(),
-                r.created_at
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_resources(&self, project_id: &str) -> Result<Vec<ProjectResource>> {
-        let mut st = self.0.prepare(
-            "SELECT id, project_id, kind, uri, metadata, created_at
-             FROM project_resources WHERE project_id = ?1 ORDER BY created_at",
-        )?;
-        let rows = st
-            .query_map(params![project_id], |r| {
-                Ok(ProjectResource {
-                    id: r.get(0)?,
-                    project_id: r.get(1)?,
-                    kind: r.get(2)?,
-                    uri: r.get(3)?,
-                    metadata: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-                    created_at: r.get(5)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    pub fn remove_resource(&self, id: &str) -> Result<()> {
-        self.0
-            .execute("DELETE FROM project_resources WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
     // ---------------- Workstreams ----------------
 
-    /// Membership is derived from the path chain, not from the retired
-    /// `workstreams.project_id` (方案 §1.12):
+    /// Membership is derived from the path chain (方案 §1.12):
     /// `workstream_paths → workspace_paths.project_id`. Any position counts as
     /// membership; `workspace::project` decides the primary/related distinction
     /// from `position = 0` when it renders a Project page.
@@ -1224,9 +667,7 @@ impl Db {
     /// WorkspacePath: it is derived from `workspace_paths.project_id` inside
     /// this same statement, so the cache and its source can never be set apart
     /// (方案 §42.3-M3). The caller's value is only honored for a Session with no
-    /// path at all. The one historical writer that set it by hand
-    /// (`assign_session_project`, a raw `UPDATE sessions SET project_id`) left
-    /// the product API for exactly that reason.
+    /// path at all. No other caller may write the cache independently.
     pub fn upsert_session(&self, s: &Session) -> Result<bool> {
         let existed = self
             .0
@@ -1317,12 +758,9 @@ impl Db {
     /// (`sessions.workspace_path_id → workspace_paths.project_id`), never the
     /// `sessions.project_id` cache.
     ///
-    /// The cache is derived for every row the app writes, so the two agree in
-    /// normal operation; they diverge exactly where v0.2 intends to diverge —
-    /// a legacy row still carrying a hand-attached v11 label while having no
-    /// resolvable cwd. Listing those under a Project would make the retired
-    /// column an authority again, and would disagree with `get_project_detail`,
-    /// which already walks the chain (§42.3-M29: one view may not be two truths).
+    /// The cache is derived for every row the app writes, but rows without a
+    /// resolvable path are not members of a Project. Listing follows the chain
+    /// so every view uses the same authority.
     pub fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<Session>> {
         // Dynamic SQL: placeholders are appended together with the bind
         // values, so the numbering can never drift out of sync.
@@ -1371,11 +809,6 @@ impl Db {
     /// or not rows were new (dedup reproduces the same hash), so the cursor
     /// always describes the source, not the store.
     ///
-    /// During full re-scans, fallback events (no native id) additionally try
-    /// to CLAIM a pre-chain legacy row of identical content onto the computed
-    /// chain position (v4 migration alias): the row keeps its id and gains
-    /// the chained identity, so stores with superseded rewrite history
-    /// migrate onto the current source chain without duplication.
     pub fn append_source_events(
         &self,
         session_id: &str,
@@ -1447,80 +880,20 @@ impl Db {
                     );
                     prev_hash = hash.clone();
                     let id = new_id();
-                    let n = if p.source_event_id.is_some() {
-                        // Native Agent id: identity is position-independent,
-                        // plain insert-or-dedup.
-                        ins.execute(params![
-                            id,
-                            session_id,
-                            next_seq,
-                            p.source_event_id,
-                            source.generation,
-                            p.source_position,
-                            hash,
-                            p.ts,
-                            p.kind,
-                            p.text,
-                            format!("{}#{}", raw_path, p.source_position),
-                            p.metadata.to_string(),
-                        ])?
-                    } else {
-                        // Fallback event on a full re-scan: before inserting,
-                        // try to CLAIM a pre-chain (legacy) row of the exact
-                        // same content onto this chain position. Legacy rows
-                        // carry the v4 migration's alias; claiming upgrades
-                        // their identity while PRESERVING the event id — and
-                        // therefore every SourceReference to it — so a store
-                        // with superseded rewrite history never duplicates.
-                        let dedup = tx
-                            .query_row(
-                                "SELECT 1 FROM session_events
-                                 WHERE session_id = ?1 AND source_identity_hash = ?2",
-                                params![session_id, hash],
-                                |_| Ok(()),
-                            )
-                            .optional()?
-                            .is_some();
-                        if dedup {
-                            0
-                        } else {
-                            let claimed = tx.execute(
-                                "UPDATE session_events
-                                 SET source_identity_hash = ?3, legacy_identity_hash = NULL
-                                 WHERE session_id = ?1 AND id = (
-                                   SELECT id FROM session_events
-                                   WHERE session_id = ?1 AND legacy_identity_hash = ?2
-                                   ORDER BY sequence LIMIT 1)",
-                                params![
-                                    session_id,
-                                    legacy_fallback_identity_hash(
-                                        &p.kind,
-                                        p.ts.as_deref(),
-                                        p.text.as_deref()
-                                    ),
-                                    hash,
-                                ],
-                            )?;
-                            if claimed == 0 {
-                                ins.execute(params![
-                                    id,
-                                    session_id,
-                                    next_seq,
-                                    p.source_event_id,
-                                    source.generation,
-                                    p.source_position,
-                                    hash,
-                                    p.ts,
-                                    p.kind,
-                                    p.text,
-                                    format!("{}#{}", raw_path, p.source_position),
-                                    p.metadata.to_string(),
-                                ])?
-                            } else {
-                                0
-                            }
-                        }
-                    };
+                    let n = ins.execute(params![
+                        id,
+                        session_id,
+                        next_seq,
+                        p.source_event_id,
+                        source.generation,
+                        p.source_position,
+                        hash,
+                        p.ts,
+                        p.kind,
+                        p.text,
+                        format!("{}#{}", raw_path, p.source_position),
+                        p.metadata.to_string(),
+                    ])?;
                     if n > 0 {
                         stored.push(SessionEvent {
                             id: id.clone(),
@@ -1593,23 +966,11 @@ impl Db {
     }
 
     pub fn get_event_by_ref(&self, source_ref: &str) -> Result<Option<SessionEvent>> {
-        // accepted forms: "session-event:<event-id>" (stable) and the legacy
-        // "session:<session-id>#<sequence>" (display-era reference).
         if let Some(id) = source_ref.strip_prefix("session-event:") {
             return self.query_event(
             "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata FROM session_events WHERE id = ?1",
             params![id],
         );
-        }
-        if let Some(rest) = source_ref.strip_prefix("session:") {
-            if let Some((sid, seq)) = rest.rsplit_once('#') {
-                if let Ok(seq) = seq.parse::<i64>() {
-                    return self.query_event(
-                        "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata FROM session_events WHERE session_id = ?1 AND sequence = ?2",
-                        params![sid, seq],
-                    );
-                }
-            }
         }
         Ok(None)
     }
@@ -2154,44 +1515,6 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Project affinity ----------------
-
-    pub fn insert_evidence(&self, e: &ProjectAffinityEvidence) -> Result<()> {
-        self.0.execute(
-            "INSERT INTO project_affinity_evidence (id, session_id, workstream_id, project_id, evidence_type, source, score, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![e.id, e.session_id, e.workstream_id, e.project_id, e.evidence_type, e.source, e.score, e.created_at],
-        )?;
-        Ok(())
-    }
-
-    pub fn evidence_for_session(&self, session_id: &str) -> Result<Vec<ProjectAffinityEvidence>> {
-        let mut st = self.0.prepare(
-            "SELECT id, session_id, workstream_id, project_id, evidence_type, source, score, created_at
-             FROM project_affinity_evidence WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 100",
-        )?;
-        let rows = st
-            .query_map(params![session_id], row_evidence)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// Score the recorded evidence and return the suggested project, if any
-    /// evidence exists. Suggestions never auto-assign anything.
-    pub fn resolve_project_affinity(&self, session_id: &str) -> Result<Option<(Id, f32)>> {
-        let evidence = self.evidence_for_session(session_id)?;
-        if evidence.is_empty() {
-            return Ok(None);
-        }
-        let mut scores: std::collections::HashMap<Id, f32> = Default::default();
-        for e in evidence {
-            *scores.entry(e.project_id).or_default() += e.score;
-        }
-        let mut ranked: Vec<(Id, f32)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(ranked.into_iter().next())
-    }
-
     // ---------------- Context deliveries ----------------
 
     pub fn record_delivery(&self, d: &ContextDelivery) -> Result<()> {
@@ -2505,10 +1828,7 @@ impl Db {
 
     /// Search's `parent_id` for a Workstream is its **primary-path Project**
     /// (`workstream_paths` at position 0 → `workspace_paths.project_id`), read
-    /// at index time. It must not come from `w.project_id`: that column is a
-    /// frozen compatibility value under v0.2, so copying it would leave search
-    /// routing on the retired authority (方案 §42.3-M18). Any path-list mutation
-    /// therefore has to re-index this row.
+    /// at index time. Any path-list mutation therefore has to re-index this row.
     pub fn index_workstream(&self, w: &Workstream) -> Result<()> {
         self.unindex("workstream", &w.id);
         self.0.execute(
@@ -2612,20 +1932,6 @@ impl Db {
         )?;
         Ok(())
     }
-
-    pub fn stats(&self) -> Result<serde_json::Value> {
-        let one = |sql: &str| -> i64 { self.0.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
-        Ok(serde_json::json!({
-            "projects": one("SELECT COUNT(*) FROM projects"),
-            "workstreams": one("SELECT COUNT(*) FROM workstreams"),
-            "sessions": one("SELECT COUNT(*) FROM sessions"),
-            "events": one("SELECT COUNT(*) FROM session_events"),
-            "context_items": one("SELECT COUNT(*) FROM context_items WHERE status = 'active'"),
-            "sync_runs": one("SELECT COUNT(*) FROM sync_runs"),
-            "open_conflicts": one("SELECT COUNT(*) FROM context_conflicts WHERE status = 'open'"),
-            "pending_launch_intents": one("SELECT COUNT(*) FROM launch_intents WHERE status = 'pending'"),
-        }))
-    }
 }
 
 // connection-level helpers --------------------------------------------------
@@ -2634,27 +1940,25 @@ impl Db {
 
 pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
     conn.execute(
-        "INSERT INTO projects (id, name, description, archived, git_id, name_customized, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO projects (id, name, description, git_id, name_customized, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
            -- A customized name is user intent: no automatic rename (worktree
            -- discovery, Git upgrade, Project merge) may overwrite it (§37).
            name = CASE WHEN name_customized = 1 THEN name ELSE ?2 END,
            description = ?3,
-           archived = ?4,
            -- Git identity is never cleared *or re-targeted* by a whole-object
            -- write: losing `.git` on one path must not detach a Project (§1.3),
            -- and pointing an existing Project at a different family is a Policy
            -- decision, not a save side effect. The one legitimate writer is
            -- `workspace::project::adopt_git_identity_conn` (first-set-only).
-           git_id = COALESCE(git_id, ?5),
-           name_customized = MAX(name_customized, ?6),
-           updated_at = ?8",
+           git_id = COALESCE(git_id, ?4),
+           name_customized = MAX(name_customized, ?5),
+            updated_at = ?7",
         params![
             p.id,
             p.name,
             p.description,
-            p.archived as i64,
             p.git_id,
             p.name_customized as i64,
             p.created_at,
@@ -2665,19 +1969,12 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
 }
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
-    // `project_id` and `default_cwd` are written at creation only and are NOT in
-    // the DO UPDATE set: since v0.2 they are compatibility reads, and
-    // `update_workstream` is a whole-object write, so leaving them here would
-    // keep re-committing retired values from every unrelated title/description
-    // edit — the exact double authority 方案 §29 forbids (see §42.2-E6).
-    // Workstream→Project is `workstream_paths`; the launch directory is the
-    // ordered path list.
     conn.execute(
-        "INSERT INTO workstreams (id, project_id, title, description, lifecycle, visibility, default_cwd, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO workstreams (id, title, description, lifecycle, visibility, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
-           title = ?3, description = ?4, lifecycle = ?5, visibility = ?6, updated_at = ?9",
-        params![w.id, w.project_id, w.title, w.description, w.lifecycle, w.visibility, w.default_cwd, w.created_at, w.updated_at],
+           title = ?2, description = ?3, lifecycle = ?4, visibility = ?5, updated_at = ?7",
+        params![w.id, w.title, w.description, w.lifecycle, w.visibility, w.created_at, w.updated_at],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
@@ -3246,15 +2543,13 @@ pub fn list_conflict_review_cases_conn(
 //
 // Name-based (`r.get("col")`) wherever a struct is wide or growing: a
 // positional mapper silently re-types every field after it when someone adds a
-// column to the SELECT list. `workspace_paths` / `workstream_paths` and the v12
-// columns are exactly that event.
+// column to the SELECT list.
 
 fn row_project(r: &Row) -> rusqlite::Result<Project> {
     Ok(Project {
         id: r.get("id")?,
         name: r.get("name")?,
         description: r.get("description")?,
-        archived: r.get::<_, i64>("archived")? != 0,
         git_id: r.get("git_id")?,
         name_customized: r.get::<_, i64>("name_customized")? != 0,
         created_at: r.get("created_at")?,
@@ -3265,12 +2560,10 @@ fn row_project(r: &Row) -> rusqlite::Result<Project> {
 fn row_workstream(r: &Row) -> rusqlite::Result<Workstream> {
     Ok(Workstream {
         id: r.get("id")?,
-        project_id: r.get("project_id")?,
         title: r.get("title")?,
         description: r.get("description")?,
         lifecycle: r.get("lifecycle")?,
         visibility: r.get("visibility")?,
-        default_cwd: r.get("default_cwd")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -3406,19 +2699,6 @@ fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
         context_bundle_revisions: r.get(13)?,
-    })
-}
-
-fn row_evidence(r: &Row) -> rusqlite::Result<ProjectAffinityEvidence> {
-    Ok(ProjectAffinityEvidence {
-        id: r.get(0)?,
-        session_id: r.get(1)?,
-        workstream_id: r.get(2)?,
-        project_id: r.get(3)?,
-        evidence_type: r.get(4)?,
-        source: r.get(5)?,
-        score: r.get(6)?,
-        created_at: r.get(7)?,
     })
 }
 

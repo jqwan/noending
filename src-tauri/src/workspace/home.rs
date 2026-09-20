@@ -1,8 +1,7 @@
 //! NoEnding Home — the on-disk data root, its bootstrap pointer, and the
 //! default workspace.
 //!
-//! Owned by Agent A (方案 §16). Skeleton content here is the frozen contract,
-//! not an implementation.
+//! This module owns the Home layout and relocation contract.
 //!
 //! ## Layout (§2)
 //!
@@ -96,10 +95,6 @@ pub const BOOTSTRAP_FILE_NAME: &str = "home.json";
 /// What a Home relocation moves (§4). `workspace/` is absent on purpose: it
 /// holds user files, and silently relocating them is data loss with extra steps.
 pub const MIGRATABLE_DIRS: [&str; 3] = [DATA_DIR_NAME, RUNTIME_DIR_NAME, LOGS_DIR_NAME];
-
-/// SQL/WAL companions that must travel with `noending.db` or the database is
-/// corrupt on open (§42.3-M14).
-const DB_COMPANION_SUFFIXES: [&str; 2] = ["-wal", "-shm"];
 
 // ---------------------------------------------------------------------------
 // resolution
@@ -761,68 +756,6 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Adopt the pre-Home data directory: every build before v0.2 kept
-/// `noending.db` directly in the OS app-support dir, which is NOT inside a
-/// NoEnding Home. Without this step, upgrading flips the database location and
-/// the user's History silently empties out.
-///
-/// `Ok(None)` when there is nothing to adopt (already moved, or the new Home has
-/// its own database). Files are copied-or-moved into `<home>/data/` and the
-/// database trio always travels together.
-pub fn adopt_legacy_data_dir(
-    legacy_dir: &Path,
-    home: &NoEndingHome,
-) -> Result<Option<MigrationReport>> {
-    let legacy_db = legacy_dir.join(DB_FILE_NAME);
-    if home.db_path.symlink_metadata().is_ok() || legacy_db.symlink_metadata().is_err() {
-        return Ok(None);
-    }
-    let mut report = MigrationReport {
-        from: legacy_dir.to_string_lossy().to_string(),
-        to: home.data_dir.to_string_lossy().to_string(),
-        dirs: Vec::new(),
-        notes: Vec::new(),
-        workspace_left_behind: None,
-    };
-    report.notes.push(format!(
-        "已把 v0.2 之前的应用数据从 {} 导入 NoEnding Home",
-        report.from
-    ));
-    std::fs::create_dir_all(&home.data_dir)?;
-
-    let mut names = vec![DB_FILE_NAME.to_string()];
-    for suffix in DB_COMPANION_SUFFIXES {
-        names.push(format!("{DB_FILE_NAME}{suffix}"));
-    }
-    let mut moved_any = false;
-    for name in names {
-        let src = legacy_dir.join(&name);
-        let dst = home.data_dir.join(&name);
-        if src.symlink_metadata().is_err() || dst.symlink_metadata().is_ok() {
-            continue;
-        }
-        let outcome = match std::fs::rename(&src, &dst) {
-            Ok(()) => DirOutcome::Moved,
-            // Same-volume cannot be assumed: fall back to copying and leave the
-            // legacy file, so adoption can never destroy the only database.
-            Err(_) => {
-                std::fs::copy(&src, &dst)?;
-                report.notes.push(format!(
-                    "{name} 无法移动，已复制；旧文件保留在 {}",
-                    src.display()
-                ));
-                DirOutcome::Copied
-            }
-        };
-        report.dirs.push((name, outcome));
-        moved_any = true;
-    }
-    if !moved_any {
-        return Ok(None);
-    }
-    Ok(Some(report))
-}
-
 // ---------------------------------------------------------------------------
 // start-up orchestration
 // ---------------------------------------------------------------------------
@@ -835,8 +768,6 @@ pub struct StartupInputs {
     pub explicit: Option<PathBuf>,
     pub pointer_path: Option<PathBuf>,
     pub user_home: Option<PathBuf>,
-    /// Pre-v0.2 app data directory to adopt, if any.
-    pub legacy_data_dir: Option<PathBuf>,
 }
 
 impl StartupInputs {
@@ -847,9 +778,6 @@ impl StartupInputs {
             explicit: resolve_explicit_override(),
             pointer_path: default_pointer_path(),
             user_home: identity::home_dir(),
-            // §42.3-M14: this is also where every pre-v0.2 build kept
-            // `noending.db`, so the same folder is the adoption source.
-            legacy_data_dir: crate::platform::paths::resolve_app_support_dir(),
         }
     }
 }
@@ -895,8 +823,8 @@ pub struct WorkspaceSettings {
     pub home_source: String,
 }
 
-/// Resolve the Home, run the pending relocation, adopt pre-v0.2 data, and create
-/// the directories — in that order, all before the database is opened.
+/// Resolve the Home, run the pending relocation, and create the directories —
+/// in that order, all before the database is opened.
 ///
 /// The `Result` covers exactly one case: no Home can be determined at all, so
 /// there is nowhere to open a database. A *migration* failure is not an error
@@ -994,19 +922,7 @@ pub fn prepare_home(inputs: &StartupInputs) -> Result<StartupOutcome> {
         }
     }
 
-    // 2. Pre-v0.2 data in the app-support directory.
-    if let Some(legacy) = inputs.legacy_data_dir.as_deref() {
-        match adopt_legacy_data_dir(legacy, &home) {
-            Ok(Some(report)) => {
-                notes.extend(report.notes.clone());
-                reports.push(report);
-            }
-            Ok(None) => {}
-            Err(e) => notes.push(format!("导入 v0.2 之前的应用数据失败: {e}")),
-        }
-    }
-
-    // 3. §42.3-M21: `default_workspace` must exist before it is a `cwd`.
+    // 2. §42.3-M21: `default_workspace` must exist before it is a `cwd`.
     if let Err(e) = home.ensure_dirs() {
         notes.push(format!(
             "无法创建 NoEnding Home 目录 {root}: {e}",
@@ -1545,41 +1461,6 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[test]
-    fn legacy_adoption_is_idempotent_and_picks_the_whole_db_trio() {
-        let base = unique_temp_dir("legacy");
-        let legacy = base.join("App Support/app.noending.desktop");
-        let home_dir = base.join("home");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join(DB_FILE_NAME), b"db").unwrap();
-        std::fs::write(legacy.join(format!("{DB_FILE_NAME}-wal")), b"wal").unwrap();
-        std::fs::write(legacy.join("unrelated.log"), b"ignore me").unwrap();
-        let home = NoEndingHome::new(home_dir.to_str().unwrap(), None).unwrap();
-
-        let report = adopt_legacy_data_dir(&legacy, &home).unwrap().unwrap();
-        assert!(home.data_dir.join(DB_FILE_NAME).is_file());
-        assert!(home.data_dir.join(format!("{DB_FILE_NAME}-wal")).is_file());
-        assert!(!home.data_dir.join("unrelated.log").exists());
-        assert!(!legacy.join(DB_FILE_NAME).exists());
-        assert!(!report.is_noop());
-        // Second run: nothing to do, and never an error at startup.
-        assert!(adopt_legacy_data_dir(&legacy, &home).unwrap().is_none());
-
-        // A Home that already has its own database keeps it: adoption must never
-        // replace a live `noending.db`.
-        let base2 = unique_temp_dir("legacy2");
-        let legacy2 = base2.join("old");
-        std::fs::create_dir_all(&legacy2).unwrap();
-        std::fs::write(legacy2.join(DB_FILE_NAME), b"old db").unwrap();
-        let home2 = NoEndingHome::new(base2.join("home").to_str().unwrap(), None).unwrap();
-        std::fs::create_dir_all(&home2.data_dir).unwrap();
-        std::fs::write(&home2.db_path, b"new db").unwrap();
-        assert!(adopt_legacy_data_dir(&legacy2, &home2).unwrap().is_none());
-        assert_eq!(std::fs::read(&home2.db_path).unwrap(), b"new db");
-        std::fs::remove_dir_all(&base).ok();
-        std::fs::remove_dir_all(&base2).ok();
-    }
-
     /// §16-3/§3 end to end, with real temp directories and NO env, NO real
     /// `~/.noending` (§42.3-M13).
     #[test]
@@ -1603,7 +1484,6 @@ mod tests {
             explicit: None,
             pointer_path: Some(pointer_path.clone()),
             user_home: Some(base.clone()),
-            legacy_data_dir: None,
         })
         .unwrap();
         assert_eq!(outcome.home.root, new);
@@ -1644,7 +1524,6 @@ mod tests {
             explicit: None,
             pointer_path: Some(pointer_path.clone()),
             user_home: Some(base.clone()),
-            legacy_data_dir: None,
         })
         .unwrap();
         assert_eq!(blocked.home.root, new, "still the working Home");
@@ -1696,7 +1575,6 @@ mod tests {
             explicit: Some(base.join("env-home")),
             pointer_path: Some(pointer_path.clone()),
             user_home: Some(base.clone()),
-            legacy_data_dir: None,
         })
         .unwrap();
         assert_eq!(outcome.source, HomeSource::ExplicitEnv);

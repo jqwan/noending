@@ -1,4 +1,3 @@
-import React from "react";
 import { timeAgo } from "../../components/common";
 import type { ContextChange } from "../../types";
 import {
@@ -47,4 +46,3 @@ export default function RecentChangesTimeline({ changes }: Props) {
     </div>
   );
 }
-

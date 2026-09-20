@@ -18,8 +18,6 @@ export interface Project {
   id: string;
   name: string;
   description: string;
-  /** Legacy column, no domain semantics: v0.2 Projects have no lifecycle. */
-  archived: boolean;
   /** Optional Git anchor (`git_identities.id`); `null` is a normal state. */
   git_id: string | null;
   /** The user renamed it — automatic naming must stop overwriting the name. */
@@ -106,15 +104,11 @@ export interface ProjectWorkstreamRow {
 }
 
 export interface Workstream {
-  /** Derived projection of the primary path's Project; never assigned directly. */
-  project_id: string | null;
   id: string;
   title: string;
   description: string;
   lifecycle: WorkstreamLifecycle;
   visibility: WorkstreamVisibility;
-  /** Frozen at creation (v12 migration input only). Use `workstream_paths`. */
-  default_cwd: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -143,7 +137,6 @@ export interface WorkstreamCardData {
   description: string;
   lifecycle: WorkstreamLifecycle;
   visibility: WorkstreamVisibility;
-  default_cwd: string | null;
   created_at: string;
   updated_at: string;
   project_name: string | null;
@@ -170,7 +163,7 @@ export interface Session {
   parent_agent_session_id: string | null;
   started_at: string | null;
   last_activity_at: string | null;
-  /** Single lifecycle authority: null = Normal, timestamp = 回收站 (v13). */
+  /** Single lifecycle authority: null = Normal, timestamp = 回收站. */
   trashed_at: string | null;
 }
 
@@ -295,7 +288,7 @@ export type ContextMutation =
   | { op: "supersede"; item_id: string; title: string; content: string; source_refs: string[]; authority: string }
   | { op: "resolve"; item_id: string; source_refs: string[] }
   /** A Project is derived from paths in v0.2, so a discovered Workstream may legitimately have none. */
-  | { op: "create_workstream"; project_id: string | null; title: string; reason: string }
+  | { op: "create_workstream"; title: string; reason: string }
   | { op: "conflict"; workstream_id: string; item_id: string; title: string; content: string; source_refs: string[]; reason: string };
 
 export interface ContextSection {

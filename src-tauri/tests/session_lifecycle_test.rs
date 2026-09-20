@@ -1367,7 +1367,6 @@ fn search_filters_stale_trashed_rows() {
 #[test]
 fn confirmed_absent_requires_accessible_source_root() {
     let db = open_db("absent-root");
-    let adapter = CodexAdapter;
     let dir = unique_dir("absent-root-src");
     let sub = dir.join("sub");
     std::fs::create_dir_all(&sub).unwrap();

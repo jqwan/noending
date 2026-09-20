@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import { useBaseExperience } from "../../app/experience";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 import ContextPreviewModal from "../launcher/ContextPreviewModal";
+import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import {
   AgentRow,
   CwdRow,
@@ -13,15 +14,15 @@ import {
 import type { Agent, PreparedLaunch, Workstream } from "../../types";
 
 /**
- * 全局新建 Session（方案 §15，跨边界契约 §8.1.1）。
+ * 全局新建 Session。
  *
  * 启动路径唯一：`prepareNewSession → launchPrepared`。Modal 一打开就 Prepare，
  * 所以「工作目录 / Agent / Runtime」显示的就是这次启动真正使用的解析结果
  * （`resolve_new_session_cwd` 的三级优先级在后端完成，前端不重算）。点击启动时
  * 后端重算状态指纹，任何变化都以 stale 中止——绝不用没预览过的参数启动
- * （Preview-Launch Identity / Launch Preparation Integrity）。
+ * 后端在启动时会再次校验状态指纹。
  *
- * `workstreamId` 是 Commit 0 冻结的可选预置入参：省略或 `"none"` 即
+ * `workstreamId` 是可选预置入参：省略或 `"none"` 即
  * standalone（0 绑定完全合法）。预置后用户仍然可以改。
  */
 export type NewSessionModalProps = {
@@ -42,39 +43,11 @@ export default function NewSessionModal({
   );
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [agentResolved, setAgentResolved] = useState(false);
-  const [prepared, setPrepared] = useState<PreparedLaunch | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [preparing, setPreparing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
 
   const { deliveryLevel } = useBaseExperience();
   const deliveryOff = deliveryLevel === "off";
-
-  /**
-   * `preparedRef` is the single held capability. `seqRef` makes adoption
-   * race-free: a prepare superseded by a later one (or by unmount) cancels
-   * itself instead of overwriting the current selection's token.
-   */
-  const preparedRef = useRef<PreparedLaunch | null>(null);
-  const wsIdRef = useRef(wsId);
-  wsIdRef.current = wsId;
-  const seqRef = useRef(0);
-
-  /**
-   * Stop holding the capability. `alreadyReleased` is for the two paths where
-   * someone else already destroyed it: the preview modal cancels on close, and
-   * `launchPrepared` consumes the token itself — cancelling in those cases
-   * would either double-release or destroy the launch that is in flight.
-   */
-  const releasePrepared = useCallback((alreadyReleased = false) => {
-    const held = preparedRef.current;
-    preparedRef.current = null;
-    setPrepared(null);
-    if (held && !alreadyReleased) {
-      api.cancelPrepared(held.id).catch(console.error);
-    }
-  }, []);
 
   useEffect(() => {
     api
@@ -88,48 +61,17 @@ export default function NewSessionModal({
       .then(setDefaultAgent)
       .catch(console.error)
       .finally(() => setAgentResolved(true));
-    return () => {
-      seqRef.current += 1;
-      if (preparedRef.current) {
-        api.cancelPrepared(preparedRef.current.id).catch(console.error);
-        preparedRef.current = null;
-      }
-    };
   }, []);
 
-  /**
-   * Prepare once: returns the token it adopted, or null. Every caller goes
-   * through here so there is exactly one place that can hold a capability.
-   */
-  const prepare = useCallback(async (): Promise<PreparedLaunch | null> => {
+  const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
     if (!defaultAgent) return null;
-    const mine = ++seqRef.current;
-    setPreparing(true);
-    try {
-      const p = await api.prepareNewSession(
-        defaultAgent,
-        wsIdRef.current === STANDALONE ? [] : [wsIdRef.current]
-      );
-      if (seqRef.current !== mine) {
-        api.cancelPrepared(p.id).catch(console.error);
-        return null;
-      }
-      preparedRef.current = p;
-      setPrepared(p);
-      setError("");
-      return p;
-    } catch (e: unknown) {
-      if (seqRef.current === mine) setError(String(e));
-      return null;
-    } finally {
-      if (seqRef.current === mine) setPreparing(false);
-    }
-  }, [defaultAgent]);
-
-  // Open (and every re-selection) prepares: 工作目录与 Runtime 都取自这份结果。
-  useEffect(() => {
-    void prepare();
-  }, [prepare, wsId]);
+    return api.prepareNewSession(
+      defaultAgent,
+      wsId === STANDALONE ? [] : [wsId],
+    );
+  }, [defaultAgent, wsId]);
+  const { prepared, preparedRef, preparing, error, setError, prepare, release: releasePrepared } =
+    usePreparedLaunch(prepareLaunch);
 
   const handleWsChange = (next: string) => {
     releasePrepared();
@@ -209,7 +151,7 @@ export default function NewSessionModal({
           <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
         )}
 
-        {/* Context Preview 在注入关闭时整块不挂载，也不出现任何 token 计数（§15、§24）。 */}
+        {/* Context 关闭时不挂载预览，也不显示 token 计数。 */}
         {!deliveryOff && (
           <div className="row-line">
             <div>
@@ -275,9 +217,8 @@ export default function NewSessionModal({
             void prepare();
           }}
           onRefresh={async () => {
-            // 预览在拿到新令牌后自行回收旧的那个。失败时 prepare 返回 null，
-            // 旧令牌仍在手上且依然有效，所以预览保持打开。
-            return await prepare();
+            // 刷新当前预览时保留旧令牌；预览拿到新令牌后再回收旧的那个。
+            return await prepare({ preserveCurrent: true });
           }}
           onLaunched={() => {
             // 预览内已经启动成功：令牌是被消费掉的，不再 cancel

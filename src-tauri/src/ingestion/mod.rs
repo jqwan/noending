@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::adapters::AgentAdapter;
-use crate::domain::{IngestSource, ProjectAffinityEvidence, Session};
+use crate::domain::{IngestSource, Session};
 use crate::error::Result;
 use crate::storage::{new_id, now, Db};
 use crate::sync::SyncEngine;
@@ -439,56 +439,6 @@ where
         }
     }
     Ok((discovered_count, total_events))
-}
-
-/// RETIRED (方案 §42.2-E11) — the name-substring affinity matcher.
-///
-/// It used to run on every newly discovered Session and write `cwd_match`
-/// evidence by matching `session.cwd` against a lowercased substring of
-/// `Project.name`. Once a Project name is itself derived from a path, that turns
-/// two path facts into a third, invented membership relation — and it is the
-/// amplifier behind the `~/.git` dotfiles mis-classification in §1.4. No product
-/// path calls it any more.
-///
-/// Kept, with the `project_affinity_evidence` rows it wrote, as read-only
-/// history: evidence rows are audit provenance for decisions already taken, and
-/// deleting them would rewrite why an old suggestion looked the way it did.
-pub fn record_session_project_evidence(db: &Db, session: &Session) {
-    let Some(cwd) = &session.cwd else { return };
-    let Ok(projects) = db.list_projects() else {
-        return;
-    };
-    let cwd_norm = cwd.to_lowercase().replace(['\\', '/'], "");
-    for p in projects {
-        let token = p.name.to_lowercase().replace([' ', '-'], "");
-        if token.is_empty() {
-            continue;
-        }
-        if cwd_norm.contains(&token) {
-            let e = ProjectAffinityEvidence {
-                id: new_id(),
-                session_id: Some(session.id.clone()),
-                workstream_id: None,
-                project_id: p.id.clone(),
-                evidence_type: "cwd_match".into(),
-                source: format!("cwd={}", cwd),
-                score: 1.0,
-                created_at: now(),
-            };
-            if let Err(err) = db.insert_evidence(&e) {
-                eprintln!("[ingest] evidence insert failed: {}", err);
-            }
-        }
-    }
-}
-
-/// RETIRED (方案 §11, §42.2-E11) — score-based Project suggestion built on the
-/// affinity evidence above. It already had no caller in the product; it stays
-/// compilable so old read paths keep resolving recorded history, and it still
-/// only ever *suggests*. Membership itself is derived from the Session's
-/// WorkspacePath now (§1.10).
-pub fn suggest_project_for_session(db: &Db, session: &Session) -> Option<(String, f32)> {
-    db.resolve_project_affinity(&session.id).ok().flatten()
 }
 
 /// Sessions with pending (un-ingested) activity, used by "sync stale" flows.

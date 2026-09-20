@@ -83,12 +83,10 @@ fn session_row(db: &Db, path: &std::path::Path) -> Session {
 fn ws_row(db: &Db, title: &str) -> Workstream {
     let w = Workstream {
         id: new_id(),
-        project_id: None,
         title: title.into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };

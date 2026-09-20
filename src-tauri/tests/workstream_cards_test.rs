@@ -47,12 +47,10 @@ fn bind(db: &Db, session_id: &str, workstream_id: &str) {
 fn workstream(db: &Db, title: &str) -> Workstream {
     let w = Workstream {
         id: new_id(),
-        project_id: None,
         title: title.into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };

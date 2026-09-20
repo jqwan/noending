@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { LaunchResult } from "../../types";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";

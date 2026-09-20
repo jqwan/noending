@@ -83,7 +83,6 @@ fn row_project_row(r: &Row) -> rusqlite::Result<Project> {
         id: r.get("id")?,
         name: r.get("name")?,
         description: r.get("description")?,
-        archived: r.get::<_, i64>("archived")? != 0,
         git_id: r.get("git_id")?,
         name_customized: r.get::<_, i64>("name_customized")? != 0,
         created_at: r.get("created_at")?,
@@ -326,9 +325,7 @@ pub fn touch_git_identity_conn(conn: &Connection, git_id: &str) -> Result<()> {
 
 /// §1.2 — the zero-path test a caller runs after removing a path. The delete
 /// itself is [`delete_zero_path_project_conn`] (borrowed connection, caller's
-/// transaction, FTS row left for the post-commit `unindex`); the `Db`-level
-/// `delete_project_and_children` is the same statement order wrapped in its own
-/// transaction for callers that are not already inside one.
+/// transaction, FTS row left for the post-commit `unindex`).
 pub fn project_is_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
     let owned: i64 = conn.query_row(
         "SELECT COUNT(*) FROM workspace_paths WHERE project_id = ?1",
@@ -398,10 +395,8 @@ pub fn rename_project_conn(conn: &Connection, project_id: &str, name: &str) -> R
 
 /// §1.2/§42.3-M4 — delete a Project that no longer owns any WorkspacePath.
 ///
-/// Both child tables reference `projects(id) NOT NULL` without a cascade, so the
-/// order is fixed: clear the two nullable references, then
-/// `project_resources` → `project_affinity_evidence` → `projects`. Skipping the
-/// evidence table is the pre-v12 bug that made any suggested Project undeletable.
+/// Sessions keep a nullable derived cache, so it is cleared before deleting the
+/// now-unowned Project.
 /// The FTS row is NOT dropped here: `unindex` belongs after the commit
 /// (`ProjectionEffect::projects_deleted` carries the ids), and an un-committed
 /// delete must not leave search with a hole if this transaction rolls back.
@@ -419,21 +414,9 @@ pub fn delete_zero_path_project_conn(conn: &Connection, project_id: &str) -> Res
             "Project {project_id} 仍然拥有 WorkspacePath，不能删除（§1.2）"
         )));
     }
-    conn.execute(
-        "UPDATE workstreams SET project_id = NULL, updated_at = ?2 WHERE project_id = ?1",
-        params![project_id, now()],
-    )?;
     // Referential hygiene, not a write to the derived cache: no Session can
     // still be projecting onto a Project that owns no path.
     super::session_paths::clear_sessions_project_for_project_conn(conn, project_id)?;
-    conn.execute(
-        "DELETE FROM project_resources WHERE project_id = ?1",
-        params![project_id],
-    )?;
-    conn.execute(
-        "DELETE FROM project_affinity_evidence WHERE project_id = ?1",
-        params![project_id],
-    )?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
     Ok(true)
 }

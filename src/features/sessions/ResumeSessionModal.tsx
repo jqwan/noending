@@ -4,6 +4,7 @@ import { Modal } from "../../components/common";
 import { useBaseExperience } from "../../app/experience";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 import ContextPreviewModal from "../launcher/ContextPreviewModal";
+import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import {
   AgentRow,
   CwdRow,
@@ -13,104 +14,55 @@ import {
 } from "../launcher/LaunchPreviewRows";
 import type { PreparedLaunch, SessionDetail } from "../../types";
 
-/** 冻结契约（§8.1.1）：形状保持不变，B 的 SessionDetailView 正按此调用。 */
+/** SessionDetailView 通过此 Modal 继续已有 Session。 */
 export type ResumeSessionModalProps = {
   sessionId: string;
   onClose: () => void;
 };
 
 /**
- * 继续 Session（方案 §15）。
- *
- * 打开即 Prepare（后端会先摄入这个 Session 自己的最新消息），预览显示
+ * 打开即准备（后端会先摄入这个 Session 自己的最新消息），预览显示
  * Agent / 工作目录 / Workstream / Runtime；「继续」消费这份 PreparedLaunch。
  * 不要求用户重新选择任何已经确定的参数。
  *
- * ⚠️ Context Preview 的隐藏只是**可见性**改动：eager prepare、关闭预览后的
- * 重 prepare、卸载时的 cancelPrepared 全部保留——PreparedLaunch 是 single-use
- * 能力令牌，少一次 prepare 就没有可启动的令牌（§15「UX 简化不能绕开 integrity」）。
+ * PreparedLaunch 是 single-use 能力令牌；关闭预览后会重新准备，卸载时会回收。
  */
 export default function ResumeSessionModal({
   sessionId,
   onClose,
 }: ResumeSessionModalProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [prepared, setPrepared] = useState<PreparedLaunch | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [preparing, setPreparing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const detailRequest = useRef(0);
 
   const { deliveryLevel } = useBaseExperience();
   const deliveryOff = deliveryLevel === "off";
 
-  const preparedRef = useRef<PreparedLaunch | null>(null);
-  const seqRef = useRef(0);
-
-  /**
-   * Stop holding the capability. `alreadyReleased` marks the paths where the
-   * token was destroyed elsewhere: the preview cancels on close, and
-   * `launchPrepared` consumes it. Cancelling again there would either
-   * double-release or kill the launch that is in flight.
-   */
-  const releasePrepared = useCallback((alreadyReleased = false) => {
-    const held = preparedRef.current;
-    preparedRef.current = null;
-    setPrepared(null);
-    if (held && !alreadyReleased) {
-      api.cancelPrepared(held.id).catch(console.error);
-    }
-  }, []);
-
-  /** mount 时 eager prepare，出错时同样从这里重来；这是唯一持有令牌的地方。 */
-  const prepare = useCallback(async (): Promise<PreparedLaunch | null> => {
-    const mine = ++seqRef.current;
-    setPreparing(true);
+  const refreshDetail = useCallback(async (isCurrent: () => boolean = () => true) => {
+    const request = ++detailRequest.current;
     try {
-      const p = await api.prepareResumeSession(sessionId, []);
-      if (seqRef.current !== mine) {
-        // 已被更晚的 prepare 取代或组件已卸载（cleanup 递增了 seq）：立刻回收，不留孤儿 preparation
-        api.cancelPrepared(p.id).catch(console.error);
-        return null;
-      }
-      preparedRef.current = p;
-      setPrepared(p);
-      setError("");
-      // Prepare 内部会摄入 Session 新消息，刷新 detail 让绑定显示与之一致
-      try {
-        const fresh = await api.getSessionDetail(sessionId);
-        if (seqRef.current === mine) setDetail(fresh);
-      } catch (e) {
-        console.error(e);
-      }
-      return p;
-    } catch (e: unknown) {
-      if (seqRef.current === mine) setError(String(e));
-      return null;
-    } finally {
-      if (seqRef.current === mine) setPreparing(false);
+      const fresh = await api.getSessionDetail(sessionId);
+      if (isCurrent() && detailRequest.current === request) setDetail(fresh);
+    } catch (e) {
+      console.error(e);
     }
   }, [sessionId]);
 
+  const prepareLaunch = useCallback(async (isCurrent: () => boolean): Promise<PreparedLaunch> => {
+    const prepared = await api.prepareResumeSession(sessionId, []);
+    if (isCurrent()) await refreshDetail(isCurrent);
+    return prepared;
+  }, [refreshDetail, sessionId]);
+  const { prepared, preparedRef, preparing, error, setError, prepare, release: releasePrepared } =
+    usePreparedLaunch(prepareLaunch);
+
   useEffect(() => {
-    let cancelled = false;
-    api
-      .getSessionDetail(sessionId)
-      .then((d) => {
-        if (!cancelled) setDetail(d);
-      })
-      .catch(console.error);
-    void prepare();
+    void refreshDetail();
     return () => {
-      cancelled = true;
-      seqRef.current += 1;
-      // 卸载时释放持有的 preparation
-      if (preparedRef.current) {
-        api.cancelPrepared(preparedRef.current.id).catch(console.error);
-        preparedRef.current = null;
-      }
+      detailRequest.current += 1;
     };
-  }, [prepare, sessionId]);
+  }, [refreshDetail]);
 
   const handleClose = () => {
     releasePrepared();
@@ -190,7 +142,7 @@ export default function ResumeSessionModal({
           <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
         )}
 
-        {/* Context Preview 在注入关闭时整块不挂载，也不出现任何 token 计数（§15、§24）。 */}
+        {/* Context 关闭时不挂载预览，也不显示 token 计数。 */}
         {!deliveryOff && (
           <div className="row-line">
             <div>
@@ -258,9 +210,8 @@ export default function ResumeSessionModal({
             void prepare();
           }}
           onRefresh={async () => {
-            // 预览在拿到新令牌后自行回收旧的那个。失败时 prepare 返回 null，
-            // 旧令牌仍在手上且依然有效，所以预览保持打开。
-            return await prepare();
+            // 刷新当前预览时保留旧令牌；预览拿到新令牌后再回收旧的那个。
+            return await prepare({ preserveCurrent: true });
           }}
           onLaunched={() => {
             // 预览内已经启动成功：令牌是被消费掉的，不再 cancel

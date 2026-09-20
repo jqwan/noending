@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import { useMemo } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Agent, type Session, type SessionBindingRow } from "../../types";

@@ -29,9 +29,6 @@ pub struct Project {
     pub id: Id,
     pub name: String,
     pub description: String,
-    /// Compatibility column, no longer domain semantics: v0.2 has no Project
-    /// lifecycle, so nothing writes 1 and `list_projects` does not filter on it.
-    pub archived: bool,
     /// References `git_identities.id`. UNIQUE across Projects when set.
     #[serde(default)]
     pub git_id: Option<Id>,
@@ -51,29 +48,12 @@ impl Project {
             id,
             name: name.into(),
             description: String::new(),
-            archived: false,
             git_id: None,
             name_customized: false,
             created_at: ts.clone(),
             updated_at: ts,
         }
     }
-}
-
-/// Optional resource attached to a Project.
-///
-/// Since v0.2 this table carries NO workspace identity: `repository` /
-/// `workspace` rows are plain user notes, and the WorkspacePath registry is
-/// the only path authority. The commands that let users add or remove rows
-/// left the product API, so this is read-only legacy data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectResource {
-    pub id: Id,
-    pub project_id: Id,
-    pub kind: String, // repository | workspace | file | document | url | artifact | external
-    pub uri: Option<String>,
-    pub metadata: serde_json::Value,
-    pub created_at: String,
 }
 
 /// One observed physical working path — the bridge between the filesystem and
@@ -146,7 +126,7 @@ pub struct GitIdentity {
 ///
 /// `position` is the whole role: 0 is the primary path, > 0 are secondary.
 /// There is deliberately no `is_primary` / `role` column — two authorities for
-/// one fact is how `default_cwd` and `workstreams.project_id` drifted apart.
+/// one fact is how the old default cwd and Workstream project field drifted apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkstreamPath {
     pub id: Id,
@@ -221,18 +201,10 @@ impl GitWorktreeKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workstream {
     pub id: Id,
-    /// Deprecated since v0.2: Workstream→Project membership comes from
-    /// `workstream_paths → workspace_paths.project_id`. Kept as a frozen
-    /// compatibility read — `upsert_workstream_conn` no longer writes it.
-    pub project_id: Option<Id>,
     pub title: String,
     pub description: String,
     pub lifecycle: String,  // active | completed
     pub visibility: String, // normal | archived
-    /// Deprecated since v0.2: replaced by the ordered `workstream_paths` list.
-    /// Now only a v12 migration input and a compatibility read.
-    #[serde(default)]
-    pub default_cwd: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -257,12 +229,10 @@ impl Workstream {
         let ts = crate::storage::now();
         Self {
             id,
-            project_id: None,
             title: title.into(),
             description: String::new(),
             lifecycle: workstream_lifecycle::ACTIVE.into(),
             visibility: workstream_visibility::NORMAL.into(),
-            default_cwd: None,
             created_at: ts.clone(),
             updated_at: ts,
         }
@@ -781,21 +751,6 @@ pub struct ContextSourceDetail {
     pub event_sequence: Option<i64>,
     pub event_ts: Option<String>,
     pub evidence: Option<String>,
-}
-
-/// Evidence that a session/workstream belongs to a Project. cwd / repo path
-/// are *evidence*, never the Project identity itself; the resolver scores
-/// evidence and only suggests.
-#[derive(Debug, Clone, Serialize)]
-pub struct ProjectAffinityEvidence {
-    pub id: Id,
-    pub session_id: Option<Id>,
-    pub workstream_id: Option<Id>,
-    pub project_id: Id,
-    pub evidence_type: String, // cwd_match | repository | session_title | history | user_correction
-    pub source: String,
-    pub score: f32,
-    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

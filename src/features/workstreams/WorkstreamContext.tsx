@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { api } from "../../api";
 import { Modal, timeAgo } from "../../components/common";
 import {
@@ -46,7 +46,6 @@ export default function WorkstreamContext({ ctx, focusedItemId, onChanged, onNav
 
   // Maps for fast lookup
   const itemByRevId = new Map(ctx.items.map(([item, rev]) => [rev.id, [item, rev] as const]));
-  const itemById = new Map(ctx.items.map(([item, rev]) => [item.id, [item, rev] as const]));
   const relationsMap = new Map((ctx.relations ?? []).map((r) => [r.item_id, r]));
 
   const active = ctx.items.filter(([i]) => i.status === "active");
@@ -406,4 +405,3 @@ export default function WorkstreamContext({ ctx, focusedItemId, onChanged, onNav
     </div>
   );
 }
-

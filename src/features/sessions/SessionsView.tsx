@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
@@ -65,11 +65,11 @@ export default function SessionsView({ navigate, action, actionSeq }: {
         .then((ss) => { if (!cancelled) setSources(ss); })
         .catch((e) => { console.error(e); if (!cancelled) setSources(null); });
     }
-    // 两个数据面各自的后端 scope（§11）：普通 = active（listAllSessions 的默认），
+    // 两个数据面各自的后端 scope（§11）：普通 = active，
     // 回收站 = trash。projects / bindings 只服务普通模式的筛选列，回收站行不显示它们。
     const trashList = () => api.listSessions(undefined, undefined, "trash");
     Promise.all([
-      trashMode ? trashList() : api.listAllSessions(),
+      trashMode ? trashList() : api.listSessions(),
       trashMode ? Promise.resolve(null) : api.listProjects(),
       trashMode ? Promise.resolve(null) : api.listSessionBindings(),
       trashMode ? Promise.resolve(null) : trashList().then((rows) => rows.length),

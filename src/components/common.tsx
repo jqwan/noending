@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from "react";
-import type { Route } from "../app/routes";
+import { useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 
 export function useRefreshSignal(cb: () => void) {
   useEffect(() => {
@@ -31,7 +31,7 @@ export function timeAgo(iso: string | null | undefined): string {
  * 都在 document 上，一次按键会同时命中，所以只让**最上面那一个**响应：
  * 自己不是最后一个 `.modal-backdrop` 时直接忽略。
  */
-export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   const backdropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

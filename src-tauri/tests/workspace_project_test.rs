@@ -1,4 +1,4 @@
-//! Agent B — Project projection and the WorkspacePath registry (方案 §17).
+//! Project projection and the WorkspacePath registry (方案 §17).
 //!
 //! Every §17 "必须测试" case is exactly one named test here, plus the extra doors
 //! the registry owns: the `WorkspaceAttaching` implementation, the reconcile
@@ -693,9 +693,8 @@ fn merge_deletes_the_zero_path_project() {
             "every Session behind a moved path follows it"
         );
     }
-    assert_eq!(
-        db.get_workstream("w-1").unwrap().unwrap().project_id,
-        None,
+    assert!(
+        db.get_workstream("w-1").unwrap().is_some(),
         "a Workstream survives its Project; membership is its path list (§1.12)"
     );
     assert_eq!(
@@ -1459,13 +1458,7 @@ fn list_projects_reports_every_derived_project_and_no_ghost() {
     expected.sort();
     assert_eq!(ids, expected);
 
-    // v0.2 removed the `archived` filter (§42.2-E3): a legacy row is as much a
-    // Project as a derived one, because its paths are still there.
-    db.0.execute(
-        "UPDATE projects SET archived = 1 WHERE id = ?1",
-        [a.project_id.as_str()],
-    )
-    .unwrap();
+    // A Project remains listed while it still owns a WorkspacePath.
     assert_eq!(db.list_projects().unwrap().len(), 2);
 
     // And a Project that loses its last path leaves the list by ceasing to exist.
@@ -1477,65 +1470,6 @@ fn list_projects_reports_every_derived_project_and_no_ghost() {
         .map(|p| p.id)
         .collect();
     assert_eq!(rest, vec![a.project_id.clone()]);
-}
-
-#[test]
-fn a_deleted_project_frees_its_family_and_its_children_go_first() {
-    // §42.3-M4: `project_resources` and `project_affinity_evidence` reference
-    // projects(id) NOT NULL with no cascade, and `foreign_keys` is ON, so the FK
-    // order is not cosmetic — get it wrong and the merge aborts.
-    let (_d, db) = temp_db();
-    let path = ensure(
-        &db,
-        &repo("/work/repo", "/work/repo/.git", GitWorktreeKind::Main, &[]),
-    );
-    let doomed = path.project_id.clone();
-    db.add_resource(&noending::domain::ProjectResource {
-        id: noending::storage::new_id(),
-        project_id: doomed.clone(),
-        kind: "repository".into(),
-        uri: Some(canon("/work/repo")),
-        metadata: serde_json::json!({}),
-        created_at: noending::storage::now(),
-    })
-    .unwrap();
-    db.insert_evidence(&noending::domain::ProjectAffinityEvidence {
-        id: noending::storage::new_id(),
-        session_id: None,
-        workstream_id: None,
-        project_id: doomed.clone(),
-        evidence_type: "user_correction".into(),
-        source: "legacy".into(),
-        score: 1.0,
-        created_at: noending::storage::now(),
-    })
-    .unwrap();
-
-    let outcome = gc_gone_workspace_paths(&db, &[path.id.clone()]).unwrap();
-    assert_eq!(outcome.deleted_projects, vec![doomed.clone()]);
-    assert!(db.list_resources(&doomed).unwrap().is_empty());
-    assert_eq!(
-        count_rows(
-            &db,
-            "SELECT COUNT(*) FROM project_affinity_evidence WHERE project_id = ?1",
-            &doomed
-        ),
-        0,
-        "no garbage behind a deleted Project"
-    );
-    // The family is free again, so a new repository can claim it.
-    let again = ensure(
-        &db,
-        &repo(
-            "/work/moved-repo",
-            "/work/repo/.git",
-            GitWorktreeKind::Main,
-            &[],
-        ),
-    );
-    assert_eq!(again.git_state, git_state::DETECTED);
-    assert_ne!(again.project_id, doomed);
-    registry_is_consistent(&db).expect("consistent");
 }
 
 #[test]

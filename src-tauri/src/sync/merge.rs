@@ -165,31 +165,16 @@ impl MergeEngine {
                     _ => Ok(false),
                 }
             }
-            ContextMutation::CreateWorkstream {
-                project_id,
-                title,
-                reason,
-            } => {
+            ContextMutation::CreateWorkstream { title, reason } => {
                 // Workstream is the core continuity unit; Project is an
                 // optional organization layer. Creating one without a
                 // project home is explicitly allowed.
                 let w = crate::domain::Workstream {
                     id: new_id(),
-                    // Ignored since v0.2: Workstream→Project is a projection
-                    // through `workstream_paths`, and the extractor never had a
-                    // real Project to offer anyway. The mutation field stays for
-                    // the frozen Context API (§31); the write does not (§18-15).
-                    project_id: {
-                        let _ = project_id;
-                        None
-                    },
                     title: title.clone(),
                     description: format!("由同步自动识别：{}", reason),
                     lifecycle: crate::domain::workstream_lifecycle::ACTIVE.into(),
                     visibility: "normal".into(),
-                    // sync-created workstreams carry no launch directory;
-                    // the launcher falls back to the latest session cwd
-                    default_cwd: None,
                     created_at: now(),
                     updated_at: now(),
                 };

@@ -358,15 +358,7 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
 /// caller's transaction. A permanent delete is all-or-nothing: a half-purged
 /// Workstream would keep Context rows whose owner no longer exists.
 ///
-/// The plan's list, expanded by the two references it does not mention:
-///
-/// * `project_affinity_evidence.workstream_id` is a 6th FK onto `workstreams`
-///   (`storage/mod.rs:331`). It is nullable, so the history-preserving repair
-///   is to NULL the attribution and keep the row: the evidence explains a
-///   Project decision and is not this Workstream's property. §42.2-E11 keeps
-///   that table as read-only history, so deleting rows would be worse than
-///   unlabelling one column.
-/// * `search_index` is an FTS5 table with no FK at all. Its `kind='item'` rows
+/// The search index is an FTS5 table with no FK. Its `kind='item'` rows
 ///   carry `parent_id = workstream_id`, so deleting the items without deleting
 ///   their index rows leaves search returning facts that no longer exist.
 ///
@@ -430,12 +422,7 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
         "DELETE FROM session_binding_removals WHERE workstream_id = ?1",
         params![workstream_id],
     )?;
-    // 10. legacy affinity evidence: keep the row, drop the attribution.
-    tx.execute(
-        "UPDATE project_affinity_evidence SET workstream_id = NULL WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
-    // 11. review state (ON DELETE CASCADE — explicit for the same reason as #9).
+    // 10. review state.
     tx.execute(
         "DELETE FROM workstream_review_state WHERE workstream_id = ?1",
         params![workstream_id],
@@ -506,12 +493,10 @@ pub fn workstreams_for_project(
         Ok((
             Workstream {
                 id: r.get("id")?,
-                project_id: r.get("project_id")?,
                 title: r.get("title")?,
                 description: r.get("description")?,
                 lifecycle: r.get("lifecycle")?,
                 visibility: r.get("visibility")?,
-                default_cwd: r.get("default_cwd")?,
                 created_at: r.get("created_at")?,
                 updated_at: r.get("updated_at")?,
             },

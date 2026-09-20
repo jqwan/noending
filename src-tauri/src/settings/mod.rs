@@ -1,8 +1,8 @@
 //! Application settings management.
 //!
 //! `settings` is a bare key/value table: no typed row is ever seeded by a
-//! migration except where a value has to be pinned explicitly (see
-//! `storage::migrate` v11). So every product default lives here, and each key
+//! initialization except where a value has to be pinned explicitly. Every
+//! product default lives here, and each key
 //! must have exactly ONE accessor that decides what a missing row means.
 
 use crate::context::ContextDeliveryLevel;

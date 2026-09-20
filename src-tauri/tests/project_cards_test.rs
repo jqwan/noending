@@ -26,12 +26,10 @@ fn add_path(db: &Db, project_id: &str, raw: &str) -> String {
 fn workstream_with_path(db: &Db, id: &str, title: &str, workspace_path_id: &str) {
     let w = Workstream {
         id: id.into(),
-        project_id: None,
         title: title.into(),
         description: String::new(),
         lifecycle: "active".into(),
         visibility: "normal".into(),
-        default_cwd: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -86,7 +84,7 @@ fn board_card_projection_counts_and_paths() {
         .unwrap();
     let a = add_path(&db, "p-1", "/work/alpha");
     let b = add_path(&db, "p-1", "/work/beta");
-    let c = add_path(&db, "p-1", "/work/gamma");
+    let _c = add_path(&db, "p-1", "/work/gamma");
     // 纯注册写入 exists_on_disk = 0（观察属于 reconcile）。a/b 已被观察到存在，
     // gamma 从磁盘上消失：missing 计数来自注册表观察，不是身份变化。
     for id in [&a, &b] {

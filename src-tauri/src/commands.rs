@@ -3,9 +3,8 @@
 //!
 //! Workspace Domain v0.2 split the Project / Workstream / Session-command areas
 //! into sibling modules (`project`, `workstream`, `session_workspace`,
-//! `workspace`) so the parallel agents in 方案 §16-§22 never edit the same file.
-//! Everything else is still here, unchanged; this file owns the shared state and
-//! helpers the submodules borrow.
+//! `workspace`) so their boundaries stay explicit.
+//! This file owns the shared state and helpers the submodules borrow.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
@@ -230,8 +229,8 @@ pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<Con
             "user",
         )?;
         // §42.3-M19 — the Project this activity belongs to is its position-0
-        // path's Project. Reading the frozen `workstreams.project_id` column
-        // here was the last live consumer of a retired authority: for a
+        // path's Project. The current projection is read from the primary
+        // path: for a
         // migrated Workstream it can name a Project §7.4 deleted or §8.3
         // merged away, which would reorder `list_projects` (ORDER BY
         // updated_at) by a membership that no longer exists.
@@ -347,7 +346,7 @@ pub fn get_workstream_context(
         let relations = db.item_relations_for_workstream(&workstream_id)?;
         let recent_changes = db.list_workstream_context_changes(&workstream_id, 20)?;
         // §42.3-M19: the name shown beside a Workstream is its position-0 path's
-        // Project, not the retired `workstreams.project_id` column.
+        // Project.
         let (_, project_name) =
             crate::workspace::workstream::primary_project_for_workstream(db, &workstream_id)?;
         Ok(WorkstreamContext {
@@ -852,11 +851,6 @@ pub fn search(
     with_db(&state, |db| {
         crate::search::search(db, &query, limit.unwrap_or(30))
     })
-}
-
-#[tauri::command]
-pub fn get_stats(state: State<AppState>) -> Result<serde_json::Value> {
-    with_db(&state, |db| db.stats())
 }
 
 #[tauri::command]

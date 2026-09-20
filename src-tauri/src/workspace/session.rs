@@ -1,6 +1,6 @@
 //! Session → WorkspacePath, and the derived Project cache.
 //!
-//! Owned by Agent D (方案 §19).
+//! This module owns Session-to-WorkspacePath and binding policy.
 //!
 //! ## The fact chain
 //!
@@ -17,9 +17,7 @@
 //! 2. the batch refresh when a WorkspacePath changes Project, from
 //!    `workspace::project`.
 //!
-//! Any other `UPDATE sessions SET project_id` is a domain violation. The old
-//! `assign_session_project` command (a raw write into the cache,
-//! `commands.rs:786-789`) left the product API for exactly that reason.
+//! Any other `UPDATE sessions SET project_id` is a domain violation.
 //!
 //! ## Rules
 //!
