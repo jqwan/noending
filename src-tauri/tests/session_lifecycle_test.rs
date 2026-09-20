@@ -1160,6 +1160,18 @@ adapter_suite!(pi_suite, Agent::Pi, PiAdapter);
 //    transaction (crash-safe by construction); the behavioral side stays
 //    locked by trash_is_removed_from_search_and_restore_reindexes above.
 
+/// Register an ingest source root (review P1-2: confirmed-absent verdicts
+/// are corroborated against these).
+fn register_source(db: &Db, agent: Agent, root: &std::path::Path) {
+    db.conn()
+        .execute(
+            "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
+             VALUES (?1, ?2, ?3, 1, 'user', '2026-01-01T00:00:00Z')",
+            rusqlite::params![new_id(), agent.as_str(), root.to_string_lossy().to_string()],
+        )
+        .unwrap();
+}
+
 #[test]
 fn prepare_allows_permanent_delete_when_source_already_deleted() {
     let db = open_db("absent-prepare");
@@ -1168,7 +1180,9 @@ fn prepare_allows_permanent_delete_when_source_already_deleted() {
     ingest(&db, &adapter, &s);
 
     lifecycle::trash_session(&db, &s.id).unwrap();
-    // The user (or a sync tool) removed the source outside NoEnding.
+    // The user (or a sync tool) removed the source outside NoEnding — but the
+    // source root it lived under is still there, corroborating the verdict.
+    register_source(&db, Agent::Codex, Path::new(&s.raw_path).parent().unwrap());
     std::fs::remove_file(&s.raw_path).unwrap();
 
     let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
@@ -1242,6 +1256,7 @@ fn confirmed_absent_source_reappearing_at_execute_is_stale() {
     let s = fixture_session(&db, Agent::Codex, "absent-reappeared");
     ingest(&db, &adapter, &s);
     lifecycle::trash_session(&db, &s.id).unwrap();
+    register_source(&db, Agent::Codex, Path::new(&s.raw_path).parent().unwrap());
 
     std::fs::remove_file(&s.raw_path).unwrap();
     let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
@@ -1287,4 +1302,117 @@ fn verified_present_plan_records_source_state() {
     );
     assert_eq!(plan.targets.len(), 1);
     assert!(!plan.targets[0].sha256.is_empty());
+}
+
+// ---- Review P1-1: search stays lifecycle-authoritative across restarts ----
+
+#[test]
+fn startup_backfill_skips_trashed_sessions() {
+    let db = open_db("backfill-trashed");
+    let adapter = CodexAdapter;
+    let active = fixture_session(&db, Agent::Codex, "backfill-trashed-a");
+    ingest(&db, &adapter, &active);
+    let trashed = fixture_session(&db, Agent::Codex, "backfill-trashed-b");
+    ingest(&db, &adapter, &trashed);
+
+    lifecycle::trash_session(&db, &trashed.id).unwrap();
+    // Trash 卸载索引后，模拟重启：startup backfill 不得把回收站加回来。
+    db.backfill_search_index().unwrap();
+
+    let hits = search::search(&db, "goals", 20).unwrap();
+    let refs: Vec<&String> = hits.iter().map(|h| &h.ref_id).collect();
+    assert!(
+        refs.iter()
+            .any(|r| r.starts_with(&format!("{}:", active.id))),
+        "active session stays searchable"
+    );
+    assert!(
+        !refs
+            .iter()
+            .any(|r| r.starts_with(&format!("{}:", trashed.id))),
+        "trashed session must not be re-indexed by the startup backfill"
+    );
+
+    // Restore 之后回到索引 —— 生命周期与索引随事务同进退。
+    lifecycle::restore_session(&db, &trashed.id).unwrap();
+    let hits = search::search(&db, "goals", 20).unwrap();
+    assert!(hits
+        .iter()
+        .any(|h| h.ref_id.starts_with(&format!("{}:", trashed.id))));
+}
+
+#[test]
+fn search_filters_stale_trashed_rows() {
+    let db = open_db("stale-rows");
+    // 一行陈旧的 event 索引：可能来自旧版本构建或崩溃窗口 —— 它的
+    // session 不存在（更不必说 active）。读侧守卫必须把它滤掉。
+    db.conn()
+        .execute(
+            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
+             VALUES ('event', 'stale:1', 'sess-gone', '', 'unique stale marker text')",
+            [],
+        )
+        .unwrap();
+
+    let hits = search::search(&db, "unique stale marker", 20).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.ref_id == "stale:1"),
+        "stale event rows must never surface: {:?}",
+        hits.iter().map(|h| h.ref_id.clone()).collect::<Vec<_>>()
+    );
+}
+
+// ---- Review P1-2: confirmed-absent must be corroborated by a live source --
+
+#[test]
+fn confirmed_absent_requires_accessible_source_root() {
+    let db = open_db("absent-root");
+    let adapter = CodexAdapter;
+    let dir = unique_dir("absent-root-src");
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let file = sub.join("session.jsonl");
+    let agent_session_id = format!("absent-root-{}", new_id());
+    write_agent_fixture(Agent::Codex, &file, &agent_session_id);
+    let discovered = noending::adapters::DiscoveredSession {
+        agent: Agent::Codex,
+        agent_session_id: agent_session_id.clone(),
+        path: file.clone(),
+        cwd: Some(dir.to_string_lossy().to_string()),
+        started_at: Some("2026-09-13T10:00:00Z".into()),
+        last_activity_at: Some("2026-09-13T10:05:00Z".into()),
+        first_user_text: Some("first user message about goals".into()),
+        parent_agent_session_id: None,
+    };
+    let (s, _) = ensure_session_row_with(&db, &discovered, &attacher()).unwrap();
+    lifecycle::trash_session(&db, &s.id).unwrap();
+
+    // Step 1 — 根可访问 + 文件 NotFound → 佐证成立，ConfirmedAbsent 可准备。
+    register_source(&db, Agent::Codex, &sub);
+    std::fs::remove_file(&file).unwrap();
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+    assert_eq!(preview.source_state, "confirmed_absent");
+    lifecycle::cancel_session_permanent_delete(&db, &preview.job_id).unwrap();
+
+    // Step 2 — 路径不被任何已注册来源包含：无法佐证，拒绝。
+    db.conn().execute("DELETE FROM ingest_sources", []).unwrap();
+    let err = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap_err();
+    assert!(
+        err.to_string().contains("不在任何已注册"),
+        "unexpected: {err}"
+    );
+    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
+        .unwrap()
+        .is_none());
+
+    // Step 3 — 匹配的来源根整个不可访问（移动盘离线、目录被删）：拒绝，
+    // 绝不把「来源不可用」解释成「文件已删除」。
+    register_source(&db, Agent::Codex, &sub);
+    std::fs::remove_dir_all(&sub).unwrap();
+    let err = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap_err();
+    assert!(err.to_string().contains("不可访问"), "unexpected: {err}");
+    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
+        .unwrap()
+        .is_none());
+    assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
 }

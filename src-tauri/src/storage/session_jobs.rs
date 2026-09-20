@@ -70,31 +70,45 @@ pub fn session_is_writable_conn(conn: &Connection, session_id: &str) -> Result<b
 
 // ---------------- FTS ----------------
 
+/// A missing `search_index` table (FTS-less build) is fine; any other SQL
+/// failure is a real error and must roll the caller's transaction back.
+fn tolerate_missing_fts(result: std::result::Result<usize, rusqlite::Error>) -> Result<()> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("no such table") => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Drop a trashed / deleted session's event rows from the FTS index. Event
 /// rows carry `parent_id = session_id`, so one delete covers the session.
-/// Errors swallowed: the virtual table may not exist (no FTS5 build).
-pub fn unindex_session_conn(conn: &Connection, session_id: &str) {
-    let _ = conn.execute(
+///
+/// Errors PROPAGATE (review P1-1): inside the lifecycle transaction a failed
+/// index write rolls the lifecycle flip back, so "trashed" and "unindexed"
+/// really do commit atomically. Only a missing virtual table (FTS-less
+/// build) is tolerated.
+pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
+    tolerate_missing_fts(conn.execute(
         "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
         params![session_id],
-    );
+    ))
 }
 
 /// Rebuild the FTS rows of a restored session from the durable event store,
-/// mirroring `backfill_search_index`'s row shape. Best effort, like every
-/// index write: an FTS-less build simply stays on the LIKE fallback.
-pub fn reindex_session_conn(conn: &Connection, session_id: &str) {
-    let _ = conn.execute(
+/// mirroring `backfill_search_index`'s row shape. Errors propagate like
+/// [`unindex_session_conn`]; an FTS-less build stays on the LIKE fallback.
+pub fn reindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
+    tolerate_missing_fts(conn.execute(
         "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
         params![session_id],
-    );
-    let _ = conn.execute(
+    ))?;
+    tolerate_missing_fts(conn.execute(
         "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
          SELECT 'event', session_id || ':' || sequence, session_id, '', text
          FROM session_events
          WHERE session_id = ?1 AND length(COALESCE(text, '')) >= 20",
         params![session_id],
-    );
+    ))
 }
 
 // ---------------- Preview counts ----------------
@@ -483,9 +497,9 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usi
     )?;
     // 12. The session row itself, last, once nothing references it.
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
-    // FTS rows of this session's events go with the data (same write the
-    // post-commit `unindex` would do — belt and braces, like workstream purge).
-    unindex_session_conn(tx, session_id);
+    // FTS rows of this session's events go with the data — a failure here
+    // rolls the whole purge back, never a half-deleted session in search.
+    unindex_session_conn(tx, session_id)?;
 
     Ok(redacted)
 }

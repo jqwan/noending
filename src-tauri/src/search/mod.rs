@@ -17,6 +17,12 @@ pub struct SearchHit {
     pub rank: f64,
 }
 
+/// Review P1-1 — the read-side lifecycle authority: event rows surface only
+/// while their session is active. Belt and braces beside the write-side
+/// guards (trash unindex + guarded backfill): a stale row left by any older
+/// build or crash must not surface a trashed session in search.
+const ACTIVE_EVENT_GUARD: &str = "(search_index.kind != 'event' OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = search_index.parent_id AND s.trashed_at IS NULL))";
+
 pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -24,12 +30,15 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     }
     if db.fts_available() {
         let fts_q = to_fts_query(q);
-        let sql = "SELECT kind, ref_id, parent_id, title,
+        let sql = format!(
+            "SELECT kind, ref_id, parent_id, title,
                    snippet(search_index, 4, '「', '」', '…', 12),
                    bm25(search_index)
                    FROM search_index WHERE search_index MATCH ?1
-                   ORDER BY bm25(search_index) LIMIT ?2";
-        match db.conn().prepare(sql) {
+                   AND {ACTIVE_EVENT_GUARD}
+                   ORDER BY bm25(search_index) LIMIT ?2"
+        );
+        match db.conn().prepare(&sql) {
             Ok(mut st) => {
                 let rows = st.query_map(params![fts_q, limit], |r| {
                     Ok(SearchHit {
@@ -64,9 +73,12 @@ fn looks_indexed(db: &Db, _q: &str) -> bool {
 
 fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let pattern = format!("%{}%", q.replace('%', ""));
-    let sql = "SELECT kind, ref_id, parent_id, title, body FROM search_index
-               WHERE title LIKE ?1 OR body LIKE ?1 LIMIT ?2";
-    let mut st = db.conn().prepare(sql)?;
+    let sql = format!(
+        "SELECT kind, ref_id, parent_id, title, body FROM search_index
+               WHERE (title LIKE ?1 OR body LIKE ?1) AND {ACTIVE_EVENT_GUARD}
+               LIMIT ?2"
+    );
+    let mut st = db.conn().prepare(&sql)?;
     let rows = st.query_map(params![pattern, limit], |r| {
         Ok(SearchHit {
             kind: r.get(0)?,

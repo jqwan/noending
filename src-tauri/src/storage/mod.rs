@@ -2580,6 +2580,12 @@ impl Db {
 
     /// One-time backfill so events ingested before the index existed (or
     /// failed to index) become searchable. Idempotent.
+    ///
+    /// Review P1-1: only ACTIVE sessions are indexed. This runs at every
+    /// startup, so an unguarded run would silently re-index everything a
+    /// Trash unindexed — the recycle bin would leak back into search after
+    /// every restart. `session_jobs::unindex_session_conn` and this WHERE
+    /// clause are two halves of one lifecycle invariant.
     pub fn backfill_search_index(&self) -> Result<()> {
         if !self.fts_available() {
             return Ok(());
@@ -2589,6 +2595,7 @@ impl Db {
              SELECT 'event', session_id || ':' || sequence, session_id, '', text
              FROM session_events
              WHERE length(COALESCE(text, '')) >= 20
+               AND session_id IN (SELECT id FROM sessions WHERE trashed_at IS NULL)
                AND session_id || ':' || sequence NOT IN (
                    SELECT ref_id FROM search_index WHERE kind = 'event')",
             [],

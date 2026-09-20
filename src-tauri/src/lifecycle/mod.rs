@@ -60,8 +60,8 @@ pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
         let changed = session_jobs::trash_session_conn(tx, session_id, &crate::storage::now())?;
         if changed {
             // §12: a trashed session leaves the search index, atomically
-            // with the flip that hides it.
-            session_jobs::unindex_session_conn(tx, session_id);
+            // with the flip that hides it — an index failure rolls BOTH back.
+            session_jobs::unindex_session_conn(tx, session_id)?;
         }
         Ok(changed)
     })?;
@@ -83,7 +83,7 @@ pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {
     let restored = db.tx(|tx| {
         let restored = session_jobs::restore_session_conn(tx, session_id)?;
         if restored {
-            session_jobs::reindex_session_conn(tx, session_id);
+            session_jobs::reindex_session_conn(tx, session_id)?;
         }
         Ok(restored)
     })?;
@@ -121,6 +121,25 @@ pub fn prepare_session_permanent_delete(
     // Adapter-owned validation. Errors here (unsupported / unsafe / wrong
     // file) leave NO job behind: the session simply stays in Trash (§38).
     let plan = adapter_for(session.agent).prepare_source_session_deletion(&session)?;
+
+    // Review P1-2 — a `ConfirmedAbsent` verdict must be corroborated: a bare
+    // NotFound on the file cannot distinguish "deleted" from "its whole
+    // source tree is offline". The registered ingest sources decide. An
+    // inaccessible (or unregistered) source root rejects prepare — the
+    // purge would otherwise destroy NoEnding data whose Agent source
+    // silently reappears when the drive comes back.
+    if plan.source == crate::adapters::SourceDeletionState::ConfirmedAbsent {
+        let roots: Vec<String> = {
+            let mut st = db
+                .conn()
+                .prepare("SELECT path FROM ingest_sources WHERE agent = ?1")?;
+            let rows = st.query_map(rusqlite::params![session.agent.as_str()], |r| {
+                r.get::<_, String>(0)
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        crate::adapters::corroborate_source_absent(&session.raw_path, &roots)?;
+    }
 
     let counts = PermanentDeletionCounts::collect(db.conn(), session_id)?;
 

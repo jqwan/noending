@@ -478,6 +478,61 @@ pub enum SourceDeletionOutcome {
     AlreadyAbsent,
 }
 
+/// Review P1-2 — corroborate a `ConfirmedAbsent` conclusion before a purge
+/// may run. A bare `NotFound` on the session file only proves THAT path no
+/// longer resolves; it cannot distinguish "the user deleted the file" from
+/// "the whole source tree is offline" (unmounted drive, network share down,
+/// removed parent directory). The registered ingest sources provide exactly
+/// that distinction, matching the product model of removable / custom
+/// sources:
+///
+/// - the most specific registered root containing `raw_path` is accessible
+///   and a directory → corroborated: the file is truly gone at a live
+///   source;
+/// - no registered root contains the path, or that root cannot be
+///   accessed → NOT corroborated: refuse the permanent deletion. The
+///   Session stays in Trash; purging now could destroy NoEnding data whose
+///   Agent source would silently come back when the drive returns.
+///
+/// Separator-insensitive prefix matching (both sides normalized to `/`)
+/// keeps this correct across macOS and Windows spellings.
+pub fn corroborate_source_absent(raw_path: &str, source_roots: &[String]) -> Result<()> {
+    let raw = raw_path.replace('\\', "/");
+    let mut best: Option<&String> = None;
+    for root in source_roots {
+        let trimmed = root.trim_end_matches(['/', '\\']);
+        let normalized = trimmed.replace('\\', "/");
+        if normalized.is_empty() || !raw.starts_with(&normalized) {
+            continue;
+        }
+        let boundary_ok =
+            raw.len() == normalized.len() || raw.as_bytes().get(normalized.len()) == Some(&b'/');
+        if !boundary_ok {
+            continue;
+        }
+        let better = best.map_or(true, |b| {
+            normalized.len() > b.trim_end_matches(['/', '\\']).replace('\\', "/").len()
+        });
+        if better {
+            best = Some(root);
+        }
+    }
+    let Some(root) = best else {
+        return Err(other(
+            "源路径不在任何已注册的 ingest 来源之下，无法佐证「源文件已删除」；永久删除暂不可用",
+        ));
+    };
+    match std::fs::metadata(root) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(other(
+            "已注册来源根不是目录，无法佐证源文件状态；永久删除暂不可用",
+        )),
+        Err(e) => Err(other(format!(
+            "来源根目录 {root} 当前不可访问（{e}），不将其视为「源文件已删除」"
+        ))),
+    }
+}
+
 pub trait AgentAdapter: Send + Sync {
     fn agent(&self) -> Agent;
 
