@@ -11,7 +11,7 @@ import {
   RuntimeRow,
   deliveryLevelLabel,
 } from "../launcher/LaunchPreviewRows";
-import type { Agent, PreparedLaunch, Workstream } from "../../types";
+import type { Agent, PreparedLaunch, WorkstreamCardData } from "../../types";
 
 /**
  * 全局新建 Session。
@@ -24,6 +24,9 @@ import type { Agent, PreparedLaunch, Workstream } from "../../types";
  *
  * `workstreamId` 是可选预置入参：省略或 `"none"` 即
  * standalone（0 绑定完全合法）。预置后用户仍然可以改。
+ *
+ * 下拉读的是 Workstream 卡片投影：标题相同的 Workstream 靠主路径才能分清，
+ * 而 Session 的实际启动目录恰恰由主路径决定——选项里必须能看到它。
  */
 export type NewSessionModalProps = {
   onClose: () => void;
@@ -33,11 +36,23 @@ export type NewSessionModalProps = {
 
 const STANDALONE = "none";
 
+/** 下拉选项里路径的紧凑形态：末段才是识别信息，整条路径留给 title。 */
+function pathTail(path: string): string {
+  const segs = path.split(/[\\/]/).filter(Boolean);
+  const tail = segs.slice(-2).join("/");
+  return segs.length > 2 ? `…/${tail}` : tail;
+}
+
+function workstreamLabel(w: WorkstreamCardData): string {
+  if (w.primary_path) return `${w.title} · ${pathTail(w.primary_path)}`;
+  return `${w.title} · 无工作路径`;
+}
+
 export default function NewSessionModal({
   onClose,
   workstreamId,
 }: NewSessionModalProps) {
-  const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
+  const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [wsId, setWsId] = useState(
     workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
   );
@@ -51,7 +66,7 @@ export default function NewSessionModal({
 
   useEffect(() => {
     api
-      .listWorkstreams()
+      .listWorkstreamCards()
       .then((ws) =>
         setWorkstreams(ws.filter((w) => w.visibility === "normal"))
       )
@@ -113,19 +128,19 @@ export default function NewSessionModal({
 
   return (
     <>
-      <Modal title="新建 Session" onClose={handleClose}>
+      <Modal title="新建会话" onClose={handleClose}>
         {workstreamId && workstreamId !== STANDALONE && selectedTitle && (
           <div className="settings-row-hint" style={{ marginBottom: 6 }}>
-            已预置 Workstream：{selectedTitle}，可以再改
+            已预置任务：{selectedTitle}，可以再改
           </div>
         )}
         <label className="field">
-          <span>Workstream（可选；也可以之后为 Session 关联）</span>
+          <span>任务（可选；也可以之后为会话关联）</span>
           <select value={wsId} onChange={(e) => handleWsChange(e.target.value)}>
             <option value={STANDALONE}>无（直接开始）</option>
             {workstreams.map((w) => (
               <option key={w.id} value={w.id}>
-                {w.title}
+                {workstreamLabel(w)}
               </option>
             ))}
           </select>

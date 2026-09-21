@@ -92,7 +92,7 @@ export default function SourceDetailModal({
             <div className="row-line">
               <div>
                 <div className="settings-row-label">来源会话</div>
-                <div className="settings-row-hint">产生该修订版本的原始 Session</div>
+                <div className="settings-row-hint">产生该修订版本的原始会话</div>
               </div>
               <span className="muted small">来源会话已被永久删除</span>
             </div>
@@ -101,7 +101,7 @@ export default function SourceDetailModal({
               {detail.session_id && (
                 <div className="row-line">
                   <div>
-                    <div className="settings-row-label">所属 Session</div>
+                    <div className="settings-row-label">所属会话</div>
                     <div className="settings-row-hint">
                       {detail.session_title ?? detail.session_id}
                     </div>
@@ -114,7 +114,7 @@ export default function SourceDetailModal({
                         onNavigateSession(detail.session_id!);
                       }}
                     >
-                      查看 Session
+                      查看会话
                     </button>
                   )}
                 </div>

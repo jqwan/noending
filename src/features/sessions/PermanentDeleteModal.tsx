@@ -12,9 +12,9 @@ import type { PermanentDeletionPreview } from "../../types";
  * 父级只提交 sessionId；这里先 prepare 拿到**冻结**的删除预览（后端持有
  * 全部 path / target，前端永不提交它们），确认后以 job_id 执行。
  *
- * execute 不用 rejection 表达运营失败（源文件删除失败 / stale）——
+ * execute 不用 rejection 表达源文件删除失败——NoEnding 数据仍会清理，
  * 调用正常返回 `{ purged, job, error }`，必须看返回值决定下一步：
- *   • purged            → 成功：提示（含脱敏条数）、关闭、父级刷新。
+ *   • purged            → NoEnding 清理成功；`error` 表示源文件未删除。
  *   • job.state=stale   → 源会话在删除前变化：展示中止说明，可重新准备或取消任务。
  *   • job.state=failed  → 源会话删除失败：可用同一 job_id 重试，或取消任务。
  *
@@ -94,10 +94,13 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
       const r = await api.executeSessionPermanentDelete(jobId);
       if (r.purged) {
         showToast(
-          r.redacted_revisions > 0
-            ? `已永久删除该 Session，并脱敏了 ${fmtCount(r.redacted_revisions)} 条 Context 来源`
-            : "已永久删除该 Session",
+          r.error
+            ? "NoEnding 数据已清理，但原始会话文件未删除"
+            : r.redacted_revisions > 0
+              ? `已永久删除该会话，并脱敏了 ${fmtCount(r.redacted_revisions)} 条 Context 来源`
+              : "已永久删除该会话",
         );
+        if (r.error) console.error("源会话文件未删除：", r.error);
         onDeleted?.();
         onClose();
         return;
@@ -201,20 +204,28 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
                 本次将只删除 NoEnding 中的该会话数据；不会尝试删除任何文件。
               </div>
             </>
-          ) : (
+          ) : preview.source_state === "unverified" ? (
             <>
-              {/* §37 关键警告，逐字保留 */}
               <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
-                此操作会同时删除 Agent 保存的原始会话。
+                无法安全验证 Agent 原始会话文件
               </div>
               <div className="small" style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
-                删除完成后：
+                NoEnding 仍会清理该会话数据；原始会话文件只会尽力删除，失败时保留在原位置。
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
+                将尝试删除 Agent 保存的原始会话
+              </div>
+              <div className="small" style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
+                如果原始文件删除失败，NoEnding 仍会清理该会话数据。删除完成后：
                 <ul className="purge-list">
-                  <li>NoEnding 中该 Session 的事件、绑定和摄入历史都会消失。</li>
-                  <li>Workstream Context 内容不会因此删除。</li>
+                  <li>NoEnding 中该会话的事件、绑定和摄入历史都会消失。</li>
+                  <li>任务 Context 内容不会因此删除。</li>
                   <li>
                     如果你以后从备份恢复原始 Agent 会话，NoEnding
-                    会将它作为一个新的 Session 再次收录。
+                    会将它作为一个新的会话再次收录。
                   </li>
                 </ul>
               </div>
@@ -223,7 +234,12 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
 
           <div className="section-label" style={{ margin: "14px 0 2px" }}>将永久删除</div>
           <ul className="purge-list">
-            {preview.source_targets.map((t) => (
+            {preview.source_state === "unverified" ? (
+              <li>
+                <span className="mono" style={{ overflowWrap: "anywhere" }}>{preview.source_targets[0]?.path}</span>
+                <span className="muted small">（原始文件只会尽力删除）</span>
+              </li>
+            ) : preview.source_targets.map((t) => (
               <li key={`${t.kind}:${t.path}`}>
                 <span className="mono" style={{ overflowWrap: "anywhere" }}>{t.path}</span>
                 <span className="muted small">
@@ -234,9 +250,9 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             {preview.source_state === "confirmed_absent" && (
               <li className="muted">Agent 源文件（已确认不存在，无需删除）</li>
             )}
-            <li>1 个 Session</li>
+            <li>1 个会话</li>
             <li>{fmtCount(preview.event_count)} 个 Events</li>
-            <li>{fmtCount(preview.binding_count)} 个 Workstream 绑定</li>
+            <li>{fmtCount(preview.binding_count)} 个任务绑定</li>
             <li>{fmtCount(preview.sync_run_count)} 个 Sync 运行</li>
             <li>{fmtCount(preview.context_delivery_count)} 个 Context 交付记录</li>
             <li>{fmtCount(preview.context_revision_redaction_count)} 条 Context 来源将被脱敏</li>
@@ -245,8 +261,8 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
 
           <div className="section-label" style={{ margin: "14px 0 2px" }}>保留</div>
           <ul className="purge-list">
-            <li>Workstream、WorkstreamPath、WorkspacePath、Project</li>
-            <li>Workstream Context 内容</li>
+            <li>任务、任务路径、WorkspacePath、项目</li>
+            <li>任务 Context 内容</li>
           </ul>
           <p className="muted small" style={{ margin: "6px 0 0", maxWidth: "72ch" }}>
             部分 Context 的「来源」将显示为「来源会话已永久删除」。
@@ -288,7 +304,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             源会话删除失败
           </div>
           <p style={{ margin: "0 0 6px", maxWidth: "72ch", overflowWrap: "anywhere" }}>
-            源会话删除失败：{errorText}，Session 仍保留在回收站，NoEnding 数据完整保留。
+            源会话删除失败：{errorText}，会话仍保留在回收站，NoEnding 数据完整保留。
           </p>
           <p className="muted small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
             常见原因是文件被占用（例如 Windows 文件共享冲突）或权限不足；处理后可直接重试。

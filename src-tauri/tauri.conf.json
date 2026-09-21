@@ -12,7 +12,10 @@
   "app": {
     "windows": [
       {
-        "title": "NoEnding — Conversations end. Context doesn't.",
+        "title": "NoEnding",
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": { "x": 15, "y": 26 },
+        "hiddenTitle": true,
         "width": 1360,
         "height": 860,
         "minWidth": 960,

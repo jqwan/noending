@@ -1123,7 +1123,7 @@ fn reconcile_a_single_path_reapplies_the_whole_decision_table() {
 }
 
 #[test]
-fn reconcile_sweep_discovers_worktrees_then_gcs_the_one_that_is_really_gone() {
+fn reconcile_sweep_discovers_then_cleans_unreferenced_worktrees() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
     observer.set(
@@ -1154,84 +1154,25 @@ fn reconcile_sweep_discovers_worktrees_then_gcs_the_one_that_is_really_gone() {
         "a discovered worktree becomes a WorkspacePath"
     );
 
-    let family = {
-        let row = db
-            .get_workspace_path(&path_id_of("/work/repo"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.git_state, git_state::DETECTED);
-        paths_of(&db, &row.project_id)
-    };
-    assert_eq!(family.len(), 2, "one Project, both worktrees (§9)");
-    let feature = family
-        .iter()
-        .find(|p| p.id == path_id_of("/work/repo-feature"))
-        .expect("the discovered worktree");
-    assert_eq!(feature.git_state, git_state::DETECTED);
-    assert_eq!(feature.git_kind.as_deref(), Some("unknown"));
-    assert!(!feature.exists, "Git mentioned it; we never stood there");
-    {
-        assert!(
-            db.list_workstream_paths("no-such-workstream")
-                .unwrap()
-                .is_empty(),
-            "§9: discovering a WorkspacePath adds no WorkstreamPath"
-        );
-    }
-
-    // Pass 2: the feature worktree's directory is removed, but Git still LISTS it
-    // (a prunable entry). §10's third condition is "no longer a live worktree", so
-    // the sweep must not delete a path another observation claims is live — that
-    // is an endless delete/re-create churn on every repository that never ran
-    // `git worktree prune`.
-    observer.set("/work/repo-feature", plain("/work/repo-feature", false));
-    let kept = reconcile_workspace_paths(&db, &projection, 500).unwrap();
-    assert_eq!(kept.scanned, 2);
-    assert!(
-        kept.outcome.deleted_paths.is_empty(),
-        "still listed by the family: {:?}",
-        kept.outcome.deleted_paths
+    assert_eq!(
+        report.outcome.deleted_paths,
+        vec![path_id_of("/work/repo"), path_id_of("/work/repo-feature")]
     );
-    {
-        assert!(db.get_workspace_path(&feature.id).unwrap().is_some());
-    }
-
-    // Pass 3: the family no longer mentions it. Absent + unreferenced + not a live
-    // worktree ⇒ §10 removes the path, and the Project survives because it still
-    // owns the main worktree.
-    observer.set(
-        "/work/repo",
-        repo(
-            "/work/repo",
-            "/work/repo/.git",
-            GitWorktreeKind::Main,
-            &["/work/repo"],
-        ),
-    );
-    let swept = reconcile_workspace_paths(&db, &projection, 500).unwrap();
-    assert_eq!(swept.scanned, 2);
-    assert_eq!(swept.outcome.deleted_paths, vec![feature.id.clone()]);
-    assert!(
-        swept.outcome.deleted_projects.is_empty(),
-        "the family still owns /work/repo, so its Project survives"
-    );
-    {
-        assert!(db.get_workspace_path(&feature.id).unwrap().is_none());
-        assert!(db
-            .get_workspace_path(&path_id_of("/work/repo"))
-            .unwrap()
-            .is_some());
-        assert_eq!(db.list_projects().unwrap().len(), 1);
-        registry_is_consistent(&db).expect("consistent after the sweep");
-    }
+    assert_eq!(report.outcome.deleted_projects.len(), 1);
+    assert!(db
+        .get_workspace_path(&path_id_of("/work/repo"))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get_workspace_path(&path_id_of("/work/repo-feature"))
+        .unwrap()
+        .is_none());
+    assert!(db.list_projects().unwrap().is_empty());
+    registry_is_consistent(&db).expect("consistent after the sweep");
 }
 
 #[test]
-fn reconcile_sweep_keeps_every_path_it_can_still_see() {
-    // §10: a sweep is not a cleanup. Two registered directories that nothing
-    // references survive every reconcile for as long as they exist on disk — only
-    // a path the sweep personally observed ABSENT is even a candidate, so a capped
-    // or partial pass can never mistake "not scanned yet" for "gone".
+fn reconcile_sweep_removes_unreferenced_paths_even_when_present() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
     observer.set("/aaa/first", plain("/aaa/first", true));
@@ -1246,14 +1187,16 @@ fn reconcile_sweep_keeps_every_path_it_can_still_see() {
 
     let report = reconcile_workspace_paths(&db, &projection, 500).unwrap();
     assert_eq!(report.scanned, 2);
-    assert!(report.outcome.deleted_paths.is_empty());
-    assert!(report.outcome.deleted_projects.is_empty());
-    {
-        assert!(db.get_workspace_path(&ids.0).unwrap().is_some());
-        assert!(db.get_workspace_path(&ids.1).unwrap().is_some());
-        assert_eq!(db.list_projects().unwrap().len(), 2);
-        registry_is_consistent(&db).expect("consistent");
-    }
+    let mut deleted = report.outcome.deleted_paths.clone();
+    deleted.sort();
+    let mut expected = vec![ids.0.clone(), ids.1.clone()];
+    expected.sort();
+    assert_eq!(deleted, expected);
+    assert_eq!(report.outcome.deleted_projects.len(), 2);
+    assert!(db.get_workspace_path(&ids.0).unwrap().is_none());
+    assert!(db.get_workspace_path(&ids.1).unwrap().is_none());
+    assert!(db.list_projects().unwrap().is_empty());
+    registry_is_consistent(&db).expect("consistent");
 }
 
 // --------------------------------------------------------------------------
@@ -1816,7 +1759,7 @@ fn last_path_gc_retires_project() {
 }
 
 #[test]
-fn git_worktree_registration_prevents_premature_gc() {
+fn git_worktree_registration_does_not_keep_unreferenced_paths_alive() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
     observer.set(
@@ -1835,26 +1778,17 @@ fn git_worktree_registration_prevents_premature_gc() {
     // 第一轮：feature 经由 `git worktree list` 被收养进注册表（目录尚不存在）。
     reconcile_workspace_paths(&db, &projection, 500).unwrap();
 
-    // 定点刷新两个家族路径：feature 仍被家族列表提及 → 即使目录缺失也不 GC。
-    let report = reconcile_workspace_path_ids(
-        &db,
-        &projection,
-        &[path_id_of("/work/repo"), path_id_of("/work/repo-feature")],
-        &|_, _| {},
-    )
-    .unwrap();
-    assert_eq!(report.scanned, 2);
-    assert!(
-        report.outcome.deleted_paths.is_empty(),
-        "a prunable worktree listing keeps the path alive, got {:?}",
-        report.outcome.deleted_paths
-    );
-    {
-        assert!(db
-            .get_workspace_path(&path_id_of("/work/repo-feature"))
-            .unwrap()
-            .is_some());
-    }
+    // Git worktree 发现不会替代 Session / Workstream 引用；两个路径都没有引用，
+    // 即使 feature 仍被 Git 家族列出，也会在本轮清理。
+    assert!(db
+        .get_workspace_path(&path_id_of("/work/repo"))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get_workspace_path(&path_id_of("/work/repo-feature"))
+        .unwrap()
+        .is_none());
+    assert_eq!(db.list_projects().unwrap().len(), 0);
 }
 
 #[test]

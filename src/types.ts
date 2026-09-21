@@ -68,6 +68,60 @@ export interface WorkstreamPathRow extends WorkstreamPath {
   bound_session_count: number;
 }
 
+// ---------------- Path picker (workspace::probe, read-only) ----------------
+
+/** Why the string is not a WorkspacePath right now (`PathProbe.status`）。 */
+export type ProbeStatus = "ok" | "unresolvable" | "reserved" | "home";
+
+/** The Project a path would land in. `known: false` = 提交后会新建这个名字。 */
+export interface ProjectHint {
+  id: string | null;
+  name: string | null;
+  known: boolean;
+}
+
+/** `probe_workspace_path` — advisory read-only preview of what `ensure_path`
+ *  would decide. The attacher's decision at create time stays the authority. */
+export interface PathProbe {
+  raw: string;
+  status: ProbeStatus;
+  canonical_path: string | null;
+  exists: boolean;
+  /** "detected" | "none" | "unavailable" — fresh evidence, not the stored row. */
+  git_state: "detected" | "none" | "unavailable" | null;
+  git_kind: string | null;
+  project: ProjectHint | null;
+}
+
+/** `list_recent_workspace_paths` — picker candidates. `known: false` rows come
+ *  from Session cwd history and are NOT WorkspacePaths yet (方案 §1.7）。 */
+export interface RecentWorkspacePath {
+  path: string;
+  known: boolean;
+  exists: boolean;
+  project_name: string | null;
+  git_state: WorkspaceGitState | null;
+  git_kind: string | null;
+  last_used_at: string | null;
+}
+
+/** One raw string of a create_workstream submission, and what became of it. */
+export interface CreatedPathOutcome {
+  raw: string;
+  accepted: boolean;
+  canonical_path: string | null;
+  position: number | null;
+  project_name: string | null;
+  reason: string | null;
+}
+
+/** `create_workstream` — the Workstream plus the per-path outcome. Rejected
+ *  paths are reported, never guessed into paths (方案 §42.3）。 */
+export interface CreateWorkstreamReport {
+  workstream: Workstream;
+  paths: CreatedPathOutcome[];
+}
+
 /** One entry of a Workstream's ordered working-path list; position 0 is primary. */
 export interface WorkstreamPath {
   id: string;
@@ -147,6 +201,8 @@ export interface WorkstreamCardData {
   latest_session: LatestSessionInfo | null;
   /** How many working paths the Workstream has. `0` is a normal state. */
   path_count: number;
+  /** The position-0 path's canonical spelling; null = 没有工作路径。 */
+  primary_path: string | null;
 }
 
 export interface Session {
@@ -196,8 +252,8 @@ export interface PermanentDeletionPreview {
   agent: Agent;
   agent_session_id: string;
   source_targets: SourceDeletionTarget[];
-  /** prepare 对源文件的结论：verified_present | confirmed_absent（加固 §2）。 */
-  source_state: "verified_present" | "confirmed_absent";
+  /** prepare 对源文件的结论：verified_present | confirmed_absent | unverified。 */
+  source_state: "verified_present" | "confirmed_absent" | "unverified";
   event_count: number;
   binding_count: number;
   sync_run_count: number;
@@ -469,6 +525,8 @@ export interface SessionDetail {
   cursor: number;
   processed_cursor: number;
   classification: string;
+  /** Read-only status of `session.raw_path` when the detail was loaded. */
+  raw_path_status: "present" | "missing" | "unavailable";
   workspace_path: SessionWorkspacePath | null;
 }
 

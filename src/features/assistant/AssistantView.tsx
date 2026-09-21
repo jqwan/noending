@@ -53,7 +53,7 @@ function runtimeSummary(st: AgentRuntimeSettings | null): string {
 const SUGGESTIONS = [
   "最近 NoEnding 项目主要解决了什么？",
   "Context Integrity 还有哪些 Open Questions？",
-  "找一下讨论 Windows launcher 的 Session。",
+  "找一下讨论 Windows launcher 的会话。",
   "把这个决定加入 Context。",
 ];
 
@@ -128,13 +128,13 @@ export default function AssistantView({ scope, navigate }: {
       case "workspace": return "Workspace";
       case "project": {
         const p = projects.find((x) => x.id === s.id);
-        return p ? `Project · ${p.name}` : `Project ${s.id.slice(0, 8)}`;
+        return p ? `项目 · ${p.name}` : `项目 ${s.id.slice(0, 8)}`;
       }
       case "workstream": {
         const t = workstreams.find((w) => w.id === s.id)?.title;
-        return t ? `Workstream · ${t}` : `Workstream ${s.id.slice(0, 8)}`;
+        return t ? `任务 · ${t}` : `任务 ${s.id.slice(0, 8)}`;
       }
-      case "session": return `Session ${s.id.slice(0, 8)}`;
+      case "session": return `会话 ${s.id.slice(0, 8)}`;
     }
   };
 
@@ -207,20 +207,20 @@ export default function AssistantView({ scope, navigate }: {
           onChange={(e) => setCurrentScope(scopeFromValue(e.target.value))}>
           <option value="workspace">整个工作区</option>
           {projects.map((p) => (
-            <option key={p.id} value={`project:${p.id}`}>Project · {p.name}</option>
+            <option key={p.id} value={`project:${p.id}`}>项目 · {p.name}</option>
           ))}
           {workstreams.map((w) => (
-            <option key={w.id} value={`workstream:${w.id}`}>Workstream · {w.title}</option>
+              <option key={w.id} value={`workstream:${w.id}`}>任务 · {w.title}</option>
           ))}
           {currentScope.type === "workstream" &&
             !workstreams.some((w) => w.id === currentScope.id) && (
               <option value={`workstream:${currentScope.id}`}>
-                Workstream {currentScope.id.slice(0, 8)}
+                任务 {currentScope.id.slice(0, 8)}
               </option>
             )}
           {currentScope.type === "session" && (
             <option value={`session:${currentScope.id}`}>
-              Session {currentScope.id.slice(0, 8)}
+              会话 {currentScope.id.slice(0, 8)}
             </option>
           )}
         </select>
@@ -231,7 +231,7 @@ export default function AssistantView({ scope, navigate }: {
           <div className="assistant-empty">
             <div className="spark">✦</div>
             <h2>你现在在推进什么？</h2>
-            <p className="hint">可以问 Workstreams、Sessions 与 Context。</p>
+          <p className="hint">可以问任务、会话与 Context。</p>
             <div className="suggest-list">
               {SUGGESTIONS.map((s) => (
                 <button key={s} className="suggest-chip" onClick={() => send(s)}>{s}</button>
@@ -258,7 +258,7 @@ export default function AssistantView({ scope, navigate }: {
       </div>
 
       <div className="row" style={{ marginTop: 10 }}>
-        <input type="text" placeholder="问 NoEnding…（问上下文、启动 Session、查摄入历史）" value={input}
+        <input type="text" placeholder="问 NoEnding…（问上下文、启动会话、查摄入历史）" value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()} />
         <button className="btn primary" onClick={() => send()} disabled={busy}>发送</button>
@@ -334,8 +334,8 @@ function ActionCard({ json, onExecute, navigate }: {
   try { action = JSON.parse(json); } catch { /* ignore */ }
   if (!action) return null;
   const label = action.action === "launch_new_session"
-    ? `启动新建的 Session · ${CHOICE_LABELS[action.agent ?? ""] ?? action.agent ?? "?"}`
-    : `继续 Session · ${action.session_id?.slice(0, 8) ?? "?"}`;
+    ? `启动新建的会话 · ${CHOICE_LABELS[action.agent ?? ""] ?? action.agent ?? "?"}`
+    : `继续会话 · ${action.session_id?.slice(0, 8) ?? "?"}`;
   return (
     <div className="card" style={{ margin: 0 }}>
       <div className="row between">
@@ -343,7 +343,7 @@ function ActionCard({ json, onExecute, navigate }: {
           <span className="badge dark">建议动作</span>
           <strong className="small">{label}</strong>
           {action.workstream_ids.length > 0 && (
-            <span className="muted small">{action.workstream_ids.length} 个 Workstream</span>
+            <span className="muted small">{action.workstream_ids.length} 个任务</span>
           )}
         </div>
         <div className="row">

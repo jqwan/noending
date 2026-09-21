@@ -77,8 +77,9 @@ fn missing_dir(tag: &str, name: &str) -> String {
 }
 
 fn workstream(database: &Db, title: &str) -> String {
-    create_workstream(database, &LexicalPaths, title, "", None)
+    create_workstream(database, &LexicalPaths, title, "", &[])
         .unwrap()
+        .workstream
         .id
 }
 

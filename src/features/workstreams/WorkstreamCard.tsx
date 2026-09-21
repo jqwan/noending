@@ -40,8 +40,8 @@ export function cardSearchFields(
 
 export function searchFieldHint(intelligenceEnabled: boolean): string {
   return intelligenceEnabled
-    ? "搜索 Workstream…（标题、描述、Project、Context 摘要）"
-    : "搜索 Workstream…（标题、描述、Project）";
+    ? "搜索任务…（标题、描述、项目、Context 摘要）"
+    : "搜索任务…（标题、描述、项目）";
 }
 
 /**
@@ -69,6 +69,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
 
   const { intelligenceEnabled } = useBaseExperience();
   const body = cardSummaryLine(card, intelligenceEnabled);
+  const archived = card.visibility === "archived";
 
   return (
     <>
@@ -84,7 +85,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
             {/* visibility=archived 就是回收站（方案 §1.13）：它和 lifecycle 正交，
                 所以这里单独一个徽标，而不是把 lifecycle 改成第三种值。 */}
             {card.visibility === "archived" && (
-              <span className="badge warn" title="在回收站里：工作路径、Session 绑定与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
+              <span className="badge warn" title="在回收站里：工作路径、会话绑定与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
             )}
             {/* Project 是主工作路径的派生投影（方案 §42.3-M19），不是用户挑的组织层：
                 没有路径就没有 Project，此时不显示任何占位。
@@ -93,7 +94,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
             {card.project_name && (
               <span
                 className="ws-card-project"
-                title={`由主工作路径派生的 Project（只读）：${card.project_name}`}
+                title={`由主工作路径派生的项目（只读）：${card.project_name}`}
                 style={{ maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               >
                 {card.project_name}
@@ -111,10 +112,10 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
         <footer className="ws-card-meta">
           <span>
             {card.session_count === 0
-              ? "还没有 Session"
-              : `最近活动 ${timeAgo(card.last_activity_at)} · ${card.session_count} 个 Session`}
+              ? "还没有会话"
+              : `最近活动 ${timeAgo(card.last_activity_at)} · ${card.session_count} 个会话`}
           </span>
-          <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
+          {!archived && <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
             {/* 与 Home 同一个判断：卡片不自己宣称「没有 Agent」。`defaultAgent`
                 由 useWorkstreamCards 异步解析（返回形状按 §8.1.1 冻结，没有
                 "解析完成"这一位），所以在解析期间 disabled + 「未检测到」的
@@ -122,23 +123,23 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
                 自己判定——它同时是唯一的启动路径。 */}
             <button
               className="btn small ws-btn"
-              title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建 Session` : "新建 Session"}
+              title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}
               onClick={() => setNewSessionOpen(true)}
             >
               {defaultAgent ? <AgentIcon agent={defaultAgent} /> : null}
-              新建 Session
+              新建会话
             </button>
             {card.latest_session && (
               <button
                 className={`btn small ws-btn ${mode === "compact" ? "resume-primary" : ""}`}
-                title={`继续最近的 ${AGENT_LABELS[card.latest_session.agent]} Session`}
+                title={`继续最近的 ${AGENT_LABELS[card.latest_session.agent]} 会话`}
                 onClick={() => setResumeOpen(true)}
               >
                 <AgentIcon agent={card.latest_session.agent} />
                 继续
               </button>
             )}
-          </div>
+          </div>}
         </footer>
       </article>
 

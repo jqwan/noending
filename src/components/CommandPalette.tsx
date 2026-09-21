@@ -17,13 +17,13 @@ interface PaletteItem {
  *  cmd-assistant 只在 Context Intelligence 开启时出现（§11.4）。 */
 const FIXED_COMMANDS: PaletteItem[] = [
   { key: "cmd-home", kind: "命令", label: "前往首页", hint: "继续最近的工作", route: { view: "home" } },
-  { key: "cmd-workstreams", kind: "命令", label: "前往 Workstreams", route: { view: "workstreams" } },
-  { key: "cmd-sessions", kind: "命令", label: "前往 Sessions", route: { view: "sessions" } },
+  { key: "cmd-workstreams", kind: "命令", label: "前往任务", route: { view: "workstreams" } },
+  { key: "cmd-sessions", kind: "命令", label: "前往会话", route: { view: "sessions" } },
   { key: "cmd-assistant", kind: "命令", label: "前往 Assistant", route: { view: "assistant" } },
-  { key: "cmd-projects", kind: "命令", label: "前往 Projects", route: { view: "projects" } },
+  { key: "cmd-projects", kind: "命令", label: "前往项目", route: { view: "projects" } },
   { key: "cmd-settings", kind: "命令", label: "前往设置", route: { view: "settings", section: "general" } },
-  { key: "cmd-new-ws", kind: "命令", label: "新建 Workstream", route: { view: "workstreams", action: "new" }, hint: "创建" },
-  { key: "cmd-new-session", kind: "命令", label: "新建 Session", route: { view: "sessions", action: "new" }, hint: "默认 Agent" },
+  { key: "cmd-new-ws", kind: "命令", label: "新建任务", route: { view: "workstreams", action: "new" }, hint: "创建" },
+  { key: "cmd-new-session", kind: "命令", label: "新建会话", route: { view: "sessions", action: "new" }, hint: "默认 Agent" },
 ];
 
 export default function CommandPalette({ onClose, navigate }: {
@@ -61,16 +61,16 @@ export default function CommandPalette({ onClose, navigate }: {
       if (!ql || c.label.toLowerCase().includes(ql)) out.push(c);
     }
     if (!ql || "workstreams".includes(ql)) {
-      out.push({ key: "nav-workstreams", kind: "页面", label: "Workstreams", hint: "看板", route: { view: "workstreams" } });
+      out.push({ key: "nav-workstreams", kind: "页面", label: "任务", hint: "看板", route: { view: "workstreams" } });
     }
     for (const w of workstreams) {
       if (!ql || w.title.toLowerCase().includes(ql)) {
-        out.push({ key: `w-${w.id}`, kind: "Workstream", label: w.title, hint: "打开", route: { view: "workstream", workstreamId: w.id } });
+        out.push({ key: `w-${w.id}`, kind: "任务", label: w.title, hint: "打开", route: { view: "workstream", workstreamId: w.id } });
       }
     }
     for (const s of sessions) {
       if (!ql || (s.title ?? "").toLowerCase().includes(ql) || (s.cwd ?? "").toLowerCase().includes(ql)) {
-        out.push({ key: `s-${s.id}`, kind: "Session", label: s.title ?? s.agent_session_id, hint: s.cwd ?? undefined, route: { view: "session", sessionId: s.id } });
+        out.push({ key: `s-${s.id}`, kind: "会话", label: s.title ?? s.agent_session_id, hint: s.cwd ?? undefined, route: { view: "session", sessionId: s.id } });
       }
     }
     for (const h of hits) {
@@ -103,7 +103,7 @@ export default function CommandPalette({ onClose, navigate }: {
         <input
           ref={inputRef}
           type="text"
-          placeholder="搜索 Workstream、Session、Context…"
+          placeholder="搜索任务、会话、Context…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {

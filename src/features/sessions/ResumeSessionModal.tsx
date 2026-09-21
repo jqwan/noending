@@ -93,7 +93,7 @@ export default function ResumeSessionModal({
 
   if (!detail) {
     return (
-      <Modal title="继续 Session" onClose={handleClose}>
+      <Modal title="继续会话" onClose={handleClose}>
         <div style={{ padding: "20px 0", color: "var(--text-muted)" }}>
           {preparing ? "准备中…" : "加载中…"}
         </div>
@@ -108,19 +108,19 @@ export default function ResumeSessionModal({
     : bindings.map(([b]) => b.workstream_id);
   const wsDisplay =
     effectiveWsIds.length === 0
-      ? "未关联 Workstream"
+      ? "未关联任务"
       : bindings
           .filter(([b]) => effectiveWsIds.includes(b.workstream_id))
           .map(([, title]) => title)
           .filter(Boolean)
-          .join(" · ") || `${effectiveWsIds.length} 个关联 Workstream`;
+          .join(" · ") || `${effectiveWsIds.length} 个关联任务`;
 
   return (
     <>
-      <Modal title="继续 Session" onClose={handleClose}>
+      <Modal title="继续会话" onClose={handleClose}>
         <AgentRow
           agent={session.agent}
-          hint="这个 Session 原本使用的 Agent"
+          hint="这个会话原本使用的 Agent"
           first
         />
         <CwdRow
@@ -130,7 +130,7 @@ export default function ResumeSessionModal({
         />
 
         <PreviewRow
-          label="Workstream"
+          label="任务"
           hint={wsDisplay}
         >
           <span className="badge">

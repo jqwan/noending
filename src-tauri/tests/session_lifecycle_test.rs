@@ -139,7 +139,9 @@ fn count(db: &Db, sql: &str, session_id: &str) -> i64 {
 }
 
 fn workstream(db: &Db, title: &str) -> noending::domain::Workstream {
-    noending::workspace::workstream::create_workstream(db, &attacher(), title, "", None).unwrap()
+    noending::workspace::workstream::create_workstream(db, &attacher(), title, "", &[])
+        .unwrap()
+        .workstream
 }
 
 fn bind(db: &Db, session_id: &str, ws_id: &str) {
@@ -710,7 +712,7 @@ fn permanent_delete_preserves_workspace_path_and_project() {
 }
 
 #[test]
-fn source_delete_failure_preserves_noending_session() {
+fn source_delete_failure_still_purges_noending_session() {
     let db = open_db("failure-preserves");
     let adapter = CodexAdapter;
     let s = fixture_session(&db, Agent::Codex, "failure-preserves");
@@ -737,33 +739,27 @@ fn source_delete_failure_preserves_noending_session() {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    assert!(
+        result.purged,
+        "NoEnding data must purge even when source deletion fails"
+    );
     #[cfg(unix)]
     {
-        assert!(!result.purged, "a failed source deletion must not purge");
-        let job = result.job.expect("job carried back");
-        assert_eq!(job.state, "failed");
-        assert!(job
-            .last_error
+        assert!(result
+            .error
             .as_deref()
             .unwrap_or("")
             .contains("删除源会话文件失败"));
-        // Session still in Trash with ALL data intact (方案 §22).
-        assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
+        assert!(db.get_session(&s.id).unwrap().is_none());
         assert_eq!(
             count(
                 &db,
                 "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
                 &s.id
             ),
-            2
+            0
         );
         assert!(Path::new(&s.raw_path).exists());
-    }
-    #[cfg(not(unix))]
-    {
-        // Non-unix CI cannot force the failure this way; at minimum the call
-        // must be one of the two sanctioned outcomes.
-        assert!(result.purged || result.job.is_some());
     }
 }
 
@@ -1225,7 +1221,7 @@ fn prepare_rejects_indeterminable_source_not_treated_as_absent() {
     let s = fixture_session(&db, Agent::Codex, "absent-indeterminable");
     lifecycle::trash_session(&db, &s.id).unwrap();
 
-    // 无遍历权限的目录：lstat 无法执行 → 无法确定状态，绝不是 NotFound。
+    // 无遍历权限的目录：lstat 无法执行 → 源文件不可验证，但不阻止清理。
     let dir = Path::new(&s.raw_path).parent().unwrap();
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
     let prepare = lifecycle::prepare_session_permanent_delete(&db, &s.id);
@@ -1236,21 +1232,17 @@ fn prepare_rejects_indeterminable_source_not_treated_as_absent() {
         return;
     }
 
-    let err = prepare.unwrap_err();
-    assert!(
-        err.to_string().contains("无法确认源会话文件状态"),
-        "must refuse as indeterminable, got: {err}"
-    );
-    // §3: Session 留在回收站，且不产生任何 deletion job。
-    assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
-    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
-        .unwrap()
-        .is_none());
+    let preview = prepare.expect("indeterminable source must still prepare a NoEnding purge");
+    assert_eq!(preview.source_state, "unverified");
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+    assert!(result.purged);
+    assert!(result.error.is_some());
+    assert!(db.get_session(&s.id).unwrap().is_none());
     assert!(Path::new(&s.raw_path).exists());
 }
 
 #[test]
-fn confirmed_absent_source_reappearing_at_execute_is_stale() {
+fn confirmed_absent_source_reappearing_at_execute_still_purges() {
     let db = open_db("absent-reappeared");
     let adapter = CodexAdapter;
     let s = fixture_session(&db, Agent::Codex, "absent-reappeared");
@@ -1267,23 +1259,19 @@ fn confirmed_absent_source_reappearing_at_execute_is_stale() {
     write_agent_fixture(Agent::Codex, Path::new(&s.raw_path), &s.agent_session_id);
 
     let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
-    assert!(!result.purged, "a reappeared source must block the purge");
-    let job = result.job.expect("job carried back");
-    assert_eq!(job.state, "stale");
+    assert!(
+        result.purged,
+        "a reappeared source must not block the NoEnding purge"
+    );
+    assert!(result.error.is_some());
     assert!(
         Path::new(&s.raw_path).exists(),
         "reappeared file is never deleted"
     );
-    // 会话原封不动留在回收站，用户重新准备或取消。
-    assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
-            &s.id
-        ),
-        2
-    );
+    assert!(db.get_session(&s.id).unwrap().is_none());
+    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -1362,10 +1350,10 @@ fn search_filters_stale_trashed_rows() {
     );
 }
 
-// ---- Review P1-2: confirmed-absent must be corroborated by a live source --
+// ---- Confirmed-absent source files do not require a registered source root --
 
 #[test]
-fn confirmed_absent_requires_accessible_source_root() {
+fn confirmed_absent_does_not_require_registered_source_root() {
     let db = open_db("absent-root");
     let dir = unique_dir("absent-root-src");
     let sub = dir.join("sub");
@@ -1386,34 +1374,20 @@ fn confirmed_absent_requires_accessible_source_root() {
     let (s, _) = ensure_session_row_with(&db, &discovered, &attacher()).unwrap();
     lifecycle::trash_session(&db, &s.id).unwrap();
 
-    // Step 1 — 根可访问 + 文件 NotFound → 佐证成立，ConfirmedAbsent 可准备。
+    // A missing source is still visible in the preview and can be purged.
     register_source(&db, Agent::Codex, &sub);
     std::fs::remove_file(&file).unwrap();
     let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
     assert_eq!(preview.source_state, "confirmed_absent");
     lifecycle::cancel_session_permanent_delete(&db, &preview.job_id).unwrap();
 
-    // Step 2 — 路径不被任何已注册来源包含：无法佐证，拒绝。
+    // The path need not belong to a registered source either.
     db.write()
         .execute("DELETE FROM ingest_sources", [])
         .unwrap();
-    let err = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap_err();
-    assert!(
-        err.to_string().contains("不在任何已注册"),
-        "unexpected: {err}"
-    );
-    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
-        .unwrap()
-        .is_none());
-
-    // Step 3 — 匹配的来源根整个不可访问（移动盘离线、目录被删）：拒绝，
-    // 绝不把「来源不可用」解释成「文件已删除」。
-    register_source(&db, Agent::Codex, &sub);
-    std::fs::remove_dir_all(&sub).unwrap();
-    let err = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap_err();
-    assert!(err.to_string().contains("不可访问"), "unexpected: {err}");
-    assert!(lifecycle::get_session_deletion_job(&db, &s.id)
-        .unwrap()
-        .is_none());
-    assert!(db.get_session(&s.id).unwrap().unwrap().is_trashed());
+    let preview = lifecycle::prepare_session_permanent_delete(&db, &s.id).unwrap();
+    assert_eq!(preview.source_state, "confirmed_absent");
+    let result = lifecycle::execute_session_permanent_delete(&db, &preview.job_id).unwrap();
+    assert!(result.purged);
+    assert!(db.get_session(&s.id).unwrap().is_none());
 }

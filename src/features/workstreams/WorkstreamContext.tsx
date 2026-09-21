@@ -271,7 +271,7 @@ export default function WorkstreamContext({ ctx, focusedItemId, onChanged, onNav
         <button className="btn small ghost" onClick={() => { setNewKind("todo"); setAdding(true); }}>添加条目</button>
       </div>
       {extended.length === 0 && (
-        <div className="l1-none">暂无扩展条目。Sync 会自动从相关 Session 提取 todo、finding 等条目。</div>
+        <div className="l1-none">暂无扩展条目。Sync 会自动从相关会话提取 todo、finding 等条目。</div>
       )}
       {extShown.map(([item, rev]) => (
         <div className="ext-row ctx-entry" key={item.id} data-context-item-id={item.id}>

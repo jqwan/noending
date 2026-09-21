@@ -36,9 +36,10 @@ const EVENT_PAGE_LIMIT = 500;
  * 界面上两者合并为一行「工作目录」：主值是规范化路径，原始 cwd 只在写法
  * 不同时以小字副行出现——两套拼写只在真的不同时才值得同时可见。
  */
-export default function SessionDetailView({ sessionId, navigate }: {
+export default function SessionDetailView({ sessionId, navigate, goBack }: {
   sessionId: string;
   navigate: (r: Route) => void;
+  goBack: (fallback?: Route) => void;
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [failed, setFailed] = useState(false);
@@ -78,7 +79,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
   if (failed && !detail) {
     return (
       <div className="main narrow">
-        <PageHeader back="Sessions" onBack={() => navigate({ view: "sessions" })} title="读取 Session 失败">
+        <PageHeader title="读取会话失败">
           <p className="muted small">
             这个 Session 可能已经被 Agent 自己清理。本地数据没有被修改，可以重试。
           </p>
@@ -127,7 +128,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
   const trashed = session.trashed_at !== null;
 
   /**
-   * 移入回收站（§36）：全局隐藏，不删任何数据。成功后回到 Sessions 列表——
+   * 移入回收站（§36）：全局隐藏，不删任何数据。成功后返回上一个界面——
    * 这个页面展示的执行事实仍然有效，但入口动作（继续 / 刷新）已经不适用。
    */
   const doTrash = async () => {
@@ -137,7 +138,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
       await api.trashSession(sessionId);
       showToast("已移入回收站");
       setConfirmTrash(false);
-      navigate({ view: "sessions" });
+      goBack({ view: "sessions" });
     } catch (e) {
       console.error(e);
       showToast(`移入回收站失败：${String(e)}`);
@@ -179,8 +180,6 @@ export default function SessionDetailView({ sessionId, navigate }: {
   return (
     <div className="main narrow">
       <PageHeader
-        back="Sessions"
-        onBack={() => navigate({ view: "sessions" })}
         title={title}
         actions={trashed ? (
           // 回收站中的会话：摄入已停止、后端拒绝 Resume——两个入口都如实呈现为不可用。
@@ -190,6 +189,9 @@ export default function SessionDetailView({ sessionId, navigate }: {
           </button>
         ) : (
           <>
+            <button className="btn ghost" onClick={() => setConfirmTrash(true)} disabled={trashBusy}>
+              移入回收站…
+            </button>
             <button className="btn ghost" onClick={doSync} disabled={syncing}>刷新</button>
             <button className="btn primary" onClick={() => setResumeOpen(true)}>继续</button>
           </>
@@ -247,13 +249,13 @@ export default function SessionDetailView({ sessionId, navigate }: {
             </span>
           ) : <span className="muted">未知</span>}
         </Field>
-        <Field label="Project">
+        <Field label="项目">
           {workspacePath ? (
             derivedProjectName ? (
               <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                 <button
                   className="link"
-                  title={`打开 Project：${derivedProjectName}`}
+                  title={`打开项目：${derivedProjectName}`}
                   onClick={() => navigate({ view: "project", projectId: workspacePath.project_id })}
                 >
                   {derivedProjectName}
@@ -261,7 +263,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
                 <span className="muted small">由下面的工作目录自动派生，只读</span>
               </span>
             ) : (
-              <span className="muted small">这条工作路径所属的 Project 记录暂时读不到。</span>
+                  <span className="muted small">这条工作路径所属的项目记录暂时读不到。</span>
             )
           ) : session.project_id ? (
             <span className="muted small" style={{ wordBreak: "break-word" }}>
@@ -272,8 +274,8 @@ export default function SessionDetailView({ sessionId, navigate }: {
           ) : (
             <span className="muted small">
               {cwd === ""
-                ? "没有记录过工作目录，所以没有 Project。"
-                : "工作路径还没有登记，所以暂时没有 Project。"}
+                ? "没有记录过工作目录，所以没有项目。"
+                : "工作路径还没有登记，所以暂时没有项目。"}
             </span>
           )}
         </Field>
@@ -303,40 +305,55 @@ export default function SessionDetailView({ sessionId, navigate }: {
             </>
           ) : cwd ? (
             <>
-              <CopyValue value={cwd} title={`${cwd} · Agent 原始记录里的 cwd，是这条 Session 自己的事实`} />
+              <CopyValue value={cwd} title={`${cwd} · Agent 原始记录里的 cwd，是这条会话自己的事实`} />
               <div className="muted small" style={{ marginTop: 4 }}>
                 这个目录还没有被登记成工作路径 —— NoEnding 会在下一次目录扫描后自动补上，不需要手工操作。
               </div>
             </>
           ) : (
-            <span className="muted">{NO_CWD}（该 Session 的原始记录里没有目录信息）</span>
+            <span className="muted">{NO_CWD}（该会话的原始记录里没有目录信息）</span>
           )}
         </Field>
-        <Field label="Session ID">
+        <Field label="原始会话文件">
+          <>
+            <CopyValue
+              value={session.raw_path}
+              mono
+              title={`${session.raw_path} · Agent 保存的原始会话文件`}
+            />
+            {detail.raw_path_status === "missing" && (
+              <div className="session-source-warning">找不到原始会话文件</div>
+            )}
+            {detail.raw_path_status === "unavailable" && (
+              <div className="session-source-warning">无法确认原始会话文件状态</div>
+            )}
+          </>
+        </Field>
+        <Field label="会话 ID">
           <CopyValue value={session.id} mono />
         </Field>
-        <Field label="Agent 侧 Session ID">
+        <Field label="Agent 侧会话 ID">
           <CopyValue value={session.agent_session_id} mono
-            title="Agent 自己记录里的 Session ID，用于回到原始转录文件" />
+            title="Agent 自己记录里的会话 ID，用于回到原始转录文件" />
         </Field>
       </div>
 
       <div className="row between" style={{ marginTop: 30, marginBottom: 8 }}>
-        <div className="section-label" style={{ margin: 0 }}>关联 Workstream</div>
+        <div className="section-label" style={{ margin: 0 }}>关联任务</div>
         <button className="btn small ghost" onClick={() => setBindingOpen(true)}>编辑</button>
       </div>
       {bindings.length === 0 && (
         <div className="l1-none">
-          还没有关联任何 Workstream。点「编辑」可以把它关联到一个或多个 Workstream；
+          还没有关联任何任务。点「编辑」可以把它关联到一个或多个任务；
           不关联也可以直接「继续」这个 Session。
         </div>
       )}
       {ordered.map(([b, t]) => (
         <div className="rail-row" key={b.workstream_id}
           onClick={() => navigate({ view: "workstream", workstreamId: b.workstream_id })}
-          title={t ?? "这个 Workstream 记录已不存在"}>
+          title={t ?? "这个任务记录已不存在"}>
           <div className="rail-main">
-            <div className="rail-title">{t ?? "Workstream 已不可用"}</div>
+            <div className="rail-title">{t ?? "任务已不可用"}</div>
             {t === null && <div className="rail-sub mono">{b.workstream_id}</div>}
           </div>
           <span className={`badge ${b.role === "primary" ? "dark" : ""}`}>{bindingRoleLabel(b.role)}</span>
@@ -363,19 +380,6 @@ export default function SessionDetailView({ sessionId, navigate }: {
       )}
 
       {/* 危险操作（§36）：只在正常状态下出现；回收站里的动作在顶部横幅。 */}
-      {!trashed && (
-        <section className="rail-section" style={{ marginTop: 34 }}>
-          <div className="section-label">危险操作</div>
-          <p className="muted small" style={{ margin: "4px 0 10px", maxWidth: "72ch" }}>
-            移入回收站 = 在 NoEnding 中全局隐藏该 Session：不再出现在列表、搜索与继续入口里，
-            摄入也会停止。Agent 原始会话不会被删除，随时可以从 Sessions 页的「回收站」恢复。
-          </p>
-          <button className="btn small" disabled={trashBusy} onClick={() => setConfirmTrash(true)}>
-            移入回收站…
-          </button>
-        </section>
-      )}
-
       {confirmTrash && (
         <Modal title="移入回收站" onClose={() => { if (!trashBusy) setConfirmTrash(false); }}>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
@@ -385,7 +389,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
               Workstream 成员关系（在「编辑关联」弹窗里），这里是全局回收站。 */}
           <div className="card hairline" style={{ marginBottom: 12 }}>
             <p style={{ margin: "0 0 6px" }}>
-              <b>从 Workstream 移除</b> = 只修改这个 Workstream 的成员关系。
+              <b>从任务移除</b> = 只修改这个任务的成员关系。
             </p>
             <p style={{ margin: 0 }}>
               <b>移入回收站</b> = 在 NoEnding 中全局隐藏该 Session。Agent 原始会话不会被删除。
@@ -404,7 +408,7 @@ export default function SessionDetailView({ sessionId, navigate }: {
         <PermanentDeleteModal
           sessionId={sessionId}
           onClose={() => { setPurgeOpen(false); refresh(); }}
-          onDeleted={() => { setPurgeOpen(false); navigate({ view: "sessions" }); }}
+          onDeleted={() => { setPurgeOpen(false); goBack({ view: "sessions" }); }}
         />
       )}
 
@@ -536,15 +540,15 @@ function BindingModal({ sessionId, bindings, onClose, onChanged }: {
   const titleOf = (id: string) => workstreams.find((w) => w.id === id)?.title ?? null;
 
   return (
-    <Modal title="编辑关联 Workstream" onClose={onClose}>
+    <Modal title="编辑关联任务" onClose={onClose}>
       {/* v0.2：Session 归类只作用在 Workstream 上（方案 §22「不让用户操作 Project」）。
           Project 是工作目录的派生结果，在这里出现只会让人以为它可以被指派。 */}
       <div className="muted small" style={{ marginBottom: 10 }}>
-        这里只操作 Workstream。Project 由这条 Session 自己的工作目录派生，不需要、也不能在这里选。
+        这里只操作任务。Project 由这条 Session 自己的工作目录派生，不需要、也不能在这里选。
       </div>
       {rows.length === 0 && (
         <div className="muted small" style={{ marginBottom: 10 }}>
-          还没有关联任何 Workstream。用下面的「添加 Workstream」选择。
+          还没有关联任何任务。用下面的「添加任务」选择。
         </div>
       )}
       {rows.map((r) => {
@@ -554,8 +558,8 @@ function BindingModal({ sessionId, bindings, onClose, onChanged }: {
             style={{ borderTop: "1px solid var(--bg-panel)", padding: "9px 0", gap: 12 }}>
             <div style={{ fontSize: 13.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {name ?? (
-                <span title="这个 Workstream 记录已不存在，仍保留其 ID 以便追溯">
-                  <span className="muted">Workstream 已不可用</span>
+                <span title="这个任务记录已不存在，仍保留其 ID 以便追溯">
+                  <span className="muted">任务已不可用</span>
                   <span className="mono" style={{ marginLeft: 6 }}>{r.workstream_id}</span>
                 </span>
               )}
@@ -577,7 +581,7 @@ function BindingModal({ sessionId, bindings, onClose, onChanged }: {
 
       <div className="row between"
         style={{ borderTop: "1px solid var(--bg-panel)", padding: "9px 0", gap: 12 }}>
-        <div style={{ fontSize: 13.5 }}>添加 Workstream</div>
+        <div style={{ fontSize: 13.5 }}>添加任务</div>
         <div className="row" style={{ flex: "none" }}>
           <select style={{ width: 200 }} value={addId} onChange={(e) => setAddId(e.target.value)}>
             <option value="none">选择…</option>

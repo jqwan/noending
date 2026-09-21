@@ -69,7 +69,7 @@ export default function ContextUpdatesSection({ cards, summaries, navigate }: Pr
               key={card.id}
               className="context-update-row"
               onClick={handleReview}
-              title="前往 Workstream 审查上下文"
+              title="前往任务审查上下文"
             >
               <div className="context-update-main">
                 <span className="context-update-title">{card.title}</span>

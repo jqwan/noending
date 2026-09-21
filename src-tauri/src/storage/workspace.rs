@@ -201,9 +201,8 @@ pub fn reassign_workspace_path_project_conn(
     Ok(())
 }
 
-/// §10 — a WorkspacePath is a physical fact worth keeping only while something
-/// references it. A missing directory or a lost `.git` sets flags instead; this
-/// never runs then.
+/// §10 — a WorkspacePath is kept only while something references it. Directory
+/// existence and Git state are observations, not retention conditions.
 pub fn workspace_path_is_gcable(conn: &Connection, path_id: &str) -> Result<bool> {
     let refs: i64 = conn.query_row(
         "SELECT (SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?1)
@@ -257,14 +256,37 @@ impl Db {
 
     pub fn find_git_identity_by_common_dir(&self, common_dir: &str) -> Result<Option<GitIdentity>> {
         let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT * FROM git_identities WHERE common_dir = ?1",
-                params![common_dir],
-                row_git_identity,
-            )
-            .optional()?)
+        find_git_identity_by_common_dir_conn(&conn, common_dir)
     }
+}
+
+/// Connection-level twin of [`Db::find_git_identity_by_common_dir`], for
+/// read-only callers that already hold the reader lock. Same two-step lookup as
+/// [`ensure_git_identity_conn`] minus the write: the exact spelling first, then
+/// the domain's location relation (方案 §44.6), so a Windows case variant of one
+/// repository is still recognized as the family it is.
+pub fn find_git_identity_by_common_dir_conn(
+    conn: &Connection,
+    common_dir: &str,
+) -> Result<Option<GitIdentity>> {
+    if let Some(row) = conn
+        .query_row(
+            "SELECT * FROM git_identities WHERE common_dir = ?1",
+            params![common_dir],
+            row_git_identity,
+        )
+        .optional()?
+    {
+        return Ok(Some(row));
+    }
+    let all: Vec<GitIdentity> = {
+        let mut stmt = conn.prepare("SELECT * FROM git_identities ORDER BY id")?;
+        let rows = stmt.query_map([], row_git_identity)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    Ok(all
+        .into_iter()
+        .find(|row| crate::workspace::identity::same_location(&row.common_dir, common_dir)))
 }
 
 /// `git_identities.id` is app-assigned, NOT derived from `common_dir`: a

@@ -27,10 +27,9 @@
 //!   exactly one Project, a Project owns at least one.
 //! * Deleting the last WorkspacePath deletes the Project — in FK order
 //!   `projects`, then `unindex("project", id)` after commit.
-//! * A `WorkspacePath` is only physically GC'd with 0 Session references, 0
-//!   WorkstreamPath references and no longer a discovered worktree of any live
-//!   Project (§10). A missing directory or a lost `.git` sets `exists` /
-//!   `git_state` and changes nothing else.
+//! * A `WorkspacePath` is physically GC'd as soon as it has 0 Session
+//!   references and 0 WorkstreamPath references. Filesystem existence and Git
+//!   state do not keep an unreferenced path alive.
 //! * `name_customized` wins over every automatic rename: after a merge, after
 //!   worktree discovery, after a Home move.
 //! * Reconcile must not hold the DB mutex across a `git` call (§42.3-M7), must
@@ -570,7 +569,7 @@ fn git_family(
 /// split §8.3 exists to prevent, so a relative answer is resolved against the
 /// path we asked about. An already-absolute common dir is untouched (the resolver
 /// is responsible for resolving git output; 方案 §42.3-M8 rule 6).
-fn resolve_common_dir(observed_canonical: &str, common_dir: &str) -> String {
+pub(crate) fn resolve_common_dir(observed_canonical: &str, common_dir: &str) -> String {
     let trimmed = common_dir.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -836,26 +835,21 @@ pub fn reassign_workspace_path_conn(
 // §10 GC
 // ---------------------------------------------------------------------------
 
-/// §10 — physically remove WorkspacePaths that nothing references any more.
+/// §10 — physically remove candidate WorkspacePaths with no references.
 ///
-/// `gone_path_ids` must only contain paths the CALLER has just observed to be
-/// absent (a failed `stat`, or a Git family that no longer lists the worktree).
-/// Existence is what makes a row GC-eligible, never a lost `.git` and never the
-/// passage of time: a directory that is temporarily unmounted, offline or simply
-/// not scanned is a fact worth keeping. Each candidate must additionally pass
-/// [`workspace_path_is_gcable`] — 0 Session references AND 0 WorkstreamPath
-/// references — so a path a user's Workstream still lists survives its own
-/// deletion from disk.
+/// The candidate list is scoped by the caller's scan. Filesystem existence and
+/// Git state do not affect this decision; only Session and WorkstreamPath
+/// references do.
 ///
 /// Deleting the last path of a Project deletes the Project (§1.2), which is why
 /// this returns the Project ids it retired: their FTS rows go after the commit.
-pub fn gc_gone_workspace_paths_conn(
+pub fn gc_unreferenced_workspace_paths_conn(
     conn: &Connection,
-    gone_path_ids: &[String],
+    path_ids: &[String],
 ) -> Result<GcOutcome> {
     let mut outcome = GcOutcome::default();
     let mut affected: Vec<String> = Vec::new();
-    for path_id in gone_path_ids {
+    for path_id in path_ids {
         if get_workspace_path_conn(conn, path_id)?.is_none() {
             continue; // already gone; a replay must not fail
         }
@@ -877,12 +871,25 @@ pub fn gc_gone_workspace_paths_conn(
 }
 
 /// The `Db`-scoped GC.
-pub fn gc_gone_workspace_paths(db: &Db, gone_path_ids: &[String]) -> Result<GcOutcome> {
-    let outcome = db.tx(|tx| gc_gone_workspace_paths_conn(tx, gone_path_ids))?;
+pub fn gc_unreferenced_workspace_paths(db: &Db, path_ids: &[String]) -> Result<GcOutcome> {
+    let outcome = db.tx(|tx| gc_unreferenced_workspace_paths_conn(tx, path_ids))?;
     for id in &outcome.deleted_projects {
         db.unindex("project", id);
     }
     Ok(outcome)
+}
+
+/// Compatibility wrapper for callers that already provide a disappeared-path
+/// candidate list. The candidate name no longer changes the GC decision.
+pub fn gc_gone_workspace_paths_conn(
+    conn: &Connection,
+    gone_path_ids: &[String],
+) -> Result<GcOutcome> {
+    gc_unreferenced_workspace_paths_conn(conn, gone_path_ids)
+}
+
+pub fn gc_gone_workspace_paths(db: &Db, gone_path_ids: &[String]) -> Result<GcOutcome> {
+    gc_unreferenced_workspace_paths(db, gone_path_ids)
 }
 
 // ---------------------------------------------------------------------------
@@ -990,27 +997,12 @@ fn reconcile_workspace_path_targets(
     progress: &dyn Fn(usize, usize),
 ) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
-    let mut gone: Vec<String> = Vec::new();
-    // Every path some Git family still listed as one of its work trees this round.
-    // §10's third condition is not "we could not stand in it" but "no live Project
-    // worktree any more", and `git worktree list` keeps prunable entries listed
-    // until `git worktree prune` runs: without this the sweep would delete such a
-    // path and re-create it from the same listing on the next pass, forever.
-    let mut live_worktrees: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut candidate_ids: Vec<String> = targets.iter().map(|(id, _)| id.clone()).collect();
 
     for (path_id, canonical) in &targets {
         // No lock is held here — this is where `git` runs.
         let observation = projection.observer().observe(canonical);
-        if let GitDetection::Detected { worktrees, .. } = &observation.git {
-            live_worktrees.insert(path_id.clone());
-            for worktree in worktrees {
-                if let Some(sibling) = normalize_path(worktree) {
-                    live_worktrees.insert(path_identity(&sibling));
-                }
-            }
-        }
         if !observation.exists {
-            gone.push(path_id.clone());
             report.missing_paths += 1;
         }
         // One short transaction, and the index work in the same lock step: the
@@ -1038,6 +1030,7 @@ fn reconcile_workspace_path_targets(
                 }
                 for discovered in &outcome.discovered {
                     push_unique(&mut report.discovered_paths, &discovered.id);
+                    push_unique(&mut candidate_ids, &discovered.id);
                 }
             }
             Err(message) => report.failed.push((path_id.clone(), message)),
@@ -1046,11 +1039,7 @@ fn reconcile_workspace_path_targets(
         progress(report.scanned, targets.len());
     }
 
-    let gone: Vec<String> = gone
-        .into_iter()
-        .filter(|id| !live_worktrees.contains(id))
-        .collect();
-    let gc = gc_gone_workspace_paths(db, &gone)?;
+    let gc = gc_unreferenced_workspace_paths(db, &candidate_ids)?;
     report.outcome = gc;
     Ok(report)
 }

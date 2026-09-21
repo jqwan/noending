@@ -416,15 +416,15 @@ pub const SOURCE_DELETION_PLAN_VERSION: u32 = 2;
 
 /// What prepare concluded about the raw source (Hardening §2/§4):
 /// - `VerifiedPresent`: the file existed and passed the full §16 proof;
-/// - `ConfirmedAbsent`: the file was definitively gone (a bare
-///   `io::ErrorKind::NotFound` — never a permission or I/O failure, which
-///   reject prepare instead, §3). Nothing remains to delete; execute only
-///   re-confirms the absence before the purge runs.
+/// - `ConfirmedAbsent`: the file was definitively gone;
+/// - `Unverified`: the source could not be safely validated. The caller may
+///   still purge NoEnding data, but execute must not touch the source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceDeletionState {
     VerifiedPresent,
     ConfirmedAbsent,
+    Unverified,
 }
 
 impl SourceDeletionState {
@@ -432,6 +432,7 @@ impl SourceDeletionState {
         match self {
             SourceDeletionState::VerifiedPresent => "verified_present",
             SourceDeletionState::ConfirmedAbsent => "confirmed_absent",
+            SourceDeletionState::Unverified => "unverified",
         }
     }
 }
@@ -461,14 +462,13 @@ pub struct SourceDeletionPlan {
     pub agent_session_id: String,
     pub source: SourceDeletionState,
     /// The recorded source path(s); exactly one here. The identity fields are
-    /// zeroed exactly when `source` is `ConfirmedAbsent` — there are no
-    /// provable bytes, but the path is kept so execute can re-confirm the
-    /// absence at the same location.
+    /// zeroed when the source is `ConfirmedAbsent` or `Unverified`; the path
+    /// is still kept for the preview.
     pub targets: Vec<SourceDeletionTarget>,
 }
 
-/// Outcome of the adapter-owned source deletion (方案 §24). Only these two
-/// allow the NoEnding purge to proceed.
+/// Outcome of the adapter-owned source deletion (方案 §24). The lifecycle
+/// layer records other adapter errors while still purging NoEnding data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceDeletionOutcome {
     /// The file existed, validated exactly, and was removed.
@@ -476,61 +476,6 @@ pub enum SourceDeletionOutcome {
     /// The file was already gone (crash between remove and purge, or a
     /// concurrent deletion). Treated as success — the purge may proceed.
     AlreadyAbsent,
-}
-
-/// Review P1-2 — corroborate a `ConfirmedAbsent` conclusion before a purge
-/// may run. A bare `NotFound` on the session file only proves THAT path no
-/// longer resolves; it cannot distinguish "the user deleted the file" from
-/// "the whole source tree is offline" (unmounted drive, network share down,
-/// removed parent directory). The registered ingest sources provide exactly
-/// that distinction, matching the product model of removable / custom
-/// sources:
-///
-/// - the most specific registered root containing `raw_path` is accessible
-///   and a directory → corroborated: the file is truly gone at a live
-///   source;
-/// - no registered root contains the path, or that root cannot be
-///   accessed → NOT corroborated: refuse the permanent deletion. The
-///   Session stays in Trash; purging now could destroy NoEnding data whose
-///   Agent source would silently come back when the drive returns.
-///
-/// Separator-insensitive prefix matching (both sides normalized to `/`)
-/// keeps this correct across macOS and Windows spellings.
-pub fn corroborate_source_absent(raw_path: &str, source_roots: &[String]) -> Result<()> {
-    let raw = raw_path.replace('\\', "/");
-    let mut best: Option<&String> = None;
-    for root in source_roots {
-        let trimmed = root.trim_end_matches(['/', '\\']);
-        let normalized = trimmed.replace('\\', "/");
-        if normalized.is_empty() || !raw.starts_with(&normalized) {
-            continue;
-        }
-        let boundary_ok =
-            raw.len() == normalized.len() || raw.as_bytes().get(normalized.len()) == Some(&b'/');
-        if !boundary_ok {
-            continue;
-        }
-        let better = best.map_or(true, |b| {
-            normalized.len() > b.trim_end_matches(['/', '\\']).replace('\\', "/").len()
-        });
-        if better {
-            best = Some(root);
-        }
-    }
-    let Some(root) = best else {
-        return Err(other(
-            "源路径不在任何已注册的 ingest 来源之下，无法佐证「源文件已删除」；永久删除暂不可用",
-        ));
-    };
-    match std::fs::metadata(root) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(other(
-            "已注册来源根不是目录，无法佐证源文件状态；永久删除暂不可用",
-        )),
-        Err(e) => Err(other(format!(
-            "来源根目录 {root} 当前不可访问（{e}），不将其视为「源文件已删除」"
-        ))),
-    }
 }
 
 pub trait AgentAdapter: Send + Sync {
@@ -699,11 +644,8 @@ pub fn title_from_text(text: &str) -> Option<String> {
 /// construction: a file whose parsed id matches is a file discovery would
 /// identify — §16.5).
 ///
-/// Hardening §2/§3: only a bare `io::ErrorKind::NotFound` on the raw source
-/// produces a `ConfirmedAbsent` plan (empty targets — the purge may run).
-/// Every other lookup or read failure (permission, I/O, mount, sharing
-/// violation, unknown) REJECTS prepare — an unmounted drive or a flaky
-/// network path must never be interpreted as "the user deleted the source".
+/// A bare `io::ErrorKind::NotFound` produces a `ConfirmedAbsent` plan. Other
+/// lookup or read failures are handled as an unverified best-effort deletion.
 pub(crate) fn prepare_single_file_source_deletion(
     session: &Session,
     expected_agent: Agent,
@@ -715,8 +657,8 @@ pub(crate) fn prepare_single_file_source_deletion(
     }
     let path = PathBuf::from(&session.raw_path);
 
-    // Hardening §2/§3: definitively gone → confirmed-absent plan; anything
-    // else that cannot be determined → refuse, the session stays in Trash.
+    // Definitively gone → confirmed-absent plan; other errors are handled as
+    // an unverified best-effort deletion by the lifecycle layer.
     let link_meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -798,10 +740,9 @@ pub(crate) fn prepare_single_file_source_deletion(
 /// - exact match → remove and report [`SourceDeletionOutcome::Deleted`].
 ///
 /// Hardening §2: a `ConfirmedAbsent` plan has nothing to delete. Execute
-/// only re-confirms the absence — still absent → AlreadyAbsent (the purge
-/// proceeds); indeterminable → failure (never purge on doubt); a file that
-/// APPEARED since prepare → stale (its bytes were never confirmed, so they
-/// are never removed — the user re-prepares).
+/// only re-confirms the absence — still absent → AlreadyAbsent; an
+/// indeterminable or reappeared file returns an error and is never removed.
+/// The lifecycle layer may still purge NoEnding data after that error.
 pub(crate) fn execute_single_file_source_deletion(
     plan: &SourceDeletionPlan,
     expected_agent: Agent,
@@ -816,11 +757,13 @@ pub(crate) fn execute_single_file_source_deletion(
     if plan.targets.len() != 1 {
         return Err(other("源删除计划与适配器能力不一致，请重新准备"));
     }
+    if plan.source == SourceDeletionState::Unverified {
+        return Err(other("源会话文件未能安全验证，跳过源文件删除"));
+    }
     if plan.source == SourceDeletionState::ConfirmedAbsent {
         // Re-confirm the absence at the SAME path (Hardening §2): still gone
-        // → AlreadyAbsent and the purge proceeds; indeterminable → failure,
-        // never purge on doubt; reappeared → stale, because bytes that were
-        // never confirmed are never removed.
+        // → AlreadyAbsent; indeterminable → failure; reappeared → stale,
+        // because bytes that were never confirmed are never removed.
         let path = PathBuf::from(&plan.targets[0].path);
         return match std::fs::symlink_metadata(&path) {
             Ok(_) => Err(AppError::SourceDeletionStale(

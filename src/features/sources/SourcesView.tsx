@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
+import WorkspacePathField from "../../components/WorkspacePathField";
 import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
 
 /**
@@ -31,17 +32,17 @@ export default function SourcesView() {
     const unlisten = Promise.all([
       listen("sync-started", () => {
         setSyncing(true);
-        setProgress("正在扫描 Session 来源…");
+        setProgress("正在扫描会话来源…");
       }),
       listen("sync-progress", (e) => {
         const p = e.payload as { agent?: string; title?: string };
-        setProgress(`正在处理：${p.title || "（未命名 Session）"}`);
+        setProgress(`正在处理：${p.title || "（未命名会话）"}`);
       }),
       listen("sync-completed", (e) => {
         const p = e.payload as { discovered?: number; events?: number };
         setSyncing(false);
         setProgress("");
-        setNotice(`摄入完成：发现 ${p.discovered ?? 0} 个 Session，摄入 ${p.events ?? 0} 条新事件。`);
+        setNotice(`摄入完成：发现 ${p.discovered ?? 0} 个会话，摄入 ${p.events ?? 0} 条新事件。`);
         reload();
       }),
       listen("sync-failed", (e) => {
@@ -95,7 +96,7 @@ export default function SourcesView() {
 
   const reingest = async (src: IngestSource) => {
     if (!window.confirm(
-      `重新摄入「${src.path}」？\n\n将从头重扫该来源的全部 Session 文件：已摄入的事件及其引用保持不变，仅真正新增或变化的内容会被追加（绑定、Context 条目与审计历史保留）。`
+      `重新摄入「${src.path}」？\n\n将从头重扫该来源的全部会话文件：已摄入的事件及其引用保持不变，仅真正新增或变化的内容会被追加（绑定、Context 条目与审计历史保留）。`
     )) {
       return;
     }
@@ -137,23 +138,24 @@ export default function SourcesView() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="row" style={{ alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
           <label className="field" style={{ marginBottom: 0 }}>
-            <span>Agent（决定解析哪种 Session 格式）</span>
+            <span>Agent（决定解析哪种会话格式）</span>
             <select value={agent} onChange={(e) => setAgent(e.target.value as Agent)} style={{ width: 170 }}>
               {Object.entries(AGENT_LABELS).map(([k, v]) => (
                 <option key={k} value={k}>{v}</option>
               ))}
             </select>
           </label>
-          <label className="field" style={{ flex: 1, minWidth: 260, marginBottom: 0 }}>
-            <span>目录路径（支持 ~，递归扫描 .jsonl Session 文件）</span>
-            <input
-              type="text"
+          <div className="field" style={{ flex: 1, minWidth: 260, marginBottom: 0 }}>
+            <span>目录路径（支持 ~，递归扫描 .jsonl 会话文件）</span>
+            <WorkspacePathField
               value={path}
+              onChange={setPath}
+              onSubmit={add}
+              enableProbe={false}
+              enableRecent={false}
               placeholder="/path/to/another/codex-home 或 ~/somewhere/sessions"
-              onChange={(e) => setPath(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && add()}
             />
-          </label>
+          </div>
           <button className="btn primary" disabled={busy || !path.trim()} onClick={add}>
             {busy ? "添加中…" : "添加来源"}
           </button>
@@ -164,7 +166,7 @@ export default function SourcesView() {
       {error && <div className="badge warn" style={{ marginBottom: 10 }}>{error}</div>}
 
       <div className="card">
-        {sources.length === 0 && <div className="muted small">暂无 Session 来源。</div>}
+        {sources.length === 0 && <div className="muted small">暂无会话来源。</div>}
         {sources.map((src) => (
           <div key={src.id} className="row" style={{ padding: "8px 4px", borderBottom: "1px solid var(--border-subtle)", alignItems: "center", gap: 8 }}>
             <input
@@ -207,7 +209,7 @@ export default function SourcesView() {
       </div>
 
       <p className="muted small" style={{ marginTop: 10 }}>
-        「同步」按增量抓取新的 Session 内容；「重新摄入」从头重扫该来源的全部 Session 文件（事件 ID 与引用保持不变，用于修复游标异常或漏抓内容，已有的 Workstream 关联与 Context 保留）。
+        「同步」按增量抓取新的会话内容；「重新摄入」从头重扫该来源的全部会话文件（事件 ID 与引用保持不变，用于修复游标异常或漏抓内容，已有的任务关联与 Context 保留）。
       </p>
     </div>
   );

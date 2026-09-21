@@ -109,8 +109,8 @@ export function AgentRow({
 /** §13 每一层的中文名。「用户选择的目录」而非「explicit」——词表 §2 说中文。 */
 const CWD_SOURCE_LABELS: Record<CwdSource, string> = {
   explicit: "你指定的目录",
-  session_cwd: "Session 上次的目录",
-  workstream_path: "Workstream 的工作路径",
+  session_cwd: "会话上次的目录",
+  workstream_path: "任务的工作路径",
   default_workspace: "NoEnding 默认工作区",
   unresolved: "未解析",
 };
@@ -143,10 +143,10 @@ export function CwdRow({
   const hint = pending
     ? "准备中…"
     : resolution
-      ? `启动来源：${cwdSourceLabel(resolution)}；它不决定 Workstream 身份`
+      ? `启动来源：${cwdSourceLabel(resolution)}；它不决定任务身份`
       : cwd
-        ? "Session 的启动目录；它不决定 Workstream 身份"
-        : "未解析出目录，Session 从 Agent 自身的默认位置开始";
+        ? "会话的启动目录；它不决定任务身份"
+        : "未解析出目录，会话从 Agent 自身的默认位置开始";
   return (
     <>
       <PreviewRow label="工作目录" hint={hint}>

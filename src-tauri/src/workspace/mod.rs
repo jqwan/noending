@@ -42,6 +42,7 @@
 
 pub mod home;
 pub mod identity;
+pub mod probe;
 pub mod project;
 pub mod resolver;
 pub mod session;

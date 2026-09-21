@@ -77,7 +77,7 @@ describe("Projects Board", () => {
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("My App");
 
-    fireEvent.change(screen.getByPlaceholderText(/搜索 Projects/), {
+    fireEvent.change(screen.getByPlaceholderText(/搜索项目/), {
       target: { value: "noending" },
     });
 
@@ -104,7 +104,7 @@ describe("Projects Board", () => {
 
     // Review P2-1 — 第三个 worktree 不在展示用的 representative_paths 里，
     // 但路径搜索覆盖全部 search_paths。
-    fireEvent.change(screen.getByPlaceholderText(/搜索 Projects/), {
+    fireEvent.change(screen.getByPlaceholderText(/搜索项目/), {
       target: { value: "worktrees/noending-ui" },
     });
 
@@ -126,6 +126,22 @@ describe("Projects Board", () => {
 
     expect(screen.getByText("Broken")).toBeTruthy();
     expect(screen.queryByText("Healthy")).toBeNull();
+  });
+
+  it("kind_filter_separates_git_projects_from_normal_directories", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      card({ id: "p-1", name: "Git Project", has_git_identity: true }),
+      card({ id: "p-2", name: "Normal Directory", has_git_identity: false }),
+    ]);
+    render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("Normal Directory");
+
+    fireEvent.change(screen.getByLabelText("项目类型"), {
+      target: { value: "git" },
+    });
+
+    expect(screen.getByText("Git Project")).toBeTruthy();
+    expect(screen.queryByText("Normal Directory")).toBeNull();
   });
 
   it("project_refresh_keeps_existing_cards_while_running", async () => {

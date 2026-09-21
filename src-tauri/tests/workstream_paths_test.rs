@@ -128,8 +128,9 @@ fn fixture() -> Fixture {
         ("/repo/docs", "p1"),
         ("/repo/backend", "p1"),
     ]);
-    let workstream =
-        create_workstream(&db, &attacher, "Three paths", "", Some("/repo/main")).unwrap();
+    let workstream = create_workstream(&db, &attacher, "Three paths", "", &["/repo/main".into()])
+        .unwrap()
+        .workstream;
     add_workstream_path(&db, &attacher, &workstream.id, "/repo/docs").unwrap();
     add_workstream_path(&db, &attacher, &workstream.id, "/repo/backend").unwrap();
     Fixture {
@@ -209,7 +210,9 @@ fn search_parent(db: &Db, workstream_id: &str) -> Option<String> {
 fn empty_path_list_is_valid() {
     let (_d, db) = temp_db();
     let attacher = ScriptedAttacher::default();
-    let w = create_workstream(&db, &attacher, "No path", "d", None).unwrap();
+    let w = create_workstream(&db, &attacher, "No path", "d", &[])
+        .unwrap()
+        .workstream;
 
     assert_eq!(w.lifecycle, workstream_lifecycle::ACTIVE);
     assert_eq!(w.visibility, workstream_visibility::NORMAL);
@@ -232,7 +235,9 @@ fn first_path_becomes_primary_automatically() {
     db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1")]);
 
-    let w = create_workstream(&db, &attacher, "Ship it", "  ", Some("/repo/main")).unwrap();
+    let w = create_workstream(&db, &attacher, "Ship it", "  ", &["/repo/main".into()])
+        .unwrap()
+        .workstream;
 
     // The string is forwarded untouched — this layer owns no second normalizer.
     assert_eq!(attacher.paths_tried(), vec!["/repo/main".to_string()]);
@@ -267,14 +272,17 @@ fn unresolvable_initial_path_leaves_a_zero_path_workstream() {
         &attacher,
         "Home default",
         "",
-        Some("~/.noending/workspace"),
+        &["~/.noending/workspace".into()],
     )
-    .unwrap();
+    .unwrap()
+    .workstream;
     assert!(db.get_workstream(&w.id).unwrap().is_some());
     assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
 
     // A blank is not a path: it never reaches the attacher at all.
-    let w2 = create_workstream(&db, &attacher, "No path", "", Some("   ")).unwrap();
+    let w2 = create_workstream(&db, &attacher, "No path", "", &["   ".into()])
+        .unwrap()
+        .workstream;
     assert!(db.list_workstream_paths(&w2.id).unwrap().is_empty());
     assert_eq!(
         attacher.paths_tried(),
@@ -289,7 +297,8 @@ fn create_rolls_back_when_the_attach_fails() {
     let mut attacher = ScriptedAttacher::default();
     attacher.failing.insert("/repo/hard".into());
 
-    let err = create_workstream(&db, &attacher, "Half built", "", Some("/repo/hard")).unwrap_err();
+    let err =
+        create_workstream(&db, &attacher, "Half built", "", &["/repo/hard".into()]).unwrap_err();
     assert!(err.to_string().contains("模拟"), "{err}");
     assert!(db.list_workstreams(None).unwrap().is_empty());
     assert!(db.list_workspace_paths().unwrap().is_empty());
@@ -306,7 +315,7 @@ fn create_rolls_back_when_the_attach_fails() {
 #[test]
 fn create_requires_a_title() {
     let (_d, db) = temp_db();
-    assert!(create_workstream(&db, &ScriptedAttacher::default(), "  ", "", None).is_err());
+    assert!(create_workstream(&db, &ScriptedAttacher::default(), "  ", "", &[]).is_err());
     assert!(db.list_workstreams(None).unwrap().is_empty());
 }
 
@@ -318,7 +327,9 @@ fn append_is_secondary() {
     let (_d, db) = temp_db();
     db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1"), ("/repo/docs", "p1")]);
-    let w = create_workstream(&db, &attacher, "Two paths", "", Some("/repo/main")).unwrap();
+    let w = create_workstream(&db, &attacher, "Two paths", "", &["/repo/main".into()])
+        .unwrap()
+        .workstream;
     let primary_before = ordered_path_ids(&db, &w.id)[0].clone();
 
     let second = add_workstream_path(&db, &attacher, &w.id, "/repo/docs").unwrap();
@@ -343,7 +354,9 @@ fn appending_to_an_empty_list_makes_it_primary() {
     let (_d, db) = temp_db();
     db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/late", "p1")]);
-    let w = create_workstream(&db, &attacher, "Late path", "", None).unwrap();
+    let w = create_workstream(&db, &attacher, "Late path", "", &[])
+        .unwrap()
+        .workstream;
 
     let row = add_workstream_path(&db, &attacher, &w.id, "/repo/late").unwrap();
     assert_eq!(row.position, 0);
@@ -469,7 +482,9 @@ fn duplicate_path_is_idempotent() {
         ("/repo/./main", "p1"),
         ("/repo/a/../main", "p1"),
     ]);
-    let w = create_workstream(&db, &attacher, "Dup", "", Some("/repo/main")).unwrap();
+    let w = create_workstream(&db, &attacher, "Dup", "", &["/repo/main".into()])
+        .unwrap()
+        .workstream;
     let first = db.list_workstream_paths(&w.id).unwrap().remove(0);
 
     for spelling in [
@@ -546,7 +561,9 @@ fn adding_a_path_imports_no_sessions() {
     let (_d, db) = temp_db();
     db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1")]);
-    let w = create_workstream(&db, &attacher, "No import", "", None).unwrap();
+    let w = create_workstream(&db, &attacher, "No import", "", &[])
+        .unwrap()
+        .workstream;
 
     // A Session already working in that directory, bound to nothing.
     let mut s = session(&db, "in-dir");
@@ -569,7 +586,9 @@ fn adding_an_unresolvable_path_is_an_error_not_a_noop() {
     let (_d, db) = temp_db();
     let mut attacher = ScriptedAttacher::default();
     attacher.unresolvable.insert("relative/dir".into());
-    let w = create_workstream(&db, &attacher, "Strict", "", None).unwrap();
+    let w = create_workstream(&db, &attacher, "Strict", "", &[])
+        .unwrap()
+        .workstream;
 
     let err = add_workstream_path(&db, &attacher, &w.id, "relative/dir").unwrap_err();
     assert!(err.to_string().contains("工作路径"), "{err}");
@@ -657,7 +676,9 @@ fn removing_a_path_writes_no_binding_tombstone() {
 #[test]
 fn a_path_row_of_another_workstream_is_not_accepted() {
     let f = fixture();
-    let b = create_workstream(&f.db, &f.attacher, "Other", "", Some("/repo/main")).unwrap();
+    let b = create_workstream(&f.db, &f.attacher, "Other", "", &["/repo/main".into()])
+        .unwrap()
+        .workstream;
     let of_b = f.db.list_workstream_paths(&b.id).unwrap().remove(0);
 
     let err = remove_workstream_path(&f.db, &f.workstream.id, &of_b.id).unwrap_err();
@@ -822,4 +843,156 @@ fn path_views_carry_the_facts_the_detail_page_needs() {
     assert_eq!(views[0].bound_session_count, 0);
     assert_eq!(views[2].canonical_path, canonical("/repo/backend"));
     assert_eq!(views[0].path.source, workstream_path_source::USER);
+}
+
+// ------------------------------------------------- multi-path creation (report)
+
+/// §11 — several initial paths land in submission order, and the report names
+/// each one's canonical spelling, position and derived Project.
+#[test]
+fn initial_paths_keep_submission_order_and_report_each_entry() {
+    let (_dir, db) = temp_db();
+    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    let attacher = ScriptedAttacher::for_projects(&[
+        ("/repo/main", "p1"),
+        ("/repo/docs", "p1"),
+        ("/repo/backend", "p1"),
+    ]);
+
+    let report = create_workstream(
+        &db,
+        &attacher,
+        "Multi",
+        "",
+        &[
+            "/repo/main".into(),
+            "/repo/docs".into(),
+            "/repo/backend".into(),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(report.workstream.title, "Multi");
+    assert!(report.paths.iter().all(|p| p.accepted), "all accepted");
+    assert_eq!(report.paths[0].project_name.as_deref(), Some("P1"));
+    let landed: Vec<(String, i64)> = report
+        .paths
+        .iter()
+        .map(|p| (p.canonical_path.clone().unwrap(), p.position.unwrap()))
+        .collect();
+    assert_eq!(
+        landed,
+        vec![
+            (canonical("/repo/main"), 0),
+            (canonical("/repo/docs"), 1),
+            (canonical("/repo/backend"), 2),
+        ]
+    );
+    assert_eq!(list(&db, &report.workstream.id).len(), 3);
+}
+
+/// The primary seat is "first ACCEPTED", not "first submitted": a refused
+/// string must not leave a hole in the ordered list (§1.5: positions are
+/// contiguous by construction).
+#[test]
+fn first_accepted_path_wins_the_primary_seat_even_after_rejections() {
+    let (_dir, db) = temp_db();
+    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    let mut attacher = ScriptedAttacher::default();
+    attacher.unresolvable.insert("/repo/ghost".into());
+    attacher.projects.insert("/repo/docs".into(), "p1".into());
+
+    let report = create_workstream(
+        &db,
+        &attacher,
+        "Compact",
+        "",
+        &["/repo/ghost".into(), "/repo/docs".into()],
+    )
+    .unwrap();
+
+    let rejected = &report.paths[0];
+    assert!(!rejected.accepted);
+    assert!(rejected.position.is_none());
+    assert!(
+        rejected
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("工作路径"),
+        "{:?}",
+        rejected.reason
+    );
+    let accepted = &report.paths[1];
+    assert!(accepted.accepted);
+    assert_eq!(accepted.position, Some(0), "first accepted IS primary");
+    assert_eq!(accepted.project_name.as_deref(), Some("P1"));
+    let rows = db.list_workstream_paths(&report.workstream.id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].position, 0,
+        "the stored list agrees with the report"
+    );
+}
+
+/// The same raw string twice, or two spellings of one directory, attach once —
+/// the second entry is reported with a reason instead of silently collapsing
+/// (`append_workstream_path_conn` would happily return the existing row).
+#[test]
+fn duplicates_inside_one_call_are_reported_not_attached() {
+    let (_dir, db) = temp_db();
+    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1"), ("/repo/main/", "p1")]);
+
+    let report = create_workstream(
+        &db,
+        &attacher,
+        "Dup raw",
+        "",
+        &["/repo/main".into(), "/repo/main".into()],
+    )
+    .unwrap();
+    assert!(report.paths[0].accepted);
+    assert!(!report.paths[1].accepted);
+    assert!(
+        report.paths[1]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("重复"),
+        "{:?}",
+        report.paths[1].reason
+    );
+    assert_eq!(
+        db.list_workstream_paths(&report.workstream.id)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let report2 = create_workstream(
+        &db,
+        &attacher,
+        "Dup canonical",
+        "",
+        &["/repo/main".into(), "/repo/main/".into()],
+    )
+    .unwrap();
+    assert!(report2.paths[0].accepted);
+    assert!(!report2.paths[1].accepted);
+    assert!(
+        report2.paths[1]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("同一目录"),
+        "{:?}",
+        report2.paths[1].reason
+    );
+    assert_eq!(
+        db.list_workstream_paths(&report2.workstream.id)
+            .unwrap()
+            .len(),
+        1
+    );
 }

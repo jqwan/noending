@@ -64,6 +64,15 @@ pub use crate::workspace::home::ReservedPaths;
 /// scripted observation instead of a real repository.
 pub trait WorkspaceObserving {
     fn observe(&self, raw_path: &str) -> WorkspaceObservation;
+
+    /// The reason [`Self::observe`] answers the sentinel for `raw_path`. The
+    /// default is the honest minimum for implementations that cannot name it;
+    /// [`WorkspaceResolver`] refines it with [`classify_rejection`]. Read-only
+    /// UI feedback — never consulted by acceptance policy.
+    fn probe_rejection(&self, raw_path: &str) -> ProbeRejection {
+        let _ = raw_path;
+        ProbeRejection::Unresolvable
+    }
 }
 
 /// The sentinel for "this string yields no WorkspacePath" — see the module docs
@@ -81,6 +90,40 @@ pub fn unobservable() -> WorkspaceObservation {
 /// [`WorkspaceObserving`] must check this before writing anything.
 pub fn is_observable(obs: &WorkspaceObservation) -> bool {
     !obs.canonical_path.trim().is_empty() && !obs.path_id.trim().is_empty()
+}
+
+/// Why a raw string yields the "no WorkspacePath" sentinel: the three exact
+/// faces of [`WorkspaceResolver::try_observe`]'s `None`, named for UI feedback.
+/// This is a *report*, never policy — the attacher's `Ok(None)` stays the only
+/// authority on whether a path is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeRejection {
+    /// Empty, un-normalizable, or a relative path with no base.
+    Unresolvable,
+    /// A reserved NoEnding Home path (§2).
+    Reserved,
+    /// The user Home itself (§1.4).
+    Home,
+}
+
+/// Name the sentinel's cause for `raw`. Only meaningful when a fresh
+/// `observe(raw)` actually produced the sentinel; the caller checks that first.
+pub fn classify_rejection(ctx: &ResolverContext, raw: &str) -> ProbeRejection {
+    let Some(canonical) = ctx.canonicalize(raw) else {
+        return ProbeRejection::Unresolvable;
+    };
+    if ctx.reserved.contains_with(&canonical, ctx.style()) {
+        return ProbeRejection::Reserved;
+    }
+    if ctx
+        .user_home_canonical()
+        .is_some_and(|home| ctx.same_location(&home, &canonical))
+    {
+        return ProbeRejection::Home;
+    }
+    // `observe` produced the sentinel without any of the three faces above
+    // refusing it — say the honest minimum rather than inventing a fourth face.
+    ProbeRejection::Unresolvable
 }
 
 /// Existence, observed in the one layer allowed to read the filesystem.
@@ -474,6 +517,10 @@ impl WorkspaceObserving for WorkspaceResolver {
             Some(obs) => obs,
             None => unobservable(),
         }
+    }
+
+    fn probe_rejection(&self, raw_path: &str) -> ProbeRejection {
+        classify_rejection(&self.ctx, raw_path)
     }
 }
 

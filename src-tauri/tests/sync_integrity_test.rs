@@ -328,7 +328,10 @@ fn nonblocking_sync_path_processes_pending_events() {
         let mut s = session_row(&db);
         let dir = std::env::temp_dir().join(format!("noending-nb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        s.raw_path = dir.join(format!("{}.jsonl", new_id())).to_string_lossy().to_string();
+        s.raw_path = dir
+            .join(format!("{}.jsonl", new_id()))
+            .to_string_lossy()
+            .to_string();
         std::fs::write(&s.raw_path, "").unwrap();
         db.upsert_session(&s).unwrap();
         s

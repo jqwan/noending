@@ -4,7 +4,7 @@ import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Agent, type Session, type SessionBindingRow } from "../../types";
 
 /* ------------------------------------------------------------------ *
- * 展示层 helper —— SessionTable 与 SessionDetailView 共用。
+ * 展示层 helper —— SessionCards 与 SessionDetailView 共用。
  *
  * 这里只做「怎么显示得下、看得懂」：截断与中文占位。领域字段一个都不改，
  * 完整值永远可达（title 提示 → Detail 页 → 复制按钮），所以截断不会损失
@@ -12,7 +12,7 @@ import { AGENT_LABELS, type Agent, type Session, type SessionBindingRow } from "
  * ------------------------------------------------------------------ */
 
 /** 无标题 / title 未知的 Session：不拿 agent_session_id 当标题糊用户。 */
-export const UNTITLED_SESSION = "未命名 Session";
+export const UNTITLED_SESSION = "未命名会话";
 
 /** 无 cwd 的 Session 仍然合法（Workstream 不是路径，Session 也不绑定路径）。 */
 export const NO_CWD = "未设置";
@@ -21,7 +21,7 @@ export const NO_CWD = "未设置";
 export const UNKNOWN_AGENT = "未知 Agent";
 
 /** Workstream 标题为空串时的兜底（Session 可以零关联，但不能显示成空白格）。 */
-export const UNNAMED_WORKSTREAM = "未命名 Workstream";
+export const UNNAMED_WORKSTREAM = "未命名任务";
 
 /** 有 cwd、但还没被 NoEnding 登记成 WorkspacePath 的 Project 单元格状态。 */
 export const PROJECT_PENDING = "待解析";
@@ -76,22 +76,22 @@ export function projectCellFor(
       ? { text: name, hint: `由工作目录自动派生 · ${name}`, dim: false }
       : {
         text: PROJECT_PENDING,
-        hint: "工作路径已经登记，但对应的 Project 名称还没读到（正在加载，或 Project 刚刚变化）。",
+        hint: "工作路径已经登记，但对应的项目名称还没读到（正在加载，或项目刚刚变化）。",
         dim: true,
       };
   }
   if (session.project_id) {
     const name = projectNameById.get(session.project_id);
     return {
-      text: name ?? "历史 Project 标签",
-      hint: "v0.2 之前手工指派留下的标签；这条 Session 没有可解析的工作路径，Project 已经不由它决定。",
+      text: name ?? "历史项目标签",
+      hint: "v0.2 之前手工指派留下的标签；这条会话没有可解析的工作路径，项目已经不由它决定。",
       dim: true,
     };
   }
   return (session.cwd ?? "").trim() === ""
     ? {
       text: PROJECT_NO_PATH,
-      hint: "原始记录里没有工作目录，所以没有可派生的 Project。",
+      hint: "原始记录里没有工作目录，所以没有可派生的项目。",
       dim: true,
     }
     : {
@@ -237,8 +237,6 @@ export function activityLabel(iso: string | null | undefined): string {
  * 让浏览器做尾部省略（那会把末段吃掉），更不让 7 列撑出 .main 的 1200px。 */
 const W_TITLE = 34;
 const W_WORKSTREAM = 16;
-const W_PROJECT = 12;
-const W_CWD = 26;
 
 /**
  * 主关联优先（§2.2 词表）：多绑定 Session 不能显示成随机的那一个。
@@ -249,15 +247,16 @@ export function primaryFirst<T>(rows: T[], roleOf: (row: T) => string): T[] {
 }
 
 /**
- * Sessions 表格（整体设计方案 §38/§40）：Session 数量多，Table 优于 Card。
- * 主要操作只有两个：打开（Detail）与继续（Resume）。
+ * Sessions 卡片（整体设计方案 §38/§40）：信息按卡片分组，随窗口宽度自适应。
+ * 点击卡片进入详情，操作区提供继续（Resume）和移入回收站。
  */
-export default function SessionTable({ sessions, bindings, projectNameById, onOpen, onResume }: {
+export default function SessionCards({ sessions, bindings, projectNameById, onOpen, onResume, onTrash }: {
   sessions: Session[];
   bindings: Map<string, SessionBindingRow[]>;
   projectNameById: Map<string, string>;
   onOpen: (sessionId: string) => void;
   onResume: (sessionId: string) => void;
+  onTrash: (sessionId: string) => void;
 }) {
   const rows = useMemo(
     () => sessions.map((s) => {
@@ -275,66 +274,67 @@ export default function SessionTable({ sessions, bindings, projectNameById, onOp
   );
 
   return (
-    <table className="session-table">
-      <thead>
-        <tr>
-          <th style={{ width: 96 }}>Agent</th>
-          <th style={{ width: 240 }}>Session</th>
-          <th style={{ width: 150 }}>Workstream</th>
-          <th style={{ width: 96 }} title="Project 由 Session 的工作目录自动派生，不能手工指派；这里只是一个分组视图">
-            Project
-          </th>
-          <th style={{ width: 200 }}>工作目录</th>
-          <th style={{ width: 96 }}>最近活动</th>
-          <th style={{ width: 108 }}>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map(({ session: s, workstream, extraWorkstreams, workstreamFull, project }) => {
-          const title = sessionDisplayTitle(s.title);
-          const untitled = title === UNTITLED_SESSION;
-          const cwd = (s.cwd ?? "").trim();
-          return (
-            <tr
-              key={s.id}
-              onClick={() => onOpen(s.id)}
-              title={`打开 Session：${title}`}
-            >
-              <td className="cell-agent">
+    <div className="ws-grid session-grid">
+      {rows.map(({ session: s, workstream, extraWorkstreams, workstreamFull, project }) => {
+        const title = sessionDisplayTitle(s.title);
+        const untitled = title === UNTITLED_SESSION;
+        const cwd = (s.cwd ?? "").trim();
+        return (
+          <article
+            className="ws-card full session-card"
+            key={s.id}
+            onClick={() => onOpen(s.id)}
+          >
+            <header className="ws-card-head session-card-head">
+              <div
+                className="ws-card-title"
+                title={untitled ? `${UNTITLED_SESSION} · ${s.agent_session_id}` : title}
+              >
+                {ellipsisTail(title, W_TITLE + 8)}
+              </div>
+              <div className="session-card-agent">
                 <AgentIcon agent={s.agent} />
                 {agentDisplayLabel(s.agent)}
-              </td>
-              <td className="cell-title" title={untitled ? `${UNTITLED_SESSION} · ${s.agent_session_id}` : title}>
-                {ellipsisTail(title, W_TITLE)}
-              </td>
-              <td
-                className={workstream ? undefined : "muted"}
-                title={workstream ? `${workstreamFull}${extraWorkstreams > 0 ? " 等多条关联" : ""}` : "未关联 Workstream"}
-              >
-                {workstream ?? "未关联"}
-                {extraWorkstreams > 0 && (
-                  <span className="badge" style={{ marginLeft: 6 }}>+{extraWorkstreams}</span>
-                )}
-              </td>
-              <td className={project.dim ? "muted" : undefined} title={project.hint}>
-                {ellipsisTail(project.text, W_PROJECT)}
-              </td>
-              <td className={cwd ? "mono" : "muted"} title={cwd || "未设置工作目录"}>
-                {cwdDisplayLabel(cwd, W_CWD)}
-              </td>
-              <td title={activityLabel(s.last_activity_at ?? s.started_at)}>
-                {timeAgo(s.last_activity_at ?? s.started_at)}
-              </td>
-              <td onClick={(e) => e.stopPropagation()}>
-                <div className="row" style={{ gap: 6 }}>
-                  <button className="btn small ghost" onClick={() => onOpen(s.id)}>打开</button>
-                  <button className="btn small" onClick={() => onResume(s.id)}>继续</button>
-                </div>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+              </div>
+            </header>
+
+            <div className="session-card-body">
+              <div className="session-card-line">
+                <span className="muted small">工作目录</span>
+                <span className={cwd ? "mono" : "muted"} title={cwd || "未设置工作目录"}>
+                  {cwdDisplayLabel(cwd, 46)}
+                </span>
+              </div>
+              <div className="session-card-line">
+                <span className="muted small">项目</span>
+                <span className={project.dim ? "muted" : undefined} title={project.hint}>
+                  {ellipsisTail(project.text, 24)}
+                </span>
+              </div>
+              <div className="session-card-line">
+                <span className="muted small">任务</span>
+                <span
+                  className={workstream ? undefined : "muted"}
+                  title={workstream ? `${workstreamFull}${extraWorkstreams > 0 ? " 等多条关联" : ""}` : "未关联任务"}
+                >
+                  {workstream ?? "未关联"}
+                  {extraWorkstreams > 0 && <span className="badge" style={{ marginLeft: 6 }}>+{extraWorkstreams}</span>}
+                </span>
+              </div>
+            </div>
+
+            <div className="ws-card-meta">
+              <span title={activityLabel(s.last_activity_at ?? s.started_at)}>
+                最近活动 {timeAgo(s.last_activity_at ?? s.started_at)}
+              </span>
+            </div>
+            <div className="session-card-actions" onClick={(e) => e.stopPropagation()}>
+              <button className="btn small" onClick={() => onResume(s.id)}>继续</button>
+              <button className="btn small ghost" onClick={() => onTrash(s.id)}>移入回收站</button>
+            </div>
+          </article>
+        );
+      })}
+    </div>
   );
 }

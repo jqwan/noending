@@ -101,15 +101,11 @@ fn path_id(db: &Db, canonical_path: &str) -> String {
 }
 
 fn ws_with_paths(db: &Db, title: &str, dirs: &[String]) -> String {
-    let id = create_workstream(
-        db,
-        &LexicalPaths,
-        title,
-        "",
-        dirs.first().map(String::as_str),
-    )
-    .unwrap()
-    .id;
+    let initial: Vec<String> = dirs.first().map(|d| vec![d.clone()]).unwrap_or_default();
+    let id = create_workstream(db, &LexicalPaths, title, "", &initial)
+        .unwrap()
+        .workstream
+        .id;
     for dir in dirs.iter().skip(1) {
         add_workstream_path(db, &LexicalPaths, &id, dir).unwrap();
     }
@@ -603,8 +599,9 @@ fn a_matched_session_produces_binding_workstream_path_and_project() {
     let session_path = db
         .tx(|tx| insert_workspace_path_conn(tx, &dir, PROJECT))
         .unwrap();
-    let w = create_workstream(&db, &LexicalPaths, "launched", "", None)
+    let w = create_workstream(&db, &LexicalPaths, "launched", "", &[])
         .unwrap()
+        .workstream
         .id;
     let intent = LaunchIntent {
         id: new_id(),

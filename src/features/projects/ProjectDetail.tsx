@@ -130,21 +130,19 @@ export default function ProjectDetail({ projectId, navigate }: {
     return (
       <div className="main narrow">
         <PageHeader
-          back="Projects"
-          onBack={() => navigate({ view: "projects" })}
-          title={gone ? "这个 Project 已经不存在" : (failure === "" ? "加载中…" : "读取 Project 失败")}
+          title={gone ? "这个项目已经不存在" : (failure === "" ? "加载中…" : "读取项目失败")}
         >
           {failure !== "" && <PathError text={failure} />}
           {gone && (
             <p className="muted small">
-              Project 没有归档、也没有「删除」这个操作：当它拥有的最后一个工作目录
-              被移除、被别的 Project 认领，或者在本机上再也找不到时，它就自动消失了。
-              它下面的 Workstream 与 Session 不会被删除 —— Project 从来不是它们的生命周期所有者。
+              项目没有归档、也没有「删除」这个操作：当它拥有的最后一个工作目录
+              被移除、被别的项目认领，或者在本机上再也找不到时，它就自动消失了。
+              它下面的任务与会话不会被删除 —— 项目从来不是它们的生命周期所有者。
             </p>
           )}
           {!gone && failure !== "" && (
             <p className="muted small">
-              这通常只是读取失败，不代表 Project 不见了。下面的按钮会重新读一次真实状态。
+              这通常只是读取失败，不代表项目不见了。下面的按钮会重新读一次真实状态。
             </p>
           )}
           <div className="invite">
@@ -162,13 +160,11 @@ export default function ProjectDetail({ projectId, navigate }: {
   return (
     <div className="main narrow">
       <PageHeader
-        back="Projects"
-        onBack={() => navigate({ view: "projects" })}
         title={<span style={{ overflowWrap: "anywhere" }}>{project.name}</span>}
         sub={
           <>
-            这个 Project 由 NoEnding 从下面 {detail.workspace_paths.length} 个工作目录派生出来。
-            你能改的只有名字；目录、成员 Workstream 与 Session 都由工作路径决定。
+            这个项目由 NoEnding 从下面 {detail.workspace_paths.length} 个工作目录派生出来。
+            你能改的只有名字；目录、成员任务与会话都由工作路径决定。
           </>
         }
         actions={
@@ -180,7 +176,7 @@ export default function ProjectDetail({ projectId, navigate }: {
               </button>
             </IntelligenceOnly>
             <button className="btn"
-              title="重新检查这个 Project 的工作目录与 Git 状态。"
+              title="重新检查这个项目的工作目录与 Git 状态。"
               disabled={refreshingWorkspace}
               onClick={refreshWorkspace}>
               {refreshingWorkspace ? "正在刷新…" : "刷新目录状态"}
@@ -205,7 +201,7 @@ export default function ProjectDetail({ projectId, navigate }: {
 
       {refreshingWorkspace && (
         <div className="muted small" style={{ marginTop: 18 }}>
-          正在重新观察这个 Project 的工作目录与 Git 状态…
+          正在重新观察这个项目的工作目录与 Git 状态…
         </div>
       )}
 
@@ -214,7 +210,7 @@ export default function ProjectDetail({ projectId, navigate }: {
         <div className="section-label">概览</div>
         <div className="ws-card-meta">
           {detail.workspace_paths.length} 个工作目录 ·{" "}
-          {detail.workstreams.length} 个 Workstream · {detail.sessions.length} 个 Session
+          {detail.workstreams.length} 个任务 · {detail.sessions.length} 个会话
         </div>
       </section>
 
@@ -222,7 +218,7 @@ export default function ProjectDetail({ projectId, navigate }: {
         <div className="section-label">工作目录（WorkspacePath）</div>
         {detail.workspace_paths.length === 0 && (
           <div className="l1-none">
-            这个 Project 已经不再拥有任何目录 —— 它会在下一次整理时自动消失。
+            这个项目已经不再拥有任何目录 —— 它会在下一次整理时自动消失。
           </div>
         )}
         {detail.workspace_paths.map((p) => (
@@ -244,21 +240,21 @@ export default function ProjectDetail({ projectId, navigate }: {
           </div>
         ))}
         <div className="small muted" style={{ marginTop: 6, maxWidth: "72ch" }}>
-          一个 Project 可以有多个目录，其中一些并不是仓库。Git 与存在性都只是<b>观察结果</b>：
-          丢证据不会让一条路径换 Project（方案 §1.3）。路径的身份是它的规范化字符串本身，
+          一个项目可以有多个目录，其中一些并不是仓库。Git 与存在性都只是<b>观察结果</b>：
+          丢证据不会让一条路径换项目（方案 §1.3）。路径的身份是它的规范化字符串本身，
           不是符号链接解析后的结果。
         </div>
       </section>
 
       <section className="rail-section">
-        <div className="section-label">Workstreams</div>
+        <div className="section-label">任务</div>
         <div className="small muted" style={{ marginBottom: 8, maxWidth: "72ch" }}>
-          <b>主关联</b> = 该 Workstream 的主工作路径（position 0）落在这个 Project 上；
+          <b>主关联</b> = 该任务的主工作路径（position 0）落在这个项目上；
           <b>关联</b> = 只是经由它的其他工作路径到达。两者都是投影出来的，
           这里既不能把手工挂上、也不能摘下来。
         </div>
         {detail.workstreams.length === 0 && (
-          <div className="l1-none">还没有 Workstream 经由这些目录关联进来。</div>
+          <div className="l1-none">还没有任务经由这些目录关联进来。</div>
         )}
         {[{ title: "主关联", rows: primary }, { title: "关联", rows: related }].map((group) => (
           group.rows.length === 0 ? null : (
@@ -276,7 +272,7 @@ export default function ProjectDetail({ projectId, navigate }: {
                       {summary && <div className="meta">{summary}</div>}
                     </div>
                     <div className="side">
-                      {w.visibility === "archived" && <span className="badge warn" title="已移入回收站；Project 与它只是投影关系">回收站</span>}
+                      {w.visibility === "archived" && <span className="badge warn" title="已移入回收站；项目与它只是投影关系">回收站</span>}
                       {w.lifecycle === "completed" && <span className="badge">已完成</span>}
                       <span>{timeAgo(w.updated_at)}</span>
                     </div>
@@ -289,14 +285,14 @@ export default function ProjectDetail({ projectId, navigate }: {
       </section>
 
       <section className="rail-section">
-        <div className="section-label">Sessions</div>
+        <div className="section-label">会话</div>
         <div className="small muted" style={{ marginBottom: 8, maxWidth: "72ch" }}>
-          这些 Session 的 cwd 正好是上面某个目录 —— 归属来自权威链
-          （Session → WorkspacePath → Project），不是手工标签。
-          只有旧缓存值、cwd 已经丢掉的 Session 不会出现在这里。
+          这些会话的 cwd 正好是上面某个目录 —— 归属来自权威链
+          （会话 → WorkspacePath → 项目），不是手工标签。
+          只有旧缓存值、cwd 已经丢掉的会话不会出现在这里。
         </div>
         {sessions.length === 0 && (
-          <div className="l1-none">这个 Project 下还没有 Session。</div>
+          <div className="l1-none">这个项目下还没有会话。</div>
         )}
         {sessions.slice(0, 12).map((s) => (
           <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
@@ -316,20 +312,20 @@ export default function ProjectDetail({ projectId, navigate }: {
         ))}
         {sessions.length > 12 && (
           <div className="small muted" style={{ marginTop: 6 }}>
-            另有 {sessions.length - 12} 个 Session —— 到 Sessions 页查看全部。
+            另有 {sessions.length - 12} 个会话 —— 到会话页查看全部。
           </div>
         )}
       </section>
 
       <div className="small muted" style={{ marginTop: 24, maxWidth: "72ch" }}>
-        Project 会在它拥有的最后一个目录离开时自动消失；那不会删除任何 Workstream
-        或 Session。想改变这里的内容，去做的是：给 Workstream 调整工作路径。
+        项目会在它拥有的最后一个目录离开时自动消失；那不会删除任何任务
+        或会话。想改变这里的内容，去做的是：给任务调整工作路径。
       </div>
 
       {renaming && (
-        <Modal title="重命名 Project" onClose={() => setRenaming(false)}>
+        <Modal title="重命名项目" onClose={() => setRenaming(false)}>
           <p className="muted small" style={{ marginTop: 0 }}>
-            名字只是展示信息：Project 的身份是它的 Git 家族与它拥有的路径，
+            名字只是展示信息：项目的身份是它的 Git 家族与它拥有的路径，
             改名不会移动任何一个目录，也不会改变任何成员关系（方案 §42.6-N4：同名是允许的）。
           </p>
           <p className="muted small" style={{ marginBottom: 10 }}>

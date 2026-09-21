@@ -4,7 +4,7 @@ import SourcesView from "../sources/SourcesView";
 export default function SourcesSettings() {
   return (
     <section>
-      <h3 style={{ marginTop: 0 }}>Session 来源</h3>
+      <h3 style={{ marginTop: 0 }}>会话来源</h3>
       <SourcesView />
     </section>
   );

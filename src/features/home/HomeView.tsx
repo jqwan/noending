@@ -33,10 +33,10 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   const archivedCount = cards.filter((c) => c.visibility === "archived").length;
   const hiddenReason =
     archivedCount === 0
-      ? "已完成的 Workstream 不会出现在首页。"
+      ? "已完成的任务不会出现在首页。"
       : cards.length - archivedCount === 0
-        ? "已归档的 Workstream 不会出现在首页。"
-        : "已归档或已完成的 Workstream 不会出现在首页。";
+      ? "已归档的任务不会出现在首页。"
+        : "已归档或已完成的任务不会出现在首页。";
 
   const modals = (
     <>
@@ -56,10 +56,10 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
           <SidebarLogo size={64} animated />
           <div className="tagline">对话会结束，上下文不会。</div>
           <p className="page-sub" style={{ textAlign: "center", marginBottom: 18 }}>
-            开始一件可以跨 Session、跨 Agent 继续推进的事。
+            开始一件可以跨会话、跨 Agent 继续推进的事。
           </p>
           <div className="actions-row">
-            <button className="btn primary" onClick={() => setCreatingWs(true)}>+ 新建 Workstream</button>
+            <button className="btn primary" onClick={() => setCreatingWs(true)}>+ 新建任务</button>
           </div>
           <div className="muted small" style={{ margin: "10px 0" }}>或</div>
           <div className="actions-row">
@@ -73,10 +73,10 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
               {defaultAgent ? (
                 <>
                   <AgentIcon agent={defaultAgent} />
-                  新建 Session
+                  新建会话
                 </>
               ) : (
-                "新建 Session"
+                "新建会话"
               )}
             </button>
           </div>
@@ -85,7 +85,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
               {hiddenReason}{" "}
               <button className="link small"
                 onClick={() => navigate({ view: "workstreams" })}>
-                Workstreams →
+                任务 →
               </button>
             </p>
           )}
@@ -107,7 +107,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
       <RecentSessions navigate={navigate} onNewSession={() => setCreatingSession(true)} />
 
       <div className="home-foot">
-        <button className="btn small ghost" onClick={() => setCreatingWs(true)}>+ 新建 Workstream</button>
+        <button className="btn small ghost" onClick={() => setCreatingWs(true)}>+ 新建任务</button>
       </div>
 
       {modals}

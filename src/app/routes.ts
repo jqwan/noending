@@ -19,14 +19,16 @@ export type SettingsSection =
  * actionSeq，页面以它为 effect 依赖）。不引入第二套 pending/event 桥。
  */
 export type ViewAction = "new";
+export type SessionScope = "active" | "trash";
+export type WorkstreamScope = "active" | "trash";
 
 export type WorkstreamEntry = "review" | "conflicts";
 
 export type Route =
   | { view: "home" }
-  | { view: "workstreams"; action?: ViewAction }
+  | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry }
-  | { view: "sessions"; action?: ViewAction }
+  | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
   | { view: "session"; sessionId: string }
   | { view: "assistant"; scope?: AssistantScope }
   | { view: "projects" }

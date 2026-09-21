@@ -12,10 +12,11 @@ import type { WorkstreamCardData } from "../types";
  * Project 不再逐个铺在导航上——它们整体进入 Projects Board（§1）；
  * 自己负责自己的数据；AppShell 只传 route/navigate。
  */
-export default function Sidebar({ route, navigate, onSearch }: {
+export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
   route: Route;
   navigate: (r: Route) => void;
   onSearch: () => void;
+  collapsed?: boolean;
 }) {
   const [recent, setRecent] = useState<WorkstreamCardData[]>([]);
 
@@ -49,7 +50,7 @@ export default function Sidebar({ route, navigate, onSearch }: {
   };
 
   return (
-    <div className="sidebar">
+    <div className={`sidebar${collapsed ? " collapsed" : ""}`}>
       {/* Brand → Home（§6）：Home 是产品起点，不设一级菜单项 */}
       <button className="brand" onClick={() => navigate({ view: "home" })} title="首页">
         <SidebarLogo size={22} />
@@ -67,17 +68,17 @@ export default function Sidebar({ route, navigate, onSearch }: {
         <div className="nav-section">工作区</div>
         <button className={`nav-item ${workspaceActive("workstreams")}`}
           onClick={() => navigate({ view: "workstreams" })}>
-          Workstreams
+          任务
         </button>
         {/* §2 — Projects 成为一等导航项：Workstream=我正在做什么，
             Project=我在哪里做，Session=我做过哪些执行 */}
         <button className={`nav-item ${workspaceActive("projects")}`}
           onClick={() => navigate({ view: "projects" })}>
-          Projects
+          项目
         </button>
         <button className={`nav-item ${workspaceActive("sessions")}`}
           onClick={() => navigate({ view: "sessions" })}>
-          Sessions
+          会话
         </button>
         <IntelligenceOnly>
           <button className={`nav-item ${workspaceActive("assistant")}`}

@@ -10,9 +10,10 @@ import SettingsView from "../features/settings/SettingsView";
 import SearchView from "../features/search/SearchView";
 import type { Route } from "./routes";
 
-export default function Router({ route, navigate, actionSeq }: {
+export default function Router({ route, navigate, goBack, actionSeq }: {
   route: Route;
   navigate: (r: Route) => void;
+  goBack: (fallback?: Route) => void;
   actionSeq: number;
 }) {
   switch (route.view) {
@@ -23,6 +24,7 @@ export default function Router({ route, navigate, actionSeq }: {
         <WorkstreamsView
           navigate={navigate}
           action={route.action}
+          scope={route.scope}
           actionSeq={actionSeq}
         />
       );
@@ -32,18 +34,20 @@ export default function Router({ route, navigate, actionSeq }: {
           workstreamId={route.workstreamId}
           entry={route.entry}
           navigate={navigate}
+          goBack={goBack}
         />
       );
     case "sessions":
       return (
         <SessionsView
           navigate={navigate}
+          scope={route.scope}
           action={route.action}
           actionSeq={actionSeq}
         />
       );
     case "session":
-      return <SessionDetailView sessionId={route.sessionId} navigate={navigate} />;
+      return <SessionDetailView sessionId={route.sessionId} navigate={navigate} goBack={goBack} />;
     case "assistant":
       return <AssistantView scope={route.scope} navigate={navigate} />;
     case "projects":

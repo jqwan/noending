@@ -19,6 +19,7 @@ import type { ProjectCardData } from "../../types";
  * 这里没有创建入口：Project 是派生的，Refresh 也不是编辑（§25）。
  */
 type FilterKey = "all" | "ok" | "missing";
+type ProjectKindFilter = "all" | "git" | "directory";
 type SortKey = "recent" | "name" | "paths";
 
 const FILTERS: Record<FilterKey, (c: ProjectCardData) => boolean> = {
@@ -52,6 +53,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   const [listError, setListError] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterKey>("all");
+  const [kindFilter, setKindFilter] = useState<ProjectKindFilter>("all");
   const [sort, setSort] = useState<SortKey>("recent");
   const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false);
 
@@ -64,7 +66,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       })
       .catch((e) => {
         setCards(null);
-        setListError(`读取 Projects 失败：${String(e)}`);
+        setListError(`读取项目失败：${String(e)}`);
       });
   }, []);
   useEffect(refresh, [refresh]);
@@ -87,7 +89,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       const notes: string[] = [];
       if ((p.missing ?? 0) > 0) notes.push(`${p.missing} 个目录变为不可用`);
       if ((p.deleted_paths ?? 0) > 0) notes.push(`${p.deleted_paths} 个目录离开注册表`);
-      if ((p.deleted_projects ?? 0) > 0) notes.push(`${p.deleted_projects} 个 Project 自动整理`);
+      if ((p.deleted_projects ?? 0) > 0) notes.push(`${p.deleted_projects} 个项目自动整理`);
       if ((p.discovered ?? 0) > 0) notes.push(`发现 ${p.discovered} 个新目录`);
       showToast(
         notes.length > 0 ? `工作区状态已刷新：${notes.join("，")}` : "工作区状态已刷新",
@@ -117,15 +119,16 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
     if (cards === null) return null;
     return cards
       .filter(FILTERS[filter])
+      .filter((c) => kindFilter === "all" || (kindFilter === "git" ? c.has_git_identity : !c.has_git_identity))
       .filter((c) => cardMatches(c, query))
       .sort(SORTERS[sort]);
-  }, [cards, query, filter, sort]);
+  }, [cards, query, filter, kindFilter, sort]);
 
   return (
     <div className="main">
       <PageHeader
-        title="Projects"
-        sub="NoEnding 根据 Session 和 Workstream 使用的工作目录自动整理这些工作空间。"
+        title="项目"
+        sub="NoEnding 根据会话和任务使用的工作目录自动整理这些工作空间。"
         actions={
           <button
             className={`btn ${workspaceRefreshing ? "" : "primary"}`}
@@ -141,7 +144,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       <input
         type="text"
         className="ws-search"
-        placeholder="搜索 Projects…（名称或工作目录）"
+        placeholder="搜索项目…（名称或工作目录）"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
@@ -156,6 +159,18 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
           </select>
         </label>
         <label className="ws-control">
+          <span className="muted small">项目类型</span>
+          <select
+            aria-label="项目类型"
+            value={kindFilter}
+            onChange={(e) => setKindFilter(e.target.value as ProjectKindFilter)}
+          >
+            <option value="all">全部类型</option>
+            <option value="git">Git 家族</option>
+            <option value="directory">普通目录</option>
+          </select>
+        </label>
+        <label className="ws-control">
           <span className="muted small">排序</span>
           <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
             <option value="recent">最近活动 ↓</option>
@@ -163,7 +178,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
             <option value="paths">目录数</option>
           </select>
         </label>
-        {list && <span className="muted small">{list.length} 个 Project</span>}
+        {list && <span className="muted small">{list.length} 个项目</span>}
       </div>
 
       {list === null && listError === "" && <div className="muted">加载中…</div>}
@@ -175,14 +190,14 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       )}
       {list !== null && list.length === 0 && cards !== null && cards.length > 0 && (
         <EmptyState
-          title="没有匹配的 Project"
+          title="没有匹配的项目"
           hint="换个关键词，或把筛选切回「全部」。"
         />
       )}
       {cards !== null && cards.length === 0 && (
         <EmptyState
-          title="还没有 Project"
-          hint="打开 Session 或给 Workstream 添加工作路径后，Project 会自动出现在这里。"
+          title="还没有项目"
+          hint="打开会话或给任务添加工作路径后，项目会自动出现在这里。"
         />
       )}
 
@@ -224,8 +239,7 @@ function ProjectCard({ card, navigate }: {
       </div>
 
       <div className="ws-card-meta">
-        {card.path_count} 个目录 · {card.primary_workstream_count + card.related_workstream_count} 个
-        Workstream · {card.session_count} 个 Session
+        {card.path_count} 个目录 · {card.primary_workstream_count + card.related_workstream_count} 个任务 · {card.session_count} 个 Session
       </div>
       <div className="ws-card-meta muted small">最近活动 {timeAgo(card.last_activity_at)}</div>
     </article>

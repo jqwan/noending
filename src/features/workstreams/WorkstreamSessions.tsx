@@ -14,10 +14,11 @@ import type { Route } from "../../app/routes";
  * 同一个 Modal（§8.1.1 冻结契约），由它走 prepare → 状态指纹 → launch_prepared；
  * 本页不再直接调用 launcher。
  */
-export default function WorkstreamSessions({ sessions, navigate, onNewSession }: {
+export default function WorkstreamSessions({ sessions, navigate, onNewSession, allowActions = true }: {
   sessions: Session[];
   navigate: (r: Route) => void;
   onNewSession?: () => void;
+  allowActions?: boolean;
 }) {
   const [resumeId, setResumeId] = useState<string | null>(null);
 
@@ -30,14 +31,14 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession }:
   return (
     <section className="rail-section">
       <div className="rail-head">
-        <div className="section-label" style={{ margin: 0 }}>Sessions</div>
+        <div className="section-label" style={{ margin: 0 }}>会话</div>
         {sorted.length > 0 && (
           <button className="link" onClick={() => navigate({ view: "sessions" })}>查看全部</button>
         )}
       </div>
 
       {sorted.length === 0 && (
-        <div className="l1-none">还没有 Session 关联到这里。</div>
+        <div className="l1-none">还没有会话关联到这里。</div>
       )}
 
       {sorted.slice(0, 8).map((s) => (
@@ -49,23 +50,25 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession }:
             </div>
             <div className="rail-sub">{timeAgo(s.last_activity_at ?? s.started_at)}</div>
           </div>
-          <button className="btn small"
-            title={`继续 ${AGENT_LABELS[s.agent]} Session`}
-            onClick={(e) => { e.stopPropagation(); setResumeId(s.id); }}>
-            继续
-          </button>
+          {allowActions && (
+            <button className="btn small"
+              title={`继续 ${AGENT_LABELS[s.agent]} 会话`}
+              onClick={(e) => { e.stopPropagation(); setResumeId(s.id); }}>
+              继续
+            </button>
+          )}
         </div>
       ))}
 
       {sorted.length > 8 && (
         <div className="small muted" style={{ padding: "8px 2px" }}>
-          另有 {sorted.length - 8} 个 Session — 到 Sessions 页查看全部。
+          另有 {sorted.length - 8} 个会话 — 到会话页查看全部。
         </div>
       )}
 
-      {onNewSession && (
+      {allowActions && onNewSession && (
         <div style={{ marginTop: 10 }}>
-          <button className="btn small" onClick={onNewSession}>新建 Session</button>
+          <button className="btn small" onClick={onNewSession}>新建会话</button>
         </div>
       )}
 

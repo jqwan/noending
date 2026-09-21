@@ -21,27 +21,60 @@ use super::{with_db, AppState};
 
 // ---------------- Workstreams ----------------
 
-/// §11 — `create_workstream(title, description, initial_path?)`.
+/// §11 — `create_workstream(title, description, initial_paths?)`.
 ///
-/// Project is derived through the path, and the launch anchor is the ordered
-/// path list. `initial_path` is a raw string, resolved by the Workspace
-/// attacher; if it does not resolve the Workstream is still created with zero
-/// paths.
+/// Project is derived through the paths, and the launch anchor is the ordered
+/// path list. Each entry of `initial_paths` is a raw string, resolved by the
+/// Workspace attacher in submission order; a string that does not resolve is
+/// reported back instead of guessed into a path, and the Workstream is still
+/// created with however many paths did land (possibly zero).
 #[tauri::command]
 pub fn create_workstream(
     state: State<AppState>,
     paths: State<'_, PathService>,
     title: String,
     description: String,
-    initial_path: Option<String>,
-) -> Result<Workstream> {
+    initial_paths: Vec<String>,
+) -> Result<workstream::CreateWorkstreamReport> {
     with_db(&state, |db| {
-        workstream::create_workstream(
+        workstream::create_workstream(db, paths.attaching(), &title, &description, &initial_paths)
+    })
+}
+
+/// Read-only probe for the path picker's feedback line: what would happen if
+/// this string were attached as a working path, and which Project it would
+/// project onto. Advisory only — the attacher decides at create time.
+#[tauri::command]
+pub fn probe_workspace_path(
+    state: State<AppState>,
+    layer: State<'_, std::sync::Arc<crate::workspace::wiring::WorkspaceLayer>>,
+    path: String,
+) -> Result<crate::workspace::probe::PathProbe> {
+    let projection = layer.projection();
+    with_db(&state, |db| {
+        crate::workspace::probe::probe_workspace_path(
             db,
-            paths.attaching(),
-            &title,
-            &description,
-            initial_path.as_deref(),
+            projection.observer(),
+            projection.policy(),
+            &path,
+        )
+    })
+}
+
+/// The path picker's "recent / known directories" candidates, ranked by recent
+/// session activity. Pure reads; nothing here creates a WorkspacePath.
+#[tauri::command]
+pub fn list_recent_workspace_paths(
+    state: State<AppState>,
+    layer: State<'_, std::sync::Arc<crate::workspace::wiring::WorkspaceLayer>>,
+    limit: Option<usize>,
+) -> Result<Vec<crate::workspace::probe::RecentWorkspacePath>> {
+    let projection = layer.projection();
+    with_db(&state, |db| {
+        crate::workspace::probe::list_recent_workspace_paths(
+            db,
+            projection.policy(),
+            limit.unwrap_or(8).clamp(1, 50),
         )
     })
 }
@@ -184,6 +217,9 @@ pub struct WorkstreamCardView {
     /// How many working paths the Workstream has. `0` is a normal state; the UI
     /// distinguishes "no path" from "a path in a Project we cannot name".
     pub path_count: i64,
+    /// The position-0 path's canonical spelling, so pickers and Session launch
+    /// dialogs can show WHERE a Workstream works without a second read.
+    pub primary_path: Option<String>,
 }
 
 pub(crate) fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
@@ -235,10 +271,10 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
         let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
         let items_activity = db.workstream_items_last_update(&w.id)?;
         let paths = db.list_workstream_paths(&w.id)?;
-        let projected_project = paths
+        let primary = paths
             .first()
-            .and_then(|p| db.get_workspace_path(&p.workspace_path_id).ok().flatten())
-            .map(|wp| wp.project_id);
+            .and_then(|p| db.get_workspace_path(&p.workspace_path_id).ok().flatten());
+        let projected_project = primary.as_ref().map(|wp| wp.project_id.clone());
         // "Last active" only follows real work signals (session activity,
         // context edits) — renames or metadata touches must not make a
         // Workstream look freshly active. Sorting still falls back to
@@ -256,6 +292,7 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
             session_count,
             latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),
             path_count: paths.len() as i64,
+            primary_path: primary.map(|wp| wp.canonical_path),
             workstream: w,
         });
     }

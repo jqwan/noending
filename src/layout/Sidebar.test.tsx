@@ -30,7 +30,7 @@ describe("Sidebar projects navigation", () => {
   it("sidebar_has_projects_navigation", async () => {
     const navigate = renderSidebar({ view: "workstreams" });
 
-    const item = await screen.findByText("Projects");
+    const item = await screen.findByText("项目");
     fireEvent.click(item);
 
     await waitFor(() => {
@@ -40,14 +40,14 @@ describe("Sidebar projects navigation", () => {
 
   it("sidebar_projects_stays_weak_active_on_project_detail", async () => {
     renderSidebar({ view: "project", projectId: "p-1" });
-    const item = await screen.findByText("Projects");
+    const item = await screen.findByText("项目");
     // §22 — Project Detail 时保持弱高亮，与 Workstream Detail 的模式一致。
     expect(item.className).toContain("weak");
   });
 
   it("sidebar_does_not_render_individual_projects", async () => {
     renderSidebar({ view: "workstreams" });
-    await screen.findByText("Projects"); // 导航项在
+    await screen.findByText("项目"); // 导航项在
 
     expect(api.listProjects).not.toHaveBeenCalled();
   });

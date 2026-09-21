@@ -49,10 +49,12 @@ export default function WorkstreamDetailView({
   workstreamId,
   entry,
   navigate,
+  goBack,
 }: {
   workstreamId: string;
   entry?: WorkstreamEntry;
   navigate: (r: Route) => void;
+  goBack: (fallback?: Route) => void;
 }) {
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(null);
   const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(null);
@@ -215,7 +217,7 @@ export default function WorkstreamDetailView({
     setActionError("");
     try {
       adopt(await api.archiveWorkstream(workstream.id));
-      navigate({ view: "workstreams" });
+      goBack({ view: "workstreams" });
     } catch (e) {
       console.error(e);
       setActionError(`移入回收站失败：${String(e)}`);
@@ -254,7 +256,7 @@ export default function WorkstreamDetailView({
     setActionError("");
     try {
       await api.deleteWorkstreamPermanently(workstream.id);
-      navigate({ view: "workstreams" });
+      goBack({ view: "workstreams" });
     } catch (e) {
       console.error(e);
       setActionError(`永久删除失败：${String(e)}`);
@@ -315,8 +317,6 @@ export default function WorkstreamDetailView({
   return (
     <div className="main narrow">
       <PageHeader
-        back="Workstreams"
-        onBack={() => navigate({ view: "workstreams" })}
         title={<span style={{ overflowWrap: "anywhere" }}>{workstream.title}</span>}
         actions={
           <>
@@ -343,7 +343,7 @@ export default function WorkstreamDetailView({
                         从回收站恢复
                       </button>
                       <button className="menu-item"
-                        title="不可撤销：会删除这条 Workstream 名下的 Context、冲突记录与审阅状态。Session 与它们的事件历史保留。"
+                        title="不可撤销：会删除这条任务名下的 Context、冲突记录与审阅状态。会话与它们的事件历史保留。"
                         onClick={() => { setMenuOpen(false); setPurgeConfirmText(""); setConfirmPurge(true); }}>
                         永久删除…
                       </button>
@@ -361,23 +361,27 @@ export default function WorkstreamDetailView({
             {/* 与 Home / Workstream 卡片同一个判断：这一页不自己宣称「没有 Agent」。
                 defaultAgent 是本页异步读回来的，解析期间 disabled + 「未检测到」
                 的 tooltip 会说假话；真正判定交给 NewSessionModal（唯一启动路径）。 */}
-            <button
-              className="btn ws-btn"
-              title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建 Session` : "新建 Session"}
-              onClick={() => setNewSessionOpen(true)}
-            >
-              {defaultAgent ? <AgentIcon agent={defaultAgent} /> : null}
-              新建 Session
-            </button>
-            {latest && (
-              <button
-                className="btn primary ws-btn resume-primary"
-                title={`继续最近的 ${AGENT_LABELS[latest.agent]} Session`}
-                onClick={() => setResumeSessionId(latest.id)}
-              >
-                <AgentIcon agent={latest.agent} />
-                继续
-              </button>
+            {!archived && (
+              <>
+                <button
+                  className="btn ws-btn"
+                  title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}
+                  onClick={() => setNewSessionOpen(true)}
+                >
+                  {defaultAgent ? <AgentIcon agent={defaultAgent} /> : null}
+                  新建会话
+                </button>
+                {latest && (
+                  <button
+                    className="btn primary ws-btn resume-primary"
+                    title={`继续最近的 ${AGENT_LABELS[latest.agent]} 会话`}
+                    onClick={() => setResumeSessionId(latest.id)}
+                  >
+                    <AgentIcon agent={latest.agent} />
+                    继续
+                  </button>
+                )}
+              </>
             )}
           </>
         }
@@ -387,10 +391,10 @@ export default function WorkstreamDetailView({
             <>
               {/* Project 是主工作路径的派生投影（§42.3-M19）：这里既不能改，也没有
                   「换一个 Project」这回事 —— 想换 Project，改的是工作路径列表。 */}
-              <button className="link" title={`由主工作路径派生的 Project（只读）\n${primary.canonical_path}\n→ ${primary.project_name ?? primary.project_id}`}
+              <button className="link" title={`由主工作路径派生的项目（只读）\n${primary.canonical_path}\n→ ${primary.project_name ?? primary.project_id}`}
                 style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                 onClick={() => navigate({ view: "project", projectId: primary.project_id })}>
-                {primary.project_name ?? "Project"}
+                {primary.project_name ?? "项目"}
               </button>
               <span className="dot-sep" />
             </>
@@ -401,7 +405,7 @@ export default function WorkstreamDetailView({
             {LIFECYCLE_LABELS[workstream.lifecycle] ?? workstream.lifecycle}
           </span>
           {archived && (
-            <span className="badge warn" title="回收站：路径、Session 绑定与 Context 都原样保留，随时可以恢复">
+            <span className="badge warn" title="回收站：路径、会话绑定与 Context 都原样保留，随时可以恢复">
               回收站
             </span>
           )}
@@ -413,8 +417,8 @@ export default function WorkstreamDetailView({
               <span
                 className="mono small"
                 title={paths && paths.length > 1
-                  ? `主工作路径（新建 Session 默认在这里启动）\n${primary.canonical_path}\n另有 ${paths.length - 1} 条工作路径`
-                  : `主工作路径（新建 Session 默认在这里启动）\n${primary.canonical_path}`}
+                  ? `主工作路径（新建会话默认在这里启动）\n${primary.canonical_path}\n另有 ${paths.length - 1} 条工作路径`
+                  : `主工作路径（新建会话默认在这里启动）\n${primary.canonical_path}`}
               >
                 {cwdDisplayLabel(primary.canonical_path, 30)}
               </span>
@@ -424,7 +428,7 @@ export default function WorkstreamDetailView({
           {paths !== null && paths.length === 0 && (
             <>
               <span className="dot-sep" />
-              <span className="small muted" title="没有工作路径是合法状态：新建 Session 会在 NoEnding 默认工作目录启动">
+              <span className="small muted" title="没有工作路径是合法状态：新建会话会在 NoEnding 默认工作目录启动">
                 无工作路径
               </span>
             </>
@@ -443,7 +447,7 @@ export default function WorkstreamDetailView({
       <div style={{ marginTop: 26 }}>
         <section className="rail-section">
           <div className="rail-head">
-            <div className="section-label" style={{ margin: 0 }}>Workstream 概览</div>
+            <div className="section-label" style={{ margin: 0 }}>任务概览</div>
             {!editingDescription && (
               <button className="link" onClick={openDescriptionEditor}>编辑描述</button>
             )}
@@ -453,7 +457,7 @@ export default function WorkstreamDetailView({
               <textarea
                 value={descriptionInput}
                 autoFocus
-                placeholder="这件 Workstream 想持续做什么（可选）"
+                placeholder="这项任务想持续做什么（可选）"
                 onChange={(e) => setDescriptionInput(e.target.value)}
               />
               <div className="row" style={{ justifyContent: "flex-end" }}>
@@ -473,7 +477,8 @@ export default function WorkstreamDetailView({
         <WorkstreamSessions
           sessions={related_sessions}
           navigate={navigate}
-          onNewSession={() => setNewSessionOpen(true)}
+          onNewSession={archived ? undefined : () => setNewSessionOpen(true)}
+          allowActions={!archived}
         />
 
         <WorkstreamPathList
@@ -484,19 +489,19 @@ export default function WorkstreamDetailView({
         />
 
         <section className="rail-section">
-          <div className="section-label">Project</div>
+          <div className="section-label">项目</div>
           {paths === null && (
             <div className="muted small">{pathsError || "读取工作路径后才能确定…"}</div>
           )}
           {paths !== null && projectRows.length === 0 && (
             <div className="l1-none">
-              这条 Workstream 还没有工作路径，所以也不归属任何 Project —— 这是合法状态。
+              这项任务还没有工作路径，所以也不归属任何 Project —— 这是合法状态。
             </div>
           )}
           {paths !== null && projectRows.map((p) => (
             <div className="list-row" key={p.id} style={{ cursor: "default" }}>
               <div className="grow">
-                <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名 Project"}</div>
+                <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名项目"}</div>
                 <div className="meta">
                   {p.primary ? "主关联 — 经由主工作路径到达" : "关联 — 经由其他工作路径到达"}
                   {p.count > 1 ? ` · ${p.count} 条路径` : ""}
@@ -537,7 +542,7 @@ export default function WorkstreamDetailView({
           <div className="small muted" style={{ marginTop: 6, maxWidth: "72ch" }}>
             {archived ? (
               <>
-                这条 Workstream 在回收站里，路径、绑定与 Context 都原样保留。
+                这项任务在回收站里，路径、绑定与 Context 都原样保留。
                 <button className="link" style={{ marginLeft: 4 }} onClick={restore} disabled={busy}>恢复</button>
                 <button className="link" style={{ marginLeft: 10 }} onClick={() => { setPurgeConfirmText(""); setConfirmPurge(true); }}
                   disabled={busy}>永久删除…</button>
@@ -586,7 +591,7 @@ export default function WorkstreamDetailView({
       )}
 
       {titleOpen && (
-        <Modal title="重命名 Workstream" onClose={() => setTitleOpen(false)}>
+        <Modal title="重命名任务" onClose={() => setTitleOpen(false)}>
           <p className="muted small" style={{ marginTop: 0 }}>
             标题是用户可见的组织信息。修改会让已经预览过、但还没启动的那次
             Session 变成「状态已变化」，需要你重新确认——这是刻意保留的保护。
@@ -605,7 +610,7 @@ export default function WorkstreamDetailView({
       {confirmTrash && (
         <Modal title="移入回收站" onClose={() => setConfirmTrash(false)}>
           <p style={{ margin: "0 0 8px", maxWidth: "72ch" }}>
-            <b>{workstream.title}</b> 会离开正常列表，出现在 Workstreams 页的「回收站」筛选里。
+            <b>{workstream.title}</b> 会离开正常列表，出现在任务页的「回收站」筛选里。
           </p>
           <p className="small muted" style={{ marginBottom: 8 }}>
             不会删除任何东西：工作路径列表、Session 绑定、Context、审阅状态、lifecycle
@@ -613,7 +618,7 @@ export default function WorkstreamDetailView({
           </p>
           <p className="small muted" style={{ marginBottom: 12 }}>
             回收站只是收起来，不是删除。要真正删除，需要在回收站里选「永久删除」，
-            那一步不可撤销、并且会连带结束这条 Workstream 名下的 Context。
+            那一步不可撤销、并且会连带结束这项任务名下的 Context。
           </p>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setConfirmTrash(false)} disabled={busy}>取消</button>
@@ -625,7 +630,7 @@ export default function WorkstreamDetailView({
       )}
 
       {confirmPurge && (
-        <Modal title="永久删除这条 Workstream？" onClose={() => setConfirmPurge(false)}>
+        <Modal title="永久删除这项任务？" onClose={() => setConfirmPurge(false)}>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
             不可撤销
           </div>
@@ -636,12 +641,12 @@ export default function WorkstreamDetailView({
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             将<b>保留</b>：它引用过的 Sessions 与这些 Session 的完整事件历史、原始 Agent
             会话文件、启动记录、以及工作目录本身（WorkspacePath）与由它派生的 Project。
-            换句话说：Project 与 Session 都不会因为删掉一条 Workstream 而受影响。
+            换句话说：Project 与 Session 都不会因为删掉一项任务而受影响。
           </p>
           <p className="small muted" style={{ marginBottom: 12 }}>
-            只有已经在回收站里的 Workstream 才能被永久删除 —— 这是刻意留的缓冲。
+            只有已经在回收站里的任务才能被永久删除 —— 这是刻意留的缓冲。
           </p>
-          <label className="field"><span>输入这条 Workstream 的标题以确认</span>
+          <label className="field"><span>输入这项任务的标题以确认</span>
             <input type="text" value={purgeConfirmText} autoFocus
               placeholder={workstream.title}
               onChange={(e) => setPurgeConfirmText(e.target.value)}

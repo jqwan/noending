@@ -91,13 +91,13 @@ export default function ContextPreviewModal({
     <Modal title="Context 注入预览" onClose={handleClose}>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
         <span className="badge accent">
-          {prepared.mode === "new" ? "新建 Session" : "继续 Session"}
+          {prepared.mode === "new" ? "新建会话" : "继续会话"}
         </span>
         <span className="badge">
           注入等级: {deliveryLevelLabel(prepared.delivery_level)}
         </span>
         <span className="badge">
-          Workstream:{" "}
+          任务：{" "}
           {prepared.workstream_ids.length > 0
             ? `${prepared.workstream_ids.length} 个`
             : "无"}
@@ -137,7 +137,7 @@ export default function ContextPreviewModal({
 
       {isEmpty ? (
         <div className="card" style={{ padding: 16, color: "var(--text-muted)" }}>
-          当前未选择 Workstream，或该 Workstream 暂无可交付的 Context 内容。
+          当前未选择任务，或该任务暂无可交付的 Context 内容。
         </div>
       ) : (
         <>

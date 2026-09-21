@@ -13,7 +13,7 @@ import type { Route, SettingsSection } from "../../app/routes";
 const SECTIONS: { key: SettingsSection; label: string }[] = [
   { key: "general", label: "通用" },
   { key: "agents", label: "Agent" },
-  { key: "sources", label: "Session 来源" },
+  { key: "sources", label: "会话来源" },
   { key: "appearance", label: "外观" },
   { key: "advanced", label: "数据与高级" },
 ];
@@ -79,7 +79,7 @@ function GeneralSettings() {
       <section>
         <h3 style={{ marginTop: 0 }}>默认 Agent</h3>
         <p className="muted small" style={{ marginTop: 0 }}>
-          所有 Workstream 卡片与 Sessions 里的新建 / 继续都使用这个 Agent，不再每次选择。
+          所有任务卡片与会话里的新建 / 继续都使用这个 Agent，不再每次选择。
         </p>
         <div className="settings-agents">
           {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
@@ -117,7 +117,7 @@ function GeneralSettings() {
         </div>
         <div className="row-line">
           <div>
-            <div className="settings-row-label">启动 Session 前确认</div>
+            <div className="settings-row-label">启动会话前确认</div>
             <div className="settings-row-hint">新建 / 继续一键直达，不经确认页。</div>
           </div>
           <span className="badge">关闭</span>
@@ -144,7 +144,7 @@ function AgentsSettings() {
 }
 
 const DELIVERY_LEVELS: { key: ContextDeliveryLevel; label: string; hint: string }[] = [
-  { key: "off", label: "关闭", hint: "不把 NoEnding 的 Workstream Context 送进 Agent Session。" },
+  { key: "off", label: "关闭", hint: "不把 NoEnding 的任务 Context 送进 Agent 会话。" },
   { key: "compact", label: "精简", hint: "只送最重要的当前 Context 与最近变更。" },
   { key: "balanced", label: "均衡", hint: "送核心 Context 加少量相关信息。" },
   { key: "detailed", label: "详细", hint: "在需要更多背景时送更广的支撑信息。" },
@@ -175,14 +175,14 @@ function IntelligenceSettings() {
     <section>
       <h3>实验性功能</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
-        NoEnding 首先是一个可靠的本地工作空间：发现 Session、留下历史、随时继续。
+        NoEnding 首先是一个可靠的本地工作空间：发现会话、留下历史、随时继续。
         下面这个开关决定它是否额外去自动理解你的工作。
       </p>
       <div className="row-line">
         <div>
           <div className="settings-row-label">Context 智能处理</div>
           <div className="settings-row-hint">
-            提取 Context 变更、自动归类 Workstream、生成待审阅与冲突。关闭时 Session 仍会被摄入和索引，
+            提取 Context 变更、自动归类任务、生成待审阅与冲突。关闭时会话仍会被摄入和索引，
             已有的 Context 与历史不会丢失；重新开启后从冻结的处理位置继续。
           </div>
         </div>
@@ -250,7 +250,7 @@ function ContextDeliverySettings() {
     <section>
       <h3 style={{ marginTop: 0 }}>Context 注入</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
-        控制新建 / 继续 Session 时，NoEnding 送进去多少 Workstream Context。
+        控制新建 / 继续会话时，NoEnding 送进去多少任务 Context。
         它只影响对外注入，不会停止摄入与同步。
       </p>
       <div className="settings-seg">
@@ -288,15 +288,15 @@ function AutomationSettings() {
       <h3 style={{ marginTop: 0 }}>自动化</h3>
       <div className="row-line">
         <div>
-          <div className="settings-row-label">Session 摄入与索引</div>
-          <div className="settings-row-hint">发现 Session、存下事件、建立搜索索引，始终运行。</div>
+          <div className="settings-row-label">会话摄入与索引</div>
+          <div className="settings-row-hint">发现会话、存下事件、建立搜索索引，始终运行。</div>
         </div>
         <span className="badge success">开</span>
       </div>
       <div className="row-line">
         <div>
           <div className="settings-row-label">Context 提取与自动归类</div>
-          <div className="settings-row-hint">自动归类只影响未显式绑定的 Session；你的手动指定优先。</div>
+          <div className="settings-row-hint">自动归类只影响未显式绑定的会话；你的手动指定优先。</div>
         </div>
         <span className={`badge ${intelligenceEnabled ? "success" : ""}`}>
           {intelligenceEnabled ? "开" : "关"}
@@ -312,7 +312,7 @@ function AutomationSettings() {
       <div className="row-line">
         <div>
           <div className="settings-row-label">后台补摄</div>
-          <div className="settings-row-hint">应用启动时补摄离开期间产生的 Session 内容。</div>
+          <div className="settings-row-hint">应用启动时补摄离开期间产生的会话内容。</div>
         </div>
         <span className="badge success">开</span>
       </div>
@@ -442,7 +442,7 @@ function WorkspaceStorageSettings() {
       <h3>NoEnding Home</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
         NoEnding Home 是 NoEnding 放在磁盘上的数据根目录：数据库、运行文件和日志都在它下面，
-        新建 Session 的默认工作目录是它里面的 <span className="mono">workspace/</span>。
+        新建会话的默认工作目录是它里面的 <span className="mono">workspace/</span>。
       </p>
 
       <PathRow
@@ -507,7 +507,7 @@ function WorkspaceStorageSettings() {
           </div>
           <div>
             <strong>旧 Home 的 <span className="mono">workspace/</span> 里的文件不会被移动。</strong>
-            它们留在原处，那个目录之后作为一个普通工作目录被识别（它仍然带着自己的 Project 与历史）。
+            它们留在原处，那个目录之后作为一个普通工作目录被识别（它仍然带着自己的项目与历史）。
           </div>
           <div>
             新 Home 下的 <span className="mono">workspace/</span> 会成为新的默认工作目录。
@@ -648,7 +648,7 @@ function ChangeHomeModal({ current, onClose, onSaved }: {
         </div>
         <div>
           新的默认工作目录会是新 Home 下的 <span className="mono">workspace/</span>，
-          已有 Session 与 Workstream 的历史不会因为这次搬迁被改写。
+          已有会话与任务的历史不会因为这次搬迁被改写。
         </div>
         {current.home_source === "explicit_env" && (
           <div>

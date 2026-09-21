@@ -25,6 +25,7 @@ use tauri::{Emitter, Manager};
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // NoEnding Home first, always before the database opens (§2, §3):
             // it resolves $NOENDING_HOME → bootstrap.current_home → ~/.noending,
@@ -188,6 +189,8 @@ pub fn run() {
             commands::workspace::get_workspace_settings,
             commands::workspace::set_noending_home,
             commands::workstream::create_workstream,
+            commands::workstream::probe_workspace_path,
+            commands::workstream::list_recent_workspace_paths,
             commands::workstream::update_workstream,
             commands::workstream::list_workstreams,
             commands::workstream::list_workstream_cards,

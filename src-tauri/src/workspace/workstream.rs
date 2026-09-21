@@ -18,8 +18,8 @@
 //!   without asking the user (§1.6).
 //! * `reorder_workstream_paths(ordered_workspace_path_ids)` takes the FULL list;
 //!   "make this the primary path" is a reorder to index 0 (§21).
-//! * `create_workstream(title, description, initial_path?)` creates zero or one
-//!   initial path.
+//! * `create_workstream(title, description, initial_paths?)` creates the
+//!   Workstream plus any accepted initial paths, in submission order.
 //! * Workstream→Project is a projection through the paths.
 //!
 //! ## Lifecycle (§1.13 / §5.7)
@@ -64,15 +64,17 @@
 //!
 //! ## Add vs. create: why unresolvable paths differ
 //!
-//! `create_workstream(…, initial_path?)` treats an unresolvable path as "no
-//! path yet" (the field is optional, so the Workstream stays valid with zero
-//! paths). `add_workstream_path` reports an error instead: there the user asked
-//! for exactly one named directory and a silent no-op would be a lie.
+//! `create_workstream(…, initial_paths?)` treats an unresolvable path as "not
+//! this one" and reports it per entry (the field is optional, so the Workstream
+//! stays valid with zero paths). `add_workstream_path` reports an error instead:
+//! there the user asked for exactly one named directory and a silent no-op would
+//! be a lie.
 
 use serde::Serialize;
 
 use crate::domain::*;
 use crate::error::{other, Result};
+use crate::storage::workspace::{get_project_conn, get_workspace_path_conn};
 use crate::storage::workstream_paths::{
     append_workstream_path_conn, count_bindings_for_workstream_path_conn,
     ordered_canonical_paths_for_workstream, primary_workspace_path, purge_workstream_data_conn,
@@ -113,20 +115,53 @@ impl PathService {
 
 // ------------------------------------------------------------- creation (§11)
 
-/// `create_workstream(title, description, initial_path?)`.
+/// One entry of [`CreateWorkstreamReport::paths`]: what became of each raw
+/// string the user submitted. An entry is either accepted (with the position it
+/// took) or rejected (with the reason); the Workstream itself is always created.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreatedPath {
+    pub raw: String,
+    pub accepted: bool,
+    /// The canonical spelling the path was attached under (accepted only).
+    pub canonical_path: Option<String>,
+    /// Position in the Workstream's ordered list, 0 = primary (accepted only).
+    pub position: Option<i64>,
+    /// Project the path projects onto (accepted only; derived, not chosen).
+    pub project_name: Option<String>,
+    /// Why the string was not attached (rejected only).
+    pub reason: Option<String>,
+}
+
+/// The Workstream plus the per-path outcome of creation. The report exists so
+/// the UI can say "these three landed, this one didn't and here's why" instead
+/// of re-reading the list and silently dropping what it cannot find.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateWorkstreamReport {
+    pub workstream: Workstream,
+    pub paths: Vec<CreatedPath>,
+}
+
+/// `create_workstream(title, description, initial_paths?)`.
 ///
-/// A Workstream is created with zero paths or exactly one, and that one is
-/// position 0 by construction — becoming primary needs no special case.
+/// Accepted paths take consecutive positions in submission order — position 0
+/// IS the primary path by construction, so "first accepted wins the primary
+/// seat" needs no special case. A string the attacher refuses (`Ok(None)`:
+/// unresolvable, reserved (§2), the Home itself (§1.4)) is reported, never
+/// guessed into a path (§42.3: 不能确定就不猜), and a Workstream whose strings
+/// all bounce is still created with zero paths.
 ///
-/// Atomic: the row and its first path commit together, so a failed path attach
-/// cannot leave a half-created Workstream.
+/// Duplicates inside one call are refused without a second attach: the same raw
+/// string twice, or two spellings that resolve to one canonical directory.
+///
+/// Atomic: the row and every accepted path commit together, so a failed attach
+/// (`Err` from the attacher) cannot leave a half-created Workstream.
 pub fn create_workstream(
     db: &Db,
     attaching: &dyn WorkspaceAttaching,
     title: &str,
     description: &str,
-    initial_path: Option<&str>,
-) -> Result<Workstream> {
+    initial_paths: &[String],
+) -> Result<CreateWorkstreamReport> {
     crate::storage::ensure_not_empty("Workstream 标题", title)?;
     let w = Workstream {
         id: new_id(),
@@ -137,21 +172,88 @@ pub fn create_workstream(
         created_at: now(),
         updated_at: now(),
     };
-    let initial = initial_path.map(str::trim).filter(|s| !s.is_empty());
+    let mut paths: Vec<CreatedPath> = Vec::new();
+    let mut attached_ids: Vec<String> = Vec::new();
     db.tx(|tx| {
         crate::storage::upsert_workstream_conn(tx, &w)?;
-        if let Some(raw) = initial {
-            // `Ok(None)` — empty, relative, a reserved app path, a Home-level
-            // repository — leaves the Workstream with zero paths. Creating it is
-            // still what the user asked for (§42.3: never guess a path).
-            if let Some(path_id) = attaching.ensure_path(tx, raw)? {
-                append_workstream_path_conn(tx, &w.id, &path_id, workstream_path_source::USER)?;
+        for raw in initial_paths {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
             }
+            if let Some(earlier) = paths.iter().position(|p| p.raw == raw) {
+                paths.push(CreatedPath {
+                    raw: raw.to_string(),
+                    accepted: false,
+                    canonical_path: None,
+                    position: None,
+                    project_name: None,
+                    reason: Some(format!(
+                        "与第 {} 条重复",
+                        earlier + 1
+                    )),
+                });
+                continue;
+            }
+            // `Ok(None)` — empty, relative, a reserved app path, a Home-level
+            // repository — leaves the Workstream without this path. Creating it
+            // is still what the user asked for; the report says what did not
+            // land. An `Err` aborts the whole creation (atomicity case).
+            let Some(path_id) = attaching.ensure_path(tx, raw)? else {
+                paths.push(CreatedPath {
+                    raw: raw.to_string(),
+                    accepted: false,
+                    canonical_path: None,
+                    position: None,
+                    project_name: None,
+                    // The attacher's `Ok(None)` covers several refusals
+                    // (relative with no base, a reserved path under NoEnding
+                    // Home, a Home-level repository) and reports no reason, so
+                    // the message stays true of all of them rather than
+                    // guessing at one — the same wording `add_workstream_path`
+                    // reports.
+                    reason: Some(
+                        "该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录"
+                            .to_string(),
+                    ),
+                });
+                continue;
+            };
+            // Two spellings, one directory: the registry already holds it from
+            // an earlier entry of this call.
+            if attached_ids.iter().any(|known| *known == path_id) {
+                paths.push(CreatedPath {
+                    raw: raw.to_string(),
+                    accepted: false,
+                    canonical_path: None,
+                    position: None,
+                    project_name: None,
+                    reason: Some("与前面一条指向同一目录".to_string()),
+                });
+                continue;
+            }
+            let wp = get_workspace_path_conn(tx, &path_id)?
+                .ok_or_else(|| other("WorkspacePath 写入后消失"))?;
+            let project_name = get_project_conn(tx, &wp.project_id)?.map(|p| p.name);
+            let row =
+                append_workstream_path_conn(tx, &w.id, &path_id, workstream_path_source::USER)?;
+            attached_ids.push(path_id);
+            paths.push(CreatedPath {
+                raw: raw.to_string(),
+                accepted: true,
+                canonical_path: Some(wp.canonical_path),
+                position: Some(row.position),
+                project_name,
+                reason: None,
+            });
         }
         reindex_workstream_search_conn(tx, &w.id)?;
         Ok(())
     })?;
-    Ok(w)
+    Ok(CreateWorkstreamReport {
+        workstream: w,
+        paths,
+    })
 }
 
 // ---------------------------------------------------------- the path list (§1.5)

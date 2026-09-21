@@ -28,6 +28,9 @@ pub struct SessionDetail {
     pub cursor: i64,
     pub processed_cursor: i64,
     pub classification: String,
+    /// Read-only observation of the Agent source file at detail-load time.
+    /// `missing` means NotFound; other filesystem errors stay `unavailable`.
+    pub raw_path_status: &'static str,
     /// §22: Session Detail shows the WorkspacePath and the Project behind it,
     /// read-only. They travel as display strings because `workspace_path_id`
     /// alone would make the UI join a table it has no command for — and the
@@ -45,6 +48,14 @@ pub struct SessionWorkspacePath {
 }
 
 pub type WorkstreamTitle = String;
+
+fn raw_path_status(path: &str) -> &'static str {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => "present",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+        _ => "unavailable",
+    }
+}
 
 // scope: active (default) | trash | all — 方案 §11; the recycle bin passes "trash".
 #[tauri::command]
@@ -88,6 +99,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let classification = SessionClassificationState::derive(&{
             bindings.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>()
         });
+        let raw_path_status = raw_path_status(&session.raw_path);
         let workspace_path = match session.workspace_path_id.as_deref() {
             Some(id) => db.get_workspace_path(id)?.map(|wp| {
                 Ok::<_, crate::error::AppError>(SessionWorkspacePath {
@@ -110,6 +122,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             cursor,
             processed_cursor,
             classification: classification.as_str().to_string(),
+            raw_path_status,
             workspace_path: workspace_path.transpose()?,
         })
     })

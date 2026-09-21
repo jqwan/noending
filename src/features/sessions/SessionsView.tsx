@@ -3,9 +3,9 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import AgentIcon from "../../components/AgentIcon";
-import { useRefreshSignal } from "../../components/common";
+import { Modal, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import SessionTable, {
+import SessionCards, {
   agentDisplayLabel,
   cwdDisplayLabel,
   ellipsisTail,
@@ -16,7 +16,7 @@ import PermanentDeleteModal from "./PermanentDeleteModal";
 import NewSessionModal from "./NewSessionModal";
 import ResumeSessionModal from "./ResumeSessionModal";
 import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session, type SessionBindingRow } from "../../types";
-import type { Route, ViewAction } from "../../app/routes";
+import type { Route, SessionScope, ViewAction } from "../../app/routes";
 
 type AssignedFilter = "all" | "assigned" | "unassigned";
 
@@ -28,12 +28,13 @@ type AssignedFilter = "all" | "assigned" | "unassigned";
  * 换一个数据面——普通模式读 scope=active（与旧行为完全一致），回收站读 scope=trash，
  * 行渲染与操作都是回收站专属（恢复 / 永久删除），正常列表不出现这些动作。
  */
-export default function SessionsView({ navigate, action, actionSeq }: {
+export default function SessionsView({ navigate, scope, action, actionSeq }: {
   navigate: (r: Route) => void;
+  scope?: SessionScope;
   action?: ViewAction;
   actionSeq: number;
 }) {
-  const [trashMode, setTrashMode] = useState(false);
+  const [trashMode, setTrashMode] = useState(scope === "trash");
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [bindings, setBindings] = useState<Map<string, SessionBindingRow[]>>(new Map());
@@ -53,6 +54,10 @@ export default function SessionsView({ navigate, action, actionSeq }: {
   const [assigned, setAssigned] = useState<AssignedFilter>("all");
   const [creating, setCreating] = useState(false);
   const [resumeModalSessionId, setResumeModalSessionId] = useState<string | null>(null);
+  const [trashSessionId, setTrashSessionId] = useState<string | null>(null);
+  const [trashBusy, setTrashBusy] = useState(false);
+  const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
+  const [bulkPurgeBusy, setBulkPurgeBusy] = useState(false);
   /** 永久删除 Modal 的目标 Session（回收站行 / 恢复冲突提示都可能打开它）。 */
   const [purgeSessionId, setPurgeSessionId] = useState<string | null>(null);
 
@@ -101,6 +106,7 @@ export default function SessionsView({ navigate, action, actionSeq }: {
   }, [trashMode]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
+  useEffect(() => setTrashMode(scope === "trash"), [scope]);
   // 页面动作随 Route 到达（palette → New Session）：
   // actionSeq 让「已在 Sessions 页」的重复命令同样触发。
   useEffect(() => {
@@ -175,6 +181,54 @@ export default function SessionsView({ navigate, action, actionSeq }: {
     setResumeModalSessionId(sessionId);
   };
 
+  const trashTarget = sessions?.find((s) => s.id === trashSessionId) ?? null;
+  const trash = async () => {
+    if (!trashTarget || trashBusy) return;
+    setTrashBusy(true);
+    try {
+      await api.trashSession(trashTarget.id);
+      showToast("已移入回收站");
+      setTrashSessionId(null);
+      refresh();
+    } catch (e) {
+      console.error(e);
+      showToast(`移入回收站失败：${String(e)}`);
+    } finally {
+      setTrashBusy(false);
+    }
+  };
+
+  const bulkPurge = async () => {
+    if (!trashMode || !sessions || sessions.length === 0 || bulkPurgeBusy) return;
+    const targets = [...sessions];
+    let purged = 0;
+    let sourceFailed = 0;
+    let failed = 0;
+    setBulkPurgeBusy(true);
+    for (const session of targets) {
+      try {
+        const preview = await api.prepareSessionPermanentDelete(session.id);
+        const result = await api.executeSessionPermanentDelete(preview.job_id);
+        if (result.purged) {
+          purged += 1;
+          if (result.error) sourceFailed += 1;
+        }
+        else failed += 1;
+      } catch (e) {
+        failed += 1;
+        console.error(`永久删除会话失败：${session.id}`, e);
+      }
+    }
+    setBulkPurgeBusy(false);
+    setBulkPurgeOpen(false);
+    refresh();
+    showToast(
+      failed === 0 && sourceFailed === 0
+        ? `已永久删除 ${purged} 个会话`
+        : `已清理 ${purged} 个会话${sourceFailed > 0 ? `，其中 ${sourceFailed} 个原始文件未删除` : ""}${failed > 0 ? `，${failed} 个仍保留在回收站` : ""}`,
+    );
+  };
+
   /** 恢复失败要把后端的拒绝原因原样给出（例如还有未取消的删除任务）。 */
   const restoreFromTrash = async (s: Session) => {
     try {
@@ -202,18 +256,18 @@ export default function SessionsView({ navigate, action, actionSeq }: {
    */
   const noSourcesEnabled = sources !== null && sources.every((s) => !s.enabled);
   const missingSourcePath = sources?.find((s) => s.enabled && !s.exists)?.path ?? "";
-  const emptyTitle = noSourcesEnabled ? "还没有启用任何 Session 来源" : "还没有发现本地 Session";
+  const emptyTitle = noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
   const emptyHint = noSourcesEnabled
-    ? "NoEnding 只读取 Agent 自己目录里的 Session 文件，不会修改它们。到「设置 → Session 来源」勾选要扫描的目录，应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的 Session。"
+    ? "NoEnding 只读取 Agent 自己目录里的会话文件，不会修改它们。到「设置 → 会话来源」勾选要扫描的目录，应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的会话。"
     : missingSourcePath
-      ? `已启用的来源里有目录当前不存在：${missingSourcePath}。接回移动盘或换一台机器时，到「设置 → Session 来源」调整目录即可。`
+      ? `已启用的来源里有目录当前不存在：${missingSourcePath}。接回移动盘或换一台机器时，到「设置 → 会话来源」调整目录即可。`
       : sources === null
-        ? "NoEnding 只读取 Agent 自己目录里的 Session 文件，不会修改它们。应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的 Session；也可以新建一个 Session 立刻开始。"
-        : "已启用的来源里还没有可发现的 Session。Agent 跑过之后应用会在启动时自动发现；也可以新建一个 Session 立刻开始。";
+        ? "NoEnding 只读取 Agent 自己目录里的会话文件，不会修改它们。应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的会话；也可以新建一个会话立刻开始。"
+        : "已启用的来源里还没有可发现的会话。Agent 跑过之后应用会在启动时自动发现；也可以新建一个会话立刻开始。";
 
   const loadFailedState = (
     <EmptyState
-      title={trashMode ? "读取回收站失败。" : "读取 Sessions 失败。"}
+      title={trashMode ? "读取回收站失败。" : "读取会话失败。"}
       hint="本地数据没有被修改。可以重试，或到「设置 → 数据与高级」查看数据库位置。"
       actions={<button className="btn small" onClick={refresh}>重试</button>}
     />
@@ -222,27 +276,27 @@ export default function SessionsView({ navigate, action, actionSeq }: {
   return (
     <div className="main">
       <PageHeader
-        title="Sessions"
-        sub="来自 Codex、Claude Code 和 Pi 的本地执行记录。长期主题由 Workstream 承载。"
+        title="会话"
+        sub="来自 Codex、Claude Code 和 Pi 的本地执行记录。长期主题由任务承载。"
         actions={
           <>
             {/* 回收站开关（§35）：同一页面的两个数据面，用分段控件而不是筛选器，
                 因为两边的行为（列、动作）不同，不是同一张表的条件过滤。 */}
-            <div className="settings-seg" role="group" aria-label="Session 列表范围">
+            <div className="settings-seg" role="group" aria-label="会话列表范围">
               <button
                 className={trashMode ? "" : "on"}
-                onClick={() => setTrashMode(false)}
+                onClick={() => navigate({ view: "sessions", scope: "active" })}
               >
                 会话列表
               </button>
               <button
                 className={trashMode ? "on" : ""}
-                onClick={() => setTrashMode(true)}
+                onClick={() => navigate({ view: "sessions", scope: "trash" })}
               >
                 回收站{trashCount !== null ? ` (${trashCount})` : ""}
               </button>
             </div>
-            <button className="btn primary" onClick={() => setCreating(true)}>新建 Session</button>
+            <button className="btn primary" onClick={() => setCreating(true)}>新建会话</button>
           </>
         }
       />
@@ -252,7 +306,7 @@ export default function SessionsView({ navigate, action, actionSeq }: {
           <input
             type="text"
             className="ws-search"
-            placeholder="搜索 Sessions…（标题、工作目录、Workstream）"
+            placeholder="搜索会话…（标题、工作目录、任务）"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -266,23 +320,23 @@ export default function SessionsView({ navigate, action, actionSeq }: {
               </select>
             </label>
             <label className="ws-control">
-              <span className="muted small">Workstream</span>
+              <span className="muted small">任务</span>
               <select value={wsFilter} onChange={(e) => setWsFilter(e.target.value)}>
-                <option value="all">全部 Workstream</option>
+                <option value="all">全部任务</option>
                 {wsOptions.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
-                <option value="unassigned">未关联 Workstream</option>
+                <option value="unassigned">未关联任务</option>
               </select>
             </label>
             <label className="ws-control">
-              <span className="muted small">Project</span>
+              <span className="muted small">项目</span>
               <select
                 value={projectId}
                 onChange={(e) => setProjectId(e.target.value)}
-                title="Project 是从工作目录派生出来的分组视图，不是 Session 的所有权：这里不能指派 Project。"
+                title="项目是从工作目录派生出来的分组视图，不是会话的所有权：这里不能指派项目。"
               >
-                <option value="all">全部 Project</option>
+                <option value="all">全部项目</option>
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                <option value="none">还没有 Project（工作目录未派生）</option>
+                <option value="none">还没有项目（工作目录未派生）</option>
               </select>
             </label>
             <label className="ws-control">
@@ -306,8 +360,8 @@ export default function SessionsView({ navigate, action, actionSeq }: {
           {/* v0.2 起 Session 的 Project 由它自己的工作目录派生（方案 §1.10），
               所以这一页不再有「设置 Project」这个动作：分组还能筛，归属不能选。 */}
           <div className="muted small" style={{ marginTop: -10, marginBottom: 14 }}>
-            Project 由 Session 的工作目录自动派生，不需要也不能手工指派；按 Project 筛选只是换一种看法。
-            想长期推进一件事，请关联 Workstream。
+            项目由会话的工作目录自动派生，不需要也不能手工指派；按项目筛选只是换一种看法。
+            想长期推进一件事，请关联任务。
           </div>
 
           {shown === null && !loadFailed && <div className="muted">加载中…</div>}
@@ -319,29 +373,30 @@ export default function SessionsView({ navigate, action, actionSeq }: {
               actions={
                 <>
                   <button className="btn small" onClick={() => navigate({ view: "settings", section: "sources" })}>
-                    配置 Session 来源
+                    配置会话来源
                   </button>
-                  <button className="btn small" onClick={() => setCreating(true)}>新建 Session</button>
+                  <button className="btn small" onClick={() => setCreating(true)}>新建会话</button>
                 </>
               }
             />
           )}
           {shown !== null && shown.length === 0 && (sessions?.length ?? 0) > 0 && (
             <EmptyState
-              title="没有符合当前筛选条件的 Session"
+              title="没有符合当前筛选条件的会话"
               hint={query.trim()
-                ? `没有匹配「${query.trim()}」的 Session。可以换个关键词，或直接清除筛选。`
-                : "调整或清除筛选条件即可看到全部 Session。"}
+                ? `没有匹配「${query.trim()}」的会话。可以换个关键词，或直接清除筛选。`
+                : "调整或清除筛选条件即可看到全部会话。"}
               actions={<button className="btn small" onClick={clearFilters}>清除筛选</button>}
             />
           )}
           {shown !== null && shown.length > 0 && (
-            <SessionTable
+            <SessionCards
               sessions={shown}
               bindings={bindings}
               projectNameById={projectNameById}
               onOpen={(id) => navigate({ view: "session", sessionId: id })}
               onResume={resume}
+              onTrash={setTrashSessionId}
             />
           )}
         </>
@@ -350,7 +405,7 @@ export default function SessionsView({ navigate, action, actionSeq }: {
       {trashMode && (
         <>
           <div className="muted small" style={{ margin: "4px 0 14px", maxWidth: "72ch" }}>
-            回收站里的 Session 不出现在会话列表、搜索与继续入口中。Agent 原始会话与
+            回收站里的会话不出现在会话列表、搜索与继续入口中。Agent 原始会话与
             NoEnding 数据都原样保留；只有「永久删除」会连同 Agent 保存的原始会话一起删除。
           </div>
 
@@ -359,18 +414,70 @@ export default function SessionsView({ navigate, action, actionSeq }: {
           {sessions !== null && sessions.length === 0 && !loadFailed && (
             <EmptyState
               title="回收站是空的。"
-              hint="「移入回收站」的 Session 会留在这里：可以随时恢复，也可以在这里永久删除。"
+              hint="「移入回收站」的会话会留在这里：可以随时恢复，也可以在这里永久删除。"
             />
           )}
           {sessions !== null && sessions.length > 0 && (
-            <TrashSessionTable
-              sessions={sessions}
-              onOpen={(id) => navigate({ view: "session", sessionId: id })}
-              onRestore={restoreFromTrash}
-              onPurge={(s) => setPurgeSessionId(s.id)}
-            />
+            <>
+              <div className="session-trash-actions">
+                <span className="muted small">共 {sessions.length} 个会话</span>
+                <button className="btn small danger" onClick={() => setBulkPurgeOpen(true)}>
+                  全部永久删除
+                </button>
+              </div>
+              <TrashSessionTable
+                sessions={sessions}
+                onOpen={(id) => navigate({ view: "session", sessionId: id })}
+                onRestore={restoreFromTrash}
+                onPurge={(s) => setPurgeSessionId(s.id)}
+              />
+            </>
           )}
         </>
+      )}
+
+      {trashTarget && (
+        <Modal
+          title="移入回收站"
+          onClose={() => { if (!trashBusy) setTrashSessionId(null); }}
+        >
+          <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
+            <b>{sessionDisplayTitle(trashTarget.title)}</b> 会从会话列表、搜索与继续入口中消失，出现在回收站里。
+          </p>
+          <div className="card hairline" style={{ marginBottom: 12 }}>
+            <p style={{ margin: 0 }}>Agent 原始会话不会被删除，之后可以从回收站恢复。</p>
+          </div>
+          <div className="row" style={{ justifyContent: "flex-end" }}>
+            <button className="btn" onClick={() => setTrashSessionId(null)} disabled={trashBusy}>取消</button>
+            <button className="btn primary" onClick={trash} disabled={trashBusy}>
+              {trashBusy ? "处理中…" : "移入回收站"}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {trashMode && bulkPurgeOpen && sessions && sessions.length > 0 && (
+        <Modal
+          title="全部永久删除"
+          onClose={() => { if (!bulkPurgeBusy) setBulkPurgeOpen(false); }}
+        >
+          <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
+            确定要永久删除回收站中的 <b>{sessions.length} 个会话</b> 吗？
+          </p>
+          <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
+            此操作会尝试删除 Agent 保存的原始会话，且 NoEnding 数据不可恢复。
+          </div>
+          <p className="small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
+            每个会话会单独执行安全校验。源文件不可访问、已变化或删除失败的会话
+            仍会清理 NoEnding 中的会话数据，但原始文件可能保留；真正的处理错误才会保留在回收站。
+          </p>
+          <div className="row" style={{ justifyContent: "flex-end" }}>
+            <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>
+            <button className="btn danger" onClick={bulkPurge} disabled={bulkPurgeBusy}>
+              {bulkPurgeBusy ? "删除中…" : "全部永久删除"}
+            </button>
+          </div>
+        </Modal>
       )}
 
       {creating && <NewSessionModal onClose={() => setCreating(false)} />}
@@ -411,7 +518,7 @@ function TrashSessionTable({ sessions, onOpen, onRestore, onPurge }: {
       <thead>
         <tr>
           <th style={{ width: 110 }}>Agent</th>
-          <th>Session</th>
+          <th>会话</th>
           <th style={{ width: 210 }}>移入回收站</th>
           <th style={{ width: 150 }}>操作</th>
         </tr>
@@ -424,11 +531,13 @@ function TrashSessionTable({ sessions, onOpen, onRestore, onPurge }: {
             <tr
               key={s.id}
               onClick={() => onOpen(s.id)}
-              title={`打开 Session：${title}`}
+              title={`打开会话：${title}`}
             >
               <td className="cell-agent">
-                <AgentIcon agent={s.agent} />
-                {agentDisplayLabel(s.agent)}
+                <span className="cell-agent-content">
+                  <AgentIcon agent={s.agent} />
+                  {agentDisplayLabel(s.agent)}
+                </span>
               </td>
               <td className="cell-title" title={title}>
                 <div style={{ whiteSpace: "normal" }}>

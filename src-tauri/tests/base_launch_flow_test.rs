@@ -63,7 +63,9 @@ impl WorkspaceAttaching for LexicalPaths {
 }
 
 fn workstream(db: &Db, title: &str) -> noending::domain::Workstream {
-    noending::workspace::workstream::create_workstream(db, &LexicalPaths, title, "", None).unwrap()
+    noending::workspace::workstream::create_workstream(db, &LexicalPaths, title, "", &[])
+        .unwrap()
+        .workstream
 }
 
 /// A real Context item, so an "injected" launch would have something to deliver.
@@ -360,9 +362,10 @@ fn prepared_launch_reports_the_resolved_working_directory() {
         &LexicalPaths,
         "cwd ws",
         "",
-        Some(&primary),
+        &[primary.clone()],
     )
-    .unwrap();
+    .unwrap()
+    .workstream;
     let launcher = launcher_in("prepared-cwd");
 
     let with_ws = launcher

@@ -25,7 +25,7 @@ export function ContinueSection({ navigate, defaultAgent, cards }: {
       <div className="page-head" style={{ marginBottom: 12 }}>
         <div className="section-label" style={{ margin: 0 }}>最近活动</div>
         <button className="btn small ghost" onClick={() => navigate({ view: "workstreams" })}>
-          Workstreams →
+          任务 →
         </button>
       </div>
       <div className="ws-grid">
@@ -70,15 +70,15 @@ export function RecentSessions({ navigate, onNewSession }: {
 
   return (
     <div className="recent-sessions" style={{ marginTop: 36 }}>
-      <div className="section-label">最近 Sessions</div>
+      <div className="section-label">最近会话</div>
 
       {/* Workstream 存在但一次都还没跑过：这里必须留下一个明确的下一步，
           否则首页看起来像空的。 */}
       {sessions.length === 0 ? (
         <div className="muted small">
-          还没有 Session。{" "}
+          还没有会话。{" "}
           {onNewSession && (
-            <button className="link small" onClick={onNewSession}>新建 Session</button>
+            <button className="link small" onClick={onNewSession}>新建会话</button>
           )}
         </div>
       ) : (

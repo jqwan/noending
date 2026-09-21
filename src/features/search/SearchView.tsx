@@ -6,8 +6,8 @@ import type { SearchHit } from "../../types";
 /** 结果类型徽标（search/mod.rs:12 的 kind 定义域）。领域词按 §2 词表保留。 */
 const HIT_KIND_LABELS: Record<string, string> = {
   item: "Context",
-  workstream: "Workstream",
-  project: "Project",
+  workstream: "任务",
+  project: "项目",
   event: "消息",
 };
 
@@ -29,8 +29,8 @@ export default function SearchView({ query, navigate }: { query: string; navigat
   return (
     <div className="main narrow">
       <h1>搜索</h1>
-      <p className="page-sub">优先展示当前 Context，其次历史与原始 Session。</p>
-      <input type="text" style={{ marginBottom: 18 }} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索 Workstream、Session、Context 消息…" />
+      <p className="page-sub">优先展示当前 Context，其次历史与原始会话。</p>
+      <input type="text" style={{ marginBottom: 18 }} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索任务、会话、Context 消息…" />
 
       {failed && (
         <div className="empty">搜索失败。本地数据没有被修改，换个关键词或稍后重试。</div>

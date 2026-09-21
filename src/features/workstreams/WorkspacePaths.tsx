@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
+import WorkspacePathField, { absolutePathHint } from "../../components/WorkspacePathField";
 import { ellipsisPathMiddle } from "../sessions/SessionTable";
 import type {
   WorkspaceGitState,
@@ -43,7 +44,7 @@ export function GitStateBadge({ state, kind }: {
     return (
       <span
         className="badge warn"
-        title="这里曾经有 Git 证据、现在读不到了。丢的是证据，不是归属：这条路径仍然属于同一个 Project（方案 §1.3）。"
+        title="这里曾经有 Git 证据、现在读不到了。丢的是证据，不是归属：这条路径仍然属于同一个项目（方案 §1.3）。"
       >
         Git 证据消失
       </span>
@@ -58,7 +59,7 @@ export function GitStateBadge({ state, kind }: {
 /** 存在性是观察，不是身份：目录暂时不在，路径条目仍然是合法的一条。 */
 export function MissingBadge() {
   return (
-    <span className="badge warn" title="本机上读不到这个目录。它仍然是这条 Workstream 的一条工作路径——身份由路径字符串决定，存在性只是观察。">
+    <span className="badge warn" title="本机上读不到这个目录。它仍然是这项任务的一条工作路径——身份由路径字符串决定，存在性只是观察。">
       目录不存在
     </span>
   );
@@ -71,7 +72,7 @@ export function MissingBadge() {
 export function pathSourceLabel(source: WorkstreamPathSource | string): string {
   switch (source) {
     case "user": return "由你添加";
-    case "session": return "由 Session 绑定带入";
+    case "session": return "由会话绑定带入";
     case "launch": return "由启动带入";
     case "migration": return "由旧版迁移带入";
     default: return `来源：${source}`;
@@ -174,7 +175,7 @@ export default function WorkstreamPathList({
       setAddOpen(false);
       setAddInput("");
       return `已添加为第 ${created.position + 1} 条工作路径。`
-        + "NoEnding 不会把这个目录下已有的 Session 导进来（方案 §1.7）。";
+        + "NoEnding 不会把这个目录下已有的会话导进来（方案 §1.7）。";
     });
   };
 
@@ -187,9 +188,9 @@ export default function WorkstreamPathList({
       const rest = (paths ?? []).filter((p) => p.id !== target.id).length;
       return `已移除 ${shortPath(target.canonical_path)}。`
         + (unbound > 0
-          ? `同时把由这条路径带来的 ${unbound} 个 Session 移出本 Workstream —— Session 本身与它们的事件历史都没有被删除。`
-          : "这条路径没有带走任何 Session 绑定。")
-        + (rest > 0 ? " 主工作路径已由剩下第一条自动接任。" : " 本 Workstream 现在没有工作路径。");
+          ? `同时把由这条路径带来的 ${unbound} 个会话移出本任务 —— 会话本身与它们的事件历史都没有被删除。`
+          : "这条路径没有带走任何会话绑定。")
+        + (rest > 0 ? " 主工作路径已由剩下第一条自动接任。" : " 本任务现在没有工作路径。");
     });
   };
 
@@ -208,7 +209,7 @@ export default function WorkstreamPathList({
 
       <div className="small muted" style={{ marginBottom: 8 }}>
         有序列表，第 1 条是<b>主工作路径</b>：它决定新建 Session 默认在哪里启动，
-        也决定这个 Workstream 出现在哪个 Project 下。路径列表不是 Workstream 的身份
+        也决定这个任务出现在哪个 Project 下。路径列表不是任务的身份
         —— 它可以为空，Session 永远记住自己的 cwd。
       </div>
 
@@ -217,7 +218,7 @@ export default function WorkstreamPathList({
 
       {paths !== null && rows.length === 0 && (
         <div className="l1-none">
-          还没有工作路径 —— 一条没有路径的 Workstream 完全合法。
+          还没有工作路径 —— 一条没有路径的任务完全合法。
           它不归属任何 Project，新建 Session 会从 NoEnding 的默认工作目录启动。
         </div>
       )}
@@ -236,13 +237,13 @@ export default function WorkstreamPathList({
               {pathSourceLabel(p.source)}
               {" · "}
               {p.bound_session_count === 0
-                ? "没有 Session 由这条路径带来"
-                : `${p.bound_session_count} 个 Session 由这条路径带来`}
+                ? "没有会话由这条路径带来"
+                : `${p.bound_session_count} 个会话由这条路径带来`}
               {" · "}
               {/* 只报归属、不给入口：Project 的入口在详情页的 Project 段落里，
                   一行路径不该有两个可点的 Project 链接。 */}
-              <span title={`这条路径所属的 Project（由路径派生，只读）：${p.project_name ?? p.project_id}`}>
-                {p.project_name ? `Project ${p.project_name}` : "Project 名称尚未同步"}
+              <span title={`这条路径所属的项目（由路径派生，只读）：${p.project_name ?? p.project_id}`}>
+                {p.project_name ? `项目 ${p.project_name}` : "项目名称尚未同步"}
               </span>
             </div>
           </div>
@@ -261,7 +262,7 @@ export default function WorkstreamPathList({
             <button className="btn small" disabled={busy || p.position >= rows.length - 1}
               title={p.position >= rows.length - 1 ? "已经是最后一条" : "下移一条"}
               onClick={() => shift(p, 1)}>↓</button>
-            <button className="btn small" disabled={busy} title="从本 Workstream 移除这条路径"
+            <button className="btn small" disabled={busy} title="从本任务移除这条路径"
               onClick={() => { setActionError(""); setNotice(""); setRemoveTarget(p); }}>
               移除
             </button>
@@ -280,19 +281,17 @@ export default function WorkstreamPathList({
         <Modal title="添加工作路径" onClose={() => setAddOpen(false)}>
           <p className="muted small" style={{ marginTop: 0 }}>
             只增加这一条路径。NoEnding 不会扫描这个目录、也不会把目录下已有的历史
-            Session 导入本 Workstream（方案 §1.7）；要让某个 Session 进来，请在
+            Session 导入本任务（方案 §1.7）；要让某个 Session 进来，请在
             Session 里绑定它。
           </p>
-          <label className="field"><span>绝对路径</span>
-            <input
-              type="text"
-              className="mono"
+          <div className="field"><span>绝对路径</span>
+            <WorkspacePathField
               value={addInput}
-              autoFocus
+              onChange={(v) => { setAddInput(v); setAddFormatHint(""); }}
+              onSubmit={submitAdd}
+              autoFocus={false}
               placeholder="/path/to/目录 或 C:\\path\\to\\目录"
-              onChange={(e) => { setAddInput(e.target.value); setAddFormatHint(""); }}
-              onKeyDown={(e) => e.key === "Enter" && submitAdd()}
-            /></label>
+            /></div>
           {addFormatHint && <div className="badge warn" style={{ marginBottom: 10 }}>{addFormatHint}</div>}
           <div className="small muted" style={{ marginBottom: 10 }}>
             NoEnding 会自己把它规范化成规范路径（展开 <span className="mono">~</span>、折叠
@@ -312,14 +311,14 @@ export default function WorkstreamPathList({
       {removeTarget && (
         <Modal title="移除工作路径" onClose={() => setRemoveTarget(null)}>
           <p className="muted small" style={{ marginTop: 0 }}>
-            这一步会连带改动 Workstream 的成员关系，所以先说清楚它到底动什么。
+            这一步会连带改动任务的成员关系，所以先说清楚它到底动什么。
           </p>
           <div className="mono" style={{ overflowWrap: "anywhere", marginBottom: 10 }}>
             <PathText path={removeTarget.canonical_path} max={200} />
           </div>
           <p style={{ margin: "0 0 8px", maxWidth: "72ch" }}>
             将同时把该路径对应的 {removeTarget.bound_session_count} 个 Session
-            从当前 Workstream 移除。Session 历史不会删除。
+            从当前任务移除。Session 历史不会删除。
           </p>
           <p className="small muted" style={{ marginBottom: 8 }}>
             只移走<b>由这条路径带来</b>的绑定：手工绑定、或因 cwd 漂移而不再对应任何路径的
@@ -337,7 +336,7 @@ export default function WorkstreamPathList({
             </p>
           ) : (
             <p className="small muted" style={{ marginBottom: 8 }}>
-              这是唯一的一条；移除后本 Workstream 没有工作路径，新建 Session
+              这是唯一的一条；移除后本任务没有工作路径，新建 Session
               会退回到 NoEnding 默认工作目录。
             </p>
           ))}
@@ -359,15 +358,6 @@ export function PathError({ text }: { text: string }) {
       {text}
     </div>
   );
-}
-
-/** 只挡明显写错的形式：绝对的判定权在 Rust 侧（workspace::identity 是唯一权威）。 */
-function absolutePathHint(raw: string): string {
-  if (raw === "") return "";
-  const absolute = /^([~/\\]|[A-Za-z]:[\\/])/.test(raw);
-  return absolute
-    ? ""
-    : "请输入绝对路径（例如 /Users/… 、C:\\Users\\…），或写成 ~ 开头的形式。";
 }
 
 function shortPath(path: string): string {

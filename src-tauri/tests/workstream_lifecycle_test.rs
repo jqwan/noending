@@ -582,7 +582,9 @@ fn permanent_delete_leaves_a_sibling_alone() {
 fn created_archived_and_purged_leaves_no_trace_of_itself() {
     let (_d, db) = temp_db();
     db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
-    let w = create_workstream(&db, &FixedAttacher, "临时", "", Some("/repo/tmp")).unwrap();
+    let w = create_workstream(&db, &FixedAttacher, "临时", "", &["/repo/tmp".into()])
+        .unwrap()
+        .workstream;
     assert_eq!(
         db.list_workstream_paths(&w.id).unwrap()[0].source,
         workstream_path_source::USER

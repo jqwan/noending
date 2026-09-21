@@ -63,6 +63,7 @@ function detail(id: string): SessionDetail {
     cursor: 0,
     processed_cursor: 0,
     classification: "",
+    raw_path_status: "present",
     workspace_path: null,
   };
 }

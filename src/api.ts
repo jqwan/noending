@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
-  ContextDeliveryLevel, ContextItem, ContextItemRevision, LaunchResult,
-  PermanentDeletionPreview, PermanentDeletionResult, Project, ProjectCardData,
-  ProjectDetailData, ProjectWorkstreamRow, SessionDeletionJob, WorkspaceSettings,
+  ContextDeliveryLevel, ContextItem, ContextItemRevision, CreateWorkstreamReport,
+  LaunchResult, PathProbe, PermanentDeletionPreview, PermanentDeletionResult,
+  Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow,
+  RecentWorkspacePath, SessionDeletionJob, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionDetail, SessionWorkstreamBinding,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
@@ -41,19 +42,31 @@ export const api = {
     invoke<Workstream[]>("list_workstreams", { projectId: projectId ?? null }),
   listWorkstreamCards: () => invoke<WorkstreamCardData[]>("list_workstream_cards"),
   /**
-   * `create_workstream(title, description, initialPath?)`.
+   * `create_workstream(title, description, initialPaths?)`.
    *
    * There is no Project argument to carry: v0.2 has no manual
-   * Workstream→Project assignment. The path the user types is not a hint
-   * either — it becomes the Workstream's position-0 path, or nothing at all
-   * when the workspace layer cannot resolve it.
+   * Workstream→Project assignment. Each entry of `initialPaths` is a raw
+   * string that becomes an ordered WorkstreamPath — first ACCEPTED entry wins
+   * the primary seat — and the report says per entry what landed and what was
+   * refused, so the UI never has to re-read and silently drop.
    */
-  createWorkstream: (title: string, description: string, initialPath?: string) =>
-    invoke<Workstream>("create_workstream", {
+  createWorkstream: (title: string, description: string, initialPaths: string[] = []) =>
+    invoke<CreateWorkstreamReport>("create_workstream", {
       title,
       description,
-      initialPath: initialPath?.trim() || null,
+      initialPaths,
     }),
+  /**
+   * Read-only preview for the path picker: what would happen if this string
+   * were attached as a working path, and which Project it would project onto.
+   * Advisory only — the attacher decides at create time.
+   */
+  probeWorkspacePath: (path: string) =>
+    invoke<PathProbe>("probe_workspace_path", { path }),
+  /** Picker candidates: known WorkspacePaths + Session cwd history, ranked by
+   *  recent activity. Pure reads; nothing here creates a WorkspacePath. */
+  listRecentWorkspacePaths: (limit = 8) =>
+    invoke<RecentWorkspacePath[]>("list_recent_workspace_paths", { limit }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
 
   // ---------------- Workstream paths, lifecycle, recycle bin (方案 §11, §18) ----------------
