@@ -11,7 +11,8 @@ export type Agent =
   | "qoder"
   | "autoclaw"
   | "workbuddy"
-  | "dsh";
+  | "dsh"
+  | "gemini";
 
 /** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
 export type WorkstreamLifecycle = "active" | "completed";
@@ -637,6 +638,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
   autoclaw: "AutoClaw",
   workbuddy: "WorkBuddy",
   dsh: "dsh",
+  gemini: "Gemini CLI",
 };
 
 // ---------- Agent Runtime Configuration (commands.rs §Agent Runtime) ----------

@@ -86,6 +86,12 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             provider: Unsupported,
             effort: Unsupported,
         },
+        // Same reason: nothing to launch, so nothing to override (方案 §37.9).
+        Agent::Gemini => AgentRuntimeCapabilities {
+            model: Unsupported,
+            provider: Unsupported,
+            effort: Unsupported,
+        },
     }
 }
 

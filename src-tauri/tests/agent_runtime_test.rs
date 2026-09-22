@@ -363,13 +363,16 @@ fn an_invalid_override_errors_for_the_assistant_instead_of_downgrading() {
 #[test]
 fn a_corrupt_assistant_agent_is_not_mistaken_for_retrieval_only() {
     let db = temp_db();
-    db.set_setting("assistant.agent", "gemini").unwrap();
+    db.set_setting("assistant.agent", "no_such_agent").unwrap();
     // `none` is the ONLY value that means "no model on purpose".
     assert!(CliExtractor::try_for_agent(&db, "none").unwrap().is_none());
-    let err = CliExtractor::try_for_agent(&db, "gemini")
+    let err = CliExtractor::try_for_agent(&db, "no_such_agent")
         .err()
         .expect("an unresolvable Agent must not become retrieval-only");
-    assert!(err.to_string().contains("gemini"), "names the value: {err}");
+    assert!(
+        err.to_string().contains("no_such_agent"),
+        "names the value: {err}"
+    );
     assert!(
         CliExtractor::try_from_settings(&db).is_err(),
         "Assistant reports an unresolvable Agent instead of quietly answering from retrieval"

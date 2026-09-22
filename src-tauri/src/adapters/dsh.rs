@@ -43,10 +43,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    file_identity, ms_epoch_to_rfc3339, mtime_secs, AgentCommand, DiscoveredSession, ExecOptions,
-    ParsedLine, ReadDelta,
+    ms_epoch_to_rfc3339, AgentCommand, DiscoveredSession, ExecOptions, ParsedLine, ReadDelta,
 };
-use crate::domain::{Agent, ParsedEvent, Session, SourceCursor, SourceCursorUpdate};
+use crate::domain::{Agent, ParsedEvent, Session, SourceCursor};
 use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
 
@@ -311,9 +310,6 @@ impl crate::adapters::AgentAdapter for DshAdapter {
     fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
         let path = PathBuf::from(&session.raw_path);
         let raw = std::fs::read(&path)?;
-        let meta = std::fs::metadata(&path)?;
-        let identity = file_identity(&path);
-        let raw_len = raw.len() as u64;
 
         // Decoded text cannot be seeked into, so every read replays the whole
         // body and leans on event identity: each record carries the writer's
@@ -343,35 +339,9 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             true
         });
 
-        // A new generation only when the file itself changed shape: replaced
-        // (identity) or truncated (a torn-frame repair removed bytes).
-        let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
-        let generation = if first_ever {
-            0
-        } else if identity != cursor.source_file_identity
-            || (raw_len as i64) < (cursor.last_seen_size as i64)
-        {
-            cursor.generation + 1
-        } else {
-            cursor.generation
-        };
-
         Ok(ReadDelta {
             events,
-            source: Some(SourceCursorUpdate {
-                file_identity: identity,
-                generation,
-                // Raw-file coordinates: the reconcile pre-filter compares the
-                // stored size/mtime against the file on disk, and that stat is
-                // the only thing known without decoding.
-                byte_offset: raw_len,
-                last_seen_size: raw_len,
-                mtime: mtime_secs(&meta),
-                // Always a full replay, so the identity chain restarts at
-                // genesis and reproduces the same hashes; `seq` makes it moot.
-                start_byte_offset: 0,
-                prefix_hash: crate::adapters::sha256_hex(&raw),
-            }),
+            source: Some(crate::adapters::replay_cursor_update(&path, cursor, &raw)?),
         })
     }
 

@@ -156,6 +156,17 @@ fn dsh_line(role: &str, text: &str) -> String {
     format!(r#"{{"type":"{vtype}","seq":{seq},"time":1783137449113,"data":{data}}}"#)
 }
 
+fn gemini_line(role: &str, text: &str) -> String {
+    // Gemini records messages one per line (`{id, timestamp, type, content}`),
+    // with `gemini` as the assistant type; `content` is a part array whose text
+    // parts carry no `type` key (方案 §37.9).
+    let id = format!("g-{}-{}", role, text);
+    let msg_type = if role == "user" { "user" } else { "gemini" };
+    format!(
+        r#"{{"id":"{id}","timestamp":"2026-09-13T10:00:00Z","type":"{msg_type}","content":[{{"text":"{text}"}}]}}"#
+    )
+}
+
 /// One ingest round-trip exactly as production does it.
 fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
     let cursor = db.get_source_cursor(&session.id).unwrap();
@@ -353,6 +364,15 @@ identity_suite!(
     dsh_line,
     write_framed,
     append_framed
+);
+identity_suite!(
+    gemini_truncate_rewrite_dedup,
+    Agent::Gemini,
+    noending::adapters::gemini::GeminiAdapter,
+    gemini_line,
+    gemini_line,
+    write_plain,
+    append_plain
 );
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a

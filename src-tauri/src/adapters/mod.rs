@@ -17,6 +17,7 @@ pub mod autoclaw;
 pub mod claude;
 pub mod codex;
 pub mod dsh;
+pub mod gemini;
 pub mod pi;
 pub mod qoder;
 pub mod workbuddy;
@@ -454,6 +455,44 @@ pub fn read_jsonl_delta(
     })
 }
 
+/// Cursor update for readers that replay the whole source on every read (dsh's
+/// zstd frames, Gemini's checkpoint log — 方案 §37.8/§37.9).
+///
+/// Their offsets must stay in the file's OWN coordinates: that is what the
+/// reconcile pre-filter stats, and it is the only thing known without decoding
+/// or replaying. A replay therefore always starts at genesis, and event
+/// identity — the writer's own ids in both formats — absorbs it: re-reading a
+/// source stores nothing. A new generation is a change of shape (the file was
+/// replaced, or truncation removed bytes), never a mere append.
+pub fn replay_cursor_update(
+    path: &Path,
+    cursor: &SourceCursor,
+    raw: &[u8],
+) -> Result<crate::domain::SourceCursorUpdate> {
+    let meta = std::fs::metadata(path)?;
+    let identity = file_identity(path);
+    let len = raw.len() as u64;
+    let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
+    let generation = if first_ever {
+        0
+    } else if identity != cursor.source_file_identity
+        || (len as i64) < (cursor.last_seen_size as i64)
+    {
+        cursor.generation + 1
+    } else {
+        cursor.generation
+    };
+    Ok(crate::domain::SourceCursorUpdate {
+        file_identity: identity,
+        generation,
+        byte_offset: len,
+        last_seen_size: len,
+        mtime: mtime_secs(&meta),
+        start_byte_offset: 0,
+        prefix_hash: sha256_hex(raw),
+    })
+}
+
 /// Extract a string field from an object if present.
 pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|s| s.as_str())
@@ -629,6 +668,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(autoclaw::AutoClawAdapter),
         Box::new(workbuddy::WorkBuddyAdapter),
         Box::new(dsh::DshAdapter),
+        Box::new(gemini::GeminiAdapter),
     ]
 }
 

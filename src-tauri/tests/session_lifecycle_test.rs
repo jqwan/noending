@@ -19,6 +19,7 @@ use noending::adapters::autoclaw::AutoClawAdapter;
 use noending::adapters::claude::ClaudeAdapter;
 use noending::adapters::codex::CodexAdapter;
 use noending::adapters::dsh::DshAdapter;
+use noending::adapters::gemini::GeminiAdapter;
 use noending::adapters::pi::PiAdapter;
 use noending::adapters::qoder::QoderAdapter;
 use noending::adapters::workbuddy::WorkBuddyAdapter;
@@ -118,6 +119,13 @@ fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
             "{{\"type\":\"workspace-directories\",\"sessionId\":\"{sid}\",\"directories\":[\"/tmp/proj\"]}}\n\
              {{\"type\":\"user\",\"sessionId\":\"{sid}\",\"uuid\":\"u1\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n\
              {{\"type\":\"assistant\",\"sessionId\":\"{sid}\",\"uuid\":\"u2\",\"parentUuid\":\"u1\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:01:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"reply\"}}]}}}}\n",
+            sid = session_id
+        ),
+        // Gemini: the metadata record opens the file and the conversation
+        // follows as an operation log. No permanent source deletion (§37.9).
+        Agent::Gemini => format!(
+            "{{\"sessionId\":\"{sid}\",\"projectHash\":\"303dd790\",\"startTime\":\"2026-09-14T15:20:39.089Z\",\"lastUpdated\":\"2026-09-14T15:20:39.089Z\",\"kind\":\"main\"}}\n\
+             {{\"id\":\"m1\",\"timestamp\":\"2026-09-14T15:20:39.089Z\",\"type\":\"user\",\"content\":[{{\"text\":\"first user message about goals\"}}]}}\n",
             sid = session_id
         ),
         // dsh: the session header carries `createdAt`, and every later record
@@ -1196,10 +1204,11 @@ adapter_suite!(qoder_suite, Agent::Qoder, QoderAdapter);
 #[test]
 fn adapters_without_deletion_support_refuse_loudly() {
     let db = open_db("no-deletion-support");
-    let cases: [(Agent, &dyn AgentAdapter); 3] = [
+    let cases: [(Agent, &dyn AgentAdapter); 4] = [
         (Agent::AutoClaw, &AutoClawAdapter),
         (Agent::WorkBuddy, &WorkBuddyAdapter),
         (Agent::Dsh, &DshAdapter),
+        (Agent::Gemini, &GeminiAdapter),
     ];
     for (agent, adapter) in cases {
         let s = fixture_session(&db, agent, "no-deletion-support");

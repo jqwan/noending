@@ -3282,3 +3282,33 @@ workspace-directories / runtime-config / worktree-state / active-leaf / last-pro
 **测试**：`identity_suite!` 这轮加了两个参数（写入器 / 追加器），普通 JSONL 用 `write_plain`/`append_plain`，dsh 用 `write_framed`/`append_framed`（每次追加一帧）——**同一套 append / 无变化 / 截断重写 / 同尺寸重写 / 文件替换 + 去重断言，七家适配器现在共用**。适配器内另有：头解析与"注入上下文不算用户话"、最高代优先（v0 + v2 同目录只认 v2）、摄入只留对话与 compression 标记、子 Agent 的父链接、pi 头不被认领、残缺尾帧不吃掉完整前缀。
 
 **验证**：`[fingerprint] dsh: 93 sessions discovered under /Users/jqk/.dsh`（= 60 个 v2 目录 + 33 个只剩 v0 的目录），真实根目录零错判，`seq`/id 全局唯一无重复；`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
+
+## 37.9 Gemini CLI（D 形态：操作日志，只摄入）
+
+`~/.gemini/tmp/<project>/chats/session-*.jsonl`，旁边 `<project>/.project_root` 写着该会话的工作目录（绝对路径），`~/.gemini` 下另有 Antigravity 自己的 brain 目录与一个 git 支撑的 history 仓库——发现**只走 `<root>/tmp`**。本机 10 个会话。
+
+**它不是消息列表，是一份操作日志。** 文件由 `fs.appendFileSync` 追加，读的时候按顺序**重放**才能得到"当前会话"（`packages/core/src/services/chatRecordingService.ts` 的 `loadConversationRecord`）。四种记录：
+
+```text
+{sessionId, projectHash, startTime, lastUpdated, kind}   元数据（可以重复）
+{id, timestamp, type, content, …}                        一条消息（按 id upsert）
+{$set: {messages: [...]}}                                检查点：清空并按该数组重建
+{$set: {…其它键…}}                                        元数据合并
+{$rewindTo: <message id>}                                回退：删掉该条及其之后的一切
+```
+
+两个直接后果：**一、检查点一行里装着多条消息**，共享的"一行一条事件"读取器表达不了，所以这个适配器自带重放器（和 dsh 一样是"整体重放 + 靠原生 id 去重"，游标存原始文件坐标，稳态靠 reconcile 预筛）。**二、`sessionId` 不能当身份**：A2A server 写下的每条录制里都是字面量 `"a2a-server"`（本机 10 个文件全是），拿它当 `agent_session_id` 会让所有录制挤进同一行——身份只能取**文件名**（`session-<时间戳>-<id 前 8 位>.jsonl`，逐文件唯一），与 Qoder 子 Agent 文件同一处理方式。
+
+**只摄入对话**：`user` → user_message，`gemini` → assistant_message；`info` / `error` / `warning` 是 CLI 自己的提示，`content` 里的 functionCall、`toolCalls`、`thoughts` 是工具与思考噪音，一律丢弃（§36.11）。**开场的 `<session_context>` 是 user 消息但不是用户的话**（一份 6KB 的仓库目录树），按 `<` 前缀丢弃——本机 10 个会话因此都没有标题，因为它们的用户消息**只有**那条上下文（真实交互式会话里，真正的提问跟在它后面）。回退（`$rewindTo`）删掉的是**锚点那条及其之后的全部**（`rewindTo()` 的注释与实现写着 "from (and including)"），重放器照此实现；被删掉的消息在 NoEnding 里仍然留着（事件库只追加，从不被后来的源状态覆盖）。
+
+**为什么只摄入**：本机没有 `gemini`，而且即便有，`--resume` 只接受 `latest` 或序号（`config.ts` 的选项描述与 coerce 都只做 trim，不认会话 id），NoEnding 的"按 id 恢复"无从表达。为此 `cli_names(Gemini)` 为空、`detect()` 恒 None、三个 builder 明确报错并写明原因。
+
+**一处已知的映射缺口**：Gemini CLI 认 `GEMINI_CLI_HOME`，但它的值是**home**（数据目录是 `<home>/.gemini`），而 `agent_env_override` 的契约是"值就是数据根"，多一段路径没法表达——所以这里填 `""`（不改写为错误语义），用户把 home 挪走后 NoEnding 会读不到，留待该契约支持路径模板时再修。
+
+**改动清单**：`domain/models.rs`（`Gemini`）、`platform/paths.rs`（`~/.gemini`；`GEMINI_CLI_HOME` 的缺口写在注释里）、`platform/exec_resolver.rs`（`cli_names` 为空）、`adapters/mod.rs`（注册 + 新增 `replay_cursor_update`：dsh 与 Gemini 共用的"整体重放式游标"）、`adapters/gemini.rs`、`agent_runtime/{capabilities,discovery}`、`src/types.ts` 与 `AgentRuntimeSettings`。
+
+顺带一处重构：dsh 上一轮内联的游标计算抽成了 `adapters::replay_cursor_update`（两家用同一套规则：原始坐标 + 只在身份变化或截断时换代），dsh 与 Gemini 各少一段重复代码。
+
+**测试**：`gemini_truncate_rewrite_dedup` 并入 identity_suite（普通 JSONL 写入器），七家适配器继续共用同一套 append / 无变化 / 截断重写 / 同尺寸重写 / 文件替换 + 去重断言。适配器内另有：工作目录标记与首条真提问（开场上下文不算）、日志重放到"当前会话"（`$set` 检查点 + `$rewindTo` 回退语义）、只摄入对话（info/warning/error 被丢）、同一个 `a2a-server` 的两条录制各成一行（身份取自文件名）、不是录制的文件不被认领（不在 `chats/` 下的 `session-*.jsonl`、首行不是元数据的文件）。另修了一处被新 Agent 撞到的测试夹具：`a_corrupt_assistant_agent_is_not_mistaken_for_retrieval_only` 原本拿 `"gemini"` 当"无法识别的 Agent"用的例子，现在 `gemini` 已经是一个真 Agent，夹具改成 `no_such_agent`（该测试的意图不变）。
+
+**验证**：`[fingerprint] Gemini CLI: 10 sessions discovered under /Users/jqk/.gemini`，真实根目录零错判；`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
