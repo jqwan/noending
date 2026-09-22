@@ -1,12 +1,29 @@
 /* NoEnding layout — AppShell / Sidebar / Main / page scaffolding */
 
-.app { display: flex; position: relative; height: 100%; }
+/* 不再给 .app 留顶部空间：那 48px 现在由页面自己的吸顶标题行（.page-head）占住，
+   好让每页的标题与动作区落在应用标题栏这条 band 里。
+   --titlebar-gutter = 标题栏左侧被占掉的宽度（红黄绿 + 三个历史按钮 + 间距），
+   侧栏收起时 .main 会顶到 x=0，标题行要照这个让开；侧栏展开时最小 200px，天然错开。 */
+.app {
+  --titlebar-height: 48px;
+  --titlebar-gutter: 104px; /* 12 + 28*3 + 4*2 */
+  display: flex;
+  position: relative;
+  height: 100%;
+}
+.app.mac-titlebar { --titlebar-gutter: 179px; } /* 87 + 28*3 + 4*2 */
+.app-titlebar { position: absolute; inset: 0 0 auto; height: var(--titlebar-height); display: flex; align-items: center; padding-left: 12px; }
+.mac-titlebar .app-titlebar { padding-left: 87px; }
+/* 窗口拖动只有一条路：带 data-tauri-drag-region 的元素（tauri 注入的 scripts/drag.js
+   在 mousedown 时沿着 composed path 找它，命中就 invoke start_dragging）。没有
+   -webkit-app-region 这回事——那是 Electron 的属性，WKWebView 里不生效，wry/tauri
+   的源码里也没有任何实现。裸值只认"正好点在这个元素上"；"deep" 认子树内任意位置，
+   但可点元素（button/input/a/[tabindex]/role=button 之类）会拦下来，除非它自带该属性。 */
 .window-drag-region {
   position: absolute;
   inset: 0 0 auto;
-  height: 42px;
+  height: 100%;
   z-index: 4;
-  -webkit-app-region: drag;
 }
 .app-content {
   position: relative;
@@ -17,17 +34,13 @@
   flex-direction: column;
 }
 .app-content > .main { flex: 1; min-height: 0; }
+.main, .sidebar-scroll { overscroll-behavior: none; }
+/* z-index 必须高于页面吸顶标题行（.page-head 也是 6，且在 DOM 里更靠后）：
+   侧栏收起时两者会落在同一段横向空间里，同值会让标题行的背景盖住这三个按钮。 */
 .history-controls {
-  position: absolute;
-  top: 10px;
-  left: 150px;
-  z-index: 6;
+  position: relative;
+  z-index: 8;
   display: flex;
-  gap: 3px;
-}
-.mac-titlebar .history-controls {
-  top: 10px;
-  left: 87px;
   gap: 4px;
 }
 .history-button {
@@ -42,7 +55,6 @@
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  -webkit-app-region: no-drag;
 }
 .history-button:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
 .history-button:disabled { opacity: 0.3; cursor: default; }
@@ -56,8 +68,7 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.mac-titlebar .sidebar { padding-top: 52px; }
-.mac-titlebar .main { padding-top: 52px; }
+
 
 /* ---------- Sidebar (整体设计方案 §5-§11) ---------- */
 .sidebar {
@@ -67,10 +78,13 @@
   background: var(--bg-sidebar);
   display: flex;
   flex-direction: column;
-  padding: 20px 12px 12px;
+  /* 顶距自己留：.app 已经不给这 48px 了（见上）。用 margin 而不是 padding —— 侧栏背景
+     才不会涂到标题栏那条里去（那条横跨全宽，应由 .app 的底色统一铺满）。 */
+  margin-top: var(--titlebar-height);
+  padding: 8px 12px 12px;
   gap: 2px;
   overflow: hidden;
-  transition: width .16s, min-width .16s, padding .16s, border-color .16s;
+
 }
 .sidebar.collapsed {
   display: none;
@@ -170,21 +184,72 @@
 
 /* ---------- Main ---------- */
 .main {
+  /* gutter 是给吸顶标题行用的：它要抵消同一份左右内距，才能铺满整行又和正文对齐。 */
+  --main-gutter: 32px;
+  /* 页头与正文之间的间距，也是「吸顶的东西钉在哪」的唯一定义。看板的搜索/筛选区
+     静态位置就在这段间距之后，sticky top 用同一个变量算「band 高 + 这段间距」，
+     于是钉住位置恒等于静态位置、它不会先跟着滚一截再固定；想看板把这段清零即可，
+     两处一起变，不会各写一个数字然后对不上。 */
+  --head-gap: 20px;
   flex: 1;
   overflow-y: auto;
-  padding: 36px 40px 72px;
+  padding: 0 var(--main-gutter) 48px;
   max-width: 1280px;
 }
+/* 看板页有紧贴页头的搜索/筛选区，不留这段间距（用户觉得 20px 太大）。回收站模式下
+   没有这条工具栏，:has 不成立，间距自动回到 20px。 */
+.main:has(> .board-toolbar) { --head-gap: 0px; }
+/* 没有页头的页面（加载中 / 错误态 / Assistant）自己让出标题栏那条的高度，
+   否则正文会顶到 y=0、压在红黄绿下面。有页头的页面由那条 band 占住这段。 */
+.main:not(:has(> .page-head)) { padding-top: var(--titlebar-height); }
 .main.narrow { max-width: 1120px; }
 
+/* 标题行=应用标题栏那一条：吸在 .main 顶部，页面滚动时内容从它下面穿过。
+   左右用负 margin 抵消 .main 的内边距，背景才能盖住滚过去的正文。
+   它的 z-index（6）盖住了 AppShell 的 .window-drag-region（4），所以它自己必须是拖动区：
+   见 PageHeader 上的 data-tauri-drag-region="deep"。里面的按钮由 tauri 的脚本判定为
+   可点元素而自动豁免，不必再写 no-drag（那是 Electron 的写法，这里不生效）。 */
 .page-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  margin: 0 calc(-1 * var(--main-gutter)) var(--head-gap);
+  padding: 0 var(--main-gutter);
+  height: var(--titlebar-height);
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 6px;
+  background: var(--bg-app);
 }
-.page-head .actions { display: flex; gap: 8px; flex: none; padding-top: 2px; }
+/* 侧栏收起后内容顶到最左，标题行必须让开历史按钮那一段，否则标题压在按钮下面。 */
+.app.sidebar-collapsed .page-head { padding-left: calc(var(--titlebar-gutter) + 16px); }
+.page-head .page-title {
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 动作区固定在右上角：标题再长也只挤压标题本身，按钮不掉行、不被挤下去。 */
+.page-head .actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+/* 标题栏里的按钮统一成与左侧历史按钮同形：28×28 方形（button.btn 的 min-height
+   是 32px、icon-button 只改了宽度，不覆盖就会是 28×32 的长方形）。 */
+.page-head .actions button.icon-button,
+.page-head .actions .settings-seg button {
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
 .divider { border: 0; border-top: 1px solid var(--border-subtle); margin: 26px 0; }
@@ -215,3 +280,27 @@
   color: var(--text-secondary);
   margin: 0 0 8px;
 }
+
+.sidebar-resizer { position: absolute; top: var(--titlebar-height); bottom: 0; left: calc(var(--sidebar-width) - 3px); width: 6px; z-index: 8; cursor: col-resize; touch-action: none; }
+.sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: var(--accent-wash); }
+.nav-item { gap: 10px; min-height: 34px; }
+.brand { margin-bottom: 12px; }
+@media (max-width: 1100px) {
+  .main { --main-gutter: 24px; padding-bottom: 40px; }
+}
+
+.truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-task { display: flex; align-items: center; }
+.sidebar-task .nav-item { min-width: 0; flex: 1; }
+.pin-button { display: flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.pin-button:hover, .pin-button[aria-pressed="true"] { background: var(--bg-hover); color: var(--text-primary); }
+.task-detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 32px; }
+.task-detail-main, .task-detail-aside { min-width: 0; }
+.task-detail-aside { border-left: 1px solid var(--border-subtle); padding-left: 24px; }
+.task-detail .ws-detail-head-meta { flex-wrap: wrap; }
+@media (max-width: 1100px) {
+  .task-detail-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .task-detail-aside { border-left: 0; border-top: 1px solid var(--border-subtle); padding: 16px 0 0; }
+}
+.task-detail-aside .list-row, .task-detail-aside .side, .task-detail-aside .row { flex-wrap: wrap; }
+.task-detail-aside .list-row .grow { flex-basis: 100%; }

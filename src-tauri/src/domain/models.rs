@@ -416,6 +416,8 @@ pub struct SessionEvent {
     pub source_generation: i64,
     pub source_position: String, // e.g. "line:42"
     pub ts: Option<String>,
+    // tool_call / tool_result are no longer produced (方案 §36.11); the value
+    // set stays open so rows ingested before that decision remain readable.
     pub kind: String, // user_message | assistant_message | tool_call | tool_result | compact | system | artifact | unknown
     pub text: Option<String>,
     pub raw_ref: String,

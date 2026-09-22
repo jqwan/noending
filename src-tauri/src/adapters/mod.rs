@@ -624,7 +624,7 @@ pub fn title_from_text(text: &str) -> Option<String> {
     if t.is_empty() {
         None
     } else {
-        Some(truncate_text(&t, 80))
+        Some(truncate_text(&t, 36))
     }
 }
 

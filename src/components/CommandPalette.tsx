@@ -109,7 +109,7 @@ export default function CommandPalette({ onClose, navigate }: {
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") { e.preventDefault(); setSelected((s) => Math.min(s + 1, items.length - 1)); }
             else if (e.key === "ArrowUp") { e.preventDefault(); setSelected((s) => Math.max(s - 1, 0)); }
-            else if (e.key === "Enter") { go(items[selected]); }
+            else if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) { go(items[selected]); }
             else if (e.key === "Escape") { onClose(); }
           }}
         />

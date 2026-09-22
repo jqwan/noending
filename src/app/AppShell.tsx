@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "../layout/Sidebar";
 import Router from "./Router";
@@ -41,6 +41,15 @@ export default function AppShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("noending.sidebarCollapsed") === "true",
   );
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = Number(localStorage.getItem("noending.sidebarWidth"));
+    return Number.isFinite(saved) && saved >= 200 ? Math.min(360, saved) : 248;
+  });
+  const resizeSidebar = (width: number) => {
+    const next = Math.max(200, Math.min(360, width));
+    setSidebarWidth(next);
+    localStorage.setItem("noending.sidebarWidth", String(next));
+  };
   // 带 action 的导航每次都递增，页面据此响应「已在目标页」的重复命令
   const [actionSeq, setActionSeq] = useState(0);
   const seqRef = useRef(0);
@@ -132,49 +141,71 @@ export default function AppShell() {
   }, []);
 
   return (
-    <div className={`app${isMac ? " mac-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-      {isMac && <div className="window-drag-region" data-tauri-drag-region />}
-      <div className="history-controls" aria-label="页面导航">
-        <button
-          className="history-button"
-          aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-          title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-          onClick={() => setSidebarCollapsed((value) => !value)}
-        >
-          <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
-            <rect x="3" y="4" width="12" height="10" rx="2.5" />
-            <path d="M7 4v10" />
-          </svg>
-        </button>
-        <button
-          className="history-button"
-          aria-label="返回上一页"
-          title="返回上一页（⌥← / ⌘[）"
-          disabled={navigation.index === 0}
-          onClick={() => goBack()}
-        >
-          <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
-            <path d="M14 9H4m5-5L4 9l5 5" />
-          </svg>
-        </button>
-        <button
-          className="history-button"
-          aria-label="前进到下一页"
-          title="前进到下一页（⌥→ / ⌘]）"
-          disabled={navigation.index >= navigation.entries.length - 1}
-          onClick={goForward}
-        >
-          <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
-            <path d="M4 9h10M9 4l5 5-5 5" />
-          </svg>
-        </button>
-      </div>
+    <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <header className="app-titlebar">
+        {isMac && <div className="window-drag-region" data-tauri-drag-region />}
+        <div className="history-controls" aria-label="页面导航">
+          <button
+            className="history-button"
+            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            onClick={() => setSidebarCollapsed((value) => !value)}
+          >
+            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
+              <rect x="3" y="4" width="12" height="10" rx="2.5" />
+              <path d="M7 4v10" />
+            </svg>
+          </button>
+          <button
+            className="history-button"
+            aria-label="返回上一页"
+            title="返回上一页（⌥← / ⌘[）"
+            disabled={navigation.index === 0}
+            onClick={() => goBack()}
+          >
+            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
+              <path d="M14 9H4m5-5L4 9l5 5" />
+            </svg>
+          </button>
+          <button
+            className="history-button"
+            aria-label="前进到下一页"
+            title="前进到下一页（⌥→ / ⌘]）"
+            disabled={navigation.index >= navigation.entries.length - 1}
+            onClick={goForward}
+          >
+            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
+              <path d="M4 9h10M9 4l5 5-5 5" />
+            </svg>
+          </button>
+        </div>
+      </header>
       <Sidebar
         route={route}
         navigate={navigate}
         onSearch={() => setPaletteOpen(true)}
         collapsed={sidebarCollapsed}
       />
+      {!sidebarCollapsed && <div
+        className="sidebar-resizer" role="separator" tabIndex={0}
+        aria-label="侧边栏宽度" aria-orientation="vertical"
+        aria-valuemin={200} aria-valuemax={360} aria-valuenow={sidebarWidth}
+        onDoubleClick={() => resizeSidebar(248)}
+        onKeyDown={(e) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+          e.preventDefault();
+          resizeSidebar(e.key === "Home" ? 200 : e.key === "End" ? 360 : sidebarWidth + (e.key === "ArrowRight" ? 8 : -8));
+        }}
+        onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); }}
+        onPointerMove={(e) => {
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            resizeSidebar(e.clientX - e.currentTarget.parentElement!.getBoundingClientRect().left);
+          }
+        }}
+        onPointerUp={(e) => {
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+        }}
+      />}
       <div className="app-content">
         <Router route={route} navigate={navigate} goBack={goBack} actionSeq={actionSeq} />
       </div>

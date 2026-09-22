@@ -6,13 +6,15 @@ import type { Agent, WorkstreamCardData, WorkstreamReviewSummary } from "../../t
 
 /** Cards + default agent + review summaries, shared by Home and Workstreams pages. */
 export function useWorkstreamCards() {
+  const [loadError, setLoadError] = useState("");
   const [cards, setCards] = useState<WorkstreamCardData[] | null>(null);
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [reviewSummaries, setReviewSummaries] = useState<WorkstreamReviewSummary[] | null>(null);
   const { intelligenceEnabled } = useBaseExperience();
 
   const refresh = useCallback(() => {
-    api.listWorkstreamCards().then(setCards).catch(console.error);
+    setLoadError("");
+    api.listWorkstreamCards().then(setCards).catch(e => setLoadError(String(e)));
     api.getDefaultAgent().then(setDefaultAgent).catch(console.error);
     // §34 要求 review 五支在 Base Experience 下不可达 —— 不是"发了请求再藏起来"。
     // 返回形状按 §8.1.1 冻结，所以这里只跳过请求，留下 null。
@@ -24,6 +26,6 @@ export function useWorkstreamCards() {
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  return { cards, defaultAgent, reviewSummaries, refresh };
+  return { loadError, cards, defaultAgent, reviewSummaries, refresh };
 }
 

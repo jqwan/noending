@@ -1,3 +1,5 @@
+import Icon from "../../components/Icon";
+import { useViewState, useViewScroll } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
@@ -51,10 +53,10 @@ function cardMatches(c: ProjectCardData, q: string): boolean {
 export default function ProjectsView({ navigate }: { navigate: (r: Route) => void }) {
   const [cards, setCards] = useState<ProjectCardData[] | null>(null);
   const [listError, setListError] = useState("");
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<FilterKey>("all");
-  const [kindFilter, setKindFilter] = useState<ProjectKindFilter>("all");
-  const [sort, setSort] = useState<SortKey>("recent");
+  const [query, setQuery] = useViewState("projects.query", "");
+  const [filter, setFilter] = useViewState<FilterKey>("projects.filter", "all");
+  const [kindFilter, setKindFilter] = useViewState<ProjectKindFilter>("projects.kindFilter", "all");
+  const [sort, setSort] = useViewState<SortKey>("projects.sort", "recent");
   const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false);
 
   const refresh = useCallback(() => {
@@ -124,26 +126,30 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       .sort(SORTERS[sort]);
   }, [cards, query, filter, kindFilter, sort]);
 
+  const scrollRef = useViewScroll("projects.scroll", cards !== null);
+
   return (
-    <div className="main">
+    <div className="main board-page" ref={scrollRef}>
       <PageHeader
         title="项目"
-        sub="NoEnding 根据会话和任务使用的工作目录自动整理这些工作空间。"
         actions={
           <button
-            className={`btn ${workspaceRefreshing ? "" : "primary"}`}
+            className="btn ghost icon-button"
             disabled={workspaceRefreshing}
+            aria-label={workspaceRefreshing ? "正在刷新工作区状态" : "刷新工作区状态"}
             title="重新检查工作目录的存在性与 Git 状态，并执行已有的整理规则。"
             onClick={refreshWorkspace}
           >
-            {workspaceRefreshing ? "正在刷新工作区状态…" : "刷新工作区状态"}
+            <Icon name="refresh" />
           </button>
         }
       />
 
+      <div className="board-toolbar">
       <input
         type="text"
         className="ws-search"
+        aria-label="搜索项目"
         placeholder="搜索项目…（名称或工作目录）"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
@@ -178,7 +184,10 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
             <option value="paths">目录数</option>
           </select>
         </label>
+        {(query || filter !== "all" || kindFilter !== "all") && <button className="btn small ghost" onClick={() => { setQuery(""); setFilter("all"); setKindFilter("all"); }}>清除筛选</button>}
         {list && <span className="muted small">{list.length} 个项目</span>}
+      </div>
+
       </div>
 
       {list === null && listError === "" && <div className="muted">加载中…</div>}
@@ -201,7 +210,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
         />
       )}
 
-      <div className="ws-grid">
+      <div className="ws-grid board-grid">
         {list?.map((c) => <ProjectCard key={c.id} card={c} navigate={navigate} />)}
       </div>
     </div>
@@ -213,24 +222,24 @@ function ProjectCard({ card, navigate }: {
   card: ProjectCardData;
   navigate: (r: Route) => void;
 }) {
-  const restPaths = card.path_count - card.representative_paths.length;
+  const restPaths = Math.max(0, card.path_count - 1);
   return (
-    <article
-      className="ws-card full"
+    <button type="button"
+      className="ws-card full project-card"
       onClick={() => navigate({ view: "project", projectId: card.id })}
     >
       <div className="ws-card-head">
-        <div className="ws-card-title">{card.name}</div>
+        <div className="ws-card-title" title={card.name}><Icon name="folder" />{card.name}</div>
         <div className="ws-card-side">
-          {card.has_git_identity && <span className="badge">Git 家族</span>}
+          {card.has_git_identity && <span className="badge">Git</span>}
           {card.missing_path_count > 0 && (
-            <span className="badge warn">{card.missing_path_count} 个目录不在</span>
+            <span className="badge warn">{card.missing_path_count} 个目录缺失</span>
           )}
         </div>
       </div>
 
-      <div className="ws-card-body">
-        {card.representative_paths.map((p) => (
+      <div className="project-card-path">
+        {card.representative_paths.slice(0, 1).map((p) => (
           <div key={p} className="small" style={{ marginBottom: 2 }}>
             <PathText path={p} />
           </div>
@@ -238,10 +247,12 @@ function ProjectCard({ card, navigate }: {
         {restPaths > 0 && <div className="muted small">另有 {restPaths} 个目录</div>}
       </div>
 
-      <div className="ws-card-meta">
-        {card.path_count} 个目录 · {card.primary_workstream_count + card.related_workstream_count} 个任务 · {card.session_count} 个 Session
+      <div className="board-stats">
+        <span title="工作目录"><Icon name="folder" />{card.path_count}<span>目录</span></span>
+        <span title="关联任务"><Icon name="tasks" />{card.primary_workstream_count + card.related_workstream_count}<span>任务</span></span>
+        <span title="会话"><Icon name="chat" />{card.session_count}<span>会话</span></span>
       </div>
-      <div className="ws-card-meta muted small">最近活动 {timeAgo(card.last_activity_at)}</div>
-    </article>
+      <div className="ws-card-meta muted small">{timeAgo(card.last_activity_at)}</div>
+    </button>
   );
 }

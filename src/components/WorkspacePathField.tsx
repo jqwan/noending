@@ -42,6 +42,10 @@ export type WorkspacePathFieldProps = {
   /** 快选列表要排除的路径（通常是已经添加过的）。 */
   exclude?: string[];
   browseLabel?: string;
+  /** 从浏览器或最近路径中选中后直接交给外层处理；不传则写回输入框。 */
+  onPathSelected?: (path: string) => void;
+  /** 在输入框右侧显示提交按钮。 */
+  submitLabel?: string;
 };
 
 /** 输入内容的探测状态：一个可独立复用的防抖 hook（路径列表的每一行也用它）。 */
@@ -127,6 +131,8 @@ export default function WorkspacePathField({
   enableBrowse = true,
   exclude = [],
   browseLabel = "浏览…",
+  onPathSelected,
+  submitLabel,
 }: WorkspacePathFieldProps) {
   const [recent, setRecent] = useState<RecentWorkspacePath[] | null>(null);
   const [listOpen, setListOpen] = useState(false);
@@ -149,18 +155,30 @@ export default function WorkspacePathField({
       });
   };
 
+  const toggleRecent = () => {
+    if (listOpen) {
+      setListOpen(false);
+    } else {
+      loadRecent();
+    }
+  };
+
   const pick = (path: string) => {
     setListOpen(false);
     setFormatHint("");
-    onChange(path);
+    if (onPathSelected) {
+      onPathSelected(path);
+      onChange("");
+    } else {
+      onChange(path);
+    }
   };
 
   const browse = async () => {
     try {
       const picked = await open({ directory: true, multiple: false, title: "选择工作目录" });
       if (typeof picked === "string" && picked.trim() !== "") {
-        setFormatHint("");
-        onChange(picked.trim());
+        pick(picked.trim());
       }
     } catch (e) {
       // 没有原生对话框可用（权限/环境）时保持输入框可用，别让按钮毁掉表单。
@@ -176,7 +194,7 @@ export default function WorkspacePathField({
     .slice(0, 8);
 
   return (
-    <div>
+    <div className="workspace-path-field">
       <div className="row" style={{ gap: 8, alignItems: "center" }}>
         <input
           type="text"
@@ -186,10 +204,9 @@ export default function WorkspacePathField({
           autoFocus={autoFocus}
           placeholder={placeholder}
           onChange={(e) => { onChange(e.target.value); setFormatHint(""); }}
-          onFocus={loadRecent}
           onBlur={() => setListOpen(false)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && onSubmit) {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && onSubmit) {
               e.preventDefault();
               onSubmit();
             } else if (e.key === "Escape") {
@@ -201,9 +218,26 @@ export default function WorkspacePathField({
             }
           }}
         />
+        {enableRecent && (
+          <button
+            type="button"
+            className="btn small"
+            aria-expanded={listOpen}
+            title="显示最近使用的工作目录"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={toggleRecent}
+          >
+            最近使用
+          </button>
+        )}
         {enableBrowse && (
           <button type="button" className="btn" title="在系统文件对话框里选择目录" onClick={browse}>
             {browseLabel}
+          </button>
+        )}
+        {onSubmit && submitLabel && (
+          <button type="button" className="btn small" disabled={trimmed === ""} onClick={onSubmit}>
+            {submitLabel}
           </button>
         )}
       </div>

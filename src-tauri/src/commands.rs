@@ -521,7 +521,7 @@ pub fn sync_source(
     Ok(serde_json::json!({ "started": true }))
 }
 
-/// 重新入库某一个数据源：清除该源会话已入库的事件与游标后重新抓取，
+/// 重新摄入某一个数据源：重置游标后重新抓取，已入库事件去重追加，
 /// 绑定、上下文条目和审计历史保留（后台执行）。
 #[tauri::command]
 pub fn reingest_source(

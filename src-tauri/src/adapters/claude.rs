@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, title_from_text, AgentCommand, DiscoveredSession, ParsedLine,
-    ReadDelta,
+    detect_format, read_jsonl_delta, AgentCommand, DiscoveredSession, ParsedLine, ReadDelta,
 };
 use crate::domain::{Agent, Session, SourceCursor};
 use crate::error::Result;
@@ -29,21 +28,9 @@ fn content_text(content: &Value) -> String {
                             parts.push(t.to_string());
                         }
                     }
-                    Some("tool_use") => {
-                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                        let input = item
-                            .get("input")
-                            .map(|i| crate::adapters::truncate_text(&i.to_string(), 200))
-                            .unwrap_or_default();
-                        parts.push(format!("[tool_use:{}] {}", name, input));
-                    }
-                    Some("tool_result") => {
-                        let t = content_text(item.get("content").unwrap_or(&Value::Null));
-                        parts.push(crate::adapters::truncate_text(
-                            &format!("[tool_result] {}", t),
-                            300,
-                        ));
-                    }
+                    // Tool traffic is deliberately dropped (方案 §36.11): the
+                    // `[tool_use:…]` / `[tool_result] …` fragments used to be
+                    // folded into the owning message's text.
                     _ => {}
                 }
             }
@@ -104,7 +91,9 @@ impl ClaudeAdapter {
             {
                 if let Some(msg) = v.get("message") {
                     let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                    if !text.is_empty() && !text.starts_with('<') {
+                    // `<…>` environment blocks and `#`-prefixed injections
+                    // (AGENTS.md, attached-file headers) are not user text.
+                    if !text.is_empty() && !text.starts_with('<') && !text.starts_with('#') {
                         first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
                 }
@@ -338,8 +327,4 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
             Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id))
         })
     }
-}
-
-pub fn extract_title(d: &DiscoveredSession) -> Option<String> {
-    d.first_user_text.as_deref().and_then(title_from_text)
 }

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
+import Icon from "../../components/Icon";
 import ResumeSessionModal from "../sessions/ResumeSessionModal";
 import { sessionDisplayTitle, UNTITLED_SESSION } from "../sessions/SessionTable";
 import { AGENT_LABELS, type Session } from "../../types";
@@ -32,8 +33,11 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
     <section className="rail-section">
       <div className="rail-head">
         <div className="section-label" style={{ margin: 0 }}>会话</div>
-        {sorted.length > 0 && (
-          <button className="link" onClick={() => navigate({ view: "sessions" })}>查看全部</button>
+        {allowActions && onNewSession && (
+          <button className="btn ghost icon-button" title="新建会话" aria-label="新建会话"
+            onClick={onNewSession}>
+            <Icon name="plus" />
+          </button>
         )}
       </div>
 
@@ -41,8 +45,8 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
         <div className="l1-none">还没有会话关联到这里。</div>
       )}
 
-      {sorted.slice(0, 8).map((s) => (
-        <div className="rail-row" key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
+      {sorted.map((s) => (
+        <div className="rail-row" role="link" tabIndex={0} onKeyDown={e => { if (e.key === "Enter" && e.target === e.currentTarget) navigate({ view: "session", sessionId: s.id }); }} key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
           <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
           <div className="rail-main">
             <div className="rail-title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
@@ -59,18 +63,6 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
           )}
         </div>
       ))}
-
-      {sorted.length > 8 && (
-        <div className="small muted" style={{ padding: "8px 2px" }}>
-          另有 {sorted.length - 8} 个会话 — 到会话页查看全部。
-        </div>
-      )}
-
-      {allowActions && onNewSession && (
-        <div style={{ marginTop: 10 }}>
-          <button className="btn small" onClick={onNewSession}>新建会话</button>
-        </div>
-      )}
 
       {resumeId && (
         <ResumeSessionModal sessionId={resumeId} onClose={() => setResumeId(null)} />

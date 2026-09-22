@@ -1,3 +1,4 @@
+import { viewState } from "../../hooks/useViewState";
 // Projects Experience v0.2 §27 — Projects Board 契约：
 // 一次卡片查询（§8）、名称/路径搜索（§5）、缺失筛选（§6）、
 // 以及刷新期间卡片保持可见（§13）。
@@ -26,6 +27,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 const navigate = vi.fn();
 
 beforeEach(() => {
+  viewState.clear();
   vi.mocked(api.listProjectCards).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
   vi.mocked(api.refreshWorkspaceProjects).mockReset().mockResolvedValue({ started: true });
@@ -151,9 +153,12 @@ describe("Projects Board", () => {
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("NoEnding");
 
-    fireEvent.click(screen.getByText("刷新工作区状态"));
+    fireEvent.click(screen.getByRole("button", { name: "刷新工作区状态" }));
 
-    expect(screen.getByText("正在刷新工作区状态…")).toBeTruthy();
+    // 页头的是图标按钮：进度只能靠 aria-label 与 disabled 如实呈现。
+    expect(
+      (screen.getByRole("button", { name: "正在刷新工作区状态" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     expect(screen.getByText("NoEnding")).toBeTruthy();
     // 卡片没有被清空重建：Board 数据仍在。
     expect(screen.queryByText("加载中…")).toBeNull();

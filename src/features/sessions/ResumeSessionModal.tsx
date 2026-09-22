@@ -120,7 +120,7 @@ export default function ResumeSessionModal({
       <Modal title="继续会话" onClose={handleClose}>
         <AgentRow
           agent={session.agent}
-          hint="这个会话原本使用的 Agent"
+          hint="原会话 Agent"
           first
         />
         <CwdRow

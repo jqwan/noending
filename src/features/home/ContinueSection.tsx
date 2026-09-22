@@ -16,6 +16,7 @@ export function ContinueSection({ navigate, defaultAgent, cards }: {
 }) {
   const active = cards
     .filter((c) => c.lifecycle === "active" && c.visibility === "normal")
+    .sort((a, b) => (b.last_activity_at ?? b.updated_at).localeCompare(a.last_activity_at ?? a.updated_at))
     .slice(0, 6);
 
   if (active.length === 0) return null;
@@ -83,7 +84,7 @@ export function RecentSessions({ navigate, onNewSession }: {
         </div>
       ) : (
         sessions.map((s) => (
-          <div className="list-row" key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
+          <div className="list-row" role="link" tabIndex={0} onKeyDown={e => { if (e.key === "Enter") navigate({ view: "session", sessionId: s.id }); }} key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
             <div className="grow">
               <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
                 {sessionDisplayTitle(s.title)}

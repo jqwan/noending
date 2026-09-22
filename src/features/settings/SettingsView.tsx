@@ -1,3 +1,4 @@
+import Icon from "../../components/Icon";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -10,12 +11,12 @@ import { refreshBaseExperience, useBaseExperience } from "../../app/experience";
 import { AGENT_LABELS, type Agent, type ContextDeliveryLevel, type WorkspaceSettings } from "../../types";
 import type { Route, SettingsSection } from "../../app/routes";
 
-const SECTIONS: { key: SettingsSection; label: string }[] = [
-  { key: "general", label: "通用" },
-  { key: "agents", label: "Agent" },
-  { key: "sources", label: "会话来源" },
-  { key: "appearance", label: "外观" },
-  { key: "advanced", label: "数据与高级" },
+const SECTIONS: { key: SettingsSection; label: string; icon: "settings" | "spark" | "folder" | "palette" | "database" }[] = [
+  { key: "general", icon: "settings", label: "通用" },
+  { key: "agents", icon: "spark", label: "Agent" },
+  { key: "sources", icon: "folder", label: "会话来源" },
+  { key: "appearance", icon: "palette", label: "外观" },
+  { key: "advanced", icon: "database", label: "数据与高级" },
 ];
 
 /**
@@ -32,15 +33,16 @@ export default function SettingsView({ section, navigate }: {
   const current = SECTIONS.some((s) => s.key === section) ? section : "general";
 
   return (
-    <div className="main narrow">
+    <div className="main settings-page">
       <PageHeader title="设置" />
       <div className="settings-layout">
-        <nav className="settings-nav">
+        <nav className="settings-nav" aria-label="设置分类">
           {SECTIONS.map((s) => (
             <button key={s.key}
+              aria-current={current === s.key ? "page" : undefined}
               className={`nav-item ${current === s.key ? "active" : ""}`}
               onClick={() => navigate({ view: "settings", section: s.key })}>
-              {s.label}
+              <Icon name={s.icon} />{s.label}
             </button>
           ))}
         </nav>
@@ -79,7 +81,7 @@ function GeneralSettings() {
       <section>
         <h3 style={{ marginTop: 0 }}>默认 Agent</h3>
         <p className="muted small" style={{ marginTop: 0 }}>
-          所有任务卡片与会话里的新建 / 继续都使用这个 Agent，不再每次选择。
+          用于新建会话；继续会话使用原来的 Agent。
         </p>
         <div className="settings-agents">
           {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
@@ -133,8 +135,7 @@ function AgentsSettings() {
     <section>
       <h3 style={{ marginTop: 0 }}>Agent</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
-        本机检测到的 Agent CLI。未检测到的 Agent 不可启动。
-        Runtime 每个字段默认都是 Agent 默认值 —— NoEnding 不传对应参数，也不猜测 Agent 的默认模型。
+        管理本机 Agent 和启动参数，未修改的选项沿用 Agent 默认值。
       </p>
       {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
         <AgentRuntimeRow key={a} agent={a} />
@@ -175,15 +176,13 @@ function IntelligenceSettings() {
     <section>
       <h3>实验性功能</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
-        NoEnding 首先是一个可靠的本地工作空间：发现会话、留下历史、随时继续。
-        下面这个开关决定它是否额外去自动理解你的工作。
+        自动整理任务与上下文。
       </p>
       <div className="row-line">
         <div>
           <div className="settings-row-label">Context 智能处理</div>
           <div className="settings-row-hint">
-            提取 Context 变更、自动归类任务、生成待审阅与冲突。关闭时会话仍会被摄入和索引，
-            已有的 Context 与历史不会丢失；重新开启后从冻结的处理位置继续。
+            自动提取上下文并归类任务。关闭后仍记录会话，保留已有历史。
           </div>
         </div>
         <div className="settings-seg">
@@ -343,9 +342,10 @@ function AppearanceSettings() {
   return (
     <section>
       <h3 style={{ marginTop: 0 }}>主题</h3>
-      <div className="settings-seg">
+      <div className="theme-options" role="group" aria-label="主题">
         {(Object.keys(THEME_LABELS) as Theme[]).map((t) => (
-          <button key={t} className={theme === t ? "on" : ""} onClick={() => apply(t)}>
+          <button key={t} className={theme === t ? "on" : ""} aria-pressed={theme === t} onClick={() => apply(t)}>
+            <span className={`theme-preview theme-preview-${t}`} aria-hidden="true"><span /><span /></span>
             {THEME_LABELS[t]}
           </button>
         ))}
@@ -417,7 +417,7 @@ function WorkspaceStorageSettings() {
         {failed ? (
           <>
             <div className="l1-none">
-              读取工作位置失败。本地数据没有被修改，也没有任何东西被移动；可以重试。
+              读取数据位置失败，请重试。
             </div>
             <div className="invite">
               <button className="btn small" onClick={load}>重试</button>
@@ -441,8 +441,7 @@ function WorkspaceStorageSettings() {
     <section>
       <h3>NoEnding Home</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
-        NoEnding Home 是 NoEnding 放在磁盘上的数据根目录：数据库、运行文件和日志都在它下面，
-        新建会话的默认工作目录是它里面的 <span className="mono">workspace/</span>。
+        存放数据库、运行文件和日志；默认工作目录为 <span className="mono">workspace/</span>。
       </p>
 
       <PathRow
@@ -618,7 +617,7 @@ function ChangeHomeModal({ current, onClose, onSaved }: {
           placeholder={current.noending_home}
           autoFocus
           onChange={(e) => { setPath(e.target.value); setError(""); }}
-          onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) void submit(); }}
           disabled={busy}
         />
       </label>

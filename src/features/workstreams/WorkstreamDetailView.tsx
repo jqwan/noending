@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
-import AgentIcon from "../../components/AgentIcon";
+import Icon from "../../components/Icon";
 import { timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal } from "../../components/common";
 import { IntelligenceOnly } from "../../app/experience";
 import NewSessionModal from "../sessions/NewSessionModal";
-import ResumeSessionModal from "../sessions/ResumeSessionModal";
-import { cwdDisplayLabel } from "../sessions/SessionTable";
+import WorkstreamFormModal from "./WorkstreamFormModal";
 import {
-  AGENT_LABELS,
-  type Agent,
   type Workstream,
   type WorkstreamContext as WorkstreamContextData,
   type WorkstreamLifecycle,
@@ -30,7 +27,7 @@ import SinceLastReview from "./SinceLastReview";
 /**
  * Workstream Detail = 持续相关 Sessions 的组织容器（方案 §14）。
  *
- * Base Experience 下这一页只有五块内容：概览（描述）、Sessions、工作路径、
+ * Base Experience 下这一页只有五块内容：概览（描述）、Sessions、工作目录、
  * Project、状态。Context 智能段落（Current Context / Since Last Review /
  * Needs Attention / Recent Changes / Conflict Review）全部保留代码但不挂载
  * ——见 §11.9，off 就是 `<IntelligenceOnly>` 里不渲染。
@@ -38,6 +35,8 @@ import SinceLastReview from "./SinceLastReview";
  * 启动路径唯一：本页不再自己调 launcher，而是挂载 New Session / Resume 的
  * 同一个 Modal（§8.1.1 契约），由它们走 prepare → 状态指纹 → launch_prepared
  * （Preview-Launch Identity / Launch Preparation Integrity）。
+ *
+ * 编辑入口唯一：标题 / 描述 / 工作目录都在 ••• → 编辑任务（WorkstreamFormModal）。
  *
  * v0.2 的边界（§1.5 / §1.13 / §42.3-M19）：
  *   • 工作目录 = **有序 WorkstreamPath 列表**；
@@ -56,19 +55,15 @@ export default function WorkstreamDetailView({
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
 }) {
+  const [loadError, setLoadError] = useState("");
+  const [retry, setRetry] = useState(0);
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(null);
   const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(null);
   const [pathsError, setPathsError] = useState("");
-  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
-  const [titleOpen, setTitleOpen] = useState(false);
-  const [titleInput, setTitleInput] = useState("");
-  const [editingDescription, setEditingDescription] = useState(false);
-  const [descriptionInput, setDescriptionInput] = useState("");
+  const [editing, setEditing] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
-  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
@@ -101,29 +96,26 @@ export default function WorkstreamDetailView({
     // 留着上一条的路径列表会让用户在错的列表上按下按钮（例如把旧 path id 发给
     // 新 Workstream 的 reorder）。宁可闪一下「加载中…」，也不拿旧数据当现状。
     setCtx(null);
+    setLoadError("");
     setPaths(null);
     setPathsError("");
     setMenuOpen(false);
+    setEditing(false);
     setConfirmTrash(false);
     setConfirmPurge(false);
     setActionError("");
-    setError("");
     api.getWorkstreamContext(workstreamId).then((c) => {
       if (!cancelled) setCtx(c);
-    }).catch(console.error);
+    }).catch(e => { if (!cancelled) setLoadError(String(e)); });
     api.listWorkstreamPaths(workstreamId).then((rows) => {
       if (!cancelled) { setPaths(rows); setPathsError(""); }
     }).catch((e) => {
-      if (!cancelled) { setPaths(null); setPathsError(`读取工作路径失败：${String(e)}`); }
+      if (!cancelled) { setPaths(null); setPathsError(`读取工作目录失败：${String(e)}`); }
     });
     return () => {
       cancelled = true;
     };
-  }, [workstreamId]);
-
-  useEffect(() => {
-    api.getDefaultAgent().then(setDefaultAgent).catch(console.error);
-  }, []);
+  }, [workstreamId, retry]);
 
   // Background refresh only re-reads the projection; the intelligence panels
   // own their own (frozen-window) refresh so this page never touches ReviewState.
@@ -132,52 +124,35 @@ export default function WorkstreamDetailView({
     api.listWorkstreamPaths(workstreamId).then((rows) => {
       setPaths(rows); setPathsError("");
     }).catch((e) => {
-      setPaths(null); setPathsError(`读取工作路径失败：${String(e)}`);
+      setPaths(null); setPathsError(`读取工作目录失败：${String(e)}`);
     });
   }, [workstreamId]);
 
   useRefreshSignal(refresh);
 
-  if (!ctx) return <div className="main narrow">加载中…</div>;
+  // 同 SessionDetailView：加载态也要渲染 PageHeader，否则整条标题栏会先消失再补回来。
+  // 标题承担"是什么状态"，正文只放具体的错误详情，不再重复一遍状态名。
+  if (!ctx) {
+    return (
+      <div className="main narrow" role="status">
+        <PageHeader title={loadError !== "" ? "读取任务失败" : "加载中…"}>
+          {loadError !== "" && (
+            <>
+              <p>{loadError}</p>
+              <button className="btn" onClick={() => setRetry(value => value + 1)}>重试</button>
+            </>
+          )}
+        </PageHeader>
+      </div>
+    );
+  }
   const { workstream, related_sessions } = ctx;
 
-  const latest = [...related_sessions]
-    .sort((a, b) =>
-      (b.last_activity_at ?? b.started_at ?? "").localeCompare(
-        a.last_activity_at ?? a.started_at ?? "",
-      ),
-    )[0];
-
-  /** 一条命令返回新的 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
-   *  手里留着旧的 lifecycle / visibility 会让下一次保存被后端拒绝。 */
-  const adopt = (next: Workstream) => setCtx((c) => (c ? { ...c, workstream: next } : c));
-
   /**
-   * `update_workstream` is a whole-object write, so every edit re-sends the
-   * current record with one field replaced — that is why only 标题 / 描述 走这条路：
-   * lifecycle、visibility 都有自己的命令；`apply_whole_object_edit` 会拒绝
-   * 携带改动过 lifecycle 的对象。
-   *
-   * title / description / updated_at are part of the launch state fingerprint
-   * (launcher/mod.rs:475-478): an edit here intentionally invalidates any
-   * not-yet-consumed PreparedLaunch, which surfaces as 「状态已变化」 in the
-   * launch modal rather than being silently absorbed.
+   * 一条命令返回新的 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
+   * 手里留着旧的 lifecycle / visibility，下一次整对象保存就会被后端拒绝。
    */
-  const save = async (patch: Partial<Pick<Workstream, "title" | "description">>) => {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    setError("");
-    try {
-      await api.updateWorkstream({ ...workstream, ...patch });
-      refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  };
+  const adopt = (next: Workstream) => setCtx((c) => (c ? { ...c, workstream: next } : c));
 
   /**
    * §1.13：lifecycle 只是分类，没有任何行为差异，随时可切；它不碰路径、
@@ -268,36 +243,20 @@ export default function WorkstreamDetailView({
     }
   };
 
-  const openTitleEditor = () => {
+  /**
+   * 工作目录还没读回来时不能进编辑模式：草稿由当前列表预填，拿「空」当「没有目录」
+   * 会在保存时把已有路径全删掉。所以这里明说还在读，而不是静默什么都不做。
+   */
+  const openEditor = () => {
     setMenuOpen(false);
-    setTitleInput(workstream.title);
-    setTitleOpen(true);
-  };
-
-  const openDescriptionEditor = () => {
-    setMenuOpen(false);
-    setDescriptionInput(workstream.description ?? "");
-    setEditingDescription(true);
-  };
-
-  const saveTitle = async () => {
-    const trimmed = titleInput.trim();
-    if (!trimmed || trimmed === workstream.title) {
-      setTitleOpen(false);
+    if (paths === null) {
+      setActionError("工作目录还在读取中，请稍后再试。");
       return;
     }
-    setTitleOpen(false);
-    await save({ title: trimmed });
-  };
-
-  const saveDescription = async () => {
-    setEditingDescription(false);
-    await save({ description: descriptionInput.trim() });
+    setEditing(true);
   };
 
   const archived = workstream.visibility === "archived";
-  // §42.3-M19：Project 只从**主工作路径**投影出来。
-  const primary = paths?.[0] ?? null;
   // §1.12：一个 Workstream 可以因为不同路径同时出现在多个 Project 里；
   // 经由 position 0 那条路径到达的才是「主关联」。
   const projectRows = (() => {
@@ -315,157 +274,60 @@ export default function WorkstreamDetailView({
   })();
 
   return (
-    <div className="main narrow">
+    <div className="main task-detail">
       <PageHeader
         title={<span style={{ overflowWrap: "anywhere" }}>{workstream.title}</span>}
         actions={
           <>
-            <div style={{ position: "relative" }} ref={menuRef}>
-              <button className="btn ghost" onClick={() => setMenuOpen((v) => !v)} title="更多操作"
-                aria-haspopup="true" aria-expanded={menuOpen}>
-                •••
-              </button>
-              {menuOpen && (
-                <div className="menu-pop">
-                  <button className="menu-item" onClick={openTitleEditor}>
-                    重命名…
-                  </button>
-                  <button className="menu-item" onClick={openDescriptionEditor}>
-                    编辑描述…
-                  </button>
-                  {/* 不写 disabled={busy}：全局样式只给了 `button.btn:disabled`
-                      一种弱化态（global.css:56），`.menu-item` 上的 disabled 既
-                      不变灰也不换 cursor，等于"看着能点、点了没反应"。真正的
-                      重复提交由各动作开头的 busyRef 守卫挡掉。 */}
-                  {archived ? (
-                    <>
-                      <button className="menu-item" onClick={restore}>
-                        从回收站恢复
-                      </button>
-                      <button className="menu-item"
-                        title="不可撤销：会删除这条任务名下的 Context、冲突记录与审阅状态。会话与它们的事件历史保留。"
-                        onClick={() => { setMenuOpen(false); setPurgeConfirmText(""); setConfirmPurge(true); }}>
-                        永久删除…
-                      </button>
-                    </>
-                  ) : (
-                    <button className="menu-item"
-                      title="移入回收站：只是不再出现在列表里，路径、绑定与 Context 都原样保留，随时可以恢复。"
-                      onClick={() => { setMenuOpen(false); setConfirmTrash(true); }}>
-                      移入回收站…
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-            {/* 与 Home / Workstream 卡片同一个判断：这一页不自己宣称「没有 Agent」。
-                defaultAgent 是本页异步读回来的，解析期间 disabled + 「未检测到」
-                的 tooltip 会说假话；真正判定交给 NewSessionModal（唯一启动路径）。 */}
+            <button className="btn ghost icon-button" title="编辑任务" aria-label="编辑任务"
+              onClick={openEditor}>
+              <Icon name="edit" />
+            </button>
             {!archived && (
-              <>
-                <button
-                  className="btn ws-btn"
-                  title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}
-                  onClick={() => setNewSessionOpen(true)}
-                >
-                  {defaultAgent ? <AgentIcon agent={defaultAgent} /> : null}
-                  新建会话
+              <button className="btn ghost icon-button" aria-label="移入回收站"
+                title="移入回收站：只是不再出现在列表里，路径、绑定与 Context 都原样保留，随时可以恢复。"
+                onClick={() => setConfirmTrash(true)}>
+                <Icon name="trash" />
+              </button>
+            )}
+            {archived && (
+              <div style={{ position: "relative" }} ref={menuRef}>
+                <button className="btn ghost icon-button" onClick={() => setMenuOpen((v) => !v)} title="更多操作"
+                  aria-label="更多操作" aria-haspopup="true" aria-expanded={menuOpen}>
+                  <Icon name="more" />
                 </button>
-                {latest && (
-                  <button
-                    className="btn primary ws-btn resume-primary"
-                    title={`继续最近的 ${AGENT_LABELS[latest.agent]} 会话`}
-                    onClick={() => setResumeSessionId(latest.id)}
-                  >
-                    <AgentIcon agent={latest.agent} />
-                    继续
-                  </button>
+                {menuOpen && (
+                  <div className="menu-pop">
+                    <button className="menu-item" onClick={restore}>
+                      从回收站恢复
+                    </button>
+                    <button className="menu-item"
+                      title="不可撤销：会删除这条任务名下的 Context、冲突记录与审阅状态。会话与它们的事件历史保留。"
+                      onClick={() => { setMenuOpen(false); setPurgeConfirmText(""); setConfirmPurge(true); }}>
+                      永久删除…
+                    </button>
+                  </div>
                 )}
-              </>
+              </div>
             )}
           </>
         }
       >
-        <div className="ws-detail-head-meta">
-          {primary?.project_id && (
-            <>
-              {/* Project 是主工作路径的派生投影（§42.3-M19）：这里既不能改，也没有
-                  「换一个 Project」这回事 —— 想换 Project，改的是工作路径列表。 */}
-              <button className="link" title={`由主工作路径派生的项目（只读）\n${primary.canonical_path}\n→ ${primary.project_name ?? primary.project_id}`}
-                style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                onClick={() => navigate({ view: "project", projectId: primary.project_id })}>
-                {primary.project_name ?? "项目"}
-              </button>
-              <span className="dot-sep" />
-            </>
-          )}
-          {/* lifecycle 与 visibility 是两个正交维度（方案 §1.13），所以这里给两枚
-              徽标，而不是让「回收站」盖掉「进行中 / 已完成」。 */}
-          <span className={`badge ${workstream.lifecycle === "active" ? "success" : ""}`}>
-            {LIFECYCLE_LABELS[workstream.lifecycle] ?? workstream.lifecycle}
-          </span>
-          {archived && (
-            <span className="badge warn" title="回收站：路径、会话绑定与 Context 都原样保留，随时可以恢复">
-              回收站
-            </span>
-          )}
-          {primary && (
-            <>
-              <span className="dot-sep" />
-              {/* 这一行是不换行的 flex：超长路径（Windows 深路径、中文目录）会把
-                  后面的状态与「最近更新」挤出屏幕。中段省略，完整路径留在 title。 */}
-              <span
-                className="mono small"
-                title={paths && paths.length > 1
-                  ? `主工作路径（新建会话默认在这里启动）\n${primary.canonical_path}\n另有 ${paths.length - 1} 条工作路径`
-                  : `主工作路径（新建会话默认在这里启动）\n${primary.canonical_path}`}
-              >
-                {cwdDisplayLabel(primary.canonical_path, 30)}
-              </span>
-              {!primary.exists && <span className="badge warn" title={primary.canonical_path}>主路径目录不存在</span>}
-            </>
-          )}
-          {paths !== null && paths.length === 0 && (
-            <>
-              <span className="dot-sep" />
-              <span className="small muted" title="没有工作路径是合法状态：新建会话会在 NoEnding 默认工作目录启动">
-                无工作路径
-              </span>
-            </>
-          )}
-          <span className="dot-sep" />
-          <span>最近更新 {timeAgo(workstream.updated_at)}</span>
-        </div>
-        {(error || actionError) && (
+        {actionError && (
           <div className="small" style={{ color: "var(--warning)", marginTop: 6, overflowWrap: "anywhere" }}>
-            {actionError || `保存失败：${error}`}
+            {actionError}
           </div>
         )}
       </PageHeader>
 
       {/* ---------- Base Experience：Workstream 自身（§14） ---------- */}
-      <div style={{ marginTop: 26 }}>
+      <div className="task-detail-layout">
+        <div className="task-detail-main">
         <section className="rail-section">
           <div className="rail-head">
             <div className="section-label" style={{ margin: 0 }}>任务概览</div>
-            {!editingDescription && (
-              <button className="link" onClick={openDescriptionEditor}>编辑描述</button>
-            )}
           </div>
-          {editingDescription ? (
-            <div className="ctx-edit">
-              <textarea
-                value={descriptionInput}
-                autoFocus
-                placeholder="这项任务想持续做什么（可选）"
-                onChange={(e) => setDescriptionInput(e.target.value)}
-              />
-              <div className="row" style={{ justifyContent: "flex-end" }}>
-                <button className="btn" onClick={() => setEditingDescription(false)}>取消</button>
-                <button className="btn primary" disabled={busy} onClick={saveDescription}>保存</button>
-              </div>
-            </div>
-          ) : workstream.description ? (
+          {workstream.description ? (
             <p style={{ margin: 0, maxWidth: "72ch", overflowWrap: "anywhere" }}>
               {workstream.description}
             </p>
@@ -481,45 +343,8 @@ export default function WorkstreamDetailView({
           allowActions={!archived}
         />
 
-        <WorkstreamPathList
-          workstreamId={workstreamId}
-          paths={paths}
-          error={pathsError}
-          onChanged={refresh}
-        />
-
-        <section className="rail-section">
-          <div className="section-label">项目</div>
-          {paths === null && (
-            <div className="muted small">{pathsError || "读取工作路径后才能确定…"}</div>
-          )}
-          {paths !== null && projectRows.length === 0 && (
-            <div className="l1-none">
-              这项任务还没有工作路径，所以也不归属任何 Project —— 这是合法状态。
-            </div>
-          )}
-          {paths !== null && projectRows.map((p) => (
-            <div className="list-row" key={p.id} style={{ cursor: "default" }}>
-              <div className="grow">
-                <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名项目"}</div>
-                <div className="meta">
-                  {p.primary ? "主关联 — 经由主工作路径到达" : "关联 — 经由其他工作路径到达"}
-                  {p.count > 1 ? ` · ${p.count} 条路径` : ""}
-                </div>
-              </div>
-              <div className="side">
-                <button className="btn small" onClick={() => navigate({ view: "project", projectId: p.id })}>
-                  打开
-                </button>
-              </div>
-            </div>
-          ))}
-          <div className="small muted" style={{ marginTop: 4 }}>
-            Project 是<b>只读投影</b>（工作路径 → WorkspacePath → Project，方案 §1.12）：
-            它不能在这里改，也没有「换一个 Project」这个操作 —— 想改变归属，改的是上面的工作路径列表。
-          </div>
-        </section>
-
+        </div>
+        <aside className="task-detail-aside">
         <section className="rail-section">
           <div className="section-label">状态</div>
           <div className="row" style={{ gap: 8 }}>
@@ -535,26 +360,42 @@ export default function WorkstreamDetailView({
             </button>
             {archived && <span className="badge warn">在回收站中</span>}
           </div>
-          <div className="small muted" style={{ marginTop: 6, maxWidth: "72ch" }}>
-            进行中 / 已完成 只是分类标签：两者没有任何行为差异，随时可以来回切换，
-            也不会触碰工作路径、Session 绑定或 Context。
-          </div>
-          <div className="small muted" style={{ marginTop: 6, maxWidth: "72ch" }}>
-            {archived ? (
-              <>
-                这项任务在回收站里，路径、绑定与 Context 都原样保留。
-                <button className="link" style={{ marginLeft: 4 }} onClick={restore} disabled={busy}>恢复</button>
-                <button className="link" style={{ marginLeft: 10 }} onClick={() => { setPurgeConfirmText(""); setConfirmPurge(true); }}
-                  disabled={busy}>永久删除…</button>
-              </>
-            ) : (
-              <>回收站：从 ••• 菜单「移入回收站」；它只是不再出现在列表里，随时可以恢复。</>
-            )}
-          </div>
           <div className="small muted" style={{ marginTop: 6 }}>
             创建于 {formatDate(workstream.created_at)} · 最近更新 {timeAgo(workstream.updated_at)}
           </div>
         </section>
+
+        <WorkstreamPathList
+          paths={paths}
+          error={pathsError}
+        />
+
+        <section className="rail-section">
+          <div className="section-label">项目</div>
+          {paths === null && (
+            <div className="muted small">{pathsError || "读取工作目录后才能确定…"}</div>
+          )}
+          {paths !== null && projectRows.length === 0 && (
+            <div className="l1-none">
+              暂无项目
+            </div>
+          )}
+          {paths !== null && projectRows.map((p) => (
+            <div className="list-row" key={p.id} role="link" tabIndex={0}
+              onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id }); }}
+              onClick={() => navigate({ view: "project", projectId: p.id })}>
+              <div className="grow">
+                <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名项目"}</div>
+                <div className="meta">
+                  {p.primary ? "主项目" : "关联项目"}
+                  {p.count > 1 ? ` · ${p.count} 条路径` : ""}
+                </div>
+              </div>
+            </div>
+          ))}
+
+        </section>
+        </aside>
       </div>
 
       {/* ---------- 智能段落：off 时整块不挂载（§11.9、§14） ---------- */}
@@ -580,31 +421,13 @@ export default function WorkstreamDetailView({
         />
       )}
 
-      {resumeSessionId && (
-        <ResumeSessionModal
-          sessionId={resumeSessionId}
-          onClose={() => {
-            setResumeSessionId(null);
-            refresh();
-          }}
+      {editing && paths !== null && (
+        <WorkstreamFormModal
+          workstream={workstream}
+          paths={paths}
+          onClose={() => setEditing(false)}
+          onSaved={refresh}
         />
-      )}
-
-      {titleOpen && (
-        <Modal title="重命名任务" onClose={() => setTitleOpen(false)}>
-          <p className="muted small" style={{ marginTop: 0 }}>
-            标题是用户可见的组织信息。修改会让已经预览过、但还没启动的那次
-            Session 变成「状态已变化」，需要你重新确认——这是刻意保留的保护。
-          </p>
-          <label className="field"><span>标题</span>
-            <input type="text" value={titleInput} autoFocus
-              onChange={(e) => setTitleInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && saveTitle()} /></label>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setTitleOpen(false)}>取消</button>
-            <button className="btn primary" disabled={!titleInput.trim()} onClick={saveTitle}>保存</button>
-          </div>
-        </Modal>
       )}
 
       {confirmTrash && (
@@ -613,13 +436,9 @@ export default function WorkstreamDetailView({
             <b>{workstream.title}</b> 会离开正常列表，出现在任务页的「回收站」筛选里。
           </p>
           <p className="small muted" style={{ marginBottom: 8 }}>
-            不会删除任何东西：工作路径列表、Session 绑定、Context、审阅状态、lifecycle
-            都按原样保留，恢复后回到你离开时的样子（方案 §1.13）。
+            路径、会话关联和上下文都会保留，可从回收站恢复。
           </p>
-          <p className="small muted" style={{ marginBottom: 12 }}>
-            回收站只是收起来，不是删除。要真正删除，需要在回收站里选「永久删除」，
-            那一步不可撤销、并且会连带结束这项任务名下的 Context。
-          </p>
+
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setConfirmTrash(false)} disabled={busy}>取消</button>
             <button className="btn primary" onClick={moveToTrash} disabled={busy}>
@@ -635,7 +454,7 @@ export default function WorkstreamDetailView({
             不可撤销
           </div>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            将<b>删除</b>：<span className="mono">{workstream.title}</span> 本身、它的有序工作路径列表、
+            将<b>删除</b>：<span className="mono">{workstream.title}</span> 本身、它的有序工作目录列表、
             它名下的全部 Context 条目与 Revision、冲突记录与解决历史、以及审阅状态（ReviewState）。
           </p>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
@@ -650,7 +469,7 @@ export default function WorkstreamDetailView({
             <input type="text" value={purgeConfirmText} autoFocus
               placeholder={workstream.title}
               onChange={(e) => setPurgeConfirmText(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && purgeConfirmText === workstream.title && purge()} /></label>
+              onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && purgeConfirmText === workstream.title && purge()} /></label>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setConfirmPurge(false)} disabled={busy}>取消</button>
             <button className="btn primary" onClick={purge}
@@ -827,13 +646,6 @@ function IntelligenceSections({
     </>
   );
 }
-
-// 词表（方案 §22）：lifecycle 只有 进行中 / 已完成 两种；archived 不属于这套词，
-// 它是 visibility 那一维，UI 上统一叫「回收站」，所以在这里没有第三个标签。
-const LIFECYCLE_LABELS: Record<Workstream["lifecycle"], string> = {
-  active: "进行中",
-  completed: "已完成",
-};
 
 /**
  * RFC3339 (UTC) → 本地 YYYY/MM/DD.

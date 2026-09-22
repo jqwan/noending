@@ -1,8 +1,10 @@
+import { useViewState, useViewScroll } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import AgentIcon from "../../components/AgentIcon";
+import Icon from "../../components/Icon";
 import { Modal, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionCards, {
@@ -38,8 +40,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [bindings, setBindings] = useState<Map<string, SessionBindingRow[]>>(new Map());
-  /** 回收站条数：页头「回收站 (N)」徽标。普通模式也读——本地查询，足够便宜。 */
-  const [trashCount, setTrashCount] = useState<number | null>(null);
   /**
    * Session 来源只用来把"空"拆成两种真实情况：一个来源都没启用 vs
    * 启用了但还没发现 Session（§23）。读失败时保持 null，文案退回中性说法——
@@ -47,11 +47,11 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
    */
   const [sources, setSources] = useState<IngestSource[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [query, setQuery] = useState("");
-  const [agent, setAgent] = useState<"all" | Agent>("all");
-  const [projectId, setProjectId] = useState("all");
-  const [wsFilter, setWsFilter] = useState("all");
-  const [assigned, setAssigned] = useState<AssignedFilter>("all");
+  const [query, setQuery] = useViewState("sessions.query", "");
+  const [agent, setAgent] = useViewState<"all" | Agent>("sessions.agent", "all");
+  const [projectId, setProjectId] = useViewState("sessions.projectId", "all");
+  const [wsFilter, setWsFilter] = useViewState("sessions.wsFilter", "all");
+  const [assigned, setAssigned] = useViewState<AssignedFilter>("sessions.assigned", "all");
   const [creating, setCreating] = useState(false);
   const [resumeModalSessionId, setResumeModalSessionId] = useState<string | null>(null);
   const [trashSessionId, setTrashSessionId] = useState<string | null>(null);
@@ -62,6 +62,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [purgeSessionId, setPurgeSessionId] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
+    setLoadFailed(false);
     let cancelled = false;
     // 来源列表独立加载：它只为普通模式的空状态分类服务，读失败不该让整张表
     // 变成"读取失败"；回收站模式压根用不到它，不发请求。
@@ -77,9 +78,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       trashMode ? trashList() : api.listSessions(),
       trashMode ? Promise.resolve(null) : api.listProjects(),
       trashMode ? Promise.resolve(null) : api.listSessionBindings(),
-      trashMode ? Promise.resolve(null) : trashList().then((rows) => rows.length),
     ])
-      .then(([ss, ps, rows, tc]) => {
+      .then(([ss, ps, rows]) => {
         if (cancelled) return;
         if (!trashMode) {
           const m = new Map<string, SessionBindingRow[]>();
@@ -90,9 +90,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
           }
           setBindings(m);
           setProjects(ps ?? []);
-          if (typeof tc === "number") setTrashCount(tc);
-        } else {
-          setTrashCount(ss.length);
         }
         setSessions(ss);
         setLoadFailed(false);
@@ -139,7 +136,9 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       // 缓存列单方面说"是"、而徽章说"历史标签，已不决定任何事"的行，不能一边
       // 显示成无归属、一边又被筛进列表（M34 / §42.3-M29：一个视图不能两个真相）。
       .filter((s) =>
-        projectId === "all" ? true : !!s.workspace_path_id && s.project_id === projectId
+        projectId === "all" ? true : projectId === "none"
+          ? !s.workspace_path_id || !s.project_id
+          : !!s.workspace_path_id && s.project_id === projectId
       )
       .filter((s) => {
         if (wsFilter === "all") return true;
@@ -257,27 +256,22 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const noSourcesEnabled = sources !== null && sources.every((s) => !s.enabled);
   const missingSourcePath = sources?.find((s) => s.enabled && !s.exists)?.path ?? "";
   const emptyTitle = noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
-  const emptyHint = noSourcesEnabled
-    ? "NoEnding 只读取 Agent 自己目录里的会话文件，不会修改它们。到「设置 → 会话来源」勾选要扫描的目录，应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的会话。"
-    : missingSourcePath
-      ? `已启用的来源里有目录当前不存在：${missingSourcePath}。接回移动盘或换一台机器时，到「设置 → 会话来源」调整目录即可。`
-      : sources === null
-        ? "NoEnding 只读取 Agent 自己目录里的会话文件，不会修改它们。应用启动时会自动发现本地 Codex、Claude Code 和 Pi 的会话；也可以新建一个会话立刻开始。"
-        : "已启用的来源里还没有可发现的会话。Agent 跑过之后应用会在启动时自动发现；也可以新建一个会话立刻开始。";
+  const emptyHint = noSourcesEnabled ? "请启用会话来源。" : missingSourcePath
+    ? `来源目录不存在：${missingSourcePath}` : "新建会话，或检查会话来源。";
 
   const loadFailedState = (
     <EmptyState
       title={trashMode ? "读取回收站失败。" : "读取会话失败。"}
-      hint="本地数据没有被修改。可以重试，或到「设置 → 数据与高级」查看数据库位置。"
       actions={<button className="btn small" onClick={refresh}>重试</button>}
     />
   );
 
+  const scrollRef = useViewScroll("sessions.scroll", sessions !== null);
+
   return (
-    <div className="main">
+    <div className="main board-page" ref={scrollRef}>
       <PageHeader
         title="会话"
-        sub="来自 Codex、Claude Code 和 Pi 的本地执行记录。长期主题由任务承载。"
         actions={
           <>
             {/* 回收站开关（§35）：同一页面的两个数据面，用分段控件而不是筛选器，
@@ -285,28 +279,38 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
             <div className="settings-seg" role="group" aria-label="会话列表范围">
               <button
                 className={trashMode ? "" : "on"}
+                aria-pressed={!trashMode}
+                aria-label="会话列表"
+                title="会话列表"
                 onClick={() => navigate({ view: "sessions", scope: "active" })}
               >
-                会话列表
+                <Icon name="chat" />
               </button>
               <button
                 className={trashMode ? "on" : ""}
+                aria-pressed={trashMode}
+                aria-label="回收站"
+                title="回收站"
                 onClick={() => navigate({ view: "sessions", scope: "trash" })}
               >
-                回收站{trashCount !== null ? ` (${trashCount})` : ""}
+                <Icon name="archive" />
               </button>
             </div>
-            <button className="btn primary" onClick={() => setCreating(true)}>新建会话</button>
+            <button className="btn ghost icon-button" aria-label="新建会话" title="新建会话" onClick={() => setCreating(true)}>
+              <Icon name="plus" />
+            </button>
           </>
         }
       />
 
       {!trashMode && (
         <>
+          <div className="board-toolbar">
           <input
             type="text"
             className="ws-search"
-            placeholder="搜索会话…（标题、工作目录、任务）"
+            aria-label="搜索会话"
+            placeholder="搜索会话…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -332,11 +336,11 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
               <select
                 value={projectId}
                 onChange={(e) => setProjectId(e.target.value)}
-                title="项目是从工作目录派生出来的分组视图，不是会话的所有权：这里不能指派项目。"
+                title="按工作目录所属项目筛选"
               >
                 <option value="all">全部项目</option>
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                <option value="none">还没有项目（工作目录未派生）</option>
+                <option value="none">无项目</option>
               </select>
             </label>
             <label className="ws-control">
@@ -357,11 +361,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
             )}
           </div>
 
-          {/* v0.2 起 Session 的 Project 由它自己的工作目录派生（方案 §1.10），
-              所以这一页不再有「设置 Project」这个动作：分组还能筛，归属不能选。 */}
-          <div className="muted small" style={{ marginTop: -10, marginBottom: 14 }}>
-            项目由会话的工作目录自动派生，不需要也不能手工指派；按项目筛选只是换一种看法。
-            想长期推进一件事，请关联任务。
           </div>
 
           {shown === null && !loadFailed && <div className="muted">加载中…</div>}

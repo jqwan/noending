@@ -1,3 +1,4 @@
+import PageHeader from "../../layout/PageHeader";
 import { useEffect, useState } from "react";
 import { api } from "../../api";
 import type { Route } from "../../app/routes";
@@ -14,30 +15,37 @@ const HIT_KIND_LABELS: Record<string, string> = {
 export default function SearchView({ query, navigate }: { query: string; navigate: (r: Route) => void }) {
   const [q, setQ] = useState(query);
   const [hits, setHits] = useState<SearchHit[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => { setQ(query); }, [query]);
   useEffect(() => {
-    if (!q.trim()) { setHits([]); return; }
+    let cancelled = false;
+    setFailed(false);
+    setHits([]);
+    setLoading(!!q.trim());
+    if (!q.trim()) return;
     const t = setTimeout(() => {
-      api.search(q).then((h) => { setHits(h); setFailed(false); })
-        .catch((e) => { console.error(e); setFailed(true); });
+      api.search(q).then(h => { if (!cancelled) setHits(h); })
+        .catch(() => { if (!cancelled) setFailed(true); })
+        .finally(() => { if (!cancelled) setLoading(false); });
     }, 200);
-    return () => clearTimeout(t);
-  }, [q]);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q, retry]);
 
   return (
     <div className="main narrow">
-      <h1>搜索</h1>
-      <p className="page-sub">优先展示当前 Context，其次历史与原始会话。</p>
-      <input type="text" style={{ marginBottom: 18 }} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索任务、会话、Context 消息…" />
+      <PageHeader title="搜索" />
+      <input aria-label="搜索" type="text" style={{ marginBottom: 18 }} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索任务、会话、Context 消息…" />
 
       {failed && (
-        <div className="empty">搜索失败。本地数据没有被修改，换个关键词或稍后重试。</div>
+        <div className="empty" role="alert">搜索失败 <button className="btn small" onClick={() => setRetry(value => value + 1)}>重试</button></div>
       )}
 
+      {loading && <div role="status" className="muted">搜索中…</div>}
       {hits.map((h) => (
-        <div className="card clickable" key={h.kind + h.ref_id}
+        <button type="button" className="search-result" key={h.kind + h.ref_id}
           onClick={() => {
             if (h.kind === "workstream") navigate({ view: "workstream", workstreamId: h.ref_id });
             else if (h.kind === "item") navigate({ view: "workstream", workstreamId: h.parent_id });
@@ -49,9 +57,9 @@ export default function SearchView({ query, navigate }: { query: string; navigat
             <strong className="small">{h.title.slice(0, 80)}</strong>
           </div>
           {h.snippet && <div className="muted small" style={{ marginTop: 4 }}>{h.snippet}</div>}
-        </div>
+        </button>
       ))}
-      {q && !failed && hits.length === 0 && <div className="empty">没有匹配结果。</div>}
+      {q.trim() && !loading && !failed && hits.length === 0 && <div className="empty">没有匹配结果。</div>}
     </div>
   );
 }

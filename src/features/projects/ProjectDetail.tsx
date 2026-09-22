@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import Icon from "../../components/Icon";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -31,6 +32,7 @@ export default function ProjectDetail({ projectId, navigate }: {
   navigate: (r: Route) => void;
 }) {
   const { intelligenceEnabled } = useBaseExperience();
+  const [showAllSessions, setShowAllSessions] = useState(false);
   const [data, setData] = useState<ProjectDetailData | null>(null);
   const [gone, setGone] = useState(false);
   const [failure, setFailure] = useState("");
@@ -128,7 +130,7 @@ export default function ProjectDetail({ projectId, navigate }: {
 
   if (detail === null || project === null) {
     return (
-      <div className="main narrow">
+      <div className="main project-detail">
         <PageHeader
           title={gone ? "这个项目已经不存在" : (failure === "" ? "加载中…" : "读取项目失败")}
         >
@@ -153,51 +155,33 @@ export default function ProjectDetail({ projectId, navigate }: {
     );
   }
 
-  const primary = detail.workstreams.filter((w) => w.is_primary);
-  const related = detail.workstreams.filter((w) => !w.is_primary);
   const sessions = detail.sessions;
 
   return (
-    <div className="main narrow">
+    <div className="main project-detail">
       <PageHeader
         title={<span style={{ overflowWrap: "anywhere" }}>{project.name}</span>}
-        sub={
-          <>
-            这个项目由 NoEnding 从下面 {detail.workspace_paths.length} 个工作目录派生出来。
-            你能改的只有名字；目录、成员任务与会话都由工作路径决定。
-          </>
-        }
         actions={
           <>
             <IntelligenceOnly>
-              <button className="btn ghost"
+              <button className="btn ghost icon-button" aria-label="询问 Assistant" title="询问 Assistant"
                 onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
-                询问 Assistant
+                <Icon name="chat" />
               </button>
             </IntelligenceOnly>
-            <button className="btn"
-              title="重新检查这个项目的工作目录与 Git 状态。"
+            <button className="btn ghost icon-button" aria-label="刷新目录状态"
+              title="刷新目录状态"
               disabled={refreshingWorkspace}
               onClick={refreshWorkspace}>
-              {refreshingWorkspace ? "正在刷新…" : "刷新目录状态"}
+              <Icon name="refresh" />
             </button>
-            <button className="btn"
+            <button className="btn ghost icon-button" title="重命名" aria-label="重命名"
               onClick={() => { setNameInput(project.name); setRenameError(""); setRenaming(true); }}>
-              重命名
+              <Icon name="edit" />
             </button>
           </>
         }
-      >
-        <div className="ws-detail-head-meta">
-          <span className={`badge ${project.git_id ? "accent" : ""}`}>
-            {project.git_id ? "由 Git 家族识别" : "普通目录家族"}
-          </span>
-          <span className="dot-sep" />
-          <span>{project.name_customized ? "名字由你改过" : "名字自动派生"}</span>
-          <span className="dot-sep" />
-          <span>创建于 {timeAgo(project.created_at)}</span>
-        </div>
-      </PageHeader>
+      />
 
       {refreshingWorkspace && (
         <div className="muted small" style={{ marginTop: 18 }}>
@@ -205,17 +189,90 @@ export default function ProjectDetail({ projectId, navigate }: {
         </div>
       )}
 
-      {/* §19 — 概览：三个数字就是这页的全部规模感。 */}
+      {/* §19 — 概览三个数字 + §36.17 的类型 / 命名 / 创建时间，都收在右栏「属性」块里：
+          标题栏只放标题与图标动作，只读事实一律放右栏。 */}
+      <div className="project-detail-layout">
+      <div>
+      <section className="rail-section">
+        <div className="section-label">任务</div>
+
+        {detail.workstreams.length === 0 && (
+          <div className="l1-none">还没有任务经由这些目录关联进来。</div>
+        )}
+        {/* 不再分「主关联 / 关联」两组：关联方式不改变一条任务对项目的归属，
+            列表只按后端给的顺序（主关联优先、其余按最近更新）平铺。 */}
+        {detail.workstreams.map(({ workstream: w }) => {
+          // 与 Workstream 卡片同一条规则：智能关闭时这里只出现用户自己写的描述，
+          // 不展示冻结期的 Agent 摘要。规则只写在 cardSummaryLine 一处。
+          const summary = cardSummaryLine(w as unknown as WorkstreamCardData, intelligenceEnabled);
+          return (
+            <div key={w.id} className="list-row"
+              onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
+              <div className="grow">
+                <div className="title" title={w.title}>{w.title}</div>
+                {summary && <div className="meta">{summary}</div>}
+              </div>
+              <div className="side">
+                {w.visibility === "archived" && <span className="badge warn" title="已移入回收站；项目与它只是投影关系">回收站</span>}
+                {w.lifecycle === "completed" && <span className="badge">已完成</span>}
+                <span>{timeAgo(w.updated_at)}</span>
+              </div>
+            </div>
+          );
+        })}
+      </section>
+
+      <section className="rail-section">
+        <div className="section-label">会话</div>
+
+        {sessions.length === 0 && (
+          <div className="l1-none">这个项目下还没有会话。</div>
+        )}
+        {sessions.slice(0, showAllSessions ? undefined : 12).map((s) => (
+          <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
+            <div className="grow">
+              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
+                {sessionDisplayTitle(s.title)}
+              </div>
+              <div className="meta mono" title={s.cwd ?? undefined}>
+                {s.cwd ? cwdDisplayLabel(s.cwd, 56) : "没有记录到 cwd"}
+              </div>
+            </div>
+            <div className="side">
+              <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
+              <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
+            </div>
+          </div>
+        ))}
+        {sessions.length > 12 && (
+          <div className="small muted" style={{ marginTop: 6 }}>
+            <button className="btn small ghost" onClick={() => setShowAllSessions(value => !value)}>{showAllSessions ? "收起" : `查看全部 ${sessions.length} 个会话`}</button>
+          </div>
+        )}
+      </section>
+
+
+
+      </div>
+      <aside>
       <section className="rail-section" style={{ marginTop: 26 }}>
-        <div className="section-label">概览</div>
-        <div className="ws-card-meta">
+        <div className="section-label">属性</div>
+        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span className={`badge ${project.git_id ? "accent" : ""}`}>
+            {project.git_id ? "Git 项目" : "目录项目"}
+          </span>
+          <span className="small muted">{project.name_customized ? "自定义名称" : "自动命名"}</span>
+        </div>
+        <div className="small muted" style={{ marginTop: 6 }}>
           {detail.workspace_paths.length} 个工作目录 ·{" "}
           {detail.workstreams.length} 个任务 · {detail.sessions.length} 个会话
         </div>
+        <div className="small muted" style={{ marginTop: 6 }}>
+          创建于 {timeAgo(project.created_at)}
+        </div>
       </section>
-
-      <section className="rail-section" style={{ marginTop: 26 }}>
-        <div className="section-label">工作目录（WorkspacePath）</div>
+      <section className="rail-section">
+        <div className="section-label">工作目录</div>
         {detail.workspace_paths.length === 0 && (
           <div className="l1-none">
             这个项目已经不再拥有任何目录 —— 它会在下一次整理时自动消失。
@@ -239,103 +296,18 @@ export default function ProjectDetail({ projectId, navigate }: {
             </div>
           </div>
         ))}
-        <div className="small muted" style={{ marginTop: 6, maxWidth: "72ch" }}>
-          一个项目可以有多个目录，其中一些并不是仓库。Git 与存在性都只是<b>观察结果</b>：
-          丢证据不会让一条路径换项目（方案 §1.3）。路径的身份是它的规范化字符串本身，
-          不是符号链接解析后的结果。
-        </div>
+
       </section>
 
-      <section className="rail-section">
-        <div className="section-label">任务</div>
-        <div className="small muted" style={{ marginBottom: 8, maxWidth: "72ch" }}>
-          <b>主关联</b> = 该任务的主工作路径（position 0）落在这个项目上；
-          <b>关联</b> = 只是经由它的其他工作路径到达。两者都是投影出来的，
-          这里既不能把手工挂上、也不能摘下来。
-        </div>
-        {detail.workstreams.length === 0 && (
-          <div className="l1-none">还没有任务经由这些目录关联进来。</div>
-        )}
-        {[{ title: "主关联", rows: primary }, { title: "关联", rows: related }].map((group) => (
-          group.rows.length === 0 ? null : (
-            <React.Fragment key={group.title}>
-              <h3>{group.title} · {group.rows.length}</h3>
-              {group.rows.map(({ workstream: w }) => {
-                // 与 Workstream 卡片同一条规则：智能关闭时这里只出现用户自己写的描述，
-                // 不展示冻结期的 Agent 摘要。规则只写在 cardSummaryLine 一处。
-                const summary = cardSummaryLine(w as unknown as WorkstreamCardData, intelligenceEnabled);
-                return (
-                  <div key={w.id} className="list-row"
-                    onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
-                    <div className="grow">
-                      <div className="title" title={w.title}>{w.title}</div>
-                      {summary && <div className="meta">{summary}</div>}
-                    </div>
-                    <div className="side">
-                      {w.visibility === "archived" && <span className="badge warn" title="已移入回收站；项目与它只是投影关系">回收站</span>}
-                      {w.lifecycle === "completed" && <span className="badge">已完成</span>}
-                      <span>{timeAgo(w.updated_at)}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </React.Fragment>
-          )
-        ))}
-      </section>
-
-      <section className="rail-section">
-        <div className="section-label">会话</div>
-        <div className="small muted" style={{ marginBottom: 8, maxWidth: "72ch" }}>
-          这些会话的 cwd 正好是上面某个目录 —— 归属来自权威链
-          （会话 → WorkspacePath → 项目），不是手工标签。
-          只有旧缓存值、cwd 已经丢掉的会话不会出现在这里。
-        </div>
-        {sessions.length === 0 && (
-          <div className="l1-none">这个项目下还没有会话。</div>
-        )}
-        {sessions.slice(0, 12).map((s) => (
-          <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
-            <div className="grow">
-              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
-                {sessionDisplayTitle(s.title)}
-              </div>
-              <div className="meta mono" title={s.cwd ?? undefined}>
-                {s.cwd ? cwdDisplayLabel(s.cwd, 56) : "没有记录到 cwd"}
-              </div>
-            </div>
-            <div className="side">
-              <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
-              <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
-            </div>
-          </div>
-        ))}
-        {sessions.length > 12 && (
-          <div className="small muted" style={{ marginTop: 6 }}>
-            另有 {sessions.length - 12} 个会话 —— 到会话页查看全部。
-          </div>
-        )}
-      </section>
-
-      <div className="small muted" style={{ marginTop: 24, maxWidth: "72ch" }}>
-        项目会在它拥有的最后一个目录离开时自动消失；那不会删除任何任务
-        或会话。想改变这里的内容，去做的是：给任务调整工作路径。
+      </aside>
       </div>
 
       {renaming && (
         <Modal title="重命名项目" onClose={() => setRenaming(false)}>
-          <p className="muted small" style={{ marginTop: 0 }}>
-            名字只是展示信息：项目的身份是它的 Git 家族与它拥有的路径，
-            改名不会移动任何一个目录，也不会改变任何成员关系（方案 §42.6-N4：同名是允许的）。
-          </p>
-          <p className="muted small" style={{ marginBottom: 10 }}>
-            改过之后 NoEnding 会记住「这是人起的名字」，之后的自动命名与 Git 家族合并
-            都不会再覆盖它。
-          </p>
           <label className="field"><span>名称</span>
             <input type="text" value={nameInput} autoFocus
               onChange={(e) => { setNameInput(e.target.value); setRenameError(""); }}
-              onKeyDown={(e) => e.key === "Enter" && commitRename()} /></label>
+              onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && commitRename()} /></label>
           {renameError && (
             <div className="badge warn" style={{ marginBottom: 10, overflowWrap: "anywhere" }}>{renameError}</div>
           )}

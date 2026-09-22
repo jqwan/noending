@@ -122,20 +122,11 @@ export default function NewSessionModal({
     }
   };
 
-  // Title of the current selection; null while standalone or still loading.
-  const selectedTitle =
-    wsId === STANDALONE ? null : workstreams.find((w) => w.id === wsId)?.title;
-
   return (
     <>
       <Modal title="新建会话" onClose={handleClose}>
-        {workstreamId && workstreamId !== STANDALONE && selectedTitle && (
-          <div className="settings-row-hint" style={{ marginBottom: 6 }}>
-            已预置任务：{selectedTitle}，可以再改
-          </div>
-        )}
         <label className="field">
-          <span>任务（可选；也可以之后为会话关联）</span>
+          <span>任务（可选）</span>
           <select value={wsId} onChange={(e) => handleWsChange(e.target.value)}>
             <option value={STANDALONE}>无（直接开始）</option>
             {workstreams.map((w) => (
@@ -147,7 +138,7 @@ export default function NewSessionModal({
         </label>
 
         {defaultAgent ? (
-          <AgentRow agent={defaultAgent} hint="设置中的默认 Agent" first />
+          <AgentRow agent={defaultAgent} hint="默认 Agent" first />
         ) : (
           <div className="row-line" style={{ borderTop: 0 }}>
             <div>

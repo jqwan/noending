@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, json_str_field, read_jsonl_delta, title_from_text, truncate_text, AgentCommand,
+    detect_format, json_str_field, read_jsonl_delta, truncate_text, AgentCommand,
     DiscoveredSession, ParsedLine, ReadDelta,
 };
 use crate::domain::{Agent, Session, SourceCursor};
@@ -68,8 +68,10 @@ impl CodexAdapter {
                     && p.get("role").and_then(|r| r.as_str()) == Some("user")
                 {
                     let text = extract_text(p.get("content").unwrap_or(&Value::Null));
-                    // skip environment_context style wrapper payloads
-                    if !text.is_empty() && !text.starts_with("<") {
+                    // `<…>` environment_context wrappers and `#`-prefixed
+                    // injections (AGENTS.md, attached-file headers) are not
+                    // user text.
+                    if !text.is_empty() && !text.starts_with("<") && !text.starts_with('#') {
                         first_user_text = Some(truncate_text(&text, 400));
                     }
                 }
@@ -219,28 +221,13 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                                 _ => ("system", text),
                             }
                         }
-                        "function_call" => (
-                            "tool_call",
-                            format!(
-                                "{} {}",
-                                payload
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("tool"),
-                                payload
-                                    .get("arguments")
-                                    .and_then(|a| a.as_str())
-                                    .map(|s| truncate_text(s, 200))
-                                    .unwrap_or_default()
-                            ),
-                        ),
-                        "function_call_output" => (
-                            "tool_result",
-                            truncate_text(
-                                payload.get("output").and_then(|o| o.as_str()).unwrap_or(""),
-                                200,
-                            ),
-                        ),
+                        // Tool traffic is deliberately not ingested (方案 §36.11):
+                        // machine chatter whose payload shape also drifts across
+                        // Codex versions (function_call vs custom_tool_call).
+                        "function_call"
+                        | "function_call_output"
+                        | "custom_tool_call"
+                        | "custom_tool_call_output" => return None,
                         "reasoning" => return None, // internal model reasoning: not meaningful context
                         _ => ("unknown", String::new()),
                     }
@@ -348,10 +335,6 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     }
 }
 
-pub fn extract_title(d: &DiscoveredSession) -> Option<String> {
-    d.first_user_text.as_deref().and_then(title_from_text)
-}
-
 #[cfg(test)]
 mod rollout_tests {
     use super::*;
@@ -406,9 +389,9 @@ mod rollout_tests {
 
     /// Regression: session_meta opens every rollout file, so the scan must
     /// continue past it to reach the first user message — stopping at the
-    /// meta line left every Codex session ingesting untitled.
+    /// meta line left every Codex session without a title source.
     #[test]
-    fn title_survives_meta_on_line_zero() {
+    fn first_user_text_survives_meta_on_line_zero() {
         let dir = temp_dir("titled");
         let path = write_rollout(
             &dir,
@@ -417,6 +400,7 @@ mod rollout_tests {
                 meta_line(),
                 message_line(2, "developer", "<app-context>\n# Codex desktop context"),
                 message_line(5, "user", "<recommended_plugins>\nDro is available…"),
+                message_line(6, "user", "# AGENTS.md instructions for /tmp/proj"),
                 message_line(8, "user", "我想对整体工程进行代码瘦身，请给出优化方案"),
             ],
         );
@@ -424,22 +408,22 @@ mod rollout_tests {
         assert_eq!(d.agent_session_id, SESSION_ID);
         assert_eq!(d.cwd.as_deref(), Some("/tmp/proj"));
         assert_eq!(
-            extract_title(&d).as_deref(),
+            d.first_user_text.as_deref(),
             Some("我想对整体工程进行代码瘦身，请给出优化方案")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A just-started session has a meta line but no user turn yet: parse
-    /// still succeeds (scanning to EOF) and simply yields no title.
+    /// still succeeds (scanning to EOF) and simply yields no user text.
     #[test]
-    fn meta_only_file_parses_without_title() {
+    fn meta_only_file_parses_without_user_text() {
         let dir = temp_dir("meta-only");
         let path = write_rollout(&dir, "rollout-meta-only.jsonl", &[meta_line()]);
         let d = CodexAdapter::parse_rollout(&path).unwrap().unwrap();
         assert_eq!(d.agent_session_id, SESSION_ID);
         assert_eq!(d.cwd.as_deref(), Some("/tmp/proj"));
-        assert_eq!(extract_title(&d), None);
+        assert_eq!(d.first_user_text, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

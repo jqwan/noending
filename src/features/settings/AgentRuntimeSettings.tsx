@@ -179,7 +179,7 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
             placeholder={field === "model" ? "模型 ID" : "自定义值"}
             onChange={(e) => setCustomText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") commitCustom(field);
+              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) commitCustom(field);
               if (e.key === "Escape") setCustom(null);
             }}
             onBlur={() => commitCustom(field)}

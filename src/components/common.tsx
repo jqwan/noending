@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
+import Icon from "./Icon";
 
 export function useRefreshSignal(cb: () => void) {
   useEffect(() => {
@@ -35,11 +36,31 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
   const backdropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = backdropRef.current?.querySelector<HTMLElement>(".modal");
+    if (!dialog?.contains(document.activeElement)) dialog?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
+  }, []);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" && e.key !== "Tab") return;
       const backdrops = document.querySelectorAll(".modal-backdrop");
       const top = backdrops[backdrops.length - 1];
       if (top !== backdropRef.current) return;
+      if (e.key === "Tab") {
+        const focusable = Array.from(top.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]'))
+          .filter(el => !el.closest('[hidden], [aria-hidden="true"]'));
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (!first) { e.preventDefault(); return; }
+        if (e.shiftKey && (document.activeElement === first || !focusable.includes(document.activeElement as HTMLElement))) {
+          e.preventDefault(); last.focus();
+        } else if (!e.shiftKey && (document.activeElement === last || !focusable.includes(document.activeElement as HTMLElement))) {
+          e.preventDefault(); first.focus();
+        }
+        return;
+      }
       e.stopPropagation();
       onClose();
     };
@@ -50,8 +71,11 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
   return (
     <div className="modal-backdrop" ref={backdropRef}
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
-        <h2>{title}</h2>
+      <div className="modal" tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-header">
+          <h2>{title}</h2>
+          <button type="button" className="btn ghost icon-only" aria-label="关闭弹窗" title="关闭" onClick={onClose}><Icon name="close" /></button>
+        </div>
         {children}
       </div>
     </div>

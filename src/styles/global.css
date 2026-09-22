@@ -4,6 +4,8 @@
 
 html, body, #root {
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
   margin: 0;
   font-family: Inter, "PingFang SC", "Noto Sans CJK SC", "Helvetica Neue", sans-serif;
   font-size: 13.5px;
@@ -163,7 +165,15 @@ label.field span { display: block; font-size: 12px; color: var(--text-muted); ma
   border: 1px solid var(--border-subtle);
   box-shadow: 0 16px 48px rgba(0,0,0,0.18);
 }
-.modal h2 { margin-top: 0; }
+.modal { overscroll-behavior: contain; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; position: sticky; top: -26px; z-index: 1; background: var(--bg-app); padding: 18px 0 14px; margin-top: -18px; }
+.modal-header h2 { margin: 0; font-size: 18px; }
+.modal > .row:last-child { position: sticky; bottom: -26px; background: var(--bg-app); padding: 14px 0; margin-bottom: -14px; border-top: 1px solid var(--border-subtle); }
+@media (max-width: 600px) {
+  .modal { padding: 20px; max-height: 90dvh; }
+  .modal-header { top: -20px; }
+  .modal > .row:last-child { bottom: -20px; flex-wrap: wrap; }
+}
 
 /* ---------- Skeleton (§75: no full-page spinner) ---------- */
 @keyframes skeleton-pulse {
@@ -177,4 +187,17 @@ label.field span { display: block; font-size: 12px; color: var(--text-muted); ma
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+
+.ui-icon { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
+button.btn { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+button.btn.small { min-height: 28px; }
+
+.brand-mark {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: middle;
+  background-color: var(--text-primary);
+  mask: no-repeat center / contain;
+  -webkit-mask: no-repeat center / contain;
 }

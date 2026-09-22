@@ -1,19 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import WorkspacePathField, { absolutePathHint, usePathProbe } from "../../components/WorkspacePathField";
+import { useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import Icon from "../../components/Icon";
+import { usePathProbe } from "../../components/WorkspacePathField";
+import ExistingPathPicker from "./ExistingPathPicker";
 import type { PathProbe } from "../../types";
 
-/**
- * 有序工作路径列表的「创建时编辑」形态（方案 §1.5）：第 1 条是主工作路径，
- * 角色完全由位置表达。与详情页 `WorkstreamPathList` 共享同一套语义——
- * 设为主路径 = 移到第 1 位，上下移 = 整表 swap，移除 = 剩余条目位置前移——
- * 但这里是**提交前的草稿**，不动任何数据库行；权威判定仍发生在创建那一刻。
- *
- * 除了手输，还接受两类快捷输入：
- * - 「浏览…」/ 快选列表（`WorkspacePathField` 内部）；
- * - 从 Finder / 资源管理器把文件夹拖进来（Tauri webview drag-drop）。
- */
-
+/** 创建前的路径草稿，第一项为主路径。 */
 export interface PathEntryDraft {
   raw: string;
 }
@@ -21,7 +13,6 @@ export interface PathEntryDraft {
 export type PathListEditorProps = {
   entries: PathEntryDraft[];
   onChange: (entries: PathEntryDraft[]) => void;
-  addPlaceholder?: string;
 };
 
 /** 一行草稿路径的探测反馈（紧凑版：只有异常与归属，不给整段解释）。 */
@@ -58,23 +49,25 @@ function DraftRow({ raw }: { raw: string }) {
   const probe = usePathProbe(raw, true);
   return (
     <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-      <span className="mono" style={{ overflowWrap: "anywhere", flex: 1, minWidth: 120 }} title={raw}>
-        {raw}
-      </span>
+      <div className="path-draft-name">
+        <strong>{raw.split(/[\\/]/).filter(Boolean).pop() ?? raw}</strong>
+        <div className="mono small muted" title={raw}>{raw}</div>
+      </div>
       <RowFeedback probe={probe} />
     </div>
   );
 }
 
-export default function PathListEditor({ entries, onChange, addPlaceholder }: PathListEditorProps) {
-  const [addValue, setAddValue] = useState("");
+export default function PathListEditor({ entries, onChange }: PathListEditorProps) {
+  const [picking, setPicking] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
   const [warn, setWarn] = useState("");
-  const [dragOver, setDragOver] = useState(false);
-  // 拖拽回调是订阅一次的闭包，读 entries 要走 ref，否则永远看到第一帧。
+  const editorRef = useRef<HTMLDivElement>(null);
+  // 目录选择结束后使用最新列表。
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
 
-  /** 追加若干条（浏览/快选/拖拽/手输共用）；已存在的直接指出，不静默吞掉。 */
+  /** 追加目录并跳过重复项。 */
   const addRawPaths = (raws: string[]) => {
     const current = entriesRef.current;
     const known = new Set(current.map((e) => e.raw));
@@ -85,6 +78,9 @@ export default function PathListEditor({ entries, onChange, addPlaceholder }: Pa
       if (trimmed === "") continue;
       if (known.has(trimmed)) {
         duplicate = true;
+        const row = Array.from(editorRef.current?.querySelectorAll<HTMLElement>("[data-path]") ?? []).find(el => el.dataset.path === trimmed);
+        row?.scrollIntoView?.({ block: "nearest" });
+        row?.focus();
         continue;
       }
       known.add(trimmed);
@@ -98,75 +94,41 @@ export default function PathListEditor({ entries, onChange, addPlaceholder }: Pa
     }
   };
 
-  const append = () => {
-    const raw = addValue.trim();
-    const hint = absolutePathHint(raw);
-    if (raw !== "" && hint !== "") {
-      setWarn(hint);
-      return;
-    }
+  const browse = async () => {
+    setBrowsing(true);
     setWarn("");
-    if (raw === "") return;
-    addRawPaths([raw]);
-    setAddValue("");
+    try {
+      const picked = await open({ directory: true, multiple: true, title: "选择工作目录" });
+      if (picked) addRawPaths(typeof picked === "string" ? [picked] : picked);
+    } catch (error) {
+      setWarn(`无法选择目录：${String(error)}。请重试。`);
+    } finally {
+      setBrowsing(false);
+    }
   };
 
   const remove = (index: number) => {
     onChange(entriesRef.current.filter((_, i) => i !== index));
   };
 
-  const move = (index: number, delta: -1 | 1) => {
+  const makePrimary = (index: number) => {
+    if (index === 0) return;
     const list = [...entriesRef.current];
-    const to = index + delta;
-    if (to < 0 || to >= list.length) return;
     const [moved] = list.splice(index, 1);
-    list.splice(to, 0, moved);
+    list.unshift(moved);
     onChange(list);
   };
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "enter") {
-          setDragOver(true);
-        } else if (event.payload.type === "leave") {
-          setDragOver(false);
-        } else if (event.payload.type === "drop") {
-          setDragOver(false);
-          if (event.payload.paths.length > 0) addRawPaths(event.payload.paths);
-        }
-      })
-      .then((u) => {
-        if (disposed) u();
-        else unlisten = u;
-      })
-      .catch(() => {
-        // 非 Tauri 环境（单测/纯浏览器）没有拖拽事件，输入框仍然完整可用。
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   return (
-    <div
-      style={{
-        border: dragOver ? "1px dashed var(--accent, #888)" : "1px dashed transparent",
-        borderRadius: 6,
-        padding: 2,
-        margin: -3,
-      }}
-    >
+    <div ref={editorRef} className="path-list-editor">
       {entries.length > 0 && (
-        <div style={{ marginBottom: 8 }}>
+        <div className="path-draft-list">
           {entries.map((entry, i) => (
             <div
               key={`${entry.raw}-${i}`}
               className="list-row"
+              data-path={entry.raw}
+              tabIndex={-1}
               style={{ cursor: "default", padding: "6px 4px" }}
             >
               <div className="grow" style={{ minWidth: 0 }}>
@@ -181,39 +143,24 @@ export default function PathListEditor({ entries, onChange, addPlaceholder }: Pa
                   <DraftRow raw={entry.raw} />
                 </div>
               </div>
-              <div className="side">
-                <button className="btn small" disabled={i === 0} title="上移一位"
-                  onClick={() => move(i, -1)}>↑</button>
-                <button className="btn small" disabled={i === entries.length - 1} title="下移一位"
-                  onClick={() => move(i, 1)}>↓</button>
-                <button className="btn small" title="从列表里拿掉这一条"
-                  onClick={() => remove(i)}>移除</button>
+              <div className="side row">
+                {i > 0 && <button type="button" className="btn small ghost" onClick={() => makePrimary(i)}>设为主要</button>}
+                <button type="button" className="btn small ghost icon-only" title="移除路径" aria-label={`移除 ${entry.raw}`} onClick={() => remove(i)}><Icon name="close" /></button>
+
               </div>
             </div>
           ))}
         </div>
       )}
 
-      <WorkspacePathField
-        value={addValue}
-        onChange={setAddValue}
-        onSubmit={append}
-        placeholder={addPlaceholder ?? "/path/to/目录 — 回车或点「添加」加入列表"}
-        exclude={entries.map((e) => e.raw)}
-      />
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 6 }}>
-        <button className="btn small" disabled={addValue.trim() === ""} onClick={append}>
-          添加
-        </button>
+      <div className="row path-add-actions">
+        <button type="button" className="btn small" disabled={browsing} onClick={browse}><Icon name="plus" />{browsing ? "选择中…" : "新增目录"}</button>
+        <button type="button" className="btn small" onClick={() => setPicking(true)}><Icon name="folder" />选择已有目录</button>
       </div>
+      {picking && <ExistingPathPicker exclude={entries.map(e => e.raw)} onClose={() => setPicking(false)} onSelect={paths => { addRawPaths(paths); setPicking(false); }} />}
       {warn !== "" && (
         <div className="badge warn" style={{ marginTop: 6, display: "block" }}>{warn}</div>
       )}
-      <div className="small muted" style={{ marginTop: 6 }}>
-        第 1 条是<b>主工作路径</b>：新建会话默认在这里启动，项目也由路径派生
-        —— 不需要、也不能手工指定。可以把文件夹直接拖进来。全部留空也合法：
-        一条没有路径的任务依然有效。
-      </div>
     </div>
   );
 }

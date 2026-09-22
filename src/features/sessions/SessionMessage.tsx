@@ -10,13 +10,12 @@ export interface SessionMessageData {
 }
 
 /**
- * 技术性事件 kind 的中文显示名（adapters 产出的集合，见 codex.rs / claude.rs / pi.rs）。
+ * 技术性事件 kind 的中文显示名。工具事件已从摄入里撤下（方案 §36.11），历史行也已清除，
+ * 所以这里不再有 tool_call / tool_result。
  * user_message / assistant_message 由调用方给的 `who` 承担（用户 / Codex / …）。
  * 原始 kind 保留在 title 提示里，报障时仍能对上转录证据（AGENTS.md: Provenance Fidelity）。
  */
 const EVENT_KIND_LABELS: Record<string, string> = {
-  tool_call: "工具调用",
-  tool_result: "工具结果",
   system: "系统",
   compact: "上下文压缩",
   unknown: "未知事件",
@@ -27,9 +26,10 @@ const EVENT_KIND_LABELS: Record<string, string> = {
  * 视觉差异保持克制。 */
 export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   const [expanded, setExpanded] = useState(false);
-  const raw = msg.text ?? "";
-  const text = raw.trim();
-  const long = raw.length > 420;
+  // 转录里的正文常带首尾空行（Codex 的尾部换行、pi 的一条前后各两个），
+  // 而 `.event .body` 是 pre-wrap，不 trim 就会在上下渲染出空白行。
+  const text = (msg.text ?? "").trim();
+  const long = text.length > 420;
 
   const cls =
     msg.kind === "user_message" || msg.kind === "assistant_message"
@@ -57,7 +57,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
       <div className="body">
         {text === ""
           ? <span className="muted">（该事件没有可读文本）</span>
-          : long && !expanded ? raw.slice(0, 420) + "…" : raw}
+          : long && !expanded ? text.slice(0, 420) + "…" : text}
       </div>
       {long && (
         <button className="link" onClick={() => setExpanded((v) => !v)}>

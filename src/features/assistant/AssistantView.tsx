@@ -1,3 +1,4 @@
+import Icon from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { timeAgo } from "../../components/common";
@@ -193,11 +194,11 @@ export default function AssistantView({ scope, navigate }: {
         <div>
           <h1>Assistant</h1>
           <p className="page-sub">
-            Assistant 经由你已登录的 Agent CLI 无头运行（<span className="mono">{cfg ? `${CHOICE_LABELS[cfg.agent] ?? cfg.agent} · ${cfg.agent === "none" ? "仅检索" : runtimeSummary(runtime)}` : "…"}</span>）。
+            <span className="mono">{cfg ? `${CHOICE_LABELS[cfg.agent] ?? cfg.agent} · ${cfg.agent === "none" ? "仅检索" : runtimeSummary(runtime)}` : "…"}</span>
           </p>
         </div>
         <div className="actions">
-          <button className="btn ghost" onClick={() => setCfgOpen(true)}>Agent 设置</button>
+          <button className="btn ghost icon-button" title="Agent 设置" aria-label="Agent 设置" onClick={() => setCfgOpen(true)}><Icon name="settings" /></button>
         </div>
       </div>
 
@@ -260,7 +261,7 @@ export default function AssistantView({ scope, navigate }: {
       <div className="row" style={{ marginTop: 10 }}>
         <input type="text" placeholder="问 NoEnding…（问上下文、启动会话、查摄入历史）" value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()} />
+          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && send()} />
         <button className="btn primary" onClick={() => send()} disabled={busy}>发送</button>
       </div>
 

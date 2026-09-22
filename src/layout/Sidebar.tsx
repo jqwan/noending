@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { onEvent, EVT_SYNCED, type Route } from "../app/routes";
 import { IntelligenceOnly } from "../app/experience";
+import Icon from "../components/Icon";
 import SidebarLogo from "../components/SidebarLogo";
 import type { WorkstreamCardData } from "../types";
 
@@ -18,6 +19,17 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
   onSearch: () => void;
   collapsed?: boolean;
 }) {
+  const [pinned, setPinned] = useState<string[]>(() => {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem("noending.pinnedTasks") ?? "[]");
+      return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
+  });
+  const togglePin = (id: string) => setPinned(current => {
+    const next = current.includes(id) ? current.filter(value => value !== id) : [...current, id];
+    localStorage.setItem("noending.pinnedTasks", JSON.stringify(next));
+    return next;
+  });
   const [recent, setRecent] = useState<WorkstreamCardData[]>([]);
 
   const refresh = useCallback(() => {
@@ -29,8 +41,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
             .filter((c) => c.lifecycle === "active" && c.visibility === "normal")
             .sort((a, b) =>
               (b.last_activity_at ?? b.updated_at).localeCompare(a.last_activity_at ?? a.updated_at),
-            )
-            .slice(0, 6),
+            ),
         ),
       )
       .catch(console.error);
@@ -51,53 +62,61 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
 
   return (
     <div className={`sidebar${collapsed ? " collapsed" : ""}`}>
-      {/* Brand → Home（§6）：Home 是产品起点，不设一级菜单项 */}
       <button className="brand" onClick={() => navigate({ view: "home" })} title="首页">
         <SidebarLogo size={22} />
         <span className="brand-name">NoEnding</span>
       </button>
-      <div className="brand-tagline">对话会结束，上下文不会。</div>
+
 
       <div className="sidebar-scroll">
+        <button className={`nav-item ${route.view === "home" ? "active" : ""}`} onClick={() => navigate({ view: "home" })}>
+          <Icon name="home" />首页
+        </button>
         <button className="nav-item" onClick={onSearch}>
-          搜索
+          <Icon name="search" />搜索
           <span style={{ flex: 1 }} />
-          <span className="kbd">⌘K</span>
+          <span className="kbd">{/Macintosh|Mac OS X/.test(navigator.userAgent) ? "⌘K" : "Ctrl K"}</span>
         </button>
 
         <div className="nav-section">工作区</div>
         <button className={`nav-item ${workspaceActive("workstreams")}`}
           onClick={() => navigate({ view: "workstreams" })}>
-          任务
+          <Icon name="tasks" />任务
         </button>
         {/* §2 — Projects 成为一等导航项：Workstream=我正在做什么，
             Project=我在哪里做，Session=我做过哪些执行 */}
         <button className={`nav-item ${workspaceActive("projects")}`}
           onClick={() => navigate({ view: "projects" })}>
-          项目
+          <Icon name="folder" />项目
         </button>
         <button className={`nav-item ${workspaceActive("sessions")}`}
           onClick={() => navigate({ view: "sessions" })}>
-          会话
+          <Icon name="chat" />会话
         </button>
         <IntelligenceOnly>
           <button className={`nav-item ${workspaceActive("assistant")}`}
             onClick={() => navigate({ view: "assistant" })}>
-            Assistant
+            <Icon name="spark" />Assistant
           </button>
         </IntelligenceOnly>
 
-        <div className="nav-section">最近</div>
-        {recent.length === 0 && <div className="nav-item muted small">暂无</div>}
-        {recent.map((w) => (
-          <button key={w.id}
-            className={`nav-item ${route.view === "workstream" && route.workstreamId === w.id ? "active" : ""}`}
-            title={w.title}
-            onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 }}>
-              {w.title}
-            </span>
-          </button>
+        {[{ label: "固定", rows: recent.filter(w => pinned.includes(w.id)) },
+          { label: "最近", rows: recent.filter(w => !pinned.includes(w.id)).slice(0, 6) }].map(group => (
+          <div key={group.label}>
+            {(group.rows.length > 0 || group.label === "最近") && <div className="nav-section">{group.label}</div>}
+            {group.rows.map(w => (
+              <div className="sidebar-task" key={w.id}>
+                <button className={`nav-item ${route.view === "workstream" && route.workstreamId === w.id ? "active" : ""}`}
+                  title={w.title} onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
+                  <span className="truncate">{w.title}</span>
+                </button>
+                <button className="pin-button" aria-label={`${pinned.includes(w.id) ? "取消固定" : "固定"}：${w.title}`}
+                  title={pinned.includes(w.id) ? "取消固定" : "固定"} aria-pressed={pinned.includes(w.id)} onClick={() => togglePin(w.id)}>
+                  <Icon name="pin" />
+                </button>
+              </div>
+            ))}
+          </div>
         ))}
       </div>
 
@@ -106,7 +125,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
           className={`nav-item ${route.view === "settings" ? "active" : ""}`}
           onClick={() => navigate({ view: "settings", section: "general" })}
         >
-          设置
+          <Icon name="settings" />设置
         </button>
       </div>
 

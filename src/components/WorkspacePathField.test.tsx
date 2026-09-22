@@ -114,16 +114,14 @@ describe("WorkspacePathField", () => {
     expect(api.probeWorkspacePath).not.toHaveBeenCalled();
   });
 
-  it("lists recent paths on focus, honours exclude, and fills on pick", async () => {
+  it("opens recent paths on demand, honours exclude, and fills on pick", async () => {
     vi.mocked(api.listRecentWorkspacePaths).mockResolvedValue(
       recent(["/repo/foo", "/repo/bar"])
     );
     const onChange = vi.fn();
     render(<Harness onChange={onChange} exclude={["/repo/bar"]} />);
 
-    await act(async () => {
-      fireEvent.focus(screen.getByRole("textbox"));
-    });
+    fireEvent.click(screen.getByRole("button", { name: "最近使用" }));
     await screen.findByText("/repo/foo");
     expect(screen.queryByText("/repo/bar")).toBeNull();
 
@@ -150,6 +148,20 @@ describe("WorkspacePathField", () => {
     render(<WorkspacePathField value="/repo/foo" onChange={vi.fn()} onSubmit={onSubmit} />);
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not submit while an IME is composing", () => {
+    const onSubmit = vi.fn();
+    render(<WorkspacePathField value="/repo/foo" onChange={vi.fn()} onSubmit={onSubmit} />);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", isComposing: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does not submit for the IME Enter key code", () => {
+    const onSubmit = vi.fn();
+    render(<WorkspacePathField value="/repo/foo" onChange={vi.fn()} onSubmit={onSubmit} />);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", keyCode: 229 });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("keeps the absolute-path hint wording shared", () => {

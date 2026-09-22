@@ -1,3 +1,5 @@
+import { useViewState } from "../../hooks/useViewState";
+import Icon from "../../components/Icon";
 import { useMemo } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
@@ -38,13 +40,6 @@ export function agentDisplayLabel(agent: Agent | null | undefined): string {
 export function sessionDisplayTitle(title: string | null | undefined): string {
   const t = (title ?? "").replace(/\s+/g, " ").trim();
   return t === "" ? UNTITLED_SESSION : t;
-}
-
-/** Binding role（§2.2）：主关联 / 相关关联。 */
-export function bindingRoleLabel(role: string | null | undefined): string {
-  if (role === "primary") return "主关联";
-  if (role === "related") return "相关关联";
-  return role ?? "相关关联";
 }
 
 /**
@@ -235,7 +230,6 @@ export function activityLabel(iso: string | null | undefined): string {
  * td 由全局 CSS 限定 max-width 320px + nowrap（components.css .session-table）。
  * 1 个宽度单位 ≈ 7px，所以这些预算就是列的真实宽度来源：宁可 JS 先省，也不
  * 让浏览器做尾部省略（那会把末段吃掉），更不让 7 列撑出 .main 的 1200px。 */
-const W_TITLE = 34;
 const W_WORKSTREAM = 16;
 
 /**
@@ -258,6 +252,7 @@ export default function SessionCards({ sessions, bindings, projectNameById, onOp
   onResume: (sessionId: string) => void;
   onTrash: (sessionId: string) => void;
 }) {
+  const [visibleCount, setVisibleCount] = useViewState("sessions.visibleCount", 100);
   const rows = useMemo(
     () => sessions.map((s) => {
       const bound = primaryFirst(bindings.get(s.id) ?? [], (r) => r.role);
@@ -274,67 +269,26 @@ export default function SessionCards({ sessions, bindings, projectNameById, onOp
   );
 
   return (
-    <div className="ws-grid session-grid">
-      {rows.map(({ session: s, workstream, extraWorkstreams, workstreamFull, project }) => {
-        const title = sessionDisplayTitle(s.title);
-        const untitled = title === UNTITLED_SESSION;
-        const cwd = (s.cwd ?? "").trim();
-        return (
-          <article
-            className="ws-card full session-card"
-            key={s.id}
-            onClick={() => onOpen(s.id)}
-          >
-            <header className="ws-card-head session-card-head">
-              <div
-                className="ws-card-title"
-                title={untitled ? `${UNTITLED_SESSION} · ${s.agent_session_id}` : title}
-              >
-                {ellipsisTail(title, W_TITLE + 8)}
-              </div>
-              <div className="session-card-agent">
-                <AgentIcon agent={s.agent} />
-                {agentDisplayLabel(s.agent)}
-              </div>
-            </header>
-
-            <div className="session-card-body">
-              <div className="session-card-line">
-                <span className="muted small">工作目录</span>
-                <span className={cwd ? "mono" : "muted"} title={cwd || "未设置工作目录"}>
-                  {cwdDisplayLabel(cwd, 46)}
-                </span>
-              </div>
-              <div className="session-card-line">
-                <span className="muted small">项目</span>
-                <span className={project.dim ? "muted" : undefined} title={project.hint}>
-                  {ellipsisTail(project.text, 24)}
-                </span>
-              </div>
-              <div className="session-card-line">
-                <span className="muted small">任务</span>
-                <span
-                  className={workstream ? undefined : "muted"}
-                  title={workstream ? `${workstreamFull}${extraWorkstreams > 0 ? " 等多条关联" : ""}` : "未关联任务"}
-                >
-                  {workstream ?? "未关联"}
-                  {extraWorkstreams > 0 && <span className="badge" style={{ marginLeft: 6 }}>+{extraWorkstreams}</span>}
-                </span>
-              </div>
-            </div>
-
-            <div className="ws-card-meta">
-              <span title={activityLabel(s.last_activity_at ?? s.started_at)}>
-                最近活动 {timeAgo(s.last_activity_at ?? s.started_at)}
-              </span>
-            </div>
-            <div className="session-card-actions" onClick={(e) => e.stopPropagation()}>
-              <button className="btn small" onClick={() => onResume(s.id)}>继续</button>
-              <button className="btn small ghost" onClick={() => onTrash(s.id)}>移入回收站</button>
-            </div>
-          </article>
-        );
-      })}
+    <div className="session-list">
+      {rows.slice(0, visibleCount).map(({ session: s, workstream, extraWorkstreams, workstreamFull, project }) => (
+        <article className="session-list-row" key={s.id}>
+          <button className="session-open" onClick={() => onOpen(s.id)}>
+            <span className="session-list-title" title={sessionDisplayTitle(s.title)}>{sessionDisplayTitle(s.title)}</span>
+            <span className="session-list-meta">
+              <span><AgentIcon agent={s.agent} />{agentDisplayLabel(s.agent)}</span>
+              {workstream && <span title={workstreamFull ?? undefined}>{workstream}{extraWorkstreams > 0 ? ` +${extraWorkstreams}` : ""}</span>}
+              {!project.dim && <span title={project.hint}>{project.text}</span>}
+              <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
+            </span>
+            {s.cwd && <span className="session-list-path" title={s.cwd}>{cwdDisplayLabel(s.cwd, 90)}</span>}
+          </button>
+          <div className="session-list-actions">
+            <button className="btn small" onClick={() => onResume(s.id)}>继续</button>
+            <button className="btn small ghost icon-button" title="移入回收站" aria-label={`将${sessionDisplayTitle(s.title)}移入回收站`} onClick={() => onTrash(s.id)}><Icon name="trash" /></button>
+          </div>
+        </article>
+      ))}
+      {rows.length > visibleCount && <button className="btn small ghost" onClick={() => setVisibleCount(count => count + 100)}>显示更多（剩余 {rows.length - visibleCount}）</button>}
     </div>
   );
 }

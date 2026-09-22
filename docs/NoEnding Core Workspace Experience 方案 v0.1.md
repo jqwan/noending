@@ -2504,7 +2504,7 @@ backlog_ingested_while_off_is_replayed_after_reenabling
 | C1 | §15/§14 只点名 3 条新建直启 | 其中一条实为 `launchResumeSession`；C 另把 3 处 Resume 直启（Detail / 卡片 / 每行）改挂 `ResumeSessionModal` | 与 D2 同一理由；集成后 `launch_new_session` / `launch_resume_session` 在前端**零调用点**（已 grep 验证，仅剩 `api.ts` 的包装） |
 | C2 | §14「只是暂时不挂载」 | 智能段落搬进同文件内的私有组件 `IntelligenceSections`，再由 `IntelligenceOnly` 包住 | 直接包 JSX 时 review 那几支请求仍在 mount 时发出；§34 要的是"不可达"而不是"发了再藏"。代码一行未删，Review 逐行保留（含 `reviewWindow.mark_through` 与 `entry==="conflicts"` 一次性语义） |
 | C3 | §14 五段结构 | Base 内容单列，`ws-detail-grid` 只留给智能段落 | 右栏卸载后只剩一段，双列会留大片空白；未新增未修改任何 CSS |
-| C4 | §14 编辑能力 | 新增「重命名」与描述行内编辑，走既有 `update_workstream`，**没有新增后端命令**；改名弹窗明说会让待启动的计划失效 | F12/F14：指纹含 title/description/updated_at，stale 是正确行为，不掩盖 |
+| C4 | §14 编辑能力 | 新增「重命名」与描述行内编辑，走既有 `update_workstream`，**没有新增后端命令**；改名弹窗明说会让待启动的计划失效（⚠️ 该弹窗与提示已由 §36.10 撤下） | F12/F14：指纹含 title/description/updated_at，stale 是正确行为，不掩盖 |
 | C5 | §14 Lifecycle | 只读 badge，无状态切换 | F13 |
 
 C 交给 Main / E 的遗留：`WorkstreamCard` 摘要优先级仍是 `current_state || description || goal`（Agent 推断压过用户自己写的描述）；`.ws-card-error` 变成死 CSS 规则；`toggleArchive` 无错误处理；••• 菜单无点击外部关闭。
@@ -2648,3 +2648,351 @@ storage/mod.rs v11 迁移注释里的「pre-migration behavior (implicit balance
 
 未做：`WorkstreamContext.tsx` 里的 `Current State` 标签与排序不动（它在
 `IntelligenceOnly` 内，智能关闭时不挂载）；`goal` 的字段语义与存储一律不改。
+
+## 36.10 编辑能力合并 — 一个「编辑任务」弹窗
+
+dogfood 反馈：任务详情页右上角的「编辑描述」改成「编辑任务」，弹出与**新建任务
+同一个弹窗**用于编辑当前任务，页面上的其它编辑入口一并撤掉。落在
+`WorkstreamFormModal.tsx`（原 `NewWorkstreamModal.tsx`）——创建与编辑共用一个
+组件，传 `workstream` 即为编辑模式，所以「一样」是构造上保证的，不是两边对齐的。
+
+```text
+••• → 编辑任务…          新增，取代「重命名…」与「编辑描述…」两项
+任务概览的行内编辑         删除（铅笔按钮 + textarea 一起走，描述只读展示）
+「重命名任务」弹窗         删除（标题在同一个弹窗里改）
+「工作目录」面板           转为只读：新增 / 选择已有 / 移除 / 设为主要 全部删除，
+                          第 1 条补一枚「主目录」徽标（顺序就是角色，§1.5）
+其它动作                   不动：状态切换、新建 / 继续会话、归档 / 恢复 / 永久删除
+```
+
+保存时的命令拆分 —— **没有新增后端命令，也没有新增领域概念**：
+
+```text
+标题 / 描述   update_workstream（整对象写；description 在弹窗里 trim，
+              因为创建路径是 trim 后落库的，而 apply_whole_object_edit 不规范化）
+工作目录      add / remove / reorder 三个既有命令
+```
+
+两个与 §14 / C4 一致、但值得写下来的实现选择：
+
+```text
+1. 工作目录按「认领 → 解析 → 移除」三步落地，每一步只有一个权威：
+   认领  草稿里与已有行 canonical_path 逐字相同的那条，直接用已有行的 id。草稿行
+         就是从 canonical_path 预填的、用户改不了它的拼写，所以这是身份而不是猜测。
+   解析  只有用户这次新加的路径才交给 add_workstream_path —— 拼写归一与 identity
+         由后端决定，前端不猜 canonical。
+   移除  只针对「用户真的从列表里拿掉」的路径。某一次解析失败不是删除的理由：那条
+         路径留在原地，改动如实报告。否则一条已附上的目录会因为「此刻解析不出来」
+         （例如 Home 搬家后它落进了自留目录）在保存时被静默移除并解绑它的会话。
+2. 路径一个字都没动时（草稿与 canonical 列表逐项全等）一个路径写命令都不发：
+   只改标题不该顺手碰工作目录，也不该把「状态已变化」的面无谓扩大。
+3. 差分用的是**弹窗打开那一刻**的列表快照，不是会跟着后台刷新变的 props：否则
+   别处刚附上的一条路径会因为「不在草稿里」被当成用户拿掉了它而静默移除并解绑
+   会话。取快照后最坏只是 reorder 因集合不完整而报错 —— 宁可失败得难看。
+```
+
+跟随 §14「不能确定就不猜」：解析不到的路径不静默丢掉 —— 其余改动照常落盘，
+弹窗转成报告逐条说破（与创建时的报告同一个形状，只换文案；两种拼写指向同一条
+目录也按创建时的口径报成「与前面一条指向同一目录」）。移除已有路径会在保存前
+点名「会解除 N 个会话关联」，这条提醒与保存时的移除判据是同一个（草稿里彻底看
+不见），所以不会多提醒也不会少提醒。
+
+**撤下的一条提示（§36.4-C4 的对应物）。** 旧「重命名任务」弹窗里那句「改完会让已经
+预览、还没启动的会话变成『状态已变化』」没有搬进新弹窗，而且**永不再搬**：它描述的
+交互在这套 UI 里不可达。弹窗背板是 `position: fixed; inset: 0`（`global.css:157`），
+启动弹窗开着时页面上的 ••• 点不到（第一下点中的是背板，而背板就是关闭）；而那份
+PreparedLaunch 只活在启动弹窗开着期间 —— 弹窗一关，`usePreparedLaunch` 的卸载清理就
+`cancelPrepared` 掉了（`usePreparedLaunch.ts:56-63`）。所以等你能进编辑弹窗时，手里已经
+没有会被编辑搞成 stale 的计划；真正会触发 stale 的是后台状态变化（如同步摄入新内容）。
+指纹校验本身一点没动，仍然在启动弹窗里照常拦。
+
+未做：有序路径的语义、`workstream_paths` 的 schema 与命令一律不动；
+`PathListEditor` 的草稿行仍是只读展示（只能新增 / 移除 / 换序）；Project 仍只从
+主工作目录派生。
+
+已知的呈现代价（留给下一次 wording pass）：`PathListEditor` 的徽标仍写「主路径」，
+只读面板写「主目录」；旧文里出现的 `NewWorkstreamModal.tsx` 指的是同一个组件。
+
+---
+
+## 36.11 撤下工具事件 — 不再摄入 `tool_call` / `tool_result`
+
+**起因是用户的一个观察**：老会话有「工具调用 / 工具结果」，新会话几乎没有。查证后发现
+是两个叠加的缺口，而不是哪一版把它们排除了：
+
+```text
+1. codex.rs 只映射 function_call / function_call_output。当前 Codex 写的是
+   custom_tool_call / custom_tool_call_output（调用参数在 input 而不是 arguments），
+   落到 `_ => ("unknown", String::new())`；而 read_jsonl_delta 丢弃文本为空的解析
+   结果（adapters/mod.rs:373-380）—— 连一条 unknown 都留不下。
+2. 即使走老路径，function_call_output.output 现在是内容块数组
+   [{"type":"input_text","text":…}]，`as_str()` 取不到 → 空文本 → 同样被丢。
+```
+
+实测 `f982539d-…`：转录里 340 + 340 条 custom 工具事件，库里只有 3 条 `tool_call`、
+0 条 `tool_result`。库里全部 821 / 335 条工具事件都来自 6 月那批 `output` 仍是纯字符串
+的老转录 —— 所以「越老越有」正是这个规律。
+
+**决定（用户：不保留工具调用和工具结果）。** 不补 custom_* 的映射，而是反向收口：三个
+adapter 一律不再产出这两类事件。
+
+```text
+codex   function_call(_output) 与 custom_tool_call(_output) 四类 payload 一律 return None
+claude  content_text 不再把 tool_use / tool_result 折进消息文本（原 "[tool_use:name] …"）
+pi      content_text 只返回文本（原返回 (text, tool_parts) 并把 "[tool:name] …" 追加回
+        所在消息），read_delta 里的追加逻辑随之删除
+```
+
+Claude / Pi 的工具内容本来就不作为独立事件，而是拼进所在消息的文本里，所以这两处是
+「从消息文本里摘掉」，不是「停发事件」。摘掉后，纯工具调用的消息只剩空文本，会被既有的
+空文本过滤整体跳过 —— 这正是想要的结果。
+
+**pi 的等价物。** pi 不发这两类事件：`toolCall` 块被折进所在消息的文本（§36.11 一并摘掉），
+而工具结果是一条 **`toolResult` 角色**的消息，落到 `_ => ("system", …)` —— 也就是说 pi 的
+工具结果一直以「系统」事件的形式在库里（1293 条 `system` 里混着它们）。这次同样按 role 挡掉
+（`pi.rs` 里 `"toolResult" | "tool_result" => return None`）。
+
+**历史行已清除（2026-09-23）。** 备份后删掉 1156 行（`tool_call` 821 + `tool_result` 335）
+以及 `search_index` 里对应的 1102 行（其余 54 条文本不足 20 字，本就没进索引）；
+`session_events` 从 6701 降到 5545，孤儿索引 0。删除不影响游标：`session_cursors` 存的是
+源文件链的尾哈希，与已存行无关，后续追加照常。副作用是 codex 会话的 `sequence` 出现空洞
+（序列由 app 分配、只增不减，UI 上的 `#序号` 会跳号）。`SessionMessage.tsx` 的
+「工具调用 / 工具结果」标签随之删掉（已无产出方）；`domain::SessionEvent.kind` 仍是开放
+字符串，schema 不变。
+
+**pi 的摄入已整体重置（2026-09-23）。** 上一轮说 pi 那些工具结果「无从区分真伪」是错的：
+事件的 `source_position` 就是转录行号（`line:N`），所以完全可以反查。但既然要重读，就没必要
+逐行挑：删掉 pi 的 `session_events`（2626）+ `session_cursors`（12）+ 索引行（2459），留下会话
+行本身，下一次 reconcile 就会把 12 份转录整份按新规则重读 —— 会话 id、标题（write-once）、
+Workstream 绑定全部不受影响，也不存在身份链错位（全量重扫从 genesis 起算，且该会话已无旧行）。
+备份 `noending.db.bak-pireingest-20260923-004523`。
+
+这也回答了一个操作上的判断：**要「重新录入」时，该删的是游标 + 事件，不是会话行。** 删会话行会
+换掉 id、让 `session_workstream_bindings` / `launch_intents` / `context_deliveries` 里的引用悬空
+（schema 里 `session_id REFERENCES sessions(id)` 没有 ON DELETE CASCADE，不会自动清），而收益
+完全一样。
+
+**已知代价。** 之后无法回答「这次会话动了哪些文件 / 跑了什么命令」；工具输出里偶含用户
+粘贴的内容，也不再进 Context 提取的候选。若要恢复，正确做法是补齐 custom_* 的 payload
+形状，而不是恢复事件前缀过滤。
+
+---
+
+## 36.12 页头并入应用标题栏
+
+**用户要求**：把各页面内容区的那一行标题（标题 + 右侧动作）搬到应用自己的标题栏里；标题行里原本是文字的按钮改成图标按钮。
+
+**为什么可以搬。** 窗口本来就是 `titleBarStyle: Overlay` + `hiddenTitle: true`（`tauri.conf.json`），系统标题不显示，App 自己在顶部画了一条 48px 的 `.app-titlebar`，里除 macOS 拖拽区和三个历史按钮外全是空的。
+
+**怎么搬：不动 React 结构，改 `PageHeader` 内部顺序 + CSS 吸顶。** 没有给 AppShell 加"标题上报"通道（那需要 context + portal，还要防重渲染死循环），而是：
+
+```text
+PageHeader   标题行（h1 + 动作区）排在返回链接 / 副标题 / children 之前 —— 顺序不能倒，
+             吸顶的必须是第一个元素
+layout.css   .app 去掉 padding-top，那 48px 交给页面自己；.sidebar 用 margin-top 让开
+             （用 margin 不用 padding：侧栏背景才不会涂进标题栏那条）
+             .main 去掉顶内距，.page-head 成为 sticky、top: 0、48px 高、负 margin 抵消
+             .main 的左右内距（--main-gutter），背景盖住滚过去的正文
+             没有页头的页面（加载中 / 错误态 / Assistant）靠 :has() 规则自己让出 48px
+```
+
+**踩到并修掉的两个坑**（都在静态预览页里实测过，不是推演）：
+
+```text
+1. sticky + 负 top margin 会被"粘性盒不得越出包含块"钳回去，标题行停在 y=48。
+   改成 .main 不留顶内距，标题行天然就在 y=0，sticky 才成立。
+2. .history-controls 与 .page-head 同为 z-index 6，而标题行在 DOM 里更靠后，
+   侧栏收起时（.main 顶到 x=0）标题行的背景会盖住那三个按钮 —— 提到 z-index 8。
+   （当时还写了 `-webkit-app-region: drag` 想让标题行"自己承担拖动"，那是错的，
+   见 §36.14——这个属性在 WKWebView 里不生效，窗口拖动一度就是这样坏掉的。）
+```
+
+**对齐**：标题左边缘与正文左边缘同源（都用 `--main-gutter`），动作区右边缘与正文右边缘同源；窄屏（≤1100px）只改变量，两处自动一起走。侧栏展开时标题行从侧栏右缘起算，天然错开历史按钮；**收起时标题行内缩 `--titlebar-gutter + 16px`（mac 195px / 非 mac 120px）**——这是搬运不可避免的代价：那条 band 与历史按钮共用同一段横向空间，收起状态下标题不再与正文左对齐。
+
+**文字按钮 → 图标按钮，且样式统一（用户两轮要求）。** 标题行里的动作一律 `btn ghost icon-button`：
+
+```text
+新建任务（Home / 任务列表）、新建会话（会话列表）   plus
+刷新工作区状态（项目列表）                        refresh
+询问 Assistant（项目详情）                        chat
+继续（会话详情）                                  play（Icon.tsx 新增）
+更多操作（任务详情 ·••• 菜单）                     more（Icon.tsx 新增，取代 "•••" 文字）
+任务列表 / 会话列表 / 回收站（分段控件）            tasks / chat / archive
+```
+
+分段控件里的「回收站」用**归档盒**而不是垃圾桶：同一个 `trash` 原本同时表示「回收站（入口）」与「移入回收站（动作）」，两个含义共用一个图形；换形状后入口与动作分开，动作那三处（`WorkstreamDetailView`、`SessionDetailView`、`SessionTable`）继续用垃圾桶。
+
+统一的两层含义：一是**变体**——原先 `新建 / 继续` 是 `primary` 实心、其余是 `ghost`，现在全部 ghost，标题栏里不再有哪个动作被强调（要恢复强调只需把那几个类名改回 `btn primary icon-button`）；二是**尺寸**——`button.btn` 自带 `min-height: 32px`，而 `button.icon-button` 只改了宽度，不覆盖的话按钮是 28×32 的长方形；标题栏作用域内统一成 28×28，与左侧三个历史按钮同形（实测四个按钮 `top` 都是 10、高 28）。
+
+`aria-label` + `title` 承接原文字名，分段控件另加 `aria-pressed`（去掉文字后，状态只剩底色，可访问性上必须显式表达）；进度类状态（刷新中）也退化为 `aria-label` 与 `disabled`，`ProjectsView.test.tsx` 相应改成按 role 断言。
+
+**标题字号**：24px（全局 h1）→ 20px → **16px**（用户两轮都嫌大）。这是唯一一处并非"标题行该多大"的推演，而是按观感调的，改的是一个数字。
+
+## 36.13 看板的搜索筛选区吸顶
+
+**用户要求**：三个看板（项目 / 会话 / 任务列表）上下滚动时，把上边的搜索筛选区固定在标题行下方。
+
+**改动**：只动 CSS（`layout.css` 抽一个变量、`components.css` 用两条规则），三个视图都复用 `.board-toolbar`，无需改任何 TSX：
+
+```text
+layout.css     .main 上定义 --head-gap: 20px（页头与正文的间距），.page-head 的 margin-bottom 改用它
+               .main:has(> .board-toolbar) { --head-gap: 0px }   ← 看板页清零
+components.css .board-toolbar { position: sticky; top: calc(var(--titlebar-height) + var(--head-gap)); z-index: 5 }
+               .board-toolbar::before { inset: calc(-1 * var(--head-gap)) 0 0; background: var(--bg-app) }
+```
+
+**关键是把「间距」和「钉在哪」变成同一个变量。** page-head 的 `margin-bottom`（间距）与 `.board-toolbar` 的 `sticky top`（钉在哪）都读 `--head-gap`：静态位置 = band 高 + 间距，钉住位置 = band 高 + 间距，两式恒等，**travel 天然为 0**。看板页把 `--head-gap` 清零，就同时得到"紧贴页头 + 不跟着滚"两个效果；回收站模式下工具栏不渲染，`:has` 不成立，间距自动回到 20px。若两处各写死一个数字，改间距时就会重演下面那个坑。
+
+**踩到的坑：`top` 不能写 `--titlebar-height`。** 第一版写的是 `top: var(--titlebar-height)`（48px），但工具栏的静态位置在页头那条 20px 间距之后、即 y=68。sticky 的语义是"先跟着滚，走到 top 才钉住"，于是它先跟着滚了 20px 再固定——用户的原话是「会跟着往下移一点，然后固定住」。修成"钉住位置等于静态位置"后 travel 归零。
+
+**间隔的取舍（用户第二轮决定不留）。** 我先按"保住现有外观"选了留 20px 间距的版本（`top = 48 + 20`，`::before` 往上多铺 20px 把那条缝盖住，否则正文会从缝里穿过去）；用户看过说「我觉得不留缝吧，现在这个间隔我觉得挺大的」，于是把 `--head-gap` 在看板页清零，卡片直接贴着 band。留缝版不需要了，但 `::before` 仍要留——卡片是圆角的，钉住后 12px 圆角缺口会漏出从下面滚过去的正文。
+
+**验证**（`/tmp/noending-header-preview/board.html`，浏览器实测非推演）：看板页 `--head-gap = 0px`、`.page-head` 的 `margin-bottom = 0`、`sticky top = 48px`，`restTop = 48`、滚到 `scrollTop = 400` 后 `scrolledTop = 48`、**travel = 0**，band 底边 48（紧贴）。把一条通栏长文本滚上去，`elementFromPoint` 在卡片圆角处（y=52 / 62）命中 `.board-toolbar`（不露字）、卡片下沿（y=180）命中正文；再把工具栏从 DOM 里摘掉，`--head-gap` 回到 20px（对应回收站模式）。`tsc --noEmit` / `vitest run`（64 passed）/ `vite build` 全绿（纯 CSS 改动）。
+
+**代价**：钉住期间固定占用约 105px 视口（搜索框 + 一行筛选控件）。若嫌占地方，下一步可做"滚动后折叠成一行"的紧凑态，需要 JS 监听滚动位置，本次没做。
+
+## 36.14 修复：页头搬到标题栏后窗口拖不动了
+
+**用户报告**：§36.12 之后，「顶部标题栏不会触发点按拖动应用窗口了」。
+
+**原因**：窗口拖动在 Tauri 里只有一条路——**带 `data-tauri-drag-region` 的元素**。tauri 注入的 `scripts/drag.js`（`tauri-2.11.5/src/window/scripts/drag.js`，由 window 插件 `js_init_script` 注入）在 `mousedown` 时沿 `composedPath` 从里往外找这个属性，命中就 `invoke('plugin:window|start_dragging')`。
+
+```text
+原来：.app 有 padding-top: 48px，顶部那条 48px 带里只有 .app-titlebar 的 .window-drag-region
+      （z-index 4）→ 直接点在它上面 → 拖动正常。
+现在：.app 不再留顶部空间，.main 顶到 y=0，吸顶的 .page-head 覆盖了同样这段（z-index 6 > 4）
+      → 命中目标变成 .page-head 或它的子元素 → 沿路径上溯找不到属性 → 不拖。
+```
+
+而 §36.12 里我给它加的 `-webkit-app-region: drag` 是 **Electron 的属性**：WKWebView 不实现它，`wry`/`tauri` 的源码里也搜不到任何 `app-region` 字样。加上它等于没加，所以"标题行自己承担拖动"这个说法从一开始就是错的。
+
+**修法**：`PageHeader` 的 `.page-head` 上写 `data-tauri-drag-region="deep"`，并把三处不生效的 `-webkit-app-region` 删掉（`.window-drag-region`、`.page-head`、`.history-button` 以及标题/动作区的 `no-drag`）。
+
+**为什么是 `deep` 而不是裸值**：脚本对属性值有三种解释——裸值/`"true"` 只认"正好点在这个元素上"；`"deep"` 认子树内任意位置；`"false"` 禁用。标题行里点得最多的是标题文字（h1）和按钮之间的空隙，裸值这两处都落空；`"deep"` 才覆盖整条。**可点元素会自动豁免**：脚本遇到 button/input/a/`[tabindex]`/`role=button` 且它自己没这个属性时直接 `return false`，所以标题栏里的按钮照常可点，不需要（也不能）再用 no-drag 表达——这一点和 Electron 的写法正相反。
+
+**验证**（`/tmp/noending-header-preview/board.html`，把 `drag.js` 的 `isDragRegion` 原样搬进页面跑）：标题行空白处 `DIV.page-head => DRAG`、标题文字 `H1.page-title => DRAG`、动作按钮 `svg => no-drag`、历史按钮 `BUTTON => no-drag`、正文 `P => no-drag`；交通灯区与侧栏列上方仍是 `DIV.window-drag-region => DRAG`。再把属性摘掉，同一位置复现为 `no-drag`——即用户报的那个故障，装上属性后回到 `DRAG`。`tsc --noEmit` / `vitest run`（64 passed）/ `vite build` 全绿。
+
+**遗留的代价**：拖动区要求 mousedown 不被 `preventDefault` 以外的处理占用，脚本对命中拖动区的按下会 `preventDefault()`（防文本光标），所以标题文字**不再能选中**——原生标题栏本来也选不中，换来的是整条可拖。另外该属性与平台无关：Windows 下窗口有原生装饰栏，标题行变可拖只是多一处能拖的地方，无害（本地只能验 macOS）。
+
+## 36.15 详情页加载态不再整页替换（沿用 ProjectDetail 的写法）
+
+**用户报告**：进入会话 / 任务详情页会先闪一个"加载中的页面"。
+
+**原因**：路由只带 id（`{ view: "session"; sessionId }`），`Router` 直接换组件、没有 keep-alive，页面把数据放在自己的 `useState(null)` 里、也没有跨页缓存——导航后的第一帧必然没有数据。真正让"等一个 IPC 往返"看起来像"闪了一整页"的是下一件事：**两个详情页的加载分支都在 `PageHeader` 之前 return**。
+
+```tsx
+// 改前
+if (!detail) return <div className="main narrow">加载中…</div>;                       // SessionDetailView:94
+if (!ctx) return <div className="main narrow" role="status">{…}</div>;                // WorkstreamDetailView:134
+```
+
+标题行是吸在应用标题栏那条 band 上的（§36.12），加载态不渲染它，**整条 band 会先消失、数据到了再补回来**（左侧三个历史按钮还在）——那一下比"内容区里一行加载中"显眼得多。（`WorkstreamDetailView` 还会在每次 `[workstreamId, retry]` 的 effect 开头清空状态，见 `:99-101`，所以进入时一定经过加载态，这是它有意为之的行为，不改。）
+
+**改法**：照 `ProjectDetail`（`:133` 无条件渲染 `PageHeader`、只换标题文案）把状态名挪进标题，页面骨架在加载 / 失败 / 成功三种情况下都是同一条：
+
+```text
+SessionDetailView    if (!detail) → <div className="main narrow">
+                       <PageHeader title={failed ? "读取会话失败" : "加载中…"}>，失败时正文放原有的说明与「重试」
+WorkstreamDetailView if (!ctx)    → <PageHeader title={loadError ? "读取任务失败" : "加载中…"}>，失败时正文放错误详情与「重试」
+```
+
+两处顺带的结果：`SessionDetailView` 原先"失败"与"加载中"两个分支合并成一个（判据本来就是同一条 `!detail`）；`WorkstreamDetailView` 正文里原写的「读取任务失败：{loadError}」去掉了前缀，因为标题已经说了状态、正文只该放详情（与 ProjectDetail 把 `PathError` 放在正文一致）。外层 `role="status"` 保留，无障碍行为与改前一致。
+
+**验证**：新增一条回归测试（`WorkstreamDetailView.test.tsx`，"keeps the title band while loading"，让读取永不返回、断言标题仍是 `加载中…` 且正文为空），防止以后又有人把带 `PageHeader` 的骨架短路掉；`tsc --noEmit` / `vitest run`（65 passed）/ `vite build` 全绿。视觉上仍需在真机点一下确认——这条改动没法在静态预览页里验（它依赖真实的 IPC 往返时长）。
+
+## 36.16 任务详情页去掉标题下那行元信息
+
+**用户要求**（先说要删状态徽标，随后更正）：「这一行信息都去掉，因为其他地方都有显示，重复了」——即 `ws-detail-head-meta` 整行。
+
+**改动**：`WorkstreamDetailView` 里整块删掉，连带这些只被它使用的代码：`const primary = paths?.[0]`、`cwdDisplayLabel` 这个 import、以及上一轮已变成孤儿的 `LIFECYCLE_LABELS` 词表（同名的另一份在 `WorkstreamCard`，看板卡片在用，保留）。`ws-detail-head-meta` / `dot-sep` 的 CSS 不动——`ProjectDetail` 与 `SessionDetailView` 的同名行还在用。
+
+**逐项对照"其他地方有没有"**（都成立）：
+
+```text
+项目        → aside「项目」块（列出每个 Project，主关联标注「主项目」，可点进项目页）
+主工作目录   → aside「工作目录」块（position 0 那条标「主目录」）
+最近更新     → aside「状态」块底部「创建于 … · 最近更新 …」
+回收站       → aside「状态」块里的「在回收站中」徽标
+无工作目录   → aside「工作目录」块的「未设置工作目录，新会话使用默认目录。」
+```
+
+**唯一一处没有替代品的**：`{!primary.exists && <span className="badge warn">主路径目录不存在</span>}`。`WorkstreamPathList` 只渲染路径与「主目录」徽标，不带 `exists` 判断（`MissingBadge` 目前只有 `ProjectDetail` 在用），所以这一行删掉之后，任务详情页上再没有"主目录在本机读不到"的提示（项目侧仍有：「有目录缺失」筛选、项目详情里的 `MissingBadge`）。用户未要求补回，故按原样删除并在交付说明里点出；若要补，最小的做法是给 `WorkstreamPathList` 的条目加上现成的 `MissingBadge`。
+
+**验证**：`WorkstreamDetailView.test.tsx` 里那条断言改成 `getByText("/repo/main")`（原来写 `getAllByText(...).length > 0`，注释还提到"路径同时出现在头部的主目录摘要里"——那行已经不存在了，改成单处断言正好把去重这件事锁住）；`tsc --noEmit` / `vitest run`（65 passed）/ `vite build` 全绿。
+
+## 36.17 项目详情页：标题下的元信息移到右侧栏
+
+**用户要求**：「项目详情页中的这部分可以移到右侧区进行显示」——截图是标题下那行 `Git 项目 · 自动命名 · 创建于 2 天前`。
+
+**改动**：`ProjectDetail` 的 `PageHeader` 不再有 children（那行是它唯一的 children），三件事搬到 `<aside>` 里成为**第一块**，标签 `属性`；形状照抄 `WorkstreamDetailView` 的「状态」块（`section-label` + 徽标行 + 一行 `small muted` 的「创建于 …」）。随后用户追加「概览内容也可以放到属性里」，于是主栏那个 `概览` section（§19 的三个数字）也并进同一块，「概览」这个标签随之消失。
+
+```text
+标题栏        只留标题 + 三个图标动作（询问 Assistant / 刷新 / 重命名）
+aside 属性     [Git 项目 | 目录项目] 自动命名 | 自定义名称
+               3 个工作目录 · X 个任务 · Y 个会话      ← 原「概览」section 的内容
+               创建于 2 天前
+aside 工作目录  原来的内容（不变）
+```
+
+概览那行原用 `.ws-card-meta`（卡片的 flex + `margin-top: auto`，为卡片底部设计的），搬进 aside 后改用与「创建于」一致的 `small muted`，块内两行间距统一 `marginTop: 6`；`.ws-card-meta` 本身仍被看板卡片与 `ProjectsView` 使用，CSS 不动。
+
+**两处细节**：aside 里原来的 `marginTop: 26` 在「工作目录」那个 section 上，作用是让右栏第一块与左栏对齐。现在它挂在新的「属性」块上、「工作目录」改回不带内联样式的 `.rail-section`——右栏起点位置不变，两块之间用 `.rail-section` 自带的 30px，不必叠加出 56px 的空档。（右栏第一块比左栏的「任务」低 26px 是**原来就有**的：那个 26px 从前挂在「工作目录」上，我只是让它跟着上移，没有改动对齐关系。）
+
+**与 §36.16 合起来看**：任务详情页那行是重复信息、整行删掉；项目详情页这行没有别的去处、于是挪进右栏。两页现在的分工一致——**标题栏只放标题与图标动作，只读事实一律放右栏**。`.ws-detail-head-meta` / `.dot-sep` 仍被 `SessionDetailView` 使用，CSS 保留。
+
+**验证**：`tsc --noEmit` / `vitest run`（65 passed）/ `vite build` 全绿。视觉上未在真机确认（这条改动依赖真实渲染，静态预览页只放了本页的两个 section 形状，没有整页数据）——新块与 `WorkstreamDetailView` 右栏的「状态」块同形，后者是已经在用的样子。
+
+## 36.18 项目详情页的任务列表不再分「主关联 / 关联」
+
+**用户要求**：「项目的关联任务不再区分主关联和次关联」。
+
+**改动**：`ProjectDetail` 的「任务」section 去掉分组，`detail.workstreams` 平铺。连带删掉只为此存在的 `const primary` / `const related`（两个 filter）、两个分组标题 `<h3>{title} · {count}</h3>`、以及只为 `React.Fragment` 存在的 `React` 默认导入（本项目用自动 JSX runtime，其余文件本来就不导入 React）。总数不会因此丢失——右栏「属性」块里的「N 个任务」就是它。
+
+**顺序没变**：后端本来就 `ORDER BY is_primary DESC, w.updated_at DESC`（`storage/workstream_paths.rs:490`），所以主关联仍在前面、其余按最近更新；这次只是不再把它显式标出来。要改成纯时间序，得动那条 SQL。
+
+**留下的**：`types.ts` 的 `ProjectWorkstream.is_primary` 前端已无人读，但后端 `ProjectWorkstream` 仍在 payload 里带着它（`commands/project.rs:376` 记的就是这个形状），清掉它要连后端一起，故未动。
+
+## 36.19 会话详情页加右栏，会话信息不再默认收起
+
+**用户要求**：先「给会话详情页也加个侧边区，把图中的两部分内容放右侧」（图里是 `◇ Codex · 122 条消息` 与收起的「会话信息」），随后「会话信息不再是默认收起的样式，其他详情页的显示样式保持一致」。
+
+**改动**（`SessionDetailView.tsx`）：
+
+```text
+标题栏      只剩标题 + 三个图标动作（移入回收站 / 刷新 / 继续）
+左栏 main   关联任务（含「编辑关联任务」）+ 消息流
+右栏 aside  rail-section「会话信息」：◇ Agent · 条数 · 无标题/回收站徽标，随后是展开的字段表
+           （开始时间 / 最近活动 / 项目 / 工作目录 / 原始会话文件 / 会话 ID / Agent 侧会话 ID）
+回收站横幅  仍是全宽，放在两栏之上
+```
+
+三件事值得记：
+
+1. **整行元信息搬走，而不是部分搬走。** 那一行里还有「无标题」「回收站」两枚徽标。只搬 Agent 与条数、把徽标留在标题下，常见情况下那行就成了一条空行（多数会话既无标题问题也不在回收站）——所以整行一起进了右栏。
+2. **`<details>` 换成 `rail-section` + `section-label`**，与 `WorkstreamDetailView` 的「状态 / 工作目录 / 项目」、`ProjectDetail` 的「属性 / 工作目录」同形；`.session-info` 那套卡片式边框样式随之删除（全仓只有这里用）。summary 上那枚「原始文件缺失」徽标也删了：字段「原始会话文件」下面本来就印着「找不到原始会话文件」，同一件事说两遍。
+3. **字段表在右栏必须改成「标签在上、值在下」。** 原来是 `grid-template-columns: auto minmax(0, 1fr)` 的标签|值两列；在 240–300px 的右栏里值只剩一百来像素，一条 Codex 转录路径会被拆成五六行。改法：把内联样式收进 `.session-info-fields`，并利用 `Field` 渲染的「标签 div + 值 div」两个兄弟节点，用 `:nth-child(odd)` 给每个标签加 12px 上间距。**这一条是在静态预览页里看出来的**（`/tmp/noending-header-preview/session-aside.html`，240px 与 300px 并排、真实样式表）：两列版本在 300px 下已经很难看、240px 下日期都被折成两行。
+
+**已知的一处不一致**：右栏只有这一个大标题块，没有像另外两页那样按主题分块（那是它们的既有结构，这里没有对应内容可分）。左栏第一个块「关联任务」原来带 `marginTop: 30`（左栏因此比右栏低 30px），用户随后反馈「关联任务上面有一个很大的间隔」——去掉后这一段的间距就只剩标题行自己那条 `--head-gap`（20px），与任务详情页一致，两栏起点也自然对齐了。
+
+## 36.20 会话详情的关联任务：不标角色，编辑改成 + 的添加弹窗
+
+**用户要求**：「关联任务不再区分主关联和相关关联。编辑按钮改为 + 按钮，点击出现会话所属项目下的任务列表弹窗可供添加任务，这个弹窗可参考新建任务中添加已有目录的弹窗」。
+
+**改动**：
+
+```text
+关联任务列表   去掉每行右侧的 主关联/相关关联 徽标（bindingRoleLabel 因此成为死代码，已从 SessionTable 删除）
+section 右上角 edit 图标 → plus 图标，aria-label「添加关联任务」
+弹窗          新组件 ExistingTaskPicker，形状照抄 ExistingPathPicker：
+              候选 = 这条会话所属项目下的任务（api.listWorkstreams(projectId)），
+              已关联的置灰打勾且不可点（.existing-path-option.is-added），底部「添加 (n)」
+```
+
+**"所属项目"怎么确定**：`workspacePath.project_id ?? session.project_id ?? null`——派生链优先，退回 v0.2 之前手工指派留下的 project_id；两者都没有时不筛，退回全部任务（否则这条会话再也关联不了任何任务）。归档任务不进候选（`visibility === "normal"`），与旧弹窗的下拉一致。
+
+**提交方式**：仍然只调 `replaceSessionBindings`，并且提交的是**完整集合**（已有关联原样带上 + 新选的按 `role: "related"` 追加）。后端在单事务里 diff，未改动的 row 连 created_at / provenance 都不动；不这样做就会把已有关联整批冲掉。`role` 字段保留在数据模型里（`domain/models.rs:509` 注释即 `primary | related`），只是不再出现在界面上——它现在只影响排序（`primaryFirst`），新加的一律 `related`（与旧弹窗的默认值相同）。
+
+**留下的一个洞（明确记录）**：解除关联原先只有那个「编辑关联任务」弹窗能做，换成添加弹窗后**界面上没有移除入口了**。后端能力还在（`replace_session_bindings` 传一个更小的集合即可），回收站确认框里「从任务移除 = 只修改这个任务的成员关系」那句话也还在，但暂时无路可走。已向用户点明，等其选择补法（关联任务行上加 ✕，或让弹窗里已关联的项可取消勾选）。
+
+
+

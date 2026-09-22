@@ -27,6 +27,15 @@ function renderSidebar(route: Route, navigate = vi.fn()) {
 }
 
 describe("Sidebar projects navigation", () => {
+  it("provides an explicit home entry", async () => {
+    const navigate = renderSidebar({ view: "home" });
+    const home = screen.getByRole("button", { name: "首页" });
+    expect(home.className).toContain("active");
+    fireEvent.click(home);
+    expect(navigate).toHaveBeenCalledWith({ view: "home" });
+    await waitFor(() => expect(api.listWorkstreamCards).toHaveBeenCalled());
+  });
+
   it("sidebar_has_projects_navigation", async () => {
     const navigate = renderSidebar({ view: "workstreams" });
 
@@ -51,4 +60,23 @@ describe("Sidebar projects navigation", () => {
 
     expect(api.listProjects).not.toHaveBeenCalled();
   });
+});
+
+it("remembers pinned tasks and keeps them outside the recent six", async () => {
+  localStorage.clear();
+  const cards = Array.from({ length: 7 }, (_, i) => ({
+    id: `w${i}`, title: `任务${i}`, lifecycle: "active", visibility: "normal", updated_at: `2026-09-${20-i}`,
+  })) as Awaited<ReturnType<typeof api.listWorkstreamCards>>;
+  vi.mocked(api.listWorkstreamCards).mockResolvedValue(cards);
+  localStorage.setItem("noending.pinnedTasks", JSON.stringify(["w6"]));
+  const view = render(<Sidebar route={{ view: "home" }} navigate={vi.fn()} onSearch={() => {}} />);
+  const unpin = await screen.findByRole("button", { name: "取消固定：任务6" });
+  expect(screen.getByText("任务0")).toBeTruthy();
+  fireEvent.click(unpin);
+  expect(localStorage.getItem("noending.pinnedTasks")).toBe("[]");
+  fireEvent.click(screen.getByRole("button", { name: "固定：任务0" }));
+  view.unmount();
+  render(<Sidebar route={{ view: "home" }} navigate={vi.fn()} onSearch={() => {}} />);
+  expect(await screen.findByRole("button", { name: "取消固定：任务0" })).toBeTruthy();
+  localStorage.clear();
 });

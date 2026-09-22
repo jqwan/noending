@@ -1,11 +1,13 @@
+import { useViewState, useViewScroll } from "../../hooks/useViewState";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
+import Icon from "../../components/Icon";
 import { Modal, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import WorkstreamCard, { cardSearchFields, searchFieldHint } from "./WorkstreamCard";
-import NewWorkstreamModal from "./NewWorkstreamModal";
+import WorkstreamFormModal from "./WorkstreamFormModal";
 import { useWorkstreamCards } from "./useWorkstreamCards";
 import { useBaseExperience } from "../../app/experience";
 import type { WorkstreamCardData } from "../../types";
@@ -35,14 +37,14 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   scope?: WorkstreamScope;
   actionSeq: number;
 }) {
-  const { cards, defaultAgent, refresh } = useWorkstreamCards();
+  const { cards, defaultAgent, refresh, loadError } = useWorkstreamCards();
   const { intelligenceEnabled } = useBaseExperience();
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortKey>("recent");
-  const [lifecycle, setLifecycle] = useState<LifecycleFilter>("active");
-  const [projectId, setProjectId] = useState("all");
-  const [sessionFilter, setSessionFilter] = useState<PresenceFilter>("all");
-  const [pathFilter, setPathFilter] = useState<PresenceFilter>("all");
+  const [query, setQuery] = useViewState("workstreams.query", "");
+  const [sort, setSort] = useViewState<SortKey>("workstreams.sort", "recent");
+  const [lifecycle, setLifecycle] = useViewState<LifecycleFilter>("workstreams.lifecycle", "active");
+  const [projectId, setProjectId] = useViewState("workstreams.projectId", "all");
+  const [sessionFilter, setSessionFilter] = useViewState<PresenceFilter>("workstreams.sessionFilter", "all");
+  const [pathFilter, setPathFilter] = useViewState<PresenceFilter>("workstreams.pathFilter", "all");
   const [creatingWs, setCreatingWs] = useState(false);
   const trashMode = scope === "trash";
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
@@ -150,37 +152,48 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
     setPathFilter("all");
   };
 
+  const scrollRef = useViewScroll("workstreams.scroll", cards !== null);
+
   return (
-    <div className="main">
+    <div className="main board-page" ref={scrollRef}>
       <PageHeader
         title="任务"
-        sub={trashMode ? "已移入回收站的任务" : "我现在有哪些持续进行中的事情？"}
         actions={
           <>
             <div className="settings-seg" role="group" aria-label="任务列表范围">
               <button
                 className={trashMode ? "" : "on"}
+                aria-pressed={!trashMode}
+                aria-label="任务列表"
+                title="任务列表"
                 onClick={() => navigate({ view: "workstreams", scope: "active" })}
               >
-                任务列表
+                <Icon name="tasks" />
               </button>
               <button
                 className={trashMode ? "on" : ""}
+                aria-pressed={trashMode}
+                aria-label="回收站"
+                title="回收站"
                 onClick={() => navigate({ view: "workstreams", scope: "trash" })}
               >
-                回收站
+                <Icon name="archive" />
               </button>
             </div>
-            <button className="btn primary" onClick={() => setCreatingWs(true)}>+ 新建任务</button>
+            <button className="btn ghost icon-button" aria-label="新建任务" title="新建任务" onClick={() => setCreatingWs(true)}>
+              <Icon name="plus" />
+            </button>
           </>
         }
       />
 
       {!trashMode && (
         <>
+          <div className="board-toolbar">
           <input
             type="text"
             className="ws-search"
+            aria-label="搜索任务"
             placeholder={searchFieldHint(intelligenceEnabled)}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -235,7 +248,10 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             )}
           </div>
 
-          {list === null && <div className="muted">加载中…</div>}
+          </div>
+
+          {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
+          {list === null && !loadError && <div className="muted" role="status">加载中…</div>}
           {list !== null && list.length === 0 && (
             <EmptyState
               title={
@@ -248,7 +264,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
               hint={
                 filtersActive
                   ? "调整或清除筛选条件即可看到全部任务。"
-                  : "为一件想跨会话继续的事情创建一个任务。工作路径是可选的 —— 它决定项目归属与新建会话的默认目录。"
+                  : "创建任务，开始工作。"
               }
               actions={
                 filtersActive ? (
@@ -260,7 +276,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             />
           )}
 
-          <div className="ws-grid">
+          <div className="ws-grid board-grid">
             {list?.map((c) => (
               <WorkstreamCard key={c.id} card={c} mode="full" navigate={navigate} defaultAgent={defaultAgent} />
             ))}
@@ -274,7 +290,8 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             回收站里的任务不出现在任务列表、首页以及新建和继续入口中。工作路径、会话
             绑定与 Context 都原样保留；打开任务详情后可以恢复或永久删除。
           </div>
-          {list === null && <div className="muted">加载中…</div>}
+          {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
+          {list === null && !loadError && <div className="muted" role="status">加载中…</div>}
           {list !== null && list.length === 0 && (
             <EmptyState
               title="回收站是空的。"
@@ -340,7 +357,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
       )}
 
       {creatingWs && (
-        <NewWorkstreamModal
+        <WorkstreamFormModal
           onClose={() => setCreatingWs(false)}
           onCreated={(w) => navigate({ view: "workstream", workstreamId: w.id })}
         />

@@ -1,0 +1,34 @@
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import SearchView from "./SearchView";
+import { api } from "../../api";
+import type { SearchHit } from "../../types";
+vi.mock("../../api", () => ({ api: { search: vi.fn() } }));
+beforeEach(() => { vi.useFakeTimers(); vi.mocked(api.search).mockReset(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+const hit = (title: string) => ({ title, kind: "workstream", ref_id: title, parent_id: "", snippet: "" }) as SearchHit;
+it("ignores outdated responses and exposes results as keyboard buttons", async () => {
+  let resolveOld!: (hits: SearchHit[]) => void;
+  vi.mocked(api.search).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; })).mockResolvedValueOnce([hit("新结果")]);
+  const navigate = vi.fn();
+  render(<SearchView query="旧查询" navigate={navigate} />);
+  await act(async () => { vi.advanceTimersByTime(200); });
+  expect(screen.queryByText("没有匹配结果。")).toBeNull();
+  fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "新查询" } });
+  await act(async () => { vi.advanceTimersByTime(200); });
+  await act(async () => resolveOld([hit("旧结果")]));
+  expect(screen.queryByText("旧结果")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "任务 新结果" }));
+  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "新结果" });
+});
+it("retries errors and clears status when the query is emptied", async () => {
+  vi.mocked(api.search).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce([]);
+  render(<SearchView query="test" navigate={() => {}} />);
+  await act(async () => { vi.advanceTimersByTime(200); });
+  fireEvent.click(screen.getByText("重试"));
+  await act(async () => { vi.advanceTimersByTime(200); });
+  expect(screen.getByText("没有匹配结果。")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "" } });
+  expect(screen.queryByText("没有匹配结果。")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});

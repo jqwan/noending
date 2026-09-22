@@ -122,7 +122,7 @@ export default function SourcesView() {
   return (
     <div>
       <p className="muted small" style={{ marginTop: 0 }}>
-        只有勾选启用的目录会被扫描摄入；默认 Agent 目录仅作为候选预置。摄入在后台执行。
+        仅同步已启用的目录。
       </p>
 
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}>
@@ -208,9 +208,7 @@ export default function SourcesView() {
         ))}
       </div>
 
-      <p className="muted small" style={{ marginTop: 10 }}>
-        「同步」按增量抓取新的会话内容；「重新摄入」从头重扫该来源的全部会话文件（事件 ID 与引用保持不变，用于修复游标异常或漏抓内容，已有的任务关联与 Context 保留）。
-      </p>
+      <details className="muted small" style={{ marginTop: 10 }}><summary>同步与重新摄入</summary><p>同步只读取新增内容；重新摄入会重扫全部文件，保留现有关联与上下文。</p></details>
     </div>
   );
 }

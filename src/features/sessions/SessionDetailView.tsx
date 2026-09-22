@@ -1,3 +1,4 @@
+import Icon from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -9,7 +10,6 @@ import ResumeSessionModal from "./ResumeSessionModal";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import {
   agentDisplayLabel,
-  bindingRoleLabel,
   formatDateTime,
   primaryFirst,
   projectCellFor,
@@ -76,21 +76,29 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     [projects],
   );
 
-  if (failed && !detail) {
+  /**
+   * 没拿到数据时也要把 PageHeader 画出来（照 ProjectDetail 的做法）：标题行是吸在
+   * 应用标题栏那条 band 上的，加载态若不渲染它，整条标题栏会先消失再补回来——那一下
+   * 比"内容区里一行加载中"显眼得多。所以这里只换标题文案，不换页面骨架。
+   */
+  if (!detail) {
     return (
       <div className="main narrow">
-        <PageHeader title="读取会话失败">
-          <p className="muted small">
-            这个 Session 可能已经被 Agent 自己清理。本地数据没有被修改，可以重试。
-          </p>
-          <div className="invite">
-            <button className="btn small" onClick={refresh}>重试</button>
-          </div>
+        <PageHeader title={failed ? "读取会话失败" : "加载中…"}>
+          {failed && (
+            <>
+              <p className="muted small">
+                这个 Session 可能已经被 Agent 自己清理。本地数据没有被修改，可以重试。
+              </p>
+              <div className="invite">
+                <button className="btn small" onClick={refresh}>重试</button>
+              </div>
+            </>
+          )}
         </PageHeader>
       </div>
     );
   }
-  if (!detail) return <div className="main narrow">加载中…</div>;
   const { session, events, bindings } = detail;
 
   /**
@@ -168,6 +176,21 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const derivedProjectName = workspacePath && workspacePath.project_name.trim() !== ""
     ? workspacePath.project_name
     : null;
+  /** 这条会话「属于」哪个项目：派生链优先，退回 v0.2 之前手工指派留下的 project_id。 */
+  const sessionProjectId = workspacePath?.project_id ?? session.project_id ?? null;
+
+  /**
+   * 添加关联（方案 §1.8）：一次提交完整的关联集合，已有关联原样带上（后端在单事务里
+   * diff，未改动的 row 连 created_at / provenance 都不动），新选的按 related 追加。
+   */
+  const addBindings = async (workstreamIds: string[]) => {
+    await api.replaceSessionBindings(sessionId, [
+      ...bindings.map(([b]) => ({ workstream_id: b.workstream_id, role: b.role })),
+      ...workstreamIds.map((id) => ({ workstream_id: id, role: "related" })),
+    ]);
+    refresh();
+    setBindingOpen(false);
+  };
 
   const messages: SessionMessageData[] = events.map((e) => ({
     sequence: e.sequence,
@@ -183,31 +206,22 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         title={title}
         actions={trashed ? (
           // 回收站中的会话：摄入已停止、后端拒绝 Resume——两个入口都如实呈现为不可用。
-          <button className="btn primary" disabled
-            title="回收站中的会话不能继续；先在上面的横幅里恢复它。">
-            继续
+          <button className="btn ghost icon-button" disabled
+            aria-label="继续" title="回收站中的会话不能继续；先在上面的横幅里恢复它。">
+            <Icon name="play" />
           </button>
         ) : (
           <>
-            <button className="btn ghost" onClick={() => setConfirmTrash(true)} disabled={trashBusy}>
-              移入回收站…
+            <button className="btn ghost icon-button" aria-label="移入回收站" title="移入回收站" onClick={() => setConfirmTrash(true)} disabled={trashBusy}>
+              <Icon name="trash" />
             </button>
-            <button className="btn ghost" onClick={doSync} disabled={syncing}>刷新</button>
-            <button className="btn primary" onClick={() => setResumeOpen(true)}>继续</button>
+            <button className="btn ghost icon-button" aria-label="刷新" title="刷新" onClick={doSync} disabled={syncing}><Icon name="refresh" /></button>
+            <button className="btn ghost icon-button" aria-label="继续" title="继续会话" onClick={() => setResumeOpen(true)}>
+              <Icon name="play" />
+            </button>
           </>
         )}
-      >
-        <div className="ws-detail-head-meta">
-          <span className="row" style={{ gap: 6 }}>
-            <AgentIcon agent={session.agent} />
-            {agentDisplayLabel(session.agent)}
-          </span>
-          {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
-          {trashed && <span className="badge warn">回收站</span>}
-          <span className="dot-sep" />
-          <span>{messages.length > 0 ? `${messages.length} 条消息` : "尚无消息"}</span>
-        </div>
-      </PageHeader>
+      />
 
       {/* 回收站横幅（§36）：替代正常动作区，恢复 / 永久删除都在这里。 */}
       {trashed && (
@@ -228,14 +242,67 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         </div>
       )}
 
+      {/* §36.19：右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（关联任务、消息）。 */}
+      <div className="task-detail-layout">
+      <div className="task-detail-main">
+      <div className="row between" style={{ marginBottom: 8 }}>
+        <div className="section-label" style={{ margin: 0 }}>关联任务</div>
+        <button className="btn small ghost icon-button" aria-label="添加关联任务" title="添加关联任务" onClick={() => setBindingOpen(true)}><Icon name="plus" /></button>
+      </div>
+      {bindings.length === 0 && (
+        <div className="l1-none">
+          暂无关联任务
+        </div>
+      )}
+      {/* 不标主/相关：两种角色只影响排序，不影响这条会话与任务的归属（同 §36.18 项目侧）。 */}
+      {ordered.map(([b, t]) => (
+        <div className="rail-row" key={b.workstream_id}
+          onClick={() => navigate({ view: "workstream", workstreamId: b.workstream_id })}
+          title={t ?? "这个任务记录已不存在"}>
+          <div className="rail-main">
+            <div className="rail-title">{t ?? "任务已不可用"}</div>
+            {t === null && <div className="rail-sub mono">{b.workstream_id}</div>}
+          </div>
+        </div>
+      ))}
+
+      <div className="section-label" style={{ marginTop: 34 }}>消息</div>
+      <p className="muted small" style={{ margin: "0 0 6px" }}>
+        {messages.length >= EVENT_PAGE_LIMIT
+          ? `已显示 ${messages.length} 条消息，可能还有更早记录。`
+          : null}
+      </p>
+      {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
+      {messages.length === 0 && (
+        <div className="empty">
+          还没有摄入消息。
+          <div className="small" style={{ marginTop: 4 }}>
+            刷新以读取原始会话。
+          </div>
+          <div className="invite">
+            <button className="btn small" onClick={doSync} disabled={syncing}>刷新</button>
+          </div>
+        </div>
+      )}
+      </div>
+
+      <aside className="task-detail-aside">
+      {/* 只读事实一律在右栏（§36.19），并且与另外两个详情页同形：rail-section + section-label，
+          直接用展开的正文，不用 <details>——默认收起把这页最有用的事实藏了起来。 */}
+      <section className="rail-section">
+      <div className="section-label">会话信息</div>
+      <div className="row" style={{ gap: 6 }}>
+        <AgentIcon agent={session.agent} />
+        <span>{agentDisplayLabel(session.agent)}</span>
+      </div>
+      <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+        {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
+        {trashed && <span className="badge warn">回收站</span>}
+        <span className="small muted">{messages.length > 0 ? `${messages.length} 条消息` : "尚无消息"}</span>
+      </div>
+
       {/* 执行事实：一次会话「在什么时候、哪个目录、叫什么 ID」。值可整段选中并复制。 */}
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: "auto minmax(0, 1fr)",
-        gap: "7px 16px",
-        alignItems: "baseline",
-        marginTop: 20,
-      }}>
+      <div className="session-info-fields">
         <Field label="开始时间">
           {session.started_at
             ? <span title={session.started_at}>{formatDateTime(session.started_at)}</span>
@@ -260,7 +327,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
                 >
                   {derivedProjectName}
                 </button>
-                <span className="muted small">由下面的工作目录自动派生，只读</span>
+
               </span>
             ) : (
                   <span className="muted small">这条工作路径所属的项目记录暂时读不到。</span>
@@ -337,47 +404,9 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             title="Agent 自己记录里的会话 ID，用于回到原始转录文件" />
         </Field>
       </div>
-
-      <div className="row between" style={{ marginTop: 30, marginBottom: 8 }}>
-        <div className="section-label" style={{ margin: 0 }}>关联任务</div>
-        <button className="btn small ghost" onClick={() => setBindingOpen(true)}>编辑</button>
+      </section>
+      </aside>
       </div>
-      {bindings.length === 0 && (
-        <div className="l1-none">
-          还没有关联任何任务。点「编辑」可以把它关联到一个或多个任务；
-          不关联也可以直接「继续」这个 Session。
-        </div>
-      )}
-      {ordered.map(([b, t]) => (
-        <div className="rail-row" key={b.workstream_id}
-          onClick={() => navigate({ view: "workstream", workstreamId: b.workstream_id })}
-          title={t ?? "这个任务记录已不存在"}>
-          <div className="rail-main">
-            <div className="rail-title">{t ?? "任务已不可用"}</div>
-            {t === null && <div className="rail-sub mono">{b.workstream_id}</div>}
-          </div>
-          <span className={`badge ${b.role === "primary" ? "dark" : ""}`}>{bindingRoleLabel(b.role)}</span>
-        </div>
-      ))}
-
-      <div className="section-label" style={{ marginTop: 34 }}>消息</div>
-      <p className="muted small" style={{ margin: "0 0 6px" }}>
-        {messages.length >= EVENT_PAGE_LIMIT
-          ? `标准化视图，只读。这里显示的是最近读取到的 ${messages.length} 条消息，可能还有更早的消息没进这次读取范围。`
-          : "标准化视图，只读。原始数据始终保留在 Agent 自己的目录中。"}
-      </p>
-      {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
-      {messages.length === 0 && (
-        <div className="empty">
-          还没有摄入消息。
-          <div className="small" style={{ marginTop: 4 }}>
-            这个 Session 的原始文件还没被读取。点「刷新」立即摄入，或重启应用后自动发现。
-          </div>
-          <div className="invite">
-            <button className="btn small" onClick={doSync} disabled={syncing}>刷新</button>
-          </div>
-        </div>
-      )}
 
       {/* 危险操作（§36）：只在正常状态下出现；回收站里的动作在顶部横幅。 */}
       {confirmTrash && (
@@ -386,7 +415,8 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             <b>{title}</b> 会从 Sessions 列表、搜索与继续入口中消失，出现在 Sessions 页的「回收站」里。
           </p>
           {/* §36 要求把两个概念摆在同一处明确区分：「从 Workstream 移除」只改
-              Workstream 成员关系（在「编辑关联」弹窗里），这里是全局回收站。 */}
+              Workstream 成员关系，这里是全局回收站。前者目前只有后端能力
+              （replace_session_bindings 传一个更小的集合），界面上还没有入口。 */}
           <div className="card hairline" style={{ marginBottom: 12 }}>
             <p style={{ margin: "0 0 6px" }}>
               <b>从任务移除</b> = 只修改这个任务的成员关系。
@@ -413,11 +443,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       )}
 
       {bindingOpen && (
-        <BindingModal
-          sessionId={sessionId}
-          bindings={bindings.map(([b]) => b)}
+        <ExistingTaskPicker
+          exclude={bindings.map(([b]) => b.workstream_id)}
+          projectId={sessionProjectId}
           onClose={() => setBindingOpen(false)}
-          onChanged={refresh}
+          onAdd={addBindings}
         />
       )}
       {resumeOpen && (
@@ -498,122 +528,72 @@ async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
-/** Binding 编辑（实施方案 §36）：主关联 / 相关关联 / 移除 / 添加，Modal 即可。 */
-function BindingModal({ sessionId, bindings, onClose, onChanged }: {
-  sessionId: string;
-  bindings: { workstream_id: string; role: string }[];
+/**
+ * 添加关联任务：列出**这条会话所属项目**下的任务（§22：Session 只归类到 Workstream，
+ * Project 是工作目录派生的，不在这里选）。形状照抄新建任务里的「选择已有目录」：
+ * 候选列表 + 已关联的置灰标出，选好一次确认就提交。
+ */
+function ExistingTaskPicker({ exclude, projectId, onClose, onAdd }: {
+  exclude: string[];
+  /** null = 这条会话没有可解析的项目，此时不筛，退回全部任务。 */
+  projectId: string | null;
   onClose: () => void;
-  onChanged: () => void;
+  onAdd: (workstreamIds: string[]) => Promise<void>;
 }) {
-  const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
-  const [rows, setRows] = useState(bindings.map((b) => ({ ...b })));
-  const [addId, setAddId] = useState("none");
-  const [addRole, setAddRole] = useState("related");
+  const [tasks, setTasks] = useState<Workstream[] | null>(null);
+  const [error, setError] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [failText, setFailText] = useState("");
 
   useEffect(() => {
-    api.listWorkstreams().then(setWorkstreams).catch(console.error);
-  }, []);
+    let active = true;
+    setError(false);
+    api.listWorkstreams(projectId ?? undefined)
+      // 归档的任务不再接收新关联，和旧弹窗的下拉是同一套候选。
+      .then((rows) => { if (active) setTasks(rows.filter((w) => w.visibility === "normal")); })
+      .catch(() => { if (active) setError(true); });
+    return () => { active = false; };
+  }, [projectId, attempt]);
 
-  const apply = async () => {
+  const submit = async () => {
     if (busy) return;
     setBusy(true);
-    setError("");
+    setFailText("");
     try {
-      // 后端在单个事务里做 diff：未改动的 Binding 原 row 保留
-      // （provenance / created_at / cursor 不动），只有新增的才是 user_assigned。
-      await api.replaceSessionBindings(
-        sessionId,
-        rows.map((r) => ({ workstream_id: r.workstream_id, role: r.role })),
-      );
-      onChanged();
-      onClose();
+      await onAdd(selected);
     } catch (e) {
-      setError(String(e));
+      setFailText(String(e));
     } finally {
       setBusy(false);
     }
   };
 
-  const bound = new Set(rows.map((r) => r.workstream_id));
-  const titleOf = (id: string) => workstreams.find((w) => w.id === id)?.title ?? null;
-
   return (
-    <Modal title="编辑关联任务" onClose={onClose}>
-      {/* v0.2：Session 归类只作用在 Workstream 上（方案 §22「不让用户操作 Project」）。
-          Project 是工作目录的派生结果，在这里出现只会让人以为它可以被指派。 */}
-      <div className="muted small" style={{ marginBottom: 10 }}>
-        这里只操作任务。Project 由这条 Session 自己的工作目录派生，不需要、也不能在这里选。
+    <Modal title="添加关联任务" onClose={onClose}>
+      <div className="existing-path-list" role="group" aria-label="项目任务">
+        {error ? <div role="alert">读取任务失败 <button className="btn small" onClick={() => setAttempt((n) => n + 1)}>重试</button></div>
+          : !tasks ? <div role="status">加载中…</div>
+          : tasks.length === 0 ? <div className="muted">{projectId ? "这个项目下还没有任务" : "还没有任务"}</div>
+          : tasks.map((w) => {
+            const added = exclude.includes(w.id);
+            return (
+              <label className={`existing-path-option${added ? " is-added" : ""}`} key={w.id}>
+                <input type="checkbox" disabled={added}
+                  checked={added || selected.includes(w.id)}
+                  onChange={(e) => setSelected((old) => e.target.checked ? [...old, w.id] : old.filter((id) => id !== w.id))} />
+                <span className="existing-path-info" title={w.title}>{w.title}</span>
+              </label>
+            );
+          })}
       </div>
-      {rows.length === 0 && (
-        <div className="muted small" style={{ marginBottom: 10 }}>
-          还没有关联任何任务。用下面的「添加任务」选择。
-        </div>
-      )}
-      {rows.map((r) => {
-        const name = titleOf(r.workstream_id);
-        return (
-          <div className="row between" key={r.workstream_id}
-            style={{ borderTop: "1px solid var(--bg-panel)", padding: "9px 0", gap: 12 }}>
-            <div style={{ fontSize: 13.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {name ?? (
-                <span title="这个任务记录已不存在，仍保留其 ID 以便追溯">
-                  <span className="muted">任务已不可用</span>
-                  <span className="mono" style={{ marginLeft: 6 }}>{r.workstream_id}</span>
-                </span>
-              )}
-            </div>
-            <div className="row" style={{ flex: "none" }}>
-              <select style={{ width: 110 }} value={r.role}
-                onChange={(e) => setRows((rs) => rs.map((x) => x.workstream_id === r.workstream_id ? { ...x, role: e.target.value } : x))}>
-                <option value="primary">主关联</option>
-                <option value="related">相关关联</option>
-              </select>
-              <button className="btn small ghost"
-                onClick={() => setRows((rs) => rs.filter((x) => x.workstream_id !== r.workstream_id))}>
-                移除
-              </button>
-            </div>
-          </div>
-        );
-      })}
-
-      <div className="row between"
-        style={{ borderTop: "1px solid var(--bg-panel)", padding: "9px 0", gap: 12 }}>
-        <div style={{ fontSize: 13.5 }}>添加任务</div>
-        <div className="row" style={{ flex: "none" }}>
-          <select style={{ width: 200 }} value={addId} onChange={(e) => setAddId(e.target.value)}>
-            <option value="none">选择…</option>
-            {workstreams.filter((w) => !bound.has(w.id) && w.visibility === "normal").map((w) => (
-              <option key={w.id} value={w.id}>{w.title}</option>
-            ))}
-          </select>
-          <select style={{ width: 110 }} value={addRole} onChange={(e) => setAddRole(e.target.value)}>
-            <option value="related">相关关联</option>
-            <option value="primary">主关联</option>
-          </select>
-          <button className="btn small" disabled={addId === "none"}
-            onClick={() => { setRows((rs) => [...rs, { workstream_id: addId, role: addRole }]); setAddId("none"); }}>
-            添加
-          </button>
-        </div>
-      </div>
-
-      {/* 这一侧的效果要说清楚（方案 §1.8 / §1.9）：关联一次会顺带决定
-          Workstream 的工作路径列表，而移除留下的否定决定是持久的。 */}
-      <div className="muted small" style={{ marginTop: 12, wordBreak: "break-word" }}>
-        保存时会发生什么：新加的关联，如果那个 Workstream 的工作路径列表里还没有这条 Session 的工作路径，
-        那条路径会被追加进去（该 Workstream 还没有任何路径时成为主路径）；
-        这条 Session 没有可解析的工作目录时只建立关联，不会编造路径。
-        移除只解除关联，路径会留在列表里；同时这是一次明确的否定决定 ——
-        NoEnding 之后不会再把这条 Session 自动归类回这个 Workstream，除非你在这里重新关联它。
-      </div>
-
-      {error && <div className="badge warn" style={{ marginTop: 8 }}>{error}</div>}
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
+      {failText && <div className="badge warn" style={{ marginTop: 8 }}>{failText}</div>}
+      <div className="row" style={{ justifyContent: "flex-end" }}>
         <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn primary" disabled={busy} onClick={apply}>{busy ? "保存中…" : "保存"}</button>
+        <button className="btn primary" disabled={busy || !selected.length} onClick={submit}>
+          {busy ? "添加中…" : `添加${selected.length ? ` (${selected.length})` : ""}`}
+        </button>
       </div>
     </Modal>
   );

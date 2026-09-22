@@ -1,3 +1,4 @@
+import Icon from "../../components/Icon";
 import { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
@@ -73,47 +74,31 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
 
   return (
     <>
-      <article className={`ws-card ${mode}`} onClick={openDetail}>
+      <article className={`ws-card task-card ${mode}`} onClick={openDetail}>
         <header className="ws-card-head">
           {/* 单行截断（.ws-card-title）与两行 clamp（.ws-card-body）都靠 title
               把完整内容留给用户，否则长标题在窄窗口里就永久丢了。 */}
-          <h3 className="ws-card-title" title={card.title}>{card.title}</h3>
+          <h3 className="ws-card-title"><button className="card-title-link" title={card.title} onClick={e => { e.stopPropagation(); openDetail(); }}>{card.title}</button></h3>
           <div className="ws-card-side">
-            {card.lifecycle !== "active" && (
-              <span className="badge" title="只是分类标签，不改变任何行为">{LIFECYCLE_LABELS[card.lifecycle] ?? card.lifecycle}</span>
+            {(
+              <span className="badge" title="任务状态">{LIFECYCLE_LABELS[card.lifecycle] ?? card.lifecycle}</span>
             )}
             {/* visibility=archived 就是回收站（方案 §1.13）：它和 lifecycle 正交，
                 所以这里单独一个徽标，而不是把 lifecycle 改成第三种值。 */}
             {card.visibility === "archived" && (
               <span className="badge warn" title="在回收站里：工作路径、会话绑定与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
             )}
-            {/* Project 是主工作路径的派生投影（方案 §42.3-M19），不是用户挑的组织层：
-                没有路径就没有 Project，此时不显示任何占位。
-                .ws-card-side 是 flex:none，长 Project 名会把标题挤没，
-                所以这里就地限宽并把全名留在 title 上。 */}
-            {card.project_name && (
-              <span
-                className="ws-card-project"
-                title={`由主工作路径派生的项目（只读）：${card.project_name}`}
-                style={{ maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-              >
-                {card.project_name}
-              </span>
-            )}
           </div>
         </header>
 
-        {body ? (
-          <p className="ws-card-body" title={body}>{body}</p>
-        ) : (
-          <p className="ws-card-body muted">还没有描述 — 在详情页补充。</p>
-        )}
+        {card.project_name && <div className="task-project" title={card.project_name}><Icon name="folder" /><span className="truncate">{card.project_name}</span></div>}
+        {body && <p className="ws-card-body" title={body}>{body}</p>}
 
         <footer className="ws-card-meta">
           <span>
             {card.session_count === 0
               ? "还没有会话"
-              : `最近活动 ${timeAgo(card.last_activity_at)} · ${card.session_count} 个会话`}
+              : `${card.session_count} 个会话 · ${timeAgo(card.last_activity_at)}`}
           </span>
           {!archived && <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
             {/* 与 Home 同一个判断：卡片不自己宣称「没有 Agent」。`defaultAgent`
@@ -122,16 +107,16 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
                 tooltip 会说假话。是否真的没有 Agent 一律交给 NewSessionModal
                 自己判定——它同时是唯一的启动路径。 */}
             <button
-              className="btn small ws-btn"
+              className={`btn small ws-btn ${card.latest_session ? "ghost icon-button" : ""}`}
+              aria-label="新建会话"
               title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}
               onClick={() => setNewSessionOpen(true)}
             >
-              {defaultAgent ? <AgentIcon agent={defaultAgent} /> : null}
-              新建会话
+              <Icon name="plus" />{!card.latest_session && "新建会话"}
             </button>
             {card.latest_session && (
               <button
-                className={`btn small ws-btn ${mode === "compact" ? "resume-primary" : ""}`}
+                className="btn small ws-btn resume-primary"
                 title={`继续最近的 ${AGENT_LABELS[card.latest_session.agent]} 会话`}
                 onClick={() => setResumeOpen(true)}
               >

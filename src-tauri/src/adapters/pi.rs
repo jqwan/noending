@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, title_from_text, AgentCommand, DiscoveredSession, ParsedLine,
-    ReadDelta,
+    detect_format, read_jsonl_delta, AgentCommand, DiscoveredSession, ParsedLine, ReadDelta,
 };
 use crate::domain::{Agent, Session, SourceCursor};
 use crate::error::Result;
@@ -17,43 +16,23 @@ use crate::platform::exec_resolver::{self, AgentInstallation};
 
 pub struct PiAdapter;
 
-fn content_text(content: &Value) -> (String, Vec<String>) {
-    // returns (text parts, tool call summaries)
+/// Text parts only: `thinking` blocks are model reasoning, and tool calls /
+/// results are deliberately dropped (方案 §36.11) — they used to be appended
+/// to the owning message's text as `[tool:…] …`.
+fn content_text(content: &Value) -> String {
     let mut text_parts = Vec::new();
-    let mut tool_parts = Vec::new();
     if let Some(arr) = content.as_array() {
         for item in arr {
-            match item.get("type").and_then(|t| t.as_str()) {
-                Some("text") => {
-                    if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                        text_parts.push(t.to_string());
-                    }
+            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                    text_parts.push(t.to_string());
                 }
-                Some("thinking") => { /* model reasoning: skip */ }
-                Some("toolCall") | Some("tool_call") => {
-                    let name = item
-                        .get("name")
-                        .or_else(|| item.get("id"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("tool");
-                    let raw_args = item
-                        .get("arguments")
-                        .or_else(|| item.get("input"))
-                        .map(|a| a.to_string())
-                        .unwrap_or_default();
-                    tool_parts.push(format!(
-                        "[tool:{}] {}",
-                        name,
-                        crate::adapters::truncate_text(&raw_args, 150)
-                    ));
-                }
-                _ => {}
             }
         }
     } else if let Some(s) = content.as_str() {
         text_parts.push(s.to_string());
     }
-    (text_parts.join("\n"), tool_parts)
+    text_parts.join("\n")
 }
 
 impl PiAdapter {
@@ -82,9 +61,14 @@ impl PiAdapter {
                     if first_user_text.is_none() {
                         if let Some(msg) = v.get("message") {
                             if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
-                                let (text, _) =
-                                    content_text(msg.get("content").unwrap_or(&Value::Null));
-                                if !text.is_empty() {
+                                let text = content_text(msg.get("content").unwrap_or(&Value::Null));
+                                // `<…>` environment blocks and `#`-prefixed
+                                // injections (AGENTS.md, attached-file
+                                // headers) are not user text.
+                                if !text.is_empty()
+                                    && !text.starts_with('<')
+                                    && !text.starts_with('#')
+                                {
                                     first_user_text =
                                         Some(crate::adapters::truncate_text(&text, 400));
                                 }
@@ -211,18 +195,16 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                 "message" => {
                     let msg = v.get("message").unwrap_or(&Value::Null);
                     let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                    let (text, tools) = content_text(msg.get("content").unwrap_or(&Value::Null));
-                    let mut text = text;
-                    if !tools.is_empty() {
-                        text.push('\n');
-                        text.push_str(&tools.join("\n"));
-                    }
+                    let text = content_text(msg.get("content").unwrap_or(&Value::Null));
                     if text.trim().is_empty() {
                         return None;
                     }
                     match role {
                         "user" => ("user_message", text),
                         "assistant" => ("assistant_message", text),
+                        // Tool output is a `toolResult` MESSAGE in pi, so it used
+                        // to land here as `system`. Not ingested (方案 §36.11).
+                        "toolResult" | "tool_result" => return None,
                         _ => ("system", text),
                     }
                 }
@@ -317,8 +299,4 @@ impl crate::adapters::AgentAdapter for PiAdapter {
             Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id))
         })
     }
-}
-
-pub fn extract_title(d: &DiscoveredSession) -> Option<String> {
-    d.first_user_text.as_deref().and_then(title_from_text)
 }

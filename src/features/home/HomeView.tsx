@@ -1,10 +1,12 @@
 import { useState } from "react";
 import AgentIcon from "../../components/AgentIcon";
+import Icon from "../../components/Icon";
+import PageHeader from "../../layout/PageHeader";
 import SidebarLogo from "../../components/SidebarLogo";
 import type { Route } from "../../app/routes";
 import { ContinueSection, RecentSessions } from "./ContinueSection";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
-import NewWorkstreamModal from "../workstreams/NewWorkstreamModal";
+import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 import NewSessionModal from "../sessions/NewSessionModal";
 
 /**
@@ -18,11 +20,11 @@ import NewSessionModal from "../sessions/NewSessionModal";
  * Identity）。Home 也从不推进 ReviewState（Home Attention Integrity）。
  */
 export default function HomeView({ navigate }: { navigate: (r: Route) => void }) {
-  const { cards, defaultAgent, refresh } = useWorkstreamCards();
+  const { cards, defaultAgent, refresh, loadError } = useWorkstreamCards();
   const [creatingWs, setCreatingWs] = useState(false);
   const [creatingSession, setCreatingSession] = useState(false);
 
-  if (cards === null) return <div className="main narrow">加载中…</div>;
+  if (cards === null) return <div className="main narrow" role="status">{loadError ? <>加载失败 <button className="btn small" onClick={refresh}>重试</button></> : "加载中…"}</div>;
 
   const activeCards = cards.filter(
     (c) => c.lifecycle === "active" && c.visibility === "normal",
@@ -41,7 +43,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   const modals = (
     <>
       {creatingWs && (
-        <NewWorkstreamModal onClose={() => setCreatingWs(false)} onCreated={refresh} />
+        <WorkstreamFormModal onClose={() => setCreatingWs(false)} onCreated={refresh} />
       )}
       {creatingSession && (
         <NewSessionModal onClose={() => setCreatingSession(false)} />
@@ -53,11 +55,8 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
     return (
       <div className="main narrow home">
         <div className="hero">
-          <SidebarLogo size={64} animated />
-          <div className="tagline">对话会结束，上下文不会。</div>
-          <p className="page-sub" style={{ textAlign: "center", marginBottom: 18 }}>
-            开始一件可以跨会话、跨 Agent 继续推进的事。
-          </p>
+          <SidebarLogo size={40} />
+          <h1>开始新任务</h1>
           <div className="actions-row">
             <button className="btn primary" onClick={() => setCreatingWs(true)}>+ 新建任务</button>
           </div>
@@ -98,17 +97,19 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
 
   return (
     <div className="main narrow">
-      <div className="home-greeting">
-        <h1>欢迎回来</h1>
-        <p className="sub">继续上次的工作</p>
-      </div>
+      <PageHeader
+        title="继续工作"
+        actions={
+          <button className="btn ghost icon-button" aria-label="新建任务" title="新建任务" onClick={() => setCreatingWs(true)}>
+            <Icon name="plus" />
+          </button>
+        }
+      />
 
       <ContinueSection navigate={navigate} defaultAgent={defaultAgent} cards={cards} />
       <RecentSessions navigate={navigate} onNewSession={() => setCreatingSession(true)} />
 
-      <div className="home-foot">
-        <button className="btn small ghost" onClick={() => setCreatingWs(true)}>+ 新建任务</button>
-      </div>
+
 
       {modals}
     </div>
