@@ -4,7 +4,7 @@
 // the parallel agents could build against them before the UI caught up. Change
 // them only together with the Rust struct they mirror (方案 §11, §15-8).
 
-export type Agent = "codex" | "claude_code" | "pi" | "qoder";
+export type Agent = "codex" | "claude_code" | "pi" | "qoder" | "autoclaw";
 
 /** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
 export type WorkstreamLifecycle = "active" | "completed";
@@ -627,6 +627,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
   claude_code: "Claude Code",
   pi: "Pi",
   qoder: "Qoder",
+  autoclaw: "AutoClaw",
 };
 
 // ---------- Agent Runtime Configuration (commands.rs §Agent Runtime) ----------

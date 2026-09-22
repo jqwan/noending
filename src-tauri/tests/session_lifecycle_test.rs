@@ -15,9 +15,11 @@
 //! All fixtures are temp files. The real ~/.codex / ~/.claude / ~/.pi are
 //! never touched (方案 §46).
 
+use noending::adapters::autoclaw::AutoClawAdapter;
 use noending::adapters::claude::ClaudeAdapter;
 use noending::adapters::codex::CodexAdapter;
 use noending::adapters::pi::PiAdapter;
+use noending::adapters::qoder::QoderAdapter;
 use noending::adapters::AgentAdapter;
 use noending::domain::{Agent, ContextDelivery, LaunchIntent, Session, SessionListScope, SyncRun};
 use noending::error::AppError;
@@ -90,6 +92,14 @@ fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
         Agent::Pi => format!(
             "{{\"type\":\"session\",\"id\":\"{sid}\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:00:00Z\"}}\n\
              {{\"type\":\"message\",\"id\":\"m1\",\"parentId\":\"{sid}\",\"provider\":\"p\",\"timestamp\":\"2026-09-13T10:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n",
+            sid = session_id
+        ),
+        // AutoClaw: the pi core's entry shape under its own directory. The
+        // permanent-deletion path is not offered for it (§37.6), so this arm
+        // exists only for the agents that do support it.
+        Agent::AutoClaw => format!(
+            "{{\"type\":\"session\",\"version\":3,\"id\":\"{sid}\",\"timestamp\":\"2026-09-13T10:00:00Z\",\"cwd\":\"/tmp/proj\"}}\n\
+             {{\"type\":\"message\",\"id\":\"m1\",\"parentId\":\"{sid}\",\"timestamp\":\"2026-09-13T10:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n",
             sid = session_id
         ),
         // Qoder = Claude's shape + its own bookkeeping line, which is what
@@ -1154,6 +1164,26 @@ macro_rules! adapter_suite {
 adapter_suite!(codex_suite, Agent::Codex, CodexAdapter);
 adapter_suite!(claude_suite, Agent::ClaudeCode, ClaudeAdapter);
 adapter_suite!(pi_suite, Agent::Pi, PiAdapter);
+adapter_suite!(qoder_suite, Agent::Qoder, QoderAdapter);
+
+/// Not every adapter can offer permanent source deletion: §16.3 requires a
+/// content fingerprint pointing back at the agent, and AutoClaw's bytes are
+/// the pi core's bytes (方案 §37.6). The refusal must be explicit — a plan
+/// that could not be verified must never be produced.
+#[test]
+fn adapters_without_deletion_support_refuse_loudly() {
+    let db = open_db("no-deletion-support");
+    let s = fixture_session(&db, Agent::AutoClaw, "no-deletion-support");
+    assert!(
+        Path::new(&s.raw_path).exists(),
+        "the fixture is a real file; the refusal is a policy, not a missing file"
+    );
+    let err = AutoClawAdapter
+        .prepare_source_session_deletion(&s)
+        .unwrap_err();
+    assert!(err.to_string().contains("暂不支持"), "unexpected: {err}");
+    assert!(Path::new(&s.raw_path).exists(), "nothing was touched");
+}
 
 // ---- Hardening patch §1-A/§1-B -------------------------------------------
 //

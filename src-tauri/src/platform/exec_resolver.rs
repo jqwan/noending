@@ -193,6 +193,13 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         Agent::ClaudeCode => vec!["claude"],
         Agent::Pi => vec!["pi"],
         Agent::Qoder => vec![],
+        // AutoClaw HAS a CLI (`openclaw`, inside its app bundle), but every
+        // invocation must be pointed at its state root through
+        // `OPENCLAW_STATE_DIR` and `AgentCommand` carries no environment.
+        // Launching without it would silently target the default `~/.openclaw`
+        // — a different, empty state — so launching is not offered until the
+        // platform layer can pass env (方案 §37.6).
+        Agent::AutoClaw => vec![],
     }
 }
 

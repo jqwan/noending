@@ -240,7 +240,8 @@ impl Workstream {
 }
 
 /// Every Agent NoEnding knows how to READ. Not every entry can be launched:
-/// Qoder ships no headless CLI, so its adapter ingests history only and
+/// Qoder ships no headless CLI and AutoClaw's CLI cannot be pointed at its own
+/// state directory from here, so those adapters ingest history only and
 /// `exec_resolver::resolve` fails by design (方案 §37.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -249,13 +250,20 @@ pub enum Agent {
     ClaudeCode,
     Pi,
     Qoder,
+    AutoClaw,
 }
 
 impl Agent {
     /// A slice rather than a fixed-size array: the roster grows, and every
     /// caller only iterates.
     pub fn all() -> &'static [Agent] {
-        &[Agent::Codex, Agent::ClaudeCode, Agent::Pi, Agent::Qoder]
+        &[
+            Agent::Codex,
+            Agent::ClaudeCode,
+            Agent::Pi,
+            Agent::Qoder,
+            Agent::AutoClaw,
+        ]
     }
 
     pub fn display_name(&self) -> &'static str {
@@ -264,6 +272,7 @@ impl Agent {
             Agent::ClaudeCode => "Claude Code",
             Agent::Pi => "Pi",
             Agent::Qoder => "Qoder",
+            Agent::AutoClaw => "AutoClaw",
         }
     }
 
@@ -273,6 +282,7 @@ impl Agent {
             Agent::ClaudeCode => "claude_code",
             Agent::Pi => "pi",
             Agent::Qoder => "qoder",
+            Agent::AutoClaw => "autoclaw",
         }
     }
 
@@ -282,6 +292,7 @@ impl Agent {
             "claude_code" | "claude" => Some(Agent::ClaudeCode),
             "pi" => Some(Agent::Pi),
             "qoder" | "qcoder" => Some(Agent::Qoder),
+            "autoclaw" | "openclaw" => Some(Agent::AutoClaw),
             _ => None,
         }
     }

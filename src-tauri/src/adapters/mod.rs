@@ -13,6 +13,7 @@
 //!   re-ingesting already-seen content is prevented by the storage layer's
 //!   content-identity dedup, so compaction can never overwrite history.
 
+pub mod autoclaw;
 pub mod claude;
 pub mod codex;
 pub mod pi;
@@ -595,6 +596,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(claude::ClaudeAdapter),
         Box::new(pi::PiAdapter),
         Box::new(qoder::QoderAdapter),
+        Box::new(autoclaw::AutoClawAdapter),
     ]
 }
 

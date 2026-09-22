@@ -17,6 +17,7 @@ export const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
   // Qoder 没有 CLI，三个字段都是 unsupported（后端 capabilities 也是这么给的），
   // 这里的字面量只是为了让 Record 完整——unsupported 的字段不会渲染（§37.5）。
   qoder: { model: "Model", provider: "Provider", effort: "Effort" },
+  autoclaw: { model: "Model", provider: "Provider", effort: "Effort" },
 };
 
 const SOURCE_NOTE: Record<ModelSource, string | null> = {

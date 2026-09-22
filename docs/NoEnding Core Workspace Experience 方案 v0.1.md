@@ -3210,3 +3210,19 @@ workspace-directories / runtime-config / worktree-state / active-leaf / last-pro
 **改动清单**：`domain/models.rs`（Agent 枚举加 `Qoder`，`all()` 改成返回切片）、`platform/paths.rs`（数据根 `~/.qoder-cn`，无环境变量覆盖——返回空串表示"这个 Agent 没有文档化的覆盖变量"，不编名字）、`platform/exec_resolver.rs`（新增 `cli_names()`，空表示无 CLI；`resolve()` 对无 CLI 的 Agent 给出"只读取历史会话"而不是 PATH 报错）、`adapters/mod.rs`（注册 + 指纹 + 位移到 discovery 层的真实数据校验）、`adapters/qoder.rs`、`agent_runtime/{capabilities,discovery}`、`src/types.ts` 与 `AgentRuntimeSettings`。
 
 **验证**：真实根目录的跨 Agent 校验从"逐文件指纹"改成"逐 Agent 发现结果"——`[fingerprint] Qoder: 7 sessions discovered under /Users/jqk/.qoder-cn`，四个已接入 Agent 各自 0 错判。逐文件那条断言其实站不住：内容本身可以是有歧义的（Qoder 的子 Agent 文件就是），"没人认领"不等于"错判"。另外新增：`agents_without_a_cli_refuse_to_build_a_command`（无 CLI 的 Agent 三个 builder 必须报错、`detect()` 必须为 None）、`agents_without_a_cli_report_an_unavailable_catalog`（模型/effort 都必须缺席，capabilities 全 unsupported）、`qoder_is_claimed_before_claude`（含整文件的 detect_format）、`qoder_truncate_rewrite_dedup`（并入既有的 identity_suite，覆盖 append/无变化/截断重写/同尺寸重写/文件替换）、以及适配器内的解析与"子 Agent 不认领"测试。`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）全绿。
+
+## 37.6 AutoClaw（A 形态，但只摄入：CLI 需要环境变量）
+
+`~/.openclaw-autoclaw/agents/<agentId>/sessions/<uuid>.jsonl`（旁边是 `sessions.json` 索引与 `<uuid>.trajectory.jsonl` 运行轨迹）。这条本该是六家里唯一"摄入 + 新建 + 恢复"都齐的，但两处都踩到了同一个根因。
+
+**一、它的会话存储就是 pi 的格式，逐字节相同。** 拿两份真实语料对照：首行都是 `{type:"session", version:3, id, timestamp, cwd}`，行型都是 `session` / `message` / `model_change` / `thinking_level_change` / `compaction`，消息行的键恰好是 `{type,id,parentId,timestamp,message}`，连 `custom` 行的字段集（`customType`/`data`/`id`/`parentId`/`timestamp`）都与 pi 自己 `session-manager.js` 里的 `appendCustomEntry` 一致。**没有任何内容标记能把两者分开**，而 `fingerprint_line` 对它的判定就是 `Pi`——这是字节层面的实话。
+
+所以 AutoClaw 的来源判定**不看字节，看目录**：路径必须真的是 `<root>/agents/<agentId>/sessions/<uuid>.jsonl`，且首行必须是那个 session 头（首行不是就拒收，不拿文件名兜底）。这与 Codex 用 `rollout-` 文件名做预筛是同一类做法：目录是证据，不是猜测。代价写在测试里：`the_bytes_themselves_fingerprint_as_pi` 把这件事钉住——哪天它变了，就可以回来重新讨论。
+
+**二、永久删除源会话不提供。** §16.3 要求内容指纹必须指回本 Agent，而这份证据不存在（同上一段）。所以不实现 `prepare_source_session_deletion`，走 trait 默认的明确拒绝；新增测试钉住"拒绝必须响亮且不碰文件"。
+
+**三、CLI 存在，但 NoEnding 起不动它**（这条才是真正卡住的地方）：`openclaw` 在应用包里，命令形状也是查得到的——新建/一次性 `openclaw agent --agent <id> --message <text> --local --json`（`--agent` 可省，但至少要给一个 session selector），交互式 `openclaw chat`（= `openclaw tui --local`，`--session <key>` 选会话）。问题是**它的状态根只能通过 `OPENCLAW_STATE_DIR` 环境变量指定**，而桌面版把状态放在 `~/.openclaw-autoclaw`（非默认的 `~/.openclaw`）；`AgentCommand` 只有 `program/args/cwd`，没有 env。硬启的后果不是报错，是**静默指向另一个空状态目录**——比不能启动糟得多。因此 `cli_names(AutoClaw)` 为空、`detect()` 恒 None、三个 builder 明确报错，并把"平台层能传 env"记为解锁条件。另一个次要原因：新建要指定 AutoClaw 自己的哪一个 agent（它内置 6 个），NoEnding 没有这个概念，也不该替用户默认。
+
+**四、身份带上了 agentId**：`agent_session_id = "<agentId>:<uuid>"`。AutoClaw 自己就用 `agent:<id>:<suffix>` 作 session key，而它的多个 agent 是彼此独立的存储，理论上可能给出同一个 uuid——`UNIQUE(agent, agent_session_id)` 只按 Agent 去重，不带 agentId 就会互相覆盖。
+
+**验证**：`[fingerprint] AutoClaw: 1 sessions discovered under /Users/jqk/.openclaw-autoclaw`，真实根目录零错判；适配器单测覆盖"只认自己的目录形状"（索引文件、trajectory 文件、位置不对的同名文件、首行不是 session 头的文件都被拒）、"摄入保留对话、丢掉 thinking/toolCall/toolResult"、以及上面那两条钉住事实的测试；`autoclaw_truncate_rewrite_dedup` 并入 identity_suite；`qoder_suite` 也补上了 §46 的删除矩阵（Qoder 支持删除，AutoClaw 不支持，两者都有测试钉住）。`cargo fmt --check` / `cargo test --all-targets`（31 个目标全绿）。

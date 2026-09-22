@@ -72,6 +72,15 @@ fn pi_line(role: &str, text: &str) -> String {
     )
 }
 
+fn autoclaw_line(role: &str, text: &str) -> String {
+    // AutoClaw = the pi core's entry shape (方案 §37.6); ids derive from
+    // content so rescans hash identically.
+    let id = format!("e-{}-{}", role, text);
+    format!(
+        r#"{{"type":"message","id":"{id}","parentId":"prev","timestamp":"2026-09-13T10:00:00Z","message":{{"role":"{role}","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+    )
+}
+
 fn qoder_line(role: &str, text: &str) -> String {
     // Qoder = Claude's shape + a sessionId; the deterministic uuid keeps
     // rescans hash-identical so dedup can be observed.
@@ -244,6 +253,13 @@ identity_suite!(
     noending::adapters::qoder::QoderAdapter,
     qoder_line,
     qoder_line
+);
+identity_suite!(
+    autoclaw_truncate_rewrite_dedup,
+    Agent::AutoClaw,
+    noending::adapters::autoclaw::AutoClawAdapter,
+    autoclaw_line,
+    autoclaw_line
 );
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a
