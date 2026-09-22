@@ -3023,3 +3023,25 @@ components.css      .event 左右各 8px 内距 + 负 margin；.event.openable �
 2. **展开按钮平时 `opacity: 0`，悬停 / `:focus-visible` 才现形**。整行可点已经足够可发现（配合 `cursor: pointer` 与 title），每条消息常驻一个图标会把密排列表弄脏；但它必须留在 DOM 里，键盘用户才能 Tab 到它。
 
 **验证**（`/tmp/noending-header-preview/messages.html`，真实样式表，量的是坐标不是观感）：`.event` 左右各外扩 8px（正文位置不变，分隔线同宽）；展开按钮 22×22、距事件右缘 8px；`min(920px, 92vw)` 在 634px 视口下算出 583px（真机 1360px 视口则是 920px）。`tsc --noEmit` / `vitest run`（65 passed）/ `vite build` 全绿。
+
+## 36.22 会话消息：弹窗内的 Markdown 预览（默认仍是原文）
+
+承接 §36.21 的第 2 条。弹窗开了以后，正文默认按**原文**（pre-wrap）显示，只在内容看起来像 Markdown 时，标题栏右侧才出现「原文 / 预览」分段开关——默认停在原文，切到预览才走渲染。这样"复制全文"拿到的永远是 Agent 的原始输出，不会被渲染结果替换掉；预览是一个**可选的阅读视图**，不是新的真相来源（AGENTS.md: Provenance Fidelity）。
+
+**依赖**：`react-markdown@10.1.0` + `remark-gfm@4.0.1`（表格 / 删除线 / 任务列表）。两者都只做 AST → React 元素，不碰 `innerHTML`。
+
+**安全边界（为什么不开 `rehype-raw`）**：转录文本是**不可信输入**——里面是 Agent 与工具的原始输出，用户没法预先审查。这个 webview 又能调 Tauri IPC（`window.__TAURI__`），一旦 raw HTML 被渲染，一个 `<img onerror>` 就等价于本地代码执行。所以：
+
+```text
+rehype-raw        不装、不启用 —— 原始 HTML 一律当纯文本节点渲染
+a / img           components 里改写成 <span>：链接显示文字 + title 提示、图片降级为「[alt] src」
+                  —— 防两件事：把应用导航走（webview 跳走就回不来了）、以及远程请求泄露阅读行为
+```
+
+`img` 不渲染成真 `<img>` 还有个副作用是好的：消息里的图片链接不会去外部拉取，弹窗打开不发任何网络请求。`md-link` / `md-img` 只是上色 + 弱化，不带 `href` / `src`，点了没有任何行为。
+
+**触发条件 `looksLikeMarkdown(text)`**：有围栏代码块、`#` 标题、列表、引用、表格、`**加粗**` 或行内 `` `code` `` 之一才算。普通散文不给开关——给一段没有 Markdown 的纯文本加个切不出差别的开关，只会让人怀疑自己看错了。该函数与 `MD_COMPONENTS` 一起从 `SessionMessage.tsx` 导出，供测试直接断言。
+
+**样式**：`.md-body` 是作用域内的完整一套（标题 14px、`pre`/`code` 走 `--bg-panel`、引用、表格、`hr`、链接用强调色），不继承全局 Markdown 约定，避免污染应用其它地方。行内代码与围栏代码同底色，靠 `pre` 的内距区分块级。
+
+**验证**：`SessionMessage.test.tsx` 新增 5 条——截断 + 弹窗（§36.21）、无文本事件不弹窗、**预览注入的 DOM 里 `script` / `a` / `img` 均为 0 个且 `h1` 正常渲染**、纯散文不给「预览」页签、`looksLikeMarkdown` 正反例。`/tmp/noending-header-preview/messages.html` 用真实样式表 + 手写的 react-markdown 产物渲染截图核对：分段开关、标题、行内 code + 加粗、被中和的链接（蓝色 span）与图片（`[图] …`）、代码块、列表、引用、表格、`hr`、底部「复制全文 / 关闭」吸底。`tsc --noEmit` / `vitest run`（70 passed）/ `vite build` 全绿。
