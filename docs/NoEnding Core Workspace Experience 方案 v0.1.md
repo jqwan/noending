@@ -3059,3 +3059,25 @@ a / img           components 里改写成 <span>：链接显示文字 + title �
 **没有新开一条左对齐的竖线 / 头像位**：多一列头像会把每条消息的正文再压窄 30px，而 240 字截断本来就短，代价不值。两侧的底色差异已经足够。
 
 **验证**（`/tmp/noending-header-preview/chat.html`，真实样式表，724px = 右侧栏上线后的实际消息列宽，明暗两套都看过）：用户气泡右缘 748px = 行右缘（行宽 740 + 左右各 8px 内距），Agent 气泡左缘 24px = 行左缘；两侧气泡宽度上限 594px = 724 × 82%；用户气泡圆角 `12px 12px 6px`（右下收角）、Agent `12px 12px 12px 6px`（左下收角）；技术事件仍是 1px 顶边线 + 724px 整行。`SessionMessage.test.tsx` 增加一条钉住三个类名（CSS 挂了单测看不出来，所以把类名钉在测试里）。`tsc --noEmit` / `vitest run`（71 passed）/ `vite build` 全绿。
+
+## 36.24 会话消息：气泡内直接预览 Markdown，热区收到气泡（修订 §36.21–§36.23）
+
+用户看过 §36.23 的效果后提了五条，都在这一节：
+
+```text
+1  悬浮选中的范围是气泡，不是整条消息栏
+2  去掉「查看完整消息」图标按钮 —— 气泡自己就是入口，给它悬浮效果就够
+3  全文弹窗默认显示 Markdown 预览
+4  弹窗右下角「复制全文」「关闭」两个按钮样式要一致
+5  列表气泡里显示的就是 Markdown 预览版
+```
+
+**热区从整行收到气泡（1、2）**：整行可点会让「悬停到哪儿」变成一条与内容无关的宽条，而"点开这条消息"这件事属于这条消息本身。于是 `.event.openable` 整行悬停底色、`.event-open` 图标按钮、以及 §36.21 为它准备的 `expand` 图标全部删掉；点击与 `:hover` 都移到 `.body` 上。键盘可达不能跟着丢——`.body` 变成 `role="button"` + `tabIndex=0` + Enter/Space 处理，焦点环交给全局的 `:focus-visible`（a11y 树里它读作 "button" + "点击查看完整消息"，与原来的图标按钮等价）。悬停底色不能用 `--bg-hover`：那会把用户气泡的蓝调洗掉，看起来像换了个人在说话，所以新增 `--accent-wash-hover`（亮 `#e2e8ff` / 暗 `#2d3763`）。
+
+**气泡里直接渲染 Markdown（5）**：看着更好，但**不能再用字数截断**——240 字切在 ``` 或 `**` 中间，后半段会被整块渲染成代码或凭空多出几个星号。改成按高度收口：`max-height: 132px`（约 6 行）+ `overflow: hidden`，再叠一层底部 26px 的渐隐提示还有下文。渐隐必须**只在真的收角时才挂**，否则内容本来就只有两行的气泡会被擦掉最后两行——所以 `is-clamped` 由 JS 量 `scrollHeight > clientHeight` 得出（`useLayoutEffect`，早于绘制）。纯文本消息仍按 240 字截断，因为纯文本可以安全地切。
+
+**弹窗默认预览（3）**：`previewable` 由列表侧算好的 `md` 传进来（现在两处判断一致，弹窗不再自己 `looksLikeMarkdown`），`useState(previewable)` 直接默认落在预览上。「原文」页签保留——复制全文拿到的仍然是原始文本（Provenance Fidelity）。
+
+**两个按钮同款（4）**：都改成 `btn`（原为 `btn small` + `btn primary`）。这是个只读查看器，没有主次动作，硬分主次反而让人以为「关闭」是推荐操作。
+
+**验证**（`/tmp/noending-header-preview/chat2.html`）：把那段收角判断原样搬到页面里跑，短 md 气泡 `scrollHeight 38 = clientHeight 38` → 不加 `is-clamped`、无渐隐；长 md 气泡 `252 > 132` → 加了，`mask-image` 生效。`--accent-wash-hover` 解析为 `#e2e8ff`，`hover` 命中后用户气泡底色实测变成 `rgb(226,232,255)`，同排 Agent 气泡仍是 `#f5f5f3`。两个页脚按钮 class 都是 `btn`、高度都是 33px。明暗两套都截了图。`tsc --noEmit` / `vitest run`（72 passed）/ `vite build` 全绿。

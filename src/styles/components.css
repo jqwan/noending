@@ -362,14 +362,21 @@
 .event.tool .body { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); }
 .event.system { opacity: 0.65; }
 .event.system .body { font-size: 12px; color: var(--text-muted); }
-/* §36.21：整行可点开全文（列表里只显示前 240 字）。正文仍要能拖选复制，
-   所以点击时只确认「没有选中文字」，不阻止选择。展开按钮只是键盘与可发现性的入口，
-   平时淡出，悬停 / 聚焦时才现形，免得每条消息都挂一个图标。 */
-.event.openable { cursor: pointer; }
-.event.openable:hover { background: var(--bg-hover); }
-.event .head .event-open { margin-left: auto; width: 22px; min-height: 22px; padding: 0; opacity: 0; transition: opacity .12s; }
-.event.is-user .head .event-open, .event.is-agent .head .event-open { margin-left: 0; }
-.event:hover .head .event-open, .event .head .event-open:focus-visible { opacity: 1; }
+/* §36.24：热区从整行收到气泡——整行的悬停底色是条与内容无关的宽条，而点开这件事
+   属于这条消息本身。按钮删掉了（气泡自己就是入口），键盘可达靠 role + tabIndex，
+   焦点环由全局的 :focus-visible 给。正文仍要能拖选复制，所以点击时只确认
+   「没有选中文字」，不阻止选择。 */
+.event .body.clickable { cursor: pointer; transition: background .12s; }
+.event.is-user .body.clickable:hover { background: var(--accent-wash-hover); }
+.event.is-agent .body.clickable:hover { background: var(--bg-hover); }
+/* Markdown 预览直接渲染在气泡里（§36.24）：不能再按字数切——切在 ``` 或 ** 中间会把
+   后半段整块渲染成代码。改成按高度收口 + 底部渐隐，点开看全文。
+   is-clamped 由 JS 量出来：内容本来就短的时候挂渐隐，会把最后两行擦掉。 */
+.event .body.md-body { white-space: normal; max-height: 132px; overflow: hidden; }
+.event .body.md-body.is-clamped {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+}
 
 /* 全文弹窗的正文：保留原始换行，宽度交给 .modal.wide，滚动交给弹窗自己
    （不在这里再套一层滚动区，否则会出现嵌套滚动条）。 */

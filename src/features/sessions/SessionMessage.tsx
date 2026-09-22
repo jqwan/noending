@@ -1,10 +1,9 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Modal, copyToClipboard } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import Icon from "../../components/Icon";
 import { formatDateTime } from "./SessionTable";
 
 export interface SessionMessageData {
@@ -16,7 +15,8 @@ export interface SessionMessageData {
 }
 
 /**
- * 列表里每条最多显示这么多字，全文点开弹窗看（§36.21）。
+ * 纯文本消息在列表里最多显示这么多字，全文点开弹窗看（§36.21）。
+ * Markdown 消息不走这里——渲染结果不能按字数切（§36.24），改用高度收口。
  *
  * 不在这里「展开全文」：这个流是密排的一列，就地展开会把后面的消息越推越远，
  * 而且长内容（代码、JSON、diff）在 724px 宽的消息列里折行折得很难读；
@@ -41,11 +41,12 @@ const EVENT_KIND_LABELS: Record<string, string> = {
  * 视觉差异保持克制。 */
 export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   const [open, setOpen] = useState(false);
+  const [clamped, setClamped] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
   // 转录里的正文常带首尾空行（Codex 的尾部换行、pi 的一条前后各两个），
   // 而 `.event .body` 是 pre-wrap，不 trim 就会在上下渲染出空白行。
   const text = (msg.text ?? "").trim();
   const readable = text !== "";
-  const truncated = text.length > TRUNCATE_AT;
 
   // 三种观感（§36.23）：用户右、Agent 左，都是气泡；其余是「系统噪音」，保持弱化的整行。
   const isProse = msg.kind === "user_message" || msg.kind === "assistant_message";
@@ -56,6 +57,15 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
         ? "tool system is-tech"
         : "tool is-tech";
 
+  // 气泡里显示的就是 Markdown 预览（§36.24）。技术事件不参与：它们不是对话，也没有气泡。
+  const md = isProse && looksLikeMarkdown(text);
+
+  // 只有真的收了角才渐隐。内容本来就短的时候挂一层渐隐，会把最后两行擦掉。
+  useLayoutEffect(() => {
+    const el = bodyRef.current;
+    setClamped(el !== null && el.scrollHeight > el.clientHeight + 1);
+  }, [text, md]);
+
   const kindLabel = EVENT_KIND_LABELS[msg.kind] ?? null;
   const who =
     msg.kind === "user_message" ? "用户"
@@ -63,52 +73,57 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
       : kindLabel ?? "其他事件";
   const stamp = `#${msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
 
+  // 整行可点会让「悬停到哪儿」变成一条与内容无关的宽条，而点开这件事属于这条消息本身，
+  // 所以热区和悬浮效果都只落在气泡上（§36.24）。键盘可达靠 role + tabIndex，
+  // 焦点环由全局的 :focus-visible 给。
   return (
     <>
-      <div
-        className={`event ${cls}${readable ? " openable" : ""}`}
-        title={readable ? "点击查看完整消息" : undefined}
-        onClick={readable ? (e) => {
-          // 正文要能拖选复制：点在自己选中的文字上不算「点开」，
-          // 否则一次划选就会弹出弹窗。
-          if (e.target instanceof HTMLElement && e.target.closest("button, a, input, select")) return;
-          if ((window.getSelection()?.toString() ?? "") !== "") return;
-          setOpen(true);
-        } : undefined}
-      >
+      <div className={`event ${cls}`}>
         <div className="head">
           <span className="who" title={msg.kind}>{who}</span>
           <span className="when mono">{stamp}</span>
-          {readable && (
-            <button className="btn small ghost icon-button event-open"
-              aria-label="查看完整消息" title="查看完整消息" onClick={() => setOpen(true)}>
-              <Icon name="expand" />
-            </button>
-          )}
         </div>
-        <div className="body">
-          {readable
-            ? (truncated ? text.slice(0, TRUNCATE_AT) + "…" : text)
-            : <span className="muted">（该事件没有可读文本）</span>}
+        <div
+          ref={bodyRef}
+          className={`body${md ? " md-body" : ""}${readable ? " clickable" : ""}${clamped ? " is-clamped" : ""}`}
+          role={readable ? "button" : undefined}
+          tabIndex={readable ? 0 : undefined}
+          title={readable ? "点击查看完整消息" : undefined}
+          onClick={readable ? (e) => {
+            // 正文要能拖选复制：点在自己选中的文字上不算「点开」，
+            // 否则一次划选就会弹出弹窗。
+            if (e.target instanceof HTMLElement && e.target.closest("button, a, input, select")) return;
+            if ((window.getSelection()?.toString() ?? "") !== "") return;
+            setOpen(true);
+          } : undefined}
+          onKeyDown={readable ? (e) => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(true); }
+          } : undefined}
+        >
+          {!readable
+            ? <span className="muted">（该事件没有可读文本）</span>
+            : md
+              ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{text}</ReactMarkdown>
+              : (text.length > TRUNCATE_AT ? text.slice(0, TRUNCATE_AT) + "…" : text)}
         </div>
       </div>
       {open && (
-        <MessageModal who={who} stamp={stamp} text={text} mono={!isProse} onClose={() => setOpen(false)} />
+        <MessageModal who={who} stamp={stamp} text={text} mono={!isProse} previewable={md} onClose={() => setOpen(false)} />
       )}
     </>
   );
 }
 
-/** 全文弹窗：整块宽度显示，可复制；看起来像 Markdown 时额外给一个「预览」页签。 */
-function MessageModal({ who, stamp, text, mono, onClose }: {
+/** 全文弹窗：整块宽度显示，可复制；是 Markdown 的话默认就停在预览上（§36.24）。 */
+function MessageModal({ who, stamp, text, mono, previewable, onClose }: {
   who: string;
   stamp: string;
   text: string;
   mono: boolean;
+  previewable: boolean;
   onClose: () => void;
 }) {
-  const [preview, setPreview] = useState(false);
-  const canPreview = looksLikeMarkdown(text);
+  const [preview, setPreview] = useState(previewable);
 
   const copyAll = async () => {
     const ok = await copyToClipboard(text);
@@ -117,7 +132,7 @@ function MessageModal({ who, stamp, text, mono, onClose }: {
 
   return (
     <Modal title={`${who} · ${stamp}`} wide onClose={onClose}>
-      {canPreview && (
+      {previewable && (
         <div className="settings-seg" role="group" aria-label="显示方式" style={{ marginBottom: 12 }}>
           <button className={preview ? "" : "on"} aria-pressed={!preview} onClick={() => setPreview(false)}>原文</button>
           <button className={preview ? "on" : ""} aria-pressed={preview} onClick={() => setPreview(true)}>预览</button>
@@ -133,8 +148,8 @@ function MessageModal({ who, stamp, text, mono, onClose }: {
         <div className={`msg-full${mono ? " mono" : ""}`}>{text}</div>
       )}
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
-        <button className="btn small" onClick={copyAll}>复制全文</button>
-        <button className="btn primary" onClick={onClose}>关闭</button>
+        <button className="btn" onClick={copyAll}>复制全文</button>
+        <button className="btn" onClick={onClose}>关闭</button>
       </div>
     </Modal>
   );

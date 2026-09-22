@@ -19,8 +19,6 @@ const paths = {
   more: "M4.5 9h.01M9 9h.01M13.5 9h.01",
   // 回收站（入口）用归档盒：垃圾桶留给「移入回收站」那个动作，两个含义不再共用图形。
   archive: "M3 4h12v3H3ZM4.5 7v7h9V7M7.5 10.5h3",
-  // 看完整内容：四角外扩。
-  expand: "M3 6.5V3h3.5M11.5 3H15v3.5M15 11.5V15h-3.5M6.5 15H3v-3.5",
 };
 
 export default function Icon({ name }: { name: keyof typeof paths }) {
