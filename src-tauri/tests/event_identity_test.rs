@@ -72,6 +72,15 @@ fn pi_line(role: &str, text: &str) -> String {
     )
 }
 
+fn qoder_line(role: &str, text: &str) -> String {
+    // Qoder = Claude's shape + a sessionId; the deterministic uuid keeps
+    // rescans hash-identical so dedup can be observed.
+    let uuid = format!("u-{}-{}", role, text);
+    format!(
+        r#"{{"type":"{role}","uuid":"{uuid}","timestamp":"2026-09-13T10:00:00Z","sessionId":"qs","cwd":"/repo","message":{{"role":"{role}","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+    )
+}
+
 /// One ingest round-trip exactly as production does it.
 fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
     let cursor = db.get_source_cursor(&session.id).unwrap();
@@ -228,6 +237,13 @@ identity_suite!(
     noending::adapters::pi::PiAdapter,
     pi_line,
     pi_line
+);
+identity_suite!(
+    qoder_truncate_rewrite_dedup,
+    Agent::Qoder,
+    noending::adapters::qoder::QoderAdapter,
+    qoder_line,
+    qoder_line
 );
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a

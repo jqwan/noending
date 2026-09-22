@@ -225,6 +225,7 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
             "codex" => Agent::Codex,
             "claude_code" | "claude" => Agent::ClaudeCode,
             "pi" => Agent::Pi,
+            "qoder" | "qcoder" => Agent::Qoder,
             _ => Agent::Codex,
         },
         agent_session_id: format!("as-{name}"),

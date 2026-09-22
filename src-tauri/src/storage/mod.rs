@@ -507,7 +507,7 @@ impl Db {
     /// Insert the standard agent data roots as disabled defaults. Idempotent.
     fn ensure_default_ingest_sources_conn(conn: &Connection) -> Result<()> {
         for agent in crate::domain::Agent::all() {
-            if let Some(root) = crate::platform::paths::resolve_agent_data_dir(agent) {
+            if let Some(root) = crate::platform::paths::resolve_agent_data_dir(*agent) {
                 conn.execute(
                     "INSERT OR IGNORE INTO ingest_sources (id, agent, path, enabled, origin, created_at)
                      VALUES (?1, ?2, ?3, 0, 'default', ?4)",

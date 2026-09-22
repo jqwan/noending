@@ -16,6 +16,7 @@
 pub mod claude;
 pub mod codex;
 pub mod pi;
+pub mod qoder;
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -172,15 +173,19 @@ pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
 ///
 /// Filename conventions (rollout-*.jsonl, *.jsonl under some directory) are
 /// pre-filters, not guarantees — and no format except Codex names its
-/// writer. The three on-disk formats are mutually exclusive, so the first
-/// few parseable lines decide deterministically:
+/// writer. The on-disk formats are mutually exclusive *except* for Qoder,
+/// whose transcript is Claude's plus Qoder-only lines, so order matters:
 /// - Codex: every line is the `{ordinal, payload, type}` envelope;
+/// - Qoder: one of its own line types (`workspace-directories`,
+///   `runtime-config`, `worktree-state`, `active-leaf`, `last-prompt`) —
+///   checked before Claude, or every Qoder file would read as Claude;
 /// - Claude Code: event lines carry `{sessionId, parentUuid/uuid, message}`;
 /// - Pi: `{type:"session", id}` header or `{parentId, provider|modelId|
 ///   thinkingLevel}` event lines.
 ///
 /// Returns None when the file is not a recognizable session file of any
-/// known agent.
+/// known agent — including files whose content is genuinely ambiguous, which
+/// must be left unclaimed rather than guessed at (方案 §37.5).
 pub fn detect_format(path: &Path) -> Option<Agent> {
     const MAX_PARSE_LINES: usize = 10;
     let file = std::fs::File::open(path).ok()?;
@@ -216,6 +221,21 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
         && v.get("type").is_some()
     {
         return Some(Agent::Codex);
+    }
+    // Qoder BEFORE Claude, and deliberately so (方案 §37.5): its transcript is
+    // Claude-shaped, so every Qoder message line would satisfy the Claude
+    // branch below. These five line types are Qoder's own bookkeeping and are
+    // re-emitted throughout the file (workspace-directories alone repeats
+    // dozens of times), so the head always carries one.
+    if matches!(
+        v.get("type").and_then(|t| t.as_str()),
+        Some("workspace-directories")
+            | Some("runtime-config")
+            | Some("worktree-state")
+            | Some("active-leaf")
+            | Some("last-prompt")
+    ) {
+        return Some(Agent::Qoder);
     }
     // Claude event chain: sessionId plus the parentUuid/uuid pair.
     // Housekeeping lines (queue-operation etc.) carry sessionId alone and
@@ -574,6 +594,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(codex::CodexAdapter),
         Box::new(claude::ClaudeAdapter),
         Box::new(pi::PiAdapter),
+        Box::new(qoder::QoderAdapter),
     ]
 }
 
@@ -868,6 +889,44 @@ mod fingerprint_tests {
         assert_eq!(fingerprint_line(&other), None);
     }
 
+    /// Qoder's transcript IS Claude's format plus bookkeeping lines, so the
+    /// only thing standing between a Qoder file and being read as Claude is
+    /// branch order in `fingerprint_line` (方案 §37.5).
+    #[test]
+    fn qoder_is_claimed_before_claude() {
+        // A Qoder bookkeeping line: no uuid/sessionId pair, but decisive.
+        let qoder = serde_json::json!({
+            "type": "workspace-directories", "sessionId": "s", "directories": ["/repo"]
+        });
+        assert_eq!(fingerprint_line(&qoder), Some(Agent::Qoder));
+        let last_prompt = serde_json::json!({"type": "last-prompt", "sessionId": "s"});
+        assert_eq!(fingerprint_line(&last_prompt), Some(Agent::Qoder));
+
+        // A Qoder message line is indistinguishable from Claude's on its own —
+        // which is exactly why the bookkeeping line has to be in the head.
+        let claude_shaped = serde_json::json!({
+            "type": "user", "sessionId": "s", "uuid": "u", "parentUuid": null,
+            "message": {"role": "user", "content": []}
+        });
+        assert_eq!(fingerprint_line(&claude_shaped), Some(Agent::ClaudeCode));
+
+        // A whole Qoder file (head included) resolves to Qoder.
+        let dir = std::env::temp_dir().join(format!("noending-fp-qoder-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&qoder).unwrap(),
+                serde_json::to_string(&claude_shaped).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(detect_format(&path), Some(Agent::Qoder));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn detect_format_reads_only_the_head_of_a_file() {
         let dir = std::env::temp_dir().join(format!("noending-fp-{}", std::process::id()));
@@ -890,63 +949,46 @@ mod fingerprint_tests {
 
     /// Real-data check against the local agent roots:
     /// `cargo test real_agent_files_match_fingerprints -- --ignored --nocapture`
+    ///
+    /// The guarantee asserted here is the one that matters: **discovery never
+    /// returns a session belonging to another agent**. It is stated at the
+    /// discovery level rather than per file, because a file's content can be
+    /// genuinely ambiguous — Qoder's sub-agent transcripts repeat Claude
+    /// Code's line shapes and are therefore claimed by nobody (方案 §37.5) —
+    /// and a file nobody claims is not a misattribution.
     #[test]
     #[ignore]
     fn real_agent_files_match_fingerprints() {
         use crate::platform::paths::resolve_agent_data_dir;
         for agent in Agent::all() {
-            let Some(root) = resolve_agent_data_dir(agent) else {
+            let Some(root) = resolve_agent_data_dir(*agent) else {
                 continue;
             };
             if !root.is_dir() {
                 continue;
             }
-            let mut checked = 0usize;
-            let mut skipped = 0usize;
-            let mut stack = vec![root];
-            while let Some(dir) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in rd.filter_map(|e| e.ok()) {
-                    let p = entry.path();
-                    if p.is_dir() {
-                        stack.push(p);
-                        continue;
-                    }
-                    let is_jsonl = p.extension().and_then(|e| e.to_str()) == Some("jsonl");
-                    let is_rollout = p
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("rollout-"))
-                        .unwrap_or(false);
-                    let candidate = match agent {
-                        Agent::Codex => is_jsonl && is_rollout,
-                        _ => is_jsonl,
-                    };
-                    if !candidate {
-                        continue;
-                    }
-                    checked += 1;
-                    // The hard guarantee: never misattribute a file to the
-                    // wrong agent. Non-session files (e.g. ~/.claude/
-                    // history.jsonl) legitimately fingerprint as None.
-                    match detect_format(&p) {
-                        Some(detected) => assert_eq!(
-                            detected,
-                            agent,
-                            "cross-agent misattribution: {}",
-                            p.display()
-                        ),
-                        None => skipped += 1,
-                    }
-                }
+            let discovered = adapter_for(*agent)
+                .discover_sessions_in(&[root.clone()], &|_| false)
+                .unwrap_or_else(|e| panic!("{} discovery failed: {e}", agent.display_name()));
+            for s in &discovered {
+                assert_eq!(
+                    s.agent,
+                    *agent,
+                    "cross-agent misattribution: {}",
+                    s.path.display()
+                );
+                assert!(
+                    !s.agent_session_id.is_empty() && s.path.starts_with(&root),
+                    "{}: bad discovery result {:?}",
+                    agent.display_name(),
+                    s.path
+                );
             }
             eprintln!(
-                "[fingerprint] {}: {} files verified, {} non-session files skipped",
+                "[fingerprint] {}: {} sessions discovered under {}",
                 agent.display_name(),
-                checked - skipped,
-                skipped
+                discovered.len(),
+                root.display()
             );
         }
     }

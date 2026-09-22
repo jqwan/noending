@@ -3098,3 +3098,115 @@ compact    5 条，最长 22 字    —— codex / pi 是固定串 "conversation
 **顺带修的一处排版**：系统事件原来的正文样式是 11.5px 等宽 + muted（`.event.tool .body`），一份文档用等宽小字渲染就不叫预览了。所以 md 落在技术事件里时把字体归回正文字体、字号归回 `.md-body` 的 13px（`.event.is-tech .body.md-body`），颜色与 `opacity: .65` 保持不动——它仍然是系统噪音，只是有结构。
 
 **验证**（`/tmp/noending-header-preview/chat2.html`）：技术事件里的 md 实测 `font-family: Inter…`（不再是等宽）、13px、颜色仍是 muted `rgb(138,138,134)`、事件 `opacity: .65`、`h2` 14px、`max-height` 132px 且已加 `is-clamped` 渐隐。`SessionMessage.test.tsx` 增加一条：`system` 事件里的 md 在行内就渲染出 `<h2>`，点开后弹窗的「预览」页签是按下状态。`tsc --noEmit` / `vitest run`（73 passed）/ `vite build` 全绿。
+
+# 37. 多 Agent 接入：六个新适配器
+
+用户要求把机器上另外六个 Agent 也接进来（qcoder / dsh / zcode / workbuddy / gemini / autoclaw）。动手前先把六家的真实形态摸清——结论是它们并不同质：**只有两家有可执行 CLI，四家只能摄入历史**；文件形态还分成四种，其中两种现有 reader 读不了。
+
+## 37.1 摸底结论
+
+```text
+Qoder CN   ~/.qoder-cn/projects/<slug>/<sessionId>.jsonl
+           与 Claude Code 同形（sessionId/uuid/parentUuid/message.content）；
+           追加式（实测 6121 行、3032 个 uuid、零重复）。
+           无 headless CLI：~/.qoder-cn/bin 只有 qoder-cn-computer-use，
+           entry/qodercn 要找的 qoderclicn 不存在。→ 只摄入
+
+dsh        ~/.dsh/sessions/<cwd-slug>/<session-id>/session.v2.jsonl.zstd
+           zstd 压缩的追加式 JSONL：首行 {type:"session",version,id,cwd,createdAt}，
+           之后每行 {type,seq,time,data}。CLI: dsh --profile headless "..." 实测可用；
+           --resume 只在文档里出现过，且 tui profile 未安装。→ 摄入 + 执行，恢复待确认
+
+ZCode      ~/.zcode/cli/db/db.sqlite（WAL，148MB，原地更新）
+           没有按会话的文件；cli/rollout/model-io-*.jsonl 是原始模型 I/O，不是转录。
+           app.asar 里零个 --resume/--print/run 字符串，无 CLI。→ 只摄入（新数据源形态）
+
+WorkBuddy  ~/.workbuddy/projects/<slug>/<id>.jsonl
+           追加式自定义 JSONL（type:"message" + content[].type ∈ input_text/output_text，
+           另有 reasoning / function_call / ai-title 行）。Electron GUI，无 CLI。→ 只摄入
+
+Gemini     ~/.gemini/tmp/<slug>/chats/session-*.jsonl
+           每行是**整份 messages 的快照**（{"$set":{messages:[...]}}），不是逐条追加；
+           而且本机没有 gemini CLI——这 10 个文件全是 Antigravity 的 a2a server 写的，
+           每条 sessionId 恒为 "a2a-server"，会话 id 只能从文件名取。→ 只摄入
+
+AutoClaw   ~/.openclaw-autoclaw/agents/<agentId>/sessions/<uuid>.jsonl
+           追加式 JSONL（首行 type:"session" v3，之后 type:"message" +
+           message.role ∈ user/assistant/toolResult + message.content[].text）。
+           CLI 存在：bundle 自带 node 跑 gateway/openclaw/openclaw.mjs；
+           新建/一次性 openclaw agent --agent X --message ... --local --json，
+           恢复 --session-key agent:X:<suffix>，需 OPENCLAW_STATE_DIR。
+           → 摄入 + 新建 + 恢复 + 执行（命令形状取自随包文档，未实机验证）
+```
+
+## 37.2 四种数据源形态
+
+现有 `read_jsonl_delta` 覆盖的只是第一种，另外三种要么换 reader，要么换策略：
+
+```text
+A 追加式纯文本 JSONL   → 复用 read_jsonl_delta          Qoder / WorkBuddy / AutoClaw
+B 追加式 zstd JSONL    → 解压后按同一套游标规则         dsh
+C 原地更新的 SQLite    → 快照式读取（见 §37.3）          ZCode
+D 整行整份快照的 JSONL → 每次变化全量解析 + 身份去重      Gemini
+```
+
+**C 为什么不违背游标契约**：`session_cursors` 存的是「源文件的身份 + 已消费前缀指纹」，文件身份用 inode，而 SQLite 是原地更新——它天然落进现有的 `rewrite` 分支（同尺寸改 mtime 或尺寸变化但前缀对不上）。所以适配器只要做到「每次调用返回该会话当前的全部消息」，storage 的事件身份去重会把已摄入的丢掉。代价是每次变化都全量扫一遍该会话（ZCode 全库 6619 条消息，可接受），换来的是不动游标模型。
+
+**D 同理**：Gemini 的每一行都携带完整历史，按行解析会把历史重复上报，但事件身份（source_event_id + 文本）相同 → 去重后只留一份。唯一要小心的是「消息被改写」会新增一条事件，这与其它 agent 的行为一致。
+
+## 37.3 每加一个 Agent 都要动的地方（增量清单）
+
+```text
+domain/models.rs        Agent 枚举 + all() + display_name/as_str/parse
+platform/paths.rs       agent_env_override（数据根的环境变量覆盖）+ agent_default_dir
+platform/exec_resolver.rs  可执行文件名候选（没有 CLI 的返回空 → detect() 永不成功）
+adapters/mod.rs         fingerprint_line 放行 + adapter_for 注册 + 「会话文件表」测试
+storage/mod.rs          ensure_default_ingest_sources_conn 自动带上（遍历 Agent::all()，
+                        已在每次打开库时幂等执行，老库也会补上新的默认源，且默认 disabled）
+agent_runtime/discovery/ 仅对有 CLI 的 agent 有效（模型/effort 探测）
+src/types.ts            前端 Agent 联合类型 + 显示名映射
+```
+
+四条工程约束（承 AGENTS.md 与既往决策）：
+
+1. **没安装就是不存在的来源**：`detect()` 返回 None 时，界面照旧显示"未安装"，不伪造路径；只摄入的 agent 永远不会有「新建 / 恢复」入口。
+2. **指纹宁可漏判不可错判**：Qoder 与 Claude 同形，`fingerprint_line` 必须让**更具体的特征优先**（Qoder 的 `workspace-directories` / `runtime-config` / `last-prompt` / `active-leaf` 行型，Claude 没有），否则会把 Qoder 的文件认成 Claude，进而用错误的解析器读它。
+3. **raw 文件只读**：六家的源文件一律只读打开（ZCode 的 SQLite 用只读模式），绝不写入、绝不迁移。
+4. **测试用临时 home**：所有新适配器的测试都在临时目录里造 fixture，绝不碰 `~/.qoder-cn`、`~/.dsh` 等真实数据，更不碰 live DB。
+
+## 37.4 顺序
+
+先做形态最简单、语料最实的，把公共管线验证透，再上前两种新 reader：
+
+```text
+37.5 Qoder（A 形态，本机最大的真实语料：7 个会话、最新一次是今天）
+37.6 AutoClaw（A 形态，且是六家里唯一带 CLI 的——能验证"新 agent 也能新建/恢复"）
+37.7 WorkBuddy（A 形态，只摄入）
+37.8 dsh（B 形态，引入 zstd 解压读取）
+37.9 Gemini（D 形态，快照式去重）
+37.10 ZCode（C 形态，SQLite 快照源）
+```
+
+每个适配器一个提交，各自带 fixture 与解析测试；全部完成后跑 `cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets` 与前端三件套。
+
+## 37.5 Qoder（A 形态，只摄入）
+
+`~/.qoder-cn/projects/<encoded-cwd>/<sessionId>.jsonl`，追加式 JSONL，实测最大的一个文件 6214 行、3032 个 uuid、零重复。转录是 **Claude Code 的形状加 Qoder 自己的行型**，所以两件事必须显式处理：
+
+**一、指纹判定必须让 Qoder 先于 Claude（否则静默错判）**。Qoder 的每一条消息行都带 `sessionId` + `uuid`/`parentUuid`，这正是现有 Claude 分支的判据——不特殊处理的话，Qoder 的文件会被认成 Claude，然后用 Claude 的解析器读它。两者都能解析成功、界面上也看不出坏，这正是"来源可以丢，但绝不能错"要防的那类 bug。所以 `fingerprint_line` 里 Qoder 的分支放在 Claude 之前，判据用**只有 Qoder 才写的行型**：
+
+```text
+workspace-directories / runtime-config / worktree-state / active-leaf / last-prompt
+```
+
+这些行型在真实文件里反复出现（`workspace-directories` 一个文件里就有 69 次），所以只在开头 10 行里扫也一定命中。
+
+**二、子 Agent 转录选择"不认领"**。`<sessionId>/subagents/agent-*.jsonl` 是子 Agent 的完整会话（主文件里 `isSidechain: true` 的行数为 0，也就是子 Agent 的对话只存在于这些文件里），但实测那个文件 76 行：前 75 行全是 Claude 形状的消息行，唯一的 Qoder 行型 `last-prompt` 在**最后一行**。也就是说按内容无法与前 10 行判定，而按路径认领等于用文件位置冒充来源、按字段认领（`agentId`/`parent_tool_use_id`）又没有证据能证明 Claude 不写这些字段。按 §37.3 的"宁可漏判不可错判"，这些文件**谁都不要**：Qoder 的发现按路径跳过 `subagents/` 目录。代价是子 Agent 的对话不进面板（与 §36.11 撤下工具事件同一取向——用户明确说过不想保留机器噪音）；要收进来的话，需要先拿到 Claude Code 真实转录做字段对照，那是另一件事。
+
+顺带记下这条路径名的另一个坑：子 Agent 文件每一行重复的是**父会话的** `sessionId`，若按字段取 id 会与父会话行撞 `UNIQUE(agent, agent_session_id)`，父会话的工作会被静默并进去——"不认领"同时避开了这个。
+
+**没有 CLI**：`~/.qoder-cn/bin` 只有 `qoder-cn-computer-use`，`entry/qodercn` 找的 `qoderclicn` 不存在，`ipc/` 是空的。所以 `detect()` 恒返回 None，三个 builder 一律返回错误（而不是编一个命令行出来），`capabilities_of` 三个字段都是 `unsupported`，模型发现返回 `Unavailable`——界面会如实显示"未安装"，新建/恢复入口不会出现。
+
+**改动清单**：`domain/models.rs`（Agent 枚举加 `Qoder`，`all()` 改成返回切片）、`platform/paths.rs`（数据根 `~/.qoder-cn`，无环境变量覆盖——返回空串表示"这个 Agent 没有文档化的覆盖变量"，不编名字）、`platform/exec_resolver.rs`（新增 `cli_names()`，空表示无 CLI；`resolve()` 对无 CLI 的 Agent 给出"只读取历史会话"而不是 PATH 报错）、`adapters/mod.rs`（注册 + 指纹 + 位移到 discovery 层的真实数据校验）、`adapters/qoder.rs`、`agent_runtime/{capabilities,discovery}`、`src/types.ts` 与 `AgentRuntimeSettings`。
+
+**验证**：真实根目录的跨 Agent 校验从"逐文件指纹"改成"逐 Agent 发现结果"——`[fingerprint] Qoder: 7 sessions discovered under /Users/jqk/.qoder-cn`，四个已接入 Agent 各自 0 错判。逐文件那条断言其实站不住：内容本身可以是有歧义的（Qoder 的子 Agent 文件就是），"没人认领"不等于"错判"。另外新增：`agents_without_a_cli_refuse_to_build_a_command`（无 CLI 的 Agent 三个 builder 必须报错、`detect()` 必须为 None）、`agents_without_a_cli_report_an_unavailable_catalog`（模型/effort 都必须缺席，capabilities 全 unsupported）、`qoder_is_claimed_before_claude`（含整文件的 detect_format）、`qoder_truncate_rewrite_dedup`（并入既有的 identity_suite，覆盖 append/无变化/截断重写/同尺寸重写/文件替换）、以及适配器内的解析与"子 Agent 不认领"测试。`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）全绿。

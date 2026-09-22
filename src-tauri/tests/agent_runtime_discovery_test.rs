@@ -30,7 +30,13 @@ fn capabilities_are_the_backend_contract_not_the_discovery_result() {
 #[test]
 #[ignore]
 fn real_agents_answer_discovery_or_warn() {
-    for agent in Agent::all() {
+    // Only Agents with a CLI can be asked anything: a history-only Agent has
+    // no catalog and no effort vocabulary to report (方案 §37.5).
+    for agent in Agent::all()
+        .iter()
+        .copied()
+        .filter(|a| !noending::platform::exec_resolver::cli_names(*a).is_empty())
+    {
         let d = noending::agent_runtime::discover_runtime_options(agent);
         println!(
             "{:?}: source={} models={} efforts={:?} warnings={:?}",
@@ -49,5 +55,34 @@ fn real_agents_answer_discovery_or_warn() {
             assert!(!m.id.is_empty());
             assert_eq!(m.provider.is_some(), agent == Agent::Pi);
         }
+    }
+}
+
+/// The other half of that contract: an Agent with no CLI answers
+/// `unavailable` instead of probing (and must not panic doing it).
+#[test]
+fn agents_without_a_cli_report_an_unavailable_catalog() {
+    for agent in Agent::all()
+        .iter()
+        .copied()
+        .filter(|a| noending::platform::exec_resolver::cli_names(*a).is_empty())
+    {
+        let d = noending::agent_runtime::discover_runtime_options(agent);
+        assert_eq!(d.model_source, "unavailable", "{agent:?}");
+        assert!(d.models.is_empty(), "{agent:?}");
+        assert!(d.effort_levels.is_empty(), "{agent:?}");
+        let caps = noending::agent_runtime::capabilities_of(agent);
+        assert_eq!(
+            caps.model,
+            noending::agent_runtime::RuntimeFieldCapability::Unsupported
+        );
+        assert_eq!(
+            caps.provider,
+            noending::agent_runtime::RuntimeFieldCapability::Unsupported
+        );
+        assert_eq!(
+            caps.effort,
+            noending::agent_runtime::RuntimeFieldCapability::Unsupported
+        );
     }
 }

@@ -6,7 +6,18 @@
 
 use noending::adapters::{adapter_for, ExecOptions};
 use noending::domain::Agent;
-use noending::platform::exec_resolver::AgentInstallation;
+use noending::platform::exec_resolver::{cli_names, AgentInstallation};
+
+/// The argv contract only exists for Agents that HAVE a CLI. Qoder is
+/// IDE-hosted: there is no command line to render, and its builders must fail
+/// instead of inventing one (方案 §37.5).
+fn launchable() -> Vec<Agent> {
+    Agent::all()
+        .iter()
+        .copied()
+        .filter(|a| !cli_names(*a).is_empty())
+        .collect()
+}
 
 fn install(agent: Agent) -> AgentInstallation {
     AgentInstallation {
@@ -43,7 +54,7 @@ fn resume_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
 /// there is the most visible way to break "Agent owns defaults".
 #[test]
 fn interactive_launches_pass_no_runtime_flag_without_an_override() {
-    for agent in Agent::all() {
+    for agent in launchable() {
         for args in [
             new_args(agent, &ExecOptions::default()),
             resume_args(agent, &ExecOptions::default()),
@@ -79,7 +90,7 @@ fn resume_keeps_its_session_selector() {
 fn every_consumer_renders_the_same_override_the_same_way() {
     // One runtime semantics: the flags an interactive session gets are the
     // flags the headless run gets — New / Resume / exec cannot diverge.
-    for agent in Agent::all() {
+    for agent in launchable() {
         let opts = ExecOptions {
             model: Some("some-model".into()),
             provider: Some("some-provider".into()),
@@ -115,7 +126,7 @@ const RUNTIME_FLAGS: &[&str] = &[
 
 #[test]
 fn no_override_leaves_the_cli_to_its_own_defaults() {
-    for agent in Agent::all() {
+    for agent in launchable() {
         let args = exec_args(agent, &ExecOptions::default());
         for flag in RUNTIME_FLAGS {
             assert!(
@@ -203,4 +214,45 @@ fn an_override_value_is_passed_literally_as_one_argv_element() {
     assert!(args.iter().any(|a| a == value), "{args:?}");
     assert_eq!(args.iter().filter(|a| a.as_str() == "--model").count(), 1);
     assert_eq!(args.last().map(|a| a.as_str()), Some("prompt text"));
+}
+
+/// An Agent without a CLI must fail loudly. Returning an empty argv (or a
+/// guessed program) would look like a successful launch and hand the user a
+/// terminal that never opens — the failure mode "Agent owns defaults" exists
+/// to prevent (方案 §37.3).
+#[test]
+fn agents_without_a_cli_refuse_to_build_a_command() {
+    let cli_less: Vec<Agent> = Agent::all()
+        .iter()
+        .copied()
+        .filter(|a| cli_names(*a).is_empty())
+        .collect();
+    assert!(
+        !cli_less.is_empty(),
+        "the roster is expected to contain at least one history-only Agent"
+    );
+
+    for agent in cli_less {
+        assert!(cli_names(agent).is_empty());
+        for built in [
+            adapter_for(agent).build_new_command(
+                &install(agent),
+                &ExecOptions::default(),
+                None,
+                None,
+            ),
+            adapter_for(agent).build_resume_command(
+                &install(agent),
+                &ExecOptions::default(),
+                "as-1",
+                None,
+                None,
+            ),
+            adapter_for(agent).build_exec_command(&install(agent), &ExecOptions::default(), "p"),
+        ] {
+            assert!(built.is_err(), "{agent:?} invented a command line");
+        }
+        // And detection never claims an installation either.
+        assert!(adapter_for(agent).detect().is_none(), "{agent:?}");
+    }
 }

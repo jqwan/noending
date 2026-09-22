@@ -24,11 +24,16 @@ pub fn resolve_app_data() -> Option<PathBuf> {
 
 /// Environment variable that overrides the data root for each agent,
 /// mirroring what the agents themselves honour where applicable.
+///
+/// The empty string means "this Agent documents no override": the IDE-hosted
+/// ones (Qoder) hard-code their home, and inventing a variable name here would
+/// be a guess that silently points at nothing.
 pub fn agent_env_override(agent: Agent) -> &'static str {
     match agent {
         Agent::Codex => "CODEX_HOME",
         Agent::ClaudeCode => "CLAUDE_CONFIG_DIR",
         Agent::Pi => "PI_HOME",
+        Agent::Qoder => "",
     }
 }
 
@@ -38,6 +43,7 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
         Agent::Codex => [".codex"].iter().collect(),
         Agent::ClaudeCode => [".claude"].iter().collect(),
         Agent::Pi => [".pi"].iter().collect(),
+        Agent::Qoder => [".qoder-cn"].iter().collect(),
     }
 }
 

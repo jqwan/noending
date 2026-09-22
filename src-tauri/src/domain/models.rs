@@ -239,17 +239,23 @@ impl Workstream {
     }
 }
 
+/// Every Agent NoEnding knows how to READ. Not every entry can be launched:
+/// Qoder ships no headless CLI, so its adapter ingests history only and
+/// `exec_resolver::resolve` fails by design (方案 §37.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Agent {
     Codex,
     ClaudeCode,
     Pi,
+    Qoder,
 }
 
 impl Agent {
-    pub fn all() -> [Agent; 3] {
-        [Agent::Codex, Agent::ClaudeCode, Agent::Pi]
+    /// A slice rather than a fixed-size array: the roster grows, and every
+    /// caller only iterates.
+    pub fn all() -> &'static [Agent] {
+        &[Agent::Codex, Agent::ClaudeCode, Agent::Pi, Agent::Qoder]
     }
 
     pub fn display_name(&self) -> &'static str {
@@ -257,6 +263,7 @@ impl Agent {
             Agent::Codex => "Codex",
             Agent::ClaudeCode => "Claude Code",
             Agent::Pi => "Pi",
+            Agent::Qoder => "Qoder",
         }
     }
 
@@ -265,6 +272,7 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::ClaudeCode => "claude_code",
             Agent::Pi => "pi",
+            Agent::Qoder => "qoder",
         }
     }
 
@@ -273,6 +281,7 @@ impl Agent {
             "codex" => Some(Agent::Codex),
             "claude_code" | "claude" => Some(Agent::ClaudeCode),
             "pi" => Some(Agent::Pi),
+            "qoder" | "qcoder" => Some(Agent::Qoder),
             _ => None,
         }
     }

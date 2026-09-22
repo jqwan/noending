@@ -92,6 +92,14 @@ fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
              {{\"type\":\"message\",\"id\":\"m1\",\"parentId\":\"{sid}\",\"provider\":\"p\",\"timestamp\":\"2026-09-13T10:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n",
             sid = session_id
         ),
+        // Qoder = Claude's shape + its own bookkeeping line, which is what
+        // makes the fingerprint read it as Qoder rather than Claude (§37.5).
+        Agent::Qoder => format!(
+            "{{\"type\":\"workspace-directories\",\"sessionId\":\"{sid}\",\"directories\":[\"/tmp/proj\"]}}\n\
+             {{\"type\":\"user\",\"sessionId\":\"{sid}\",\"uuid\":\"u1\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n\
+             {{\"type\":\"assistant\",\"sessionId\":\"{sid}\",\"uuid\":\"u2\",\"parentUuid\":\"u1\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:01:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"reply\"}}]}}}}\n",
+            sid = session_id
+        ),
     };
     std::fs::write(path, body).unwrap();
 }

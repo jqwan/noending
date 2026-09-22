@@ -34,7 +34,7 @@ fn overrides(
 fn no_override_resolves_to_no_exec_options_at_all() {
     let db = temp_db();
     for agent in Agent::all() {
-        let opts = runtime_exec_options(&db, agent).expect("defaults always resolve");
+        let opts = runtime_exec_options(&db, *agent).expect("defaults always resolve");
         assert_eq!(
             (opts.model, opts.provider, opts.effort),
             (None, None, None),
@@ -304,7 +304,7 @@ fn an_assistant_without_a_model_has_nothing_to_migrate() {
     db.set_setting("assistant.model", "gpt-5.6-luna").unwrap();
     assert_eq!(migrate_legacy_assistant_runtime(&db).unwrap(), None);
     for agent in Agent::all() {
-        assert!(runtime_exec_options(&db, agent).unwrap().is_default());
+        assert!(runtime_exec_options(&db, *agent).unwrap().is_default());
     }
     assert!(db.get_setting("assistant.model").unwrap().is_none());
 }

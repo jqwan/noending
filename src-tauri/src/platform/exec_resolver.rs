@@ -184,12 +184,28 @@ fn is_executable_file(p: &Path) -> bool {
     p.is_file() && (cfg!(target_os = "windows") || is_executable_unix(p))
 }
 
-pub fn resolve(agent: Agent) -> Result<AgentInstallation> {
-    let names: Vec<&str> = match agent {
+/// Executable names to probe for an Agent, in order. **Empty means the Agent
+/// has no headless CLI at all** (Qoder is IDE-hosted): its adapter still
+/// reads history, but it can never be launched or resumed (方案 §37.3).
+pub fn cli_names(agent: Agent) -> Vec<&'static str> {
+    match agent {
         Agent::Codex => vec!["codex"],
         Agent::ClaudeCode => vec!["claude"],
         Agent::Pi => vec!["pi"],
-    };
+        Agent::Qoder => vec![],
+    }
+}
+
+pub fn resolve(agent: Agent) -> Result<AgentInstallation> {
+    let names: Vec<&str> = cli_names(agent);
+    if names.is_empty() {
+        // Reading an Agent's transcripts never depends on its CLI; only
+        // launching does. Saying so beats a PATH error the user cannot fix.
+        return Err(other(format!(
+            "{} 没有可启动的 CLI，NoEnding 只读取它的历史会话",
+            agent.display_name()
+        )));
+    }
     let now = chrono::Utc::now().to_rfc3339();
     for name in names {
         if let Some(candidate) = resolve_executable(name) {

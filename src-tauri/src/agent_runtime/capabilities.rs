@@ -59,6 +59,14 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             provider: Discoverable,
             effort: Suggested,
         },
+        // Qoder is IDE-hosted: no CLI, so there is no argument to override
+        // anything with. Every field must read as unsupported, otherwise the
+        // Settings UI would offer a control that can never take effect.
+        Agent::Qoder => AgentRuntimeCapabilities {
+            model: Unsupported,
+            provider: Unsupported,
+            effort: Unsupported,
+        },
     }
 }
 

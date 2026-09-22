@@ -129,8 +129,8 @@ pub fn default_agent_of(db: &Db) -> Result<Option<Agent>> {
         }
     }
     for a in Agent::all() {
-        if db.get_installation(a)?.is_some() {
-            return Ok(Some(a));
+        if db.get_installation(*a)?.is_some() {
+            return Ok(Some(*a));
         }
     }
     Ok(None)
@@ -840,7 +840,7 @@ pub fn search(
 pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
     let mut out = serde_json::Map::new();
     for agent in Agent::all() {
-        let install = with_db(&state, |db| db.get_installation(agent))?;
+        let install = with_db(&state, |db| db.get_installation(*agent))?;
         out.insert(
             agent.as_str().to_string(),
             serde_json::json!({

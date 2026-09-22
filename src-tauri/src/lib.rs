@@ -71,14 +71,14 @@ pub fn run() {
             // no longer be auto-selected as default agent.
             {
                 for agent in domain::Agent::all() {
-                    let resolved = platform::exec_resolver::resolve(agent).ok();
+                    let resolved = platform::exec_resolver::resolve(*agent).ok();
                     if resolved.is_none() {
                         eprintln!(
                             "[noending] {} CLI not found — adapter will be unavailable",
                             agent.display_name()
                         );
                     }
-                    let _ = commands::record_installation_probe(&db, agent, resolved);
+                    let _ = commands::record_installation_probe(&db, *agent, resolved);
                 }
             }
 
