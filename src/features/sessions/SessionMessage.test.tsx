@@ -77,6 +77,19 @@ it("looksLikeMarkdown 认代码块 / 标题 / 列表，不认普通句子", () =
   expect(looksLikeMarkdown("就是一段普通的话，没有别的。")).toBe(false);
 });
 
+it("系统事件里的 md 一样预览（判断只看内容，不看 kind）", () => {
+  // 库里最像 Markdown 的恰恰是 system / compact：Codex 的 preamble、Claude 的压缩摘要。
+  const { container } = renderMessage("## 规则\n\n- 一\n- 二", "system");
+  const body = container.querySelector(".event .body")!;
+
+  expect(container.querySelector(".event")!.className).toContain("is-tech");
+  expect(body.querySelector("h2")?.textContent).toBe("规则");
+
+  fireEvent.click(body);
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByRole("button", { name: "预览" }).getAttribute("aria-pressed")).toBe("true");
+});
+
 it("用户消息右、Agent 左，技术事件保持整行", () => {
   // 左右对齐全靠这三个类（§36.23）；CSS 挂了测试也看不出来，所以在这里钉住类名。
   const { container } = render(

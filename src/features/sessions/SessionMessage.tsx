@@ -57,8 +57,10 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
         ? "tool system is-tech"
         : "tool is-tech";
 
-  // 气泡里显示的就是 Markdown 预览（§36.24）。技术事件不参与：它们不是对话，也没有气泡。
-  const md = isProse && looksLikeMarkdown(text);
+  // 气泡里显示的就是 Markdown 预览（§36.24）。判断只认内容、不认 kind（§36.25）：
+  // 库里最像 Markdown 的恰恰是 system 事件——Codex 把整份 preamble 灌进来（实测 44KB、
+  // 32 个标题、8 个围栏），而 compact 里装的是 Claude 的压缩摘要，也是正经散文。
+  const md = looksLikeMarkdown(text);
 
   // 只有真的收了角才渐隐。内容本来就短的时候挂一层渐隐，会把最后两行擦掉。
   useLayoutEffect(() => {

@@ -3081,3 +3081,20 @@ a / img           components 里改写成 <span>：链接显示文字 + title �
 **两个按钮同款（4）**：都改成 `btn`（原为 `btn small` + `btn primary`）。这是个只读查看器，没有主次动作，硬分主次反而让人以为「关闭」是推荐操作。
 
 **验证**（`/tmp/noending-header-preview/chat2.html`）：把那段收角判断原样搬到页面里跑，短 md 气泡 `scrollHeight 38 = clientHeight 38` → 不加 `is-clamped`、无渐隐；长 md 气泡 `252 > 132` → 加了，`mask-image` 生效。`--accent-wash-hover` 解析为 `#e2e8ff`，`hover` 命中后用户气泡底色实测变成 `rgb(226,232,255)`，同排 Agent 气泡仍是 `#f5f5f3`。两个页脚按钮 class 都是 `btn`、高度都是 33px。明暗两套都截了图。`tsc --noEmit` / `vitest run`（72 passed）/ `vite build` 全绿。
+
+## 36.25 会话消息：Markdown 判断只看内容，不看 kind（修订 §36.24）
+
+用户问「系统消息不支持 md 吗？」——不支持，而且这是我在 §36.24 里写坏的一处：当时把判断收紧成 `isProse && looksLikeMarkdown(text)`，顺手把 system / compact 的预览也一起关掉了。查了库里的实际内容，这个判断恰好把**最像 Markdown 的那批事件**排除在外：
+
+```text
+system   316 条，最长 44,878 字 —— Codex 把整份 preamble 当系统事件灌进来
+                                 （实测那条：32 个 `##` 标题、8 个 ``` 围栏）
+compact    5 条，最长 22 字    —— codex / pi 是固定串 "conversation compacted"
+                                 但 Claude 的 summary 事件走的就是 compact，装的是压缩摘要
+```
+
+所以判断改成只认内容：`const md = looksLikeMarkdown(text)`。kind 只决定**它长什么样**（气泡 / 弱化整行），不决定**它能不能被读懂**。原来 modal 里的 `canPreview` 本来就是只看内容，§36.24 把它和 `md` 合并成一处之后才一起收紧——现在两者是同一个只看内容的判断。
+
+**顺带修的一处排版**：系统事件原来的正文样式是 11.5px 等宽 + muted（`.event.tool .body`），一份文档用等宽小字渲染就不叫预览了。所以 md 落在技术事件里时把字体归回正文字体、字号归回 `.md-body` 的 13px（`.event.is-tech .body.md-body`），颜色与 `opacity: .65` 保持不动——它仍然是系统噪音，只是有结构。
+
+**验证**（`/tmp/noending-header-preview/chat2.html`）：技术事件里的 md 实测 `font-family: Inter…`（不再是等宽）、13px、颜色仍是 muted `rgb(138,138,134)`、事件 `opacity: .65`、`h2` 14px、`max-height` 132px 且已加 `is-clamped` 渐隐。`SessionMessage.test.tsx` 增加一条：`system` 事件里的 md 在行内就渲染出 `<h2>`，点开后弹窗的「预览」页签是按下状态。`tsc --noEmit` / `vitest run`（73 passed）/ `vite build` 全绿。

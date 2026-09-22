@@ -360,6 +360,10 @@
 }
 .event.is-agent .body { align-self: flex-start; border-bottom-left-radius: var(--radius-sm); }
 .event.tool .body { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); }
+/* 系统事件里的 Markdown（§36.25）：一份文档用 11.5px 等宽字渲染就不叫预览了。
+   字号归回 .md-body 的 13px、字体归回正文字体；仍然保持 muted 颜色与 system 的降低
+   不透明度——它是系统噪音，只是有结构。 */
+.event.is-tech .body.md-body { font-family: inherit; font-size: 13px; }
 .event.system { opacity: 0.65; }
 .event.system .body { font-size: 12px; color: var(--text-muted); }
 /* §36.24：热区从整行收到气泡——整行的悬停底色是条与内容无关的宽条，而点开这件事
