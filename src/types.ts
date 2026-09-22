@@ -12,7 +12,8 @@ export type Agent =
   | "autoclaw"
   | "workbuddy"
   | "dsh"
-  | "gemini";
+  | "gemini"
+  | "zcode";
 
 /** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
 export type WorkstreamLifecycle = "active" | "completed";
@@ -639,6 +640,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
   workbuddy: "WorkBuddy",
   dsh: "dsh",
   gemini: "Gemini CLI",
+  zcode: "ZCode",
 };
 
 // ---------- Agent Runtime Configuration (commands.rs §Agent Runtime) ----------

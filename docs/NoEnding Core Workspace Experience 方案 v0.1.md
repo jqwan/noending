@@ -3312,3 +3312,52 @@ workspace-directories / runtime-config / worktree-state / active-leaf / last-pro
 **测试**：`gemini_truncate_rewrite_dedup` 并入 identity_suite（普通 JSONL 写入器），七家适配器继续共用同一套 append / 无变化 / 截断重写 / 同尺寸重写 / 文件替换 + 去重断言。适配器内另有：工作目录标记与首条真提问（开场上下文不算）、日志重放到"当前会话"（`$set` 检查点 + `$rewindTo` 回退语义）、只摄入对话（info/warning/error 被丢）、同一个 `a2a-server` 的两条录制各成一行（身份取自文件名）、不是录制的文件不被认领（不在 `chats/` 下的 `session-*.jsonl`、首行不是元数据的文件）。另修了一处被新 Agent 撞到的测试夹具：`a_corrupt_assistant_agent_is_not_mistaken_for_retrieval_only` 原本拿 `"gemini"` 当"无法识别的 Agent"用的例子，现在 `gemini` 已经是一个真 Agent，夹具改成 `no_such_agent`（该测试的意图不变）。
 
 **验证**：`[fingerprint] Gemini CLI: 10 sessions discovered under /Users/jqk/.gemini`，真实根目录零错判；`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
+
+## 37.10 ZCode（C 形态：SQLite 快照源，只摄入）
+
+`~/.zcode/cli/db/db.sqlite`（WAL，148MB，**原地更新**）。六家里唯一没有转录文件的一家，所以文件那套机器一概用不上：没有字节偏移、没有前缀指纹、没有 append 判定。三张表承载全部对话（**只读打开**，绝不写入、绝不迁移、绝不 VACUUM）：
+
+```text
+session(id, parent_id, directory, title, time_created, time_updated, time_archived, …)
+         directory 就是 cwd；time_archived 是 ZCode 自己"从列表里退下"的判决
+message(id, session_id, data, sequence)
+         data 是 JSON：role ∈ user/assistant（库里只有这两种），时间在 time.created / time.completed
+part(id, message_id, session_id, data, sequence)
+         data.type ∈ text / reasoning / tool / step-start / step-finish / timeline / compaction / file
+```
+
+`text` 型 part 按 `sequence` 拼起来就是散文，挂在**消息自己的 id** 上作为原生事件 id。用户提问在这里**不需要拆信封**——dsh 与 WorkBuddy 都要剥壳，ZCode 把环境快照放在 `message.data.contextSnapshot`，`text` 是干净的（实测某真实会话的首条用户 text 就是用户敲的那句话）。
+
+**一、`role` 不代表是谁写的（这条是本适配器真正的坑，是 §37.7 那个教训换了身衣服）。** ZCode 给每条消息都盖了 `data.semantics.{origin,kind}`，而在 `role:"user"` 底下，运行时跟模型说的话就藏在明面上——实测 6620 条真实消息里，`real_user`/`user_prompt` 只有 308 条，对面是 489 条 `todo_reminder`、50 条 `system_reminder`、14 条 `background_notification`、10 条 `compact_summary`、2 条 `system`。**按 `role` 读会摄入三倍于人类散文的机器提醒，而且每个会话的标题都会被一条提醒抢走。** 所以判据是 `semantics`：只有 `real_user`/`user_prompt` 是人类轮次，只有 `agent_runtime`/`assistant_response` 是回答。`compact_summary` 与 `timeline_event` 一律不产生消息事件——压缩边界由 `compaction` **part** 单独给出（实测库里 20 个 compaction part，覆盖全部 20 次压缩）。
+
+**二、只有写完的回答才算数。** 回答的行在生成开始时就被插进去、之后原地改写，而 storage 按 id 去重——早读会把一句截断的话永久冻在它的 id 上。所以回答必须带 `time.completed` 才读；用户消息从来不带这个字段（实测），这也是守卫只加在回答一侧的原因。
+
+**三、归档会话不收，子 Agent 照收。** `time_archived` 是 ZCode 自己"藏起来"的判决：丢来源是设计容忍的失败，凭空发明应用自己隐藏的会话则是它不容忍的。子 Agent 则是带真实 `parent_id` 的普通行（本机 27 个里 15 个），照收并带上父链接。ZCode 自己的 `title` 列不用——NoEnding 的标题取自首条真人提问、且只写一次（§37.7 的决定，一致执行）。
+
+**四、`unchanged` 预筛必须放弃（这条是本次唯一偏离契约的地方）。** 预筛的键是**原始路径**（`discovery_skipset` 就是 `raw_path → (identity, size, mtime)`），而 ZCode 的 27 个会话共用这**同一个路径**——于是它的判词是"SOME 会话已入库"，不是"全部已入库"。更糟的是库是 WAL 提交：新行可以先落进 `db.sqlite-wal`，而主文件的 size 与 mtime 一动不动，stat 预筛会认为整个库没变，**把新会话一直搁浅到下一次 checkpoint**。所以 ZCode 的发现**每次列出全部未归档会话**：一个会话一次走索引的查询，重放由事件身份吸收，用这点代价换"永远不会漏掉一个会话"。
+
+**游标**：整体重放 + 消息 id 去重（与 §37.8/§37.9 同一取向，但这里是自带的一份：没有"内容前缀"这个概念，所以 `prefix_hash` 留空、`start_byte_offset` 恒为 0、只有库文件被整体替换才换代）。§37.2 当初预计它"落进 rewrite 分支"是过虑了——真正决定去重的是事件身份，游标只要不撒谎就够。
+
+**没有可启动的 CLI**：`~/.zcode/cli` 是它自己的数据目录，不是用户的命令；`app.asar` 里零个 `--resume`/`--print`/`run` 字符串。所以 `cli_names(ZCode)` 为空、`detect()` 恒 None、三个 builder 明确报错。
+
+**永久删除源会话不提供（这里是六家里最硬的一条）**：其余五家的理由是"指纹不足以证明是同一个 Session"，ZCode 的理由更根本——**27 个会话共享同一个数据库文件，按文件删就是删掉全部会话**。并入 `adapters_without_deletion_support_refuse_loudly`（现在是 5 例）。
+
+**改动清单**：`domain/models.rs`（`ZCode`）、`platform/paths.rs`（`~/.zcode`，无环境变量覆盖）、`platform/exec_resolver.rs`（`cli_names` 为空）、`adapters/mod.rs`（注册）、`adapters/zcode.rs`、`agent_runtime/{capabilities,discovery}`、`context_eval/evaluator.rs`、`src/types.ts` 与 `AgentRuntimeSettings`。
+
+**测试**：identity_suite **没有** ZCode 条目——这套 fixture 的做法是让适配器去读一个被改写的转录文件，而 ZCode 的源是活的 SQLite，读不了。它的游标与身份行为改由适配器单测覆盖，并在 suite 里写明了为什么缺席（不是忘了）。适配器内 6 项：根目录与"根就是库文件"两种写法、发现（归档不收 / cwd / 父链接 / 新会话在前）、标题取首条真人提问而非提醒、摄入只留真人提问与写完的回答（提醒 / reasoning / tool 全部出局，text 按 sequence 拼接）、**没写完的回答先不收、写完之后再收**（并断言这不是换代）、压缩是边界而不是消息。另加一条走**真实 storage 路径**的集成测试：`zcode_sessions_ingest_and_a_replay_stores_nothing` —— 首次摄入 2 条，重放摄入 0 条——这正是"整体重放式游标"这个偏离的安全证明。
+
+**验证**：`[fingerprint] ZCode: 27 sessions discovered under /Users/jqk/.zcode`，真实根目录零错判。逐值核对（临时探针，跑完即删）：27 个会话的标题全是真人提问，**0 个被提醒污染、0 个为空**；子 Agent 会话带 `parent_id`；前 8 个会话 237 条 user / 1594 条 assistant / 18 个压缩边界，kind 只出现这三种。`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿，lib 98 项）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
+
+## 37.11 六家接入收口
+
+六家全部落地，`Agent` 现在可读九家（原有 Codex / Claude Code / Pi，加上 Qoder / AutoClaw / WorkBuddy / dsh / Gemini CLI / ZCode），**其中只有 Codex / Claude Code / Pi 三家可启动**，其余六家只摄入历史——每一家都记了**基于证据的解锁条件**，而不是"暂不支持"了事：
+
+```text
+Qoder       IDE 托管，没有 headless CLI
+AutoClaw    启动必须传 OPENCLAW_STATE_DIR，而 AgentCommand 不带 env（平台层能传 env 即可解锁）
+dsh         启动必须 --profile <name>，那是用户自己的装法（能选 profile 即可解锁）
+Gemini CLI  --resume 只认 latest 或序号，表达不了"按 id 恢复"（上游支持按 id 恢复即可解锁）
+ZCode       桌面应用，且会话共享一个库文件
+```
+
+四种数据源形态都验证过了：A 追加式 JSONL（Qoder / WorkBuddy / AutoClaw，共用 `read_jsonl_delta`）、B zstd 帧式追加（dsh）、C 原地更新的 SQLite（ZCode）、D 整行快照的操作日志（Gemini）；后三种都是"整体重放 + 原生 id 去重"，其中 B/D 共用 `replay_cursor_update`。每家的首条真人轮次都按自己的格式显式取（WorkBuddy 剥 `<user_query>` 信封、dsh 丢运行时上下文、Gemini 丢 `<session_context>`、ZCode 认 `semantics`）——**"谁写的"这四家都不能靠 `role` 判断，这是本 Phase 最反复出现的一课**。永久删除源会话只有 Qoder 支持（Codex / Claude / Pi 原有三家不变），其余五家全部走 trait 默认的响亮拒绝，其中 ZCode 是共享库、物理上不可分。

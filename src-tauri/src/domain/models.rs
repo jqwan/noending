@@ -254,6 +254,7 @@ pub enum Agent {
     WorkBuddy,
     Dsh,
     Gemini,
+    ZCode,
 }
 
 impl Agent {
@@ -269,6 +270,7 @@ impl Agent {
             Agent::WorkBuddy,
             Agent::Dsh,
             Agent::Gemini,
+            Agent::ZCode,
         ]
     }
 
@@ -282,6 +284,7 @@ impl Agent {
             Agent::WorkBuddy => "WorkBuddy",
             Agent::Dsh => "dsh",
             Agent::Gemini => "Gemini CLI",
+            Agent::ZCode => "ZCode",
         }
     }
 
@@ -295,6 +298,7 @@ impl Agent {
             Agent::WorkBuddy => "workbuddy",
             Agent::Dsh => "dsh",
             Agent::Gemini => "gemini",
+            Agent::ZCode => "zcode",
         }
     }
 
@@ -308,6 +312,7 @@ impl Agent {
             "workbuddy" | "work_buddy" => Some(Agent::WorkBuddy),
             "dsh" | "deepseek_harness" => Some(Agent::Dsh),
             "gemini" | "gemini_cli" => Some(Agent::Gemini),
+            "zcode" | "z_code" => Some(Agent::ZCode),
             _ => None,
         }
     }

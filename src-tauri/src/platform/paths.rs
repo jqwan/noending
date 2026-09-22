@@ -47,6 +47,8 @@ pub fn agent_env_override(agent: Agent) -> &'static str {
         // root, so the extra segment cannot be expressed; NoEnding reads
         // `~/.gemini` and would miss a relocated home.
         Agent::Gemini => "",
+        // Desktop app with no documented override; its data root is `~/.zcode`.
+        Agent::ZCode => "",
     }
 }
 
@@ -61,6 +63,7 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
         Agent::WorkBuddy => [".workbuddy"].iter().collect(),
         Agent::Dsh => [".dsh"].iter().collect(),
         Agent::Gemini => [".gemini"].iter().collect(),
+        Agent::ZCode => [".zcode"].iter().collect(),
     }
 }
 

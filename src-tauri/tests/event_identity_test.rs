@@ -374,6 +374,10 @@ identity_suite!(
     write_plain,
     append_plain
 );
+// ZCode has no entry: its source is a live SQLite store, and this suite works
+// by mutating a transcript file under the adapter's own reader. Its cursor and
+// identity behaviour is covered by the adapter's unit tests instead (方案
+// §37.10).
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a
 /// rewrite: generation bump + rescan, old history intact, new text stored.

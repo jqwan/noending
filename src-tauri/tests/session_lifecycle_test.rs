@@ -23,6 +23,7 @@ use noending::adapters::gemini::GeminiAdapter;
 use noending::adapters::pi::PiAdapter;
 use noending::adapters::qoder::QoderAdapter;
 use noending::adapters::workbuddy::WorkBuddyAdapter;
+use noending::adapters::zcode::ZCodeAdapter;
 use noending::adapters::AgentAdapter;
 use noending::domain::{Agent, ContextDelivery, LaunchIntent, Session, SessionListScope, SyncRun};
 use noending::error::AppError;
@@ -81,6 +82,12 @@ fn attacher() -> LexicalPaths {
 /// parses back to `session_id` through the adapter's own discovery parser —
 /// the exact property `prepare_source_session_deletion` demands (方案 §16).
 fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
+    // ZCode has no transcript to write at all: its source is a live SQLite
+    // store that no line-based fingerprint could ever claim (方案 §37.10).
+    if agent == Agent::ZCode {
+        write_zcode_store(path, session_id);
+        return;
+    }
     let body = match agent {
         Agent::Codex => format!(
             "{{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{sid}\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:00:00Z\"}}}}\n\
@@ -135,6 +142,7 @@ fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
              {{\"type\":\"user/message\",\"seq\":1,\"time\":1788969927205,\"data\":{{\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}],\"role\":\"user\"}}}}\n",
             sid = session_id
         ),
+        Agent::ZCode => unreachable!("written above: ZCode's source is a database"),
     };
     // dsh is the one agent whose transcript is zstd (方案 §37.8).
     if agent == Agent::Dsh {
@@ -142,6 +150,100 @@ fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
     } else {
         std::fs::write(path, body).unwrap();
     }
+}
+
+/// ZCode's source is a SQLite store, not a transcript, so it has no line to
+/// return: this builds the real three tables at the fixture path, with one real
+/// prompt and one settled reply in them. Only the refusal test reads it as a
+/// path — but `zcode_sessions_ingest_and_a_replay_stores_nothing` below drives
+/// it through the production store, so the fixture has to be a store ZCode
+/// could actually have written (§37.10).
+fn write_zcode_store(path: &Path, session_id: &str) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session (
+            id text primary key, project_id text not null, workspace_id text,
+            parent_id text, slug text not null, directory text not null,
+            path text, title text not null, version text not null, share_url text,
+            summary_additions integer, summary_deletions integer, summary_files integer,
+            summary_diffs text, revert text, permission text,
+            time_created integer not null, time_updated integer not null,
+            time_compacting integer, time_archived integer,
+            task_type text not null default 'interactive',
+            title_source text not null default 'first_input',
+            title_message_id text, time_title_updated integer, trace_id text);
+         CREATE TABLE message (
+            id text primary key,
+            session_id text not null references session(id) on delete cascade,
+            time_created integer not null, time_updated integer not null,
+            data text not null, sequence integer);
+         CREATE TABLE part (
+            id text primary key,
+            message_id text not null references message(id) on delete cascade,
+            session_id text not null, time_created integer not null,
+            time_updated integer not null, data text not null, sequence integer);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session (id, project_id, slug, directory, title, version,
+                              time_created, time_updated)
+         VALUES (?1, 'p', ?1, '/tmp/proj', 'app title', '1', 1788012788361, 1788012789059)",
+        [session_id],
+    )
+    .unwrap();
+    // A user-role reminder first, so a reader that trusts `role` would both
+    // ingest noise and title the session after it.
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data, sequence)
+         VALUES ('z-reminder', ?1, 0, 0, ?2, 0)",
+        rusqlite::params![
+            session_id,
+            r#"{"role":"user","time":{"created":1788538485030},"semantics":{"origin":"agent_runtime","kind":"todo_reminder"}}"#
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data, sequence)
+         VALUES ('z-p0', 'z-reminder', ?1, 0, 0, ?2, 0)",
+        rusqlite::params![
+            session_id,
+            r#"{"type":"text","text":"The TodoWrite tool hasn't been used recently."}"#
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data, sequence)
+         VALUES ('z-user', ?1, 0, 0, ?2, 1)",
+        rusqlite::params![
+            session_id,
+            r#"{"role":"user","time":{"created":1788012788361},"semantics":{"origin":"real_user","kind":"user_prompt"}}"#
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data, sequence)
+         VALUES ('z-p1', 'z-user', ?1, 0, 0, ?2, 0)",
+        rusqlite::params![
+            session_id,
+            r#"{"type":"text","text":"first user message about goals"}"#
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data, sequence)
+         VALUES ('z-reply', ?1, 0, 0, ?2, 2)",
+        rusqlite::params![
+            session_id,
+            r#"{"role":"assistant","time":{"created":1788012788390,"completed":1788012789059},"semantics":{"origin":"agent_runtime","kind":"assistant_response"}}"#
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data, sequence)
+         VALUES ('z-p2', 'z-reply', ?1, 0, 0, ?2, 0)",
+        rusqlite::params![session_id, r#"{"type":"text","text":"reply"}"#],
+    )
+    .unwrap();
 }
 
 fn fixture_session(db: &Db, agent: Agent, tag: &str) -> Session {
@@ -1199,16 +1301,21 @@ adapter_suite!(qoder_suite, Agent::Qoder, QoderAdapter);
 /// Not every adapter can offer permanent source deletion: §16.3 requires a
 /// content fingerprint pointing back at the agent, and AutoClaw's bytes are
 /// the pi core's bytes (方案 §37.6); WorkBuddy's file has no per-session
-/// identity to revalidate against (§37.7). The refusal must be explicit — a
-/// plan that could not be verified must never be produced.
+/// identity to revalidate against (§37.7); dsh's and Gemini's bytes are not a
+/// line-per-session file (§37.8/§37.9). ZCode is stronger still: its sessions
+/// all live inside one shared database, so there is no per-session source to
+/// remove at all — deleting the file would delete every session (§37.10).
+/// The refusal must be explicit — a plan that could not be verified must never
+/// be produced.
 #[test]
 fn adapters_without_deletion_support_refuse_loudly() {
     let db = open_db("no-deletion-support");
-    let cases: [(Agent, &dyn AgentAdapter); 4] = [
+    let cases: [(Agent, &dyn AgentAdapter); 5] = [
         (Agent::AutoClaw, &AutoClawAdapter),
         (Agent::WorkBuddy, &WorkBuddyAdapter),
         (Agent::Dsh, &DshAdapter),
         (Agent::Gemini, &GeminiAdapter),
+        (Agent::ZCode, &ZCodeAdapter),
     ];
     for (agent, adapter) in cases {
         let s = fixture_session(&db, agent, "no-deletion-support");
@@ -1220,6 +1327,48 @@ fn adapters_without_deletion_support_refuse_loudly() {
         assert!(err.to_string().contains("暂不支持"), "unexpected: {err}");
         assert!(Path::new(&s.raw_path).exists(), "nothing was touched");
     }
+}
+
+/// ZCode's cursor carries no byte offset into its own content (there is no
+/// content to offset into: the source is a live database), so this is the test
+/// that proves the deviation is safe — a full replay goes through the real
+/// storage path and stores nothing twice (方案 §37.10).
+#[test]
+fn zcode_sessions_ingest_and_a_replay_stores_nothing() {
+    let db = open_db("zcode-ingest");
+    let s = fixture_session(&db, Agent::ZCode, "zcode-ingest");
+
+    let first = ingest(&db, &ZCodeAdapter, &s);
+    assert_eq!(
+        first, 2,
+        "the real prompt and the settled reply, nothing else"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?1",
+            &s.id
+        ),
+        2
+    );
+
+    // Every read replays the whole session; event identity (the message ids) is
+    // what keeps the store append-only.
+    assert_eq!(ingest(&db, &ZCodeAdapter, &s), 0, "a replay stores nothing");
+
+    let kinds: Vec<String> = {
+        let conn = db.read();
+        let mut stmt = conn
+            .prepare("SELECT kind FROM session_events WHERE session_id = ?1 ORDER BY sequence")
+            .unwrap();
+        let rows = stmt
+            .query_map([&s.id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(kinds, vec!["user_message", "assistant_message"]);
 }
 
 // ---- Hardening patch §1-A/§1-B -------------------------------------------

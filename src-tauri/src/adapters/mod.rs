@@ -21,6 +21,7 @@ pub mod gemini;
 pub mod pi;
 pub mod qoder;
 pub mod workbuddy;
+pub mod zcode;
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -669,6 +670,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(workbuddy::WorkBuddyAdapter),
         Box::new(dsh::DshAdapter),
         Box::new(gemini::GeminiAdapter),
+        Box::new(zcode::ZCodeAdapter),
     ]
 }
 

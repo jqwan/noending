@@ -92,6 +92,12 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             provider: Unsupported,
             effort: Unsupported,
         },
+        // Desktop app, no CLI at all (方案 §37.10).
+        Agent::ZCode => AgentRuntimeCapabilities {
+            model: Unsupported,
+            provider: Unsupported,
+            effort: Unsupported,
+        },
     }
 }
 
