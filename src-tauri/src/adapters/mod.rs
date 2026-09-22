@@ -18,6 +18,7 @@ pub mod claude;
 pub mod codex;
 pub mod pi;
 pub mod qoder;
+pub mod workbuddy;
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -165,6 +166,12 @@ pub fn file_identity(path: &Path) -> String {
     }
 }
 
+/// Epoch milliseconds → RFC3339, the spelling every other agent's transcripts
+/// already use for their timestamps.
+pub fn ms_epoch_to_rfc3339(ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.to_rfc3339())
+}
+
 pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
     let t: chrono::DateTime<chrono::Utc> = meta.modified().ok()?.into();
     Some(t.timestamp() as f64 + t.timestamp_subsec_nanos() as f64 / 1e9)
@@ -182,7 +189,9 @@ pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
 ///   checked before Claude, or every Qoder file would read as Claude;
 /// - Claude Code: event lines carry `{sessionId, parentUuid/uuid, message}`;
 /// - Pi: `{type:"session", id}` header or `{parentId, provider|modelId|
-///   thinkingLevel}` event lines.
+///   thinkingLevel}` event lines;
+/// - WorkBuddy: `{type:"message", role, content:[…]}` with the payload at the
+///   top level, plus its own `ai-title` / `file-history-snapshot` lines.
 ///
 /// Returns None when the file is not a recognizable session file of any
 /// known agent — including files whose content is genuinely ambiguous, which
@@ -243,6 +252,22 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
     // are deliberately not decisive.
     if v.get("sessionId").is_some() && (v.get("parentUuid").is_some() || v.get("uuid").is_some()) {
         return Some(Agent::ClaudeCode);
+    }
+    // WorkBuddy: no session header, and unlike pi the message payload is NOT
+    // nested — `role` / `content` sit at the top level next to `type`. Its
+    // `ai-title` / `file-history-snapshot` bookkeeping lines are unique to it,
+    // and they always appear within the first few lines.
+    if matches!(
+        v.get("type").and_then(|t| t.as_str()),
+        Some("ai-title") | Some("file-history-snapshot")
+    ) {
+        return Some(Agent::WorkBuddy);
+    }
+    if v.get("type").and_then(|t| t.as_str()) == Some("message")
+        && v.get("role").is_some()
+        && v.get("content").map(|c| c.is_array()).unwrap_or(false)
+    {
+        return Some(Agent::WorkBuddy);
     }
     // Pi: self-describing session header, or event lines with a parentId
     // plus one of the pi-specific fields.
@@ -387,10 +412,14 @@ pub fn read_jsonl_delta(
             Ok(v) => v,
             Err(_) => continue,
         };
-        let ts = v
-            .get("timestamp")
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string());
+        // Timestamps are RFC3339 strings in every format but WorkBuddy's,
+        // which writes epoch millis as a number. Both are normalized here so
+        // downstream (display, ordering) sees one spelling.
+        let ts = match v.get("timestamp") {
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(serde_json::Value::Number(n)) => n.as_i64().and_then(ms_epoch_to_rfc3339),
+            _ => None,
+        };
         if let Some(p) = parse_line(idx, &v) {
             if p.text
                 .as_deref()
@@ -597,6 +626,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(pi::PiAdapter),
         Box::new(qoder::QoderAdapter),
         Box::new(autoclaw::AutoClawAdapter),
+        Box::new(workbuddy::WorkBuddyAdapter),
     ]
 }
 
@@ -927,6 +957,37 @@ mod fingerprint_tests {
         .unwrap();
         assert_eq!(detect_format(&path), Some(Agent::Qoder));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WorkBuddy keeps its message payload at the top level (`role` /
+    /// `content` next to `type`), unlike pi, whose `type:"message"` line nests
+    /// the same fields under `message` (方案 §37.7). Its bookkeeping line types
+    /// are decisive on their own.
+    #[test]
+    fn workbuddy_is_claimed_by_its_top_level_shape() {
+        let msg = serde_json::json!({
+            "id": "m1", "timestamp": 1783137449113i64, "type": "message",
+            "role": "user", "content": [{"type": "input_text", "text": "hi"}],
+            "sessionId": "s", "cwd": "/repo"
+        });
+        assert_eq!(fingerprint_line(&msg), Some(Agent::WorkBuddy));
+
+        let title = serde_json::json!({
+            "timestamp": 1783137451207i64, "type": "ai-title", "aiTitle": "t", "sessionId": "s"
+        });
+        assert_eq!(fingerprint_line(&title), Some(Agent::WorkBuddy));
+        let snapshot = serde_json::json!({
+            "timestamp": 1783137449152i64, "type": "file-history-snapshot", "sessionId": "s"
+        });
+        assert_eq!(fingerprint_line(&snapshot), Some(Agent::WorkBuddy));
+
+        // pi's nested message line must stay pi — the top-level `role` is the
+        // only thing separating the two shapes.
+        let pi_event = serde_json::json!({
+            "type": "message", "id": "m1", "parentId": "p1", "provider": "openai",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        });
+        assert_eq!(fingerprint_line(&pi_event), Some(Agent::Pi));
     }
 
     #[test]

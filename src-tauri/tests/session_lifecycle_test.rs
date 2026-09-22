@@ -20,6 +20,7 @@ use noending::adapters::claude::ClaudeAdapter;
 use noending::adapters::codex::CodexAdapter;
 use noending::adapters::pi::PiAdapter;
 use noending::adapters::qoder::QoderAdapter;
+use noending::adapters::workbuddy::WorkBuddyAdapter;
 use noending::adapters::AgentAdapter;
 use noending::domain::{Agent, ContextDelivery, LaunchIntent, Session, SessionListScope, SyncRun};
 use noending::error::AppError;
@@ -100,6 +101,14 @@ fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
         Agent::AutoClaw => format!(
             "{{\"type\":\"session\",\"version\":3,\"id\":\"{sid}\",\"timestamp\":\"2026-09-13T10:00:00Z\",\"cwd\":\"/tmp/proj\"}}\n\
              {{\"type\":\"message\",\"id\":\"m1\",\"parentId\":\"{sid}\",\"timestamp\":\"2026-09-13T10:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}]}}}}\n",
+            sid = session_id
+        ),
+        // WorkBuddy: no session header, the payload sits at the top level, and
+        // the timestamp is epoch millis. It offers no permanent source
+        // deletion (§37.7), so this arm exists only for match exhaustiveness.
+        Agent::WorkBuddy => format!(
+            "{{\"id\":\"m1\",\"timestamp\":1783137449113,\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"first user message about goals\"}}],\"sessionId\":\"{sid}\",\"cwd\":\"/tmp/proj\"}}\n\
+             {{\"id\":\"m2\",\"parentId\":\"m1\",\"timestamp\":1783137455216,\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"reply\"}}],\"sessionId\":\"{sid}\",\"cwd\":\"/tmp/proj\"}}\n",
             sid = session_id
         ),
         // Qoder = Claude's shape + its own bookkeeping line, which is what
@@ -1168,21 +1177,26 @@ adapter_suite!(qoder_suite, Agent::Qoder, QoderAdapter);
 
 /// Not every adapter can offer permanent source deletion: §16.3 requires a
 /// content fingerprint pointing back at the agent, and AutoClaw's bytes are
-/// the pi core's bytes (方案 §37.6). The refusal must be explicit — a plan
-/// that could not be verified must never be produced.
+/// the pi core's bytes (方案 §37.6); WorkBuddy's file has no per-session
+/// identity to revalidate against (§37.7). The refusal must be explicit — a
+/// plan that could not be verified must never be produced.
 #[test]
 fn adapters_without_deletion_support_refuse_loudly() {
     let db = open_db("no-deletion-support");
-    let s = fixture_session(&db, Agent::AutoClaw, "no-deletion-support");
-    assert!(
-        Path::new(&s.raw_path).exists(),
-        "the fixture is a real file; the refusal is a policy, not a missing file"
-    );
-    let err = AutoClawAdapter
-        .prepare_source_session_deletion(&s)
-        .unwrap_err();
-    assert!(err.to_string().contains("暂不支持"), "unexpected: {err}");
-    assert!(Path::new(&s.raw_path).exists(), "nothing was touched");
+    let cases: [(Agent, &dyn AgentAdapter); 2] = [
+        (Agent::AutoClaw, &AutoClawAdapter),
+        (Agent::WorkBuddy, &WorkBuddyAdapter),
+    ];
+    for (agent, adapter) in cases {
+        let s = fixture_session(&db, agent, "no-deletion-support");
+        assert!(
+            Path::new(&s.raw_path).exists(),
+            "the fixture is a real file; the refusal is a policy, not a missing file"
+        );
+        let err = adapter.prepare_source_session_deletion(&s).unwrap_err();
+        assert!(err.to_string().contains("暂不支持"), "unexpected: {err}");
+        assert!(Path::new(&s.raw_path).exists(), "nothing was touched");
+    }
 }
 
 // ---- Hardening patch §1-A/§1-B -------------------------------------------

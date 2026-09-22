@@ -200,6 +200,8 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         // — a different, empty state — so launching is not offered until the
         // platform layer can pass env (方案 §37.6).
         Agent::AutoClaw => vec![],
+        // Electron GUI: only /Applications/WorkBuddy.app/Contents/MacOS/Electron.
+        Agent::WorkBuddy => vec![],
     }
 }
 

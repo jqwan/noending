@@ -251,6 +251,7 @@ pub enum Agent {
     Pi,
     Qoder,
     AutoClaw,
+    WorkBuddy,
 }
 
 impl Agent {
@@ -263,6 +264,7 @@ impl Agent {
             Agent::Pi,
             Agent::Qoder,
             Agent::AutoClaw,
+            Agent::WorkBuddy,
         ]
     }
 
@@ -273,6 +275,7 @@ impl Agent {
             Agent::Pi => "Pi",
             Agent::Qoder => "Qoder",
             Agent::AutoClaw => "AutoClaw",
+            Agent::WorkBuddy => "WorkBuddy",
         }
     }
 
@@ -283,6 +286,7 @@ impl Agent {
             Agent::Pi => "pi",
             Agent::Qoder => "qoder",
             Agent::AutoClaw => "autoclaw",
+            Agent::WorkBuddy => "workbuddy",
         }
     }
 
@@ -293,6 +297,7 @@ impl Agent {
             "pi" => Some(Agent::Pi),
             "qoder" | "qcoder" => Some(Agent::Qoder),
             "autoclaw" | "openclaw" => Some(Agent::AutoClaw),
+            "workbuddy" | "work_buddy" => Some(Agent::WorkBuddy),
             _ => None,
         }
     }

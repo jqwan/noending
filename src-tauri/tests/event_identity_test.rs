@@ -81,6 +81,21 @@ fn autoclaw_line(role: &str, text: &str) -> String {
     )
 }
 
+fn workbuddy_line(role: &str, text: &str) -> String {
+    // WorkBuddy: append-only JSONL with no session header; the content block
+    // is typed by role (`input_text` / `output_text`) and the timestamp is
+    // epoch millis. The deterministic id keeps rescans hash-identical.
+    let id = format!("wb-{}-{}", role, text);
+    let block = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    format!(
+        r#"{{"id":"{id}","timestamp":1783137449113,"type":"message","role":"{role}","content":[{{"type":"{block}","text":"{text}"}}],"sessionId":"s1","cwd":"/repo"}}"#
+    )
+}
+
 fn qoder_line(role: &str, text: &str) -> String {
     // Qoder = Claude's shape + a sessionId; the deterministic uuid keeps
     // rescans hash-identical so dedup can be observed.
@@ -260,6 +275,13 @@ identity_suite!(
     noending::adapters::autoclaw::AutoClawAdapter,
     autoclaw_line,
     autoclaw_line
+);
+identity_suite!(
+    workbuddy_truncate_rewrite_dedup,
+    Agent::WorkBuddy,
+    noending::adapters::workbuddy::WorkBuddyAdapter,
+    workbuddy_line,
+    workbuddy_line
 );
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a

@@ -74,6 +74,11 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             provider: Unsupported,
             effort: Unsupported,
         },
+        Agent::WorkBuddy => AgentRuntimeCapabilities {
+            model: Unsupported,
+            provider: Unsupported,
+            effort: Unsupported,
+        },
     }
 }
 

@@ -3226,3 +3226,30 @@ workspace-directories / runtime-config / worktree-state / active-leaf / last-pro
 **四、身份带上了 agentId**：`agent_session_id = "<agentId>:<uuid>"`。AutoClaw 自己就用 `agent:<id>:<suffix>` 作 session key，而它的多个 agent 是彼此独立的存储，理论上可能给出同一个 uuid——`UNIQUE(agent, agent_session_id)` 只按 Agent 去重，不带 agentId 就会互相覆盖。
 
 **验证**：`[fingerprint] AutoClaw: 1 sessions discovered under /Users/jqk/.openclaw-autoclaw`，真实根目录零错判；适配器单测覆盖"只认自己的目录形状"（索引文件、trajectory 文件、位置不对的同名文件、首行不是 session 头的文件都被拒）、"摄入保留对话、丢掉 thinking/toolCall/toolResult"、以及上面那两条钉住事实的测试；`autoclaw_truncate_rewrite_dedup` 并入 identity_suite；`qoder_suite` 也补上了 §46 的删除矩阵（Qoder 支持删除，AutoClaw 不支持，两者都有测试钉住）。`cargo fmt --check` / `cargo test --all-targets`（31 个目标全绿）。
+
+## 37.7 WorkBuddy（A 形态，只摄入）
+
+`~/.workbuddy/projects/<slug>/<sessionId>.jsonl`（旁边还有 `audit-log/*.jsonl` 审计日志与 `binaries/`）。同样是追加式 JSONL、没有 session 头：**第一行就是一条 message**，`sessionId` / `cwd` 逐行重复。实测三个真实会话共 712 行，行型分布：`function_call` 237、`function_call_result` 237、`reasoning` 101、`message` 95、`file-history-snapshot` 35、`ai-title` 7；消息块只有 `input_text`(17) / `output_text`(78) 两种，角色只有 `user`/`assistant`。
+
+**一、指纹判据不能借用别人**。WorkBuddy 的行没有 `ordinal`（不是 Codex）、`type` 不是 `user`/`assistant`（不是 Claude/Qoder）、消息的 `role`/`content` 就摆在**顶层**而不是嵌在 `message` 里（不是 pi）。所以 `fingerprint_line` 里单独给它一个分支：`type=="message"` 且顶层有 `role` 且 `content` 是数组；另外 `ai-title`（带 `aiTitle`）与 `file-history-snapshot` 是它独有的行型，在开头几行必然出现，单独也可判定。`audit-log/*.jsonl` 是另一套形状（`category`/`eventType`），三条判据都不满足，因此不会被误收——实测发现结果正好是 3 个会话。
+
+**二、时间戳是 epoch 毫秒（数字）**。六家里只有 WorkBuddy 这样写，其余全是 RFC3339 字符串。`read_jsonl_delta` 原来只认字符串，直接在 `parse_line` 之前把数字型 `timestamp` 归一化成 RFC3339（新增 `ms_epoch_to_rfc3339`），这样下游（排序、展示）只面对一种拼写，不用各家自己补。库里三个会话的 `started_at` 因此都能落到正确时刻（如 `2026-07-04T03:57:29.113+00:00`）。
+
+**三、用户轮次是"信封"，不是人说的话（这条是真正的坑）**。WorkBuddy 把每一个真人轮次都包在 `<system-reminder data-role="user-context">` 里，真正的提问在**最末尾**的 `<user_query>…</user_query>`；而开场那条 message 本身就是 9KB 的 `SOUL.md`/`IDENTITY.md` 身份前导，一个字都不是用户写的。按 Codex 那套"`<` 开头就跳过"的写法会得到两个坏结果：三个会话的首条用户消息全部被跳过（标题全空），而且每条 `user_message` 都塞进 2–36KB 的机器前导——正是用户之前抱怨的那类噪音。所以 WorkBuddy 的解析必须认识这个格式：
+
+```text
+<user_query>…</user_query>   → user_message，取引号内的正文
+<cb_summary> / <conversation_history_summary>  → compact，只留"conversation compacted"标记
+以 < 或 # 开头的其它            → 丢弃（纯系统信封，里面没有人话）
+剩下的一切                      → user_message（如 "Please continue…" 这种续写提示）
+```
+
+压缩摘要判定放在最前：它内部会引用用户原话、甚至引用 `<user_query>` 标签，但它依然不是用户轮次。判定规则单独抽成 `classify_user_turn` 并配了纯函数单测（`the_envelope_is_not_the_user_turn`），标题与摄入走同一套规则。用真实语料跑一遍，三个会话的标题是 `workbuddy可以做到导入微信聊天记录吗？`、`你能连接通达信做些什么？`、`@skill:wb-finance-skill 分析一下股票：生益电子`，事件数 4 / 67 / 24——都对得上人真正说过的话。
+
+**没有 CLI**：`/Applications/WorkBuddy.app` 里唯一的可执行文件是 Electron 本体。所以 `detect()` 恒 None、三个 builder 明确报错、`capabilities_of` 三字段全 `unsupported`、模型发现 `Unavailable`，界面上不会出现新建/恢复入口。
+
+**永久删除源会话不提供**：这个文件没有 session 头、没有任何逐会话身份可以回校（`sessionId` 是逐行重复的，文件名也可以被改名），满足不了 §16.3 的"内容指纹必须指回本 Agent 且能证明还是同一个 Session"。走 trait 默认的明确拒绝，并把它并进 `adapters_without_deletion_support_refuse_loudly`。
+
+**改动清单**：`domain/models.rs`（`WorkBuddy`）、`platform/paths.rs`（`~/.workbuddy`，无环境变量覆盖）、`platform/exec_resolver.rs`（`cli_names` 为空）、`adapters/mod.rs`（注册 + 指纹分支 + 数字时间戳归一化）、`adapters/workbuddy.rs`、`agent_runtime/{capabilities,discovery}`、`src/types.ts` 与 `AgentRuntimeSettings`。
+
+**验证**：`[fingerprint] WorkBuddy: 3 sessions discovered under /Users/jqk/.workbuddy`，真实根目录零错判；`workbuddy_is_claimed_by_its_top_level_shape`（三条判据 + "pi 的嵌套 message 行仍是 pi"）、`the_envelope_is_not_the_user_turn`（信封 / 压缩 / 裸信封 / 白话四种输入）、适配器内的发现与摄入测试（把压缩块也纳入 fixture）、`workbuddy_truncate_rewrite_dedup` 并入 identity_suite、`adapters_without_deletion_support_refuse_loudly` 覆盖 WorkBuddy。`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
