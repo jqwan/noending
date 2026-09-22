@@ -330,15 +330,35 @@
 .session-table .cell-agent-content { display: flex; align-items: center; gap: 7px; }
 .session-table .cell-title { font-weight: 550; }
 
-/* ---------- Session detail messages (§43/§44) ---------- */
-/* 左右各留 8px 内距再负 margin 抵消：悬停底色才不会贴着文字，而独立事件的
-   分隔线也保持同宽（正文位置一点没动）。 */
-.event { padding: 12px 8px; margin: 0 -8px; border-top: 1px solid var(--bg-panel); border-radius: var(--radius-sm); }
-.event:first-of-type { border-top: 0; }
-.event .head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 3px; }
+/* ---------- Session detail messages (§43/§44, 聊天观感 §36.23) ---------- */
+/* 左右各留 8px 内距再负 margin 抵消：悬停底色才不会贴着文字，而独立事件的分隔线
+   也保持同宽（正文位置一点没动）。 */
+.event { display: flex; flex-direction: column; padding: 6px 8px; margin: 0 -8px; border-radius: var(--radius-sm); }
+/* 技术事件（system / compact / 其它）仍是「分隔线 + 弱化的整行」——它们是系统噪音，
+   不是对话的一方；用户与 Agent 的对话行改用气泡分区，不再画线。 */
+.event.is-tech { padding: 12px 8px; border-top: 1px solid var(--bg-panel); }
+.event.is-tech:first-of-type { border-top: 0; }
+.event .head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
 .event .who { font-weight: 600; font-size: 12.5px; }
 .event .when { color: var(--text-muted); font-size: 11.5px; }
-.event .body { white-space: pre-wrap; }
+.event .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 气泡只占 82%，对侧留白——一眼能看出「这句是谁说的」。标题行跟着气泡走，
+   而不是横铺整列，否则右对齐的气泡下面挂着一行左起的名字，读起来是断裂的。 */
+.event.is-user .head, .event.is-agent .head { max-width: 82%; }
+.event.is-user .head { align-self: flex-end; justify-content: flex-end; }
+.event.is-agent .head { align-self: flex-start; }
+.event.is-user .body, .event.is-agent .body {
+  max-width: 82%;
+  padding: 8px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+.event.is-user .body {
+  align-self: flex-end;
+  background: var(--accent-wash);
+  border-bottom-right-radius: var(--radius-sm);
+}
+.event.is-agent .body { align-self: flex-start; border-bottom-left-radius: var(--radius-sm); }
 .event.tool .body { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); }
 .event.system { opacity: 0.65; }
 .event.system .body { font-size: 12px; color: var(--text-muted); }
@@ -348,6 +368,7 @@
 .event.openable { cursor: pointer; }
 .event.openable:hover { background: var(--bg-hover); }
 .event .head .event-open { margin-left: auto; width: 22px; min-height: 22px; padding: 0; opacity: 0; transition: opacity .12s; }
+.event.is-user .head .event-open, .event.is-agent .head .event-open { margin-left: 0; }
 .event:hover .head .event-open, .event .head .event-open:focus-visible { opacity: 1; }
 
 /* 全文弹窗的正文：保留原始换行，宽度交给 .modal.wide，滚动交给弹窗自己

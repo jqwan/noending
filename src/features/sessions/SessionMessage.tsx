@@ -47,13 +47,14 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   const readable = text !== "";
   const truncated = text.length > TRUNCATE_AT;
 
+  // 三种观感（§36.23）：用户右、Agent 左，都是气泡；其余是「系统噪音」，保持弱化的整行。
   const isProse = msg.kind === "user_message" || msg.kind === "assistant_message";
   const cls =
     isProse
-      ? ""
+      ? msg.kind === "user_message" ? "is-user" : "is-agent"
       : msg.kind.startsWith("system")
-        ? "tool system"
-        : "tool";
+        ? "tool system is-tech"
+        : "tool is-tech";
 
   const kindLabel = EVENT_KIND_LABELS[msg.kind] ?? null;
   const who =

@@ -62,3 +62,20 @@ it("looksLikeMarkdown 认代码块 / 标题 / 列表，不认普通句子", () =
   expect(looksLikeMarkdown("- 一条")).toBe(true);
   expect(looksLikeMarkdown("就是一段普通的话，没有别的。")).toBe(false);
 });
+
+it("用户消息右、Agent 左，技术事件保持整行", () => {
+  // 左右对齐全靠这三个类（§36.23）；CSS 挂了测试也看不出来，所以在这里钉住类名。
+  const { container } = render(
+    <>
+      <SessionMessage msg={{ sequence: 1, kind: "user_message", text: "提问", ts: null, who: "用户" }} />
+      <SessionMessage msg={{ sequence: 2, kind: "assistant_message", text: "回答", ts: null, who: "Codex" }} />
+      <SessionMessage msg={{ sequence: 3, kind: "system", text: "系统提示", ts: null, who: "系统" }} />
+    </>,
+  );
+
+  const rows = [...container.querySelectorAll(".event")].map((el) => el.className);
+  expect(rows[0]).toContain("is-user");
+  expect(rows[1]).toContain("is-agent");
+  expect(rows[2]).toContain("is-tech");
+  expect(rows[2]).not.toContain("is-user");
+});
