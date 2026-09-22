@@ -202,6 +202,13 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         Agent::AutoClaw => vec![],
         // Electron GUI: only /Applications/WorkBuddy.app/Contents/MacOS/Electron.
         Agent::WorkBuddy => vec![],
+        // dsh HAS a CLI (`dsh --profile <name> …`, bin `@deepseek-ai/dsh`), but
+        // every invocation must name a profile that lives under
+        // `$DSH_HOME/profiles`; the name is the user's own setup, and NoEnding
+        // cannot know it. Guessing one would boot the wrong tree — or nothing —
+        // so launching waits until a profile can be chosen deliberately, the
+        // same wait AutoClaw is in (方案 §37.8).
+        Agent::Dsh => vec![],
     }
 }
 

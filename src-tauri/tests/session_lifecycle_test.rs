@@ -18,6 +18,7 @@
 use noending::adapters::autoclaw::AutoClawAdapter;
 use noending::adapters::claude::ClaudeAdapter;
 use noending::adapters::codex::CodexAdapter;
+use noending::adapters::dsh::DshAdapter;
 use noending::adapters::pi::PiAdapter;
 use noending::adapters::qoder::QoderAdapter;
 use noending::adapters::workbuddy::WorkBuddyAdapter;
@@ -119,8 +120,20 @@ fn write_agent_fixture(agent: Agent, path: &Path, session_id: &str) {
              {{\"type\":\"assistant\",\"sessionId\":\"{sid}\",\"uuid\":\"u2\",\"parentUuid\":\"u1\",\"cwd\":\"/tmp/proj\",\"timestamp\":\"2026-09-13T10:01:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"reply\"}}]}}}}\n",
             sid = session_id
         ),
+        // dsh: the session header carries `createdAt`, and every later record
+        // carries the writer's own `seq`. No permanent source deletion (§37.8).
+        Agent::Dsh => format!(
+            "{{\"type\":\"session\",\"version\":2,\"id\":\"{sid}\",\"createdAt\":1788969915099,\"cwd\":\"/tmp/proj\"}}\n\
+             {{\"type\":\"user/message\",\"seq\":1,\"time\":1788969927205,\"data\":{{\"content\":[{{\"type\":\"text\",\"text\":\"first user message about goals\"}}],\"role\":\"user\"}}}}\n",
+            sid = session_id
+        ),
     };
-    std::fs::write(path, body).unwrap();
+    // dsh is the one agent whose transcript is zstd (方案 §37.8).
+    if agent == Agent::Dsh {
+        std::fs::write(path, zstd::encode_all(body.as_bytes(), 3).unwrap()).unwrap();
+    } else {
+        std::fs::write(path, body).unwrap();
+    }
 }
 
 fn fixture_session(db: &Db, agent: Agent, tag: &str) -> Session {
@@ -1183,9 +1196,10 @@ adapter_suite!(qoder_suite, Agent::Qoder, QoderAdapter);
 #[test]
 fn adapters_without_deletion_support_refuse_loudly() {
     let db = open_db("no-deletion-support");
-    let cases: [(Agent, &dyn AgentAdapter); 2] = [
+    let cases: [(Agent, &dyn AgentAdapter); 3] = [
         (Agent::AutoClaw, &AutoClawAdapter),
         (Agent::WorkBuddy, &WorkBuddyAdapter),
+        (Agent::Dsh, &DshAdapter),
     ];
     for (agent, adapter) in cases {
         let s = fixture_session(&db, agent, "no-deletion-support");

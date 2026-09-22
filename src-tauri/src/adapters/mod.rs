@@ -16,6 +16,7 @@
 pub mod autoclaw;
 pub mod claude;
 pub mod codex;
+pub mod dsh;
 pub mod pi;
 pub mod qoder;
 pub mod workbuddy;
@@ -304,7 +305,7 @@ fn observe(path: &Path) -> Result<(FileObservation, String)> {
 }
 
 /// Hex SHA-256 of a byte slice — the prefix fingerprint stored on cursors.
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;
     use std::fmt::Write;
     let mut h = sha2::Sha256::new();
@@ -627,6 +628,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(qoder::QoderAdapter),
         Box::new(autoclaw::AutoClawAdapter),
         Box::new(workbuddy::WorkBuddyAdapter),
+        Box::new(dsh::DshAdapter),
     ]
 }
 

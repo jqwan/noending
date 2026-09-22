@@ -31,6 +31,35 @@ fn open_db(tag: &str) -> Db {
     Db::open(&dir.join("test.db")).unwrap()
 }
 
+// ---- per-source write strategies -----------------------------------------
+//
+// Plain JSONL is written as text; dsh's transcript is zstd, appended one
+// complete frame per write batch (方案 §37.8). Both must pass the same suite.
+
+fn write_plain(file: &std::path::Path, body: &str) {
+    std::fs::write(file, body).unwrap();
+}
+
+fn append_plain(file: &std::path::Path, extra: &str) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+    write!(f, "{extra}").unwrap();
+}
+
+fn frame(body: &str) -> Vec<u8> {
+    zstd::encode_all(body.as_bytes(), 3).unwrap()
+}
+
+fn write_framed(file: &std::path::Path, body: &str) {
+    std::fs::write(file, frame(body)).unwrap();
+}
+
+fn append_framed(file: &std::path::Path, extra: &str) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+    f.write_all(&frame(extra)).unwrap();
+}
+
 fn session_row(db: &Db, agent: Agent, path: &std::path::Path) -> Session {
     let s = Session {
         id: new_id(),
@@ -105,6 +134,28 @@ fn qoder_line(role: &str, text: &str) -> String {
     )
 }
 
+fn dsh_line(role: &str, text: &str) -> String {
+    // dsh records the writer's own contiguous `seq`; a per-line counter keeps
+    // the fixture faithful (ids are unique and never reused) so the suite
+    // exercises the id-based dedup production relies on.
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    let (vtype, data) = if role == "user" {
+        (
+            "user/message",
+            format!(r#"{{"content":[{{"type":"text","text":"{text}"}}],"role":"user"}}"#),
+        )
+    } else {
+        (
+            "assistant/message",
+            format!(
+                r#"{{"turn":1,"step":1,"message":{{"role":"assistant","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            ),
+        )
+    };
+    format!(r#"{{"type":"{vtype}","seq":{seq},"time":1783137449113,"data":{data}}}"#)
+}
+
 /// One ingest round-trip exactly as production does it.
 fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
     let cursor = db.get_source_cursor(&session.id).unwrap();
@@ -117,25 +168,26 @@ fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
 }
 
 macro_rules! identity_suite {
-    ($fn_name:ident, $agent:expr, $adapter:expr, $user_line:expr, $asst_line:expr) => {
+    ($fn_name:ident, $agent:expr, $adapter:expr, $user_line:expr, $asst_line:expr, $write:expr, $append:expr) => {
         #[test]
         fn $fn_name() {
             let db = open_db(stringify!($fn_name));
             let dir = unique_dir(stringify!($fn_name));
             let file = dir.join("session.jsonl");
             let adapter: &dyn AgentAdapter = &$adapter;
+            let write: fn(&std::path::Path, &str) = $write;
+            let append: fn(&std::path::Path, &str) = $append;
 
             // ---- initial ingest: 3 lines ----
-            std::fs::write(
+            write(
                 &file,
-                format!(
+                &format!(
                     "{}\n{}\n{}\n",
                     $user_line("user", "first user message about goals"),
                     $asst_line("assistant", "first assistant reply"),
                     $user_line("user", "second user message")
                 ),
-            )
-            .unwrap();
+            );
             let s = session_row(&db, $agent, &file);
 
             assert_eq!(
@@ -166,14 +218,14 @@ macro_rules! identity_suite {
 
             // ---- append: only the delta is stored ----
             std::thread::sleep(std::time::Duration::from_millis(20));
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&file)
-                .unwrap();
-            use std::io::Write;
-            writeln!(f, "{}", $asst_line("assistant", "appended assistant reply")).unwrap();
-            writeln!(f, "{}", $user_line("user", "appended user message")).unwrap();
-            drop(f);
+            append(
+                &file,
+                &format!(
+                    "{}\n{}\n",
+                    $asst_line("assistant", "appended assistant reply"),
+                    $user_line("user", "appended user message")
+                ),
+            );
 
             assert_eq!(ingest(&db, adapter, &s), 2, "append stores only new lines");
             let all = db.get_events(&s.id, None, 100).unwrap();
@@ -189,15 +241,14 @@ macro_rules! identity_suite {
 
             // ---- truncate + rewrite with different content ----
             std::thread::sleep(std::time::Duration::from_millis(20));
-            std::fs::write(
+            write(
                 &file,
-                format!(
+                &format!(
                     "{}\n{}\n",
                     $user_line("user", "compacted summary of everything"),
                     $asst_line("assistant", "post-compact state")
                 ),
-            )
-            .unwrap();
+            );
 
             assert_eq!(
                 ingest(&db, adapter, &s),
@@ -223,11 +274,10 @@ macro_rules! identity_suite {
             // ---- file replacement (new identity) ----
             std::thread::sleep(std::time::Duration::from_millis(20));
             std::fs::remove_file(&file).unwrap();
-            std::fs::write(
+            write(
                 &file,
-                format!("{}\n", $user_line("user", "brand new session file content")),
-            )
-            .unwrap();
+                &format!("{}\n", $user_line("user", "brand new session file content")),
+            );
             assert_eq!(
                 ingest(&db, adapter, &s),
                 1,
@@ -246,42 +296,63 @@ identity_suite!(
     Agent::Codex,
     noending::adapters::codex::CodexAdapter,
     codex_line,
-    codex_line
+    codex_line,
+    write_plain,
+    append_plain
 );
 identity_suite!(
     claude_truncate_rewrite_dedup,
     Agent::ClaudeCode,
     noending::adapters::claude::ClaudeAdapter,
     claude_line,
-    claude_line
+    claude_line,
+    write_plain,
+    append_plain
 );
 identity_suite!(
     pi_truncate_rewrite_dedup,
     Agent::Pi,
     noending::adapters::pi::PiAdapter,
     pi_line,
-    pi_line
+    pi_line,
+    write_plain,
+    append_plain
 );
 identity_suite!(
     qoder_truncate_rewrite_dedup,
     Agent::Qoder,
     noending::adapters::qoder::QoderAdapter,
     qoder_line,
-    qoder_line
+    qoder_line,
+    write_plain,
+    append_plain
 );
 identity_suite!(
     autoclaw_truncate_rewrite_dedup,
     Agent::AutoClaw,
     noending::adapters::autoclaw::AutoClawAdapter,
     autoclaw_line,
-    autoclaw_line
+    autoclaw_line,
+    write_plain,
+    append_plain
 );
 identity_suite!(
     workbuddy_truncate_rewrite_dedup,
     Agent::WorkBuddy,
     noending::adapters::workbuddy::WorkBuddyAdapter,
     workbuddy_line,
-    workbuddy_line
+    workbuddy_line,
+    write_plain,
+    append_plain
+);
+identity_suite!(
+    dsh_truncate_rewrite_dedup,
+    Agent::Dsh,
+    noending::adapters::dsh::DshAdapter,
+    dsh_line,
+    dsh_line,
+    write_framed,
+    append_framed
 );
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a

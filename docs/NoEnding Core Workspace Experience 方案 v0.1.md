@@ -3253,3 +3253,32 @@ workspace-directories / runtime-config / worktree-state / active-leaf / last-pro
 **改动清单**：`domain/models.rs`（`WorkBuddy`）、`platform/paths.rs`（`~/.workbuddy`，无环境变量覆盖）、`platform/exec_resolver.rs`（`cli_names` 为空）、`adapters/mod.rs`（注册 + 指纹分支 + 数字时间戳归一化）、`adapters/workbuddy.rs`、`agent_runtime/{capabilities,discovery}`、`src/types.ts` 与 `AgentRuntimeSettings`。
 
 **验证**：`[fingerprint] WorkBuddy: 3 sessions discovered under /Users/jqk/.workbuddy`，真实根目录零错判；`workbuddy_is_claimed_by_its_top_level_shape`（三条判据 + "pi 的嵌套 message 行仍是 pi"）、`the_envelope_is_not_the_user_turn`（信封 / 压缩 / 裸信封 / 白话四种输入）、适配器内的发现与摄入测试（把压缩块也纳入 fixture）、`workbuddy_truncate_rewrite_dedup` 并入 identity_suite、`adapters_without_deletion_support_refuse_loudly` 覆盖 WorkBuddy。`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
+
+## 37.8 dsh（B 形态：解压后才能读的 JSONL，只摄入）
+
+`$DSH_HOME/sessions/<encoded-cwd>/<id>/session.v2.jsonl.zstd`（`$DSH_HOME` 默认 `~/.dsh`；旁边还有旧一代的 `session.v1.jsonl.zstd`、`session.jsonl.zstd` 与一把 `session.lock`）。**六家里唯一"源字节不是 JSONL"的一家**：转录是 zstd 压缩的，本机 93 个会话共 54MB。实现之前先把它的读写语义读清楚了（实现仓库 `/Users/jqk/projects/deepseek-harness`，`packages/session/session-persistence-jsonl` + `src/index.ts`），四条事实决定了适配器怎么写：
+
+1. **一次写入 = 追加一个完整的 zstd 帧**。不是一个长开的流：`open(path,'a')` → `writeFile(一帧)` → `fsync` → `close`（`src/index.ts:996-1011`，`encodeEventBatch` 每批一帧）。文件里因此是多个**首尾相接的帧**（实测多数文件 2–8 帧，最多的一个 65 帧），这也正是"可以按追加读取"的依据。
+2. **已提交的字节永远不会被改写**。只有两处截断：追加失败回滚到写入前的大小、以及"残缺尾帧"修复——两者都只砍掉**最后一个不完整帧**。所以游标那套 append / truncate / replace 判定在这里依然成立。
+3. **迁移不覆盖旧文件**，而是把新一代文件名**新发布**在旁边（`generation.ts` 用 `link()` 独占创建），旧文件原样留着。于是同一个 session 目录里可能同时躺着 v0 / v1 / v2 三个文件、描述**同一个会话 id**——发现必须只认一个：**取存在的最高代**（`session.v2.jsonl.zstd` > `v1` > 无版本中缀），否则同一个 id 会被两个文件争抢同一行。
+4. **`seq` 是写入方分配、连续、单调** 的每会话序号（`seq: SessionSeq(this.log.length)`，`invariant.ts` 强制严格递增），所以它就是**原生事件 id**：去重精确且与位置无关。
+
+**记录形状**（解码后）：第 0 行是会话头 `{type:"session", version, id, createdAt, cwd, …}`，也是唯一没有 `seq` 的记录；之后每条都是 `{type, seq, time, data}`。只摄入对话：`user/message`、`assistant/message`，以及 `compaction/*`（只留一个"conversation compacted"边界标记）。`assistant/chunk`（v0/v1 的逐 token 增量）、`tool/call`、`tool/result`、`todo/write`、`request/*`、`session/title*` 与 turn/step 记账一律丢弃（§36.11）。
+
+**两处需要真功夫的地方**：
+
+**一、user/message 里不全是用户的话。** dsh 会把"当前运行时上下文"和 `<system-reminder>` 工作区指令**也写成 user/message**。原样摄入的话，每个会话都以一段机器前导开头——正是用户抱怨过的那类噪音。所以 `user/message` 先过一遍：以 `<` 开头或以 `Current runtime context` 开头的丢弃。真实语料验证：93 个会话里 36 个**根本没有 user/message**（空会话，只有头 + 配置），另外 57 个"有用户消息就有真提问"，**0 个被误丢**——这条规则没有吃掉的标题。
+
+**二、游标坐标系。** 共享读取器的偏移量就是它解析的那段文本的偏移量，而 dsh 的文本是**解码后**才存在的。所以这个适配器每次读取都整段解码重放，靠 `seq` 去重把重放吸收掉（回放不会产生新行）；存进游标的则是**原生文件**的 identity / size / mtime，这样 reconcile 的"已入库且 stat 未变"预筛依旧生效——稳态下根本不会去解码。代价写在明面上：会话在活跃写入时，每次 reconcile 都要重解一次那个文件（最大的 3.7MB 压缩，本机全量一次约 0.3s）。要更省就得按帧边界做真增量，那需要 `find_frame_compressed_size` 之类的帧长探测，v0.1 不做。
+
+另外两件事：**残缺尾帧不算错误**——`scan_lines` 读到解不动的最后一帧就停，前面完整的帧照常入库（等价于"半行 JSON 不入库"，下一轮读到完整帧再收）；**子 Agent 会话照收**，它们的 id 是各自独立的裸 uuid、头里 `parentSession` / `origin:"subagent"` / `delegationDepth` 都写明了父会话，所以 `parent_agent_session_id` 是**事实而非猜测**（本机 28 个）。还有一处必须显式绕开：`$DSH_HOME` 下除了 `sessions/` 还有 `profiles/web/node_modules` 那种插件森林，发现**只进 `<root>/sessions`**，既避免走几万个目录，也避免里面冒出一个同名文件被误判。
+
+**没有可启动的 CLI**：`dsh` 确实有 CLI（`apps/cli`，`bin: dsh`），但每次调用都必须 `--profile <name>` 指定 `$DSH_HOME/profiles` 下的某个 profile——那是用户自己的装法，NoEnding 无从得知（本机只装了 `web`）。猜一个名字的后果不是报错，而是**启动另一棵插件树**，所以走 AutoClaw 同一条路：`cli_names(Dsh)` 为空、`detect()` 恒 None、三个 builder 明确报错，"平台层能选 profile"记为解锁条件。
+
+**永久删除源会话不提供**：§16.3 要求内容指纹能指回本 Agent，而这个文件的字节是压缩流，唯一能读出的身份还是 pi 形状的头（`type/version/id`），证据不足。走 trait 默认的明确拒绝，并入 `adapters_without_deletion_support_refuse_loudly`。这条也用测试钉住：`a_pi_header_inside_a_zstd_file_is_not_claimed` —— 一个 zstd 文件里装 pi 的头，解码后看得到 `createdAt` 的差异，不看内容就分不出来。
+
+**改动清单**：`Cargo.toml`（新增 `zstd`，本 Phase 唯一的依赖新增）、`domain/models.rs`（`Dsh`）、`platform/paths.rs`（`$DSH_HOME` ?? `~/.dsh`）、`platform/exec_resolver.rs`（`cli_names` 为空）、`adapters/mod.rs`（注册；`sha256_hex` 提为 `pub(crate)`，供 dsh 写原始字节的前缀指纹）、`adapters/dsh.rs`、`agent_runtime/{capabilities,discovery}`、`src/types.ts` 与 `AgentRuntimeSettings`。
+
+**测试**：`identity_suite!` 这轮加了两个参数（写入器 / 追加器），普通 JSONL 用 `write_plain`/`append_plain`，dsh 用 `write_framed`/`append_framed`（每次追加一帧）——**同一套 append / 无变化 / 截断重写 / 同尺寸重写 / 文件替换 + 去重断言，七家适配器现在共用**。适配器内另有：头解析与"注入上下文不算用户话"、最高代优先（v0 + v2 同目录只认 v2）、摄入只留对话与 compression 标记、子 Agent 的父链接、pi 头不被认领、残缺尾帧不吃掉完整前缀。
+
+**验证**：`[fingerprint] dsh: 93 sessions discovered under /Users/jqk/.dsh`（= 60 个 v2 目录 + 33 个只剩 v0 的目录），真实根目录零错判，`seq`/id 全局唯一无重复；`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。

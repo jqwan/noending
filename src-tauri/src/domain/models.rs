@@ -252,6 +252,7 @@ pub enum Agent {
     Qoder,
     AutoClaw,
     WorkBuddy,
+    Dsh,
 }
 
 impl Agent {
@@ -265,6 +266,7 @@ impl Agent {
             Agent::Qoder,
             Agent::AutoClaw,
             Agent::WorkBuddy,
+            Agent::Dsh,
         ]
     }
 
@@ -276,6 +278,7 @@ impl Agent {
             Agent::Qoder => "Qoder",
             Agent::AutoClaw => "AutoClaw",
             Agent::WorkBuddy => "WorkBuddy",
+            Agent::Dsh => "dsh",
         }
     }
 
@@ -287,6 +290,7 @@ impl Agent {
             Agent::Qoder => "qoder",
             Agent::AutoClaw => "autoclaw",
             Agent::WorkBuddy => "workbuddy",
+            Agent::Dsh => "dsh",
         }
     }
 
@@ -298,6 +302,7 @@ impl Agent {
             "qoder" | "qcoder" => Some(Agent::Qoder),
             "autoclaw" | "openclaw" => Some(Agent::AutoClaw),
             "workbuddy" | "work_buddy" => Some(Agent::WorkBuddy),
+            "dsh" | "deepseek_harness" => Some(Agent::Dsh),
             _ => None,
         }
     }

@@ -19,6 +19,7 @@ export const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
   qoder: { model: "Model", provider: "Provider", effort: "Effort" },
   autoclaw: { model: "Model", provider: "Provider", effort: "Effort" },
   workbuddy: { model: "Model", provider: "Provider", effort: "Effort" },
+  dsh: { model: "Model", provider: "Provider", effort: "Effort" },
 };
 
 const SOURCE_NOTE: Record<ModelSource, string | null> = {

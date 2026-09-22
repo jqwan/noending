@@ -24,6 +24,9 @@ rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+# dsh stores its transcripts as zstd frames (方案 §37.8) — the only agent whose
+# source bytes must be decoded before they are JSONL.
+zstd = "0.13"
 dirs = "5"
 thiserror = "2"
 

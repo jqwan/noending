@@ -10,7 +10,8 @@ export type Agent =
   | "pi"
   | "qoder"
   | "autoclaw"
-  | "workbuddy";
+  | "workbuddy"
+  | "dsh";
 
 /** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
 export type WorkstreamLifecycle = "active" | "completed";
@@ -635,6 +636,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
   qoder: "Qoder",
   autoclaw: "AutoClaw",
   workbuddy: "WorkBuddy",
+  dsh: "dsh",
 };
 
 // ---------- Agent Runtime Configuration (commands.rs §Agent Runtime) ----------

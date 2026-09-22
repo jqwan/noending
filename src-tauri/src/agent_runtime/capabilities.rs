@@ -79,6 +79,13 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             provider: Unsupported,
             effort: Unsupported,
         },
+        // dsh's model/effort come from its own profile bundle, and NoEnding
+        // cannot launch it at all, so it offers no override (方案 §37.8).
+        Agent::Dsh => AgentRuntimeCapabilities {
+            model: Unsupported,
+            provider: Unsupported,
+            effort: Unsupported,
+        },
     }
 }
 

@@ -228,6 +228,7 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
             "qoder" | "qcoder" => Agent::Qoder,
             "autoclaw" | "openclaw" => Agent::AutoClaw,
             "workbuddy" | "work_buddy" => Agent::WorkBuddy,
+            "dsh" | "deepseek_harness" => Agent::Dsh,
             _ => Agent::Codex,
         },
         agent_session_id: format!("as-{name}"),

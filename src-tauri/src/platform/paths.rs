@@ -39,6 +39,8 @@ pub fn agent_env_override(agent: Agent) -> &'static str {
         Agent::AutoClaw => "OPENCLAW_STATE_DIR",
         // Electron app; no documented override.
         Agent::WorkBuddy => "",
+        // Documented by dsh's own settings loader: `$DSH_HOME` ?? `~/.dsh`.
+        Agent::Dsh => "DSH_HOME",
     }
 }
 
@@ -51,6 +53,7 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
         Agent::Qoder => [".qoder-cn"].iter().collect(),
         Agent::AutoClaw => [".openclaw-autoclaw"].iter().collect(),
         Agent::WorkBuddy => [".workbuddy"].iter().collect(),
+        Agent::Dsh => [".dsh"].iter().collect(),
     }
 }
 

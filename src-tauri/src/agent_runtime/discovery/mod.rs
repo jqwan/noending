@@ -87,7 +87,9 @@ pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
         Agent::Pi => pi::discover(),
         // No CLI to ask. `Unavailable` is the honest answer and the UI already
         // renders it as "无法获取模型列表" rather than as a broken install.
-        Agent::Qoder | Agent::AutoClaw | Agent::WorkBuddy => (ModelCatalog::Unavailable, vec![]),
+        Agent::Qoder | Agent::AutoClaw | Agent::WorkBuddy | Agent::Dsh => {
+            (ModelCatalog::Unavailable, vec![])
+        }
     };
     let model_source = models.source();
     if model_source == "unavailable" {
@@ -119,7 +121,7 @@ pub fn effort_levels_for(agent: Agent) -> Vec<String> {
         Agent::Codex => codex::EFFORT_LEVELS,
         Agent::ClaudeCode => claude::EFFORT_LEVELS,
         Agent::Pi => pi::EFFORT_LEVELS,
-        Agent::Qoder | Agent::AutoClaw | Agent::WorkBuddy => &[],
+        Agent::Qoder | Agent::AutoClaw | Agent::WorkBuddy | Agent::Dsh => &[],
     };
     levels.iter().map(|s| s.to_string()).collect()
 }
