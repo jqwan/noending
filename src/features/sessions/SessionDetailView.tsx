@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { Modal, timeAgo, useRefreshSignal } from "../../components/common";
+import { Modal, copyToClipboard, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { type SessionMessageData } from "./SessionMessage";
 import ResumeSessionModal from "./ResumeSessionModal";
@@ -494,38 +494,6 @@ function CopyValue({ value, mono, title }: { value: string; mono?: boolean; titl
       </button>
     </span>
   );
-}
-
-/**
- * 剪贴板：Tauri webview 里 navigator.clipboard 通常可用（localhost / tauri:// 都是
- * secure context），但没有授权时会抛；退到隐藏 textarea + execCommand，最后返回
- * false 让调用方给出「手动选中」的提示，绝不静默失败。
- */
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch (e) {
-    console.error(e);
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "-1000px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch (e) {
-    console.error(e);
-    return false;
-  }
 }
 
 /**

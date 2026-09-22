@@ -32,7 +32,7 @@ export function timeAgo(iso: string | null | undefined): string {
  * 都在 document 上，一次按键会同时命中，所以只让**最上面那一个**响应：
  * 自己不是最后一个 `.modal-backdrop` 时直接忽略。
  */
-export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   const backdropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -71,7 +71,7 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
   return (
     <div className="modal-backdrop" ref={backdropRef}
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}>
+      <div className={`modal${wide ? " wide" : ""}`} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
           <h2>{title}</h2>
           <button type="button" className="btn ghost icon-only" aria-label="关闭弹窗" title="关闭" onClick={onClose}><Icon name="close" /></button>
@@ -80,4 +80,36 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
       </div>
     </div>
   );
+}
+
+/**
+ * 剪贴板：Tauri webview 里 navigator.clipboard 通常可用（localhost / tauri:// 都是
+ * secure context），但没有授权时会抛；退到隐藏 textarea + execCommand，最后返回
+ * false 让调用方给出「手动选中」的提示，绝不静默失败。
+ */
+export async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) {
+    console.error(e);
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) {
+    console.error(e);
+    return false;
+  }
 }

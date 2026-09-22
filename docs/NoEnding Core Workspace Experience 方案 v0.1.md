@@ -2996,3 +2996,30 @@ section 右上角 edit 图标 → plus 图标，aria-label「添加关联任务�
 
 
 
+
+## 36.21 会话消息：列表截断到 240 字，点开弹窗看全文
+
+**用户要求**：三条一起提的——「1、消息内容过长时，不用『展开全文』，而是消息栏可点击出现文本显示弹窗；2、希望文本显示支持 md 格式预览；3、希望能呈现出一种聊天记录的感觉，用户消息标题置右」。讨论后定了顺序（先 1 后 2 再 3），并明确「截断要做，420 字多了，可以缩到 240 字」。本节记第 1 条，第 2、3 条各见 §36.22 / §36.23。
+
+**改动**：
+
+```text
+SessionMessage.tsx  TRUNCATE_AT = 240（原 420）；删掉「展开全文 / 收起」那个 link 按钮与 expanded 状态
+                    整行 onClick 开弹窗；head 右侧新增 .event-open 图标按钮（expand）作为键盘 / 可发现性入口
+                    新组件 MessageModal：标题「who · #序号 时间」，正文 pre-wrap，底部「复制全文 / 关闭」
+common.tsx          Modal 增开 wide 开关；copyToClipboard 从 SessionDetailView 搬到这里（两处共用）
+global.css          .modal.wide { width: min(920px, 92vw) }
+components.css      .event 左右各 8px 内距 + 负 margin；.event.openable 悬停底色；.event-open 平时淡出；
+                    .msg-full 保留原始换行
+```
+
+**为什么保留截断、而不是整段就地铺开**：这个流是密排的一列，就地展开会把后面的消息越推越远，读到一半就丢了位置；而消息列在右侧栏上线后只有 ~724px，长内容（代码块、JSON、diff）就地折行会非常难读。弹窗给的是整块宽度加一屏可滚动区域。
+
+**弹窗必须比消息列宽，否则这事没意义**：`.modal` 默认 640px，比 724px 的消息列还窄——那开弹窗只会更难受。所以给 `Modal` 加了 `wide` 开关（`min(920px, 92vw)`），只给全文类弹窗用。
+
+**两个交互细节**：
+
+1. **正文仍要能拖选复制**。整行可点，所以点击时先确认「没有选中任何文字」（`window.getSelection()`）并且落点不是按钮——否则一次划选就会弹出弹窗。
+2. **展开按钮平时 `opacity: 0`，悬停 / `:focus-visible` 才现形**。整行可点已经足够可发现（配合 `cursor: pointer` 与 title），每条消息常驻一个图标会把密排列表弄脏；但它必须留在 DOM 里，键盘用户才能 Tab 到它。
+
+**验证**（`/tmp/noending-header-preview/messages.html`，真实样式表，量的是坐标不是观感）：`.event` 左右各外扩 8px（正文位置不变，分隔线同宽）；展开按钮 22×22、距事件右缘 8px；`min(920px, 92vw)` 在 634px 视口下算出 583px（真机 1360px 视口则是 920px）。`tsc --noEmit` / `vitest run`（65 passed）/ `vite build` 全绿。
