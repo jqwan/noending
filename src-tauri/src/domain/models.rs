@@ -243,16 +243,32 @@ impl Workstream {
 /// Qoder ships no headless CLI and AutoClaw's CLI cannot be pointed at its own
 /// state directory from here, so those adapters ingest history only and
 /// `exec_resolver::resolve` fails by design (方案 §37.1).
+///
+/// The rename on each variant is the IPC spelling and MUST equal `as_str()` —
+/// the sessions table, the frontend's `Agent` union and its `AGENT_LABELS` all
+/// use that same string. Declaring it per variant rather than deriving it with
+/// `rename_all = "snake_case"` is deliberate: the derive spelled three variants
+/// (`auto_claw`, `work_buddy`, `z_code`) differently from everything else, so
+/// those rows rendered as「未知 Agent」and every command taking an `agent`
+/// argument failed to deserialize (方案 §37.14). `serde_spelling_equals_as_str_for_every_agent`
+/// keeps the three spellings in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Agent {
+    #[serde(rename = "codex")]
     Codex,
+    #[serde(rename = "claude_code")]
     ClaudeCode,
+    #[serde(rename = "pi")]
     Pi,
+    #[serde(rename = "qoder")]
     Qoder,
+    #[serde(rename = "autoclaw")]
     AutoClaw,
+    #[serde(rename = "workbuddy")]
     WorkBuddy,
+    #[serde(rename = "dsh")]
     Dsh,
+    #[serde(rename = "zcode")]
     ZCode,
 }
 
@@ -887,4 +903,53 @@ pub struct WorkstreamReviewSummary {
     pub reviewed_at: String,
     pub has_updates: bool,
     pub needs_attention: bool,
+}
+
+#[cfg(test)]
+mod agent_wire_spelling_tests {
+    use super::*;
+
+    /// The Agent enum has THREE spellings to keep in step: `as_str()` (the DB
+    /// column and every SQL literal), `parse` (what we read back), and serde
+    /// (the Tauri IPC boundary the frontend sees). They are hand-written in two
+    /// places and derived in the third, so the only way they stay equal is a
+    /// test. `WorkBuddy` and `ZCode` are where this broke: `rename_all =
+    /// "snake_case"` spelled them `work_buddy` / `z_code` while everything else
+    /// — the sessions table, the frontend's `Agent` union, `AGENT_LABELS` —
+    /// spells them `workbuddy` / `zcode`, so those rows rendered as「未知 Agent」
+    /// and every command taking an `agent` argument failed to deserialize
+    /// (方案 §37.14).
+    #[test]
+    fn serde_spelling_equals_as_str_for_every_agent() {
+        for agent in Agent::all() {
+            let wire = serde_json::to_value(agent).unwrap();
+            assert_eq!(
+                wire.as_str(),
+                Some(agent.as_str()),
+                "{}: the wire spelling must be as_str(), or the frontend cannot label it",
+                agent.display_name()
+            );
+        }
+    }
+
+    /// Whatever we emit, we must be able to read back — a command that takes an
+    /// `agent` argument receives exactly this string.
+    #[test]
+    fn every_emitted_spelling_deserializes_back_to_the_same_agent() {
+        for agent in Agent::all() {
+            let wire = serde_json::to_string(agent).unwrap();
+            let back: Agent = serde_json::from_str(&wire).unwrap();
+            assert_eq!(back, *agent, "round trip failed for {wire}");
+        }
+    }
+
+    /// `parse` is the third spelling and predates the enum's serde derive: it
+    /// accepts the legacy aliases too, and must keep accepting the canonical
+    /// one or a stored row could stop round-tripping.
+    #[test]
+    fn parse_accepts_the_canonical_spelling_of_every_agent() {
+        for agent in Agent::all() {
+            assert_eq!(Agent::parse(agent.as_str()), Some(*agent));
+        }
+    }
 }
