@@ -17,7 +17,6 @@ pub mod autoclaw;
 pub mod claude;
 pub mod codex;
 pub mod dsh;
-pub mod gemini;
 pub mod pi;
 pub mod qoder;
 pub mod workbuddy;
@@ -457,7 +456,7 @@ pub fn read_jsonl_delta(
 }
 
 /// Cursor update for readers that replay the whole source on every read (dsh's
-/// zstd frames, Gemini's checkpoint log — 方案 §37.8/§37.9).
+/// zstd frames — 方案 §37.8).
 ///
 /// Their offsets must stay in the file's OWN coordinates: that is what the
 /// reconcile pre-filter stats, and it is the only thing known without decoding
@@ -669,7 +668,6 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(autoclaw::AutoClawAdapter),
         Box::new(workbuddy::WorkBuddyAdapter),
         Box::new(dsh::DshAdapter),
-        Box::new(gemini::GeminiAdapter),
         Box::new(zcode::ZCodeAdapter),
     ]
 }

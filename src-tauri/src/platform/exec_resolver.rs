@@ -209,10 +209,6 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         // so launching waits until a profile can be chosen deliberately, the
         // same wait AutoClaw is in (方案 §37.8).
         Agent::Dsh => vec![],
-        // Not installed on this machine, and even where it is, `--resume` only
-        // names `latest` or an index — never a session — so NoEnding's
-        // resume-by-id flow has nothing to hand the CLI (方案 §37.9).
-        Agent::Gemini => vec![],
         // Desktop app: `~/.zcode/cli` is its own data directory, not a command
         // the user can run (方案 §37.10).
         Agent::ZCode => vec![],

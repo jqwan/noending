@@ -86,12 +86,6 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             provider: Unsupported,
             effort: Unsupported,
         },
-        // Same reason: nothing to launch, so nothing to override (方案 §37.9).
-        Agent::Gemini => AgentRuntimeCapabilities {
-            model: Unsupported,
-            provider: Unsupported,
-            effort: Unsupported,
-        },
         // Desktop app, no CLI at all (方案 §37.10).
         Agent::ZCode => AgentRuntimeCapabilities {
             model: Unsupported,

@@ -229,7 +229,6 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
             "autoclaw" | "openclaw" => Agent::AutoClaw,
             "workbuddy" | "work_buddy" => Agent::WorkBuddy,
             "dsh" | "deepseek_harness" => Agent::Dsh,
-            "gemini" | "gemini_cli" => Agent::Gemini,
             "zcode" | "z_code" => Agent::ZCode,
             _ => Agent::Codex,
         },

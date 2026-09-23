@@ -253,7 +253,6 @@ pub enum Agent {
     AutoClaw,
     WorkBuddy,
     Dsh,
-    Gemini,
     ZCode,
 }
 
@@ -269,7 +268,6 @@ impl Agent {
             Agent::AutoClaw,
             Agent::WorkBuddy,
             Agent::Dsh,
-            Agent::Gemini,
             Agent::ZCode,
         ]
     }
@@ -283,7 +281,6 @@ impl Agent {
             Agent::AutoClaw => "AutoClaw",
             Agent::WorkBuddy => "WorkBuddy",
             Agent::Dsh => "dsh",
-            Agent::Gemini => "Gemini CLI",
             Agent::ZCode => "ZCode",
         }
     }
@@ -297,7 +294,6 @@ impl Agent {
             Agent::AutoClaw => "autoclaw",
             Agent::WorkBuddy => "workbuddy",
             Agent::Dsh => "dsh",
-            Agent::Gemini => "gemini",
             Agent::ZCode => "zcode",
         }
     }
@@ -311,7 +307,6 @@ impl Agent {
             "autoclaw" | "openclaw" => Some(Agent::AutoClaw),
             "workbuddy" | "work_buddy" => Some(Agent::WorkBuddy),
             "dsh" | "deepseek_harness" => Some(Agent::Dsh),
-            "gemini" | "gemini_cli" => Some(Agent::Gemini),
             "zcode" | "z_code" => Some(Agent::ZCode),
             _ => None,
         }

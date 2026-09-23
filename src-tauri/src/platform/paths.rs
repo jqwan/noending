@@ -41,12 +41,6 @@ pub fn agent_env_override(agent: Agent) -> &'static str {
         Agent::WorkBuddy => "",
         // Documented by dsh's own settings loader: `$DSH_HOME` ?? `~/.dsh`.
         Agent::Dsh => "DSH_HOME",
-        // Gemini CLI honours `GEMINI_CLI_HOME`, but its value is the HOME, not
-        // the data root — the data dir is `<home>/.gemini` (`paths.ts`:
-        // `homedir()` then `GEMINI_DIR`). This contract's value IS the data
-        // root, so the extra segment cannot be expressed; NoEnding reads
-        // `~/.gemini` and would miss a relocated home.
-        Agent::Gemini => "",
         // Desktop app with no documented override; its data root is `~/.zcode`.
         Agent::ZCode => "",
     }
@@ -62,7 +56,6 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
         Agent::AutoClaw => [".openclaw-autoclaw"].iter().collect(),
         Agent::WorkBuddy => [".workbuddy"].iter().collect(),
         Agent::Dsh => [".dsh"].iter().collect(),
-        Agent::Gemini => [".gemini"].iter().collect(),
         Agent::ZCode => [".zcode"].iter().collect(),
     }
 }

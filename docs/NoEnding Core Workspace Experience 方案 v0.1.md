@@ -3099,9 +3099,9 @@ compact    5 条，最长 22 字    —— codex / pi 是固定串 "conversation
 
 **验证**（`/tmp/noending-header-preview/chat2.html`）：技术事件里的 md 实测 `font-family: Inter…`（不再是等宽）、13px、颜色仍是 muted `rgb(138,138,134)`、事件 `opacity: .65`、`h2` 14px、`max-height` 132px 且已加 `is-clamped` 渐隐。`SessionMessage.test.tsx` 增加一条：`system` 事件里的 md 在行内就渲染出 `<h2>`，点开后弹窗的「预览」页签是按下状态。`tsc --noEmit` / `vitest run`（73 passed）/ `vite build` 全绿。
 
-# 37. 多 Agent 接入：六个新适配器
+# 37. 多 Agent 接入：六个新适配器（Gemini 已移除，现存五个）
 
-用户要求把机器上另外六个 Agent 也接进来（qcoder / dsh / zcode / workbuddy / gemini / autoclaw）。动手前先把六家的真实形态摸清——结论是它们并不同质：**只有两家有可执行 CLI，四家只能摄入历史**；文件形态还分成四种，其中两种现有 reader 读不了。
+用户要求把机器上另外六个 Agent 也接进来（qcoder / dsh / zcode / workbuddy / gemini / autoclaw）。**其中 Gemini CLI 已于 2026-09-23 按用户要求整体移除——代码、测试、库中会话与来源行都删了，§37.9 是这次移除的记录；本节其余五家仍在。** 动手前先把六家的真实形态摸清——结论是它们并不同质：**只有两家有可执行 CLI，四家只能摄入历史**；文件形态还分成四种，其中两种现有 reader 读不了。
 
 ## 37.1 摸底结论
 
@@ -3125,10 +3125,9 @@ WorkBuddy  ~/.workbuddy/projects/<slug>/<id>.jsonl
            追加式自定义 JSONL（type:"message" + content[].type ∈ input_text/output_text，
            另有 reasoning / function_call / ai-title 行）。Electron GUI，无 CLI。→ 只摄入
 
-Gemini     ~/.gemini/tmp/<slug>/chats/session-*.jsonl
-           每行是**整份 messages 的快照**（{"$set":{messages:[...]}}），不是逐条追加；
-           而且本机没有 gemini CLI——这 10 个文件全是 Antigravity 的 a2a server 写的，
-           每条 sessionId 恒为 "a2a-server"，会话 id 只能从文件名取。→ 只摄入
+Gemini     —— 已于 2026-09-23 移除：~/.gemini/tmp/<slug>/chats/session-*.jsonl 是
+           Antigravity 的 a2a server 写的整行快照，10 个文件里没有一条人类消息。
+           详见 §37.9。
 
 AutoClaw   ~/.openclaw-autoclaw/agents/<agentId>/sessions/<uuid>.jsonl
            追加式 JSONL（首行 type:"session" v3，之后 type:"message" +
@@ -3147,12 +3146,12 @@ AutoClaw   ~/.openclaw-autoclaw/agents/<agentId>/sessions/<uuid>.jsonl
 A 追加式纯文本 JSONL   → 复用 read_jsonl_delta          Qoder / WorkBuddy / AutoClaw
 B 追加式 zstd JSONL    → 解压后按同一套游标规则         dsh
 C 原地更新的 SQLite    → 快照式读取（见 §37.3）          ZCode
-D 整行整份快照的 JSONL → 每次变化全量解析 + 身份去重      Gemini
+D 整行整份快照的 JSONL → 每次变化全量解析 + 身份去重      （原 Gemini，已移除）
 ```
 
 **C 为什么不违背游标契约**：`session_cursors` 存的是「源文件的身份 + 已消费前缀指纹」，文件身份用 inode，而 SQLite 是原地更新——它天然落进现有的 `rewrite` 分支（同尺寸改 mtime 或尺寸变化但前缀对不上）。所以适配器只要做到「每次调用返回该会话当前的全部消息」，storage 的事件身份去重会把已摄入的丢掉。代价是每次变化都全量扫一遍该会话（ZCode 全库 6619 条消息，可接受），换来的是不动游标模型。
 
-**D 同理**：Gemini 的每一行都携带完整历史，按行解析会把历史重复上报，但事件身份（source_event_id + 文本）相同 → 去重后只留一份。唯一要小心的是「消息被改写」会新增一条事件，这与其它 agent 的行为一致。
+**D 同理（该形态已随 Gemini 移除，保留作为记录）**：它的每一行都携带完整历史，按行解析会把历史重复上报，但事件身份（source_event_id + 文本）相同 → 去重后只留一份。唯一要小心的是「消息被改写」会新增一条事件，这与其它 agent 的行为一致。
 
 ## 37.3 每加一个 Agent 都要动的地方（增量清单）
 
@@ -3183,7 +3182,7 @@ src/types.ts            前端 Agent 联合类型 + 显示名映射
 37.6 AutoClaw（A 形态，且是六家里唯一带 CLI 的——能验证"新 agent 也能新建/恢复"）
 37.7 WorkBuddy（A 形态，只摄入）
 37.8 dsh（B 形态，引入 zstd 解压读取）
-37.9 Gemini（D 形态，快照式去重）
+37.9 Gemini（D 形态，快照式去重）—— 已于 2026-09-23 移除
 37.10 ZCode（C 形态，SQLite 快照源）
 ```
 
@@ -3283,35 +3282,29 @@ workspace-directories / runtime-config / worktree-state / active-leaf / last-pro
 
 **验证**：`[fingerprint] dsh: 93 sessions discovered under /Users/jqk/.dsh`（= 60 个 v2 目录 + 33 个只剩 v0 的目录），真实根目录零错判，`seq`/id 全局唯一无重复；`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
 
-## 37.9 Gemini CLI（D 形态：操作日志，只摄入）
+## 37.9 Gemini CLI（D 形态：操作日志）——已于 2026-09-23 移除
 
-`~/.gemini/tmp/<project>/chats/session-*.jsonl`，旁边 `<project>/.project_root` 写着该会话的工作目录（绝对路径），`~/.gemini` 下另有 Antigravity 自己的 brain 目录与一个 git 支撑的 history 仓库——发现**只走 `<root>/tmp`**。本机 10 个会话。
-
-**它不是消息列表，是一份操作日志。** 文件由 `fs.appendFileSync` 追加，读的时候按顺序**重放**才能得到"当前会话"（`packages/core/src/services/chatRecordingService.ts` 的 `loadConversationRecord`）。四种记录：
+**本节是移除记录，不是现行规格。** 用户要求把 Gemini CLI 的支持整体删除，执行如下：
 
 ```text
-{sessionId, projectHash, startTime, lastUpdated, kind}   元数据（可以重复）
-{id, timestamp, type, content, …}                        一条消息（按 id upsert）
-{$set: {messages: [...]}}                                检查点：清空并按该数组重建
-{$set: {…其它键…}}                                        元数据合并
-{$rewindTo: <message id>}                                回退：删掉该条及其之后的一切
+代码  adapters/gemini.rs 删除；adapters/mod.rs（注册 + replay_cursor_update 的注释）、
+      domain/models.rs 的 Agent::Gemini（enum / all / display_name / as_str / parse）、
+      platform/paths.rs、platform/exec_resolver.rs、agent_runtime/{capabilities,discovery}、
+      context_eval/evaluator.rs、src/types.ts（Agent 联合类型 + AGENT_LABELS）与
+      AgentRuntimeSettings 的 FIELD_LABELS 全部移除；测试删掉 gemini_line 与
+      identity_suite 条目、session_lifecycle_test 的 fixture 分支，
+      「拒绝永久删除」的用例从 5 例回到 4 例。
+数据  live DB 删掉 10 个 gemini 会话（本来 0 条事件、0 条绑定、10 条游标）与
+      ingest_sources 的 ~/.gemini 行；sessions 总数 191 → 181，其他 Agent 一行未动。
+      备份：~/.noending/data/noending.db.bak-20260923-232153。
+未动  ~/.gemini/** 一个字节没动——那是 Antigravity 的数据目录，只读读取。
 ```
 
-两个直接后果：**一、检查点一行里装着多条消息**，共享的"一行一条事件"读取器表达不了，所以这个适配器自带重放器（和 dsh 一样是"整体重放 + 靠原生 id 去重"，游标存原始文件坐标，稳态靠 reconcile 预筛）。**二、`sessionId` 不能当身份**：A2A server 写下的每条录制里都是字面量 `"a2a-server"`（本机 10 个文件全是），拿它当 `agent_session_id` 会让所有录制挤进同一行——身份只能取**文件名**（`session-<时间戳>-<id 前 8 位>.jsonl`，逐文件唯一），与 Qoder 子 Agent 文件同一处理方式。
+**移除的理由**：这 10 个录制里没有一条人类消息（A2A server 只写了一段 `<session_context>` 注入），摄入进列表的只是空壳；而本机又没有 `gemini` CLI，连启动都做不到。
 
-**只摄入对话**：`user` → user_message，`gemini` → assistant_message；`info` / `error` / `warning` 是 CLI 自己的提示，`content` 里的 functionCall、`toolCalls`、`thoughts` 是工具与思考噪音，一律丢弃（§36.11）。**开场的 `<session_context>` 是 user 消息但不是用户的话**（一份 6KB 的仓库目录树），按 `<` 前缀丢弃——本机 10 个会话因此都没有标题，因为它们的用户消息**只有**那条上下文（真实交互式会话里，真正的提问跟在它后面）。回退（`$rewindTo`）删掉的是**锚点那条及其之后的全部**（`rewindTo()` 的注释与实现写着 "from (and including)"），重放器照此实现；被删掉的消息在 NoEnding 里仍然留着（事件库只追加，从不被后来的源状态覆盖）。
+**保留的形态结论**（它解释了「为什么读得到却没有内容」，也是身份只能取文件名的依据）：`~/.gemini/tmp/<project>/chats/session-*.jsonl`，旁边 `<project>/.project_root` 写着 cwd，发现只走 `<root>/tmp`。文件是**操作日志**而不是消息列表，要按顺序重放才能得到「当前会话」（元数据 / 一条消息按 id upsert / `{$set:{messages:[…]}}` 检查点 / `{$rewindTo:<id>}` 回退）。`sessionId` 恒为字面量 `"a2a-server"`，所以身份只能取文件名。只摄入 `user` / `gemini` 两种消息，`<session_context>` 按 `<` 前缀丢弃——这也是这 10 个会话全都没有标题的原因。
 
-**为什么只摄入**：本机没有 `gemini`，而且即便有，`--resume` 只接受 `latest` 或序号（`config.ts` 的选项描述与 coerce 都只做 trim，不认会话 id），NoEnding 的"按 id 恢复"无从表达。为此 `cli_names(Gemini)` 为空、`detect()` 恒 None、三个 builder 明确报错并写明原因。
-
-**一处已知的映射缺口**：Gemini CLI 认 `GEMINI_CLI_HOME`，但它的值是**home**（数据目录是 `<home>/.gemini`），而 `agent_env_override` 的契约是"值就是数据根"，多一段路径没法表达——所以这里填 `""`（不改写为错误语义），用户把 home 挪走后 NoEnding 会读不到，留待该契约支持路径模板时再修。
-
-**改动清单**：`domain/models.rs`（`Gemini`）、`platform/paths.rs`（`~/.gemini`；`GEMINI_CLI_HOME` 的缺口写在注释里）、`platform/exec_resolver.rs`（`cli_names` 为空）、`adapters/mod.rs`（注册 + 新增 `replay_cursor_update`：dsh 与 Gemini 共用的"整体重放式游标"）、`adapters/gemini.rs`、`agent_runtime/{capabilities,discovery}`、`src/types.ts` 与 `AgentRuntimeSettings`。
-
-顺带一处重构：dsh 上一轮内联的游标计算抽成了 `adapters::replay_cursor_update`（两家用同一套规则：原始坐标 + 只在身份变化或截断时换代），dsh 与 Gemini 各少一段重复代码。
-
-**测试**：`gemini_truncate_rewrite_dedup` 并入 identity_suite（普通 JSONL 写入器），七家适配器继续共用同一套 append / 无变化 / 截断重写 / 同尺寸重写 / 文件替换 + 去重断言。适配器内另有：工作目录标记与首条真提问（开场上下文不算）、日志重放到"当前会话"（`$set` 检查点 + `$rewindTo` 回退语义）、只摄入对话（info/warning/error 被丢）、同一个 `a2a-server` 的两条录制各成一行（身份取自文件名）、不是录制的文件不被认领（不在 `chats/` 下的 `session-*.jsonl`、首行不是元数据的文件）。另修了一处被新 Agent 撞到的测试夹具：`a_corrupt_assistant_agent_is_not_mistaken_for_retrieval_only` 原本拿 `"gemini"` 当"无法识别的 Agent"用的例子，现在 `gemini` 已经是一个真 Agent，夹具改成 `no_such_agent`（该测试的意图不变）。
-
-**验证**：`[fingerprint] Gemini CLI: 10 sessions discovered under /Users/jqk/.gemini`，真实根目录零错判；`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
+**一条被证伪的旧说法**：`--resume` 其实支持完整 UUID（上游 `sessionUtils.ts` 的 `findSession` 先按 `session.id === trimmedIdentifier` 精确匹配），错的是之前写的「只认 latest 或序号」。若将来重新接入，障碍不在 CLI，而在源里没有可区分的会话 id。
 
 ## 37.10 ZCode（C 形态：SQLite 快照源，只摄入）
 
@@ -3348,16 +3341,15 @@ part(id, message_id, session_id, data, sequence)
 
 **验证**：`[fingerprint] ZCode: 27 sessions discovered under /Users/jqk/.zcode`，真实根目录零错判。逐值核对（临时探针，跑完即删）：27 个会话的标题全是真人提问，**0 个被提醒污染、0 个为空**；子 Agent 会话带 `parent_id`；前 8 个会话 237 条 user / 1594 条 assistant / 18 个压缩边界，kind 只出现这三种。`cargo fmt --check` / `cargo check --all-targets` / `cargo test --all-targets`（后端 31 个测试目标全绿，lib 98 项）与前端 `tsc` / `vitest`（73 passed）/ `vite build` 全绿。
 
-## 37.11 六家接入收口
+## 37.11 接入收口（原六家；Gemini 已于 2026-09-23 移除，现存五家）
 
-六家全部落地，`Agent` 现在可读九家（原有 Codex / Claude Code / Pi，加上 Qoder / AutoClaw / WorkBuddy / dsh / Gemini CLI / ZCode），**其中只有 Codex / Claude Code / Pi 三家可启动**，其余六家只摄入历史——每一家都记了**基于证据的解锁条件**，而不是"暂不支持"了事：
+五家仍在、一家已移除。`Agent` 现在可读八家（原有 Codex / Claude Code / Pi，加上 Qoder / AutoClaw / WorkBuddy / dsh / ZCode），**其中只有 Codex / Claude Code / Pi 三家可启动**，其余五家只摄入历史——每一家都记了**基于证据的解锁条件**，而不是「暂不支持」了事：
 
 ```text
 Qoder       IDE 托管，没有 headless CLI
 AutoClaw    启动必须传 OPENCLAW_STATE_DIR，而 AgentCommand 不带 env（平台层能传 env 即可解锁）
 dsh         启动必须 --profile <name>，那是用户自己的装法（能选 profile 即可解锁）
-Gemini CLI  --resume 只认 latest 或序号，表达不了"按 id 恢复"（上游支持按 id 恢复即可解锁）
 ZCode       桌面应用，且会话共享一个库文件
 ```
 
-四种数据源形态都验证过了：A 追加式 JSONL（Qoder / WorkBuddy / AutoClaw，共用 `read_jsonl_delta`）、B zstd 帧式追加（dsh）、C 原地更新的 SQLite（ZCode）、D 整行快照的操作日志（Gemini）；后三种都是"整体重放 + 原生 id 去重"，其中 B/D 共用 `replay_cursor_update`。每家的首条真人轮次都按自己的格式显式取（WorkBuddy 剥 `<user_query>` 信封、dsh 丢运行时上下文、Gemini 丢 `<session_context>`、ZCode 认 `semantics`）——**"谁写的"这四家都不能靠 `role` 判断，这是本 Phase 最反复出现的一课**。永久删除源会话只有 Qoder 支持（Codex / Claude / Pi 原有三家不变），其余五家全部走 trait 默认的响亮拒绝，其中 ZCode 是共享库、物理上不可分。
+四种数据源形态都验证过了：A 追加式 JSONL（Qoder / WorkBuddy / AutoClaw，共用 `read_jsonl_delta`）、B zstd 帧式追加（dsh）、C 原地更新的 SQLite（ZCode）、D 整行快照的操作日志（随 Gemini 移除，形态记录留在 §37.9）；后三种都是「整体重放 + 原生 id 去重」，`replay_cursor_update` 现在只有 dsh 在用。每家的首条真人轮次都按自己的格式显式取（WorkBuddy 剥 `<user_query>` 信封、dsh 丢运行时上下文、ZCode 认 `semantics`）——**「谁写的」这几家都不能靠 `role` 判断，这是本 Phase 最反复出现的一课**。永久删除源会话只有 Qoder 支持（Codex / Claude / Pi 原有三家不变），其余四家全部走 trait 默认的响亮拒绝，其中 ZCode 是共享库、物理上不可分。

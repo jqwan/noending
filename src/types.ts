@@ -12,7 +12,6 @@ export type Agent =
   | "autoclaw"
   | "workbuddy"
   | "dsh"
-  | "gemini"
   | "zcode";
 
 /** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
@@ -639,7 +638,6 @@ export const AGENT_LABELS: Record<Agent, string> = {
   autoclaw: "AutoClaw",
   workbuddy: "WorkBuddy",
   dsh: "dsh",
-  gemini: "Gemini CLI",
   zcode: "ZCode",
 };
 
