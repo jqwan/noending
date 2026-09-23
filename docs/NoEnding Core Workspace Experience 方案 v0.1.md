@@ -3353,3 +3353,48 @@ ZCode       桌面应用，且会话共享一个库文件
 ```
 
 四种数据源形态都验证过了：A 追加式 JSONL（Qoder / WorkBuddy / AutoClaw，共用 `read_jsonl_delta`）、B zstd 帧式追加（dsh）、C 原地更新的 SQLite（ZCode）、D 整行快照的操作日志（随 Gemini 移除，形态记录留在 §37.9）；后三种都是「整体重放 + 原生 id 去重」，`replay_cursor_update` 现在只有 dsh 在用。每家的首条真人轮次都按自己的格式显式取（WorkBuddy 剥 `<user_query>` 信封、dsh 丢运行时上下文、ZCode 认 `semantics`）——**「谁写的」这几家都不能靠 `role` 判断，这是本 Phase 最反复出现的一课**。永久删除源会话只有 Qoder 支持（Codex / Claude / Pi 原有三家不变），其余四家全部走 trait 默认的响亮拒绝，其中 ZCode 是共享库、物理上不可分。
+
+## 37.12 Codex 一线程一会话（2026-09-23 修正）
+
+用户看完真实摄入结果后追问「78 个 rollout 怎么只入库 37 个会话」，核查后改掉了 Codex 适配器的身份判定。**这一节推翻 §37.1 里 Codex 那段的结论，也是本 Phase 唯一一次把已入库数据清掉重建。**
+
+**病根**：身份取的是 `payload.session_id`（`session_id.or_else(id)`）。实测 78 个 rollout 文件里 `payload.id` 有 **77 个不同**、`payload.session_id` 只有 **37 个**——`session_id` 说的是"这条线程挂在哪个会话下"，不是它自己是谁。于是 `UNIQUE(agent, agent_session_id)` 把整个线程家族并成一行：库里 15 条父链接里 **11 条自指**（子文件先被扫到 → 以父的 id 建行 → 又把父的 id 写成自己的父）、3 条悬空、只有 1 条有效。
+
+**三条判定规则**（都来自实测）：
+
+```text
+身份  文件自己的线程 id。分页文件的 meta 仍然写着它从哪条线程分叉出来
+      （payload.id == history_base.thread_id），所以那里由**文件名**决定——
+      名字里的 `_<own uuid>` 是 Codex 自己的记号。其余文件以 meta 的 id 为准；
+      回退顺序 id → 文件名 → session_id（后者只为夹具与旧形状兜底）。
+      实测：77/78 个文件两个值相等，唯一不等的正是那个分页文件。
+父    parent_thread_id；分页文件没有它，改取 history_base.thread_id（仍挡掉自指）。
+      实测：51 条父链接，41 条可解析、10 条悬空（父文件已被 Codex 自己清掉，
+      archived_sessions/ 是空的）——悬空照存：那是指向事实的指针，不发明也不抹掉。
+标题  thread_source ∈ {subagent, guardian_review} 的线程**不派生标题**：它们的
+      "用户消息"是 Codex 自己写的提示词（把父转录整段嵌进来当被审材料），
+      没有用户的话可截。实测 50 个这样的文件占 4.32 MB 文本，其中 3.86 MB
+      是这类注入，子线程自己的回答只有 0.18 MB。
+摄入  同上：内部线程**只入库它自己的回答**（assistant），注入的 user/developer
+      文本与簿记事件全部丢弃——与 ZCode「按 semantics 认作者」同一条规矩（§36.11）。
+```
+
+**先纠正我自己说错的一处**：早先记的是"子线程转录带着父的完整历史"，还据此说要"从 `subagent_history_start_ordinal` 起读"。实测两条都不成立：子线程文件**不是**父转录的副本（43 条消息与父的 128 条零重叠、原生 id 零共享），而 `sh` 在 **50/50** 个文件上恰好等于该文件自己的 ordinal 总数——它指的是"子线程自己的记录从这里开始"，而本机这 50 个文件里**一条自己的记录都还没写**（按它切片会一条都读不到）。Codex 源码 `codex-rs/rollout/src/ordinal.rs` 的注释写着这条边界（`prefix_end = sh - 1`）。**修法完全没用它。**
+
+**迁移**（一次性工具，跑完即删）：这 78 个文件的会话行只能清掉重建——旧行的身份是错的，而它里面的子线程事件已被并进父行、无法拆分。按 §29 的 `purge_session_data_conn` 在一个 `BEGIN IMMEDIATE` 事务里清掉 37 行（连带 2919 条事件、37 条游标、3 条 binding），再按新规则重摄入。逐值核对：
+
+```text
+改动前  sessions=181  codex=37  有父=15  自指=11  悬空=3  有标题=37  事件=2919
+purge   sessions=144  codex=0
+重摄入  发现 78 个会话，写入 2419 条事件
+改动后  sessions=222  codex=78  有父=51  自指=0   悬空=10  有标题=27  事件=2419
+        （assistant 1779 / user 462 / system 178）
+        其他 Agent 一行未动：dsh 93 / zcode 27 / pi 12 / qoder 7 / workbuddy 3 /
+        autoclaw 1 / claude_code 1
+```
+
+有标题的 27 个与预期相符：78 − 50 个内部线程 − 1 个 `agent_created_thread`（它的用户消息**全是**信封，本来就没有可截的话）。事件数从 2919 降到 2419，差的是内部线程的注入文本。**未解决、与本改动无关**：27 个标题里还有两三个是机械前言（`# Files mentioned by the user:`、`[@Shiro](plugin://…)`），因为现有过滤只挡 `text.starts_with("<"/"#")`，前导空白就漏了——那是已知的老账——现有过滤只挡字面开头的 `<`/`#`，前导空白就漏（与本改动无关）。
+
+**一个要记住的操作顺序**：身份变了，**旧构建的 app 一旦点同步，就会用旧规则把这些行再建一遍**（会话 id 取 session_id）。所以改完必须整包重建再启动（`pnpm tauri build` / 重启 `pnpm tauri dev`），别只重启一半。
+
+**测试**：适配器单测两条（分页文件的身份与父、内部线程无标题）；集成测试一条走真实 storage 路径——`codex_review_threads_store_their_own_replies_only`（发现的身份取自名字、父链接正确、`title IS NULL`、只入库 1 条 `assistant_message`）。另：`session_workspace_test` 里两条 reconcile 用例的 fixture 文件名中那 5 段"像 uuid"的其实是假的，规则若让文件名**无条件**优先就会被当成身份，所以规则收窄成"只有分页文件由文件名决定"，两条随即可恢复。

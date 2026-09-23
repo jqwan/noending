@@ -31,13 +31,45 @@ fn extract_text(content: &Value) -> String {
     parts.join("\n")
 }
 
+/// The uuid Codex wrote into a rollout's name: the file's OWN thread id.
+/// 77 of this machine's 78 rollouts have it equal to `payload.id`, and the one
+/// that does not is exactly the forked page below (方案 §37.12).
+fn thread_id_from_filename(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    let rest = stem.strip_prefix("rollout-")?;
+    let own = rest.rsplit('_').next()?;
+    let parts: Vec<&str> = own.rsplit('-').take(5).collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    Some(parts.into_iter().rev().collect::<Vec<_>>().join("-"))
+}
+
+/// A forked page's name carries `_<own uuid>` after the id it forked from;
+/// this is Codex's own mark that the file continues another rollout rather than
+/// being it (方案 §37.12).
+fn is_forked_page_name(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("rollout-"))
+        .map(|rest| rest.contains('_'))
+        .unwrap_or(false)
+}
+
 impl CodexAdapter {
     fn parse_rollout(path: &Path) -> Result<Option<DiscoveredSession>> {
         let lines = crate::adapters::read_jsonl_lines(path)?;
-        let mut session_id = None;
+        let mut meta_seen = false;
+        let mut meta_id = None;
+        let mut legacy_session_id = None;
         let mut cwd = None;
         let mut started_at = None;
         let mut parent = None;
+        let mut fork_base = None;
+        // Codex's own review subagents: their user turns are prompts Codex wrote
+        // (the parent transcript re-embedded) and their developer turns are its
+        // instructions, so there is no user text to name them after.
+        let mut internal_thread = false;
         let mut first_user_text = None;
 
         for (_, line) in &lines {
@@ -48,9 +80,13 @@ impl CodexAdapter {
             let vtype = v.get("type").and_then(|t| t.as_str());
             if vtype == Some("session_meta") {
                 let p = v.get("payload").unwrap_or(&v);
-                session_id = p
+                meta_seen = true;
+                meta_id = p.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
+                // Legacy last resort only: `session_id` is the conversation the
+                // writer was joined to, not this thread, so it never decides
+                // identity while a real thread id is available (§37.12).
+                legacy_session_id = p
                     .get("session_id")
-                    .or_else(|| p.get("id"))
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
                 cwd = p.get("cwd").and_then(|c| c.as_str()).map(|c| c.to_string());
@@ -62,7 +98,20 @@ impl CodexAdapter {
                     .get("parent_thread_id")
                     .and_then(|t| t.as_str())
                     .map(|t| t.to_string());
-            } else if first_user_text.is_none() && vtype == Some("response_item") {
+                // A forked page records where the prefix it inherited lives.
+                fork_base = p
+                    .get("history_base")
+                    .and_then(|h| h.get("thread_id"))
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_string());
+                internal_thread = matches!(
+                    p.get("thread_source").and_then(|t| t.as_str()),
+                    Some("subagent") | Some("guardian_review")
+                );
+            } else if first_user_text.is_none()
+                && !internal_thread
+                && vtype == Some("response_item")
+            {
                 let p = v.get("payload").unwrap_or(&v);
                 if p.get("type").and_then(|t| t.as_str()) == Some("message")
                     && p.get("role").and_then(|r| r.as_str()) == Some("user")
@@ -78,31 +127,32 @@ impl CodexAdapter {
             }
             // session_meta opens a rollout file, so stopping at the meta
             // line itself would leave first_user_text — and every title —
-            // unset. Stop only once both meta and first user text are in
-            // hand; a meta-only session (no user turn yet) scans to EOF.
-            if session_id.is_some() && first_user_text.is_some() {
+            // unset. Stop only once the meta is parsed and either the first user
+            // text is in hand or this is a thread Codex wrote itself; a
+            // meta-only session (no user turn yet) scans to EOF.
+            if meta_seen && (internal_thread || first_user_text.is_some()) {
                 break;
             }
         }
 
-        let session_id = match session_id {
-            Some(id) => id,
-            None => {
-                // fall back to filename-derived uuid
-                let stem = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .ok_or_else(|| crate::error::other("无效的 rollout 文件名"))?;
-                let id = stem.rsplit('-').take(5).collect::<Vec<_>>();
-                if id.len() < 5 {
-                    return Err(crate::error::other(format!(
-                        "无法解析 Codex session id: {}",
-                        stem
-                    )));
-                }
-                id.into_iter().rev().collect::<Vec<_>>().join("-")
-            }
-        };
+        // Identity is the file's OWN thread id. A forked page's meta still
+        // names the thread it forked FROM, so there the name has to decide;
+        // everywhere else the meta is Codex's own statement of the thread id
+        // and leads. Keying on `session_id` instead is what collapsed this
+        // machine's 78 rollouts into 37 sessions (§37.12).
+        let by_name = || thread_id_from_filename(path);
+        let session_id = if is_forked_page_name(path) {
+            by_name().or(meta_id).or(legacy_session_id)
+        } else {
+            meta_id.or_else(by_name).or(legacy_session_id)
+        }
+        .ok_or_else(|| {
+            crate::error::other(format!("无法解析 Codex session id: {}", path.display()))
+        })?;
+
+        // A fork whose only parent link is `history_base` still gets a real
+        // parent; a self-reference would be a lie.
+        let parent = parent.or_else(|| fork_base.filter(|b| *b != session_id));
 
         let meta = std::fs::metadata(path)?;
         let last_activity = meta
@@ -198,6 +248,19 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
         let path = PathBuf::from(&session.raw_path);
+        // Internal review threads contribute only the subagent's own replies:
+        // their user turns are prompts Codex wrote and their developer turns are
+        // its instructions — machine chatter in the user role, which is the same
+        // call ZCode makes from `semantics` (方案 §36.11 / §37.12).
+        let internal = crate::adapters::read_first_json_line(&path)
+            .map(|v| {
+                let p = v.get("payload").unwrap_or(&v);
+                matches!(
+                    p.get("thread_source").and_then(|t| t.as_str()),
+                    Some("subagent") | Some("guardian_review")
+                )
+            })
+            .unwrap_or(false);
         read_jsonl_delta(&path, cursor, &|_idx, v| {
             let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let payload = v.get("payload").cloned().unwrap_or(Value::Null);
@@ -243,6 +306,13 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                 "session_meta" => ("system", "session meta".into()),
                 _ => return None, // unrecognized payload types carry no meaningful text
             };
+
+            // An internal review thread contributes only its own replies; every
+            // other line is a prompt Codex wrote, a compaction marker, or the
+            // synthetic session-meta event.
+            if internal && kind != "assistant_message" {
+                return None;
+            }
 
             Some(ParsedLine {
                 kind: kind.into(),
@@ -411,6 +481,73 @@ mod rollout_tests {
             d.first_user_text.as_deref(),
             Some("我想对整体工程进行代码瘦身，请给出优化方案")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn meta_line_with(payload: serde_json::Value) -> String {
+        serde_json::json!({
+            "timestamp": "2026-09-20T13:01:47.832Z", "ordinal": 0,
+            "type": "session_meta", "payload": payload
+        })
+        .to_string()
+    }
+
+    /// A forked page carries `_<own uuid>` in its name yet still names the
+    /// thread it forked FROM in `payload.id`: identity must follow the name, or
+    /// the fork collapses back into the thread it came from (方案 §37.12).
+    #[test]
+    fn a_forked_page_is_its_own_session_with_the_fork_as_parent() {
+        const BASE: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
+        const OWN: &str = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
+        let dir = temp_dir("forked-page");
+        let path = write_rollout(
+            &dir,
+            &format!("rollout-2026-09-22T21-17-07-{BASE}_{OWN}.jsonl"),
+            &[
+                meta_line_with(serde_json::json!({
+                    "session_id": BASE, "id": BASE, "cwd": "/tmp/proj",
+                    "thread_source": "user", "history_mode": "paginated",
+                    "history_base": { "thread_id": BASE, "end_ordinal_exclusive": 90 }
+                })),
+                message_line(90, "user", "接着上面继续"),
+            ],
+        );
+        let d = CodexAdapter::parse_rollout(&path).unwrap().unwrap();
+        assert_eq!(d.agent_session_id, OWN, "the file's name owns the identity");
+        assert_eq!(d.parent_agent_session_id.as_deref(), Some(BASE));
+        assert_eq!(d.first_user_text.as_deref(), Some("接着上面继续"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex's review subagents have no user turns of their own: their first
+    /// "user" message is a prompt Codex wrote (the parent transcript
+    /// re-embedded). Naming the session after it would put a paragraph of
+    /// machine text in the list (方案 §37.12).
+    #[test]
+    fn an_internal_review_thread_gets_no_title() {
+        let dir = temp_dir("internal-thread");
+        let parent = "019f135a-621c-76a1-a76c-7c71021847aa";
+        let path = write_rollout(
+            &dir,
+            &format!("rollout-2026-09-20T21-01-47-{SESSION_ID}.jsonl"),
+            &[
+                meta_line_with(serde_json::json!({
+                    "session_id": SESSION_ID, "id": SESSION_ID, "cwd": "/tmp/proj",
+                    "thread_source": "subagent", "parent_thread_id": parent
+                })),
+                message_line(2, "developer", "<permissions instructions>"),
+                message_line(
+                    5,
+                    "user",
+                    "The following is the Codex agent history whose request action you are assessing.",
+                ),
+                message_line(9, "assistant", "{\"outcome\":\"allow\"}"),
+            ],
+        );
+        let d = CodexAdapter::parse_rollout(&path).unwrap().unwrap();
+        assert_eq!(d.agent_session_id, SESSION_ID);
+        assert_eq!(d.first_user_text, None, "no user text, so no title");
+        assert_eq!(d.parent_agent_session_id.as_deref(), Some(parent));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

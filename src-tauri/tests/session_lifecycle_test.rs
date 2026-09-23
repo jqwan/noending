@@ -1362,6 +1362,61 @@ fn zcode_sessions_ingest_and_a_replay_stores_nothing() {
     assert_eq!(kinds, vec!["user_message", "assistant_message"]);
 }
 
+/// A Codex review subagent (`thread_source: subagent`) has no user turns of its
+/// own — its first "user" message is a prompt Codex wrote with the parent
+/// transcript re-embedded — so only its own replies are stored, and the row is
+/// named after nothing. Its identity comes from the file's own name (the
+/// `_<uuid>` suffix) while `payload.id` still names the thread it forked from,
+/// which is what keeps a fork from collapsing back into its parent (§37.12).
+#[test]
+fn codex_review_threads_store_their_own_replies_only() {
+    let db = open_db("codex-internal-ingest");
+    let dir = unique_dir("codex-internal");
+    let base = "019f135a-621c-76a1-a76c-7c71021847aa";
+    let own = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
+    let file = dir.join(format!("rollout-2026-09-22T21-17-07-{base}_{own}.jsonl"));
+    std::fs::write(
+        &file,
+        format!(
+            "{{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{{\"id\":\"{base}\",\"session_id\":\"{base}\",\"cwd\":\"/tmp/proj\",\"thread_source\":\"subagent\",\"parent_thread_id\":\"{base}\"}}}}\n\
+             {{\"ordinal\":1,\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"The following is the Codex agent history whose request action you are assessing.\"}}]}}}}\n\
+             {{\"ordinal\":2,\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{{\\\"outcome\\\":\\\"allow\\\"}}\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let adapter = CodexAdapter;
+    let found = adapter
+        .discover_sessions_in(&[dir.clone()], &|_| false)
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].agent_session_id, own, "the name owns the identity");
+    assert_eq!(found[0].first_user_text, None, "no user text, so no title");
+    assert_eq!(found[0].parent_agent_session_id.as_deref(), Some(base));
+
+    let (s, _) = ensure_session_row_with(&db, &found[0], &attacher()).unwrap();
+    assert_eq!(s.title, None);
+    assert_eq!(s.parent_agent_session_id.as_deref(), Some(base));
+
+    assert_eq!(
+        ingest(&db, &adapter, &s),
+        1,
+        "only the subagent's own reply"
+    );
+    let kinds: Vec<String> = {
+        let conn = db.read();
+        let mut stmt = conn
+            .prepare("SELECT kind FROM session_events WHERE session_id = ?1 ORDER BY sequence")
+            .unwrap();
+        stmt.query_map([&s.id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(kinds, vec!["assistant_message"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- Hardening patch §1-A/§1-B -------------------------------------------
 //
 // A: a source already deleted OUTSIDE the app is preparable as

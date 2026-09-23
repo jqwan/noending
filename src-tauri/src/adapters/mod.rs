@@ -687,6 +687,21 @@ pub fn adapter_for(agent: Agent) -> &'static dyn AgentAdapter {
 
 // Shared JSONL helpers -------------------------------------------------
 
+/// First non-empty line of a JSONL file, parsed. Session headers open these
+/// files in every format NoEnding reads, so one line is enough to learn how the
+/// writer labelled the record — without paying for the whole file.
+pub fn read_first_json_line(path: &Path) -> Option<serde_json::Value> {
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { return None };
+        if line.trim().is_empty() {
+            continue;
+        }
+        return serde_json::from_str(&line).ok();
+    }
+    None
+}
+
 pub fn read_jsonl_lines(path: &Path) -> Result<Vec<(usize, String)>> {
     let data = std::fs::read(path)?;
     let text = String::from_utf8_lossy(&data);
