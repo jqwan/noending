@@ -12,6 +12,8 @@ export interface SessionMessageData {
   text: string | null;
   ts: string | null;
   who: string;
+  /** 事件 metadata 原样透传（§37.13：跨线程信封的对方身份在这里）。 */
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -33,6 +35,8 @@ const TRUNCATE_AT = 240;
 const EVENT_KIND_LABELS: Record<string, string> = {
   system: "系统",
   compact: "上下文压缩",
+  // 跨线程信封（§37.13）：Codex 的子 Agent 之间互发的任务/答复。
+  agent_message: "子 Agent 消息",
   unknown: "未知事件",
 };
 
@@ -73,6 +77,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
     msg.kind === "user_message" ? "用户"
       : msg.kind === "assistant_message" ? msg.who
       : kindLabel ?? "其他事件";
+  const from = counterpartOf(msg);
   const stamp = `#${msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
 
   // 整行可点会让「悬停到哪儿」变成一条与内容无关的宽条，而点开这件事属于这条消息本身，
@@ -83,6 +88,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
       <div className={`event ${cls}`}>
         <div className="head">
           <span className="who" title={msg.kind}>{who}</span>
+          {from && <span className="from" title={from.hint}>{from.text}</span>}
           <span className="when mono">{stamp}</span>
         </div>
         <div
@@ -114,6 +120,37 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
       )}
     </>
   );
+}
+
+/**
+ * 跨线程信封的对方（§37.13）：先说清是哪一侧——读子线程转录的人第一个问题就是
+ * 「这条是启动我的任务，还是我交回去的答复」。方向由适配器从两条 agent 路径算出，
+ * 解不出对方的会话 id 也照样有方向（两件事互不依赖）。
+ */
+const COUNTERPART_ROLE_LABELS: Record<string, string> = {
+  parent: "来自父 Agent",
+  child: "来自子 Agent",
+  sibling: "来自同级 Agent",
+};
+
+/**
+ * 显示用的两段：`text` 是「来自谁」，`hint` 是溯源信息（源自己的 message_type、
+ * NoEnding 的 session id、完整 agent 路径）——对方优先显示会话标题（人读得懂），
+ * 退到源里的路径；id 不是给人扫的，放在悬停提示里。两者都解不出时返回 null。
+ */
+function counterpartOf(msg: SessionMessageData): { text: string; hint: string } | null {
+  if (msg.kind !== "agent_message") return null;
+  const str = (k: string) => (typeof msg.meta?.[k] === "string" ? (msg.meta[k] as string) : null);
+  const path = str("counterpart_agent_path");
+  const label = str("counterpart_title") ?? path;
+  const role = COUNTERPART_ROLE_LABELS[str("counterpart_role") ?? ""];
+  const text = role
+    ? label ? `${role} · ${label}` : role
+    : label ? `来自 ${label}` : null;
+  const hint = [str("message_type"), str("counterpart_session_id"), path]
+    .filter((b): b is string => !!b)
+    .join(" · ");
+  return text ? { text, hint } : null;
 }
 
 /** 全文弹窗：整块宽度显示，可复制；是 Markdown 的话默认就停在预览上（§36.24）。 */

@@ -339,8 +339,15 @@
 .event.is-tech { padding: 12px 8px; border-top: 1px solid var(--bg-panel); }
 .event.is-tech:first-of-type { border-top: 0; }
 .event .head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
-.event .who { font-weight: 600; font-size: 12.5px; }
-.event .when { color: var(--text-muted); font-size: 11.5px; }
+.event .who { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+/* 「来自谁」：只有跨线程信封（agent_message）才有，跟在 who 后面弱化显示（§37.13）。
+   它可能是一条很长的 agent 路径，所以自己是唯一可压缩的那一项：截断加省略号，
+   时间戳与标签都不跟着折行（全文在 title 提示里）。 */
+.event .from {
+  color: var(--text-muted); font-size: 11.5px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.event .when { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
 .event .body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 气泡只占 82%，对侧留白——一眼能看出「这句是谁说的」。标题行跟着气泡走，
    而不是横铺整列，否则右对齐的气泡下面挂着一行左起的名字，读起来是断裂的。 */

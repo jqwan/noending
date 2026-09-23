@@ -106,3 +106,51 @@ it("用户消息右、Agent 左，技术事件保持整行", () => {
   expect(rows[2]).toContain("is-tech");
   expect(rows[2]).not.toContain("is-user");
 });
+
+it("跨线程信封标明来源：先说方向，再给标题；NoEnding 的会话 id 在提示里", () => {
+  const { container } = render(
+    <SessionMessage msg={{
+      sequence: 9, kind: "agent_message", text: "改完了", ts: null, who: "Codex",
+      meta: {
+        counterpart_role: "parent",
+        counterpart_title: "设计评审",
+        counterpart_agent_path: "/root/design_prompt_review",
+        counterpart_session_id: "sess-1",
+        message_type: "FINAL_ANSWER",
+      },
+    }} />,
+  );
+
+  expect(screen.getByText("子 Agent 消息")).toBeTruthy();
+  const from = container.querySelector(".event .from")!;
+  expect(from.textContent).toBe("来自父 Agent · 设计评审");
+  // 溯源用的原值没有丢：源 id、NoEnding 会话 id、信封类型都在提示里。
+  expect(from.getAttribute("title")).toContain("sess-1");
+  expect(from.getAttribute("title")).toContain("FINAL_ANSWER");
+  expect(from.getAttribute("title")).toContain("/root/design_prompt_review");
+});
+
+it("子 Agent 发来的消息说成「来自子 Agent」", () => {
+  const { container } = render(
+    <SessionMessage msg={{
+      sequence: 9, kind: "agent_message", text: "改完了", ts: null, who: "Codex",
+      meta: { counterpart_role: "child", counterpart_agent_path: "/root/godot_prompt_review" },
+    }} />,
+  );
+
+  const from = container.querySelector(".event .from")!;
+  expect(from.textContent).toBe("来自子 Agent · /root/godot_prompt_review");
+});
+
+it("方向解不出时只说「来自谁」，路径就是全部；会话 id 不留空话", () => {
+  const { container } = render(
+    <SessionMessage msg={{
+      sequence: 9, kind: "agent_message", text: "给你两条", ts: null, who: "Codex",
+      meta: { counterpart_agent_path: "/root/boss_runtime_rebuild" },
+    }} />,
+  );
+
+  const from = container.querySelector(".event .from")!;
+  expect(from.textContent).toBe("来自 /root/boss_runtime_rebuild");
+  expect(from.getAttribute("title")).toBe("/root/boss_runtime_rebuild");
+});
