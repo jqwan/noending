@@ -536,6 +536,13 @@ export interface SessionDetail {
   /** Read-only status of `session.raw_path` when the detail was loaded. */
   raw_path_status: "present" | "missing" | "unavailable";
   workspace_path: SessionWorkspacePath | null;
+  /**
+   * 父/子会话（同一 Agent 的 id 空间）。父会话可能不在库里——转录记了它、但
+   * 我们从没发现过那一条，此时是 null，而 `session.parent_agent_session_id`
+   * 仍然说明「有一个父会话」。子会话按开始时间排序，回收站里的也在。
+   */
+  parent: Session | null;
+  children: Session[];
 }
 
 export interface SearchHit {

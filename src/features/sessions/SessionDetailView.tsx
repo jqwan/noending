@@ -17,7 +17,7 @@ import {
   NO_CWD,
   UNTITLED_SESSION,
 } from "./SessionTable";
-import { type Project, type SessionDetail, type Workstream } from "../../types";
+import { type Project, type Session, type SessionDetail, type Workstream } from "../../types";
 import type { Route } from "../../app/routes";
 
 /** 后端 get_session_detail 的 events 上限（commands.rs）——到达上限时如实说明。 */
@@ -198,6 +198,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     text: e.text,
     ts: e.ts,
     who: agentDisplayLabel(session.agent),
+    meta: e.metadata,
   }));
 
   return (
@@ -403,6 +404,33 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           <CopyValue value={session.agent_session_id} mono
             title="Agent 自己记录里的会话 ID，用于回到原始转录文件" />
         </Field>
+        {/* §37.20 —— 同一次执行所在的父子会话树。父子链接是 Agent 侧的事实
+            （Codex 线程、dsh 会话），在同一个 Agent 的 id 空间里解析。父会话可能
+            不在库里（转录记了它，我们从没发现过那一条），那就如实说明；子会话
+            按开始时间列出，回收站里的也在，用徽标标出。 */}
+        {(detail.parent || session.parent_agent_session_id) && (
+          <Field label="父会话">
+            {detail.parent ? (
+              <SessionLink session={detail.parent} navigate={navigate} />
+            ) : (
+              <span className="muted small">
+                不在 NoEnding 库里
+                <span className="mono" style={{ wordBreak: "break-all" }}>
+                  {" · "}{session.parent_agent_session_id}
+                </span>
+              </span>
+            )}
+          </Field>
+        )}
+        {detail.children.length > 0 && (
+          <Field label={`子会话（${detail.children.length}）`}>
+            <div className="row" style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
+              {detail.children.map((c) => (
+                <SessionLink key={c.id} session={c} navigate={navigate} />
+              ))}
+            </div>
+          </Field>
+        )}
       </div>
       </section>
       </aside>
@@ -466,6 +494,31 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="muted small" style={{ whiteSpace: "nowrap" }}>{label}</div>
       <div style={{ minWidth: 0 }}>{children}</div>
     </>
+  );
+}
+
+/**
+ * 父子会话行（§37.20）：点进那条会话的详情页。父子链接是 Agent 侧的事实，
+ * 所以这里只负责导航——两条会话是不是同一个 Agent，后端解析时已经限定过。
+ * 回收站里的孩子照样列出，用徽标如实标出，而不是藏起来。
+ */
+function SessionLink({ session, navigate }: {
+  session: Session;
+  navigate: (r: Route) => void;
+}) {
+  const title = sessionDisplayTitle(session.title);
+  return (
+    <button
+      className="link"
+      style={{ textAlign: "left", wordBreak: "break-word" }}
+      title={`${title} · ${session.agent_session_id}`}
+      onClick={() => navigate({ view: "session", sessionId: session.id })}
+    >
+      {title}
+      {session.trashed_at !== null && (
+        <span className="badge warn" style={{ marginLeft: 6 }}>回收站</span>
+      )}
+    </button>
   );
 }
 

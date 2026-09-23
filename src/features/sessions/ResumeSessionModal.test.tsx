@@ -65,6 +65,8 @@ function detail(id: string): SessionDetail {
     classification: "",
     raw_path_status: "present",
     workspace_path: null,
+    parent: null,
+    children: [],
   };
 }
 
