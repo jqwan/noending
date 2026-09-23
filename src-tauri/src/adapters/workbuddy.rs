@@ -104,7 +104,7 @@ fn classify_user_turn(raw: &str) -> UserTurn {
     if let Some(prompt) = extract_user_query(raw) {
         return UserTurn::Prompt(prompt);
     }
-    if raw.starts_with('<') || raw.starts_with('#') {
+    if crate::adapters::is_injected_preamble(raw) {
         return UserTurn::Envelope;
     }
     UserTurn::Prompt(raw.to_string())
@@ -122,7 +122,9 @@ impl WorkBuddyAdapter {
         let mut cwd: Option<String> = None;
         let mut started_at: Option<String> = None;
         let mut last_ts: Option<String> = None;
+        let mut native_title = None;
         let mut first_user_text = None;
+        let mut first_agent_text = None;
 
         for (_, line) in &lines {
             let v: Value = match serde_json::from_str(line) {
@@ -148,13 +150,34 @@ impl WorkBuddyAdapter {
                 }
                 last_ts = Some(ts);
             }
-            if first_user_text.is_none()
-                && v.get("type").and_then(|t| t.as_str()) == Some("message")
-                && v.get("role").and_then(|r| r.as_str()) == Some("user")
-            {
-                let raw = content_text(v.get("content").unwrap_or(&Value::Null));
-                if let UserTurn::Prompt(text) = classify_user_turn(&raw) {
-                    first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+            // WorkBuddy writes its own `ai-title` and REWRITES it as the
+            // conversation moves on (one session here carries four, drifting
+            // from 「通达信连接功能介绍」 to 「分析国轩高科股票」). The last one
+            // written is the Agent's final word on what the session is about,
+            // so it is the one worth showing (§37.15).
+            if v.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
+                if let Some(t) = v
+                    .get("aiTitle")
+                    .and_then(|t| t.as_str())
+                    .filter(|t| !t.trim().is_empty())
+                {
+                    native_title = Some(t.to_string());
+                }
+            }
+            if v.get("type").and_then(|t| t.as_str()) == Some("message") {
+                let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                if first_user_text.is_none() && role == "user" {
+                    let raw = content_text(v.get("content").unwrap_or(&Value::Null));
+                    if let UserTurn::Prompt(text) = classify_user_turn(&raw) {
+                        first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                    }
+                }
+                // Last resort for a title (§37.15).
+                if first_agent_text.is_none() && role == "assistant" {
+                    let raw = content_text(v.get("content").unwrap_or(&Value::Null));
+                    if !raw.trim().is_empty() {
+                        first_agent_text = Some(crate::adapters::truncate_text(&raw, 400));
+                    }
                 }
             }
         }
@@ -172,7 +195,9 @@ impl WorkBuddyAdapter {
             cwd,
             started_at,
             last_activity_at: last_activity.or(last_ts),
+            native_title,
             first_user_text,
+            first_agent_text,
             parent_agent_session_id: None,
         }))
     }
@@ -329,11 +354,43 @@ mod tests {
         assert_eq!(s.agent_session_id, "s1");
         assert_eq!(s.cwd.as_deref(), Some("/Users/jqk/Workbuddy/x"));
         assert_eq!(s.first_user_text.as_deref(), Some("整理一下昨天的会议纪要"));
+        assert_eq!(
+            s.native_title.as_deref(),
+            Some("整理会议纪要"),
+            "WorkBuddy titles the session itself"
+        );
         // Epoch millis are normalized to the spelling every other agent uses.
         assert_eq!(
             s.started_at.as_deref(),
             Some("2026-07-04T03:57:29.113+00:00")
         );
+    }
+
+    /// WorkBuddy rewrites its `ai-title` as the conversation moves on — one real
+    /// session here carries four, drifting from 「通达信连接功能介绍」 to
+    /// 「分析国轩高科股票」. The last one written is the current one (§37.15).
+    #[test]
+    fn the_last_ai_title_wins() {
+        let dir = unique_dir("ai-title");
+        let file = dir.join("s1.jsonl");
+        std::fs::write(
+            &file,
+            concat!(
+                r#"{"timestamp":1783137449113,"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>先看看通达信</user_query>"}],"sessionId":"s1","cwd":"/tmp/w"}"#,
+                "\n",
+                r#"{"timestamp":1783137451207,"type":"ai-title","aiTitle":"通达信连接功能介绍","sessionId":"s1"}"#,
+                "\n",
+                r#"{"timestamp":1783259041800,"type":"ai-title","aiTitle":"分析国轩高科股票","sessionId":"s1"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let found = WorkBuddyAdapter
+            .discover_sessions_in(&[dir.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found[0].native_title.as_deref(), Some("分析国轩高科股票"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -32,6 +32,8 @@ fn session(database: &Db, agent_session_id: &str) -> String {
             started_at: Some("2026-09-01T08:00:00Z".into()),
             last_activity_at: None,
             first_user_text: None,
+            native_title: None,
+            first_agent_text: None,
             parent_agent_session_id: None,
         },
     )

@@ -96,6 +96,18 @@ fn is_machine_context(text: &str) -> bool {
     text.starts_with('<') || text.starts_with("Current runtime context")
 }
 
+/// dsh's own task envelope: the parent's task description, pasted in as the
+/// first "user" turn of a delegated session. It is not a human turn — the same
+/// call this codebase makes for Codex's review prompts (§37.13) — and its first
+/// line names the envelope, not the session: three sessions here would
+/// otherwise be titled `## Task context task title:` (§37.15).
+///
+/// Deliberately NOT folded into [`is_machine_context`]: that one also decides
+/// what gets stored as a `user_message` event, and this is a title-only call.
+fn is_task_envelope(text: &str) -> bool {
+    text.starts_with("## Task context")
+}
+
 /// Decoded lines of a transcript, stopping early when `keep_going` says so.
 /// A torn final frame ends the walk instead of erroring — the complete prefix
 /// is exactly what a mid-write file has to offer, and the next read sees the
@@ -150,13 +162,26 @@ fn session_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
 fn parsed_line(v: &Value) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str())?;
     let source_event_id = v.get("seq").and_then(|s| s.as_i64()).map(|s| s.to_string());
+    // A `user/message` is not necessarily the user: dsh labels the writer in
+    // `data.source`, and the four kinds that bring a `senderSessionId` are the
+    // messages another session sent (§37.17). That one field is the whole test
+    // — a fifth cross-agent kind would need no change here.
+    let counterpart_id = v
+        .pointer("/data/source/senderSessionId")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let (kind, text) = match vtype {
         "user/message" => {
             let text = text_blocks(v.pointer("/data/content"));
             if text.trim().is_empty() || is_machine_context(&text) {
                 return None;
             }
-            ("user_message", text)
+            if counterpart_id.is_some() {
+                ("agent_message", text)
+            } else {
+                ("user_message", text)
+            }
         }
         "assistant/message" => {
             let text = text_blocks(v.pointer("/data/message/content"));
@@ -170,11 +195,25 @@ fn parsed_line(v: &Value) -> Option<ParsedLine> {
         t if t.starts_with("compaction/") => ("compact", "conversation compacted".into()),
         _ => return None,
     };
+    let mut metadata = serde_json::json!({ "agent": "dsh", "type": vtype });
+    if kind == "agent_message" {
+        let meta = metadata.as_object_mut()?;
+        meta.insert(
+            "counterpart_source_id".into(),
+            Value::String(counterpart_id.unwrap_or_default()),
+        );
+        // The source's own word for the message class (`subagent-report`,
+        // `subagent-settled`, `agent-message`, `coordinator`), unnormalized —
+        // the same slot Codex fills from its `Message Type:` line (§37.13).
+        if let Some(sk) = v.pointer("/data/source/kind").and_then(|k| k.as_str()) {
+            meta.insert("message_type".into(), Value::String(sk.to_string()));
+        }
+    }
     Some(ParsedLine {
         kind: kind.into(),
         text: Some(text),
         source_event_id,
-        metadata: serde_json::json!({ "agent": "dsh", "type": vtype }),
+        metadata,
     })
 }
 
@@ -182,7 +221,9 @@ impl DshAdapter {
     fn parse_session_file(path: &Path) -> Result<Option<DiscoveredSession>> {
         let raw = std::fs::read(path)?;
         let mut header: Option<Value> = None;
+        let mut native_title: Option<String> = None;
         let mut first_user_text: Option<String> = None;
+        let mut first_agent_text: Option<String> = None;
 
         scan_lines(&raw, |line| {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -196,15 +237,56 @@ impl DshAdapter {
                 // dsh transcript, and a mid-file header is not evidence.
                 return header.is_some();
             }
-            if first_user_text.is_none()
-                && v.get("type").and_then(|t| t.as_str()) == Some("user/message")
-            {
-                let text = text_blocks(v.pointer("/data/content"));
-                if !text.trim().is_empty() && !is_machine_context(&text) {
-                    first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+            match v.get("type").and_then(|t| t.as_str()) {
+                Some("user/message") if first_user_text.is_none() => {
+                    let text = text_blocks(v.pointer("/data/content"));
+                    if !text.trim().is_empty()
+                        && !is_machine_context(&text)
+                        && !is_task_envelope(&text)
+                    {
+                        first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                    }
                 }
+                // Only consulted when the session has no user turn (§37.15).
+                Some("assistant/message") if first_agent_text.is_none() => {
+                    let text = text_blocks(v.pointer("/data/message/content"));
+                    if !text.trim().is_empty() {
+                        first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
+                    }
+                }
+                // dsh names its own sessions and REWRITES the name: measured
+                // order is always `fallback` → `provider` → `user`, so the last
+                // record is the current one and no ranking is needed.
+                //
+                // `source.kind` says who named it. `fallback` is dsh itself
+                // truncating the first line of the first message — on three of
+                // this machine's sessions that produced the literal machine
+                // preamble `## Task context task title:`, i.e. exactly the
+                // naive truncation this tier exists to beat, so it is skipped
+                // and the derived title stands (§37.15).
+                Some("session/title") => {
+                    let named_by = v
+                        .pointer("/data/source/kind")
+                        .and_then(|k| k.as_str())
+                        .unwrap_or("");
+                    let title = v
+                        .pointer("/data/title")
+                        .and_then(|t| t.as_str())
+                        .filter(|t| !t.trim().is_empty());
+                    if named_by != "fallback" {
+                        if let Some(t) = title {
+                            native_title = Some(t.to_string());
+                        }
+                    }
+                }
+                _ => {}
             }
-            first_user_text.is_none()
+            // The whole transcript is scanned, because the title is the LAST
+            // one written and a record can appear at any position. Measured
+            // cost of a full pass over this machine's 104 dsh sessions
+            // (198 MB decompressed, 123 k records) is ~1.5 s, and only
+            // CHANGED files are read at all (§37.15).
+            true
         });
 
         let Some(header) = header else {
@@ -235,7 +317,9 @@ impl DshAdapter {
                 .and_then(|c| c.as_i64())
                 .and_then(ms_epoch_to_rfc3339),
             last_activity_at: last_activity,
+            native_title,
             first_user_text,
+            first_agent_text,
             // Sub-agent sessions are ordinary siblings with their own id; the
             // header names the parent, so the link is a fact, not a guess.
             parent_agent_session_id: header
@@ -565,6 +649,144 @@ mod tests {
             delta.events[0].ts.as_deref(),
             Some("2026-09-09T16:05:27.205+00:00")
         );
+    }
+
+    /// A `user/message` that carries a `senderSessionId` was written by another
+    /// session, not by the user — dsh says so in `data.source` (§37.17).
+    #[test]
+    fn a_message_from_another_session_is_an_agent_message() {
+        let id = "session-agent-msg";
+        let child = "a73db4b1-ade0-4635-ac0b-a8666803f733";
+        let dir = session_dir(
+            &unique_dir("agent-msg"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, ""),
+                &user(3, "怎么拆这个任务"),
+                r#"{"type":"user/message","seq":8,"time":4,"data":{"content":[{"type":"text","text":"Background subagent a73db4b1-ade0-4635-ac0b-a8666803f733 reported:"},{"type":"text","text":"只读检查完成。"}],"role":"user","source":{"kind":"subagent-report","form":"relay","senderSessionId":"a73db4b1-ade0-4635-ac0b-a8666803f733"}}}"#,
+                r#"{"type":"user/message","seq":9,"time":5,"data":{"content":[{"type":"text","text":"我的补充结论。"}],"role":"user","source":{"kind":"agent-message","form":"relay","senderSessionId":"session-peer"}}}"#,
+                // A plugin notice is also a `user/message`, and it is NOT an
+                // agent message: no sender, so the label stays the source's.
+                r#"{"type":"user/message","seq":10,"time":6,"data":{"content":[{"type":"text","text":"The approval policy changed from \"ask\" to \"never\"."}],"role":"user","source":{"kind":"plugin","plugin":"user-approval"}}}"#,
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let session = Session {
+            id: "sess-dsh".into(),
+            agent: Agent::Dsh,
+            agent_session_id: id.into(),
+            title: None,
+            cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            raw_path: file.to_string_lossy().to_string(),
+            parent_agent_session_id: None,
+            started_at: None,
+            last_activity_at: None,
+            trashed_at: None,
+        };
+        let delta = DshAdapter
+            .read_delta(&session, &SourceCursor::default())
+            .unwrap();
+        let kinds: Vec<&str> = delta.events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "user_message",
+                "agent_message",
+                "agent_message",
+                "user_message"
+            ],
+            "got {kinds:?}"
+        );
+        let report = &delta.events[1];
+        assert_eq!(
+            report
+                .metadata
+                .get("counterpart_source_id")
+                .and_then(|v| v.as_str()),
+            Some(child)
+        );
+        assert_eq!(
+            report.metadata.get("message_type").and_then(|v| v.as_str()),
+            Some("subagent-report"),
+            "the source's own word for the message class, unnormalized"
+        );
+        assert_eq!(
+            delta.events[2]
+                .metadata
+                .get("message_type")
+                .and_then(|v| v.as_str()),
+            Some("agent-message")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// dsh names its own sessions and rewrites the name; measured order is
+    /// always `fallback` → `provider` → `user`, so the last record is the
+    /// current one — no ranking table needed (§37.15).
+    #[test]
+    fn the_last_session_title_wins() {
+        let root = unique_dir("dsh-title");
+        let lines = [
+            r#"{"type":"session","version":2,"id":"sess-t","createdAt":1788969915099,"cwd":"/tmp/proj"}"#,
+            r#"{"type":"user/message","seq":9,"time":1788969927205,"data":{"content":[{"type":"text","text":"demo"}],"role":"user"}}"#,
+            r#"{"type":"session/title","seq":12,"time":1788969928000,"data":{"title":"demo","messageSeqs":[9],"source":{"kind":"fallback"}}}"#,
+            r#"{"type":"session/title","seq":13,"time":1788969930000,"data":{"title":"了解 feedback 指令的用途","messageSeqs":[9],"source":{"kind":"provider"}}}"#,
+        ];
+        session_dir(&root, "sess-t", "session.v2.jsonl.zstd", &lines);
+
+        let found = DshAdapter
+            .discover_sessions_in(&[root.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(
+            found[0].native_title.as_deref(),
+            Some("了解 feedback 指令的用途")
+        );
+        assert_eq!(found[0].first_user_text.as_deref(), Some("demo"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `fallback` is dsh truncating the first line of the first message, which
+    /// on three of this machine's sessions is the literal machine preamble
+    /// `## Task context task title:` — not a title anyone wrote (§37.15).
+    /// The task envelope is the parent's words, not the user's: its first line
+    /// names the envelope. It must not become the title (§37.15).
+    #[test]
+    fn the_task_envelope_is_not_the_user_turn() {
+        let root = unique_dir("dsh-envelope");
+        let lines = [
+            r#"{"type":"session","version":2,"id":"sess-e","createdAt":1788969915099,"cwd":"/tmp/proj"}"#,
+            r###"{"type":"user/message","seq":8,"time":1788969927000,"data":{"content":[{"type":"text","text":"## Task context\ntask title: 回收站中的任务及会话打开逻辑"}],"role":"user"}}"###,
+        ];
+        session_dir(&root, "sess-e", "session.v2.jsonl.zstd", &lines);
+
+        let found = DshAdapter
+            .discover_sessions_in(&[root.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found[0].first_user_text, None, "not a human turn");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fallback_title_is_not_a_native_title() {
+        let root = unique_dir("dsh-fallback");
+        let lines = [
+            r#"{"type":"session","version":2,"id":"sess-f","createdAt":1788969915099,"cwd":"/tmp/proj"}"#,
+            r#"{"type":"user/message","seq":8,"time":1788969927000,"data":{"content":[{"type":"text","text":"看下这个"}],"role":"user"}}"#,
+            r###"{"type":"session/title","seq":12,"time":1788969928000,"data":{"title":"## Task context task title:","messageSeqs":[8],"source":{"kind":"fallback"}}}"###,
+        ];
+        session_dir(&root, "sess-f", "session.v2.jsonl.zstd", &lines);
+
+        let found = DshAdapter
+            .discover_sessions_in(&[root.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].native_title, None, "the fallback is not a title");
+        assert_eq!(found[0].first_user_text.as_deref(), Some("看下这个"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

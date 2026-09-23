@@ -92,6 +92,7 @@ impl AutoClawAdapter {
         let mut started_at: Option<String> = None;
         let mut last_ts: Option<String> = None;
         let mut first_user_text: Option<String> = None;
+        let mut first_agent_text: Option<String> = None;
 
         for (idx, line) in &lines {
             let v: Value = match serde_json::from_str(line) {
@@ -126,15 +127,22 @@ impl AutoClawAdapter {
                         .map(|t| t.to_string())
                         .or(started_at);
                 }
-                Some("message") if first_user_text.is_none() => {
+                Some("message") => {
                     let msg = v.get("message").unwrap_or(&Value::Null);
-                    if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
-                        let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                        // `<…>` environment blocks and `#`-prefixed injections
-                        // are not user text.
-                        if !text.is_empty() && !text.starts_with('<') && !text.starts_with('#') {
-                            first_user_text = Some(crate::adapters::truncate_text(&text, 400));
-                        }
+                    let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                    let text = content_text(msg.get("content").unwrap_or(&Value::Null));
+                    // `<…>` environment blocks and `#`-prefixed injections
+                    // are not user text.
+                    if first_user_text.is_none()
+                        && role == "user"
+                        && !text.is_empty()
+                        && !crate::adapters::is_injected_preamble(&text)
+                    {
+                        first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                    }
+                    // Last resort for a title (§37.15).
+                    if first_agent_text.is_none() && role == "assistant" && !text.is_empty() {
+                        first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
                 }
                 _ => {}
@@ -163,7 +171,10 @@ impl AutoClawAdapter {
             cwd,
             started_at,
             last_activity_at: last_activity.or(last_ts),
+            // AutoClaw writes no session title.
+            native_title: None,
             first_user_text,
+            first_agent_text,
             parent_agent_session_id: None,
         }))
     }

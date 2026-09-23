@@ -41,8 +41,9 @@ use noending::storage::workstream_paths::remove_workstream_path_conn;
 use noending::storage::Db;
 use noending::sync::SyncEngine;
 use noending::workspace::session::{
-    attach_session_conn, record_user_binding, register_workspace_attacher,
-    replace_session_bindings, resolve_binding_path_conn, DesiredBinding, UnattachedWorkspacePaths,
+    attach_session_conn, attach_sessions_to_registered_paths, record_user_binding,
+    register_workspace_attacher, replace_session_bindings, resolve_binding_path_conn,
+    DesiredBinding, UnattachedWorkspacePaths,
 };
 use noending::workspace::{normalize_path, path_identity_of, WorkspaceAttaching};
 
@@ -118,6 +119,8 @@ fn discovered(agent_session_id: &str, cwd: Option<&str>, raw_path: &Path) -> Dis
         started_at: Some("2026-09-13T10:00:00Z".into()),
         last_activity_at: Some("2026-09-13T10:05:00Z".into()),
         first_user_text: Some("帮我看下这个模块".into()),
+        native_title: None,
+        first_agent_text: None,
         parent_agent_session_id: None,
     }
 }
@@ -1530,5 +1533,120 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
             .as_deref(),
         Some("p-real"),
         "the stale cache value is left alone — this is a read-side fix, not a rewrite"
+    );
+}
+
+/// §37.15 — a Session's title comes from the first source that has one:
+/// the transcript's own title, else the first user text, else the first agent
+/// text. The order is the whole point (an Agent's own title beats a derived
+/// one, and a human prompt beats a machine reply), so it is pinned here rather
+/// than left to whichever adapter happens to fill which field.
+#[test]
+fn a_session_title_prefers_the_native_then_the_user_then_the_agent() {
+    let dir = unique_dir("title-order");
+    let db = Db::open(&dir.join("noending.db")).unwrap();
+    project(&db, "p-repo", "repo");
+    let raw = dir.join("raw.jsonl");
+
+    let with = |native: Option<&str>, user: Option<&str>, agent: Option<&str>| DiscoveredSession {
+        agent: Agent::Codex,
+        agent_session_id: format!("t-{native:?}-{user:?}-{agent:?}"),
+        path: raw.clone(),
+        cwd: None,
+        started_at: None,
+        last_activity_at: None,
+        native_title: native.map(Into::into),
+        first_user_text: user.map(Into::into),
+        first_agent_text: agent.map(Into::into),
+        parent_agent_session_id: None,
+    };
+
+    let cases = [
+        (
+            with(
+                Some("原生标题"),
+                Some("第一句用户话"),
+                Some("第一句 agent 话"),
+            ),
+            Some("原生标题"),
+        ),
+        (
+            with(None, Some("第一句用户话"), Some("第一句 agent 话")),
+            Some("第一句用户话"),
+        ),
+        (
+            with(None, None, Some("第一句 agent 话")),
+            Some("第一句 agent 话"),
+        ),
+        (with(None, None, None), None),
+        // A machine blob is not a title, so the next source gets its turn.
+        (with(None, None, Some("{\"outcome\":\"allow\"}")), None),
+    ];
+    for (d, expected) in cases {
+        let (session, _) = ensure_session_row_with(&db, &d, &Scripted::new("p-repo")).unwrap();
+        assert_eq!(
+            session.title.as_deref(),
+            expected,
+            "agent_session_id={}",
+            d.agent_session_id
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §37.19 — discovery skips a transcript whose cursor says "unchanged", so a
+/// Session ingested before its directory was registered used to keep
+/// `workspace_path_id = NULL` forever: the branch that exists for exactly that
+/// case sits behind the gate. One cheap pass over the registered paths repairs
+/// it, and touching an unregistered directory stays a decision rather than a
+/// repair.
+#[test]
+fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
+    let (_d, db) = temp_db("late-attach");
+    project(&db, "p1", "P1");
+    let path_id = {
+        let conn = db.write();
+        insert_workspace_path_conn(&conn, "/repo/late", "p1").unwrap()
+    };
+
+    // A Session row as `ensure_session_row_with` leaves it when the seam had
+    // nothing to answer with — which is what a pre-registration ingest does.
+    let orphan = |cwd: &str, id: &str| Session {
+        id: id.into(),
+        agent: Agent::Codex,
+        agent_session_id: format!("a-{id}"),
+        title: Some("t".into()),
+        cwd: Some(cwd.into()),
+        workspace_path_id: None,
+        project_id: None,
+        raw_path: format!("/raw/{id}.jsonl"),
+        parent_agent_session_id: None,
+        started_at: None,
+        last_activity_at: None,
+        trashed_at: None,
+    };
+    db.upsert_session(&orphan("/repo/late", "late")).unwrap();
+    db.upsert_session(&orphan("/repo/nobody-registered", "stranger"))
+        .unwrap();
+    assert_eq!(stored(&db, "late").workspace_path_id, None);
+
+    assert_eq!(attach_sessions_to_registered_paths(&db).unwrap(), 1);
+
+    let late = stored(&db, "late");
+    assert_eq!(late.workspace_path_id.as_deref(), Some(path_id.as_str()));
+    assert_eq!(
+        late.project_id.as_deref(),
+        Some("p1"),
+        "the derived Project cache moves in the same statement, not after it"
+    );
+    assert_eq!(
+        stored(&db, "stranger").workspace_path_id,
+        None,
+        "an unregistered directory is not registered as a side effect"
+    );
+    assert_eq!(
+        attach_sessions_to_registered_paths(&db).unwrap(),
+        0,
+        "idempotent: once attached, the Session leaves the set"
     );
 }

@@ -114,6 +114,26 @@ pub fn resolve_app_support_dir() -> Option<PathBuf> {
     base.map(|d| d.join(APP_IDENTIFIER))
 }
 
+/// The OS-native folder a THIRD-PARTY app keeps its data in, by bundle id:
+/// macOS `~/Library/Application Support/<bundle>`, Windows
+/// `%APPDATA%\<bundle>`. Same resolution as [`resolve_app_support_dir`] with
+/// the identifier parameterised.
+///
+/// This is for reading another vendor's store as a title sidecar (方案 §37.16),
+/// and it is a *lookup*, not a dependency: a wrong or missing path yields no
+/// titles rather than an error. `[实测]` on macOS, `com.qodercn.app.stable`
+/// holds Qoder's `main.sqlite`; the Windows spelling follows Electron's own
+/// `app.getPath('userData')` rule (`[推断]`).
+pub fn resolve_external_app_support(bundle_id: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = dirs::data_dir();
+    #[cfg(target_os = "windows")]
+    let base = dirs::config_dir();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let base = dirs::config_dir();
+    base.map(|d| d.join(bundle_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

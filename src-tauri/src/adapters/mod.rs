@@ -69,7 +69,19 @@ pub struct DiscoveredSession {
     pub cwd: Option<String>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
+    /// The transcript's OWN title, when the Agent writes one — dsh's
+    /// `session/title`, WorkBuddy's `ai-title`, ZCode's `session.title`. It
+    /// outranks anything NoEnding derives, because it is the Agent's own word
+    /// about the session (方案 §37.15).
+    pub native_title: Option<String>,
+    /// First meaningful text in the USER role. `None` when the format has no
+    /// user turn (an internal thread whose only "user" text is a machine
+    /// prompt) — that is a fact about the session, not a parse failure.
     pub first_user_text: Option<String>,
+    /// First meaningful text in the AGENT role: the last resort for a title,
+    /// so a session that starts with the agent (a review thread answering a
+    /// prompt nobody typed) still gets named after what it said.
+    pub first_agent_text: Option<String>,
     pub parent_agent_session_id: Option<String>,
 }
 
@@ -723,7 +735,28 @@ pub fn truncate_text(s: &str, max: usize) -> String {
     }
 }
 
-/// Session display title from the first meaningful user text.
+/// An injected preamble rather than the user's own words: `<…>` environment
+/// blocks and `#`-prefixed injections (AGENTS.md, attached-file headers).
+///
+/// The test is on the trimmed text because the runtime does not always put the
+/// marker first: Codex writes the pasted-file block as `"\n# Files pasted by
+/// the user: …"`, and testing the raw text let exactly that become a title
+/// (§37.15). Adapters call this when picking their first human turn; it never
+/// gates ingestion.
+pub fn is_injected_preamble(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with('<') || t.starts_with('#')
+}
+
+/// Session display title from one text candidate. `None` when there is
+/// nothing title-worthy in it.
+///
+/// A machine blob is not a title (§37.15): Codex's review threads open with
+/// `{"risk_level":"medium","user_authorization":"high","outcome":"allow"}` (27
+/// of the 50 internal threads on this machine do), and putting that in the
+/// session list is noise, not a title. Same call the user-text tier already
+/// makes for `<…>` / `#` injections — this is simply the agent-role spelling
+/// of it.
 pub fn title_from_text(text: &str) -> Option<String> {
     let t = text
         .lines()
@@ -731,7 +764,7 @@ pub fn title_from_text(text: &str) -> Option<String> {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if t.is_empty() {
+    if t.is_empty() || t.starts_with('{') || t.starts_with('[') {
         None
     } else {
         Some(truncate_text(&t, 36))
@@ -1111,5 +1144,55 @@ mod fingerprint_tests {
                 root.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::{is_injected_preamble, title_from_text};
+
+    #[test]
+    fn a_title_is_one_line_and_short() {
+        // Lines are joined with a space (a title is one line) and the ends are
+        // trimmed; inner spacing is left as the writer wrote it.
+        assert_eq!(
+            title_from_text("  帮我\n看下这个模块 ").as_deref(),
+            Some("帮我 看下这个模块")
+        );
+        assert_eq!(title_from_text("   \n  "), None);
+        let long = "字".repeat(60);
+        let t = title_from_text(&long).unwrap();
+        assert_eq!(t.chars().count(), 37, "36 chars plus the ellipsis");
+    }
+
+    /// A structured blob is a machine payload, not a title. Codex's review
+    /// threads open with one — 27 of this machine's 50 internal threads do — and
+    /// the session list is the wrong place for `{"risk_level":"medium",…}`
+    /// (方案 §37.15).
+    #[test]
+    fn a_machine_blob_is_not_a_title() {
+        assert_eq!(
+            title_from_text("{\"risk_level\":\"medium\",\"outcome\":\"allow\"}"),
+            None
+        );
+        assert_eq!(title_from_text("[1, 2, 3]"), None);
+        assert_eq!(
+            title_from_text(" {\"a\":1}"),
+            None,
+            "leading space included"
+        );
+    }
+
+    /// The runtime does not always put the marker on the first byte: Codex's
+    /// pasted-file block opens with a blank line, and testing the raw text let
+    /// `"\n# Files pasted by the user: …"` through as a title (§37.15).
+    #[test]
+    fn an_injected_preamble_is_recognized_after_leading_whitespace() {
+        assert!(is_injected_preamble("# Files pasted by the user: ## a.png"));
+        assert!(is_injected_preamble(
+            "\n# Files pasted by the user: ## a.png"
+        ));
+        assert!(is_injected_preamble("  <environment_context>"));
+        assert!(!is_injected_preamble("看一下这个"));
     }
 }

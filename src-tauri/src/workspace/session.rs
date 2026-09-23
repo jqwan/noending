@@ -58,6 +58,8 @@
 //!   workspace call);
 //! * [`attach_session_conn`] — an existing row moves, and its binding claims are
 //!   reconciled in the same transaction;
+//! * [`attach_sessions_to_registered_paths`] — the same move for every Session
+//!   discovery skipped, so a late-registered path still reaches them (§37.19);
 //! * [`resolve_binding_path_conn`] — which WorkstreamPath brings a binding in,
 //!   appending one only when a user action says the list should grow;
 //! * [`record_user_binding`] / [`replace_session_bindings`] — the two write
@@ -193,6 +195,45 @@ pub fn attach_session_conn(
     }
     move_session_to_path_conn(conn, session_id, &path_id)?;
     Ok(true)
+}
+
+/// §19-4 — attach the Sessions that owe a WorkspacePath but were never given
+/// one, because discovery skipped their file.
+///
+/// `ensure_session_row_with` resolves the cwd while a row is created or
+/// re-read, and discovery skips transcripts the stored cursors call unchanged —
+/// so a Session ingested before its directory was registered (or before the
+/// workspace layer was wired at all) keeps `workspace_path_id = NULL` forever.
+/// Runs once per reconcile pass, after discovery (§37.19).
+///
+/// Deliberately a JOIN and not the seam: the seam's job is to *establish* a
+/// path's identity (canonicalisation, reserved verdict, git family), while here
+/// that identity is already stored — `workspace_paths.canonical_path` equal to
+/// the Session's cwd IS the resolution. The seam would re-observe every row,
+/// `git` included. Sessions whose cwd is not registered are left alone:
+/// registering a new directory is a decision, not a repair (§5.5, §7.2), so the
+/// set this walks only ever shrinks.
+pub fn attach_sessions_to_registered_paths(db: &Db) -> Result<usize> {
+    let pairs: Vec<(String, String)> = {
+        let conn = db.read();
+        let mut stmt = conn.prepare(
+            "SELECT s.id, wp.id
+               FROM sessions s JOIN workspace_paths wp ON wp.canonical_path = s.cwd
+              WHERE s.workspace_path_id IS NULL AND s.trashed_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if pairs.is_empty() {
+        return Ok(0);
+    }
+    db.tx(|tx| {
+        for (session_id, path_id) in &pairs {
+            move_session_to_path_conn(tx, session_id, path_id)?;
+        }
+        Ok(())
+    })?;
+    Ok(pairs.len())
 }
 
 // ------------------------------------------------------- binding semantics

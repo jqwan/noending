@@ -767,6 +767,28 @@ impl Db {
             .optional()?)
     }
 
+    /// §37.20 — the Sessions that name this one as their parent, in the source's
+    /// own id space (so the same `agent`, like every other id lookup). Trashed
+    /// rows are included: the link is a fact about the execution, and the child's
+    /// own page says whether it is in the recycle bin.
+    pub fn child_sessions(
+        &self,
+        agent: Agent,
+        parent_agent_session_id: &str,
+    ) -> Result<Vec<Session>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM sessions
+              WHERE agent = ?1 AND parent_agent_session_id = ?2
+              ORDER BY started_at, id",
+        )?;
+        let rows = stmt.query_map(
+            params![agent.as_str(), parent_agent_session_id],
+            row_session,
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Sessions discovered but not yet seen by us. Used by LaunchIntent
     /// matching: only genuinely new sessions may claim a pending intent.
     /// The SQL has no created_at column, so the since-filter runs in Rust.
@@ -1005,6 +1027,81 @@ impl Db {
     ) -> Result<Vec<SessionEvent>> {
         let conn = self.read();
         get_events_conn(&conn, session_id, after, limit)
+    }
+
+    /// §37.13 — an `agent_message` names its counterpart by the SOURCE's own id
+    /// (`metadata.counterpart_source_id`: a Codex thread id, a dsh session id…),
+    /// which adapters can supply without a database. Turning that into a
+    /// NoEnding Session id happens here, at read time, and never at write time:
+    /// `session_events` is append-only, so a resolved id could not be written
+    /// back, and when the event is ingested the counterpart's row may not exist
+    /// yet — it can be discovered later, or never (its source file may already
+    /// be gone). Resolving on read is additive and self-healing; unresolvable
+    /// counterparts keep the source-supplied path and get no id, never a guess.
+    ///
+    /// The returned events carry the resolved pair, so the caller needs no
+    /// second lookup, and nothing here is persisted.
+    pub fn resolve_event_counterparts(
+        &self,
+        session: &Session,
+        events: &mut [SessionEvent],
+    ) -> Result<()> {
+        for event in events.iter_mut() {
+            if event.kind != "agent_message" {
+                continue;
+            }
+            // Owned, because the metadata is borrowed mutably below.
+            let Some(source_id) = event
+                .metadata
+                .get("counterpart_source_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            // A source's id space is its own: a Codex thread id means nothing
+            // to dsh, so the counterpart is looked up under the same agent.
+            let Some(counterpart) = self.find_session_by_agent_id(session.agent, &source_id)?
+            else {
+                continue;
+            };
+            let Some(meta) = event.metadata.as_object_mut() else {
+                continue;
+            };
+            meta.insert(
+                "counterpart_session_id".into(),
+                serde_json::Value::String(counterpart.id),
+            );
+            if let Some(title) = counterpart.title {
+                meta.insert("counterpart_title".into(), serde_json::Value::String(title));
+            }
+            // A role the adapter did not know: which side of the tree the
+            // counterpart sits on is a fact about the session graph, not about
+            // the message, so it is read from the parent links here (§37.17).
+            // Codex fills this at ingest from the agent paths in its transcript
+            // — information it has even when the counterpart has no row — and
+            // that value stands.
+            if !meta.contains_key("counterpart_role") {
+                let me = session.agent_session_id.as_str();
+                let role = if counterpart.parent_agent_session_id.as_deref() == Some(me) {
+                    "child"
+                } else if session.parent_agent_session_id.as_deref() == Some(source_id.as_str()) {
+                    "parent"
+                } else if counterpart.parent_agent_session_id.is_some()
+                    && counterpart.parent_agent_session_id == session.parent_agent_session_id
+                {
+                    "sibling"
+                } else {
+                    // Nothing in the graph relates them; a label would be a guess.
+                    continue;
+                };
+                meta.insert(
+                    "counterpart_role".into(),
+                    serde_json::Value::String(role.into()),
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn get_event_by_ref(&self, source_ref: &str) -> Result<Option<SessionEvent>> {

@@ -3,13 +3,15 @@
 //! operation; the one exception is the adapter-owned, user-confirmed
 //! permanent source deletion below (方案 §39).
 
+use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, json_str_field, read_jsonl_delta, truncate_text, AgentCommand,
-    DiscoveredSession, ParsedLine, ReadDelta,
+    detect_format, json_str_field, read_first_json_line, read_jsonl_delta, truncate_text,
+    AgentCommand, DiscoveredSession, ParsedLine, ReadDelta,
 };
 use crate::domain::{Agent, Session, SourceCursor};
 use crate::error::Result;
@@ -29,6 +31,202 @@ fn extract_text(content: &Value) -> String {
         parts.push(t.to_string());
     }
     parts.join("\n")
+}
+
+/// Codex opens every envelope with `Message Type: <X>`; the remaining lines
+/// (Task name / Sender / Payload) are the body and are stored verbatim.
+fn message_type_of(text: &str) -> Option<String> {
+    text.lines()
+        .next()?
+        .strip_prefix("Message Type:")
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// The agent path one level up (`/root/foo` → `/root`; `/root` → `/`).
+fn parent_path_of(path: &str) -> Option<String> {
+    path.rsplit_once('/')
+        .map(|(head, _)| if head.is_empty() { "/" } else { head }.to_string())
+}
+
+/// The other end of an inter-agent message, resolved as far as THIS file's own
+/// records allow (方案 §37.13).
+///
+/// Codex logs a message only in the receiver's transcript — all 135 envelopes
+/// on this machine carry `recipient` == the reading file's own agent path — so
+/// the counterpart is always the `author` and the only missing piece is that
+/// author's thread id. Two sources, both file-local: the `SubAgentActivity`
+/// items this file wrote when it spawned a thread (100/135), and its own
+/// `parent_thread_id` for a message from above (33/135). The remaining 2 are
+/// peer/grandchild paths spawned by a shared ancestor, whose mapping lives in
+/// that ancestor's file — they keep the path and get no id.
+struct Peers {
+    /// Whether this rollout is a thread Codex wrote itself (§37.12).
+    internal: bool,
+    /// This file's own agent path (`/root/foo`), from its session meta.
+    own_path: Option<String>,
+    parent_thread_id: Option<String>,
+    spawned: HashMap<String, String>,
+}
+
+impl Peers {
+    fn load(path: &Path) -> Self {
+        let meta = match read_first_json_line(path) {
+            Some(v) => match v.get("payload") {
+                Some(p) => p.clone(),
+                None => v,
+            },
+            None => Value::Null,
+        };
+        let spawn = meta.pointer("/source/subagent/thread_spawn");
+        let mut spawned = HashMap::new();
+        // The mapping lives wherever the spawn happened, which may sit earlier
+        // in this file than the envelope that needs it, and may have been
+        // consumed by an earlier incremental read — so it is collected from the
+        // whole file rather than from the delta. Streaming keeps a long
+        // transcript from being buffered twice.
+        if let Ok(file) = std::fs::File::open(path) {
+            for line in std::io::BufReader::new(file).lines() {
+                let Ok(line) = line else { break };
+                // Cheap gate: most rollout lines cannot carry this mapping, and
+                // parsing the parent's whole transcript just to skip it is the
+                // expensive half of a reconcile pass.
+                if !line.contains("SubAgentActivity") {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let p = v.get("payload").unwrap_or(&v);
+                let item = p.get("item").unwrap_or(&Value::Null);
+                if item.get("type").and_then(|t| t.as_str()) != Some("SubAgentActivity") {
+                    continue;
+                }
+                if let (Some(agent_path), Some(thread_id)) = (
+                    json_str_field(item, "agent_path"),
+                    json_str_field(item, "agent_thread_id"),
+                ) {
+                    spawned.insert(agent_path.to_string(), thread_id.to_string());
+                }
+            }
+        }
+        // A root rollout has no `source.subagent.thread_spawn`, so its own path
+        // is nowhere in its meta — but its children's paths are, and they all
+        // sit under it, so the deepest common one is its own. Without this a
+        // root transcript could not tell a child's report from a peer's.
+        let own_path = spawn
+            .and_then(|s| json_str_field(s, "agent_path"))
+            .map(str::to_string)
+            .or_else(|| {
+                let mut keys: Vec<&str> = spawned.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                let first = keys.first()?;
+                let last = keys.last()?;
+                let common = first
+                    .char_indices()
+                    .zip(last.chars())
+                    .take_while(|((_, a), b)| a == b)
+                    .map(|((i, _), _)| i)
+                    .last()?;
+                let cut = first[..common + 1].rfind('/')?;
+                Some(first[..cut].to_string())
+            });
+        Self {
+            internal: matches!(
+                meta.get("thread_source").and_then(|t| t.as_str()),
+                Some("subagent") | Some("guardian_review")
+            ),
+            own_path,
+            parent_thread_id: json_str_field(&meta, "parent_thread_id").map(str::to_string),
+            spawned,
+        }
+    }
+
+    /// The counterpart's thread id, or `None` rather than a guess.
+    fn thread_id_of(&self, author: &str) -> Option<String> {
+        if let Some(id) = self.spawned.get(author) {
+            return Some(id.clone());
+        }
+        // A message from above names the parent, whose path is my own path
+        // minus its last segment (`/root/foo` → `/root`).
+        let parent_path = self.own_path.as_deref().and_then(parent_path_of);
+        if Some(author) == parent_path.as_deref() {
+            return self.parent_thread_id.clone();
+        }
+        None
+    }
+
+    /// Which side of the thread tree the counterpart sits on — the question a
+    /// reader of a subagent transcript actually has (`<` the task that started
+    /// it, or a report handed back?).
+    ///
+    /// Derived from the two agent paths alone, so it also covers the envelopes
+    /// whose thread id could not be resolved. It is a DIRECTION, not a
+    /// generation: Codex nests deeper than two levels, and `counterpart_agent_path`
+    /// always carries the exact path for anyone who needs the depth.
+    fn role_of(&self, author: &str) -> Option<&'static str> {
+        let own = self.own_path.as_deref()?;
+        if author.starts_with(&format!("{own}/")) {
+            return Some("child");
+        }
+        if own.starts_with(&format!("{author}/")) {
+            return Some("parent");
+        }
+        if parent_path_of(author).as_deref() == parent_path_of(own).as_deref() {
+            return Some("sibling");
+        }
+        None
+    }
+}
+
+/// Codex's own name for each thread: `<root>/session_index.jsonl`, one
+/// `{"id": <thread id>, "thread_name": <name>}` per line (方案 §37.16).
+///
+/// `[实测]` this file is a row-for-row mirror of `threads.name` in
+/// `~/.codex/state_5.sqlite` (31 rows, same ids, same names, 0 differences), so
+/// reading it needs neither the WAL nor the version number baked into that
+/// file's name (`state_5` → the next release's `state_6`).
+struct ThreadNames(HashMap<String, String>);
+
+impl ThreadNames {
+    const FILE: &'static str = "session_index.jsonl";
+
+    fn load(roots: &[PathBuf]) -> Self {
+        let mut map = HashMap::new();
+        for root in roots {
+            let Ok(lines) = crate::adapters::read_jsonl_lines(&root.join(Self::FILE)) else {
+                continue;
+            };
+            for (_, line) in &lines {
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let (Some(id), Some(name)) =
+                    (json_str_field(&v, "id"), json_str_field(&v, "thread_name"))
+                else {
+                    continue;
+                };
+                if !name.trim().is_empty() {
+                    map.insert(id.to_string(), name.to_string());
+                }
+            }
+        }
+        Self(map)
+    }
+
+    /// The name, unless it is merely the first user message again.
+    ///
+    /// The index holds the runtime's placeholder until the model names the
+    /// thread: 4 of this machine's 31 names are their own transcript's first
+    /// user text (3 verbatim, 1 cut at 60 chars with `…`). Comparing against
+    /// `first_user_text` — which the parser already found — is exact where a
+    /// length or ellipsis rule would be a guess.
+    fn title_for(&self, thread_id: &str, first_user_text: Option<&str>) -> Option<String> {
+        let name = self.0.get(thread_id)?;
+        let placeholder =
+            first_user_text.is_some_and(|t| t.starts_with(name.trim_end_matches('…')));
+        (!placeholder).then(|| name.clone())
+    }
 }
 
 /// The uuid Codex wrote into a rollout's name: the file's OWN thread id.
@@ -71,6 +269,7 @@ impl CodexAdapter {
         // instructions, so there is no user text to name them after.
         let mut internal_thread = false;
         let mut first_user_text = None;
+        let mut first_agent_text = None;
 
         for (_, line) in &lines {
             let v: Value = match serde_json::from_str(line) {
@@ -108,29 +307,39 @@ impl CodexAdapter {
                     p.get("thread_source").and_then(|t| t.as_str()),
                     Some("subagent") | Some("guardian_review")
                 );
-            } else if first_user_text.is_none()
-                && !internal_thread
-                && vtype == Some("response_item")
-            {
+            } else if vtype == Some("response_item") {
                 let p = v.get("payload").unwrap_or(&v);
-                if p.get("type").and_then(|t| t.as_str()) == Some("message")
-                    && p.get("role").and_then(|r| r.as_str()) == Some("user")
-                {
+                if p.get("type").and_then(|t| t.as_str()) == Some("message") {
+                    let role = p.get("role").and_then(|r| r.as_str()).unwrap_or("");
                     let text = extract_text(p.get("content").unwrap_or(&Value::Null));
                     // `<…>` environment_context wrappers and `#`-prefixed
                     // injections (AGENTS.md, attached-file headers) are not
                     // user text.
-                    if !text.is_empty() && !text.starts_with("<") && !text.starts_with('#') {
+                    if role == "user"
+                        && first_user_text.is_none()
+                        && !internal_thread
+                        && !text.is_empty()
+                        && !crate::adapters::is_injected_preamble(&text)
+                    {
                         first_user_text = Some(truncate_text(&text, 400));
+                    }
+                    // The last resort for a title: what the thread itself said
+                    // first. Only consulted when there is no user text, so it
+                    // costs nothing on the common path.
+                    if role == "assistant" && first_agent_text.is_none() && !text.is_empty() {
+                        first_agent_text = Some(text);
                     }
                 }
             }
             // session_meta opens a rollout file, so stopping at the meta
             // line itself would leave first_user_text — and every title —
-            // unset. Stop only once the meta is parsed and either the first user
-            // text is in hand or this is a thread Codex wrote itself; a
-            // meta-only session (no user turn yet) scans to EOF.
-            if meta_seen && (internal_thread || first_user_text.is_some()) {
+            // unset. Stop once the meta is parsed and there is a user text to
+            // name the session after; a thread Codex wrote itself has no user
+            // text, so it scans on until its own first reply (or EOF, for a
+            // meta-only session).
+            if meta_seen
+                && (first_user_text.is_some() || (internal_thread && first_agent_text.is_some()))
+            {
                 break;
             }
         }
@@ -167,7 +376,12 @@ impl CodexAdapter {
             cwd,
             started_at,
             last_activity_at: last_activity,
+            // Codex writes no title of its own anywhere in a rollout. Its name
+            // for the thread lives in the session index, and discovery fills
+            // this in from there (§37.16).
+            native_title: None,
             first_user_text,
+            first_agent_text: first_agent_text.as_deref().map(|t| truncate_text(t, 400)),
             parent_agent_session_id: parent,
         }))
     }
@@ -202,6 +416,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         unchanged: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<DiscoveredSession>> {
         let mut out = Vec::new();
+        let names = ThreadNames::load(roots);
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
             let rd = match std::fs::read_dir(&dir) {
@@ -237,7 +452,11 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                     continue;
                 }
                 match Self::parse_rollout(&p) {
-                    Ok(Some(s)) => out.push(s),
+                    Ok(Some(mut s)) => {
+                        s.native_title =
+                            names.title_for(&s.agent_session_id, s.first_user_text.as_deref());
+                        out.push(s)
+                    }
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
@@ -248,19 +467,14 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
         let path = PathBuf::from(&session.raw_path);
-        // Internal review threads contribute only the subagent's own replies:
-        // their user turns are prompts Codex wrote and their developer turns are
-        // its instructions — machine chatter in the user role, which is the same
-        // call ZCode makes from `semantics` (方案 §36.11 / §37.12).
-        let internal = crate::adapters::read_first_json_line(&path)
-            .map(|v| {
-                let p = v.get("payload").unwrap_or(&v);
-                matches!(
-                    p.get("thread_source").and_then(|t| t.as_str()),
-                    Some("subagent") | Some("guardian_review")
-                )
-            })
-            .unwrap_or(false);
+        // Internal review threads contribute only their own replies: their user
+        // turns are prompts Codex wrote and their developer turns are its
+        // instructions — machine chatter in the user role, which is the same
+        // call ZCode makes from `semantics` (方案 §36.11 / §37.12). Their
+        // inter-agent envelopes ARE kept: that is the task they were handed
+        // (§37.13).
+        let peers = Peers::load(&path);
+        let internal = peers.internal;
         read_jsonl_delta(&path, cursor, &|_idx, v| {
             let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let payload = v.get("payload").cloned().unwrap_or(Value::Null);
@@ -283,6 +497,17 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                                 "assistant" => ("assistant_message", text),
                                 _ => ("system", text),
                             }
+                        }
+                        // A message that crossed between two threads: the
+                        // counterpart lives in the source's own id space, and
+                        // resolving it to a NoEnding session is the reader's
+                        // job — adapters stay database-free (方案 §37.13).
+                        "agent_message" => {
+                            let text = extract_text(payload.get("content").unwrap_or(&Value::Null));
+                            if text.trim().is_empty() {
+                                return None;
+                            }
+                            ("agent_message", text)
                         }
                         // Tool traffic is deliberately not ingested (方案 §36.11):
                         // machine chatter whose payload shape also drifts across
@@ -307,18 +532,44 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                 _ => return None, // unrecognized payload types carry no meaningful text
             };
 
-            // An internal review thread contributes only its own replies; every
-            // other line is a prompt Codex wrote, a compaction marker, or the
-            // synthetic session-meta event.
-            if internal && kind != "assistant_message" {
+            // An internal review thread contributes only its own replies and the
+            // envelopes it received; every other line is a prompt Codex wrote, a
+            // compaction marker, or the synthetic session-meta event.
+            if internal && kind != "assistant_message" && kind != "agent_message" {
                 return None;
+            }
+
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("agent".into(), Value::String("codex".into()));
+            metadata.insert("type".into(), Value::String(vtype.into()));
+            if kind == "agent_message" {
+                let author = payload
+                    .get("author")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !author.is_empty() {
+                    metadata.insert(
+                        "counterpart_agent_path".into(),
+                        Value::String(author.clone()),
+                    );
+                }
+                if let Some(role) = peers.role_of(&author) {
+                    metadata.insert("counterpart_role".into(), Value::String(role.into()));
+                }
+                if let Some(id) = peers.thread_id_of(&author) {
+                    metadata.insert("counterpart_source_id".into(), Value::String(id));
+                }
+                if let Some(mt) = message_type_of(&text) {
+                    metadata.insert("message_type".into(), Value::String(mt));
+                }
             }
 
             Some(ParsedLine {
                 kind: kind.into(),
                 text: Some(text),
                 source_event_id,
-                metadata: serde_json::json!({ "agent": "codex", "type": vtype }),
+                metadata: Value::Object(metadata),
             })
         })
     }
@@ -408,6 +659,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 #[cfg(test)]
 mod rollout_tests {
     use super::*;
+    use crate::adapters::AgentAdapter;
 
     const SESSION_ID: &str = "01a0bee7-6afb-7622-afcd-e26c61dd545d";
 
@@ -522,7 +774,8 @@ mod rollout_tests {
     /// Codex's review subagents have no user turns of their own: their first
     /// "user" message is a prompt Codex wrote (the parent transcript
     /// re-embedded). Naming the session after it would put a paragraph of
-    /// machine text in the list (方案 §37.12).
+    /// machine text in the list (方案 §37.12). What the thread itself said
+    /// first IS available, though, and is the last resort for a title (§37.15).
     #[test]
     fn an_internal_review_thread_gets_no_title() {
         let dir = temp_dir("internal-thread");
@@ -547,6 +800,11 @@ mod rollout_tests {
         let d = CodexAdapter::parse_rollout(&path).unwrap().unwrap();
         assert_eq!(d.agent_session_id, SESSION_ID);
         assert_eq!(d.first_user_text, None, "no user text, so no title");
+        assert_eq!(
+            d.first_agent_text.as_deref(),
+            Some("{\"outcome\":\"allow\"}"),
+            "the thread's own first words are kept — they are what's left to name it by"
+        );
         assert_eq!(d.parent_agent_session_id.as_deref(), Some(parent));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -561,6 +819,272 @@ mod rollout_tests {
         assert_eq!(d.agent_session_id, SESSION_ID);
         assert_eq!(d.cwd.as_deref(), Some("/tmp/proj"));
         assert_eq!(d.first_user_text, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Inter-agent envelopes (方案 §37.13) ------------------------------
+
+    const CHILD_THREAD: &str = "019fbbd3-47be-78f2-89fd-9deec2e4c6d9";
+
+    /// `SubAgentActivity` is how a transcript records a thread it spawned, and
+    /// it is the only place that maps an agent path to a thread id.
+    fn spawn_line(ordinal: usize, agent_path: &str, thread_id: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-09-20T13:01:48.000Z", "ordinal": ordinal,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed", "thread_id": SESSION_ID, "turn_id": "t1",
+                "item": {
+                    "type": "SubAgentActivity", "id": format!("call_{ordinal}"),
+                    "kind": "started", "agent_thread_id": thread_id, "agent_path": agent_path
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn envelope_line(ordinal: usize, author: &str, recipient: &str, body: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-09-20T13:01:49.000Z", "ordinal": ordinal,
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message", "id": format!("amsg_{ordinal}"),
+                "author": author, "recipient": recipient,
+                "content": [
+                    { "type": "input_text", "text": format!(
+                        "Message Type: FINAL_ANSWER\nTask name: {recipient}\nSender: {author}\nPayload:\n{body}") },
+                    { "type": "encrypted_content", "encrypted_content": "zzz" }
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    fn session_at(path: &Path) -> Session {
+        Session {
+            id: "sess-codex".into(),
+            agent: Agent::Codex,
+            agent_session_id: SESSION_ID.into(),
+            title: None,
+            cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            raw_path: path.to_string_lossy().to_string(),
+            parent_agent_session_id: None,
+            started_at: None,
+            last_activity_at: None,
+            trashed_at: None,
+        }
+    }
+
+    fn metadata_of(delta: &ReadDelta, kind: &str) -> serde_json::Value {
+        delta
+            .events
+            .iter()
+            .find(|e| e.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} event in {:?}", delta.events.len()))
+            .metadata
+            .clone()
+    }
+
+    /// A message from a thread this transcript spawned: the mapping is in its
+    /// own `SubAgentActivity` items, so the counterpart resolves to a thread id
+    /// (not a guess at a path) — 100 of this machine's 135 envelopes.
+    #[test]
+    fn an_envelope_from_a_spawned_thread_names_its_thread_id() {
+        let dir = temp_dir("envelope-spawned");
+        let path = write_rollout(
+            &dir,
+            "rollout-parent.jsonl",
+            &[
+                meta_line(),
+                spawn_line(3, "/root/design_prompt_review", CHILD_THREAD),
+                envelope_line(9, "/root/design_prompt_review", "/root", "改完了"),
+            ],
+        );
+        let delta = CodexAdapter
+            .read_delta(&session_at(&path), &SourceCursor::default())
+            .unwrap();
+        let meta = metadata_of(&delta, "agent_message");
+        assert_eq!(meta["counterpart_agent_path"], "/root/design_prompt_review");
+        assert_eq!(meta["counterpart_source_id"], CHILD_THREAD);
+        assert_eq!(meta["message_type"], "FINAL_ANSWER");
+        assert_eq!(
+            meta["counterpart_role"], "child",
+            "a root rollout derives its own agent path from the threads it spawned"
+        );
+        let text = &delta
+            .events
+            .iter()
+            .find(|e| e.kind == "agent_message")
+            .unwrap()
+            .text;
+        assert!(text.as_deref().unwrap().contains("改完了"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A message from above, read in the child's own transcript: the author is
+    /// the parent, whose path is this file's own path minus its last segment,
+    /// and whose thread id is this file's `parent_thread_id` (33/135). The
+    /// envelope also has to survive the internal-thread gate — it is the task
+    /// the thread was handed, without which its timeline has no beginning.
+    #[test]
+    fn a_child_resolves_a_message_from_above_and_keeps_it() {
+        let dir = temp_dir("envelope-from-parent");
+        let parent = "019f135a-621c-76a1-a76c-7c71021847aa";
+        let path = write_rollout(
+            &dir,
+            &format!("rollout-2026-09-20T21-01-47-{SESSION_ID}.jsonl"),
+            &[
+                meta_line_with(serde_json::json!({
+                    "session_id": SESSION_ID, "id": SESSION_ID, "cwd": "/tmp/proj",
+                    "thread_source": "subagent", "parent_thread_id": parent,
+                    "source": { "subagent": { "thread_spawn": {
+                        "parent_thread_id": parent, "agent_path": "/root/godot_prompt_review"
+                    } } }
+                })),
+                message_line(2, "user", "The following is the Codex agent history…"),
+                envelope_line(5, "/root", "/root/godot_prompt_review", "审一遍这份设计"),
+                message_line(9, "assistant", "有阻断项，按严重度如下。"),
+            ],
+        );
+        let delta = CodexAdapter
+            .read_delta(&session_at(&path), &SourceCursor::default())
+            .unwrap();
+        let kinds: Vec<&str> = delta.events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["agent_message", "assistant_message"],
+            "the injected prompt is dropped, the envelope is not"
+        );
+        let meta = metadata_of(&delta, "agent_message");
+        assert_eq!(meta["counterpart_source_id"], parent);
+        assert_eq!(meta["counterpart_agent_path"], "/root");
+        assert_eq!(meta["counterpart_role"], "parent");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A message from a sibling: the sibling's spawn was recorded by the shared
+    /// ancestor, so this file cannot name its thread id. The path is still the
+    /// truth and is kept; the id stays absent rather than guessed (2/135).
+    #[test]
+    fn an_envelope_from_a_sibling_keeps_the_path_and_invents_no_id() {
+        let dir = temp_dir("envelope-sibling");
+        let parent = "019f135a-621c-76a1-a76c-7c71021847aa";
+        let path = write_rollout(
+            &dir,
+            &format!("rollout-2026-09-20T21-01-47-{SESSION_ID}.jsonl"),
+            &[
+                meta_line_with(serde_json::json!({
+                    "session_id": SESSION_ID, "id": SESSION_ID, "cwd": "/tmp/proj",
+                    "thread_source": "subagent", "parent_thread_id": parent,
+                    "source": { "subagent": { "thread_spawn": {
+                        "parent_thread_id": parent, "agent_path": "/root/binding_spec_audit"
+                    } } }
+                })),
+                envelope_line(
+                    5,
+                    "/root/boss_runtime_rebuild",
+                    "/root/binding_spec_audit",
+                    "给你两条",
+                ),
+            ],
+        );
+        let delta = CodexAdapter
+            .read_delta(&session_at(&path), &SourceCursor::default())
+            .unwrap();
+        let meta = metadata_of(&delta, "agent_message");
+        assert_eq!(meta["counterpart_agent_path"], "/root/boss_runtime_rebuild");
+        assert_eq!(
+            meta["counterpart_role"], "sibling",
+            "same parent, different leaf — a peer, not a parent or a child"
+        );
+        assert!(
+            meta.get("counterpart_source_id").is_none(),
+            "no thread id is derivable from this file, and a wrong one is worse than none"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- The session index as a title source (方案 §37.16) ----------------
+
+    fn index_line(id: &str, name: &str) -> String {
+        serde_json::json!({ "id": id, "thread_name": name, "updated_at": "2026-09-20T13:00:00Z" })
+            .to_string()
+    }
+
+    /// The name Codex gives a thread is its title, and the transcript has no
+    /// copy of it — discovery has to go to the index for it.
+    #[test]
+    fn the_index_names_a_thread_that_its_transcript_cannot() {
+        let dir = temp_dir("index-named");
+        write_rollout(
+            &dir,
+            &format!("rollout-2026-09-20T21-01-47-{SESSION_ID}.jsonl"),
+            &[
+                meta_line(),
+                message_line(
+                    3,
+                    "user",
+                    "任务看板界面右上角的那个新建任务按钮 去掉 前边的“+”",
+                ),
+            ],
+        );
+        std::fs::write(
+            dir.join("session_index.jsonl"),
+            format!("{}\n", index_line(SESSION_ID, "移除新建任务按钮加号")),
+        )
+        .unwrap();
+        let found = CodexAdapter
+            .discover_sessions_in(&[dir.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].native_title.as_deref(),
+            Some("移除新建任务按钮加号")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Until the model names the thread, the index holds the first user message
+    /// — cut at 60 chars with `…`, or verbatim when it is shorter. That is the
+    /// same string NoEnding derives, so it must not be promoted over it.
+    #[test]
+    fn a_placeholder_name_is_not_a_native_title() {
+        let dir = temp_dir("index-placeholder");
+        let long = "这是一个初始godot引擎工程，我该如何在该工程里使用godot mcp：/Users/jqk/projects/r/godot-mcp";
+        let cut: String = long.chars().take(59).collect();
+        // Shorter than the cut: the index stores the message verbatim.
+        let short = "如何让你能够接管收发微信消息？";
+        write_rollout(
+            &dir,
+            &format!("rollout-2026-09-20T21-01-47-{SESSION_ID}.jsonl"),
+            &[meta_line(), message_line(3, "user", long)],
+        );
+        std::fs::write(
+            dir.join("session_index.jsonl"),
+            format!(
+                "{}\n{}\n",
+                index_line(SESSION_ID, &format!("{cut}…")),
+                index_line("019ff12a-3a13-7553-b629-9c7403deb658", short)
+            ),
+        )
+        .unwrap();
+        let found = CodexAdapter
+            .discover_sessions_in(&[dir.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].native_title, None,
+            "a cut first message is not a name"
+        );
+        assert_eq!(found[0].first_user_text.as_deref(), Some(long));
+        let names = ThreadNames::load(&[dir.clone()]);
+        assert_eq!(
+            names.title_for("019ff12a-3a13-7553-b629-9c7403deb658", Some(short)),
+            None,
+            "verbatim-equal to the first message is the same placeholder"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

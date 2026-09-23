@@ -107,6 +107,21 @@ pub fn ensure_session_row(
     ensure_session_row_with(db, d, attacher.as_ref())
 }
 
+/// A Session's display title: the first of the three sources that has one, in
+/// this order (§37.15) — the transcript's own title, the first user text, the
+/// first agent text. The rule lives here and only here; adapters report the
+/// three sources, they do not decide between them.
+///
+/// Public because a one-off re-derive has to produce exactly what a fresh
+/// discovery would: two implementations of this order would be two rules.
+pub fn session_title(d: &crate::adapters::DiscoveredSession) -> Option<String> {
+    d.native_title
+        .as_deref()
+        .or(d.first_user_text.as_deref())
+        .or(d.first_agent_text.as_deref())
+        .and_then(crate::adapters::title_from_text)
+}
+
 /// Ensure a session row exists for a discovered session, resolving its cwd
 /// against the injected [`WorkspaceAttaching`] seam.
 ///
@@ -122,10 +137,7 @@ pub fn ensure_session_row_with(
     d: &crate::adapters::DiscoveredSession,
     attacher: &dyn crate::workspace::WorkspaceAttaching,
 ) -> Result<(Session, bool)> {
-    let title = d
-        .first_user_text
-        .as_deref()
-        .and_then(crate::adapters::title_from_text);
+    let title = session_title(d);
     let existing = db.find_session_by_agent_id(d.agent, &d.agent_session_id)?;
     let raw_path = d.path.to_string_lossy().to_string();
     if let Some(s) = existing {
@@ -328,6 +340,16 @@ where
                 Err(e) => eprintln!("[reconcile] ingest {} failed: {}", s.id, e),
             }
         }
+    }
+
+    // §19-4/§37.19 — the one piece of workspace work a skipped Session still
+    // owes. It runs AFTER the loop so a path first registered by this very pass
+    // is already visible to it, and it never observes a path (the identity is
+    // stored), so a pass over frozen files stays as cheap as it looks.
+    match crate::workspace::session::attach_sessions_to_registered_paths(db) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[reconcile] 补绑 {} 个会话到已注册的 workspace 路径", n),
+        Err(e) => eprintln!("[reconcile] workspace 补绑失败: {e}"),
     }
     Ok((total_discovered, total_events))
 }

@@ -42,6 +42,7 @@ impl PiAdapter {
         let mut cwd: Option<String> = None;
         let mut started_at: Option<String> = None;
         let mut first_user_text: Option<String> = None;
+        let mut first_agent_text: Option<String> = None;
 
         for (_, line) in &lines {
             let v: Value = match serde_json::from_str(line) {
@@ -58,21 +59,21 @@ impl PiAdapter {
                         .map(|t| t.to_string());
                 }
                 Some("message") => {
-                    if first_user_text.is_none() {
-                        if let Some(msg) = v.get("message") {
-                            if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
-                                let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                                // `<…>` environment blocks and `#`-prefixed
-                                // injections (AGENTS.md, attached-file
-                                // headers) are not user text.
-                                if !text.is_empty()
-                                    && !text.starts_with('<')
-                                    && !text.starts_with('#')
-                                {
-                                    first_user_text =
-                                        Some(crate::adapters::truncate_text(&text, 400));
-                                }
-                            }
+                    if let Some(msg) = v.get("message") {
+                        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                        let text = content_text(msg.get("content").unwrap_or(&Value::Null));
+                        // `<…>` environment blocks and `#`-prefixed injections
+                        // (AGENTS.md, attached-file headers) are not user text.
+                        if first_user_text.is_none()
+                            && role == "user"
+                            && !text.is_empty()
+                            && !crate::adapters::is_injected_preamble(&text)
+                        {
+                            first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                        }
+                        // Last resort for a title (§37.15).
+                        if first_agent_text.is_none() && role == "assistant" && !text.is_empty() {
+                            first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
                         }
                     }
                 }
@@ -109,7 +110,10 @@ impl PiAdapter {
             cwd,
             started_at,
             last_activity_at: last_activity,
+            // pi writes no session title.
+            native_title: None,
             first_user_text,
+            first_agent_text,
             parent_agent_session_id: None,
         }))
     }

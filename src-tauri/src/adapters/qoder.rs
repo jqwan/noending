@@ -21,9 +21,15 @@
 //! that does not exist), so this adapter **ingests history only**: `detect()`
 //! never succeeds, and there is no new/resume/exec command to build. The raw
 //! transcripts are opened read-only, always.
+//!
+//! **One fact comes from a second store.** The transcript carries no title, so
+//! discovery reads the app's own `chat_sessions` for it — read-only, looked up
+//! by the very session id the transcript reports, and silent when that store is
+//! absent (方案 §37.16). Nothing else about the session is taken from there.
 
 use std::path::{Path, PathBuf};
 
+use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
@@ -34,6 +40,77 @@ use crate::domain::{Agent, Session, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct QoderAdapter;
+
+/// Qoder's bundle id, i.e. the name of the folder it keeps its app data in.
+const QODER_BUNDLE: &str = "com.qodercn.app.stable";
+/// The app database inside that folder; `chat_sessions` is the table we read.
+const QODER_DB: &str = "main.sqlite";
+
+/// The titles Qoder itself shows, read from the app's own database (方案 §37.16).
+///
+/// The transcript has none, which is why discovery reads a second source for
+/// this one fact. `[实测]` `chat_sessions.session_id` is the id the transcript
+/// carries (7/7 on this machine), so the join is exact; `title` is the model's
+/// short name for the session — except when Qoder says otherwise, which it does
+/// out loud: `extra_json.titleSource`.
+struct SessionTitles(Option<Connection>);
+
+impl SessionTitles {
+    /// `None` when the store is absent, locked, or shaped differently — a
+    /// missing title source must cost nothing but the title.
+    fn open() -> Self {
+        let path = crate::platform::paths::resolve_external_app_support(QODER_BUNDLE)
+            .map(|dir| dir.join(QODER_DB));
+        Self::open_at(path.as_deref())
+    }
+
+    /// Split from [`Self::open`] so a fixture database can be read without the
+    /// app's own folder existing.
+    fn open_at(path: Option<&Path>) -> Self {
+        let conn = path.and_then(|path| {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .ok()
+        });
+        Self(conn)
+    }
+
+    fn title_for(&self, session_id: &str) -> Option<String> {
+        let mut stmt = self
+            .0
+            .as_ref()?
+            .prepare("SELECT title, extra_json FROM chat_sessions WHERE session_id = ?1")
+            .ok()?;
+        let (title, extra): (String, Option<String>) = stmt
+            .query_row([session_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .ok()?;
+        let source = extra
+            .as_deref()
+            .and_then(|e| serde_json::from_str::<Value>(e).ok())
+            .and_then(|v| {
+                v.get("titleSource")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string)
+            });
+        is_resolved_title(source.as_deref())
+            .then_some(title)
+            .filter(|t| !t.trim().is_empty())
+    }
+}
+
+/// Whether Qoder's `title` is a name it settled on.
+///
+/// `[实测]` the two values it writes: `ai` (6 of 7 sessions locally — 「修改任务
+/// 编辑功能」, 「了解工程概况」) and `provisional` (the first user message, shown
+/// until the model answers). The rule is therefore a deny-list, not an
+/// allow-list: a future `custom` (the user renaming the session) is a title too.
+/// An absent field means a store from before the field existed, when `title`
+/// was the raw prompt — treated as provisional.
+fn is_resolved_title(source: Option<&str>) -> bool {
+    matches!(source, Some(s) if s != "provisional")
+}
 
 /// Text of a message's content blocks. Only `type:"text"` counts: Qoder folds
 /// tool results into `user`-role lines (`toolUseResult` + a `tool_result`
@@ -79,6 +156,7 @@ impl QoderAdapter {
         let mut started_at = None;
         let mut last_ts = None;
         let mut first_user_text = None;
+        let mut first_agent_text = None;
 
         for (_, line) in &lines {
             let v: Value = match serde_json::from_str(line) {
@@ -121,8 +199,21 @@ impl QoderAdapter {
                     .unwrap_or_default();
                 // `<…>` environment blocks and `#`-prefixed injections
                 // (AGENTS.md, attached-file headers) are not user text.
-                if !text.is_empty() && !text.starts_with('<') && !text.starts_with('#') {
+                if !text.is_empty() && !crate::adapters::is_injected_preamble(&text) {
                     first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                }
+            }
+            // Last resort for a title (§37.15).
+            if first_agent_text.is_none()
+                && v.get("type").and_then(|t| t.as_str()) == Some("assistant")
+                && v.get("isSidechain").and_then(|s| s.as_bool()) != Some(true)
+            {
+                let text = v
+                    .get("message")
+                    .map(|m| content_text(m.get("content").unwrap_or(&Value::Null)))
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
                 }
             }
         }
@@ -142,7 +233,11 @@ impl QoderAdapter {
             cwd,
             started_at,
             last_activity_at: last_activity.or(last_ts),
+            // The transcript carries no title; discovery fills this in from the
+            // app's own database (§37.16).
+            native_title: None,
             first_user_text,
+            first_agent_text,
             parent_agent_session_id: None,
         }))
     }
@@ -165,6 +260,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         unchanged: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<DiscoveredSession>> {
         let mut out = Vec::new();
+        let titles = SessionTitles::open();
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
             let rd = match std::fs::read_dir(&dir) {
@@ -194,7 +290,10 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
                     continue;
                 }
                 match Self::parse_session_file(&p) {
-                    Ok(Some(s)) => out.push(s),
+                    Ok(Some(mut s)) => {
+                        s.native_title = titles.title_for(&s.agent_session_id);
+                        out.push(s)
+                    }
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
@@ -435,5 +534,73 @@ mod tests {
         assert_eq!(found.len(), 1, "only the parent session is ingested");
         assert_eq!(found[0].agent_session_id, "s-main");
         assert_eq!(found[0].parent_agent_session_id, None);
+    }
+
+    // ---- The app database as a title source (方案 §37.16) -----------------
+
+    /// A `chat_sessions` as Qoder lays it out — only the columns the reader
+    /// touches, but with the real constraints, so the fixture could have been
+    /// written by the app itself.
+    fn title_store(tag: &str, rows: &[(&str, &str, &str)]) -> PathBuf {
+        let path = unique_dir(tag).join("main.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chat_sessions (
+                session_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                extra_json TEXT NOT NULL DEFAULT '{}');",
+        )
+        .unwrap();
+        for (id, title, extra) in rows {
+            conn.execute(
+                "INSERT INTO chat_sessions (session_id, title, extra_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, title, extra],
+            )
+            .unwrap();
+        }
+        path
+    }
+
+    /// The transcript has no title, so the model's own name for the session can
+    /// only come from here — and the join is exact, not fuzzy.
+    #[test]
+    fn the_app_database_names_the_session() {
+        let path = title_store(
+            "titles",
+            &[
+                (
+                    "s-main",
+                    "修改任务编辑功能",
+                    r#"{"titleSource":"ai","provisionalTitle":"先了解下这个工程"}"#,
+                ),
+                (
+                    "s-other",
+                    "如何让你能够接管收发微信消息？",
+                    r#"{"titleSource":"provisional","provisionalTitle":"如何让你能够接管收发微信消息？"}"#,
+                ),
+            ],
+        );
+        let titles = SessionTitles::open_at(Some(&path));
+        assert_eq!(
+            titles.title_for("s-main").as_deref(),
+            Some("修改任务编辑功能")
+        );
+        assert_eq!(
+            titles.title_for("s-other"),
+            None,
+            "Qoder says this one is still the raw prompt"
+        );
+        assert_eq!(titles.title_for("s-absent"), None);
+    }
+
+    /// The `titleSource` field is what the rule turns on, so test it directly:
+    /// `ai` is a name, `provisional` and an absent field are not, and anything
+    /// else (a future `custom`) is.
+    #[test]
+    fn only_a_settled_title_is_a_native_title() {
+        assert!(is_resolved_title(Some("ai")));
+        assert!(is_resolved_title(Some("custom")));
+        assert!(!is_resolved_title(Some("provisional")));
+        assert!(!is_resolved_title(None));
     }
 }

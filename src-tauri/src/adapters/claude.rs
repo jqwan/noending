@@ -50,6 +50,7 @@ impl ClaudeAdapter {
         let lines = crate::adapters::read_jsonl_lines(path)?;
         let mut session_id: Option<String> = None;
         let mut first_user_text = None;
+        let mut first_agent_text = None;
         let mut started_at = None;
         let mut last_ts = None;
 
@@ -93,8 +94,20 @@ impl ClaudeAdapter {
                     let text = content_text(msg.get("content").unwrap_or(&Value::Null));
                     // `<…>` environment blocks and `#`-prefixed injections
                     // (AGENTS.md, attached-file headers) are not user text.
-                    if !text.is_empty() && !text.starts_with('<') && !text.starts_with('#') {
+                    if !text.is_empty() && !crate::adapters::is_injected_preamble(&text) {
                         first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                    }
+                }
+            }
+            // Last resort for a title when the session has no user turn (§37.15).
+            if first_agent_text.is_none()
+                && v.get("type").and_then(|t| t.as_str()) == Some("assistant")
+                && v.get("isSidechain").and_then(|s| s.as_bool()) != Some(true)
+            {
+                if let Some(msg) = v.get("message") {
+                    let text = content_text(msg.get("content").unwrap_or(&Value::Null));
+                    if !text.is_empty() {
+                        first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
                 }
             }
@@ -113,7 +126,10 @@ impl ClaudeAdapter {
             cwd,
             started_at,
             last_activity_at: last_activity.or(last_ts),
+            // Claude Code writes no session title.
+            native_title: None,
             first_user_text,
+            first_agent_text,
             parent_agent_session_id: None,
         }))
     }

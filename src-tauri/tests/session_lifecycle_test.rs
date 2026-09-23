@@ -251,6 +251,8 @@ fn fixture_session(db: &Db, agent: Agent, tag: &str) -> Session {
         started_at: Some("2026-09-13T10:00:00Z".into()),
         last_activity_at: Some("2026-09-13T10:05:00Z".into()),
         first_user_text: Some("first user message about goals".into()),
+        native_title: None,
+        first_agent_text: None,
         parent_agent_session_id: None,
     };
     let (s, _) = ensure_session_row_with(db, &discovered, &attacher()).unwrap();
@@ -549,6 +551,8 @@ fn discovery_does_not_restore_or_mutate_trashed_session() {
         started_at: Some("2026-09-13T10:00:00Z".into()),
         last_activity_at: Some("2026-09-14T10:00:00Z".into()),
         first_user_text: Some("brand new title text".into()),
+        native_title: None,
+        first_agent_text: None,
         parent_agent_session_id: None,
     };
     let (row, is_new) = ensure_session_row_with(&db, &discovered, &attacher()).unwrap();
@@ -986,6 +990,8 @@ fn restored_source_is_discovered_again_as_a_new_session() {
         started_at: Some("2026-09-13T10:00:00Z".into()),
         last_activity_at: Some("2026-09-13T10:00:00Z".into()),
         first_user_text: Some("first user message about goals".into()),
+        native_title: None,
+        first_agent_text: None,
         parent_agent_session_id: None,
     };
     let (s2, is_new) = ensure_session_row_with(&db, &discovered, &attacher()).unwrap();
@@ -1417,6 +1423,206 @@ fn codex_review_threads_store_their_own_replies_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// §37.13 — an inter-agent envelope is stored with the counterpart's id in the
+/// SOURCE's id space, and only the read path turns that into a NoEnding Session
+/// id. Two properties matter here, and neither could hold if the id were
+/// written at ingest time:
+/// - the counterpart may not exist yet when the envelope is stored (it is
+///   discovered later, or never) — the event must still be stored, and must
+///   resolve the moment the row appears, with no re-ingest and no migration;
+/// - `session_events` is append-only, so a resolved id could never be written
+///   back into it.
+#[test]
+fn agent_envelopes_resolve_to_the_counterpart_session_when_read() {
+    const PARENT: &str = "019f665a-5793-7752-96ac-f420b2598e2a";
+    const CHILD: &str = "019fbbd3-47be-78f2-89fd-9deec2e4c6d9";
+    let db = open_db("agent-envelope");
+    let dir = unique_dir("agent-envelope");
+
+    let parent_file = dir.join(format!("rollout-2026-07-15T23-17-04-{PARENT}.jsonl"));
+    std::fs::write(
+        &parent_file,
+        format!(
+            "{{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{{\"id\":\"{PARENT}\",\"session_id\":\"{PARENT}\",\"cwd\":\"/tmp/proj\"}}}}\n\
+             {{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{{\"type\":\"item_completed\",\"item\":{{\"type\":\"SubAgentActivity\",\"kind\":\"started\",\"agent_thread_id\":\"{CHILD}\",\"agent_path\":\"/root/design_prompt_review\"}}}}}}\n\
+             {{\"ordinal\":2,\"type\":\"response_item\",\"payload\":{{\"type\":\"agent_message\",\"id\":\"amsg_1\",\"author\":\"/root/design_prompt_review\",\"recipient\":\"/root\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Message Type: FINAL_ANSWER\\nSender: /root/design_prompt_review\\nPayload:\\n改完了\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+    let (parent, _) = ensure_session_row_with(
+        &db,
+        &noending::adapters::DiscoveredSession {
+            agent: Agent::Codex,
+            agent_session_id: PARENT.into(),
+            path: parent_file.clone(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            first_user_text: None,
+            native_title: None,
+            first_agent_text: None,
+            parent_agent_session_id: None,
+        },
+        &attacher(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        ingest(&db, &CodexAdapter, &parent),
+        2,
+        "the synthetic session-meta event and the envelope"
+    );
+
+    let envelope = |db: &Db| {
+        let mut events = db.get_events(&parent.id, None, 100).unwrap();
+        db.resolve_event_counterparts(&parent, &mut events).unwrap();
+        events
+            .into_iter()
+            .find(|e| e.kind == "agent_message")
+            .expect("the envelope is stored")
+    };
+
+    // Nothing to resolve against yet: the counterpart is still unknown, so the
+    // event keeps the source-supplied path and gains no id.
+    let event = envelope(&db);
+    assert_eq!(
+        event.metadata["counterpart_agent_path"],
+        "/root/design_prompt_review"
+    );
+    assert!(event.metadata.get("counterpart_session_id").is_none());
+
+    // The counterpart is discovered afterwards — same stored event, now resolved.
+    let child_file = dir.join(format!("rollout-2026-08-01T13-36-53-{CHILD}.jsonl"));
+    write_agent_fixture(Agent::Codex, &child_file, CHILD);
+    let (child, _) = ensure_session_row_with(
+        &db,
+        &noending::adapters::DiscoveredSession {
+            agent: Agent::Codex,
+            agent_session_id: CHILD.into(),
+            path: child_file,
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            first_user_text: Some("审一遍这份设计".into()),
+            native_title: None,
+            first_agent_text: None,
+            parent_agent_session_id: Some(PARENT.into()),
+        },
+        &attacher(),
+    )
+    .unwrap();
+
+    let event = envelope(&db);
+    assert_eq!(event.metadata["counterpart_source_id"], CHILD);
+    assert_eq!(
+        event.metadata["counterpart_session_id"], child.id,
+        "the resolved id is NoEnding's own Session id, not the agent's thread id"
+    );
+    assert_eq!(event.metadata["counterpart_title"], "审一遍这份设计");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `role` is a fact about the session graph, not about the message, so a source
+/// that only names the sender's id (dsh) gets it here (§37.17).
+#[test]
+fn an_agent_messages_role_comes_from_the_session_graph() {
+    let db = open_db("agent-role");
+
+    let row = |agent_session_id: &str, parent: Option<&str>| {
+        ensure_session_row_with(
+            &db,
+            &noending::adapters::DiscoveredSession {
+                agent: Agent::Dsh,
+                agent_session_id: agent_session_id.into(),
+                path: PathBuf::new(),
+                cwd: None,
+                started_at: None,
+                last_activity_at: None,
+                first_user_text: Some(agent_session_id.into()),
+                native_title: None,
+                first_agent_text: None,
+                parent_agent_session_id: parent.map(str::to_string),
+            },
+            &attacher(),
+        )
+        .unwrap()
+        .0
+    };
+
+    let me = row("me", Some("parent"));
+    row("parent", None);
+    row("sibling", Some("parent"));
+    row("child", Some("me"));
+    row("unrelated", None);
+
+    // One message per counterpart, exactly as dsh writes them: the sender's id
+    // and nothing else.
+    let events: Vec<noending::domain::SessionEvent> = ["parent", "child", "sibling", "unrelated"]
+        .iter()
+        .enumerate()
+        .map(|(i, sender)| noending::domain::SessionEvent {
+            id: new_id(),
+            session_id: me.id.clone(),
+            sequence: i as i64 + 1,
+            source_event_id: Some(format!("{i}")),
+            source_generation: 1,
+            source_position: format!("line:{i}"),
+            ts: None,
+            kind: "agent_message".into(),
+            text: Some(format!("from {sender}")),
+            raw_ref: format!("test:{i}"),
+            metadata: serde_json::json!({
+                "agent": "dsh",
+                "type": "user/message",
+                "counterpart_source_id": sender,
+            }),
+        })
+        .collect();
+    db.append_events(&events).unwrap();
+
+    let mut read = db.get_events(&me.id, None, 100).unwrap();
+    db.resolve_event_counterparts(&me, &mut read).unwrap();
+    let role_of = |text: &str| {
+        read.iter()
+            .find(|e| e.text.as_deref() == Some(text))
+            .and_then(|e| e.metadata.get("counterpart_role"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(role_of("from parent").as_deref(), Some("parent"));
+    assert_eq!(role_of("from child").as_deref(), Some("child"));
+    assert_eq!(role_of("from sibling").as_deref(), Some("sibling"));
+    assert_eq!(
+        role_of("from unrelated"),
+        None,
+        "nothing in the graph relates them, and a label would be a guess"
+    );
+
+    // §37.20 — the same graph, walked the other way for the detail page: the
+    // parent row and the children that name me. Both children here have a NULL
+    // `started_at`, so the tie-break is the random row id — only membership is
+    // assertable, and the ORDER BY itself is covered by the live shapes.
+    let parent = db.find_session_by_agent_id(Agent::Dsh, "parent").unwrap();
+    assert_eq!(
+        parent.map(|s| s.agent_session_id).as_deref(),
+        Some("parent")
+    );
+    let ids = |v: Vec<noending::domain::Session>| {
+        v.into_iter()
+            .map(|s| s.agent_session_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(db.child_sessions(Agent::Dsh, "me").unwrap()),
+        vec!["child"]
+    );
+    let mut kids = ids(db.child_sessions(Agent::Dsh, "parent").unwrap());
+    kids.sort();
+    assert_eq!(kids, vec!["me", "sibling"]);
+    // A dsh id means nothing to Codex: the tree never crosses agents.
+    assert!(db.child_sessions(Agent::Codex, "me").unwrap().is_empty());
+}
+
 // ---- Hardening patch §1-A/§1-B -------------------------------------------
 //
 // A: a source already deleted OUTSIDE the app is preparable as
@@ -1639,6 +1845,8 @@ fn confirmed_absent_does_not_require_registered_source_root() {
         started_at: Some("2026-09-13T10:00:00Z".into()),
         last_activity_at: Some("2026-09-13T10:05:00Z".into()),
         first_user_text: Some("first user message about goals".into()),
+        native_title: None,
+        first_agent_text: None,
         parent_agent_session_id: None,
     };
     let (s, _) = ensure_session_row_with(&db, &discovered, &attacher()).unwrap();

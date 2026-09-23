@@ -43,9 +43,9 @@
 //!   design tolerates; inventing sessions the app itself hides is the one it
 //!   does not. Sub-agent sessions, by contrast, are ordinary rows with a real
 //!   `parent_id`, so they are ingested with their parent link (15 of 27
-//!   locally). ZCode's own `title` is not used — NoEnding's title is derived
-//!   from the first user message and is write-once (§37.7's decision, applied
-//!   consistently).
+//!   locally). ZCode's own `title` is reported as the native title **only when
+//!   `title_source` is not `first_input`** — that value means the store itself
+//!   fell back to the first prompt, which NoEnding derives anyway (§37.15).
 //!
 //! There is no launchable CLI: ZCode is a desktop app (`~/.zcode/cli` is its
 //! own data dir, not a user-facing command), so `detect()` never succeeds and
@@ -236,6 +236,16 @@ impl ZCodeAdapter {
         let directory: Option<String> = row.get(2)?;
         let time_created: Option<i64> = row.get(3)?;
         let time_updated: Option<i64> = row.get(4)?;
+        let title: Option<String> = row.get(5)?;
+        let title_source: Option<String> = row.get(6)?;
+        // ZCode says where each title came from. `generated` is a real title
+        // (「实施 NoEnding 首页与 Workstream 看板设计方案」); `first_input` is
+        // ZCode truncating the first input, which is the same naive derivation
+        // as ours and is often worse (`You are running a verification smoke
+        // tes`, `研究 /Users/jqk/projects/deepseek-harness `), so it is skipped
+        // and our own derivation stands (§37.15).
+        let native_title = title
+            .filter(|t| !t.trim().is_empty() && title_source.as_deref() != Some("first_input"));
         Ok((
             DiscoveredSession {
                 agent: Agent::ZCode,
@@ -245,20 +255,39 @@ impl ZCodeAdapter {
                 cwd: directory.filter(|d| !d.is_empty()),
                 started_at: time_created.and_then(ms_epoch_to_rfc3339),
                 last_activity_at: time_updated.and_then(ms_epoch_to_rfc3339),
+                native_title,
                 first_user_text: None,
+                first_agent_text: None,
                 parent_agent_session_id: parent_id,
             },
             id,
         ))
     }
 
-    /// The first human turn, for the title — the first `real_user` prompt, not
-    /// the app's own title and not the first `role:"user"` row (which is a
+    /// The first human turn — the fallback when the session carries no title.
+    /// The first `real_user` prompt, not the first `role:"user"` row (which is a
     /// reminder more often than not).
     fn first_user_text(conn: &Connection, session_id: &str) -> Result<Option<String>> {
         for (message, parts) in conversation(conn, session_id)? {
             let data = message.get("data").unwrap_or(&Value::Null);
             if message_kind(data) != Some("user_prompt") {
+                continue;
+            }
+            let text = text_of(&parts);
+            if !text.trim().is_empty() {
+                return Ok(Some(crate::adapters::truncate_text(&text, 400)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The first settled agent reply — the last resort for a title (§37.15).
+    /// Settled only: the row appears when streaming starts and is rewritten in
+    /// place, so an early read would name the session after a half sentence.
+    fn first_agent_text(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+        for (message, parts) in conversation(conn, session_id)? {
+            let data = message.get("data").unwrap_or(&Value::Null);
+            if message_kind(data) != Some("assistant_response") || !is_settled(data) {
                 continue;
             }
             let text = text_of(&parts);
@@ -308,8 +337,8 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             let conn = open_read_only(&db)?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, parent_id, directory, time_created, time_updated FROM session
-                     WHERE time_archived IS NULL ORDER BY time_created",
+                    "SELECT id, parent_id, directory, time_created, time_updated, title, title_source
+                     FROM session WHERE time_archived IS NULL ORDER BY time_created",
                 )
                 .map_err(|e| other(format!("查询 ZCode session 失败: {e}")))?;
             let rows = stmt
@@ -320,6 +349,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
                     row.map_err(|e| other(format!("读取 ZCode session 失败: {e}")))?;
                 discovered.path = db.clone();
                 discovered.first_user_text = Self::first_user_text(&conn, &id)?;
+                discovered.first_agent_text = Self::first_agent_text(&conn, &id)?;
                 out.push(discovered);
             }
         }
@@ -456,12 +486,24 @@ mod tests {
     }
 
     fn session_row(conn: &Connection, id: &str, parent: Option<&str>, dir: &str, created: i64) {
+        session_row_titled(conn, id, parent, dir, created, "app title", "generated");
+    }
+
+    fn session_row_titled(
+        conn: &Connection,
+        id: &str,
+        parent: Option<&str>,
+        dir: &str,
+        created: i64,
+        title: &str,
+        title_source: &str,
+    ) {
         conn.execute(
             "INSERT INTO session
                (id, project_id, parent_id, slug, directory, title, version,
-                time_created, time_updated)
-             VALUES (?1, 'p', ?2, ?1, ?3, 'app title', '1', ?4, ?4)",
-            rusqlite::params![id, parent, dir, created],
+                title_source, time_created, time_updated)
+             VALUES (?1, 'p', ?2, ?1, ?3, ?4, '1', ?5, ?6, ?6)",
+            rusqlite::params![id, parent, dir, title, title_source, created],
         )
         .unwrap();
     }
@@ -596,6 +638,40 @@ mod tests {
         assert_eq!(child.cwd.as_deref(), Some("/repo/sub"));
         assert_eq!(child.agent, Agent::ZCode);
         assert_eq!(child.path, db);
+        assert_eq!(
+            child.native_title.as_deref(),
+            Some("app title"),
+            "the session's own title column outranks anything derived from the messages"
+        );
+    }
+
+    /// A `first_input` title is ZCode's own naive truncation of the first
+    /// input — the same thing we would derive, and measurably worse
+    /// (`You are running a verification smoke tes`). It is not a title the
+    /// Agent thought about, so the derived one stands (§37.15).
+    #[test]
+    fn a_first_input_title_is_not_treated_as_native() {
+        let root = unique_dir("title-source");
+        let db = store(&root);
+        let conn = open(&db);
+        session_row_titled(
+            &conn,
+            "s",
+            None,
+            "/repo",
+            100,
+            "Explore the codebase at /Users/jqk/proje",
+            "first_input",
+        );
+        message_row(&conn, "m2", "s", 1, prompt());
+        part_row(&conn, "p2", "m2", "s", 0, text_part("只看这一句"));
+        drop(conn);
+
+        let found = ZCodeAdapter
+            .discover_sessions_in(&[root], &|_| false)
+            .unwrap();
+        assert_eq!(found[0].native_title, None);
+        assert_eq!(found[0].first_user_text.as_deref(), Some("只看这一句"));
     }
 
     #[test]

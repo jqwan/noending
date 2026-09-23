@@ -24,6 +24,8 @@ fn discovered(agent: Agent, agent_session_id: &str, activity: &str) -> Discovere
         started_at: Some("2026-09-01T08:00:00Z".into()),
         last_activity_at: Some(activity.into()),
         first_user_text: Some("继续上次的工作".into()),
+        native_title: None,
+        first_agent_text: None,
         parent_agent_session_id: None,
     }
 }

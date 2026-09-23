@@ -23,6 +23,8 @@ fn discovered(agent_session_id: &str, cwd: Option<&str>, activity: &str) -> Disc
         started_at: Some("2026-08-18T14:21:22Z".into()),
         last_activity_at: Some(activity.into()),
         first_user_text: Some("帮我看看这个量化脚本".into()),
+        native_title: None,
+        first_agent_text: None,
         parent_agent_session_id: None,
     }
 }
