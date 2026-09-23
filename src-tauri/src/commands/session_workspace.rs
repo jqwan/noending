@@ -36,6 +36,13 @@ pub struct SessionDetail {
     /// alone would make the UI join a table it has no command for — and the
     /// Project shown here is derived through that path, never picked by a user.
     pub workspace_path: Option<SessionWorkspacePath>,
+    /// §37.20 — the other sessions this execution belongs to, as whole rows so
+    /// the UI needs no second lookup. The parent is resolved in the source's own
+    /// id space (`session.parent_agent_session_id` is an Agent-side id) and is
+    /// simply `None` when that thread was never discovered — the field on
+    /// `session` still says a parent exists, and the UI says so honestly.
+    pub parent: Option<Session>,
+    pub children: Vec<Session>,
 }
 
 #[derive(Serialize)]
@@ -85,7 +92,8 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        let events = db.get_events(&session_id, None, 500)?;
+        let mut events = db.get_events(&session_id, None, 500)?;
+        db.resolve_event_counterparts(&session, &mut events)?;
         let cursor = db.get_cursor(&session_id)?;
         let processed_cursor = db.get_processed_sequence(&session_id)?;
         let bindings = db
@@ -115,6 +123,14 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             }),
             None => None,
         };
+        // §37.20 — the session tree, read in the source's own id space. A
+        // child's `parent_agent_session_id` is an Agent-side id, so the lookup
+        // is scoped to the same agent (a Codex thread id means nothing to dsh).
+        let parent = match session.parent_agent_session_id.as_deref() {
+            Some(id) => db.find_session_by_agent_id(session.agent, id)?,
+            None => None,
+        };
+        let children = db.child_sessions(session.agent, &session.agent_session_id)?;
         Ok(SessionDetail {
             session,
             events,
@@ -124,6 +140,8 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             classification: classification.as_str().to_string(),
             raw_path_status,
             workspace_path: workspace_path.transpose()?,
+            parent,
+            children,
         })
     })
 }
