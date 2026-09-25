@@ -23,7 +23,7 @@ pub mod session_paths;
 pub mod workspace;
 pub mod workstream_paths;
 
-pub use schema::DATABASE_FORMAT_VERSION;
+pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 pub use session_jobs::PermanentDeletionCounts;
 
 /// Two connections to one SQLite file, so the UI's reads never queue behind a
@@ -140,12 +140,14 @@ impl Db {
         Ok(out)
     }
 
-    /// Open (or create) the database in the ONE format this build understands
-    /// — see [`schema`] for the rule and the refusal cases. There is no
-    /// in-place repair of an existing database.
+    /// Open (or create) the database in the ONE format this build understands,
+    /// then reconcile the defaults that depend on the current environment —
+    /// see [`schema`] for the recognition rule, the refusal cases and why
+    /// reconciliation is not a migration. Neither step ever repairs structure.
     fn initialize_schema(&self) -> Result<()> {
         let conn = self.write();
-        schema::open_or_create(&conn)
+        schema::open_or_create(&conn)?;
+        schema::reconcile_runtime_defaults(&conn)
     }
 
     // ---------------- Projects ----------------

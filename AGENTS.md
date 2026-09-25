@@ -46,6 +46,33 @@ Key areas:
 
 For domain-specific behavior, inspect the current code, tests, and relevant documentation before making changes.
 
+## Database
+
+NoEnding supports exactly one SQLite format at a time and has **no migrations**.
+`src-tauri/src/storage/schema.rs` is the only schema source: it holds the current
+DDL, `DATABASE_APPLICATION_ID`, `DATABASE_FORMAT_VERSION` and the recognition
+rule.
+
+* An empty file is created in the current format.
+* A database carrying the current `(application_id, user_version)` pair is used
+  as it is: startup never repairs schema. It must still have every object the DDL
+  declares, or it is refused — no repair never means no validation.
+* Anything else (a foreign SQLite file, another generation, an incomplete
+  database) is refused, never upgraded.
+
+A breaking schema change is:
+
+1. edit the current DDL in `src-tauri/src/storage/schema.rs`;
+2. increment `DATABASE_FORMAT_VERSION`;
+3. update the contract tests in `src-tauri/tests/schema_test.rs`;
+4. rebuild the local database (Agent Sessions are re-ingested, but Workstream
+   and Context state NoEnding owns is lost).
+
+Never add an `ALTER TABLE` step, an old-row mapping, or a fallback that exists
+only to read an older NoEnding database. Reconciling environment-dependent
+defaults on startup (`reconcile_runtime_defaults`) is not a migration: it inserts
+missing default rows only and creates no schema.
+
 Documents under `docs/` may include current design, implementation plans, or historical records. Do not assume every document is an active specification.
 
 ## Verify

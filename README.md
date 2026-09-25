@@ -70,13 +70,20 @@ pnpm tauri build   # 打包
 
 ## 数据库兼容策略（无 Migration）
 
-NoEnding 只支持当前数据库格式，不提供任何数据库 migration：
+NoEnding 只支持当前数据库格式，不提供任何数据库 migration。数据库身份写在 SQLite
+头部（`application_id` + 格式版本号），两者缺一不可：
 
 ```text
-空数据库          → 按当前格式创建
-当前格式数据库     → 直接使用；启动时不执行任何 schema 修补
-其他格式数据库     → 拒绝打开，提示删除数据库后重启
+空文件                            → 按当前格式创建，并写入身份
+当前格式 + 结构完整                → 直接使用；不执行任何 schema 修补，但会校验结构
+当前格式 + 缺少表/索引             → 拒绝打开（不自动补建）
+其他格式 / 其他 SQLite 文件        → 拒绝打开，提示删除数据库后重启
 ```
+
+「不修补」不等于「不校验」：带着当前身份但结构残缺的数据库会被拒绝，而不是被悄悄补全。
+
+启动时的 `reconcile_runtime_defaults` 只做环境相关的默认值补齐（新增 Agent 的默认
+source root、缺失的默认设置），属于当前环境的幂等 reconciliation，不是 migration。
 
 SQLite 数据库是可重建的本地投影：Session 来自 Agent 源数据，删除数据库后重启会重新摄入。
 但 **Workstream / Context 等 NoEnding 自有状态无法从 Agent 源恢复**，重建会丢失这部分数据。

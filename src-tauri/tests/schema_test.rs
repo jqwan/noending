@@ -1,11 +1,13 @@
 //! Database format contract (方案 §1–§4).
 //!
-//! NoEnding supports exactly one SQLite format generation at a time: an empty
-//! file is created in the current format, a current-format database is used
-//! untouched (startup never repairs schema), and anything else is refused
-//! rather than upgraded.
+//! NoEnding supports exactly one SQLite format generation at a time, identified
+//! by the header pair (`application_id`, `user_version`) that creation stamps.
+//! An empty file is created in that format; a database carrying the pair must
+//! also still have the full structure; anything else — a foreign SQLite file, an
+//! older generation, or an incomplete current-format database — is refused
+//! instead of migrated or repaired.
 
-use noending::storage::{Db, DATABASE_FORMAT_VERSION};
+use noending::storage::{Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
@@ -55,12 +57,36 @@ fn user_version(conn: &Connection) -> i64 {
         .unwrap()
 }
 
-/// A brand-new database carries the current format generation and the current
-/// structure — not an older shape that startup then has to reconcile.
+fn application_id(conn: &Connection) -> i32 {
+    conn.query_row("PRAGMA application_id", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn object_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// `Db` has no `Debug`, and a failure should print the message the user sees.
+fn open_error(path: &Path) -> String {
+    match Db::open(path) {
+        Ok(_) => panic!("{} must be refused", path.display()),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// A brand-new database carries the current format identity, the current
+/// generation and the current structure — not an older shape that startup then
+/// has to reconcile.
 #[test]
 fn fresh_database_uses_current_format_generation() {
     let path = db_path("current");
     let db = Db::open(path.path()).unwrap();
+    assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
     assert_eq!(user_version(&db.read()), DATABASE_FORMAT_VERSION);
 
     // 方案 §6.1 — the Session↔Workstream binding tables are gone, not carried
@@ -72,15 +98,10 @@ fn fresh_database_uses_current_format_generation() {
         "session_workstream_bindings",
         "session_binding_removals",
     ] {
-        let exists: i64 = db
-            .read()
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                [table],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(exists, 0, "retired table remains: {table}");
+        assert!(
+            !object_exists(&db.read(), table),
+            "retired table remains: {table}"
+        );
     }
     for (table, column) in [
         ("projects", "archived"),
@@ -120,15 +141,10 @@ fn fresh_database_uses_current_format_generation() {
             on_delete.contains("workstreams") && on_delete.ends_with("SET NULL"),
             "owner FK must be workstreams(id) ON DELETE SET NULL, got {on_delete}"
         );
-        let indexed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                  WHERE type = 'index' AND name = 'idx_sessions_owner_workstream'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(indexed, 1, "idx_sessions_owner_workstream is missing");
+        assert!(
+            object_exists(&conn, "idx_sessions_owner_workstream"),
+            "idx_sessions_owner_workstream is missing"
+        );
     }
 
     // 方案 §15.1 — a pending LaunchIntent's chosen Owner follows the same rule
@@ -152,9 +168,8 @@ fn fresh_database_uses_current_format_generation() {
     }
 }
 
-/// Reopening a current-format database is a pure read of the format marker:
-/// the data survives and startup runs no DDL at all, so nothing that is
-/// missing can be silently "repaired" back into existence.
+/// Reopening a current-format database reads the format marker and checks the
+/// structure: the data survives and startup runs no DDL at all.
 #[test]
 fn current_format_database_reopens_without_reinitialization() {
     let path = db_path("reopen");
@@ -165,15 +180,15 @@ fn current_format_database_reopens_without_reinitialization() {
             [],
         )
         .unwrap();
-    // A table startup must NOT recreate: if `initialize_schema` re-ran its DDL
-    // batches on an existing database, `CREATE TABLE IF NOT EXISTS` would bring
-    // it back and this assertion would catch it.
-    db.write()
-        .execute("DROP TABLE context_deliveries", [])
-        .unwrap();
+    // The FTS table is the ONE optional object of the format: a database without
+    // it is still valid, so startup must accept it (search falls back to LIKE)
+    // and — crucially — must NOT recreate it, because recreating it would mean
+    // startup had run CREATE statements against an existing database.
+    db.write().execute("DROP TABLE search_index", []).unwrap();
     drop(db);
 
     let reopened = Db::open(path.path()).unwrap();
+    assert_eq!(application_id(&reopened.read()), DATABASE_APPLICATION_ID);
     assert_eq!(user_version(&reopened.read()), DATABASE_FORMAT_VERSION);
     assert_eq!(
         reopened
@@ -181,43 +196,111 @@ fn current_format_database_reopens_without_reinitialization() {
             .query_row(
                 "SELECT value FROM settings WHERE key = 'schema-test'",
                 [],
-                |row| { row.get::<_, String>(0) }
+                |row| row.get::<_, String>(0)
             )
             .unwrap(),
         "persists"
     );
-    let recreated: i64 = reopened
-        .read()
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-              WHERE type = 'table' AND name = 'context_deliveries'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        recreated, 0,
+    assert!(
+        !object_exists(&reopened.read(), "search_index"),
         "startup re-ran schema creation on an existing database"
     );
 }
 
-/// A database built by another NoEnding generation is refused, never upgraded.
-/// The error names both sides so the log says exactly which format was found.
+/// "No repair" must never mean "no validation": a database carrying this
+/// build's identity but missing part of its structure is refused rather than
+/// quietly completed, and the missing object is not recreated.
 #[test]
-fn non_current_database_format_is_rejected() {
-    let unsupported = DATABASE_FORMAT_VERSION + 1;
-    let path = db_path("unsupported");
+fn incomplete_current_format_database_is_refused_without_repair() {
+    for (tag, drop_sql, missing) in [
+        (
+            "missing-table",
+            "DROP TABLE context_deliveries",
+            "context_deliveries",
+        ),
+        (
+            "missing-index",
+            "DROP INDEX idx_sessions_owner_workstream",
+            "idx_sessions_owner_workstream",
+        ),
+    ] {
+        let path = db_path(tag);
+        let db = Db::open(path.path()).unwrap();
+        db.write().execute(drop_sql, []).unwrap();
+        drop(db);
+
+        let err = open_error(path.path());
+        assert!(
+            err.contains(missing),
+            "refusal must name the missing object, got: {err}"
+        );
+
+        let conn = Connection::open(path.path()).unwrap();
+        assert!(
+            !object_exists(&conn, missing),
+            "startup repaired {missing} instead of refusing the database"
+        );
+    }
+}
+
+/// A foreign SQLite file is not an empty database: it has objects of its own, so
+/// it is refused and left exactly as it was found.
+#[test]
+fn foreign_sqlite_file_is_refused_and_left_untouched() {
+    let path = db_path("foreign");
+    let conn = Connection::open(path.path()).unwrap();
+    conn.execute("CREATE TABLE foo (a TEXT)", []).unwrap();
+    drop(conn);
+
+    let err = open_error(path.path());
+    assert!(
+        err.contains("application_id=0"),
+        "refusal must report the identity found, got: {err}"
+    );
+
+    let conn = Connection::open(path.path()).unwrap();
+    assert!(object_exists(&conn, "foo"), "the foreign file was modified");
+    assert!(
+        !object_exists(&conn, "projects"),
+        "NoEnding schema was created inside a foreign file"
+    );
+    assert_eq!(application_id(&conn), 0);
+    assert_eq!(user_version(&conn), 0);
+}
+
+/// A generation marker without the identity that belongs with it is not a
+/// NoEnding database either: the version number alone never proves the format.
+#[test]
+fn version_marker_without_the_database_identity_is_refused() {
+    let path = db_path("no-identity");
     let conn = Connection::open(path.path()).unwrap();
     conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)", [])
         .unwrap();
-    conn.pragma_update(None, "user_version", unsupported)
+    conn.pragma_update(None, "user_version", DATABASE_FORMAT_VERSION)
         .unwrap();
     drop(conn);
 
-    let err = match Db::open(path.path()) {
-        Ok(_) => panic!("a database in the format {unsupported} must be refused"),
-        Err(e) => e.to_string(),
-    };
+    let err = open_error(path.path());
+    assert!(
+        err.contains(&format!("required_format={DATABASE_FORMAT_VERSION}")),
+        "refusal must name the required format, got: {err}"
+    );
+}
+
+/// Another NoEnding generation is refused, never upgraded. The error names both
+/// sides so the log says exactly what was found.
+#[test]
+fn other_generation_of_this_database_is_refused() {
+    let unsupported = DATABASE_FORMAT_VERSION + 1;
+    let path = db_path("unsupported");
+    let db = Db::open(path.path()).unwrap();
+    assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
+    db.write()
+        .pragma_update(None, "user_version", unsupported)
+        .unwrap();
+    drop(db);
+
+    let err = open_error(path.path());
     assert!(
         err.contains(&format!("database_format={unsupported}"))
             && err.contains(&format!("required_format={DATABASE_FORMAT_VERSION}")),
@@ -225,45 +308,74 @@ fn non_current_database_format_is_rejected() {
     );
 }
 
-/// A non-empty SQLite file with no format marker is not an empty database: it
-/// belongs to something else and is refused instead of overwritten.
+/// The environment-dependent defaults are reconciled on EVERY start, not only
+/// when the database is created: a relocated `CODEX_HOME` or a newly supported
+/// Agent must not need a format change. Reconciliation only inserts what is
+/// missing.
 #[test]
-fn unversioned_nonempty_database_is_rejected() {
-    let path = db_path("unversioned");
-    let conn = Connection::open(path.path()).unwrap();
-    conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)", [])
+fn runtime_defaults_are_reconciled_on_every_start() {
+    let path = db_path("defaults");
+    let db = Db::open(path.path()).unwrap();
+    let seeded_sources: i64 = db
+        .read()
+        .query_row("SELECT COUNT(*) FROM ingest_sources", [], |row| row.get(0))
         .unwrap();
-    drop(conn);
-
-    assert!(Db::open(path.path()).is_err());
-}
-
-/// Creation is all-or-nothing. A file where one of the creation statements
-/// cannot run (here: `settings` is already taken by a view) must be left with
-/// no version marker and no half-created schema, so the next start refuses the
-/// file instead of trusting a partial database.
-#[test]
-fn failed_database_creation_rolls_back_completely() {
-    let path = db_path("rollback");
-    let conn = Connection::open(path.path()).unwrap();
-    conn.execute("CREATE VIEW settings AS SELECT 1 AS value", [])
-        .unwrap();
-    drop(conn);
-
-    assert!(Db::open(path.path()).is_err());
-
-    let conn = Connection::open(path.path()).unwrap();
-    let projects: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
+    // A source the user added: reconciliation must never touch it.
+    db.write()
+        .execute(
+            "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
+             VALUES ('user-src', 'codex', '/mine', 1, 'user', '2026-01-01T00:00:00Z')",
             [],
-            |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(projects, 0, "failed creation left partial schema");
+    db.write()
+        .execute("DELETE FROM ingest_sources WHERE origin = 'default'", [])
+        .unwrap();
+    db.delete_setting(noending::settings::CONTEXT_DELIVERY_LEVEL_KEY)
+        .unwrap();
+    drop(db);
+
+    let reopened = Db::open(path.path()).unwrap();
     assert_eq!(
-        user_version(&conn),
-        0,
-        "failed creation left a version marker"
+        reopened
+            .read()
+            .query_row(
+                "SELECT COUNT(*) FROM ingest_sources WHERE origin = 'default' AND enabled = 0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        seeded_sources,
+        "default ingest sources must be reconciled on every start, still disabled"
     );
+    let (enabled, origin): (i64, String) = reopened
+        .read()
+        .query_row(
+            "SELECT enabled, origin FROM ingest_sources WHERE id = 'user-src'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((enabled, origin.as_str()), (1, "user"));
+    assert_eq!(
+        reopened
+            .get_setting(noending::settings::CONTEXT_DELIVERY_LEVEL_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("off")
+    );
+}
+
+/// Identity and structure are written by ONE transaction, so a database that
+/// carries NoEnding's identity always has the schema that identity promises.
+#[test]
+fn creation_stamps_identity_with_the_schema() {
+    let path = db_path("stamp");
+    let db = Db::open(path.path()).unwrap();
+    assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
+    drop(db);
+
+    let conn = Connection::open(path.path()).unwrap();
+    assert!(object_exists(&conn, "sessions"));
+    assert_eq!(user_version(&conn), DATABASE_FORMAT_VERSION);
 }
