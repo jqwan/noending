@@ -60,3 +60,35 @@ fn a_query_inside_a_token_still_finds_the_document() {
         "no match anywhere is an empty result, not an error"
     );
 }
+
+/// The LIKE pass treats the query as text, not as a pattern: `_` and `%` are
+/// ordinary characters in a file name or a percentage, and a query that is
+/// nothing but one of them must not turn into "match everything".
+#[test]
+fn like_wildcards_are_matched_literally() {
+    let db = open_db("wildcards");
+    for (id, name) in [
+        ("a", "hello_world"),
+        ("b", "helloworld"),
+        ("c", "progress 100%"),
+        ("d", "progress complete"),
+    ] {
+        let p = support::project(id.into(), name);
+        db.upsert_project(&p).unwrap();
+        db.index_project(&p).unwrap();
+    }
+
+    let underscore = search(&db, "_", 10).unwrap();
+    assert_eq!(
+        underscore.iter().map(|h| &h.ref_id).collect::<Vec<_>>(),
+        vec!["a"],
+        "`_` is a literal underscore, not a single-character wildcard"
+    );
+
+    let percent = search(&db, "%", 10).unwrap();
+    assert_eq!(
+        percent.iter().map(|h| &h.ref_id).collect::<Vec<_>>(),
+        vec!["c"],
+        "`%` is a literal percent sign, not a wildcard"
+    );
+}

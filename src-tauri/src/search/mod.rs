@@ -41,14 +41,15 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     if hits.is_empty() {
         // FTS5 MATCH compares whole tokens, so a query that sits *inside* a
         // token — a substring of an identifier, or CJK without spaces — is only
-        // answerable by LIKE.
+        // answerable by LIKE. A query with no token at all (`%`, `_`) lands here
+        // too, which is why the LIKE pass matches literally.
         return like_search(db, q, limit);
     }
     Ok(hits)
 }
 
-/// The FTS5 pass. A failing statement is a real error now that the index is a
-/// required part of the format, and must not be hidden behind the LIKE pass.
+/// The FTS5 pass. A failing statement is a real error and must not be hidden
+/// behind the LIKE pass.
 fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let sql = format!(
         "SELECT kind, ref_id, parent_id, title,
@@ -80,10 +81,14 @@ fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
 }
 
 fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
-    let pattern = format!("%{}%", q.replace('%', ""));
+    // A literal, not a pattern: `_` and `%` are ordinary characters in a file
+    // name or a percentage, and only `!` has to be escaped for itself.
+    let escaped = q.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+    let pattern = format!("%{escaped}%");
     let sql = format!(
         "SELECT kind, ref_id, parent_id, title, body FROM search_index
-               WHERE (title LIKE ?1 OR body LIKE ?1) AND {ACTIVE_EVENT_GUARD}
+               WHERE (title LIKE ?1 ESCAPE '!' OR body LIKE ?1 ESCAPE '!')
+               AND {ACTIVE_EVENT_GUARD}
                LIMIT ?2"
     );
     let conn = db.read();
