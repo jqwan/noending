@@ -275,16 +275,22 @@ fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> 
 /// `workspace` is §13's tier-3 fact, needed because a freshly discovered
 /// Session may claim a pending LaunchIntent: matching it asks whether that
 /// Session's cwd is just the shared default workspace, which is not in the DB.
-/// What a freshly discovered Session owes the workspace, wherever it was
-/// discovered from.
+/// What a Session owes the workspace the first time it is discovered, and the
+/// retry window after that.
 ///
 /// A Session acquires its Owner in exactly two ways: a user action, or the
 /// LaunchIntent that started it (方案 §15.1/§21). Matching is the only one
-/// ingestion can do, and it is available exactly ONCE — while the Session is
-/// new. So every discovery door (full reconcile, single source, re-ingest)
-/// has to run it: if a source-scoped sync discovers the Session first and does
-/// not match, the later full reconcile sees `is_new == false` and the intent
-/// stays pending forever, leaving the Session permanently ownerless.
+/// ingestion can do, and every discovery door (full reconcile, single source,
+/// re-ingest) has to run it — a source-scoped sync that discovers the Session
+/// first must offer the same chance, or the later full reconcile sees a known
+/// Session and the intent stays pending forever.
+///
+/// The gate is therefore "new OR still ownerless", not `is_new` alone: the
+/// Session ROW is already persisted by the time this runs, so `is_new` is true
+/// exactly once, and a single transient failure would burn that one chance for
+/// good. Re-attempting while the Session has no Owner keeps the recovery
+/// available; the matcher's own agent and time-window rules are what keep it
+/// from matching a Session that never had an intent.
 ///
 /// A match failure is logged, never fatal: one bad intent must not abort the
 /// discovery pass that is ingesting everything else.
@@ -294,13 +300,26 @@ pub fn finalize_newly_discovered_session(
     is_new: bool,
     workspace: &crate::launcher::LaunchWorkspace,
 ) -> Result<()> {
-    if !is_new {
+    // The ROW decides, not the caller's copy: discovery hands over a struct
+    // that may already be behind a concurrent ownership change or trash.
+    let Some(current) = db.get_session(&session.id)? else {
+        return Ok(());
+    };
+    if current.is_trashed() {
         return Ok(());
     }
-    match crate::launcher::try_match_launch_intents_in(db, session, workspace) {
-        Ok(true) => eprintln!("[ingest] launch intent matched to session {}", session.id),
+    if !is_new && current.owner_workstream_id.is_some() {
+        return Ok(());
+    }
+    // Nothing waiting for a Session: skip the per-Session matcher entirely.
+    // On a first pass over a large history this is the common answer.
+    if !db.has_pending_launch_intents()? {
+        return Ok(());
+    }
+    match crate::launcher::try_match_launch_intents_in(db, &current, workspace) {
+        Ok(true) => eprintln!("[ingest] launch intent matched to session {}", current.id),
         Ok(false) => {}
-        Err(e) => eprintln!("[ingest] intent match failed for {}: {}", session.id, e),
+        Err(e) => eprintln!("[ingest] intent match failed for {}: {}", current.id, e),
     }
     Ok(())
 }
@@ -348,15 +367,14 @@ where
                     continue;
                 }
             };
-            if is_new {
-                // A brand-new external session may claim a pending
-                // LaunchIntent (crash recovery included).
-                finalize_newly_discovered_session(db, &s, is_new, workspace)?;
-                // §42.2-E11 — no name-substring Project evidence is recorded
-                // any more. A Project is derived from the Session's
-                // WorkspacePath (§1.10), which `ensure_session_row` has just
-                // resolved, so this hot path does no Project work.
-            }
+            // A brand-new external session may claim a pending LaunchIntent
+            // (crash recovery included); a still-ownerless one gets the retry.
+            //
+            // §42.2-E11 — no name-substring Project evidence is recorded any
+            // more. A Project is derived from the Session's WorkspacePath
+            // (§1.10), which `ensure_session_row` has just resolved, so this
+            // hot path does no Project work.
+            finalize_newly_discovered_session(db, &s, is_new, workspace)?;
             // §8 — trashed sessions are skipped entirely: no ingest, no sync.
             if s.is_trashed() {
                 continue;

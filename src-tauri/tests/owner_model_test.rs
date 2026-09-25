@@ -111,11 +111,15 @@ fn workstream(db: &Db, title: &str) -> Workstream {
 }
 
 fn session(db: &TestDb, cwd: Option<&str>) -> Session {
+    session_of_agent(db, Agent::Codex, cwd)
+}
+
+fn session_of_agent(db: &TestDb, agent: Agent, cwd: Option<&str>) -> Session {
     let raw = db.dir.join(format!("raw-{}.jsonl", new_id()));
     let _ = std::fs::write(&raw, "");
     let s = Session {
         id: new_id(),
-        agent: Agent::Codex,
+        agent,
         agent_session_id: format!("as-{}", new_id()),
         title: Some("Owner Model".into()),
         cwd: cwd.map(str::to_string),
@@ -1135,7 +1139,7 @@ fn a_failed_match_leaves_the_intent_pending() {
         last_activity_at: None,
         trashed_at: None,
     };
-    assert!(apply_match(&db, &intent, &ghost, &LaunchWorkspace::default()).is_err());
+    assert!(apply_match(&db, &intent.id, &ghost, &LaunchWorkspace::default()).is_err());
 
     let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
     assert_eq!(
@@ -1193,7 +1197,7 @@ fn a_deleted_workstream_cannot_leave_a_dangling_intent_owner() {
     );
 
     let s = session(&db, None);
-    apply_match(&db, &stored, &s, &LaunchWorkspace::default()).unwrap();
+    apply_match(&db, &stored.id, &s, &LaunchWorkspace::default()).unwrap();
     assert!(
         owner_of(&db, &s.id).is_none(),
         "there is nothing to inherit"
@@ -1206,4 +1210,380 @@ fn a_deleted_workstream_cannot_leave_a_dangling_intent_owner() {
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
         launch_status::MATCHED
     );
+}
+
+// -------------------- §20/§21 prepare-time consistency (Preview = Launch)
+
+/// The consistency predicate a Resume preparation ends with: it may only hand
+/// back a plan while the Session still names the Owner it was built for.
+///
+/// Read against the live row, because that is what the predicate does: the
+/// fingerprint cannot stand in for it — it hashes the Owner the bundle was
+/// built for AND the Owner currently on the row, so an ownership move while the
+/// bundle renders produces the very same hash on both sides.
+#[test]
+fn preparation_matches_current_owner_tracks_the_row() {
+    use noending::launcher::preparation_matches_current_owner;
+
+    let db = open_db("prepare-owner-cas");
+    let a = workstream(&db, "A");
+    let b = workstream(&db, "B");
+    let s = session(&db, None);
+
+    // Unowned: only "no Owner" matches.
+    assert!(preparation_matches_current_owner(&db, &s.id, None).unwrap());
+    assert!(!preparation_matches_current_owner(&db, &s.id, Some(&a.id)).unwrap());
+
+    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
+    assert!(preparation_matches_current_owner(&db, &s.id, Some(&a.id)).unwrap());
+    assert!(
+        !preparation_matches_current_owner(&db, &s.id, Some(&b.id)).unwrap(),
+        "a plan built for A must not be certified against B"
+    );
+
+    // Ownership moves mid-flight (what a concurrent edit does).
+    db.set_session_owner(&s.id, Some(&b.id)).unwrap();
+    assert!(!preparation_matches_current_owner(&db, &s.id, Some(&a.id)).unwrap());
+    assert!(preparation_matches_current_owner(&db, &s.id, Some(&b.id)).unwrap());
+
+    // A trashed Session matches nothing, and neither does a missing one.
+    noending::lifecycle::trash_session(&db, &s.id).unwrap();
+    assert!(!preparation_matches_current_owner(&db, &s.id, Some(&b.id)).unwrap());
+    assert!(!preparation_matches_current_owner(&db, "no-such-session", None).unwrap());
+}
+
+/// A New Session prepared against a Workstream that is deleted before the
+/// preview is built must fail loudly instead of launching against nothing.
+#[test]
+fn new_preparation_refuses_a_workstream_that_no_longer_exists() {
+    let db = open_db("prepare-new-gone-ws");
+    let a = workstream(&db, "A");
+    archive_workstream(&db, &a.id).unwrap();
+    delete_workstream_permanently(&db, &a.id).unwrap();
+
+    let workspace = LaunchWorkspace {
+        default_workspace: None,
+    };
+    let err = SessionLauncher {
+        runtime_dir: db.dir.join("runtime"),
+    }
+    .prepare_new_in(&db, Agent::Codex, Some(&a.id), None, &workspace)
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("Workstream"),
+        "the error must name the missing Workstream, got {err}"
+    );
+}
+
+// --------------------- §15.1 a LaunchIntent is spent exactly once
+
+/// An intent is a one-shot capability: the second consumer must not be able to
+/// re-point it at its own Session, and the first Session keeps what it got.
+#[test]
+fn a_launch_intent_is_consumed_exactly_once() {
+    use noending::domain::{launch_status, LaunchIntent};
+    use noending::launcher::{apply_match, LaunchWorkspace};
+
+    let db = open_db("intent-one-shot");
+    let a = workstream(&db, "A");
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    let first = session(&db, None);
+    let second = session(&db, None);
+    apply_match(&db, &intent.id, &first, &LaunchWorkspace::default()).unwrap();
+
+    let err = apply_match(&db, &intent.id, &second, &LaunchWorkspace::default())
+        .expect_err("a consumed intent must not be handed out again");
+    assert!(err.to_string().contains("LaunchIntent"), "got {err}");
+
+    // The first match stands, and the loser has nothing.
+    assert_eq!(owner_of(&db, &first.id).as_deref(), Some(a.id.as_str()));
+    assert!(owner_of(&db, &second.id).is_none());
+    let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
+    assert_eq!(stored.status, launch_status::MATCHED);
+    assert_eq!(
+        stored.matched_session_id.as_deref(),
+        Some(first.id.as_str())
+    );
+}
+
+/// The storage CAS behind the match: a second claim affected zero rows, which
+/// is what makes the losing transaction roll back instead of overwriting the
+/// winner's `matched_session_id`.
+#[test]
+fn the_match_claim_is_a_cas_that_only_fires_once() {
+    use noending::domain::{launch_status, LaunchIntent};
+    use noending::storage::mark_launch_intent_matched_conn;
+
+    let db = open_db("intent-cas");
+    let a = workstream(&db, "A");
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    let first = db
+        .tx(|tx| mark_launch_intent_matched_conn(tx, &intent.id, "session-a", "first"))
+        .unwrap();
+    assert!(first, "the waiting intent is claimable");
+    let second = db
+        .tx(|tx| mark_launch_intent_matched_conn(tx, &intent.id, "session-b", "second"))
+        .unwrap();
+    assert!(!second, "a claimed intent is no longer claimable");
+
+    let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
+    assert_eq!(
+        stored.matched_session_id.as_deref(),
+        Some("session-a"),
+        "the winner's match is never overwritten"
+    );
+}
+
+/// Matching refuses a Session that is not the intent's to give an Owner to:
+/// another Agent's Session, or one that has been trashed.
+#[test]
+fn matching_refuses_a_foreign_agent_or_a_trashed_session() {
+    use noending::domain::{launch_status, LaunchIntent};
+    use noending::launcher::{apply_match, LaunchWorkspace};
+
+    let db = open_db("intent-preconditions");
+    let a = workstream(&db, "A");
+    let mk_intent = || {
+        let intent = LaunchIntent {
+            id: new_id(),
+            launch_type: "new".into(),
+            agent: Agent::Codex,
+            owner_workstream_id: Some(a.id.clone()),
+            cwd: None,
+            context_bundle_markdown: None,
+            context_bundle_revisions: None,
+            process_id: None,
+            launched_at: now(),
+            matched_session_id: None,
+            status: launch_status::PENDING.into(),
+            note: String::new(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_launch_intent(&intent).unwrap();
+        intent
+    };
+
+    // A different Agent's Session.
+    let foreign = mk_intent();
+    let claude = session_of_agent(&db, Agent::ClaudeCode, None);
+    assert!(apply_match(&db, &foreign.id, &claude, &LaunchWorkspace::default()).is_err());
+    assert_eq!(
+        db.get_launch_intent(&foreign.id).unwrap().unwrap().status,
+        launch_status::PENDING,
+        "a refused match leaves the intent waiting"
+    );
+    assert!(owner_of(&db, &claude.id).is_none());
+
+    // A trashed Session.
+    let trashed = mk_intent();
+    let s = session(&db, None);
+    noending::lifecycle::trash_session(&db, &s.id).unwrap();
+    assert!(apply_match(&db, &trashed.id, &s, &LaunchWorkspace::default()).is_err());
+    assert_eq!(
+        db.get_launch_intent(&trashed.id).unwrap().unwrap().status,
+        launch_status::PENDING
+    );
+    assert!(owner_of(&db, &s.id).is_none());
+}
+
+// ---------------- §15.1 the discovery retry window for an unclaimed intent
+
+/// An ownerless Session gets more than one chance to claim a pending intent.
+///
+/// The Session row is persisted before matching runs, so `is_new` is true
+/// exactly once: if the only attempt were the first one, a transient failure
+/// (or a Workstream deleted between the read and the write) would leave the
+/// intent pending and the Session ownerless forever — `is_new` never comes back.
+#[test]
+fn an_ownerless_session_can_still_claim_its_intent_later() {
+    use noending::domain::{launch_status, LaunchIntent};
+    use noending::ingestion::finalize_newly_discovered_session;
+
+    let db = open_db("intent-retry");
+    let a = workstream(&db, "A");
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    let s = session(&db, None);
+    // NOT a first discovery (`is_new = false`): this is the retry the seam has
+    // to allow, because the row already exists and the Owner is still unset.
+    finalize_newly_discovered_session(&db, &s, false, &LaunchWorkspace::default()).unwrap();
+    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
+    assert_eq!(
+        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
+        launch_status::MATCHED
+    );
+}
+
+/// The retry is bounded by ownership and by waiting intents: a Session that
+/// already has an Owner is left alone, and so is everyone while no intent is
+/// pending.
+#[test]
+fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
+    use noending::domain::{launch_status, LaunchIntent};
+    use noending::ingestion::finalize_newly_discovered_session;
+
+    let db = open_db("intent-retry-scope");
+    let a = workstream(&db, "A");
+    let b = workstream(&db, "B");
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    // Already owned: the retry must not re-route a decided Session.
+    let owned = session(&db, None);
+    db.set_session_owner(&owned.id, Some(&b.id)).unwrap();
+    finalize_newly_discovered_session(&db, &owned, false, &LaunchWorkspace::default()).unwrap();
+    assert_eq!(owner_of(&db, &owned.id).as_deref(), Some(b.id.as_str()));
+    assert_eq!(
+        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
+        launch_status::PENDING,
+        "the waiting intent is untouched while nothing is claimable"
+    );
+
+    // A trashed Session is never a candidate.
+    let trashed = session(&db, None);
+    noending::lifecycle::trash_session(&db, &trashed.id).unwrap();
+    finalize_newly_discovered_session(&db, &trashed, true, &LaunchWorkspace::default()).unwrap();
+    assert!(owner_of(&db, &trashed.id).is_none());
+    assert_eq!(
+        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
+        launch_status::PENDING
+    );
+
+    // With no waiting intent, an ownerless Session is left as it is.
+    let stray = session(&db, None);
+    db.tx(|tx| {
+        noending::storage::update_waiting_launch_intent_conn(
+            tx,
+            &intent.id,
+            "expired",
+            "test: no longer waiting",
+        )
+    })
+    .unwrap();
+    finalize_newly_discovered_session(&db, &stray, false, &LaunchWorkspace::default()).unwrap();
+    assert!(owner_of(&db, &stray.id).is_none());
+}
+
+// ------------------ §39 search projections follow the facts they copy
+
+/// A Session's search document embeds its Owner's title and its Project's name
+/// (§39). Every write that changes either fact must rebuild those documents —
+/// otherwise a rename leaves the old name searchable, and a deletion keeps a
+/// Workstream findable through the Sessions that used to own it.
+#[test]
+fn session_search_documents_follow_workstream_and_project_renames() {
+    use noending::search::search;
+
+    let db = open_db("search-projection");
+    db.upsert_project(&Project::new("p1".to_string(), "ProjX".to_string()))
+        .unwrap();
+    let a = workstream(&db, "Alpha");
+    let mut s = session(&db, None);
+    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
+    // The Project a Session projects onto, set through the production door: a
+    // Session with no WorkspacePath honors the caller's value.
+    s.project_id = Some("p1".into());
+    db.upsert_session(&s).unwrap();
+
+    let hits_session = |query: &str| {
+        search(&db, query, 40)
+            .unwrap()
+            .into_iter()
+            .any(|h| h.kind == "session" && h.ref_id == s.id)
+    };
+    assert!(
+        hits_session("Alpha"),
+        "the session carries its Owner's title"
+    );
+    assert!(hits_session("ProjX"), "and its Project's name");
+
+    // Rename the Workstream: the Session's document must follow.
+    let mut renamed = db.get_workstream(&a.id).unwrap().unwrap();
+    renamed.title = "Beta".into();
+    renamed.updated_at = now();
+    db.upsert_workstream(&renamed).unwrap();
+    assert!(!hits_session("Alpha"), "the old title is gone");
+    assert!(hits_session("Beta"), "the new title is there");
+
+    // Rename the Project: same rule, the other input of the body.
+    db.tx(|tx| noending::storage::workspace::rename_project_conn(tx, "p1", "ProjY"))
+        .unwrap();
+    assert!(!hits_session("ProjX"), "the old Project name is gone");
+    assert!(hits_session("ProjY"));
+
+    // Deleting the Workstream clears the Owner (FK) and must clear its title
+    // from the Session's document with it.
+    archive_workstream(&db, &a.id).unwrap();
+    delete_workstream_permanently(&db, &a.id).unwrap();
+    assert!(
+        !hits_session("Beta"),
+        "a deleted Workstream's title must not stay findable through its Sessions"
+    );
+    assert!(hits_session("ProjY"), "the rest of the document survives");
 }

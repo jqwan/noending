@@ -623,7 +623,7 @@ fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
     assert!(s.owner_workstream_id.is_none());
     assert_eq!(count(&db, "SELECT COUNT(*) FROM workstream_paths"), 0);
 
-    apply_match(&db, &intent, &s, &LaunchWorkspace::default()).unwrap();
+    apply_match(&db, &intent.id, &s, &LaunchWorkspace::default()).unwrap();
 
     // The Owner is the intent's, verbatim.
     let matched = db.get_session(&s.id).unwrap().unwrap();
@@ -718,7 +718,7 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
 
     // The human decision is what assigns the Owner, and it cannot cross the two
     // intents.
-    apply_match(&db, &intent_a, &discovered, &LaunchWorkspace::default()).unwrap();
+    apply_match(&db, &intent_a.id, &discovered, &LaunchWorkspace::default()).unwrap();
     assert_eq!(
         db.get_session(&discovered.id)
             .unwrap()
@@ -776,7 +776,7 @@ fn a_match_never_teaches_the_workstream_a_foreign_path() {
         .unwrap();
     let s = session_row(&db, Some(&default_ws), Some(&shared_path));
 
-    apply_match(&db, &intent, &s, &workspace(Some(&default_ws))).unwrap();
+    apply_match(&db, &intent.id, &s, &workspace(Some(&default_ws))).unwrap();
 
     assert_eq!(
         db.get_session(&s.id)

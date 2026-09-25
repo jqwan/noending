@@ -19,6 +19,7 @@
 
 use std::path::PathBuf;
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::AgentCommand;
@@ -34,6 +35,13 @@ const MATCH_WINDOW_SECS: i64 = 6 * 3600;
 const MATCH_CLOCK_SKEW_SECS: i64 = 120;
 /// Pending intents older than this never match again.
 const INTENT_TTL_SECS: i64 = 24 * 3600;
+
+/// How many times a preparation may restart when the state it read moves under
+/// it (a Context edit, an ownership move, a path reorder landing between two of
+/// its reads). The competing writers are user actions, so a restart or two
+/// covers reality; the cap exists so a busy database cannot turn a preview into
+/// an unbounded loop.
+const PREPARE_ATTEMPTS: usize = 3;
 
 /// How a prepared launch decided the directory the Agent will start in
 /// (方案 §13). This is a *user-visible* fact, not an implementation detail:
@@ -269,38 +277,69 @@ impl SessionLauncher {
     ) -> Result<PreparedLaunch> {
         self.sync_stale_for_workstreams(db, owner_workstream_id)?;
 
-        let resolution = resolve_new_cwd(db, owner_workstream_id, cwd, workspace)?;
+        // §12 — the preview and the launch must describe the SAME state, so the
+        // state is hashed on both sides of building the bundle. A Context edit,
+        // a path reorder or a delivery-level change that lands while the bundle
+        // is being rendered would otherwise hand the user a plan that no longer
+        // describes what the Agent will receive (the launch-side check cannot
+        // see it: it recomputes the fingerprint from whatever is current).
+        for _ in 0..PREPARE_ATTEMPTS {
+            // A Workstream is the Owner (or there is none): an Owner that was
+            // deleted mid-flight leaves nothing to launch against.
+            if let Some(ws_id) = owner_workstream_id {
+                if db.get_workstream(ws_id)?.is_none() {
+                    return Err(other("所选 Workstream 已不存在，请重新选择所属任务"));
+                }
+            }
 
-        let delivery_level = crate::settings::context_delivery_level_of(db)?;
-        let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
-        let bundle =
-            crate::context::build_bundle(db, "new", None, owner_workstream_id, delivery_level)?;
+            let resolution = resolve_new_cwd(db, owner_workstream_id, cwd, workspace)?;
+            let delivery_level = crate::settings::context_delivery_level_of(db)?;
+            let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
 
-        let state_fingerprint = compute_state_fingerprint_in(
-            db,
-            "new",
-            None,
-            owner_workstream_id,
-            delivery_level,
-            agent,
-            workspace,
-            &resolution,
-        )?;
+            let before = compute_state_fingerprint_in(
+                db,
+                "new",
+                None,
+                owner_workstream_id,
+                delivery_level,
+                agent,
+                workspace,
+                &resolution,
+            )?;
+            let bundle =
+                crate::context::build_bundle(db, "new", None, owner_workstream_id, delivery_level)?;
+            let after = compute_state_fingerprint_in(
+                db,
+                "new",
+                None,
+                owner_workstream_id,
+                delivery_level,
+                agent,
+                workspace,
+                &resolution,
+            )?;
+            if before != after {
+                continue;
+            }
 
-        Ok(PreparedLaunch {
-            id: new_id(),
-            mode: "new".into(),
-            agent,
-            session_id: None,
-            owner_workstream_id: owner_workstream_id.map(str::to_string),
-            cwd: resolution.cwd.clone(),
-            cwd_resolution: resolution,
-            delivery_level,
-            bundle,
-            runtime,
-            state_fingerprint,
-            prepared_at: now(),
-        })
+            return Ok(PreparedLaunch {
+                id: new_id(),
+                mode: "new".into(),
+                agent,
+                session_id: None,
+                owner_workstream_id: owner_workstream_id.map(str::to_string),
+                cwd: resolution.cwd.clone(),
+                cwd_resolution: resolution,
+                delivery_level,
+                bundle,
+                runtime,
+                state_fingerprint: after,
+                prepared_at: now(),
+            });
+        }
+        Err(other(
+            "Workspace 状态在准备期间持续变化，请稍后重新预览 New Session。",
+        ))
     }
 
     /// Prepare Resume Session:
@@ -358,52 +397,81 @@ impl SessionLauncher {
         session_id: &str,
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
-        let session = db
-            .get_session(session_id)?
-            .ok_or_else(|| other("Session 不存在"))?;
-        if session.is_trashed() {
-            return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+        for _ in 0..PREPARE_ATTEMPTS {
+            let session = db
+                .get_session(session_id)?
+                .ok_or_else(|| other("Session 不存在"))?;
+            if session.is_trashed() {
+                return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+            }
+
+            let owner = session.owner_workstream_id.clone();
+            let resolution = resolve_resume_cwd(db, session_id, owner.as_deref(), workspace)?;
+            let delivery_level = crate::settings::context_delivery_level_of(db)?;
+            let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, session.agent)?;
+
+            // §12 — hash the launch state on BOTH sides of building the bundle:
+            // the fingerprint covers the Workstream's items, revisions,
+            // conflicts, path list, delivery level and runtime intent, so
+            // anything that moved while the bundle rendered is caught here.
+            let before = compute_state_fingerprint_in(
+                db,
+                "resume",
+                Some(session_id),
+                owner.as_deref(),
+                delivery_level,
+                session.agent,
+                workspace,
+                &resolution,
+            )?;
+            let bundle = crate::context::build_bundle(
+                db,
+                "resume",
+                Some(&session),
+                owner.as_deref(),
+                delivery_level,
+            )?;
+            let after = compute_state_fingerprint_in(
+                db,
+                "resume",
+                Some(session_id),
+                owner.as_deref(),
+                delivery_level,
+                session.agent,
+                workspace,
+                &resolution,
+            )?;
+            if before != after {
+                continue;
+            }
+
+            // The Owner check is NOT redundant with the fingerprints above: the
+            // fingerprint hashes both the Owner the bundle was built for AND the
+            // Owner the row currently names, so an ownership move during the
+            // build produces the SAME hash on both sides — it would happily
+            // certify A's bundle for a Session that now belongs to B.
+            if !preparation_matches_current_owner(db, session_id, owner.as_deref())? {
+                continue;
+            }
+
+            return Ok(PreparedLaunch {
+                id: new_id(),
+                mode: "resume".into(),
+                agent: session.agent,
+                session_id: Some(session_id.to_string()),
+                owner_workstream_id: owner,
+                cwd: resolution.cwd.clone(),
+                cwd_resolution: resolution,
+                delivery_level,
+                bundle,
+                runtime,
+                state_fingerprint: after,
+                prepared_at: now(),
+            });
         }
-
-        let owner = session.owner_workstream_id.clone();
-
-        let resolution = resolve_resume_cwd(db, session_id, owner.as_deref(), workspace)?;
-
-        let delivery_level = crate::settings::context_delivery_level_of(db)?;
-        let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, session.agent)?;
-        let bundle = crate::context::build_bundle(
-            db,
-            "resume",
-            Some(&session),
-            owner.as_deref(),
-            delivery_level,
-        )?;
-
-        let state_fingerprint = compute_state_fingerprint_in(
-            db,
-            "resume",
-            Some(session_id),
-            owner.as_deref(),
-            delivery_level,
-            session.agent,
-            workspace,
-            &resolution,
-        )?;
-
-        Ok(PreparedLaunch {
-            id: new_id(),
-            mode: "resume".into(),
-            agent: session.agent,
-            session_id: Some(session_id.to_string()),
-            owner_workstream_id: owner,
-            cwd: resolution.cwd.clone(),
-            cwd_resolution: resolution,
-            delivery_level,
-            bundle,
-            runtime,
-            state_fingerprint,
-            prepared_at: now(),
-        })
+        Err(other(
+            "会话状态在准备期间持续变化，请重新预览 Resume Session。",
+        ))
     }
 
     /// Launch a previously prepared launch.
@@ -551,18 +619,23 @@ impl SessionLauncher {
             )?;
             let outcome = spawn(&cmd)?;
 
-            db.update_launch_intent(
-                &intent.id,
-                launch_status::PENDING,
-                None,
-                &format!(
-                    "launched_via={};pid={:?};runtime={}",
-                    outcome.launched_via,
-                    outcome.pid,
-                    prepared.runtime.intent_summary()
-                ),
-            )?;
-
+            // Record how the Agent was started. Guarded like every other write
+            // to a waiting intent: this note describes an intent that is still
+            // PENDING, and a match that landed in between must not be reset to
+            // waiting by it.
+            db.tx(|tx| {
+                crate::storage::update_waiting_launch_intent_conn(
+                    tx,
+                    &intent.id,
+                    launch_status::PENDING,
+                    &format!(
+                        "launched_via={};pid={:?};runtime={}",
+                        outcome.launched_via,
+                        outcome.pid,
+                        prepared.runtime.intent_summary()
+                    ),
+                )
+            })?;
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
                 command_line: outcome.command_line,
@@ -1382,7 +1455,7 @@ pub fn try_match_launch_intents_in(
         0 => Ok(false),
         1 => {
             let (intent, _) = scored.remove(0);
-            apply_match(db, &intent, session, workspace)?;
+            apply_match(db, &intent.id, session, workspace)?;
             Ok(true)
         }
         _ => {
@@ -1400,10 +1473,10 @@ pub fn try_match_launch_intents_in(
                 .collect();
             if clear {
                 let (intent, _) = scored.remove(0);
-                apply_match(db, &intent, session, workspace)?;
+                apply_match(db, &intent.id, session, workspace)?;
                 Ok(true)
             } else if selected.len() == 1 {
-                apply_match(db, selected[0], session, workspace)?;
+                apply_match(db, &selected[0].id, session, workspace)?;
                 Ok(true)
             } else {
                 // §42.3-M15: every tied top candidate is awaiting the user, not
@@ -1413,48 +1486,93 @@ pub fn try_match_launch_intents_in(
                     "多个候选 Session（score {:.1} vs {:.1}），等待用户确认",
                     best_score, second
                 );
-                for (intent, _) in scored.iter().filter(|(_, s)| tied(*s)) {
-                    db.update_launch_intent(
-                        &intent.id,
-                        launch_status::AMBIGUOUS,
-                        None,
-                        &format!(
-                            "{}（{}）",
-                            note,
-                            if intent.owner_workstream_id.is_some() {
-                                "已选所属任务"
-                            } else {
-                                "未归属"
-                            }
-                        ),
-                    )?;
-                }
+                // One transaction, and every write is guarded: "still waiting"
+                // must never be written over an intent another match already
+                // consumed (§42.3-M15, one-shot capability).
+                db.tx(|tx| {
+                    for (intent, _) in scored.iter().filter(|(_, s)| tied(*s)) {
+                        crate::storage::update_waiting_launch_intent_conn(
+                            tx,
+                            &intent.id,
+                            launch_status::AMBIGUOUS,
+                            &format!(
+                                "{}（{}）",
+                                note,
+                                if intent.owner_workstream_id.is_some() {
+                                    "已选所属任务"
+                                } else {
+                                    "未归属"
+                                }
+                            ),
+                        )?;
+                    }
+                    Ok(())
+                })?;
                 Ok(false)
             }
         }
     }
 }
 
+/// Consume a LaunchIntent for `session`: the ONE Session that gets to inherit
+/// its Owner and its delivery snapshot.
+///
+/// `intent_id` is the whole input — the intent is re-read INSIDE the writer
+/// transaction, because the copy the caller matched on can be arbitrarily old
+/// by the time the lock is taken. Everything the match depends on is verified
+/// there:
+///
+/// * the intent still waits (PENDING/AMBIGUOUS) and no Session has claimed it;
+/// * its Agent is the Session's Agent;
+/// * the Session still exists and is not trashed;
+/// * the final status write is a CAS whose affected rows must be 1.
+///
+/// Together those make the intent a capability that can be spent once: two
+/// resolvers reading the same PENDING intent cannot both hand it out, and a
+/// failure anywhere leaves the intent exactly as waiting as it was.
+///
 /// `_workspace` stays in the signature because every caller and test drives
 /// this through the same launcher seam; matching itself no longer consults the
 /// default workspace, since a match writes ownership only.
 pub fn apply_match(
     db: &Db,
-    intent: &LaunchIntent,
+    intent_id: &str,
     session: &Session,
     _workspace: &LaunchWorkspace,
 ) -> Result<()> {
-    // Parsed before the transaction: a malformed snapshot is a data problem,
-    // not a reason to leave a half-applied match behind.
-    let snapshot = intent
-        .context_bundle_revisions
-        .as_deref()
-        .and_then(|snap| serde_json::from_str::<serde_json::Value>(snap).ok());
-
     db.tx(|tx| {
+        let intent = crate::storage::get_launch_intent_conn(tx, intent_id)?
+            .ok_or_else(|| other("LaunchIntent 不存在"))?;
+        let waiting = matches!(
+            intent.status.as_str(),
+            launch_status::PENDING | launch_status::AMBIGUOUS
+        );
+        if !waiting || intent.matched_session_id.is_some() {
+            return Err(other("该 LaunchIntent 已被其他匹配处理，本次匹配作废"));
+        }
+        if intent.agent != session.agent {
+            return Err(other("LaunchIntent 与 Session 的 Agent 不一致，拒绝匹配"));
+        }
+        // The Session row decides, not the caller's copy: it may have been
+        // trashed or removed since the match was computed.
+        let current: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT agent, trashed_at FROM sessions WHERE id = ?1",
+                rusqlite::params![session.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match current {
+            Some((agent, None)) if agent == intent.agent.as_str() => {}
+            _ => return Err(other("Session 不存在或已在回收站，无法匹配 LaunchIntent")),
+        }
+
         // The matched Session inherits the intent's Owner Workstream verbatim
         // (方案 §15.1). Nothing else is written: no WorkstreamPath is added, and
         // the Session's cwd / workspace_path_id / project_id stay untouched.
+        // Reading the intent here also means a Workstream deleted after the
+        // match was computed is seen as the NULL the FK already wrote, rather
+        // than as the stale id the caller read.
         if let Some(ws_id) = intent.owner_workstream_id.as_deref() {
             crate::storage::set_session_owner_conn(tx, &session.id, Some(ws_id))?;
         }
@@ -1462,6 +1580,10 @@ pub fn apply_match(
         // record the delivery snapshot now, so its first resume computes a true
         // delta instead of re-sending the full context. One bundle, one
         // Workstream — the intent's Owner is the delivery's Workstream.
+        let snapshot = intent
+            .context_bundle_revisions
+            .as_deref()
+            .and_then(|snap| serde_json::from_str::<serde_json::Value>(snap).ok());
         if let (Some(ws_id), Some(v)) = (intent.owner_workstream_id.as_deref(), &snapshot) {
             let ids = |key: &str| -> Vec<String> {
                 v.get(key)
@@ -1490,18 +1612,41 @@ pub fn apply_match(
                 },
             )?;
         }
-        // Status LAST and inside the same transaction: an intent that says
-        // MATCHED always has the Session, its Owner and its delivery to go
-        // with it, and none of the three can land without the others.
-        crate::storage::update_launch_intent_conn(
+        // Status LAST, and as a CAS: an intent that says MATCHED always has the
+        // Session, its Owner and its delivery to go with it, and none of the
+        // three can land without the others. Zero affected rows means another
+        // writer consumed the intent between our read and this statement — the
+        // transaction rolls back rather than overwrite their match.
+        let claimed = crate::storage::mark_launch_intent_matched_conn(
             tx,
             &intent.id,
-            launch_status::MATCHED,
-            Some(&session.id),
+            &session.id,
             &format!("自动匹配：session {}", session.id),
         )?;
+        if !claimed {
+            return Err(other("该 LaunchIntent 已被其他匹配消费，本次匹配作废"));
+        }
         Ok(())
     })
+}
+
+/// Is the Session still the one a preparation was built for? True only while it
+/// exists, is not trashed, and still names `owner` as its Owner Workstream.
+///
+/// The post-build half of the prepare-time CAS: sync and the user's edits run
+/// without the DB lock, so between the read that decided `owner` and the read
+/// that produced the bundle the row can move. Public because the rule is worth
+/// pinning directly — a Session missing this check resumes under an Owner it no
+/// longer has.
+pub fn preparation_matches_current_owner(
+    db: &Db,
+    session_id: &str,
+    owner: Option<&str>,
+) -> Result<bool> {
+    Ok(db
+        .get_session(session_id)?
+        .map(|s| !s.is_trashed() && s.owner_workstream_id.as_deref() == owner)
+        .unwrap_or(false))
 }
 
 /// Pending intents that never produced a session expire; ambiguous ones
@@ -1511,6 +1656,9 @@ pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
         db.list_launch_intents(&[launch_status::PENDING, launch_status::AMBIGUOUS], 500)?;
     let now_ts = chrono::Utc::now();
     let mut expired = 0;
+    // One transaction, and each write only touches intent that still wait:
+    // expiring by id alone would overwrite a match that landed after the list
+    // above was read.
     for intent in pending {
         let ttl = if intent.status == launch_status::AMBIGUOUS {
             INTENT_TTL_SECS * 3
@@ -1519,13 +1667,17 @@ pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
         };
         if let Ok(launched) = chrono::DateTime::parse_from_rfc3339(&intent.launched_at) {
             if now_ts - launched.with_timezone(&chrono::Utc) > chrono::Duration::seconds(ttl) {
-                db.update_launch_intent(
-                    &intent.id,
-                    launch_status::EXPIRED,
-                    None,
-                    "超时未发现匹配 Session",
-                )?;
-                expired += 1;
+                let expired_now = db.tx(|tx| {
+                    crate::storage::update_waiting_launch_intent_conn(
+                        tx,
+                        &intent.id,
+                        launch_status::EXPIRED,
+                        "超时未发现匹配 Session",
+                    )
+                })?;
+                if expired_now {
+                    expired += 1;
+                }
             }
         }
     }

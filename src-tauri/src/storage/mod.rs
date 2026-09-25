@@ -663,6 +663,18 @@ impl Db {
         self.index_workstream(w)
     }
 
+    /// Is any LaunchIntent still waiting for a Session? Cheap gate for the
+    /// discovery path, which would otherwise run the matcher once per
+    /// ownerless Session on every pass.
+    pub fn has_pending_launch_intents(&self) -> Result<bool> {
+        let conn = self.read();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM launch_intents WHERE status IN (?1, ?2))",
+            params![launch_status::PENDING, launch_status::AMBIGUOUS],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Delete a Workstream and everything it owns — in the full FK order of
     /// §42.3-M6, which a bare `DELETE FROM workstreams` violates under
     /// `PRAGMA foreign_keys = ON` (it fails the moment the Workstream has ever
@@ -1582,27 +1594,9 @@ impl Db {
         Ok(())
     }
 
-    pub fn update_launch_intent(
-        &self,
-        id: &str,
-        status: &str,
-        matched_session_id: Option<&str>,
-        note: &str,
-    ) -> Result<()> {
-        let conn = self.write();
-        update_launch_intent_conn(&conn, id, status, matched_session_id, note)
-    }
-
     pub fn get_launch_intent(&self, id: &str) -> Result<Option<LaunchIntent>> {
         let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
-                 FROM launch_intents WHERE id = ?1",
-                params![id],
-                row_launch_intent,
-            )
-            .optional()?)
+        crate::storage::get_launch_intent_conn(&conn, id)
     }
 
     pub fn list_launch_intents(&self, statuses: &[&str], limit: i64) -> Result<Vec<LaunchIntent>> {
@@ -2137,6 +2131,17 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
 }
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
+    // §39 — a Session's search document carries its Owner's title, so a rename
+    // has to reach every Session that owns this Workstream. The previous title
+    // is read first: an update that changed nothing else must not rewrite N
+    // documents.
+    let previous_title: Option<String> = conn
+        .query_row(
+            "SELECT title FROM workstreams WHERE id = ?1",
+            params![w.id],
+            |r| r.get(0),
+        )
+        .optional()?;
     conn.execute(
         "INSERT INTO workstreams (id, title, description, lifecycle, visibility, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -2149,6 +2154,9 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
          VALUES (?1, ?2, '[]', ?2)",
         params![w.id, w.created_at],
     )?;
+    if previous_title.as_deref() != Some(w.title.as_str()) {
+        reindex_owned_sessions_conn(conn, &w.id)?;
+    }
     Ok(())
 }
 
@@ -2205,20 +2213,116 @@ pub fn record_delivery_conn(conn: &Connection, d: &ContextDelivery) -> Result<()
     Ok(())
 }
 
-/// Move a LaunchIntent to a new status through a caller-held connection.
-/// `matched_session_id` is sticky: passing `None` keeps whatever was recorded
-/// (a later status edit must not erase the Session that claimed the intent).
-pub fn update_launch_intent_conn(
+/// Read one LaunchIntent through a caller-held connection — inside a matching
+/// transaction the *current* row decides, never the copy read before it.
+pub fn get_launch_intent_conn(conn: &Connection, id: &str) -> Result<Option<LaunchIntent>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
+             FROM launch_intents WHERE id = ?1",
+            params![id],
+            row_launch_intent,
+        )
+        .optional()?)
+}
+
+/// Consume a LaunchIntent's match, exactly once: the row must still be waiting
+/// (PENDING or AMBIGUOUS) and unclaimed. Returns false when someone else got
+/// there first — the caller must then abandon its own match rather than
+/// overwrite theirs. A plain `UPDATE … WHERE id` would let two resolvers both
+/// succeed and leave one Session owned by an intent that records the other.
+pub fn mark_launch_intent_matched_conn(
+    conn: &Connection,
+    id: &str,
+    session_id: &str,
+    note: &str,
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE launch_intents
+            SET status = ?2, matched_session_id = ?3, note = ?4, updated_at = ?5
+          WHERE id = ?1
+            AND status IN (?6, ?7)
+            AND matched_session_id IS NULL",
+        params![
+            id,
+            launch_status::MATCHED,
+            session_id,
+            note,
+            now(),
+            launch_status::PENDING,
+            launch_status::AMBIGUOUS
+        ],
+    )?;
+    Ok(updated == 1)
+}
+
+/// Move an intent that is still WAITING (PENDING/AMBIGUOUS, unclaimed) to
+/// another status, and report whether it still was.
+///
+/// Every transition that is not the match itself goes through here: parking a
+/// tie as AMBIGUOUS, expiring a stale intent, and recording the pid note after
+/// spawning the Agent. None of them may resurrect or overwrite a match —
+/// "still waiting" written over an already-consumed intent would make it
+/// consumable a second time and hand out an Owner twice.
+pub fn update_waiting_launch_intent_conn(
     conn: &Connection,
     id: &str,
     status: &str,
-    matched_session_id: Option<&str>,
     note: &str,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE launch_intents SET status = ?2, matched_session_id = COALESCE(?3, matched_session_id), note = ?4, updated_at = ?5 WHERE id = ?1",
-        params![id, status, matched_session_id, note, now()],
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE launch_intents
+            SET status = ?2, note = ?3, updated_at = ?4
+          WHERE id = ?1
+            AND status IN (?5, ?6)
+            AND matched_session_id IS NULL",
+        params![
+            id,
+            status,
+            note,
+            now(),
+            launch_status::PENDING,
+            launch_status::AMBIGUOUS
+        ],
     )?;
+    Ok(updated == 1)
+}
+
+/// Rebuild the search documents of the Sessions that OWN `workstream_id`.
+///
+/// §39 — a Session's document embeds its Owner Workstream's title, so anything
+/// that changes that title (a rename) or the ownership itself (a Workstream
+/// deletion nulling it) leaves every owned Session's document describing a fact
+/// that is no longer true. The caller runs this in the same transaction as the
+/// change.
+pub fn reindex_owned_sessions_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut st = conn.prepare("SELECT id FROM sessions WHERE owner_workstream_id = ?1")?;
+        for row in st.query_map(params![workstream_id], |r| r.get(0))? {
+            ids.push(row?);
+        }
+    }
+    for id in ids {
+        index_session_conn(conn, &id)?;
+    }
+    Ok(())
+}
+
+/// Rebuild the search documents of the Sessions that project onto
+/// `project_id`. Same rule as [`reindex_owned_sessions_conn`] for the other
+/// input of a Session document's body — the Project name (§39).
+pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut st = conn.prepare("SELECT id FROM sessions WHERE project_id = ?1")?;
+        for row in st.query_map(params![project_id], |r| r.get(0))? {
+            ids.push(row?);
+        }
+    }
+    for id in ids {
+        index_session_conn(conn, &id)?;
+    }
     Ok(())
 }
 

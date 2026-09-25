@@ -189,7 +189,7 @@ fn ambiguous_candidates_wait_for_the_user() {
     // user resolves manually
     launcher::apply_match(
         &db,
-        &ambiguous[0],
+        &ambiguous[0].id,
         &session,
         &launcher::LaunchWorkspace::default(),
     )
@@ -216,8 +216,15 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
     .unwrap());
 
     // expire pending intents that are older than the TTL
-    db.update_launch_intent(&intent.id, launch_status::PENDING, None, "")
-        .unwrap();
+    db.tx(|tx| {
+        noending::storage::update_waiting_launch_intent_conn(
+            tx,
+            &intent.id,
+            launch_status::PENDING,
+            "",
+        )
+    })
+    .unwrap();
     db.write()
         .execute(
             "UPDATE launch_intents SET launched_at = ?2 WHERE id = ?1",
@@ -654,7 +661,9 @@ fn launch_intent_match_records_delivery_snapshot() {
     };
     db.insert_launch_intent(&intent).unwrap();
 
-    assert!(launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).is_ok());
+    assert!(
+        launcher::apply_match(&db, &intent.id, &s, &launcher::LaunchWorkspace::default()).is_ok()
+    );
 
     // the Owner is established explicitly…
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(ws.id.as_str()));
@@ -953,7 +962,9 @@ fn launch_intent_with_off_sets_owner_but_no_delivery() {
     };
     db.insert_launch_intent(&intent).unwrap();
 
-    assert!(launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).is_ok());
+    assert!(
+        launcher::apply_match(&db, &intent.id, &s, &launcher::LaunchWorkspace::default()).is_ok()
+    );
 
     // The Owner Workstream is preserved!
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(ws.id.as_str()));
@@ -1812,7 +1823,7 @@ fn apply_match_handles_conflict_only_bundle() {
     };
     db.insert_launch_intent(&intent).unwrap();
 
-    launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).unwrap();
+    launcher::apply_match(&db, &intent.id, &s, &launcher::LaunchWorkspace::default()).unwrap();
 
     let deliveries = db.latest_deliveries(&s.id).unwrap();
     let d = deliveries

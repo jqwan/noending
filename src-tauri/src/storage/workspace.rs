@@ -416,6 +416,9 @@ pub fn rename_project_conn(conn: &Connection, project_id: &str, name: &str) -> R
     if changed == 0 {
         return Err(other(format!("Project {project_id} 不存在")));
     }
+    // §39 — a Session's search document carries its Project's name too, so the
+    // rename has to reach the Sessions projecting onto this Project.
+    crate::storage::reindex_sessions_for_project_conn(conn, project_id)?;
     get_project_conn(conn, project_id)?.ok_or_else(|| other(format!("Project {project_id} 不存在")))
 }
 
@@ -442,8 +445,22 @@ pub fn delete_zero_path_project_conn(conn: &Connection, project_id: &str) -> Res
     }
     // Referential hygiene, not a write to the derived cache: no Session can
     // still be projecting onto a Project that owns no path.
+    //
+    // §39 — the ids are collected first: clearing the cache below is exactly
+    // what would make the Project's name wrong in these Sessions' search
+    // documents, and afterwards `project_id` no longer names them.
+    let mut projections: Vec<String> = Vec::new();
+    {
+        let mut st = conn.prepare("SELECT id FROM sessions WHERE project_id = ?1")?;
+        for row in st.query_map(params![project_id], |r| r.get(0))? {
+            projections.push(row?);
+        }
+    }
     super::session_paths::clear_sessions_project_for_project_conn(conn, project_id)?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+    for session_id in &projections {
+        crate::storage::index_session_conn(conn, session_id)?;
+    }
     Ok(true)
 }
 

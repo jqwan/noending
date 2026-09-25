@@ -387,10 +387,26 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
     )?;
     // 9. the Workstream itself. Sessions survive; their `owner_workstream_id`
     //    is cleared by the FK's ON DELETE SET NULL in the same statement.
+    //
+    //    Their search documents are rebuilt right after, in this same
+    //    transaction: a Session document embeds its Owner's title (§39), so
+    //    leaving it would keep the deleted Workstream's name findable through
+    //    the Sessions that used to own it. The ids are collected BEFORE the
+    //    delete — afterwards the owner column no longer names them.
+    let mut owned_sessions: Vec<String> = Vec::new();
+    {
+        let mut st = tx.prepare("SELECT id FROM sessions WHERE owner_workstream_id = ?1")?;
+        for row in st.query_map(params![workstream_id], |r| r.get(0))? {
+            owned_sessions.push(row?);
+        }
+    }
     tx.execute(
         "DELETE FROM workstreams WHERE id = ?1",
         params![workstream_id],
     )?;
+    for session_id in &owned_sessions {
+        crate::storage::index_session_conn(tx, session_id)?;
+    }
     Ok(())
 }
 

@@ -611,7 +611,7 @@ pub fn resolve_launch_intent(
         if session.is_trashed() {
             return Err(other("会话已在回收站，无法关联启动记录"));
         }
-        crate::launcher::apply_match(db, &intent, &session, &workspace)
+        crate::launcher::apply_match(db, &intent.id, &session, &workspace)
     })
 }
 
