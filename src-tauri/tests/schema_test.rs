@@ -71,6 +71,18 @@ fn object_exists(conn: &Connection, name: &str) -> bool {
     .unwrap()
 }
 
+/// Every object the file holds, including SQLite's own (`sqlite_master` rows
+/// for an FTS5 table include its shadow tables).
+fn object_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn journal_mode(conn: &Connection) -> String {
+    conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap()
+}
+
 /// `Db` has no `Debug`, and a failure should print the message the user sees.
 fn open_error(path: &Path) -> String {
     match Db::open(path) {
@@ -169,7 +181,8 @@ fn fresh_database_uses_current_format_generation() {
 }
 
 /// Reopening a current-format database reads the format marker and checks the
-/// structure: the data survives and startup runs no DDL at all.
+/// structure: the data survives and startup runs no DDL at all — the object set
+/// is exactly the one creation left behind.
 #[test]
 fn current_format_database_reopens_without_reinitialization() {
     let path = db_path("reopen");
@@ -180,16 +193,17 @@ fn current_format_database_reopens_without_reinitialization() {
             [],
         )
         .unwrap();
-    // The FTS table is the ONE optional object of the format: a database without
-    // it is still valid, so startup must accept it (search falls back to LIKE)
-    // and — crucially — must NOT recreate it, because recreating it would mean
-    // startup had run CREATE statements against an existing database.
-    db.write().execute("DROP TABLE search_index", []).unwrap();
+    let objects = object_count(&db.read());
     drop(db);
 
     let reopened = Db::open(path.path()).unwrap();
     assert_eq!(application_id(&reopened.read()), DATABASE_APPLICATION_ID);
     assert_eq!(user_version(&reopened.read()), DATABASE_FORMAT_VERSION);
+    assert_eq!(
+        object_count(&reopened.read()),
+        objects,
+        "startup created or dropped an object on an existing database"
+    );
     assert_eq!(
         reopened
             .read()
@@ -201,9 +215,46 @@ fn current_format_database_reopens_without_reinitialization() {
             .unwrap(),
         "persists"
     );
-    assert!(
-        !object_exists(&reopened.read(), "search_index"),
-        "startup re-ran schema creation on an existing database"
+}
+
+/// The format gate runs before any persistent PRAGMA, so a database we refuse
+/// keeps the journal mode it had: `journal_mode = WAL` rewrites the file header
+/// and must never reach a file that is not ours.
+#[test]
+fn a_refused_database_is_never_switched_to_wal() {
+    let foreign = db_path("foreign-journal");
+    let conn = Connection::open(foreign.path()).unwrap();
+    conn.execute("CREATE TABLE foo (a TEXT)", []).unwrap();
+    let before = journal_mode(&conn);
+    drop(conn);
+
+    assert!(Db::open(foreign.path()).is_err());
+
+    let conn = Connection::open(foreign.path()).unwrap();
+    assert_ne!(before, "wal", "the fixture must not start in WAL");
+    assert_eq!(
+        journal_mode(&conn),
+        before,
+        "a refused file must keep its journal mode"
+    );
+
+    // The same holds for our own identity in a generation this build refuses.
+    let old = db_path("old-generation-journal");
+    let db = Db::open(old.path()).unwrap();
+    let objects = object_count(&db.read());
+    db.write()
+        .pragma_update(None, "user_version", DATABASE_FORMAT_VERSION + 1)
+        .unwrap();
+    let wal = journal_mode(&db.read());
+    drop(db);
+
+    assert!(Db::open(old.path()).is_err());
+    let conn = Connection::open(old.path()).unwrap();
+    assert_eq!(journal_mode(&conn), wal);
+    assert_eq!(
+        object_count(&conn),
+        objects,
+        "a refused generation must not have objects added to it"
     );
 }
 
@@ -212,21 +263,38 @@ fn current_format_database_reopens_without_reinitialization() {
 /// quietly completed, and the missing object is not recreated.
 #[test]
 fn incomplete_current_format_database_is_refused_without_repair() {
-    for (tag, drop_sql, missing) in [
+    for (tag, damage, missing) in [
         (
             "missing-table",
-            "DROP TABLE context_deliveries",
+            vec!["DROP TABLE context_deliveries"],
             "context_deliveries",
         ),
         (
             "missing-index",
-            "DROP INDEX idx_sessions_owner_workstream",
+            vec!["DROP INDEX idx_sessions_owner_workstream"],
             "idx_sessions_owner_workstream",
+        ),
+        (
+            "missing-fts",
+            vec!["DROP TABLE search_index"],
+            "search_index",
+        ),
+        // A same-named view is not the table the format declares: the check
+        // matches on `sqlite_master.type` too.
+        (
+            "view-impersonator",
+            vec![
+                "DROP TABLE context_deliveries",
+                "CREATE VIEW context_deliveries AS SELECT 1 AS id",
+            ],
+            "context_deliveries",
         ),
     ] {
         let path = db_path(tag);
         let db = Db::open(path.path()).unwrap();
-        db.write().execute(drop_sql, []).unwrap();
+        for sql in damage {
+            db.write().execute(sql, []).unwrap();
+        }
         drop(db);
 
         let err = open_error(path.path());
@@ -235,9 +303,17 @@ fn incomplete_current_format_database_is_refused_without_repair() {
             "refusal must name the missing object, got: {err}"
         );
 
-        let conn = Connection::open(path.path()).unwrap();
+        // Startup neither completed the schema nor rewrote what was there.
+        let now_a_table: bool = Connection::open(path.path())
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type = 'table')",
+                [missing],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(
-            !object_exists(&conn, missing),
+            !now_a_table,
             "startup repaired {missing} instead of refusing the database"
         );
     }

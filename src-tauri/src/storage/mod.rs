@@ -95,24 +95,29 @@ impl Db {
             std::fs::create_dir_all(parent)?;
         }
         let writer = Connection::open(path)?;
+        // Connection-local settings first, then the format gate: nothing that
+        // outlives the connection may touch the file until we know it is ours.
+        // `journal_mode = WAL` is a header change, so it comes after the gate —
+        // a refused database is left exactly as it was found.
+        writer.pragma_update(None, "foreign_keys", "ON")?;
+        writer.pragma_update(None, "synchronous", "NORMAL")?;
+        writer.busy_timeout(std::time::Duration::from_secs(5))?;
+        Self::initialize_schema(&writer)?;
         writer.pragma_update(None, "journal_mode", "WAL")?;
-        let db = Db {
+
+        // Opened only once the file is known to be ours.
+        let reader = Connection::open(path)?;
+        reader.pragma_update(None, "foreign_keys", "ON")?;
+        reader.pragma_update(None, "synchronous", "NORMAL")?;
+        // A generous busy timeout: the reader never competes with the writer
+        // under WAL, but an external process touching the file should cause a
+        // wait, not an error.
+        reader.busy_timeout(std::time::Duration::from_secs(5))?;
+
+        Ok(Db {
             writer: Mutex::new(writer),
-            reader: Mutex::new(Connection::open(path)?),
-        };
-        for half in [&db.writer, &db.reader] {
-            let conn = half.lock().map_err(|_| other("db lock poisoned"))?;
-            // synchronous + foreign_keys are per-connection; journal_mode is
-            // persistent and was set once above.
-            conn.pragma_update(None, "synchronous", "NORMAL")?;
-            conn.pragma_update(None, "foreign_keys", "ON")?;
-            // A generous busy timeout: the reader never competes with the
-            // writer under WAL, but an external process touching the file
-            // should cause a wait, not an error.
-            conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        }
-        db.initialize_schema()?;
-        Ok(db)
+            reader: Mutex::new(reader),
+        })
     }
 
     /// A WAL snapshot for query-only work. UI commands run here: a long write
@@ -143,11 +148,12 @@ impl Db {
     /// Open (or create) the database in the ONE format this build understands,
     /// then reconcile the defaults that depend on the current environment —
     /// see [`schema`] for the recognition rule, the refusal cases and why
-    /// reconciliation is not a migration. Neither step ever repairs structure.
-    fn initialize_schema(&self) -> Result<()> {
-        let conn = self.write();
-        schema::open_or_create(&conn)?;
-        schema::reconcile_runtime_defaults(&conn)
+    /// reconciliation is not a migration. Neither step ever repairs structure,
+    /// and neither runs a persistent PRAGMA, so calling this before
+    /// `journal_mode = WAL` keeps a refused file untouched.
+    fn initialize_schema(conn: &Connection) -> Result<()> {
+        schema::open_or_create(conn)?;
+        schema::reconcile_runtime_defaults(conn)
     }
 
     // ---------------- Projects ----------------
@@ -1563,18 +1569,6 @@ impl Db {
 
     // ---------------- FTS ----------------
 
-    pub fn fts_available(&self) -> bool {
-        let conn = self.read();
-        conn.query_row(
-            "SELECT 1 FROM sqlite_master WHERE name = 'search_index'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()
-        .unwrap_or(None)
-        .is_some()
-    }
-
     pub fn unindex(&self, kind: &str, ref_id: &str) {
         let conn = self.write();
         unindex_conn(&conn, kind, ref_id);
@@ -1676,9 +1670,6 @@ impl Db {
     /// clause are two halves of one lifecycle invariant.
     pub fn backfill_search_index(&self) -> Result<()> {
         let conn = self.write();
-        if !self.fts_available() {
-            return Ok(());
-        }
         conn.execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
              SELECT 'event', session_id || ':' || sequence, session_id, '', text
@@ -1986,19 +1977,8 @@ pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) ->
 ///
 /// Title is the Session title (falling back to the Agent name); body is the
 /// Project name plus the ONE Owner Workstream title. A Session has a single
-/// Owner, so there is exactly one Workstream title to store. A no-op when FTS is unavailable (LIKE fallback covers it).
+/// Owner, so there is exactly one Workstream title to store.
 pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
-    if conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE name = 'search_index'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_none()
-    {
-        return Ok(());
-    }
     let row: Option<(String, String, Option<String>, Option<String>)> = conn
         .query_row(
             "SELECT COALESCE(s.title, s.agent), COALESCE(p.name, ''), w.title, s.cwd

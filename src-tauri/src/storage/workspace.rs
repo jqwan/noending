@@ -475,19 +475,12 @@ pub fn retire_project_if_unowned(conn: &Connection, project_id: &str) -> Result<
 
 /// §42.3-M18 — a Workstream's search row is parented by its PRIMARY-path
 /// Project, so any change behind `path_ids` can move it. Done as one SQL
-/// statement pair so there is no Rust-side round trip to get wrong; a no-op when
-/// the bundled SQLite has no FTS5 (`search_index` absent).
+/// statement pair so there is no Rust-side round trip to get wrong.
 pub fn refresh_workstream_search_parents_conn(
     conn: &Connection,
     path_ids: &[String],
 ) -> Result<()> {
     if path_ids.is_empty() {
-        return Ok(());
-    }
-    if conn
-        .query_row("SELECT 1 FROM search_index LIMIT 1", [], |_| Ok(()))
-        .is_err()
-    {
         return Ok(());
     }
     // Distinct `?1..?n` indexes, one per path id: repeating `?1` would make the

@@ -1053,25 +1053,23 @@ fn the_string_door_reports_its_effect_to_the_transaction_owner() {
         .expect("attached");
     assert!(!outcome.effect.projects_touched.is_empty());
     let project_id = outcome.path.project_id.clone();
-    if db.fts_available() {
-        assert_eq!(
-            count_rows(
-                &db,
-                "SELECT COUNT(*) FROM search_index WHERE kind = 'project' AND ref_id = ?1",
-                &project_id
-            ),
-            0
-        );
-        apply_projection_effect(&db, &outcome.effect);
-        assert_eq!(
-            count_rows(
-                &db,
-                "SELECT COUNT(*) FROM search_index WHERE kind = 'project' AND ref_id = ?1",
-                &project_id
-            ),
-            1
-        );
-    }
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM search_index WHERE kind = 'project' AND ref_id = ?1",
+            &project_id
+        ),
+        0
+    );
+    apply_projection_effect(&db, &outcome.effect);
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM search_index WHERE kind = 'project' AND ref_id = ?1",
+            &project_id
+        ),
+        1
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -1422,16 +1420,10 @@ fn the_core_writes_no_index_rows_and_the_wrapper_does() {
             )
             .unwrap_or(0)
     };
-    assert_eq!(
-        indexed(&db),
-        0,
-        "in-transaction: still nothing indexed (or FTS is unavailable, which is also 0)"
-    );
+    assert_eq!(indexed(&db), 0, "in-transaction: still nothing indexed");
 
     apply_projection_effect(&db, &outcome.effect);
-    if db.fts_available() {
-        assert_eq!(indexed(&db), 1, "after commit: exactly one row");
-    }
+    assert_eq!(indexed(&db), 1, "after commit: exactly one row");
 
     // A deleted id is never also "touched": the wrapper must not re-create the row
     // it was told to drop.
@@ -1441,9 +1433,7 @@ fn the_core_writes_no_index_rows_and_the_wrapper_does() {
     assert!(effect.projects_touched.is_empty());
     assert_eq!(effect.projects_deleted, vec![project_id.clone()]);
     apply_projection_effect(&db, &effect);
-    if db.fts_available() {
-        assert_eq!(indexed(&db), 0);
-    }
+    assert_eq!(indexed(&db), 0);
 }
 
 #[test]

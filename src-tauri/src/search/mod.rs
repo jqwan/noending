@@ -1,4 +1,4 @@
-//! Search — FTS5 when available, LIKE fallback otherwise.
+//! Search — FTS5, with a LIKE fallback for queries its tokenizer cannot match.
 //! Prioritizes current context (items / workstreams), then raw events.
 
 use rusqlite::params;
@@ -37,43 +37,39 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     if q.is_empty() {
         return Ok(vec![]);
     }
-    if db.fts_available() {
-        let fts_q = to_fts_query(q);
-        let sql = format!(
-            "SELECT kind, ref_id, parent_id, title,
-                   snippet(search_index, 4, '「', '」', '…', 12),
-                   bm25(search_index)
-                   FROM search_index WHERE search_index MATCH ?1
-                   AND {ACTIVE_EVENT_GUARD}
-                   ORDER BY bm25(search_index) LIMIT ?2"
-        );
-        // Scoped via the closure: the reader guard must drop before
-        // `looks_indexed` / `like_search` run — they take their own read
-        // lock, and re-entry on it deadlocks just like the writer's would.
-        let hits: Option<Vec<SearchHit>> = (|| {
-            let conn = db.read();
-            let mut st = conn.prepare(&sql).ok()?;
-            let rows = st.query_map(params![fts_q, limit], |r| {
-                Ok(SearchHit {
-                    kind: r.get(0)?,
-                    ref_id: r.get(1)?,
-                    parent_id: r.get(2)?,
-                    title: r.get(3)?,
-                    snippet: r.get(4)?,
-                    rank: r.get::<_, f64>(5)?,
-                })
-            });
-            let collected: Vec<SearchHit> = rows.ok()?.filter_map(|r| r.ok()).collect();
-            Some(collected)
-        })();
-        match hits {
-            Some(hits) if !hits.is_empty() || looks_indexed(db, q) => return Ok(hits),
-            // fall through to LIKE when FTS finds nothing (e.g. tokenization)
-            _ => {}
-        }
-        return like_search(db, q, limit);
+    let fts_q = to_fts_query(q);
+    let sql = format!(
+        "SELECT kind, ref_id, parent_id, title,
+               snippet(search_index, 4, '「', '」', '…', 12),
+               bm25(search_index)
+               FROM search_index WHERE search_index MATCH ?1
+               AND {ACTIVE_EVENT_GUARD}
+               ORDER BY bm25(search_index) LIMIT ?2"
+    );
+    // Scoped via the closure: the reader guard must drop before
+    // `looks_indexed` / `like_search` run — they take their own read
+    // lock, and re-entry on it deadlocks just like the writer's would.
+    let hits: Option<Vec<SearchHit>> = (|| {
+        let conn = db.read();
+        let mut st = conn.prepare(&sql).ok()?;
+        let rows = st.query_map(params![fts_q, limit], |r| {
+            Ok(SearchHit {
+                kind: r.get(0)?,
+                ref_id: r.get(1)?,
+                parent_id: r.get(2)?,
+                title: r.get(3)?,
+                snippet: r.get(4)?,
+                rank: r.get::<_, f64>(5)?,
+            })
+        });
+        let collected: Vec<SearchHit> = rows.ok()?.filter_map(|r| r.ok()).collect();
+        Some(collected)
+    })();
+    match hits {
+        Some(hits) if !hits.is_empty() || looks_indexed(db, q) => Ok(hits),
+        // fall through to LIKE when FTS finds nothing (e.g. tokenization)
+        _ => like_search(db, q, limit),
     }
-    like_search(db, q, limit)
 }
 
 fn looks_indexed(db: &Db, _q: &str) -> bool {

@@ -640,9 +640,7 @@ fn the_primary_path_projection_moves_the_search_row_and_the_card() {
     assert_eq!(card.project_id.as_deref(), Some("p_real"));
     assert_eq!(card.project_name.as_deref(), Some("P_REAL"));
     assert_eq!(card.path_count, 2);
-    if db.fts_available() {
-        assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_real"));
-    }
+    assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_real"));
 
     // Make the other path primary: the projection moves with the ordered list.
     let rows = db.list_workstream_paths(&w.id).unwrap();
@@ -659,9 +657,7 @@ fn the_primary_path_projection_moves_the_search_row_and_the_card() {
         work_cards(&db, &w.id).project_name.as_deref(),
         Some("P_OTHER")
     );
-    if db.fts_available() {
-        assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_other"));
-    }
+    assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_other"));
 
     // Removing every path returns the projection to "no Project" instead of
     // falling back to the stale column.
@@ -672,9 +668,7 @@ fn the_primary_path_projection_moves_the_search_row_and_the_card() {
     assert_eq!(card.project_id, None);
     assert_eq!(card.project_name, None);
     assert_eq!(card.path_count, 0);
-    if db.fts_available() {
-        assert_eq!(search_parent(&db, &w.id), None);
-    }
+    assert_eq!(search_parent(&db, &w.id), None);
 }
 
 fn work_cards(db: &Db, workstream_id: &str) -> noending::commands::workstream::WorkstreamCardView {

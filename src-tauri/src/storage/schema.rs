@@ -27,7 +27,8 @@
 //!
 //! Responsibility split:
 //!
-//! * [`CURRENT_SCHEMA`] — the complete current structure (tables, indexes).
+//! * [`CURRENT_SCHEMA`] — the complete current structure (tables, indexes and
+//!   the FTS5 search index).
 //! * [`open_or_create`] — recognise, validate, or create. Nothing else.
 //! * [`reconcile_runtime_defaults`] — environment-dependent defaults, on every
 //!   start. Not schema, not a migration.
@@ -120,43 +121,51 @@ fn has_user_objects(conn: &Connection) -> Result<bool> {
 }
 
 /// A database with this build's identity must also have this build's structure.
-/// Every object [`CURRENT_SCHEMA`] declares has to be there; a missing one is
-/// reported, never recreated.
+/// Every object [`CURRENT_SCHEMA`] declares has to be there, of the right kind;
+/// a missing one is reported, never recreated.
 fn validate(conn: &Connection) -> Result<()> {
-    for name in required_objects() {
+    for object in required_objects() {
         let present: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
-            params![name],
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type = ?2)",
+            params![object.name, object.kind],
             |r| r.get(0),
         )?;
         if !present {
             return Err(other(format!(
-                "数据库结构与当前格式不符（缺少 {name}）。当前版本不支持修复，\
-                 请删除数据库后重新启动，Session 会从已配置的 Agent 数据源重新摄入。"
+                "数据库结构与当前格式不符（缺少 {} {}）。当前版本不支持修复，\
+                 请删除数据库后重新启动，Session 会从已配置的 Agent 数据源重新摄入。",
+                object.kind, object.name
             )));
         }
     }
     Ok(())
 }
 
-/// Names of the objects the current format is made of, read off
-/// [`CURRENT_SCHEMA`] so a new table or index cannot be forgotten here. The
-/// optional FTS table is excluded on purpose: a build without FTS5 creates a
-/// usable database without it.
-fn required_objects() -> Vec<&'static str> {
-    let mut names = Vec::new();
-    for marker in [
-        "CREATE TABLE IF NOT EXISTS ",
-        "CREATE UNIQUE INDEX IF NOT EXISTS ",
-        "CREATE INDEX IF NOT EXISTS ",
+/// One object the current format is made of, and the `sqlite_master` type it
+/// has to be — a virtual table is still a `table`, so a same-named view can
+/// never satisfy the check.
+struct RequiredObject {
+    kind: &'static str,
+    name: &'static str,
+}
+
+/// Objects the current format is made of, read off [`CURRENT_SCHEMA`] so a new
+/// table or index cannot be forgotten here.
+fn required_objects() -> Vec<RequiredObject> {
+    let mut out = Vec::new();
+    for (marker, kind) in [
+        ("CREATE TABLE IF NOT EXISTS ", "table"),
+        ("CREATE VIRTUAL TABLE IF NOT EXISTS ", "table"),
+        ("CREATE UNIQUE INDEX IF NOT EXISTS ", "index"),
+        ("CREATE INDEX IF NOT EXISTS ", "index"),
     ] {
         for tail in CURRENT_SCHEMA.split(marker).skip(1) {
             if let Some(name) = tail.split(|c: char| c.is_whitespace() || c == '(').next() {
-                names.push(name);
+                out.push(RequiredObject { kind, name });
             }
         }
     }
-    names
+    out
 }
 
 fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError {
@@ -435,13 +444,12 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
       ON projects(git_id)
       WHERE git_id IS NOT NULL;
-"#;
 
-/// The FTS5 search index (external-content style: we manage rows manually).
-/// Kept out of [`CURRENT_SCHEMA`] because it is the one optional part: a bundled
-/// SQLite without FTS5 still creates a usable database, and search then falls
-/// back to LIKE at query time.
-const OPTIONAL_FTS_SCHEMA: &str = r#"
+    -- The search projection: one row per searchable document, written by the
+    -- app itself rather than indexed from another table. FTS5 is part of this
+    -- format, not an option — this dependency graph bundles SQLite with
+    -- `-DSQLITE_ENABLE_FTS5` (libsqlite3-sys `bundled`), so a build that cannot
+    -- create this table is a build whose search would silently return nothing.
     CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
       kind, ref_id, parent_id, title, body, tokenize = 'unicode61'
     );
@@ -451,65 +459,64 @@ const OPTIONAL_FTS_SCHEMA: &str = r#"
 /// every `IF NOT EXISTS` here is a fresh creation.
 fn create(conn: &Connection) -> Result<()> {
     conn.execute_batch(CURRENT_SCHEMA)?;
-    if conn.execute_batch(OPTIONAL_FTS_SCHEMA).is_err() {
-        eprintln!("[storage] FTS5 unavailable, search will use LIKE fallback");
-    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     /// The validation list is read off the DDL, so this pins the reader itself:
-    /// every object of the current format must come out of it, and the optional
-    /// FTS table must not be demanded.
+    /// every object of the current format must come out of it, with the kind it
+    /// must have in `sqlite_master`.
     #[test]
     fn required_objects_covers_the_whole_ddl() {
-        let names: HashSet<&str> = required_objects().into_iter().collect();
-        for expected in [
-            "projects",
-            "workstreams",
-            "sessions",
-            "session_events",
-            "session_cursors",
-            "context_items",
-            "context_item_revisions",
-            "sync_runs",
-            "agent_installations",
-            "settings",
-            "launch_intents",
-            "context_conflicts",
-            "context_deliveries",
-            "ingest_sources",
-            "assistant_sessions",
-            "assistant_messages",
-            "context_conflict_events",
-            "workstream_review_state",
-            "git_identities",
-            "workspace_paths",
-            "workstream_paths",
-            "session_deletion_jobs",
-            "idx_sessions_project",
-            "idx_items_workstream",
-            "idx_sessions_owner_workstream",
-            "idx_events_session",
-            "idx_intents_status",
-            "idx_sync_runs_fingerprint",
-            "idx_conflict_events_conflict",
-            "idx_workspace_paths_project",
-            "idx_workspace_paths_canonical",
-            "idx_workstream_paths_ws",
-            "idx_workstream_paths_path",
-            "idx_projects_git_id",
+        let found: Vec<(&str, &str)> = required_objects()
+            .into_iter()
+            .map(|o| (o.kind, o.name))
+            .collect();
+        for (kind, name) in [
+            ("table", "projects"),
+            ("table", "workstreams"),
+            ("table", "sessions"),
+            ("table", "session_events"),
+            ("table", "session_cursors"),
+            ("table", "context_items"),
+            ("table", "context_item_revisions"),
+            ("table", "sync_runs"),
+            ("table", "agent_installations"),
+            ("table", "settings"),
+            ("table", "launch_intents"),
+            ("table", "context_conflicts"),
+            ("table", "context_deliveries"),
+            ("table", "ingest_sources"),
+            ("table", "assistant_sessions"),
+            ("table", "assistant_messages"),
+            ("table", "context_conflict_events"),
+            ("table", "workstream_review_state"),
+            ("table", "git_identities"),
+            ("table", "workspace_paths"),
+            ("table", "workstream_paths"),
+            ("table", "session_deletion_jobs"),
+            ("table", "search_index"),
+            ("index", "idx_sessions_project"),
+            ("index", "idx_items_workstream"),
+            ("index", "idx_sessions_owner_workstream"),
+            ("index", "idx_events_session"),
+            ("index", "idx_intents_status"),
+            ("index", "idx_sync_runs_fingerprint"),
+            ("index", "idx_conflict_events_conflict"),
+            ("index", "idx_workspace_paths_project"),
+            ("index", "idx_workspace_paths_canonical"),
+            ("index", "idx_workstream_paths_ws"),
+            ("index", "idx_workstream_paths_path"),
+            ("index", "idx_projects_git_id"),
         ] {
             assert!(
-                names.contains(expected),
-                "required_objects() missed {expected}"
+                found.contains(&(kind, name)),
+                "required_objects() missed {kind} {name}"
             );
         }
-        assert_eq!(names.len(), 34, "required_objects() found a name twice");
-        assert!(!names.contains("search_index"));
+        assert_eq!(found.len(), 35, "required_objects() found an object twice");
     }
 }

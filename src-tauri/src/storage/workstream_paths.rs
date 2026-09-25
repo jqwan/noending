@@ -287,16 +287,7 @@ pub fn ordered_canonical_paths_for_workstream(
 /// for a removal: by the time it runs, the row that connected the Workstream to
 /// the path is gone. This one takes the Workstream id directly and is therefore
 /// usable on both sides of a mutation.
-///
-/// A no-op when the bundled SQLite has no FTS5 (`search_index` absent), exactly
-/// like the sibling helper.
 pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
-    if conn
-        .query_row("SELECT 1 FROM search_index LIMIT 1", [], |_| Ok(()))
-        .is_err()
-    {
-        return Ok(());
-    }
     conn.execute(
         "DELETE FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
         params![workstream_id],
@@ -351,10 +342,9 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
         params![workstream_id],
     )?;
     // 4. the item search rows, while we can still see which items they were.
-    search_delete_conn(
-        tx,
+    tx.execute(
         "DELETE FROM search_index WHERE kind = 'item' AND parent_id = ?1",
-        workstream_id,
+        params![workstream_id],
     )?;
     // 5. items.
     tx.execute(
@@ -380,10 +370,9 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
         "DELETE FROM workstream_review_state WHERE workstream_id = ?1",
         params![workstream_id],
     )?;
-    search_delete_conn(
-        tx,
+    tx.execute(
         "DELETE FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
-        workstream_id,
+        params![workstream_id],
     )?;
     // 9. the Workstream itself. Sessions survive; their `owner_workstream_id`
     //    is cleared by the FK's ON DELETE SET NULL in the same statement.
@@ -407,19 +396,6 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
     for session_id in &owned_sessions {
         crate::storage::index_session_conn(tx, session_id)?;
     }
-    Ok(())
-}
-
-/// `search_index` is optional (FTS5 may be absent from the bundled SQLite), so
-/// every direct statement against it has to tolerate its absence.
-fn search_delete_conn(conn: &Connection, sql: &str, arg: &str) -> Result<()> {
-    if conn
-        .query_row("SELECT 1 FROM search_index LIMIT 1", [], |_| Ok(()))
-        .is_err()
-    {
-        return Ok(());
-    }
-    conn.execute(sql, params![arg])?;
     Ok(())
 }
 

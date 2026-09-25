@@ -70,52 +70,43 @@ pub fn session_is_writable_conn(conn: &Connection, session_id: &str) -> Result<b
 
 // ---------------- FTS ----------------
 
-/// A missing `search_index` table (FTS-less build) is fine; any other SQL
-/// failure is a real error and must roll the caller's transaction back.
-fn tolerate_missing_fts(result: std::result::Result<usize, rusqlite::Error>) -> Result<()> {
-    match result {
-        Ok(_) => Ok(()),
-        Err(e) if e.to_string().contains("no such table") => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// Drop a trashed / deleted session's event rows from the FTS index. Event
 /// rows carry `parent_id = session_id`, so one delete covers the session.
 ///
 /// Errors PROPAGATE (review P1-1): inside the lifecycle transaction a failed
 /// index write rolls the lifecycle flip back, so "trashed" and "unindexed"
-/// really do commit atomically. Only a missing virtual table (FTS-less
-/// build) is tolerated.
+/// really do commit atomically.
 pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
-    tolerate_missing_fts(conn.execute(
+    conn.execute(
         "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
         params![session_id],
-    ))?;
+    )?;
     // §39 — the Session's own document goes with it (Trash and permanent
     // deletion both route through here; a Restore rebuilds it).
-    tolerate_missing_fts(conn.execute(
+    conn.execute(
         "DELETE FROM search_index WHERE kind = 'session' AND ref_id = ?1",
         params![session_id],
-    ))
+    )?;
+    Ok(())
 }
 
 /// Rebuild the FTS rows of a restored session from the durable event store,
 /// mirroring `backfill_search_index`'s row shape. Errors propagate like
-/// [`unindex_session_conn`]; an FTS-less build stays on the LIKE fallback.
+/// [`unindex_session_conn`].
 pub fn reindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
-    tolerate_missing_fts(conn.execute(
+    conn.execute(
         "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
         params![session_id],
-    ))?;
+    )?;
     crate::storage::index_session_conn(conn, session_id)?;
-    tolerate_missing_fts(conn.execute(
+    conn.execute(
         "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
          SELECT 'event', session_id || ':' || sequence, session_id, '', text
          FROM session_events
          WHERE session_id = ?1 AND length(COALESCE(text, '')) >= 20",
         params![session_id],
-    ))
+    )?;
+    Ok(())
 }
 
 // ---------------- Preview counts ----------------

@@ -480,20 +480,17 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     ] {
         assert_eq!(count(&db, sql, &w.id), 0, "{label} must be gone");
     }
-    // FTS5 is optional in the bundled build; where it exists the Workstream's own
-    // row and its items' rows both have to go with them, or search keeps
-    // answering with facts nobody owns any more.
-    if db.fts_available() {
-        assert_eq!(
-            count(
-                &db,
-                "SELECT COUNT(*) FROM search_index WHERE ref_id = ?1 OR (kind = 'item' AND parent_id = ?1)",
-                &w.id
-            ),
-            0,
-            "search rows must be gone"
-        );
-    }
+    // The Workstream's own search row and its items' rows both have to go with
+    // them, or search keeps answering with facts nobody owns any more.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM search_index WHERE ref_id = ?1 OR (kind = 'item' AND parent_id = ?1)",
+            &w.id
+        ),
+        0,
+        "search rows must be gone"
+    );
     // The Sessions, their events, their cursors and the physical paths all live.
     assert!(db.get_session(&s.id).unwrap().is_some());
     assert!(db.get_session(&rejected.id).unwrap().is_some());
@@ -599,16 +596,14 @@ fn created_archived_and_purged_leaves_no_trace_of_itself() {
     // and so does the Project that owns it.
     assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
     assert_eq!(db.get_project("p1").unwrap().unwrap().id, "p1");
-    if db.fts_available() {
-        assert_eq!(
-            count(
-                &db,
-                "SELECT COUNT(*) FROM search_index WHERE ref_id = ?1",
-                &w.id
-            ),
-            0
-        );
-    }
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM search_index WHERE ref_id = ?1",
+            &w.id
+        ),
+        0
+    );
 }
 
 /// The whole-object write is what silently reverted an archive before:
