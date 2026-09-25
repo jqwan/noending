@@ -33,7 +33,7 @@
 //! * [`reconcile_runtime_defaults`] — environment-dependent defaults, on every
 //!   start. Not schema, not a migration.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{other, Result};
 
@@ -131,14 +131,44 @@ fn validate(conn: &Connection) -> Result<()> {
             |r| r.get(0),
         )?;
         if !present {
-            return Err(other(format!(
-                "数据库结构与当前格式不符（缺少 {} {}）。当前版本不支持修复，\
-                 请删除数据库后重新启动，Session 会从已配置的 Agent 数据源重新摄入。",
+            return Err(structure_mismatch(format!(
+                "缺少 {} {}",
                 object.kind, object.name
             )));
         }
     }
+    validate_search_index(conn)
+}
+
+/// `search_index` is the one object whose kind alone is not enough: SQLite
+/// records a virtual table as `type = 'table'` too, so a plain table with the
+/// same name and columns would pass the object check and only fail later, on
+/// the first `MATCH`.
+fn validate_search_index(conn: &Connection) -> Result<()> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let normalized = sql
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if !normalized.contains("using fts5") {
+        return Err(structure_mismatch("search_index 不是 FTS5 索引表".into()));
+    }
     Ok(())
+}
+
+fn structure_mismatch(what: String) -> crate::error::AppError {
+    other(format!(
+        "数据库结构与当前格式不符（{what}）。当前版本不支持修复，\
+         请删除数据库后重新启动，Session 会从已配置的 Agent 数据源重新摄入。"
+    ))
 }
 
 /// One object the current format is made of, and the `sqlite_master` type it

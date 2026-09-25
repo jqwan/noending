@@ -52,7 +52,7 @@ Tauri 2 + React + TypeScript + Rust + SQLite (FTS5)
 | Sync Engine | SyncJob（delta → pre-filter → extract → merge → cursor），Context 路由只认 Session 的 Owner Workstream；确定性 Merge Engine（Dedup / Supersede / Resolve / Conflict 保留不自动覆盖），Authority 分级（user_edit 不可被 Agent 静默覆盖） |
 | Context Builder | New / Resume 两种模式的最小充分上下文 bundle + token budget |
 | Launcher | New Session / Resume Session（先同步 stale session，再注入 bundle 启动 CLI） |
-| Search | SQLite FTS5（FTS 不可用时 LIKE 兜底），优先 Current Context |
+| Search | SQLite FTS5（token 内子串查询由 LIKE 兜底），优先 Current Context |
 | Workspace Assistant | Interactive Mode v0（基于 Domain API 检索）；Background Mode 即 Sync Engine，LLM Runtime 通过 trait 预留接入 |
 
 ## 运行

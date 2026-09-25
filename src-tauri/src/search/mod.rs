@@ -37,7 +37,19 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     if q.is_empty() {
         return Ok(vec![]);
     }
-    let fts_q = to_fts_query(q);
+    let hits = fts_search(db, q, limit)?;
+    if hits.is_empty() {
+        // FTS5 MATCH compares whole tokens, so a query that sits *inside* a
+        // token — a substring of an identifier, or CJK without spaces — is only
+        // answerable by LIKE.
+        return like_search(db, q, limit);
+    }
+    Ok(hits)
+}
+
+/// The FTS5 pass. A failing statement is a real error now that the index is a
+/// required part of the format, and must not be hidden behind the LIKE pass.
+fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let sql = format!(
         "SELECT kind, ref_id, parent_id, title,
                snippet(search_index, 4, '「', '」', '…', 12),
@@ -46,38 +58,25 @@ pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
                AND {ACTIVE_EVENT_GUARD}
                ORDER BY bm25(search_index) LIMIT ?2"
     );
-    // Scoped via the closure: the reader guard must drop before
-    // `looks_indexed` / `like_search` run — they take their own read
-    // lock, and re-entry on it deadlocks just like the writer's would.
-    let hits: Option<Vec<SearchHit>> = (|| {
-        let conn = db.read();
-        let mut st = conn.prepare(&sql).ok()?;
-        let rows = st.query_map(params![fts_q, limit], |r| {
-            Ok(SearchHit {
-                kind: r.get(0)?,
-                ref_id: r.get(1)?,
-                parent_id: r.get(2)?,
-                title: r.get(3)?,
-                snippet: r.get(4)?,
-                rank: r.get::<_, f64>(5)?,
-            })
-        });
-        let collected: Vec<SearchHit> = rows.ok()?.filter_map(|r| r.ok()).collect();
-        Some(collected)
-    })();
-    match hits {
-        Some(hits) if !hits.is_empty() || looks_indexed(db, q) => Ok(hits),
-        // fall through to LIKE when FTS finds nothing (e.g. tokenization)
-        _ => like_search(db, q, limit),
-    }
-}
-
-fn looks_indexed(db: &Db, _q: &str) -> bool {
-    db.read()
-        .query_row("SELECT COUNT(*) > 0 FROM search_index", [], |r| {
-            r.get::<_, bool>(0)
+    let conn = db.read();
+    let mut st = conn.prepare(&sql)?;
+    let rows = st.query_map(params![to_fts_query(q), limit], |r| {
+        Ok(SearchHit {
+            kind: r.get(0)?,
+            ref_id: r.get(1)?,
+            // FTS columns admit NULL: a Workstream with no primary path has no
+            // parent Project, and it still has to be findable.
+            parent_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            title: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            snippet: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            rank: r.get::<_, f64>(5)?,
         })
-        .unwrap_or(false)
+    })?;
+    let mut hits = Vec::new();
+    for row in rows {
+        hits.push(row?);
+    }
+    Ok(hits)
 }
 
 fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
@@ -93,13 +92,20 @@ fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
         Ok(SearchHit {
             kind: r.get(0)?,
             ref_id: r.get(1)?,
-            parent_id: r.get(2)?,
-            title: r.get(3)?,
-            snippet: crate::adapters::truncate_text(&r.get::<_, String>(4)?, 160),
+            parent_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            title: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            snippet: crate::adapters::truncate_text(
+                &r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                160,
+            ),
             rank: 0.0,
         })
     })?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    let mut hits = Vec::new();
+    for row in rows {
+        hits.push(row?);
+    }
+    Ok(hits)
 }
 
 /// Build an FTS query: quote each term, AND them; tolerate CJK bigrams

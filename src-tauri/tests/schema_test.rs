@@ -319,6 +319,31 @@ fn incomplete_current_format_database_is_refused_without_repair() {
     }
 }
 
+/// The search index is the FTS5 virtual table the format declares: a plain
+/// table with the same name and columns would satisfy a name+type check and
+/// then fail on the first `MATCH`.
+#[test]
+fn a_plain_table_cannot_stand_in_for_the_fts_index() {
+    let path = db_path("plain-index");
+    let db = Db::open(path.path()).unwrap();
+    db.write()
+        .execute_batch(
+            "DROP TABLE search_index;
+             CREATE TABLE search_index (
+               kind TEXT NOT NULL, ref_id TEXT NOT NULL, parent_id TEXT NOT NULL,
+               title TEXT NOT NULL, body TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    drop(db);
+
+    let err = open_error(path.path());
+    assert!(
+        err.to_lowercase().contains("fts5"),
+        "refusal must name the FTS5 index, got: {err}"
+    );
+}
+
 /// A foreign SQLite file is not an empty database: it has objects of its own, so
 /// it is refused and left exactly as it was found.
 #[test]
