@@ -148,6 +148,14 @@ pub struct MergeContext {
     pub run_id: String,
     /// extractor runtime name; recorded as `created_by = sync:<runtime>`.
     pub runtime: String,
+    /// The ONE Workstream this run may write (方案 §3.3/§20). Every mutation is
+    /// checked against it before anything is stored: a Session has a single
+    /// Owner, so a SyncRun that wrote another Workstream's Context would make
+    /// routing a suggestion again. The check lives here rather than only in the
+    /// extractor because model output is untrusted input — an `item_id` the
+    /// transcript happened to contain must not become a write into a Workstream
+    /// this Session does not belong to.
+    pub workstream_id: String,
 }
 
 pub struct SyncEngine {
@@ -301,9 +309,24 @@ impl SyncEngine {
         runtime: &str,
         diagnostics: Vec<String>,
     ) -> Result<SyncJobOutput> {
+        // §21 — the Owner IS the routing target. `prepare` refuses to prepare an
+        // ownerless Session, so arriving here without one means a caller built a
+        // `PreparedSync` by hand: never write Context, a SyncRun or a cursor
+        // advance for a Session that has no Workstream to route into.
+        let Some(run_workstream) = pre.owner_workstream_id.clone() else {
+            return Ok(SyncJobOutput {
+                run_id: pre.run_id.clone(),
+                status: "no_owner".into(),
+                applied: 0,
+                skipped: 0,
+                unclassified: 0,
+                summary: "该 Session 没有 Owner Workstream，本次同步不处理 Context。".into(),
+            });
+        };
         let ctx = MergeContext {
             run_id: pre.run_id.clone(),
             runtime: runtime.to_string(),
+            workstream_id: run_workstream,
         };
         db.tx(|tx| {
             // §43 — commit-time trash guard, FIRST of the re-checks: a run

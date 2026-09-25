@@ -572,10 +572,11 @@ pub struct LaunchIntent {
     pub cwd: Option<String>,
     pub context_bundle_markdown: Option<String>,
     /// JSON snapshot of what the launched session actually received:
-    /// `{"bundle_id": "...", "by_workstream": {ws_id: [revision_id, ...]}}`.
-    /// Recorded as ContextDelivery rows when the intent matches a session,
-    /// so the first resume computes a true delta instead of re-sending
-    /// the full context.
+    /// `{"bundle_id": "...", "workstream_id": "...", "revisions": [...],
+    /// "conflicts": [...]}`. One bundle belongs to one Workstream, so the ids
+    /// are plain lists. Recorded as a ContextDelivery row when the intent
+    /// matches a session, so the first resume computes a true delta instead of
+    /// re-sending the full context.
     pub context_bundle_revisions: Option<String>,
     pub process_id: Option<u32>,
     pub launched_at: String,

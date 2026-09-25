@@ -37,7 +37,7 @@ pub struct Db {
 
 /// Current database shape. New databases are created directly; an older or
 /// newer version must be rebuilt with the current application.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -284,7 +284,7 @@ impl Db {
               id TEXT PRIMARY KEY,
               launch_type TEXT NOT NULL DEFAULT 'new',
               agent TEXT NOT NULL,
-              owner_workstream_id TEXT,
+              owner_workstream_id TEXT REFERENCES workstreams(id) ON DELETE SET NULL,
               cwd TEXT,
               context_bundle_markdown TEXT,
               context_bundle_revisions TEXT,
@@ -1174,25 +1174,7 @@ impl Db {
     /// mutation happens here (方案 §5.1).
     pub fn set_session_owner(&self, session_id: &str, workstream_id: Option<&str>) -> Result<()> {
         let conn = self.write();
-        if let Some(id) = workstream_id {
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workstreams WHERE id = ?1)",
-                params![id],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(other(format!("未知 Workstream: {id}")));
-            }
-        }
-        let changed = conn.execute(
-            "UPDATE sessions SET owner_workstream_id = ?2 WHERE id = ?1",
-            params![session_id, workstream_id],
-        )?;
-        if changed == 0 {
-            return Err(other(format!("未知 Session: {session_id}")));
-        }
-        index_session_conn(&conn, session_id)?;
-        Ok(())
+        set_session_owner_conn(&conn, session_id, workstream_id)
     }
 
     /// Active Sessions that own `workstream_id`, most recent activity first
@@ -1608,11 +1590,7 @@ impl Db {
         note: &str,
     ) -> Result<()> {
         let conn = self.write();
-        conn.execute(
-            "UPDATE launch_intents SET status = ?2, matched_session_id = COALESCE(?3, matched_session_id), note = ?4, updated_at = ?5 WHERE id = ?1",
-            params![id, status, matched_session_id, note, now()],
-        )?;
-        Ok(())
+        update_launch_intent_conn(&conn, id, status, matched_session_id, note)
     }
 
     pub fn get_launch_intent(&self, id: &str) -> Result<Option<LaunchIntent>> {
@@ -1655,20 +1633,7 @@ impl Db {
 
     pub fn record_delivery(&self, d: &ContextDelivery) -> Result<()> {
         let conn = self.write();
-        conn.execute(
-            "INSERT INTO context_deliveries (id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                d.id,
-                d.session_id,
-                d.workstream_id,
-                d.bundle_id,
-                serde_json::to_string(&d.delivered_revisions)?,
-                serde_json::to_string(&d.delivered_conflicts)?,
-                d.delivered_at,
-            ],
-        )?;
-        Ok(())
+        record_delivery_conn(&conn, d)
     }
 
     /// Latest successful delivery per workstream for a session.
@@ -2183,6 +2148,76 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
         "INSERT OR IGNORE INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
          VALUES (?1, ?2, '[]', ?2)",
         params![w.id, w.created_at],
+    )?;
+    Ok(())
+}
+
+/// Set (or clear) a Session's single Owner Workstream through a caller-held
+/// connection, so a launch match can write ownership together with everything
+/// that must agree with it in ONE transaction.
+///
+/// The target Workstream is checked to exist: a Session pointing at a row that
+/// is not there would be a silently broken owner. The search document is
+/// refreshed inside the same connection (§39) — an ownership change that never
+/// reached the index would leave the Session searchable under its old label.
+pub fn set_session_owner_conn(
+    conn: &Connection,
+    session_id: &str,
+    workstream_id: Option<&str>,
+) -> Result<()> {
+    if let Some(id) = workstream_id {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workstreams WHERE id = ?1)",
+            params![id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(other(format!("未知 Workstream: {id}")));
+        }
+    }
+    let changed = conn.execute(
+        "UPDATE sessions SET owner_workstream_id = ?2 WHERE id = ?1",
+        params![session_id, workstream_id],
+    )?;
+    if changed == 0 {
+        return Err(other(format!("未知 Session: {session_id}")));
+    }
+    index_session_conn(conn, session_id)
+}
+
+/// Record one Context delivery through a caller-held connection. The matched
+/// Session already received this bundle, so this is normally written inside
+/// the match transaction, not as a step of its own.
+pub fn record_delivery_conn(conn: &Connection, d: &ContextDelivery) -> Result<()> {
+    conn.execute(
+        "INSERT INTO context_deliveries (id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            d.id,
+            d.session_id,
+            d.workstream_id,
+            d.bundle_id,
+            serde_json::to_string(&d.delivered_revisions)?,
+            serde_json::to_string(&d.delivered_conflicts)?,
+            d.delivered_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Move a LaunchIntent to a new status through a caller-held connection.
+/// `matched_session_id` is sticky: passing `None` keeps whatever was recorded
+/// (a later status edit must not erase the Session that claimed the intent).
+pub fn update_launch_intent_conn(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    matched_session_id: Option<&str>,
+    note: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE launch_intents SET status = ?2, matched_session_id = COALESCE(?3, matched_session_id), note = ?4, updated_at = ?5 WHERE id = ?1",
+        params![id, status, matched_session_id, note, now()],
     )?;
     Ok(())
 }

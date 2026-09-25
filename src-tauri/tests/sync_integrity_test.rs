@@ -78,38 +78,35 @@ fn user_item(
 // Issue #3: transactions
 // ---------------------------------------------------------------------------
 
-/// A DB failure in the middle of the mutation batch must roll back the
-/// whole run: earlier mutations, the SyncRun row and the processed cursor
-/// all disappear. (Foreign-keys are ON, so an Add pointing at a missing
-/// workstream reliably fails at the DB level.)
+/// A DB failure anywhere in the run's transaction must roll back the whole
+/// run: earlier mutations, the SyncRun row and the processed cursor all
+/// disappear.
+///
+/// The failure is injected at the cursor write (a Session that does not
+/// exist), not by an out-of-owner mutation: since the single-owner boundary
+/// landed, a mutation aimed at another Workstream is refused deterministically
+/// and SKIPPED — it never reaches the FK, so it is no longer a way to fail a
+/// run (that behaviour is pinned by
+/// `mutations_outside_the_owner_are_skipped_not_written`).
 #[test]
 fn mutation_failure_rolls_back_entire_run() {
     let db = open_db("rollback");
     let s = session_row(&db);
     let ws = ws_row(&db, "real workstream");
 
-    let mutations = vec![
-        ContextMutation::Add {
-            workstream_id: ws.id.clone(),
-            item_kind: "note".into(),
-            title: "first mutation".into(),
-            content: "ok".into(),
-            source_refs: vec![],
-            authority: "agent_inferred".into(),
-        },
-        ContextMutation::Add {
-            workstream_id: "ws-does-not-exist".into(), // FK violation
-            item_kind: "note".into(),
-            title: "second mutation".into(),
-            content: "boom".into(),
-            source_refs: vec![],
-            authority: "agent_inferred".into(),
-        },
-    ];
+    let mutations = vec![ContextMutation::Add {
+        workstream_id: ws.id.clone(),
+        item_kind: "note".into(),
+        title: "first mutation".into(),
+        content: "ok".into(),
+        source_refs: vec![],
+        authority: "agent_inferred".into(),
+    }];
 
     let ctx = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
     let run = noending::domain::SyncRun {
         id: ctx.run_id.clone(),
@@ -131,7 +128,8 @@ fn mutation_failure_rolls_back_entire_run() {
             MergeEngine.apply(tx, m, &ctx)?;
         }
         insert_sync_run_conn(tx, &run)?;
-        set_processed_sequence_conn(tx, &s.id, 5)?;
+        // FK violation: there is no such Session to advance.
+        set_processed_sequence_conn(tx, "missing-session", 5)?;
         Ok(())
     });
     assert!(
@@ -142,7 +140,7 @@ fn mutation_failure_rolls_back_entire_run() {
     // everything rolled back
     assert!(
         db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
-        "the first (valid) mutation must NOT survive the rollback"
+        "the applied mutation must NOT survive the rollback"
     );
     assert_eq!(db.list_sync_runs(50).unwrap().len(), 0, "no SyncRun row");
     assert_eq!(
@@ -171,32 +169,29 @@ fn retry_after_rollback_applies_once_and_commit_is_idempotent() {
         }]
     };
 
-    // 1st attempt fails mid-batch (bad second mutation)
+    // 1st attempt fails after the mutation was applied
     let ctx = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
-    let mut mutations = mk_mutations();
-    mutations.push(ContextMutation::Add {
-        workstream_id: "missing-ws".into(),
-        item_kind: "note".into(),
-        title: "bad".into(),
-        content: "x".into(),
-        source_refs: vec![],
-        authority: "agent_inferred".into(),
-    });
     let failed = db.tx(|tx| {
-        for m in &mutations {
+        for m in &mk_mutations() {
             MergeEngine.apply(tx, m, &ctx)?;
         }
-        Ok(())
+        set_processed_sequence_conn(tx, "missing-session", 1)
     });
     assert!(failed.is_err());
+    assert!(
+        db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
+        "the failed attempt left nothing behind"
+    );
 
     // retry with only the good mutation succeeds exactly once
     let ctx2 = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
     db.tx(|tx| {
         for m in mk_mutations() {
@@ -211,6 +206,7 @@ fn retry_after_rollback_applies_once_and_commit_is_idempotent() {
     let ctx3 = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
     let applied_again = db
         .tx(|tx| {
@@ -410,6 +406,7 @@ fn agent_update_of_user_item_creates_conflict_not_overwrite() {
     let ctx = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
     let applied = db.tx(|tx| MergeEngine.apply(tx, &m, &ctx)).unwrap();
     assert!(applied, "the disagreement is recorded (as a conflict)");
@@ -449,6 +446,7 @@ fn agent_supersede_and_resolve_of_user_items_never_apply() {
     let ctx = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
 
     let sup = ContextMutation::Supersede {
@@ -504,6 +502,7 @@ fn agent_may_evolve_agent_owned_items_with_full_trail() {
     let ctx = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
     let update = ContextMutation::Update {
         item_id: item.id.clone(),
@@ -608,6 +607,7 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
     let ctx = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
 
     let add = ContextMutation::Add {
@@ -657,6 +657,7 @@ fn dedup_update_path_also_persists_revision() {
     let ctx = MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        workstream_id: ws.id.clone(),
     };
 
     let add = ContextMutation::Add {

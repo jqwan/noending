@@ -518,6 +518,9 @@ fn auto_created_workstream_may_have_no_project() {
     let ctx = noending::sync::MergeContext {
         run_id: new_id(),
         runtime: "heuristic".into(),
+        // This case is about `create_workstream`, which writes no existing
+        // Workstream's context: the owner boundary does not apply to it.
+        workstream_id: "ws-none".into(),
     };
     let m = noending::sync::ContextMutation::CreateWorkstream {
         title: "自动发现的新工作流".into(),
@@ -635,7 +638,9 @@ fn launch_intent_match_records_delivery_snapshot() {
         context_bundle_revisions: Some(
             serde_json::json!({
                 "bundle_id": "bundle-1",
-                "by_workstream": { ws.id.clone(): [head_rev(&items[0].id)] }
+                "workstream_id": ws.id.clone(),
+                "revisions": [head_rev(&items[0].id)],
+                "conflicts": [],
             })
             .to_string(),
         ),
@@ -1791,9 +1796,9 @@ fn apply_match_handles_conflict_only_bundle() {
         context_bundle_revisions: Some(
             serde_json::json!({
                 "bundle_id": "b-test",
-                "conflicts_by_workstream": {
-                    ws.id.clone(): [conflict_id.clone()]
-                }
+                "workstream_id": ws.id.clone(),
+                "revisions": [],
+                "conflicts": [conflict_id.clone()],
             })
             .to_string(),
         ),

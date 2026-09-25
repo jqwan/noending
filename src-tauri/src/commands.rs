@@ -503,12 +503,13 @@ pub fn sync_source(
     state: State<AppState>,
     source_id: String,
 ) -> Result<serde_json::Value> {
+    let workspace = launch_workspace(&app);
     spawn_sync_job(&app, &state, move |db, notify| {
         let source = db
             .get_ingest_source(&source_id)?
             .ok_or_else(|| other("数据源不存在"))?;
         let engine = crate::sync::SyncEngine::from_settings(db);
-        crate::ingestion::reconcile_source(db, &engine, &source, &|s| {
+        crate::ingestion::reconcile_source(db, &engine, &source, &workspace, &|s| {
             notify(serde_json::json!({
                 "agent": s.agent.as_str(),
                 "title": s.title,
@@ -519,19 +520,20 @@ pub fn sync_source(
 }
 
 /// 重新摄入某一个数据源：重置游标后重新抓取，已入库事件去重追加，
-/// 绑定、上下文条目和审计历史保留（后台执行）。
+/// 所属任务（Owner）、上下文条目和审计历史保留（后台执行）。
 #[tauri::command]
 pub fn reingest_source(
     app: AppHandle,
     state: State<AppState>,
     source_id: String,
 ) -> Result<serde_json::Value> {
+    let workspace = launch_workspace(&app);
     spawn_sync_job(&app, &state, move |db, notify| {
         let source = db
             .get_ingest_source(&source_id)?
             .ok_or_else(|| other("数据源不存在"))?;
         let engine = crate::sync::SyncEngine::from_settings(db);
-        crate::ingestion::reingest_source(db, &engine, &source, &|s| {
+        crate::ingestion::reingest_source(db, &engine, &source, &workspace, &|s| {
             notify(serde_json::json!({
                 "agent": s.agent.as_str(),
                 "title": s.title,

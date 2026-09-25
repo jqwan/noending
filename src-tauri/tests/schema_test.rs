@@ -120,6 +120,26 @@ fn fresh_database_is_already_in_the_current_shape() {
         assert_eq!(indexed, 1, "idx_sessions_owner_workstream is missing");
     }
 
+    // 方案 §15.1 — a pending LaunchIntent's chosen Owner follows the same rule
+    // as a Session's: deleting the Workstream nulls it. Without the FK the
+    // intent would keep a dangling id, the match would fail forever and the
+    // discovered Session would be left permanently ownerless.
+    {
+        let intent_owner_fk: String = db
+            .read()
+            .query_row(
+                "SELECT \"table\" || '|' || on_delete FROM pragma_foreign_key_list('launch_intents')
+                  WHERE \"from\" = 'owner_workstream_id'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            intent_owner_fk, "workstreams|SET NULL",
+            "launch_intents.owner_workstream_id must be workstreams(id) ON DELETE SET NULL"
+        );
+    }
+
     db.write()
         .execute(
             "INSERT INTO settings (key, value) VALUES ('schema-test', 'persists')",

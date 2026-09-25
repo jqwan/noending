@@ -9,6 +9,13 @@
 //! chains), resolve, conflict (persisted ContextConflict rows; the user's
 //! item is never silently overwritten). Every applied mutation produces a
 //! new revision with full source trail.
+//!
+//! Owner boundary (方案 §3.3/§20): a run may only write the Workstream the
+//! Session owns. `update` / `supersede` / `resolve` name their target by
+//! `item_id`, and that id comes from model output — untrusted input that may
+//! echo an id found anywhere in the transcript. The check therefore lives
+//! here, on the deterministic side, and not only in the extractor's parser:
+//! see [`MergeEngine::is_within_owner`].
 
 use rusqlite::Connection;
 
@@ -33,6 +40,9 @@ impl MergeEngine {
         m: &ContextMutation,
         ctx: &MergeContext,
     ) -> Result<bool> {
+        if !self.is_within_owner(conn, m, ctx)? {
+            return Ok(false);
+        }
         match m {
             ContextMutation::Add {
                 workstream_id,
@@ -242,6 +252,58 @@ impl MergeEngine {
                 )?;
                 Ok(true)
             }
+        }
+    }
+
+    /// §3.3/§20 — may this mutation touch the run's Owner Workstream at all?
+    ///
+    /// Checked once, before any write, so "a SyncRun only ever writes its
+    /// Owner" holds for every op instead of by per-arm inspection:
+    ///
+    /// * `add` / `conflict` carry their target workstream: it must be the owner.
+    /// * `update` / `supersede` / `resolve` name an item instead — the item is
+    ///   looked up and must belong to the owner. `item_id` is model output, so
+    ///   this is the boundary where an id copied out of the transcript stops
+    ///   being a way to write someone else's Context.
+    /// * `conflict` additionally links the item it disagrees with: a foreign
+    ///   `item_id` would drag another Workstream's item into this one's
+    ///   conflict, so the whole mutation is refused.
+    /// * `create_workstream` writes no existing Workstream's context — it
+    ///   brings a new one into being and is out of this boundary's scope.
+    ///
+    /// The lookup duplicates the read each arm already does; a run carries at
+    /// most a handful of mutations, and one auditable boundary is worth one
+    /// indexed point read.
+    fn is_within_owner(
+        &self,
+        conn: &Connection,
+        m: &ContextMutation,
+        ctx: &MergeContext,
+    ) -> Result<bool> {
+        let owner = ctx.workstream_id.as_str();
+        match m {
+            ContextMutation::Add { workstream_id, .. } => Ok(workstream_id == owner),
+            ContextMutation::Conflict {
+                workstream_id,
+                item_id,
+                ..
+            } => {
+                if workstream_id != owner {
+                    return Ok(false);
+                }
+                if item_id.is_empty() {
+                    return Ok(true);
+                }
+                Ok(get_item_conn(conn, item_id)?
+                    .map(|item| item.workstream_id == owner)
+                    .unwrap_or(false))
+            }
+            ContextMutation::Update { item_id, .. }
+            | ContextMutation::Supersede { item_id, .. }
+            | ContextMutation::Resolve { item_id, .. } => Ok(get_item_conn(conn, item_id)?
+                .map(|item| item.workstream_id == owner)
+                .unwrap_or(false)),
+            ContextMutation::CreateWorkstream { .. } => Ok(true),
         }
     }
 

@@ -327,13 +327,43 @@ impl SessionLauncher {
             .ok_or_else(|| other("Session 不存在"))?;
         // §10 — a trashed session is inactive and must not resume. All resume
         // entries (command layer, Assistant, legacy one-shot) funnel through
-        // here, so this is the single prepare-side gate.
+        // here, so this is the single prepare-side gate. This first read is the
+        // early exit only; the preparation below re-reads after the sync.
         if session.is_trashed() {
             return Err(other("会话已在回收站，无法继续；请先恢复会话"));
         }
 
         let engine = crate::sync::SyncEngine::from_settings(db);
         sync_one_session_with_engine(db, &engine, &session)?;
+
+        self.prepare_resume_from_current(db, session_id, workspace)
+    }
+
+    /// The post-sync half of Resume preparation, reading the Session row AS IT
+    /// IS NOW.
+    ///
+    /// Sync runs without holding the DB lock, so by the time it returns the
+    /// user may have moved the Session to another Workstream (which is exactly
+    /// what sync's own owner CAS tolerates). Everything that decides what the
+    /// Agent receives — Owner, cwd, bundle — must therefore come from a read
+    /// taken *after* the sync: resuming under the pre-sync Owner would deliver
+    /// Workstream A's context and directory to a Session that now belongs to B.
+    /// The lifecycle gate is repeated here because the same window can also
+    /// trash the Session.
+    ///
+    /// Public so the ownership rule is directly testable.
+    pub fn prepare_resume_from_current(
+        &self,
+        db: &Db,
+        session_id: &str,
+        workspace: &LaunchWorkspace,
+    ) -> Result<PreparedLaunch> {
+        let session = db
+            .get_session(session_id)?
+            .ok_or_else(|| other("Session 不存在"))?;
+        if session.is_trashed() {
+            return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+        }
 
         let owner = session.owner_workstream_id.clone();
 
@@ -470,11 +500,8 @@ impl SessionLauncher {
         };
 
         if prepared.mode == "new" {
-            let (delivered_by_ws, delivered_confs_by_ws) = if ctx_file.is_some() {
-                delivered_revisions_and_conflicts_by_workstream(
-                    &prepared.bundle,
-                    prepared.owner_workstream_id.as_deref().unwrap_or(""),
-                )
+            let (delivered_revisions, delivered_conflicts) = if ctx_file.is_some() {
+                delivered_revisions_and_conflicts(&prepared.bundle)
             } else {
                 Default::default()
             };
@@ -493,8 +520,9 @@ impl SessionLauncher {
                     Some(
                         serde_json::json!({
                             "bundle_id": prepared.bundle.bundle_id,
-                            "by_workstream": delivered_by_ws,
-                            "conflicts_by_workstream": delivered_confs_by_ws,
+                            "workstream_id": prepared.owner_workstream_id,
+                            "revisions": delivered_revisions,
+                            "conflicts": delivered_conflicts,
                         })
                         .to_string(),
                     )
@@ -875,36 +903,29 @@ pub fn compute_state_fingerprint_in(
     Ok(format!("{:x}", hash))
 }
 
-/// Group the bundle's delivered revision ids and conflict ids by the workstream that owns
-/// each section. Sections without a workstream attribution (rare) fall back to `fallback_ws`.
-pub fn delivered_revisions_and_conflicts_by_workstream(
+/// The bundle's delivered revision ids and conflict ids, in section order.
+///
+/// A bundle describes ONE Workstream, so there is nothing to group by any
+/// more: the ids ARE the delivery's lists (方案 §20). Duplicates are dropped
+/// because a revision can appear in two sections of the same bundle.
+pub fn delivered_revisions_and_conflicts(
     bundle: &crate::context::SessionContextBundle,
-    fallback_ws: &str,
-) -> (
-    std::collections::BTreeMap<String, Vec<String>>,
-    std::collections::BTreeMap<String, Vec<String>>,
-) {
-    let mut revs_by_ws: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    let mut confs_by_ws: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+) -> (Vec<String>, Vec<String>) {
+    let mut revisions: Vec<String> = Vec::new();
+    let mut conflicts: Vec<String> = Vec::new();
     for s in &bundle.sections {
-        let ws = s
-            .workstream_id
-            .clone()
-            .unwrap_or_else(|| fallback_ws.to_string());
         if let Some(rev) = &s.revision_id {
-            let entry = revs_by_ws.entry(ws.clone()).or_default();
-            if !entry.contains(rev) {
-                entry.push(rev.clone());
+            if !revisions.contains(rev) {
+                revisions.push(rev.clone());
             }
         }
         if let Some(cid) = &s.conflict_id {
-            let entry = confs_by_ws.entry(ws).or_default();
-            if !entry.contains(cid) {
-                entry.push(cid.clone());
+            if !conflicts.contains(cid) {
+                conflicts.push(cid.clone());
             }
         }
     }
-    (revs_by_ws, confs_by_ws)
+    (revisions, conflicts)
 }
 
 /// Compute cumulative delivery snapshot (Agent-Known State) for a workstream.
@@ -1423,71 +1444,64 @@ pub fn apply_match(
     session: &Session,
     _workspace: &LaunchWorkspace,
 ) -> Result<()> {
-    // The matched Session inherits the intent's Owner Workstream verbatim
-    // (方案 §15.1). Nothing else is written: no WorkstreamPath is added, and
-    // the Session's cwd / workspace_path_id / project_id stay untouched.
-    if let Some(ws_id) = intent.owner_workstream_id.as_deref() {
-        db.set_session_owner(&session.id, Some(ws_id))?;
-    }
-    // The matched session already RECEIVED the context bundle at launch:
-    // record the delivery snapshot now, so its first resume computes a true
-    // delta instead of re-sending the full context.
-    if let Some(snap) = &intent.context_bundle_revisions {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(snap) {
-            let bundle_id = v
-                .get("bundle_id")
-                .and_then(|b| b.as_str())
-                .unwrap_or(&intent.id)
-                .to_string();
-            let by_ws = v.get("by_workstream").and_then(|m| m.as_object());
-            let confs_by_ws = v.get("conflicts_by_workstream").and_then(|m| m.as_object());
+    // Parsed before the transaction: a malformed snapshot is a data problem,
+    // not a reason to leave a half-applied match behind.
+    let snapshot = intent
+        .context_bundle_revisions
+        .as_deref()
+        .and_then(|snap| serde_json::from_str::<serde_json::Value>(snap).ok());
 
-            let mut all_ws_ids = std::collections::BTreeSet::new();
-            if let Some(m) = by_ws {
-                all_ws_ids.extend(m.keys().cloned());
-            }
-            if let Some(m) = confs_by_ws {
-                all_ws_ids.extend(m.keys().cloned());
-            }
-
-            for ws_id in all_ws_ids {
-                let revisions: Vec<String> = by_ws
-                    .and_then(|m| m.get(&ws_id))
+    db.tx(|tx| {
+        // The matched Session inherits the intent's Owner Workstream verbatim
+        // (方案 §15.1). Nothing else is written: no WorkstreamPath is added, and
+        // the Session's cwd / workspace_path_id / project_id stay untouched.
+        if let Some(ws_id) = intent.owner_workstream_id.as_deref() {
+            crate::storage::set_session_owner_conn(tx, &session.id, Some(ws_id))?;
+        }
+        // The matched session already RECEIVED the context bundle at launch:
+        // record the delivery snapshot now, so its first resume computes a true
+        // delta instead of re-sending the full context. One bundle, one
+        // Workstream — the intent's Owner is the delivery's Workstream.
+        if let (Some(ws_id), Some(v)) = (intent.owner_workstream_id.as_deref(), &snapshot) {
+            let ids = |key: &str| -> Vec<String> {
+                v.get(key)
                     .and_then(|a| a.as_array())
                     .map(|a| {
                         a.iter()
                             .filter_map(|x| x.as_str().map(String::from))
                             .collect()
                     })
-                    .unwrap_or_default();
-                let conflicts: Vec<String> = confs_by_ws
-                    .and_then(|c| c.get(&ws_id))
-                    .and_then(|a| a.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                db.record_delivery(&ContextDelivery {
+                    .unwrap_or_default()
+            };
+            crate::storage::record_delivery_conn(
+                tx,
+                &ContextDelivery {
                     id: new_id(),
                     session_id: session.id.clone(),
-                    workstream_id: ws_id,
-                    bundle_id: bundle_id.clone(),
-                    delivered_revisions: revisions,
-                    delivered_conflicts: conflicts,
+                    workstream_id: ws_id.to_string(),
+                    bundle_id: v
+                        .get("bundle_id")
+                        .and_then(|b| b.as_str())
+                        .unwrap_or(&intent.id)
+                        .to_string(),
+                    delivered_revisions: ids("revisions"),
+                    delivered_conflicts: ids("conflicts"),
                     delivered_at: now(),
-                })?;
-            }
+                },
+            )?;
         }
-    }
-    db.update_launch_intent(
-        &intent.id,
-        launch_status::MATCHED,
-        Some(&session.id),
-        &format!("自动匹配：session {}", session.id),
-    )?;
-    Ok(())
+        // Status LAST and inside the same transaction: an intent that says
+        // MATCHED always has the Session, its Owner and its delivery to go
+        // with it, and none of the three can land without the others.
+        crate::storage::update_launch_intent_conn(
+            tx,
+            &intent.id,
+            launch_status::MATCHED,
+            Some(&session.id),
+            &format!("自动匹配：session {}", session.id),
+        )?;
+        Ok(())
+    })
 }
 
 /// Pending intents that never produced a session expire; ambiguous ones

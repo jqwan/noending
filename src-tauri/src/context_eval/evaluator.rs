@@ -408,6 +408,7 @@ pub fn run_domain_golden(fixture: &ContextQualityFixture) -> Result<Db> {
     let merge_ctx = MergeContext {
         run_id: format!("eval-run-{name}"),
         runtime: "eval-harness".into(),
+        workstream_id: owner_workstream_id.clone(),
     };
 
     db.tx(|tx| {
@@ -496,6 +497,7 @@ pub fn evaluate_extractor(
     let merge_ctx = MergeContext {
         run_id: format!("eval-run-{name}-{}", extractor.name()),
         runtime: "eval-harness".into(),
+        workstream_id: env.owner_workstream_id.clone(),
     };
     env.db
         .tx(|tx| {

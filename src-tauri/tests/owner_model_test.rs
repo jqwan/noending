@@ -818,3 +818,392 @@ fn workstream_session_stats_count_only_owned_sessions() {
     assert_eq!(db.workstream_session_stats(&a.id).unwrap().0, 1);
     assert_eq!(db.workstream_session_stats(&b.id).unwrap().0, 1);
 }
+
+// --------------------------------- §43 the Owner is the only write target
+
+/// §3.3/§20 — a run writes its Owner Workstream and nothing else.
+///
+/// `update` / `supersede` / `resolve` name their target by `item_id`, and that
+/// id comes from model output: untrusted text that may echo an identifier
+/// found anywhere in the transcript. The boundary therefore lives in the merge
+/// engine, on the deterministic side — an id from another Workstream is a
+/// skip, not a way in.
+#[test]
+fn mutations_outside_the_owner_are_skipped_not_written() {
+    use noending::sync::merge::MergeEngine;
+    use noending::sync::{create_item, MergeContext};
+
+    let db = open_db("merge-owner-boundary");
+    let a = workstream(&db, "A");
+    let b = workstream(&db, "B");
+
+    // B owns an item; the run below is owned by A and never names A's items.
+    let foreign = create_item(
+        &db,
+        &b.id,
+        "decision",
+        "属于 B 的决定",
+        "B 的内容",
+        "agent_inferred",
+        "session_event",
+        &[],
+        None,
+        "sync:other",
+    )
+    .unwrap();
+    let before = db.get_item(&foreign.id).unwrap().unwrap();
+
+    let ctx = MergeContext {
+        run_id: new_id(),
+        runtime: "probe".into(),
+        workstream_id: a.id.clone(),
+    };
+    let mutations = vec![
+        ContextMutation::Add {
+            workstream_id: b.id.clone(),
+            item_kind: "decision".into(),
+            title: "偷渡进 B".into(),
+            content: "x".into(),
+            source_refs: vec![],
+            authority: "agent_statement".into(),
+        },
+        ContextMutation::Update {
+            item_id: foreign.id.clone(),
+            title: "被改写".into(),
+            content: "y".into(),
+            source_refs: vec![],
+            authority: "agent_statement".into(),
+        },
+        ContextMutation::Supersede {
+            item_id: foreign.id.clone(),
+            title: "被取代".into(),
+            content: "z".into(),
+            source_refs: vec![],
+            authority: "agent_statement".into(),
+        },
+        ContextMutation::Resolve {
+            item_id: foreign.id.clone(),
+            source_refs: vec![],
+        },
+        // A conflict that links B's item into A's workstream: refused whole,
+        // because the linked item is not this run's to drag across.
+        ContextMutation::Conflict {
+            workstream_id: a.id.clone(),
+            item_id: foreign.id.clone(),
+            title: "跨库冲突".into(),
+            content: "c".into(),
+            source_refs: vec![],
+            reason: "模型判定与用户约束可能冲突".into(),
+        },
+        // The control: the same run CAN write its own Owner.
+        ContextMutation::Add {
+            workstream_id: a.id.clone(),
+            item_kind: "decision".into(),
+            title: "合法写入".into(),
+            content: "own".into(),
+            source_refs: vec![],
+            authority: "agent_statement".into(),
+        },
+    ];
+
+    let applied = db
+        .tx(|tx| {
+            let mut n = 0;
+            for m in &mutations {
+                if MergeEngine.apply(tx, m, &ctx)? {
+                    n += 1;
+                }
+            }
+            Ok(n)
+        })
+        .unwrap();
+
+    assert_eq!(applied, 1, "only the Owner's own mutation is applied");
+
+    // B is untouched: same head, same status, no new item, no conflict.
+    let after = db.get_item(&foreign.id).unwrap().unwrap();
+    assert_eq!(after.current_revision_id, before.current_revision_id);
+    assert_eq!(after.status, before.status);
+    assert_eq!(
+        db.items_for_workstream(&b.id, true).unwrap().len(),
+        1,
+        "nothing was added to B"
+    );
+    assert!(db.conflicts_for_workstream(&b.id, true).unwrap().is_empty());
+    assert!(
+        db.conflicts_for_workstream(&a.id, true).unwrap().is_empty(),
+        "the refused conflict must not land on A either"
+    );
+    assert_eq!(db.items_for_workstream(&a.id, true).unwrap().len(), 1);
+}
+
+// ------------------------- §43 resume reads the Owner after the sync seam
+
+/// §21-3 — Resume preparation reads ownership AFTER its sync, never from the
+/// snapshot taken before it.
+///
+/// Sync runs without the DB lock, so the user can move the Session to another
+/// Workstream while it is in flight (sync's own owner CAS tolerates exactly
+/// that). Preparing against the pre-sync Owner would deliver Workstream A's
+/// directory and bundle to a Session that now belongs to B.
+#[test]
+fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
+    let db = open_db("owner-resume-fresh");
+    seed_project(&db, "p1");
+    let paths = TempPaths::new(&db.dir, "p1");
+    let dir_a = paths.dir("repo-a");
+    let dir_b = paths.dir("repo-b");
+    let a = create_workstream(&db, &paths, "A", "", &[dir_a.clone()])
+        .unwrap()
+        .workstream;
+    let b = create_workstream(&db, &paths, "B", "", &[dir_b.clone()])
+        .unwrap()
+        .workstream;
+
+    // The Session's own cwd is gone, so the OWNER decides the launch
+    // directory — the only way the result can be evidence of which Owner was
+    // used (§13 tier 2).
+    let s = session(&db, Some("/gone/workspace"));
+    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
+
+    let launcher = SessionLauncher {
+        runtime_dir: db.dir.join("runtime"),
+    };
+    let workspace = LaunchWorkspace {
+        default_workspace: None,
+    };
+
+    let first = launcher
+        .prepare_resume_from_current(&db, &s.id, &workspace)
+        .unwrap();
+    assert_eq!(first.owner_workstream_id.as_deref(), Some(a.id.as_str()));
+    assert_eq!(first.cwd.as_deref(), Some(dir_a.as_str()));
+    assert_eq!(first.bundle.workstream_id.as_deref(), Some(a.id.as_str()));
+
+    // Ownership moves during the window in which sync would have been running.
+    db.set_session_owner(&s.id, Some(&b.id)).unwrap();
+
+    let second = launcher
+        .prepare_resume_from_current(&db, &s.id, &workspace)
+        .unwrap();
+    assert_eq!(second.owner_workstream_id.as_deref(), Some(b.id.as_str()));
+    assert_eq!(
+        second.cwd.as_deref(),
+        Some(dir_b.as_str()),
+        "the cwd tier follows the CURRENT Owner"
+    );
+    assert_eq!(second.bundle.workstream_id.as_deref(), Some(b.id.as_str()));
+
+    // And the end-to-end entry point (which syncs first) agrees.
+    let full = launcher.prepare_resume_in(&db, &s.id, &workspace).unwrap();
+    assert_eq!(full.owner_workstream_id.as_deref(), Some(b.id.as_str()));
+    assert_eq!(full.cwd.as_deref(), Some(dir_b.as_str()));
+}
+
+// ------------------- §43 first discovery, whichever door found the session
+
+/// A Codex rollout the real adapter discovers, so the source-scoped
+/// reconcile below runs the production discovery → row → ingest path.
+fn codex_rollout(dir: &std::path::Path, session_id: &str, cwd: &str) -> std::path::PathBuf {
+    let file = dir.join(format!("rollout-2026-09-22T21-17-07-{session_id}.jsonl"));
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n{}\n",
+            format_args!(
+                r#"{{"ordinal":0,"type":"session_meta","payload":{{"id":"{session_id}","cwd":"{cwd}","timestamp":"2026-09-22T21:17:07Z"}}}}"#
+            ),
+            r#"{"ordinal":1,"type":"response_item","timestamp":"2026-09-22T21:18:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"从 NoEnding 启动的新会话"}]}}"#
+        ),
+    )
+    .unwrap();
+    file
+}
+
+/// §15.1/§21 — a Session's Owner is decided ONCE, at first discovery: by a
+/// user action, or by the LaunchIntent that started it. A source-scoped sync
+/// discovers sessions too, so it must offer the same chance — otherwise the
+/// intent stays pending forever (the later full reconcile sees a known
+/// Session) and the Session is left permanently ownerless.
+#[test]
+fn source_scoped_reconcile_lets_a_first_discovery_claim_its_intent() {
+    use noending::domain::{ingest_origin, launch_status, IngestSource, LaunchIntent};
+    use noending::ingestion::reconcile_source;
+    use noending::sync::SyncEngine;
+
+    let db = open_db("owner-intent-source-first");
+    let a = workstream(&db, "A");
+
+    let dir = db.dir.join("codex-source");
+    std::fs::create_dir_all(&dir).unwrap();
+    codex_rollout(&dir, "rollout-thread-1", "/repo/app");
+
+    // The user launched a New Session for A: the intent exists BEFORE the
+    // agent session is discoverable (方案 §15.1).
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: "2026-09-22T21:17:07Z".into(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    let source = IngestSource {
+        id: new_id(),
+        agent: Agent::Codex,
+        path: dir.to_string_lossy().to_string(),
+        enabled: true,
+        origin: ingest_origin::USER.into(),
+        created_at: now(),
+    };
+
+    let engine = SyncEngine::default();
+    let (discovered, _) =
+        reconcile_source(&db, &engine, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    assert_eq!(discovered, 1, "the rollout fixture is discoverable");
+
+    let stored = db
+        .list_sessions(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|s| s.agent_session_id == "rollout-thread-1")
+        .expect("discovery created the Session row");
+    assert_eq!(
+        stored.owner_workstream_id.as_deref(),
+        Some(a.id.as_str()),
+        "first discovery must claim the pending LaunchIntent"
+    );
+    assert_eq!(
+        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
+        launch_status::MATCHED
+    );
+}
+
+// ---------------------- §43 a match is one atomic ownership handover
+
+/// A match writes the Owner, the delivery snapshot and the intent status as
+/// ONE unit: an intent that says MATCHED always has a Session that exists.
+#[test]
+fn a_failed_match_leaves_the_intent_pending() {
+    use noending::domain::{launch_status, LaunchIntent};
+    use noending::launcher::{apply_match, LaunchWorkspace};
+
+    let db = open_db("owner-match-atomic");
+    let a = workstream(&db, "A");
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    // A Session row that is not there: the owner write cannot land, and
+    // nothing else may land either.
+    let ghost = Session {
+        id: "no-such-session".into(),
+        agent: Agent::Codex,
+        agent_session_id: "ghost".into(),
+        title: None,
+        cwd: None,
+        workspace_path_id: None,
+        project_id: None,
+        owner_workstream_id: None,
+        raw_path: "/tmp/ghost.jsonl".into(),
+        parent_agent_session_id: None,
+        started_at: None,
+        last_activity_at: None,
+        trashed_at: None,
+    };
+    assert!(apply_match(&db, &intent, &ghost, &LaunchWorkspace::default()).is_err());
+
+    let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
+    assert_eq!(
+        stored.status,
+        launch_status::PENDING,
+        "a failed match must not consume the intent"
+    );
+    assert!(stored.matched_session_id.is_none());
+}
+
+/// Deleting the Workstream a pending intent pointed at clears the intent's
+/// Owner (`ON DELETE SET NULL`) instead of leaving a dangling id. The match
+/// then still lands — the Session simply inherits nothing, which is the
+/// honest answer when the chosen Workstream is gone.
+#[test]
+fn a_deleted_workstream_cannot_leave_a_dangling_intent_owner() {
+    use noending::domain::{launch_status, LaunchIntent};
+    use noending::launcher::{apply_match, LaunchWorkspace};
+
+    let db = open_db("owner-intent-ws-deleted");
+    let a = workstream(&db, "A");
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: Some(
+            serde_json::json!({
+                "bundle_id": "bundle-gone",
+                "workstream_id": a.id.clone(),
+                "revisions": [],
+                "conflicts": [],
+            })
+            .to_string(),
+        ),
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    archive_workstream(&db, &a.id).unwrap();
+    delete_workstream_permanently(&db, &a.id).unwrap();
+
+    let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
+    assert!(
+        stored.owner_workstream_id.is_none(),
+        "the FK must null the intent's Owner with the Workstream"
+    );
+
+    let s = session(&db, None);
+    apply_match(&db, &stored, &s, &LaunchWorkspace::default()).unwrap();
+    assert!(
+        owner_of(&db, &s.id).is_none(),
+        "there is nothing to inherit"
+    );
+    assert!(
+        db.latest_deliveries(&s.id).unwrap().is_empty(),
+        "no delivery for a bundle whose Workstream is gone"
+    );
+    assert_eq!(
+        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
+        launch_status::MATCHED
+    );
+}

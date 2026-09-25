@@ -275,6 +275,36 @@ fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> 
 /// `workspace` is §13's tier-3 fact, needed because a freshly discovered
 /// Session may claim a pending LaunchIntent: matching it asks whether that
 /// Session's cwd is just the shared default workspace, which is not in the DB.
+/// What a freshly discovered Session owes the workspace, wherever it was
+/// discovered from.
+///
+/// A Session acquires its Owner in exactly two ways: a user action, or the
+/// LaunchIntent that started it (方案 §15.1/§21). Matching is the only one
+/// ingestion can do, and it is available exactly ONCE — while the Session is
+/// new. So every discovery door (full reconcile, single source, re-ingest)
+/// has to run it: if a source-scoped sync discovers the Session first and does
+/// not match, the later full reconcile sees `is_new == false` and the intent
+/// stays pending forever, leaving the Session permanently ownerless.
+///
+/// A match failure is logged, never fatal: one bad intent must not abort the
+/// discovery pass that is ingesting everything else.
+pub fn finalize_newly_discovered_session(
+    db: &Db,
+    session: &Session,
+    is_new: bool,
+    workspace: &crate::launcher::LaunchWorkspace,
+) -> Result<()> {
+    if !is_new {
+        return Ok(());
+    }
+    match crate::launcher::try_match_launch_intents_in(db, session, workspace) {
+        Ok(true) => eprintln!("[ingest] launch intent matched to session {}", session.id),
+        Ok(false) => {}
+        Err(e) => eprintln!("[ingest] intent match failed for {}: {}", session.id, e),
+    }
+    Ok(())
+}
+
 pub fn reconcile_with_engine<F>(
     db: &Db,
     engine: &SyncEngine,
@@ -321,11 +351,7 @@ where
             if is_new {
                 // A brand-new external session may claim a pending
                 // LaunchIntent (crash recovery included).
-                match crate::launcher::try_match_launch_intents_in(db, &s, workspace) {
-                    Ok(true) => eprintln!("[reconcile] launch intent matched to session {}", s.id),
-                    Ok(false) => {}
-                    Err(e) => eprintln!("[reconcile] intent match failed: {}", e),
-                }
+                finalize_newly_discovered_session(db, &s, is_new, workspace)?;
                 // §42.2-E11 — no name-substring Project evidence is recorded
                 // any more. A Project is derived from the Session's
                 // WorkspacePath (§1.10), which `ensure_session_row` has just
@@ -357,10 +383,15 @@ where
 
 /// Sync one specific ingest source: discover sessions under that source's
 /// own path only, ingest + sync them.
+///
+/// Takes the [`crate::launcher::LaunchWorkspace`] because first discovery can
+/// happen here as easily as in a full reconcile, and a Session's Owner is
+/// decided once per Session — see [`finalize_newly_discovered_session`].
 pub fn reconcile_source<F>(
     db: &Db,
     engine: &SyncEngine,
     source: &IngestSource,
+    workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
@@ -373,7 +404,8 @@ where
     let discovered_count = discovered.len();
     let mut total_events = 0i64;
     for d in &discovered {
-        let s = ensure_session_row(db, d)?.0;
+        let (s, is_new) = ensure_session_row(db, d)?;
+        finalize_newly_discovered_session(db, &s, is_new, workspace)?;
         // §8 — trashed sessions are skipped entirely.
         if s.is_trashed() {
             continue;
@@ -396,10 +428,14 @@ where
 ///
 /// Deliberately passes the all-false "unchanged" predicate: a re-ingest
 /// WANTS to re-read every file, cursor match or not.
+///
+/// Like [`reconcile_source`], it takes the launch workspace so a Session it
+/// discovers first still gets the chance to claim its LaunchIntent.
 pub fn reingest_source<F>(
     db: &Db,
     engine: &SyncEngine,
     source: &IngestSource,
+    workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
@@ -411,7 +447,8 @@ where
     let discovered_count = discovered.len();
     let mut total_events = 0i64;
     for d in &discovered {
-        let (s, _is_new) = ensure_session_row(db, d)?;
+        let (s, is_new) = ensure_session_row(db, d)?;
+        finalize_newly_discovered_session(db, &s, is_new, workspace)?;
         // §8 — a trashed session keeps its cursor untouched: no rewind,
         // no re-scan. (Its source file is also invisible to discovery
         // updates, so a rewind would be a mutation with no consumer.)
