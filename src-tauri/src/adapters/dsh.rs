@@ -13,13 +13,19 @@
 //! Record shape (decoded):
 //! - line 0 is the session header `{type:"session", version, id, createdAt,
 //!   cwd, …}`; it is the only record without a `seq`;
-//! - every later record is `{type, seq, time, data}` and only the conversation
-//!   is ingested: `user/message`, `assistant/message`, and `compaction/*` as a
-//!   boundary marker. `assistant/chunk` (v0/v1 token deltas), `tool/call`,
-//!   `tool/result`, `todo/write`, `request/*`, `session/title*` and the
-//!   turn/step bookkeeping are machine traffic and are dropped (§36.11).
+//! - every later record is `{type, seq, time, data}`. The header's
+//!   `parentSession` / `origin` / `delegationDepth` name the member graph
+//!   directly (§26.4): a transcript with a `parentSession` is a CHILD member
+//!   of that parent; without one it is a ROOT.
+//! - Only the ROOT's conversation is ingested: `user/message` (real user
+//!   turns) and `assistant/message`. A `user/message` that carries
+//!   `data.source.senderSessionId` was sent by another session — execution
+//!   observation (side activity), never conversation. `assistant/chunk`
+//!   (v0/v1 token deltas), `tool/call`, `tool/result`, `todo/write`,
+//!   `request/*`, `session/title*` and the turn/step bookkeeping are machine
+//!   traffic and are dropped or counted (§36.11).
 //! - `seq` is writer-assigned, contiguous and monotonic within a generation,
-//!   so it is the native event id — dedup is exact and position-independent.
+//!   so it is the native message id — dedup is exact and position-independent.
 //!
 //! Two shapes need real work:
 //! - **The user turn is not always the user's words.** dsh injects its own
@@ -29,9 +35,10 @@
 //!   as codex's `<…>`/`#` injections are for the title.
 //! - **Cursor coordinates.** The shared reader's offsets live in the bytes it
 //!   parses, and those are decoded here, not on disk. This adapter reads the
-//!   whole decoded body every time and lets `seq` dedup absorb it, while the
-//!   stored cursor keeps raw-file identity/size/mtime so the reconcile
-//!   pre-filter ("already ingested and stat-identical") still works.
+//!   whole decoded body every time and lets message identity absorb it, while
+//!   the stored cursor keeps raw-file identity/size/mtime so the reconcile
+//!   pre-filter ("already ingested and stat-identical") still works. Because
+//!   every replay is a full scan, its observations become a stats SNAPSHOT.
 //!
 //! There is no launchable CLI: `dsh --profile <name>` needs a profile name
 //! that is the user's own setup, and NoEnding cannot know it — guessing one
@@ -43,9 +50,11 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, AgentCommand, DiscoveredSession, ExecOptions, ParsedLine, ReadDelta,
+    ms_epoch_to_rfc3339, replay_cursor_update, AgentCommand, DiscoveredMember,
+    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta, ParsedLine,
+    SessionMessageRole,
 };
-use crate::domain::{Agent, ParsedEvent, Session, SourceCursor};
+use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
 
@@ -103,7 +112,7 @@ fn is_machine_context(text: &str) -> bool {
 /// otherwise be titled `## Task context task title:` (§37.15).
 ///
 /// Deliberately NOT folded into [`is_machine_context`]: that one also decides
-/// what gets stored as a `user_message` event, and this is a title-only call.
+/// what gets stored as a user turn, and this is a title-only call.
 fn is_task_envelope(text: &str) -> bool {
     text.starts_with("## Task context")
 }
@@ -159,11 +168,13 @@ fn session_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn parsed_line(v: &Value) -> Option<ParsedLine> {
+/// One decoded record's contribution to the member read (§26.4). Root members
+/// produce conversation; child members produce observations only.
+fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str())?;
-    let source_event_id = v.get("seq").and_then(|s| s.as_i64()).map(|s| s.to_string());
+    let source_message_id = v.get("seq").and_then(|s| s.as_i64()).map(|s| s.to_string());
     // A `user/message` is not necessarily the user: dsh labels the writer in
-    // `data.source`, and the four kinds that bring a `senderSessionId` are the
+    // `data.source`, and the kinds that bring a `senderSessionId` are the
     // messages another session sent (§37.17). That one field is the whole test
     // — a fifth cross-agent kind would need no change here.
     let counterpart_id = v
@@ -171,54 +182,60 @@ fn parsed_line(v: &Value) -> Option<ParsedLine> {
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let (kind, text) = match vtype {
+    match vtype {
         "user/message" => {
             let text = text_blocks(v.pointer("/data/content"));
             if text.trim().is_empty() || is_machine_context(&text) {
                 return None;
             }
             if counterpart_id.is_some() {
-                ("agent_message", text)
-            } else {
-                ("user_message", text)
+                // Agent-to-agent relay: observed, never conversation (§2.3).
+                return Some(ParsedLine::observation_only(MemberObservation {
+                    side_activity: 1,
+                    ..Default::default()
+                }));
             }
+            if !is_root {
+                return Some(ParsedLine::observation_only(MemberObservation::default()));
+            }
+            Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                source_message_id,
+                SessionMessageRole::User,
+                text,
+            )))
         }
         "assistant/message" => {
             let text = text_blocks(v.pointer("/data/message/content"));
             if text.trim().is_empty() {
                 return None;
             }
-            ("assistant_message", text)
+            if !is_root {
+                return Some(ParsedLine::observation_only(MemberObservation::default()));
+            }
+            Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                source_message_id,
+                SessionMessageRole::Assistant,
+                text,
+            )))
         }
-        // Compaction is a boundary worth marking, but its payload is machine
+        // Compaction is a boundary worth counting, but its payload is machine
         // bookkeeping: a marker, never the pruned content itself.
-        t if t.starts_with("compaction/") => ("compact", "conversation compacted".into()),
-        _ => return None,
-    };
-    let mut metadata = serde_json::json!({ "agent": "dsh", "type": vtype });
-    if kind == "agent_message" {
-        let meta = metadata.as_object_mut()?;
-        meta.insert(
-            "counterpart_source_id".into(),
-            Value::String(counterpart_id.unwrap_or_default()),
-        );
-        // The source's own word for the message class (`subagent-report`,
-        // `subagent-settled`, `agent-message`, `coordinator`), unnormalized —
-        // the same slot Codex fills from its `Message Type:` line (§37.13).
-        if let Some(sk) = v.pointer("/data/source/kind").and_then(|k| k.as_str()) {
-            meta.insert("message_type".into(), Value::String(sk.to_string()));
+        t if t.starts_with("compaction/") => {
+            Some(ParsedLine::observation_only(MemberObservation {
+                compactions: 1,
+                ..Default::default()
+            }))
         }
+        "tool/call" | "tool/result" => Some(ParsedLine::observation_only(MemberObservation {
+            tool_calls: 1,
+            ..Default::default()
+        })),
+        _ => None,
     }
-    Some(ParsedLine {
-        kind: kind.into(),
-        text: Some(text),
-        source_event_id,
-        metadata,
-    })
 }
 
 impl DshAdapter {
-    fn parse_session_file(path: &Path) -> Result<Option<DiscoveredSession>> {
+    fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
         let raw = std::fs::read(path)?;
         let mut header: Option<Value> = None;
         let mut native_title: Option<String> = None;
@@ -243,6 +260,7 @@ impl DshAdapter {
                     if !text.trim().is_empty()
                         && !is_machine_context(&text)
                         && !is_task_envelope(&text)
+                        && v.pointer("/data/source/senderSessionId").is_none()
                     {
                         first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
@@ -296,6 +314,19 @@ impl DshAdapter {
             .get("id")
             .and_then(|i| i.as_str())
             .ok_or_else(|| other("dsh session 头缺少 id"))?;
+        let parent = header
+            .get("parentSession")
+            .and_then(|p| p.as_str())
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_string());
+        // The header names the member graph directly (§26.4): a parentSession
+        // makes this a CHILD of that parent; origin/delegationDepth ride along
+        // as metadata facts.
+        let kind = if parent.is_some() {
+            DiscoveredMemberKind::Child
+        } else {
+            DiscoveredMemberKind::Root
+        };
 
         let meta = std::fs::metadata(path)?;
         let last_activity = meta
@@ -303,10 +334,14 @@ impl DshAdapter {
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
-        Ok(Some(DiscoveredSession {
+        Ok(Some(DiscoveredMember {
             agent: Agent::Dsh,
-            agent_session_id: id.to_string(),
-            path: path.to_path_buf(),
+            source_member_id: id.to_string(),
+            kind,
+            parent_source_member_id: parent.clone(),
+            root_hint: parent,
+            source_kind: "dsh_zstd_transcript".into(),
+            source_path: path.to_path_buf(),
             cwd: header
                 .get("cwd")
                 .and_then(|c| c.as_str())
@@ -317,15 +352,25 @@ impl DshAdapter {
                 .and_then(|c| c.as_i64())
                 .and_then(ms_epoch_to_rfc3339),
             last_activity_at: last_activity,
-            native_title,
-            first_user_text,
-            first_agent_text,
-            // Sub-agent sessions are ordinary siblings with their own id; the
-            // header names the parent, so the link is a fact, not a guess.
-            parent_agent_session_id: header
-                .get("parentSession")
-                .and_then(|p| p.as_str())
-                .map(|p| p.to_string()),
+            native_title: if kind.is_logical_root() {
+                native_title
+            } else {
+                None
+            },
+            first_user_text: if kind.is_logical_root() {
+                first_user_text
+            } else {
+                None
+            },
+            first_agent_text: if kind.is_logical_root() {
+                first_agent_text
+            } else {
+                None
+            },
+            metadata: serde_json::json!({
+                "origin": header.get("origin").and_then(|o| o.as_str()),
+                "delegation_depth": header.get("delegationDepth").and_then(|d| d.as_i64()),
+            }),
         }))
     }
 }
@@ -341,11 +386,11 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         None
     }
 
-    fn discover_sessions_in(
+    fn discover_members_in(
         &self,
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<DiscoveredSession>> {
+    ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
         let mut stack: Vec<PathBuf> = session_roots(roots);
         while let Some(dir) = stack.pop() {
@@ -382,8 +427,8 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             if unchanged(&path) {
                 continue;
             }
-            match Self::parse_session_file(&path) {
-                Ok(Some(s)) => out.push(s),
+            match Self::parse_member(&path) {
+                Ok(Some(m)) => out.push(m),
                 Ok(None) => {}
                 Err(e) => eprintln!("[discover] skip {}: {}", path.display(), e),
             }
@@ -391,42 +436,59 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
-        let path = PathBuf::from(&session.raw_path);
+    fn read_member_delta(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+    ) -> Result<MemberReadDelta> {
+        let path = PathBuf::from(&member.source_path);
         let raw = std::fs::read(&path)?;
 
         // Decoded text cannot be seeked into, so every read replays the whole
-        // body and leans on event identity: each record carries the writer's
-        // own `seq`, so a replay stores nothing it already has.
-        let mut index = 0usize;
-        let mut events: Vec<ParsedEvent> = Vec::new();
+        // body and leans on message identity: each record carries the writer's
+        // own `seq`, so a replay stores nothing it already has. Every replay
+        // is a full scan, so the observations become a stats SNAPSHOT (§7.3).
+        let is_root = member.relation.as_str() == "root";
+        let mut messages = Vec::new();
+        let mut observation = MemberObservation::default();
         scan_lines(&raw, |line| {
-            let position = index + 1;
-            index += 1;
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 return true;
             };
-            let Some(p) = parsed_line(&v) else {
+            let Some(p) = parsed_line(&v, is_root) else {
                 return true;
             };
-            events.push(ParsedEvent {
-                source_event_id: p.source_event_id,
-                source_position: format!("line:{position}"),
-                ts: v
-                    .get("time")
-                    .and_then(|t| t.as_i64())
-                    .and_then(ms_epoch_to_rfc3339),
-                kind: p.kind,
-                text: p.text,
-                metadata: p.metadata,
-            });
+            observation.add(&p.observation);
+            if let Some(mut m) = p.message {
+                if !m.content.trim().is_empty() {
+                    if m.ts.is_none() {
+                        m.ts = v
+                            .get("time")
+                            .and_then(|t| t.as_i64())
+                            .and_then(ms_epoch_to_rfc3339);
+                    }
+                    if m.source_position.is_empty() {
+                        m.source_position =
+                            format!("seq:{}", m.source_message_id.clone().unwrap_or_default());
+                    }
+                    messages.push(m);
+                }
+            }
             true
         });
 
-        Ok(ReadDelta {
-            events,
-            source: Some(crate::adapters::replay_cursor_update(&path, cursor, &raw)?),
+        let source = replay_cursor_update(&path, cursor, &raw)?;
+        Ok(MemberReadDelta {
+            stats: crate::adapters::stats_update_from(&observation, &source),
+            messages,
+            source: Some(source),
         })
+    }
+
+    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+        Ok(crate::adapters::inspect_file_source(Path::new(
+            &member.source_path,
+        )))
     }
 
     fn build_new_command(
@@ -464,6 +526,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
+    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -517,7 +580,23 @@ mod tests {
 
     const RUNTIME_CTX: &str = r#"{"type":"user/message","seq":1,"time":1788969927205,"data":{"content":[{"type":"text","text":"Current runtime context. This snapshot supersedes earlier runtime-context snapshots."}],"role":"user"}}"#;
     const REMINDER: &str = r#"{"type":"user/message","seq":2,"time":1788969927206,"data":{"content":[{"type":"text","text":"<system-reminder>\nworkspace instructions\n</system-reminder>"}],"role":"user"}}"#;
-    const TOOL_CALL: &str = r#"{"type":"tool/call","seq":9,"time":1788969930000,"data":{"name":"read","arguments":"{}"}}"#;
+
+    fn member_at(path: &Path, relation: SessionMemberRelation) -> SessionMember {
+        SessionMember {
+            id: "mem-dsh".into(),
+            session_id: "sess-dsh".into(),
+            agent: Agent::Dsh,
+            source_member_id: "session-x".into(),
+            relation,
+            parent_source_member_id: None,
+            source_kind: "dsh_zstd_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
 
     #[test]
     fn discovery_reads_header_facts_and_skips_injected_context() {
@@ -535,20 +614,59 @@ mod tests {
             ],
         );
         let found = DshAdapter
-            .discover_sessions_in(&[root.clone()], &|_| false)
+            .discover_members_in(&[root.clone()], &|_| false)
             .unwrap();
         assert_eq!(found.len(), 1, "{found:#?}");
-        let s = &found[0];
-        assert_eq!(s.agent, Agent::Dsh);
-        assert_eq!(s.agent_session_id, id);
-        assert_eq!(s.cwd.as_deref(), Some("/repo"));
+        let m = &found[0];
+        assert_eq!(m.agent, Agent::Dsh);
+        assert_eq!(m.source_member_id, id);
+        assert_eq!(m.kind, DiscoveredMemberKind::Root);
+        assert_eq!(m.cwd.as_deref(), Some("/repo"));
         // The runtime snapshot is a user/message too, but not the user's words.
-        assert_eq!(s.first_user_text.as_deref(), Some("请审计这个仓库"));
+        assert_eq!(m.first_user_text.as_deref(), Some("请审计这个仓库"));
         assert_eq!(
-            s.started_at.as_deref(),
+            m.started_at.as_deref(),
             Some("2026-09-09T16:05:15.099+00:00")
         );
-        assert!(s.parent_agent_session_id.is_none());
+        assert!(m.parent_source_member_id.is_none());
+    }
+
+    /// The header names the member graph (§26.4): a `parentSession` makes the
+    /// transcript a CHILD of that parent, and a child never carries a title
+    /// source.
+    #[test]
+    fn a_parent_session_makes_the_transcript_a_child_member() {
+        let root = unique_dir("subagent");
+        let child = "06a1b2c3-0000-4000-8000-000000000001";
+        let parent = "session-parent";
+        session_dir(
+            &root,
+            child,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(
+                    child,
+                    r#","parentSession":"session-parent","origin":"subagent","delegationDepth":1"#,
+                ),
+                &user(1, "delegated task"),
+                &assistant(2, "done"),
+            ],
+        );
+        let found = DshAdapter.discover_members_in(&[root], &|_| false).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_member_id, child);
+        assert_eq!(found[0].kind, DiscoveredMemberKind::Child);
+        assert_eq!(found[0].parent_source_member_id.as_deref(), Some(parent));
+        assert_eq!(found[0].root_hint.as_deref(), Some(parent));
+        assert_eq!(
+            found[0].native_title, None,
+            "a child never names a Logical Session"
+        );
+        assert_eq!(
+            found[0].metadata["origin"].as_str(),
+            Some("subagent"),
+            "the header facts ride along as execution metadata"
+        );
     }
 
     #[test]
@@ -577,23 +695,23 @@ mod tests {
         )
         .unwrap();
 
-        let found = DshAdapter
-            .discover_sessions_in(&[root], &|_| false)
-            .unwrap();
+        let found = DshAdapter.discover_members_in(&[root], &|_| false).unwrap();
         assert_eq!(found.len(), 1, "{found:#?}");
         assert_eq!(
             found[0].first_user_text.as_deref(),
             Some("second generation prompt")
         );
         assert!(
-            found[0].path.ends_with("session.v2.jsonl.zstd"),
+            found[0].source_path.ends_with("session.v2.jsonl.zstd"),
             "the newest generation is the source: {:?}",
-            found[0].path
+            found[0].source_path
         );
     }
 
+    /// §32.2 — the root read keeps the conversation and drops machine traffic;
+    /// the writer's own `seq` is the native message id.
     #[test]
-    fn ingest_keeps_the_conversation_and_drops_machine_traffic() {
+    fn the_root_read_keeps_the_conversation_and_drops_machine_traffic() {
         let id = "session-ingest";
         let dir = session_dir(
             &unique_dir("ingest"),
@@ -605,59 +723,52 @@ mod tests {
                 RUNTIME_CTX,
                 REMINDER,
                 &user(3, "帮我看看这个 bug"),
-                TOOL_CALL,
+                r#"{"type":"tool/call","seq":4,"time":1788969930000,"data":{"name":"read"}}"#,
                 &assistant(5, "看完了。"),
                 r#"{"type":"session/title","seq":6,"time":2,"data":{"title":"看 bug"}}"#,
                 r#"{"type":"compaction/prune","seq":7,"time":3,"data":{}}"#,
             ],
         );
         let file = dir.join("session.v2.jsonl.zstd");
-        let session = Session {
-            id: "sess-dsh".into(),
-            agent: Agent::Dsh,
-            agent_session_id: id.into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: file.to_string_lossy().to_string(),
-            parent_agent_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            trashed_at: None,
-        };
         let delta = DshAdapter
-            .read_delta(&session, &SourceCursor::default())
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
             .unwrap();
-        let kinds: Vec<(&str, &str)> = delta
-            .events
+        let texts: Vec<(SessionMessageRole, &str)> = delta
+            .messages
             .iter()
-            .map(|e| (e.kind.as_str(), e.text.as_deref().unwrap_or("")))
+            .map(|m| (m.role, m.content.as_str()))
             .collect();
         assert_eq!(
-            kinds,
+            texts,
             vec![
-                ("user_message", "帮我看看这个 bug"),
-                ("assistant_message", "看完了。"),
-                ("compact", "conversation compacted"),
+                (SessionMessageRole::User, "帮我看看这个 bug"),
+                (SessionMessageRole::Assistant, "看完了。"),
             ],
-            "got {kinds:?}"
         );
         // The writer's own seq is the native id, so dedup is exact.
-        assert_eq!(delta.events[0].source_event_id.as_deref(), Some("3"));
+        assert_eq!(delta.messages[0].source_message_id.as_deref(), Some("3"));
         assert_eq!(
-            delta.events[0].ts.as_deref(),
+            delta.messages[0].ts.as_deref(),
             Some("2026-09-09T16:05:27.205+00:00")
         );
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.tool_call_count, 1);
+                assert_eq!(s.compaction_count, 1);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
     }
 
     /// A `user/message` that carries a `senderSessionId` was written by another
-    /// session, not by the user — dsh says so in `data.source` (§37.17).
+    /// session, not by the user — dsh says so in `data.source` (§37.17). It is
+    /// execution observation now (§26.4), never conversation.
     #[test]
-    fn a_message_from_another_session_is_an_agent_message() {
+    fn a_message_from_another_session_is_side_activity() {
         let id = "session-agent-msg";
-        let child = "a73db4b1-ade0-4635-ac0b-a8666803f733";
         let dir = session_dir(
             &unique_dir("agent-msg"),
             id,
@@ -665,63 +776,37 @@ mod tests {
             &[
                 &header(id, ""),
                 &user(3, "怎么拆这个任务"),
-                r#"{"type":"user/message","seq":8,"time":4,"data":{"content":[{"type":"text","text":"Background subagent a73db4b1-ade0-4635-ac0b-a8666803f733 reported:"},{"type":"text","text":"只读检查完成。"}],"role":"user","source":{"kind":"subagent-report","form":"relay","senderSessionId":"a73db4b1-ade0-4635-ac0b-a8666803f733"}}}"#,
+                r#"{"type":"user/message","seq":8,"time":4,"data":{"content":[{"type":"text","text":"Background subagent reported:"},{"type":"text","text":"只读检查完成。"}],"role":"user","source":{"kind":"subagent-report","form":"relay","senderSessionId":"a73db4b1-ade0-4635-ac0b-a8666803f733"}}}"#,
                 r#"{"type":"user/message","seq":9,"time":5,"data":{"content":[{"type":"text","text":"我的补充结论。"}],"role":"user","source":{"kind":"agent-message","form":"relay","senderSessionId":"session-peer"}}}"#,
                 // A plugin notice is also a `user/message`, and it is NOT an
-                // agent message: no sender, so the label stays the source's.
+                // agent message: no sender.
                 r#"{"type":"user/message","seq":10,"time":6,"data":{"content":[{"type":"text","text":"The approval policy changed from \"ask\" to \"never\"."}],"role":"user","source":{"kind":"plugin","plugin":"user-approval"}}}"#,
             ],
         );
         let file = dir.join("session.v2.jsonl.zstd");
-        let session = Session {
-            id: "sess-dsh".into(),
-            agent: Agent::Dsh,
-            agent_session_id: id.into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: file.to_string_lossy().to_string(),
-            parent_agent_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            trashed_at: None,
-        };
         let delta = DshAdapter
-            .read_delta(&session, &SourceCursor::default())
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
             .unwrap();
-        let kinds: Vec<&str> = delta.events.iter().map(|e| e.kind.as_str()).collect();
+        let roles: Vec<SessionMessageRole> = delta.messages.iter().map(|m| m.role).collect();
         assert_eq!(
-            kinds,
-            vec![
-                "user_message",
-                "agent_message",
-                "agent_message",
-                "user_message"
-            ],
-            "got {kinds:?}"
+            roles,
+            vec![SessionMessageRole::User, SessionMessageRole::User],
+            "the two relayed messages are out of the conversation"
         );
-        let report = &delta.events[1];
+        assert_eq!(delta.messages[0].content, "怎么拆这个任务");
         assert_eq!(
-            report
-                .metadata
-                .get("counterpart_source_id")
-                .and_then(|v| v.as_str()),
-            Some(child)
+            delta.messages[1].content,
+            "The approval policy changed from \"ask\" to \"never\"."
         );
-        assert_eq!(
-            report.metadata.get("message_type").and_then(|v| v.as_str()),
-            Some("subagent-report"),
-            "the source's own word for the message class, unnormalized"
-        );
-        assert_eq!(
-            delta.events[2]
-                .metadata
-                .get("message_type")
-                .and_then(|v| v.as_str()),
-            Some("agent-message")
-        );
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.side_activity_count, 2);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -740,7 +825,7 @@ mod tests {
         session_dir(&root, "sess-t", "session.v2.jsonl.zstd", &lines);
 
         let found = DshAdapter
-            .discover_sessions_in(&[root.clone()], &|_| false)
+            .discover_members_in(&[root.clone()], &|_| false)
             .unwrap();
         assert_eq!(found.len(), 1, "{found:#?}");
         assert_eq!(
@@ -754,8 +839,7 @@ mod tests {
     /// `fallback` is dsh truncating the first line of the first message, which
     /// on three of this machine's sessions is the literal machine preamble
     /// `## Task context task title:` — not a title anyone wrote (§37.15).
-    /// The task envelope is the parent's words, not the user's: its first line
-    /// names the envelope. It must not become the title (§37.15).
+    /// The task envelope is the parent's words, not the user's (§37.15).
     #[test]
     fn the_task_envelope_is_not_the_user_turn() {
         let root = unique_dir("dsh-envelope");
@@ -766,7 +850,7 @@ mod tests {
         session_dir(&root, "sess-e", "session.v2.jsonl.zstd", &lines);
 
         let found = DshAdapter
-            .discover_sessions_in(&[root.clone()], &|_| false)
+            .discover_members_in(&[root.clone()], &|_| false)
             .unwrap();
         assert_eq!(found[0].first_user_text, None, "not a human turn");
         let _ = std::fs::remove_dir_all(&root);
@@ -783,42 +867,12 @@ mod tests {
         session_dir(&root, "sess-f", "session.v2.jsonl.zstd", &lines);
 
         let found = DshAdapter
-            .discover_sessions_in(&[root.clone()], &|_| false)
+            .discover_members_in(&[root.clone()], &|_| false)
             .unwrap();
         assert_eq!(found.len(), 1, "{found:#?}");
         assert_eq!(found[0].native_title, None, "the fallback is not a title");
         assert_eq!(found[0].first_user_text.as_deref(), Some("看下这个"));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn subagent_sessions_keep_their_parent_link_and_own_identity() {
-        let root = unique_dir("subagent");
-        let child = "06a1b2c3-0000-4000-8000-000000000001";
-        let parent = "session-parent";
-        session_dir(
-            &root,
-            child,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(
-                    child,
-                    r#","parentSession":"session-parent","origin":"subagent","delegationDepth":1"#,
-                ),
-                &user(1, "delegated task"),
-                &assistant(2, "done"),
-            ],
-        );
-        let found = DshAdapter
-            .discover_sessions_in(&[root], &|_| false)
-            .unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].agent_session_id, child);
-        assert_eq!(
-            found[0].parent_agent_session_id.as_deref(),
-            Some(parent),
-            "the header names the parent — the link is a fact, not a guess"
-        );
     }
 
     /// The decoded header is pi's header shape plus `createdAt`. Only the
@@ -834,9 +888,7 @@ mod tests {
             frame(r#"{"type":"session","version":3,"id":"p1","cwd":"/x"}"#),
         )
         .unwrap();
-        let found = DshAdapter
-            .discover_sessions_in(&[root], &|_| false)
-            .unwrap();
+        let found = DshAdapter.discover_members_in(&[root], &|_| false).unwrap();
         assert!(found.is_empty(), "{found:#?}");
     }
 
@@ -868,29 +920,41 @@ mod tests {
             f.write_all(&partial[..partial.len() / 2]).unwrap();
         }
 
-        let session = Session {
-            id: "sess-torn".into(),
-            agent: Agent::Dsh,
-            agent_session_id: id.into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: file.to_string_lossy().to_string(),
-            parent_agent_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            trashed_at: None,
-        };
         let delta = DshAdapter
-            .read_delta(&session, &SourceCursor::default())
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
             .unwrap();
-        let texts: Vec<&str> = delta
-            .events
-            .iter()
-            .map(|e| e.text.as_deref().unwrap_or(""))
-            .collect();
+        let texts: Vec<&str> = delta.messages.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(texts, vec!["first prompt", "first reply"], "{texts:?}");
+    }
+
+    /// A child member replays to observations only (§26.4).
+    #[test]
+    fn a_child_member_produces_observations_only() {
+        let id = "session-child";
+        let dir = session_dir(
+            &unique_dir("child-read"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(
+                    id,
+                    r#","parentSession":"session-parent","origin":"subagent","delegationDepth":1"#,
+                ),
+                &user(1, "delegated task"),
+                &assistant(2, "done"),
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Child),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        assert!(delta.messages.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

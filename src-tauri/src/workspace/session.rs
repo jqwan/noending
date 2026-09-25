@@ -42,8 +42,8 @@
 //! from one), so these rules are testable with a scripted stand-in while
 //! `workspace::project` remains the only real implementation. Because Session
 //! discovery runs on a background thread that has nowhere to carry one,
-//! [`register_workspace_attacher`] holds the app-wide seam that
-//! `ingestion::ensure_session_row` uses; [`UnattachedWorkspacePaths`] is what it
+//! [`register_workspace_attacher`] holds the app-wide seam that ingestion's
+//! logical-session resolution uses; [`UnattachedWorkspacePaths`] is what it
 //! falls back to, and it answers "no path" to everything — never a guess.
 //!
 //! The doors, in the order the fact chain is walked:
@@ -173,8 +173,8 @@ pub fn attach_session_conn(
 /// §19-4 — attach the Sessions that owe a WorkspacePath but were never given
 /// one, because discovery skipped their file.
 ///
-/// `ensure_session_row_with` resolves the cwd while a row is created or
-/// re-read, and discovery skips transcripts the stored cursors call unchanged —
+/// `ingestion::ensure_logical_session` resolves the cwd while a row is created
+/// or re-read, and discovery skips sources the stored cursors call unchanged —
 /// so a Session ingested before its directory was registered (or before the
 /// workspace layer was wired at all) keeps `workspace_path_id = NULL` forever.
 /// Runs once per reconcile pass, after discovery (§37.19).

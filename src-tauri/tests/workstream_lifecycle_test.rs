@@ -11,7 +11,7 @@ mod support;
 
 use noending::domain::{
     workstream_lifecycle, workstream_visibility, Agent, ContextConflict, ContextDelivery, Session,
-    SessionEvent, Workstream,
+    SessionMessageRole, Workstream,
 };
 use noending::error::Result;
 use noending::storage::{new_id, now, Db};
@@ -57,15 +57,31 @@ fn workstream(db: &Db, id: &str) -> Workstream {
     w
 }
 
+/// The row id is store-assigned (identity is the ROOT member's Agent-side
+/// id), so callers use the returned Session instead of a fixture id.
+fn session_row_at(
+    db: &Db,
+    tag: &str,
+    cwd: Option<&str>,
+    workspace_path_id: Option<&str>,
+) -> Session {
+    let (row_id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            &format!("src-{tag}"),
+            None,
+            cwd,
+            workspace_path_id,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    db.get_session(&row_id).unwrap().expect("session row")
+}
+
 fn session(db: &Db, tag: &str) -> Session {
-    let s = support::session(
-        new_id(),
-        Agent::Codex,
-        format!("src-{tag}"),
-        format!("/raw/{tag}.jsonl"),
-    );
-    db.upsert_session(&s).unwrap();
-    s
+    session_row_at(db, tag, None, None)
 }
 
 fn set_owner(db: &Db, session_id: &str, workstream_id: &str) {
@@ -208,7 +224,7 @@ fn restore_returns_the_previous_lifecycle() {
     .enumerate()
     {
         set_workstream_lifecycle(&db, &w.id, lifecycle).unwrap();
-        // A distinct agent_session_id per turn: upsert keys on it, so reusing one
+        // A distinct root identity per turn: upsert keys on it, so reusing one
         // would update the first row instead of making a second Session.
         let s = session(&db, &format!("s-restore-{i}"));
         set_owner(&db, &s.id, &w.id);
@@ -280,18 +296,26 @@ fn permanent_delete_is_refused_until_archived() {
 fn permanent_delete_preserves_sessions_and_their_events() {
     let (_d, db) = temp_db();
     let w = workstream(&db, "w-sessions");
-    let s = session(&db, "s-keep");
     let path_id = add_workstream_path(&db, &FixedAttacher, &w.id, "/repo/docs")
         .unwrap()
         .workspace_path_id;
-    let mut bound = s.clone();
-    bound.cwd = Some(normalize_path("/repo/docs").unwrap());
-    bound.workspace_path_id = Some(path_id.clone());
-    db.upsert_session(&bound).unwrap();
+    let s = session_row_at(
+        &db,
+        "s-keep",
+        Some(&normalize_path("/repo/docs").unwrap()),
+        Some(&path_id),
+    );
     set_owner(&db, &s.id, &w.id);
-    db.append_events(&[event(&s.id, 1, "first")]).unwrap();
-    db.append_events(&[event(&s.id, 2, "second")]).unwrap();
-    db.set_processed_sequence(&s.id, 2).unwrap();
+    // A two-message conversation, seeded through the production commit path.
+    let member_id =
+        support::ensure_root_member(&db, &s.id, Agent::Codex, "src-s-keep", "/raw/s-keep.jsonl");
+    let messages = [
+        support::parsed_message("m-1", SessionMessageRole::User, "first"),
+        support::parsed_message("m-2", SessionMessageRole::Assistant, "second"),
+    ];
+    db.commit_member_ingest(&s.id, &member_id, &messages, None, &support::seed_source(0))
+        .unwrap();
+    db.set_processed_message_sequence(&s.id, 2).unwrap();
     // A LaunchIntent naming this Workstream is historical evidence: §42.3-M24
     // forbids a fourth path column on it, and M6 forbids touching it at all.
     let intent = noending::domain::LaunchIntent {
@@ -327,8 +351,14 @@ fn permanent_delete_preserves_sessions_and_their_events() {
         db.get_workspace_path(&path_id).unwrap().unwrap().project_id,
         "p1"
     );
-    assert_eq!(db.event_count(&s.id).unwrap(), 2, "append-only history");
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 2, "read cursor");
+    assert_eq!(db.message_count(&s.id).unwrap(), 2, "append-only history");
+    assert_eq!(
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        2,
+        "context frontier"
+    );
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
         noending::domain::launch_status::MATCHED
@@ -345,22 +375,6 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     );
     assert!(db.sessions_for_workstream(&w.id).unwrap().is_empty());
     assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
-}
-
-fn event(session_id: &str, sequence: i64, text: &str) -> SessionEvent {
-    SessionEvent {
-        id: new_id(),
-        session_id: session_id.into(),
-        sequence,
-        source_event_id: None,
-        source_generation: 0,
-        source_position: format!("line:{sequence}"),
-        ts: Some(now()),
-        kind: "user_message".into(),
-        text: Some(text.into()),
-        raw_ref: format!("/raw/x.jsonl#line:{sequence}"),
-        metadata: serde_json::json!({}),
-    }
 }
 
 /// §42.3-M6 — the cleanup list has to be COMPLETE or the first real delete dies

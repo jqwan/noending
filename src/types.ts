@@ -200,10 +200,16 @@ export interface WorkstreamCardData {
   primary_path: string | null;
 }
 
+/**
+ * 逻辑会话（重构方案 §4）：一次用户可感知、可 Resume 的主会话。身份是
+ * `(agent, root_agent_session_id)`——Root 成员真实的 Resume 身份；内部执行
+ * （child/side）是 `session_members` 行，永远不会拥有/重命名/Resume 本会话。
+ */
 export interface Session {
   id: string;
   agent: Agent;
-  agent_session_id: string;
+  /** Root 成员的 Agent 侧 Resume 身份；LaunchIntent 匹配与 Resume 的唯一依据。 */
+  root_agent_session_id: string;
   title: string | null;
   cwd: string | null;
   /** Derived cache of `workspace_path_id → workspace_paths.project_id`. */
@@ -212,71 +218,138 @@ export interface Session {
   workspace_path_id: string | null;
   /**
    * 语义归属：这条执行属于哪项持续工作。`null` = 未归属任务。
-   * A Session has at most one Owner Workstream.
+   * A Session has at most one Owner Workstream. 只由显式用户动作或匹配到的
+   * LaunchIntent 设置，fork 不继承。
    */
   owner_workstream_id: string | null;
-  raw_path: string;
-  parent_agent_session_id: string | null;
+  /** 若本会话是独立 fork，其来源会话（仅 provenance；生命周期完全独立）。 */
+  forked_from_session_id: string | null;
   started_at: string | null;
+  /** 整个执行图（Root + child + side）的最后活动。 */
   last_activity_at: string | null;
+  /** Root 会话最后一条真实用户/Assistant 消息时间。 */
+  last_conversation_at: string | null;
   /** Single lifecycle authority: null = Normal, timestamp = 回收站. */
   trashed_at: string | null;
 }
 
-/** session_deletion_jobs row — transient coordination, never a tombstone. */
-export interface SessionDeletionJob {
+/** Member relation：root（唯一）| child | side。fork 不是 relation。 */
+export type SessionMemberRelation = "root" | "child" | "side";
+
+/** 执行图的一个成员（重构方案 §5）：Agent 内部的执行单元，不是另一个 Session。 */
+export interface SessionMember {
   id: string;
   session_id: string;
-  /** prepared | deleting_source | failed | stale */
-  state: "prepared" | "deleting_source" | "failed" | "stale";
-  plan_json: string;
-  last_error: string | null;
-  created_at: string;
+  agent: Agent;
+  /** Adapter 稳定身份；不要求等于 Agent 原生 session id。 */
+  source_member_id: string;
+  relation: SessionMemberRelation;
+  parent_source_member_id: string | null;
+  source_kind: string;
+  source_path: string;
+  cwd: string | null;
+  started_at: string | null;
+  last_activity_at: string | null;
+  metadata: Record<string, unknown>;
+}
+
+/** `role` 只有 user | assistant——Conversation 的全部形状（重构方案 §6）。 */
+export type SessionMessageRole = "user" | "assistant";
+
+/** 会话消息：只来自 Root 成员的用户可见 prose（重构方案 §6）。 */
+export interface SessionMessage {
+  id: string;
+  session_id: string;
+  member_id: string;
+  sequence: number;
+  role: SessionMessageRole;
+  content: string;
+  ts: string | null;
+  source_message_id: string | null;
+  source_generation: number;
+  source_position: string;
+  source_identity_hash: string;
+  raw_ref: string;
+}
+
+/** 成员的执行统计快照（重构方案 §7）：NULL = 源不提供，0 = 观测为零。 */
+export interface SessionMemberStats {
+  member_id: string;
+  tool_call_count: number | null;
+  tool_error_count: number | null;
+  compaction_count: number | null;
+  side_activity_count: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+  cost: number | null;
+  model: string | null;
+  provider: string | null;
+  effort: string | null;
   updated_at: string;
 }
 
-/** One file the permanent deletion will remove (frozen by the adapter). */
-export interface SourceDeletionTarget {
-  path: string;
-  kind: string;
-  file_identity: string;
-  size: number;
-  sha256: string;
+/** 查询时聚合的执行图统计（重构方案 §7.4，无 cache 表）。 */
+export interface SessionAggregateStats {
+  member_count: number;
+  child_count: number;
+  side_count: number;
+  max_depth: number;
+  tool_call_count: number;
+  tool_error_count: number;
+  compaction_count: number;
+  side_activity_count: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+  cost: number | null;
+  model: string | null;
+  provider: string | null;
+  effort: string | null;
 }
 
-/** §20 preview returned by prepare_session_permanent_delete. */
-export interface PermanentDeletionPreview {
-  job_id: string;
+/** Adapter 对成员源可用性的严格结论（重构方案 §9.1）：任何异常都不等于 missing。 */
+export type SourceAvailability = "present" | "missing" | "unavailable";
+
+/** 摄入诊断（重构方案 §11）：无法归属的内部源。不是 Session——无 Owner/
+ *  Resume/Trash/Context，只出现在 Settings 的诊断页。 */
+export interface IngestionDiagnostic {
+  id: string;
+  diagnostic_key: string;
+  agent: Agent;
+  kind: string;
+  source_member_id: string | null;
+  parent_source_member_id: string | null;
+  source_path: string | null;
+  reason: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  observation_count: number;
+  details: Record<string, unknown>;
+}
+
+/** §20.2 无状态本地删除预览：永久删除只清 NoEnding 本地数据。 */
+export interface LocalDeletePreview {
   session_id: string;
   session_title: string | null;
   agent: Agent;
-  agent_session_id: string;
-  source_targets: SourceDeletionTarget[];
-  /** prepare 对源文件的结论：verified_present | confirmed_absent | unverified。 */
-  source_state: "verified_present" | "confirmed_absent" | "unverified";
-  event_count: number;
+  root_agent_session_id: string;
+  root_source_status: SourceAvailability;
+  can_permanently_delete: boolean;
+  message_count: number;
+  member_count: number;
   sync_run_count: number;
   context_delivery_count: number;
   launch_intent_count: number;
   context_revision_redaction_count: number;
 }
 
-/** §21/§22 outcome of execute_session_permanent_delete. */
-export interface PermanentDeletionResult {
+/** §20.3 outcome of permanently_delete_session. */
+export interface PermanentDeleteResult {
   purged: boolean;
   redacted_revisions: number;
-  job: SessionDeletionJob | null;
-  error: string | null;
-}
-
-export interface SessionEvent {
-  session_id: string;
-  sequence: number;
-  ts: string | null;
-  kind: string;
-  text: string | null;
-  raw_ref: string;
-  metadata: Record<string, unknown>;
 }
 
 export interface ContextItem {
@@ -450,8 +523,8 @@ export interface ContextSourceDetail {
   session_id: string | null;
   session_title: string | null;
   agent: Agent | null;
-  event_sequence: number | null;
-  event_ts: string | null;
+  message_sequence: number | null;
+  message_ts: string | null;
   evidence: string | null;
 }
 
@@ -508,23 +581,28 @@ export interface SessionWorkspacePath {
   project_name: string;
 }
 
+/** `get_session_detail` — 逻辑会话详情（重构方案 §28）。没有 parent/children
+ *  Session 链接：执行图以 members 呈现，是执行信息而非可进入的其他会话。 */
 export interface SessionDetail {
   session: Session;
-  events: SessionEvent[];
+  /** Conversation：只含 root 的 user/assistant 消息（§22.1）。 */
+  messages: SessionMessage[];
   /** 唯一的所属任务；`null` = 未归属任务。 */
   owner_workstream: Workstream | null;
-  cursor: number;
-  processed_cursor: number;
-  /** Read-only status of `session.raw_path` when the detail was loaded. */
-  raw_path_status: "present" | "missing" | "unavailable";
   workspace_path: SessionWorkspacePath | null;
-  /**
-   * 父/子会话（同一 Agent 的 id 空间）。父会话可能不在库里——转录记了它、但
-   * 我们从没发现过那一条，此时是 null，而 `session.parent_agent_session_id`
-   * 仍然说明「有一个父会话」。子会话按开始时间排序，回收站里的也在。
-   */
-  parent: Session | null;
-  children: Session[];
+  /** 执行图（§22.2）：root / children / sides，root 在前。 */
+  members: (SessionMember & { stats: SessionMemberStats | null })[];
+  /** 查询时聚合的执行图统计。 */
+  stats: SessionAggregateStats;
+  ingested_message_sequence: number;
+  processed_message_sequence: number;
+  /** 详情加载时对 Root 源的新鲜结论（§20.1）。 */
+  root_source_status: SourceAvailability;
+  can_resume: boolean;
+  /** trashed + fresh root missing 才为 true（§20.1）。 */
+  can_permanently_delete: boolean;
+  /** §22.3 — fork 来源会话摘要（当本地仍存在时）。 */
+  forked_from: Session | null;
 }
 
 export interface SearchHit {

@@ -13,7 +13,7 @@ import { AGENT_LABELS, type Agent, type Session } from "../../types";
  * provenance（AGENTS.md: Context Provenance Fidelity）。
  * ------------------------------------------------------------------ */
 
-/** 无标题 / title 未知的 Session：不拿 agent_session_id 当标题糊用户。 */
+/** 无标题 / title 未知的 Session：不拿 root_agent_session_id 当标题糊用户。 */
 export const UNTITLED_SESSION = "未命名会话";
 
 /** 无 cwd 的 Session 仍然合法（Workstream 不是路径，Session 也不持有路径）。 */
@@ -132,7 +132,7 @@ export function ellipsisTail(text: string, max: number): string {
 }
 
 /** 保头保尾、省中间：UUID / 超长目录名这种「两头都有信息」的字符串用。 */
-function shrinkMiddle(text: string, max: number): string {
+export function shrinkMiddle(text: string, max: number): string {
   if (text === "") return "";
   if (widthOf(text) <= max) return text;
   if (max <= 2) return "…";

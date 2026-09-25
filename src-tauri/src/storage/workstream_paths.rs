@@ -317,9 +317,9 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
 /// order is written down rather than inferred from the schema.
 ///
 /// NOT touched, on purpose: `sessions` (their `owner_workstream_id` is cleared
-/// by the FK in step 9, the rows themselves survive), `session_events`,
-/// `session_cursors`, `launch_intents`, `workspace_paths`, `projects`,
-/// `sync_runs` and the Agents' raw transcript files. A Session survives the
+/// by the FK in step 9, the rows themselves survive), `session_members`,
+/// `session_messages`, `launch_intents`, `workspace_paths`, `projects`,
+/// `sync_runs` and the Agents' raw source data. A Session survives the
 /// Workstream that referenced it (方案 §37); `launch_intents` keep their
 /// recorded `cwd` as historical evidence even when it names a Workstream that
 /// is gone (§42.3-M24).

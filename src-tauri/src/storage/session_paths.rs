@@ -13,8 +13,8 @@
 //! from the path in the same statement instead of taking a Project from the
 //! caller:
 //!
-//! 1. `Db::upsert_session` (in `storage/mod.rs`) — discovery / launch matching,
-//!    called by `ingestion::ensure_session_row`;
+//! 1. `Db::upsert_logical_session` (in `storage/mod.rs`) — discovery resolves
+//!    the Root's cwd through it (`ingestion::ensure_logical_session`);
 //! 2. [`attach_session_workspace_path_conn`] — an explicit re-attach, called when
 //!    discovery sees the cwd move (`workspace::session`);
 //! 3. [`refresh_sessions_project_for_path_conn`] — a WorkspacePath changed Project,

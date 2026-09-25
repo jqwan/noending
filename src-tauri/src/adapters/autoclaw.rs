@@ -19,25 +19,26 @@
 //!    A file only becomes an AutoClaw session because AutoClaw's own state
 //!    directory says so, the same way Codex's `rollout-` naming is a
 //!    pre-filter rather than proof.
-//! 2. **Source deletion is not offered.** `prepare_single_file_source_deletion`
-//!    (§16.3) demands a content fingerprint that points back at this agent, and
-//!    that proof does not exist for these bytes. The trait default returns a
-//!    clear refusal instead of a best guess.
+//! 2. **No source deletion exists.** NoEnding never deletes an Agent-owned
+//!    source (重构方案 §2.6), so there is nothing to refuse — the adapter
+//!    simply reads.
 //!
-//! The CLI exists (`openclaw`, inside the app bundle) but cannot be launched
-//! from here: every invocation needs `OPENCLAW_STATE_DIR` pointing at
-//! `~/.openclaw-autoclaw`, and `AgentCommand` carries no environment — without
-//! it the CLI would silently use the default `~/.openclaw`, a different and
-//! empty state. So this adapter ingests history only, and `cli_names` is empty.
+//! Member mapping (§26.6): one transcript, one ROOT member. The CLI exists
+//! (`openclaw`, inside the app bundle) but cannot be launched from here: every
+//! invocation needs `OPENCLAW_STATE_DIR` pointing at `~/.openclaw-autoclaw`,
+//! and `AgentCommand` carries no environment — without it the CLI would
+//! silently use the default `~/.openclaw`, a different and empty state. So
+//! this adapter ingests history only, and `cli_names` is empty.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::adapters::{
-    read_jsonl_delta, AgentCommand, DiscoveredSession, ExecOptions, ParsedLine, ReadDelta,
+    read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind, ExecOptions,
+    MemberObservation, ParsedLine, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceCursor};
+use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
 
 pub struct AutoClawAdapter;
@@ -58,6 +59,18 @@ fn content_text(content: &Value) -> String {
         parts.push(s.to_string());
     }
     parts.join("\n")
+}
+
+/// `toolCall` blocks in a message's content, counted (§7).
+fn tool_calls_of(content: &Value) -> u64 {
+    content
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("toolCall"))
+                .count() as u64
+        })
+        .unwrap_or(0)
 }
 
 impl AutoClawAdapter {
@@ -82,7 +95,7 @@ impl AutoClawAdapter {
         Some(agent_dir.file_name()?.to_string_lossy().to_string())
     }
 
-    fn parse_session_file(path: &Path) -> Result<Option<DiscoveredSession>> {
+    fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
         let Some(agent_id) = Self::session_agent_id(path) else {
             return Ok(None);
         };
@@ -161,13 +174,17 @@ impl AutoClawAdapter {
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
-        Ok(Some(DiscoveredSession {
+        Ok(Some(DiscoveredMember {
             agent: Agent::AutoClaw,
             // The agent id is part of the identity: AutoClaw keys its own
             // sessions as `agent:<id>:<suffix>`, and two of its agents are
             // separate stores that could otherwise hand us the same uuid.
-            agent_session_id: format!("{agent_id}:{id}"),
-            path: path.to_path_buf(),
+            source_member_id: format!("{agent_id}:{id}"),
+            kind: DiscoveredMemberKind::Root,
+            parent_source_member_id: None,
+            root_hint: None,
+            source_kind: "autoclaw_transcript".into(),
+            source_path: path.to_path_buf(),
             cwd,
             started_at,
             last_activity_at: last_activity.or(last_ts),
@@ -175,7 +192,7 @@ impl AutoClawAdapter {
             native_title: None,
             first_user_text,
             first_agent_text,
-            parent_agent_session_id: None,
+            metadata: serde_json::json!({ "agent_id": agent_id }),
         }))
     }
 }
@@ -191,11 +208,11 @@ impl crate::adapters::AgentAdapter for AutoClawAdapter {
         None
     }
 
-    fn discover_sessions_in(
+    fn discover_members_in(
         &self,
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<DiscoveredSession>> {
+    ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
@@ -215,8 +232,8 @@ impl crate::adapters::AgentAdapter for AutoClawAdapter {
                 if unchanged(&p) {
                     continue;
                 }
-                match Self::parse_session_file(&p) {
-                    Ok(Some(s)) => out.push(s),
+                match Self::parse_member(&p) {
+                    Ok(Some(m)) => out.push(m),
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
@@ -225,42 +242,21 @@ impl crate::adapters::AgentAdapter for AutoClawAdapter {
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
-        let path = PathBuf::from(&session.raw_path);
+    fn read_member_delta(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+    ) -> Result<crate::adapters::MemberReadDelta> {
+        let path = PathBuf::from(&member.source_path);
         read_jsonl_delta(&path, cursor, &|_idx, v| {
-            let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let source_event_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
-
-            let (kind, text) = match vtype {
-                "message" => {
-                    let msg = v.get("message").unwrap_or(&Value::Null);
-                    let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                    let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                    if text.trim().is_empty() {
-                        return None;
-                    }
-                    match role {
-                        "user" => ("user_message", text),
-                        "assistant" => ("assistant_message", text),
-                        // Tool output is a `toolResult` message here; not
-                        // ingested (方案 §36.11).
-                        "toolResult" | "tool_result" => return None,
-                        _ => ("system", text),
-                    }
-                }
-                "compaction" | "compact" => ("compact", "conversation compacted".into()),
-                // `session` / `model_change` / `thinking_level_change` /
-                // `custom` are bookkeeping, not conversation.
-                _ => return None,
-            };
-
-            Some(ParsedLine {
-                kind: kind.into(),
-                text: Some(text),
-                source_event_id,
-                metadata: serde_json::json!({ "agent": "autoclaw", "type": vtype }),
-            })
+            parse_line(v, member.relation.as_str() == "root")
         })
+    }
+
+    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+        Ok(crate::adapters::inspect_file_source(Path::new(
+            &member.source_path,
+        )))
     }
 
     fn build_new_command(
@@ -300,16 +296,97 @@ impl crate::adapters::AgentAdapter for AutoClawAdapter {
     }
 }
 
+/// One line's contribution: prose only, with `toolCall` blocks counted and
+/// `toolResult` messages refused.
+fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
+    let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let source_message_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
+
+    match vtype {
+        "message" => {
+            let msg = v.get("message").unwrap_or(&Value::Null);
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let content = msg.get("content").unwrap_or(&Value::Null);
+            let text = content_text(content);
+            let observation = MemberObservation {
+                tool_calls: tool_calls_of(content),
+                ..Default::default()
+            };
+            // A thinking/toolCall-only turn carries no prose but still counts
+            // its observations; an observation-less empty line is nothing.
+            if text.trim().is_empty() {
+                let empty = observation.tool_calls == 0
+                    && observation.tool_errors == 0
+                    && observation.compactions == 0
+                    && observation.side_activity == 0;
+                return if empty {
+                    None
+                } else {
+                    Some(ParsedLine::observation_only(observation))
+                };
+            }
+            match (role, is_root) {
+                ("user", true) if !crate::adapters::is_injected_preamble(&text) => {
+                    Some(ParsedLine {
+                        message: Some(crate::adapters::parsed_message(
+                            source_message_id,
+                            SessionMessageRole::User,
+                            text,
+                        )),
+                        observation,
+                    })
+                }
+                ("assistant", true) => Some(ParsedLine {
+                    message: Some(crate::adapters::parsed_message(
+                        source_message_id,
+                        SessionMessageRole::Assistant,
+                        text,
+                    )),
+                    observation,
+                }),
+                // Tool output is a `toolResult` message here; not conversation
+                // (方案 §36.11).
+                _ => Some(ParsedLine::observation_only(observation)),
+            }
+        }
+        "compaction" | "compact" => Some(ParsedLine::observation_only(MemberObservation {
+            compactions: 1,
+            ..Default::default()
+        })),
+        // `session` / `model_change` / `thinking_level_change` / `custom` are
+        // bookkeeping, not conversation.
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
+    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("noending-autoclaw-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn root_member(path: &Path) -> SessionMember {
+        SessionMember {
+            id: "mem-ac".into(),
+            session_id: "sess-ac".into(),
+            agent: Agent::AutoClaw,
+            source_member_id: "auto-coder:4a6255bc-612b-494b-9e7e-3c5d7e58f088".into(),
+            relation: SessionMemberRelation::Root,
+            parent_source_member_id: None,
+            source_kind: "autoclaw_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        }
     }
 
     /// The real shapes: a session header, the bookkeeping lines, a prompt, a
@@ -353,18 +430,19 @@ mod tests {
         std::fs::write(sessions.join("b2.jsonl"), "{\"hello\":\"world\"}\n").unwrap();
 
         let found = AutoClawAdapter
-            .discover_sessions_in(&[root], &|_| false)
+            .discover_members_in(&[root], &|_| false)
             .unwrap();
         assert_eq!(found.len(), 1, "one transcript: {found:#?}");
-        let s = &found[0];
-        assert_eq!(s.agent, Agent::AutoClaw);
+        let m = &found[0];
+        assert_eq!(m.agent, Agent::AutoClaw);
         assert_eq!(
-            s.agent_session_id,
+            m.source_member_id,
             "auto-coder:4a6255bc-612b-494b-9e7e-3c5d7e58f088"
         );
-        assert_eq!(s.cwd.as_deref(), Some("/Users/jqk/WorkBuddy/x"));
-        assert_eq!(s.started_at.as_deref(), Some("2026-09-18T12:40:00.000Z"));
-        assert_eq!(s.first_user_text.as_deref(), Some("把日报整理一下"));
+        assert_eq!(m.kind, DiscoveredMemberKind::Root);
+        assert_eq!(m.cwd.as_deref(), Some("/Users/jqk/WorkBuddy/x"));
+        assert_eq!(m.started_at.as_deref(), Some("2026-09-18T12:40:00.000Z"));
+        assert_eq!(m.first_user_text.as_deref(), Some("把日报整理一下"));
     }
 
     /// AutoClaw's bytes are pi's bytes; that is why the adapter must not lean
@@ -381,51 +459,64 @@ mod tests {
         );
     }
 
+    /// §32.2 — the conversation is kept; the toolCall is counted; the
+    /// toolResult message is out.
     #[test]
-    fn ingest_keeps_the_conversation_and_drops_the_tool_traffic() {
+    fn ingest_keeps_the_conversation_and_counts_the_tool_traffic() {
         let dir = unique_dir("parse");
         let sessions = dir.join("agents").join("auto-coder").join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         let file = sessions.join("s.jsonl");
         std::fs::write(&file, session_lines()).unwrap();
 
-        let session = Session {
-            id: "sess-1".into(),
-            agent: Agent::AutoClaw,
-            agent_session_id: "auto-coder:s".into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: file.to_string_lossy().to_string(),
-            parent_agent_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            trashed_at: None,
-        };
         let delta = AutoClawAdapter
-            .read_delta(&session, &SourceCursor::default())
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
             .unwrap();
-        let kinds: Vec<(&str, &str)> = delta
-            .events
+        let roles: Vec<(SessionMessageRole, &str)> = delta
+            .messages
             .iter()
-            .map(|e| (e.kind.as_str(), e.text.as_deref().unwrap_or("")))
+            .map(|m| (m.role, m.content.as_str()))
             .collect();
-
         assert_eq!(
-            kinds,
+            roles,
             vec![
-                ("user_message", "把日报整理一下"),
-                // The thinking/toolCall-only turn yields no text and is skipped.
-                ("assistant_message", "日报已整理好。"),
+                (SessionMessageRole::User, "把日报整理一下"),
+                // The thinking/toolCall-only turn yields no text; the reply
+                // with the same shape yields its prose.
+                (SessionMessageRole::Assistant, "日报已整理好。"),
             ],
-            "got {kinds:?}"
+            "got {roles:?}"
         );
         assert_eq!(
-            delta.events[0].source_event_id.as_deref(),
+            delta.messages[0].source_message_id.as_deref(),
             Some("m1"),
             "identity comes from the entry id"
         );
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.tool_call_count, 1);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_reports_missing_only_for_a_confirmed_absent_file() {
+        let dir = unique_dir("inspect");
+        let sessions = dir.join("agents").join("auto-coder").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let file = sessions.join("s.jsonl");
+        std::fs::write(&file, session_lines()).unwrap();
+        let member = root_member(&file);
+        assert_eq!(
+            AutoClawAdapter.inspect_member_source(&member).unwrap(),
+            SourceAvailability::Present
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            AutoClawAdapter.inspect_member_source(&member).unwrap(),
+            SourceAvailability::Missing
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

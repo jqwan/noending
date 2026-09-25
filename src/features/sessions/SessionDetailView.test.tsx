@@ -2,10 +2,18 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, expect, it, vi } from "vitest";
 import SessionDetailView from "./SessionDetailView";
 import { api } from "../../api";
-import type { Session, SessionDetail, Workstream } from "../../types";
+import type {
+  Session,
+  SessionAggregateStats,
+  SessionDetail,
+  SessionMember,
+  SessionMessage,
+  SessionMemberStats,
+  Workstream,
+} from "../../types";
 
-// 只覆盖「会话信息」里那棵父子会话树（§37.20）与「所属任务」这个单 Owner 入口
-// （方案 §28/§29）。命令怎么走由后端测试覆盖。
+// 只覆盖重构后的详情页（§22）：执行信息（聚合统计 + 成员树）、源会话状态、
+// fork 链接、回收站横幅的永久删除门槛，以及「所属任务」这个单 Owner 入口。
 vi.mock("../../api", () => ({
   api: {
     getSessionDetail: vi.fn(),
@@ -27,16 +35,16 @@ function session(id: string, over: Partial<Session> = {}): Session {
   return {
     id,
     agent: "codex",
-    agent_session_id: `${id}-agent`,
+    root_agent_session_id: `${id}-agent`,
     title: null,
     cwd: null,
     project_id: null,
     workspace_path_id: null,
     owner_workstream_id: null,
-    raw_path: `/${id}.jsonl`,
-    parent_agent_session_id: null,
+    forked_from_session_id: null,
     started_at: null,
     last_activity_at: null,
+    last_conversation_at: null,
     trashed_at: null,
     ...over,
   };
@@ -54,17 +62,90 @@ function workstream(id: string, title: string): Workstream {
   };
 }
 
+function stats(over: Partial<SessionAggregateStats> = {}): SessionAggregateStats {
+  return {
+    member_count: 1,
+    child_count: 0,
+    side_count: 0,
+    max_depth: 0,
+    tool_call_count: 0,
+    tool_error_count: 0,
+    compaction_count: 0,
+    side_activity_count: 0,
+    input_tokens: null,
+    output_tokens: null,
+    cached_tokens: null,
+    reasoning_tokens: null,
+    cost: null,
+    model: null,
+    provider: null,
+    effort: null,
+    ...over,
+  };
+}
+
+function member(
+  sessionId: string,
+  sourceMemberId: string,
+  relation: SessionMember["relation"],
+  parentSourceMemberId: string | null,
+  over: Partial<SessionMember> & { stats?: SessionMemberStats | null } = {},
+): SessionMember & { stats: SessionMemberStats | null } {
+  const { stats: memberStats = null, ...rest } = over;
+  return {
+    id: `${sessionId}-${sourceMemberId}`,
+    session_id: sessionId,
+    agent: "codex",
+    source_member_id: sourceMemberId,
+    relation,
+    parent_source_member_id: parentSourceMemberId,
+    source_kind: "codex_thread",
+    source_path: `/sources/${sourceMemberId}.jsonl`,
+    cwd: null,
+    started_at: null,
+    last_activity_at: null,
+    metadata: {},
+    stats: memberStats,
+    ...rest,
+  };
+}
+
+function message(
+  sessionId: string,
+  sequence: number,
+  role: SessionMessage["role"],
+  content: string,
+): SessionMessage {
+  return {
+    id: `m${sequence}`,
+    session_id: sessionId,
+    member_id: "root",
+    sequence,
+    role,
+    content,
+    ts: null,
+    source_message_id: null,
+    source_generation: 0,
+    source_position: "",
+    source_identity_hash: "",
+    raw_ref: "",
+  };
+}
+
 function detail(me: Session, over: Partial<SessionDetail> = {}): SessionDetail {
   return {
     session: me,
-    events: [],
+    messages: [],
     owner_workstream: null,
-    cursor: 0,
-    processed_cursor: 0,
-    raw_path_status: "present",
     workspace_path: null,
-    parent: null,
-    children: [],
+    members: [member(me.id, `${me.id}-root`, "root", null)],
+    stats: stats(),
+    ingested_message_sequence: 0,
+    processed_message_sequence: 0,
+    root_source_status: "present",
+    can_resume: true,
+    can_permanently_delete: false,
+    forked_from: null,
     ...over,
   };
 }
@@ -74,64 +155,187 @@ async function renderDetail(d: SessionDetail) {
   const navigate = vi.fn();
   render(<SessionDetailView sessionId={d.session.id} navigate={navigate} goBack={vi.fn()} />);
   await screen.findByText("会话信息");
-  return navigate;
+  return { navigate, container: document.body };
 }
 
-it("links to the parent session and to each child", async () => {
-  const me = session("me", { parent_agent_session_id: "p-agent" });
-  const navigate = await renderDetail(detail(me, {
-    parent: session("p", { title: "父会话标题", agent_session_id: "p-agent" }),
-    children: [
-      session("c1", { title: "子会话一" }),
-      session("c2", { title: "子会话二" }),
+// ---------------- 执行信息（§22.2） ----------------
+
+it("shows aggregate execution stats and an expandable member tree", async () => {
+  const me = session("me");
+  await renderDetail(detail(me, {
+    members: [
+      member(me.id, `${me.id}-root`, "root", null),
+      member(me.id, "child-src-1", "child", `${me.id}-root`, {
+        stats: { member_id: "c1", tool_call_count: 12, tool_error_count: 2, compaction_count: 1 } as SessionMemberStats,
+      }),
+      member(me.id, "side-src-1", "side", `${me.id}-root`),
+    ],
+    stats: stats({
+      member_count: 3,
+      child_count: 1,
+      side_count: 1,
+      max_depth: 1,
+      tool_call_count: 12,
+      tool_error_count: 2,
+      compaction_count: 1,
+    }),
+  }));
+
+  // 聚合统计常驻。
+  const body = document.body.textContent ?? "";
+  expect(body).toContain("成员 3 · 子 1 · 边 1 · 最大深度 1");
+  expect(body).toContain("工具调用 12 · 失败 2 · 压缩 1");
+
+  // 成员默认收起，点开才出现。
+  expect(screen.queryByText("child-src-1")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开成员（3）" }));
+
+  screen.getByText("child-src-1");
+  screen.getByText("side-src-1");
+  // 关系标签：根 / 子 / 边执行。
+  expect(screen.getAllByText("根")).toHaveLength(1);
+  screen.getByText("子");
+  screen.getByText("边执行");
+  // 成员自己的计数只在有数据时出现。
+  expect(document.body.textContent).toContain("工具 12 · 失败 2 · 压缩 1");
+
+  // 成员是执行信息，不是可进入的其他会话页面。
+  expect(screen.queryByRole("button", { name: /child-src-1/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /side-src-1/ })).toBeNull();
+});
+
+it("shows tool / token / cost / runtime rows only when the data is present", async () => {
+  const me = session("me");
+  await renderDetail(detail(me, { stats: stats() }));
+
+  let body = document.body.textContent ?? "";
+  expect(body).not.toContain("Tokens");
+  expect(body).not.toContain("成本");
+  expect(body).not.toContain("工具调用");
+
+  cleanup();
+  await renderDetail(detail(me, {
+    stats: stats({
+      tool_call_count: 4,
+      input_tokens: 1000,
+      output_tokens: 200,
+      cost: 0.5,
+      model: "gpt-5",
+      provider: "openai",
+      effort: "high",
+    }),
+  }));
+
+  body = document.body.textContent ?? "";
+  expect(body).toContain("工具调用 4");
+  expect(body).toContain("Tokens 输入 1,000 · 输出 200");
+  expect(body).toContain("成本 0.5");
+  expect(body).toContain("gpt-5 · openai · high");
+});
+
+// ---------------- 源会话（§22.4） ----------------
+
+it("shows the root member's source as 源会话 without status noise when present", async () => {
+  await renderDetail(detail(session("me")));
+
+  screen.getByText("源会话");
+  screen.getByText(/sources\/me-root\.jsonl/);
+  expect(screen.queryByText("源会话已不存在")).toBeNull();
+  expect(screen.queryByText("无法确认源会话状态")).toBeNull();
+});
+
+it("warns and disables resume when the root source is missing", async () => {
+  await renderDetail(detail(session("me"), { root_source_status: "missing", can_resume: false }));
+
+  screen.getByText("源会话已不存在");
+  const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
+  expect(resume.disabled).toBe(true);
+  expect(resume.title).toContain("源会话已不存在");
+});
+
+it("warns when the root source status is unavailable", async () => {
+  await renderDetail(detail(session("me"), { root_source_status: "unavailable", can_resume: false }));
+
+  screen.getByText("无法确认源会话状态");
+  const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
+  expect(resume.disabled).toBe(true);
+});
+
+it("treats a missing root member as unavailable even when the verdict says present", async () => {
+  await renderDetail(detail(session("me"), { members: [], root_source_status: "present" }));
+
+  screen.getByText(/没有 Root 成员记录/);
+  screen.getByText("无法确认源会话状态");
+});
+
+// ---------------- 消息（§22.1） ----------------
+
+it("renders only the user/assistant conversation", async () => {
+  await renderDetail(detail(session("me"), {
+    messages: [
+      message("me", 1, "user", "帮我看看这个报错"),
+      message("me", 2, "assistant", "好的，我在看"),
     ],
   }));
 
-  fireEvent.click(screen.getByRole("button", { name: "父会话标题" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "p" });
-
-  fireEvent.click(screen.getByRole("button", { name: "子会话一" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "c1" });
-
-  fireEvent.click(screen.getByRole("button", { name: "子会话二" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "c2" });
+  screen.getByText("帮我看看这个报错");
+  screen.getByText("好的，我在看");
 });
 
-it("says the parent is missing instead of pretending there is none", async () => {
-  const me = session("me", { parent_agent_session_id: "ghost-agent" });
-  await renderDetail(detail(me, { parent: null }));
+// ---------------- Fork（§22.3） ----------------
 
-  // 转录记了父会话、但我们从没发现过那一条：字段在，链接不在。
-  screen.getByText("父会话");
-  screen.getByText(/不在 NoEnding 库里/);
-  screen.getByText(/ghost-agent/);
-  expect(screen.queryByRole("button", { name: /未命名会话/ })).toBeNull();
-});
-
-it("marks a trashed child but still links to it", async () => {
-  const me = session("me");
-  const navigate = await renderDetail(detail(me, {
-    children: [session("c1", { title: "子会话一", trashed_at: "2026-09-24T00:00:00+00:00" })],
+it("links to the session it forked from", async () => {
+  const me = session("me", { forked_from_session_id: "orig" });
+  const { navigate } = await renderDetail(detail(me, {
+    forked_from: session("orig", { title: "原始会话" }),
   }));
 
-  const link = screen.getByRole("button", { name: /子会话一/ });
-  expect(link.textContent).toContain("回收站");
-  fireEvent.click(link);
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "c1" });
+  fireEvent.click(screen.getByRole("button", { name: "分叉自：原始会话" }));
+  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "orig" });
 });
 
-it("shows no session-tree fields for a session that has neither", async () => {
-  await renderDetail(detail(session("me"), { children: [] }));
+it("names the missing fork source instead of hiding the provenance", async () => {
+  const me = session("me", { forked_from_session_id: "ghost" });
+  await renderDetail(detail(me));
 
-  expect(screen.queryByText("父会话")).toBeNull();
-  expect(screen.queryByText(/^子会话/)).toBeNull();
+  screen.getByText(/来源会话不在 NoEnding 库里/);
+  screen.getByText(/ghost/);
+});
+
+it("shows no fork field for a session that is not a fork", async () => {
+  await renderDetail(detail(session("me")));
+
+  expect(screen.queryByText(/分叉自/)).toBeNull();
+});
+
+// ---------------- 回收站横幅（§36 + §22.4） ----------------
+
+it("offers permanent delete in the trash banner only when allowed", async () => {
+  await renderDetail(detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
+    can_resume: false,
+    root_source_status: "missing",
+    can_permanently_delete: true,
+  }));
+
+  screen.getByRole("button", { name: "永久删除…" });
+  expect(screen.queryByText(/永久删除不可用/)).toBeNull();
+});
+
+it("explains why permanent delete is unavailable while trashed", async () => {
+  await renderDetail(detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
+    root_source_status: "present",
+    can_permanently_delete: false,
+  }));
+
+  expect(screen.queryByRole("button", { name: "永久删除…" })).toBeNull();
+  screen.getByText(/永久删除不可用（Root 源仍存在或无法确认）/);
 });
 
 // ---------------- 所属任务（单 Owner，方案 §28/§29） ----------------
 
 it("shows the one owner workstream and links to it", async () => {
   const owner = workstream("w1", "会话与 Workstream 重构");
-  const navigate = await renderDetail(detail(session("me", { owner_workstream_id: "w1" }), {
+  const { navigate } = await renderDetail(detail(session("me", { owner_workstream_id: "w1" }), {
     owner_workstream: owner,
   }));
 

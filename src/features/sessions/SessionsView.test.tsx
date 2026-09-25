@@ -17,8 +17,8 @@ vi.mock("../../api", () => ({
     listIngestSources: vi.fn(),
     trashSession: vi.fn(),
     restoreSession: vi.fn(),
-    prepareSessionPermanentDelete: vi.fn(),
-    executeSessionPermanentDelete: vi.fn(),
+    getSessionLocalDeletePreview: vi.fn(),
+    permanentlyDeleteSession: vi.fn(),
   },
 }));
 
@@ -33,16 +33,16 @@ function session(over: Partial<Session> = {}): Session {
   return {
     id: "s1",
     agent: "codex",
-    agent_session_id: "a1",
+    root_agent_session_id: "a1",
     title: "会话",
     cwd: "/repo",
     workspace_path_id: null,
     project_id: null,
     owner_workstream_id: null,
-    raw_path: "/tmp/s1.jsonl",
-    parent_agent_session_id: null,
+    forked_from_session_id: null,
     started_at: "2026-09-01T00:00:00Z",
     last_activity_at: "2026-09-02T00:00:00Z",
+    last_conversation_at: "2026-09-02T00:00:00Z",
     trashed_at: null,
     ...over,
   };

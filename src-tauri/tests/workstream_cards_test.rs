@@ -3,11 +3,7 @@
 //! the active current_state revision, and a zero-session Workstream stays a
 //! legal card with no Resume target.
 
-use std::path::PathBuf;
-
-use noending::adapters::DiscoveredSession;
-use noending::domain::{Agent, Workstream};
-use noending::ingestion::ensure_session_row;
+use noending::domain::{Agent, Session, Workstream};
 use noending::storage::{new_id, now, Db};
 
 fn db(tag: &str) -> Db {
@@ -15,19 +11,23 @@ fn db(tag: &str) -> Db {
     Db::open(&dir.join("test.db")).unwrap()
 }
 
-fn discovered(agent: Agent, agent_session_id: &str, activity: &str) -> DiscoveredSession {
-    DiscoveredSession {
-        agent,
-        agent_session_id: agent_session_id.into(),
-        path: PathBuf::from(format!("/tmp/fake/{}.jsonl", agent_session_id)),
-        cwd: Some("/tmp/fake".into()),
-        started_at: Some("2026-09-01T08:00:00Z".into()),
-        last_activity_at: Some(activity.into()),
-        first_user_text: Some("继续上次的工作".into()),
-        native_title: None,
-        first_agent_text: None,
-        parent_agent_session_id: None,
-    }
+/// A discovered Logical Session, written through the production discovery
+/// write (`upsert_logical_session`): identity is (agent, root id), the cwd
+/// and the activity timestamps are the facts the card reads.
+fn discovered(db: &Db, agent: Agent, root_agent_session_id: &str, activity: &str) -> Session {
+    let (row_id, _) = db
+        .upsert_logical_session(
+            agent,
+            root_agent_session_id,
+            Some("继续上次的工作"),
+            Some("/tmp/fake"),
+            None,
+            None,
+            Some("2026-09-01T08:00:00Z"),
+            Some(activity),
+        )
+        .unwrap();
+    db.get_session(&row_id).unwrap().unwrap()
 }
 
 fn set_owner(db: &Db, session_id: &str, workstream_id: &str) {
@@ -55,18 +55,13 @@ fn card_stats_follow_sessions_and_active_state() {
     let w = workstream(&database, "Context Integrity");
 
     // Two owned sessions; the OLDER row was written later, activity decides.
-    let older = ensure_session_row(
+    let older = discovered(
         &database,
-        &discovered(Agent::ClaudeCode, "s-old", "2026-09-10T09:00:00Z"),
-    )
-    .unwrap()
-    .0;
-    let newer = ensure_session_row(
-        &database,
-        &discovered(Agent::Codex, "s-new", "2026-09-12T18:00:00Z"),
-    )
-    .unwrap()
-    .0;
+        Agent::ClaudeCode,
+        "s-old",
+        "2026-09-10T09:00:00Z",
+    );
+    let newer = discovered(&database, Agent::Codex, "s-new", "2026-09-12T18:00:00Z");
     set_owner(&database, &older.id, &w.id);
     set_owner(&database, &newer.id, &w.id);
 

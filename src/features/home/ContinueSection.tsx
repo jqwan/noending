@@ -86,7 +86,7 @@ export function RecentSessions({ navigate, onNewSession }: {
         sessions.map((s) => (
           <div className="list-row" role="link" tabIndex={0} onKeyDown={e => { if (e.key === "Enter") navigate({ view: "session", sessionId: s.id }); }} key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
             <div className="grow">
-              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
+              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
                 {sessionDisplayTitle(s.title)}
               </div>
             </div>

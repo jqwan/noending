@@ -1,5 +1,8 @@
 //! Search — FTS5, with a LIKE fallback for queries its tokenizer cannot match.
-//! Prioritizes current context (items / workstreams), then raw events.
+//! Prioritizes current context (items / workstreams), then the conversation
+//! (§21): only Logical Session documents and ROOT SessionMessages are
+//! indexed — never child/side transcripts, tool traffic, thinking bodies,
+//! MemberStats or IngestionDiagnostics.
 
 use rusqlite::params;
 use serde::Serialize;
@@ -9,7 +12,7 @@ use crate::storage::Db;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
-    pub kind: String, // item | workstream | project | session | event
+    pub kind: String, // item | workstream | project | session | message
     pub ref_id: String,
     pub parent_id: String,
     pub title: String,
@@ -18,16 +21,16 @@ pub struct SearchHit {
 }
 
 /// Review P1-1 — the read-side lifecycle authority: a Session's own document
-/// (`kind = 'session'`, `ref_id` is the session id) and its event rows surface
-/// only while that session is active. Belt and braces beside the write-side
-/// guards (trash unindex + guarded backfill): a stale row left behind by an
-/// interrupted write must not surface a trashed session in search.
-const ACTIVE_EVENT_GUARD: &str = "(
-    search_index.kind NOT IN ('event', 'session')
+/// (`kind = 'session'`, `ref_id` is the session id) and its message rows
+/// surface only while that session is active. Belt and braces beside the
+/// write-side guards (trash unindex + guarded backfill): a stale row left
+/// behind by an interrupted write must not surface a trashed session in search.
+const ACTIVE_MESSAGE_GUARD: &str = "(
+    search_index.kind NOT IN ('message', 'session')
     OR EXISTS (
         SELECT 1 FROM sessions s
          WHERE s.id = CASE search_index.kind
-                        WHEN 'event' THEN search_index.parent_id
+                        WHEN 'message' THEN search_index.parent_id
                         ELSE search_index.ref_id
                       END
            AND s.trashed_at IS NULL))";
@@ -56,7 +59,7 @@ fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
                snippet(search_index, 4, '「', '」', '…', 12),
                bm25(search_index)
                FROM search_index WHERE search_index MATCH ?1
-               AND {ACTIVE_EVENT_GUARD}
+               AND {ACTIVE_MESSAGE_GUARD}
                ORDER BY bm25(search_index) LIMIT ?2"
     );
     let conn = db.read();
@@ -88,7 +91,7 @@ fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let sql = format!(
         "SELECT kind, ref_id, parent_id, title, body FROM search_index
                WHERE (title LIKE ?1 ESCAPE '!' OR body LIKE ?1 ESCAPE '!')
-               AND {ACTIVE_EVENT_GUARD}
+               AND {ACTIVE_MESSAGE_GUARD}
                LIMIT ?2"
     );
     let conn = db.read();

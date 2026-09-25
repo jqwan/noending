@@ -13,27 +13,32 @@ import {
   formatDateTime,
   projectCellFor,
   sessionDisplayTitle,
+  shrinkMiddle,
   NO_CWD,
   UNTITLED_SESSION,
 } from "./SessionTable";
-import { type Project, type Session, type SessionDetail, type Workstream } from "../../types";
+import {
+  type Project,
+  type SessionDetail,
+  type SessionMemberRelation,
+  type Workstream,
+} from "../../types";
 import type { Route } from "../../app/routes";
 
-/** 后端 get_session_detail 的 events 上限（commands.rs）——到达上限时如实说明。 */
-const EVENT_PAGE_LIMIT = 500;
+/** 详情里的一个执行成员：member 行 + 查询时带出的统计快照。 */
+type DetailMember = SessionDetail["members"][number];
+
+const MEMBER_ID_WIDTH = 24;
 
 /**
- * Session Detail = 一次具体 Agent 执行的记录（方案 v0.1 §13）。
- * Execution-oriented 而不是 Context-oriented：Header 回答「哪个 Agent、什么时候开始、
- * 最近什么时候动过、在哪个目录、Session ID 是什么」，正文是标准化消息流。
- * 这里不出现同步提取、Context 变更或自动归类。
+ * Session Detail = 一个逻辑会话（重构方案 §4/§28）：一次用户可感知、可 Resume
+ * 的主会话。§22 的四块内容——Conversation（只有 user/assistant prose）、
+ * Execution Info（聚合统计 + 成员树）、Source / Lifecycle（源会话 + 回收站）、
+ * Context / Owner（所属任务）。
  *
- * v0.2 增加只读事实（方案 §22、§43.3-M29）：Session 的 cwd 解析成的
- * WorkspacePath，以及从那条路径派生出来的 Project。两者都**没有编辑入口**——
- * 路径由 NoEnding 从磁盘观察得到，Project 只有「移动路径」这一条改变方式，
- * 而那属于 Projects 侧，不属于一次已经发生的执行记录。
- * 界面上两者合并为一行「工作目录」：主值是规范化路径，原始 cwd 只在写法
- * 不同时以小字副行出现——两套拼写只在真的不同时才值得同时可见。
+ * parent/children Session 链接已删除：执行图以 members 呈现，成员是执行信息，
+ * 不是可进入的「另一个 Session 页面」（§22.2）。唯一的会话链接是 fork 来源
+ * （§22.3）。右栏的 WorkspacePath / Project 事实照旧（v0.2 §43.3-M29）。
  */
 export default function SessionDetailView({ sessionId, navigate, goBack }: {
   sessionId: string;
@@ -50,6 +55,8 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [trashBusy, setTrashBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
+  // 执行成员树默认收起：统计常看，整棵图偶看（§22.2「可展开 Members」）。
+  const [membersOpen, setMembersOpen] = useState(false);
   /**
    * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字
    * （§43.4-2）。派生链自带名字，所以正常情况下不多这一次读取。
@@ -97,7 +104,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       </div>
     );
   }
-  const { session, events, owner_workstream } = detail;
+  const { session, owner_workstream } = detail;
 
   /**
    * 刷新 = 只摄入。Context 提取只在智能开启时才会发生（方案 v0.1 §11.6），
@@ -160,7 +167,6 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       showToast("已恢复");
       refresh();
     } catch (e) {
-      // 后端可能拒绝：例如还有未取消的永久删除任务（须先取消任务）。
       console.error(e);
       showToast(String(e));
     } finally {
@@ -187,14 +193,30 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     setOwnerOpen(false);
   };
 
-  const messages: SessionMessageData[] = events.map((e) => ({
-    sequence: e.sequence,
-    kind: e.kind,
-    text: e.text,
-    ts: e.ts,
-    who: agentDisplayLabel(session.agent),
-    meta: e.metadata,
+  /** Conversation（§22.1）：只有 root 的 user/assistant prose。 */
+  const messages: SessionMessageData[] = detail.messages.map((m) => ({
+    sequence: m.sequence,
+    role: m.role,
+    content: m.content,
+    ts: m.ts,
+    who: m.role === "user" ? "用户" : agentDisplayLabel(session.agent),
   }));
+
+  /**
+   * 源会话（§22.4）：Root 成员的源文件 + 详情加载时的新鲜结论。
+   * members 里没有 root 行本身就是一个异常，按 unavailable 对待。
+   */
+  const rootMember = detail.members.find((m) => m.relation === "root") ?? null;
+  const sourceMissing = rootMember !== null && detail.root_source_status === "missing";
+  const sourceUnavailable = rootMember === null || detail.root_source_status === "unavailable";
+
+  /** Resume 的门（§22.4）：源 missing / unavailable 时禁用，并说清为什么。 */
+  const resumeDisabled = !detail.can_resume;
+  const resumeTitle = detail.can_resume
+    ? "继续会话"
+    : sourceMissing
+      ? "源会话已不存在，无法继续这个会话"
+      : "无法确认源会话状态，暂时不能继续";
 
   return (
     <div className="main narrow">
@@ -212,14 +234,15 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
               <Icon name="trash" />
             </button>
             <button className="btn ghost icon-button" aria-label="刷新" title="刷新" onClick={doSync} disabled={syncing}><Icon name="refresh" /></button>
-            <button className="btn ghost icon-button" aria-label="继续" title="继续会话" onClick={() => setResumeOpen(true)}>
+            <button className="btn ghost icon-button" aria-label="继续" title={resumeTitle} onClick={() => setResumeOpen(true)} disabled={resumeDisabled}>
               <Icon name="play" />
             </button>
           </>
         )}
       />
 
-      {/* 回收站横幅（§36）：替代正常动作区，恢复 / 永久删除都在这里。 */}
+      {/* 回收站横幅（§36 + §22.4）：恢复永远可用；「永久删除」只在
+          can_permanently_delete（trashed + fresh root missing）时出现。 */}
       {trashed && (
         <div className="session-trash-banner">
           <div style={{ minWidth: 0 }}>
@@ -228,12 +251,19 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
               移入回收站：{formatDateTime(session.trashed_at)}。NoEnding 已停止摄入这个会话；
               Agent 原始会话不会被删除，随时可以恢复。
             </div>
+            {!detail.can_permanently_delete && (
+              <div className="muted small" style={{ marginTop: 4 }}>
+                永久删除不可用（Root 源仍存在或无法确认）。
+              </div>
+            )}
           </div>
           <div className="row" style={{ flex: "none", gap: 8 }}>
             <button className="btn small" disabled={trashBusy} onClick={doRestore}>恢复</button>
-            <button className="btn small" disabled={trashBusy} onClick={() => setPurgeOpen(true)}>
-              永久删除…
-            </button>
+            {detail.can_permanently_delete && (
+              <button className="btn small" disabled={trashBusy} onClick={() => setPurgeOpen(true)}>
+                永久删除…
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -270,11 +300,6 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       )}
 
       <div className="section-label" style={{ marginTop: 34 }}>消息</div>
-      <p className="muted small" style={{ margin: "0 0 6px" }}>
-        {messages.length >= EVENT_PAGE_LIMIT
-          ? `已显示 ${messages.length} 条消息，可能还有更早记录。`
-          : null}
-      </p>
       {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
       {messages.length === 0 && (
         <div className="empty">
@@ -304,7 +329,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         <span className="small muted">{messages.length > 0 ? `${messages.length} 条消息` : "尚无消息"}</span>
       </div>
 
-      {/* 执行事实：一次会话「在什么时候、哪个目录、叫什么 ID」。值可整段选中并复制。 */}
+      {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
       <div className="session-info-fields">
         <Field label="开始时间">
           {session.started_at
@@ -384,56 +409,87 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             <span className="muted">{NO_CWD}（该会话的原始记录里没有目录信息）</span>
           )}
         </Field>
-        <Field label="原始会话文件">
-          <>
-            <CopyValue
-              value={session.raw_path}
-              mono
-              title={`${session.raw_path} · Agent 保存的原始会话文件`}
-            />
-            {detail.raw_path_status === "missing" && (
-              <div className="session-source-warning">找不到原始会话文件</div>
-            )}
-            {detail.raw_path_status === "unavailable" && (
-              <div className="session-source-warning">无法确认原始会话文件状态</div>
-            )}
-          </>
+        {/* 源会话（§22.4）：Root 成员的源文件，不再是 session.raw_path。
+            状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。 */}
+        <Field label="源会话">
+          {rootMember ? (
+            <>
+              <CopyValue
+                value={rootMember.source_path}
+                mono
+                title={`${rootMember.source_path} · Agent 保存的 Root 源会话`}
+              />
+              {sourceMissing && (
+                <div className="session-source-warning">源会话已不存在</div>
+              )}
+              {sourceUnavailable && (
+                <div className="session-source-warning">无法确认源会话状态</div>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="muted small">这个会话没有 Root 成员记录。</span>
+              <div className="session-source-warning">无法确认源会话状态</div>
+            </>
+          )}
         </Field>
         <Field label="会话 ID">
           <CopyValue value={session.id} mono />
         </Field>
-        <Field label="Agent 侧会话 ID">
-          <CopyValue value={session.agent_session_id} mono
-            title="Agent 自己记录里的会话 ID，用于回到原始转录文件" />
+        <Field label="Agent 会话 ID">
+          <CopyValue value={session.root_agent_session_id} mono
+            title="Root 成员在 Agent 侧的会话身份；Resume 与 LaunchIntent 匹配的唯一依据" />
         </Field>
-        {/* §37.20 —— 同一次执行所在的父子会话树。父子链接是 Agent 侧的事实
-            （Codex 线程、dsh 会话），在同一个 Agent 的 id 空间里解析。父会话可能
-            不在库里（转录记了它，我们从没发现过那一条），那就如实说明；子会话
-            按开始时间列出，回收站里的也在，用徽标标出。 */}
-        {(detail.parent || session.parent_agent_session_id) && (
-          <Field label="父会话">
-            {detail.parent ? (
-              <SessionLink session={detail.parent} navigate={navigate} />
+        {/* Fork（§22.3）：唯一的会话→会话链接。来源只是 provenance，
+            生命周期完全独立；来源不在本地库时也如实说明。 */}
+        {(detail.forked_from || session.forked_from_session_id) && (
+          <Field label="来源">
+            {detail.forked_from ? (
+              <button
+                className="link"
+                style={{ textAlign: "left", wordBreak: "break-word" }}
+                title={`打开来源会话：${sessionDisplayTitle(detail.forked_from.title)}`}
+                onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id })}
+              >
+                分叉自：{sessionDisplayTitle(detail.forked_from.title)}
+                {detail.forked_from.trashed_at !== null && (
+                  <span className="badge warn" style={{ marginLeft: 6 }}>回收站</span>
+                )}
+              </button>
             ) : (
               <span className="muted small">
-                不在 NoEnding 库里
+                来源会话不在 NoEnding 库里
                 <span className="mono" style={{ wordBreak: "break-all" }}>
-                  {" · "}{session.parent_agent_session_id}
+                  {" · "}{session.forked_from_session_id}
                 </span>
               </span>
             )}
           </Field>
         )}
-        {detail.children.length > 0 && (
-          <Field label={`子会话（${detail.children.length}）`}>
-            <div className="row" style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
-              {detail.children.map((c) => (
-                <SessionLink key={c.id} session={c} navigate={navigate} />
-              ))}
-            </div>
-          </Field>
-        )}
       </div>
+      </section>
+
+      {/* 执行信息（§22.2）：聚合统计 + 可展开的成员树。成员不是链接——
+          它们是 Agent 内部的执行单元，不是另一个 Session 页面。 */}
+      <section className="rail-section">
+      <div className="section-label">执行信息</div>
+      <ExecutionStats stats={detail.stats} />
+      {detail.members.length > 0 && (
+        <>
+          <div style={{ marginTop: 8 }}>
+            <button
+              className="btn small ghost"
+              aria-expanded={membersOpen}
+              onClick={() => setMembersOpen((o) => !o)}
+            >
+              {membersOpen
+                ? "收起成员"
+                : `展开成员（${detail.members.length}）`}
+            </button>
+          </div>
+          {membersOpen && <MemberTree members={detail.members} />}
+        </>
+      )}
       </section>
       </aside>
       </div>
@@ -498,28 +554,105 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
+/** 数值 → 千位分隔；null = 源不提供，显示「—」。 */
+const fmtCount = (n: number | null): string => (n === null ? "—" : n.toLocaleString("en-US"));
+
 /**
- * 父子会话行（§37.20）：点进那条会话的详情页。父子链接是 Agent 侧的事实，
- * 所以这里只负责导航——两条会话是不是同一个 Agent，后端解析时已经限定过。
- * 回收站里的孩子照样列出，用徽标如实标出，而不是藏起来。
+ * 聚合执行统计（§22.2）。基础形状（成员 / 子 / 边 / 深度）永远显示；
+ * 工具、token、成本、模型这些行只在数据真的在场上时出现——有数据才显示，
+ * 没有就不画一行「0」去冒称观测。
  */
-function SessionLink({ session, navigate }: {
-  session: Session;
-  navigate: (r: Route) => void;
-}) {
-  const title = sessionDisplayTitle(session.title);
+function ExecutionStats({ stats }: { stats: SessionDetail["stats"] }) {
+  const toolBits: string[] = [];
+  if (stats.tool_call_count > 0) toolBits.push(`工具调用 ${stats.tool_call_count}`);
+  if (stats.tool_error_count > 0) toolBits.push(`失败 ${stats.tool_error_count}`);
+  if (stats.compaction_count > 0) toolBits.push(`压缩 ${stats.compaction_count}`);
+  if (stats.side_activity_count > 0) toolBits.push(`边活动 ${stats.side_activity_count}`);
+
+  const tokenBits: string[] = [];
+  if (stats.input_tokens !== null) tokenBits.push(`输入 ${fmtCount(stats.input_tokens)}`);
+  if (stats.output_tokens !== null) tokenBits.push(`输出 ${fmtCount(stats.output_tokens)}`);
+  if (stats.cached_tokens !== null) tokenBits.push(`缓存 ${fmtCount(stats.cached_tokens)}`);
+  if (stats.reasoning_tokens !== null) tokenBits.push(`推理 ${fmtCount(stats.reasoning_tokens)}`);
+
+  const runtimeBits = [stats.model, stats.provider, stats.effort].filter(
+    (v): v is string => v !== null && v.trim() !== "",
+  );
+
   return (
-    <button
-      className="link"
-      style={{ textAlign: "left", wordBreak: "break-word" }}
-      title={`${title} · ${session.agent_session_id}`}
-      onClick={() => navigate({ view: "session", sessionId: session.id })}
-    >
-      {title}
-      {session.trashed_at !== null && (
-        <span className="badge warn" style={{ marginLeft: 6 }}>回收站</span>
+    <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
+      <div className="small">
+        成员 {stats.member_count} · 子 {stats.child_count} · 边 {stats.side_count} · 最大深度 {stats.max_depth}
+      </div>
+      {toolBits.length > 0 && <div className="small muted">{toolBits.join(" · ")}</div>}
+      {tokenBits.length > 0 && <div className="small muted">Tokens {tokenBits.join(" · ")}</div>}
+      {stats.cost !== null && (
+        <div className="small muted">成本 {stats.cost.toLocaleString("en-US", { maximumFractionDigits: 4 })}</div>
       )}
-    </button>
+      {runtimeBits.length > 0 && <div className="small muted">{runtimeBits.join(" · ")}</div>}
+    </div>
+  );
+}
+
+const RELATION_LABELS: Record<SessionMemberRelation, string> = {
+  root: "根",
+  child: "子",
+  side: "边执行",
+};
+
+/** 一行成员：关系标签 + 稳定身份（mono，截断，原值在 title 里）+ 自身计数。 */
+function MemberRow({ member, depth }: { member: DetailMember; depth: number }) {
+  const s = member.stats;
+  const bits: string[] = [];
+  if (s?.tool_call_count != null) bits.push(`工具 ${s.tool_call_count}`);
+  if (s?.tool_error_count != null && s.tool_error_count > 0) bits.push(`失败 ${s.tool_error_count}`);
+  if (s?.compaction_count != null && s.compaction_count > 0) bits.push(`压缩 ${s.compaction_count}`);
+
+  return (
+    <div className="row" style={{ paddingLeft: depth * 18, gap: 8, minWidth: 0, alignItems: "baseline" }}>
+      <span className="badge" style={{ flex: "none" }}>{RELATION_LABELS[member.relation]}</span>
+      <span
+        className="mono small"
+        style={{ minWidth: 0, overflowWrap: "anywhere" }}
+        title={member.source_member_id}
+      >
+        {shrinkMiddle(member.source_member_id, MEMBER_ID_WIDTH)}
+      </span>
+      {bits.length > 0 && <span className="muted small" style={{ flex: "none" }}>{bits.join(" · ")}</span>}
+    </div>
+  );
+}
+
+/**
+ * 成员树（§22.2）：root 在顶，child / side 挂在自己的 parent 下，缩进呈现。
+ * parent 记录缺席（未摄入或被清理）的成员不能消失——按顶层孤儿如实列出。
+ */
+function MemberTree({ members }: { members: DetailMember[] }) {
+  const byParent = useMemo(() => {
+    const map = new Map<string, DetailMember[]>();
+    const ids = new Set(members.map((m) => m.source_member_id));
+    const top: DetailMember[] = [];
+    for (const m of members) {
+      const parent = m.relation === "root" ? null : m.parent_source_member_id;
+      if (parent === null || !ids.has(parent)) top.push(m);
+      else {
+        const list = map.get(parent) ?? [];
+        list.push(m);
+        map.set(parent, list);
+      }
+    }
+    return { map, top };
+  }, [members]);
+
+  const renderNode = (m: DetailMember, depth: number): React.ReactNode[] => [
+    <MemberRow key={m.id} member={m} depth={depth} />,
+    ...(byParent.map.get(m.source_member_id) ?? []).flatMap((c) => renderNode(c, depth + 1)),
+  ];
+
+  return (
+    <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+      {byParent.top.flatMap((m) => renderNode(m, 0))}
+    </div>
   );
 }
 

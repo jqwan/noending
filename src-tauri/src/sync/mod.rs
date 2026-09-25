@@ -1,11 +1,18 @@
 //! Workspace Assistant Core — Background Sync.
 //!
-//! A SyncJob reads the event delta after the *processed* cursor, extracts
-//! context mutations routed to the Session's single Owner Workstream, and
-//! merges — all database writes of one run commit in a single SQLite
-//! transaction together with the SyncRun row and the processed-cursor advance.
-//! Any failure rolls the whole run back; retries are idempotent via the delta
-//! fingerprint.
+//! A SyncJob reads the CONVERSATION messages after the Context frontier
+//! (`session_context_state.processed_message_sequence`), extracts context
+//! mutations routed to the Session's single Owner Workstream, and merges —
+//! all database writes of one run commit in a single SQLite transaction
+//! together with the SyncRun row and the frontier advance. Any failure rolls
+//! the whole run back; retries are idempotent via the delta fingerprint.
+//!
+//! The input is exactly `session_messages` (§15): the Conversation is already
+//! curated at ingestion (only root user/assistant prose is stored), so there
+//! is no second kind-based filter and no length heuristic here — a short
+//! message can be the constraint that matters (§2.4). Adapter and Extractor
+//! own the two judgment calls the design names: the adapter decides what is
+//! real conversation text, the extractor decides what carries Context value.
 //!
 //! Routing has exactly one input: `session.owner_workstream_id` (方案 §19).
 //! There is no automatic classification and no candidate set.
@@ -17,11 +24,11 @@
 //! needs.
 //!
 //! Policy (docs §13/§26, Issue #3/#4):
-//! - read_cursor (events durably ingested) and processed_cursor (events
-//!   consumed by a committed SyncRun) are separate;
+//! - the member cursors (read position) and the session's context frontier
+//!   (processed position) are separate lifecycles (§8);
 //! - every mutation passes the unified AuthorityPolicy; user authority is
 //!   never silently overridden — disagreement becomes a ContextConflict;
-//! - every mutation leaves a full source trail.
+//! - every mutation leaves a full source trail (`session-message:<id>`).
 
 pub mod extractor;
 pub mod merge;
@@ -31,13 +38,13 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{ContextItem, ContextItemRevision, Session, SessionEvent, SyncRun};
+use crate::domain::{ContextItem, ContextItemRevision, Session, SessionMessage, SyncRun};
 use crate::error::Result;
 use crate::storage::{new_id, now, Db};
 
 /// A proposed change to a workstream's context, produced by the Assistant.
-/// `source_refs` are stable event references ("session-event:<id>"); a
-/// mutation may cite several events. Empty = no resolvable source.
+/// `source_refs` are stable message references ("session-message:<id>"); a
+/// mutation may cite several messages. Empty = no resolvable source.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ContextMutation {
@@ -108,7 +115,7 @@ pub struct SyncJobOutput {
     pub summary: String,
 }
 
-/// The extraction seam between raw session deltas and the deterministic
+/// The extraction seam between conversation messages and the deterministic
 /// merge engine. `inputs` are the prompt-building reads snapshotted while
 /// the DB lock was held — extraction itself must not touch the database.
 pub trait ContextExtractor: Send + Sync {
@@ -119,7 +126,7 @@ pub trait ContextExtractor: Send + Sync {
     fn extract(
         &self,
         session: &Session,
-        events: &[&SessionEvent],
+        messages: &[&SessionMessage],
         workstream_id: &str,
         inputs: &extractor::PromptInputs,
     ) -> Result<ExtractOutput>;
@@ -131,14 +138,14 @@ pub trait ContextExtractor: Send + Sync {
 pub struct PreparedSync {
     pub run_id: String,
     pub fingerprint: String,
-    pub source_generation: i64,
     pub from_sequence: i64,
     pub to_sequence: i64,
     /// Snapshot of `sessions.owner_workstream_id` taken at prepare time. It is
     /// both the routing target and the commit-phase CAS (方案 §19.2, §20).
     pub owner_workstream_id: Option<String>,
-    pub meaningful: Vec<SessionEvent>,
-    pub meaningful_count: usize,
+    /// The conversation messages this run processes — already exactly the
+    /// user/assistant prose the store curates (§15: no pre-filter here).
+    pub messages: Vec<SessionMessage>,
     pub inputs: extractor::PromptInputs,
 }
 
@@ -191,35 +198,31 @@ impl SyncEngine {
         }
     }
 
-    /// Phase A (DB lock held): idempotency check, Owner snapshot, pre-filter,
-    /// prompt-input snapshot. Returns None when this delta was already
-    /// processed by a committed run, or when the Session has no Owner
-    /// Workstream (方案 §21).
+    /// Phase A (DB lock held): idempotency check, Owner snapshot, prompt-input
+    /// snapshot. Returns None when this delta was already processed by a
+    /// committed run, or when the Session has no Owner Workstream (方案 §21 —
+    /// ownerless: messages keep ingesting, the frontier stays put, and a later
+    /// owner assignment re-processes from here).
     pub fn prepare(
         &self,
         db: &Db,
         session: &Session,
-        events: &[SessionEvent],
+        messages: &[SessionMessage],
         from_sequence: i64,
         to_sequence: i64,
     ) -> Result<Option<PreparedSync>> {
         let run_id = new_id();
-        let fingerprint = delta_fingerprint(&session.id, events);
-        let source_generation = events
-            .iter()
-            .map(|e| e.source_generation)
-            .max()
-            .unwrap_or(0);
+        let fingerprint = delta_fingerprint(&session.id, messages);
 
         // Idempotent retries: this exact delta already committed once.
-        if !events.is_empty() && db.has_completed_run(&session.id, &fingerprint)? {
+        if !messages.is_empty() && db.has_completed_run(&session.id, &fingerprint)? {
             return Ok(None);
         }
 
         // 1. routing: the Session's single Owner Workstream, read fresh from
         //    the DB. No Owner means no Context processing at all (方案 §21):
-        //    events keep ingesting, `processed_sequence` stays put, and a
-        //    later owner assignment re-processes from here.
+        //    messages keep ingesting, the frontier stays put, and a later
+        //    owner assignment re-processes from here.
         let owner_workstream_id: Option<String> = db
             .get_session(&session.id)?
             .and_then(|s| s.owner_workstream_id);
@@ -227,15 +230,7 @@ impl SyncEngine {
             return Ok(None);
         }
 
-        // 2. pre-filter: only meaningful message kinds
-        let meaningful: Vec<SessionEvent> = events
-            .iter()
-            .filter(|e| matches!(e.kind.as_str(), "user_message" | "assistant_message"))
-            .filter(|e| e.text.as_deref().map(|t| t.len() > 30).unwrap_or(false))
-            .cloned()
-            .collect();
-
-        // 3. snapshot everything extraction needs while the lock is held.
+        // 2. snapshot everything extraction needs while the lock is held.
         let inputs = if self.llm.is_some() {
             extractor::collect_prompt_inputs(db, owner_workstream_id.as_deref().unwrap_or(""))?
         } else {
@@ -245,12 +240,10 @@ impl SyncEngine {
         Ok(Some(PreparedSync {
             run_id,
             fingerprint,
-            source_generation,
             from_sequence,
             to_sequence,
             owner_workstream_id,
-            meaningful_count: meaningful.len(),
-            meaningful,
+            messages: messages.to_vec(),
             inputs,
         }))
     }
@@ -258,7 +251,7 @@ impl SyncEngine {
     /// Phase B (NO DB lock): extraction. The heuristic is instant; the CLI
     /// extractor may run the user's agent CLI for minutes. An extractor
     /// failure falls back to the heuristic; a heuristic failure surfaces so
-    /// the commit phase (and processed cursor) is skipped for retry.
+    /// the commit phase (and frontier) is skipped for retry.
     pub fn extract(
         &self,
         session: &Session,
@@ -267,10 +260,10 @@ impl SyncEngine {
         let Some(ws_id) = pre.owner_workstream_id.as_deref() else {
             return Ok((Vec::new(), "none".to_string(), Vec::new()));
         };
-        if pre.meaningful.is_empty() {
+        if pre.messages.is_empty() {
             return Ok((Vec::new(), "none".to_string(), Vec::new()));
         }
-        let refs: Vec<&SessionEvent> = pre.meaningful.iter().collect();
+        let refs: Vec<&SessionMessage> = pre.messages.iter().collect();
         if let Some(cli) = &self.llm {
             match cli.extract(session, &refs, ws_id, &pre.inputs) {
                 Ok(o) => Ok((o.mutations, cli.name(), o.diagnostics)),
@@ -291,14 +284,14 @@ impl SyncEngine {
     }
 
     /// Phase C (DB lock held): apply mutations, record the SyncRun and
-    /// advance the processed cursor — all inside ONE transaction. Any error
+    /// advance the Context frontier — all inside ONE transaction. Any error
     /// rolls the entire run back and the batch is retried later.
     ///
     /// CAS inside the transaction: `prepare` snapshotted `from_sequence`
     /// while holding the lock, but extraction runs WITHOUT it and may take
     /// minutes. If another run committed a newer delta for this session in
     /// the meantime, our mutations are stale — applying them would duplicate
-    /// context and move the processed cursor BACKWARDS. The run is discarded
+    /// context and move the frontier BACKWARDS. The run is discarded
     /// (status "stale"); the next sync re-prepares from the current state.
     pub fn commit(
         &self,
@@ -311,7 +304,7 @@ impl SyncEngine {
     ) -> Result<SyncJobOutput> {
         // §21 — the Owner IS the routing target. `prepare` refuses to prepare an
         // ownerless Session, so arriving here without one means a caller built a
-        // `PreparedSync` by hand: never write Context, a SyncRun or a cursor
+        // `PreparedSync` by hand: never write Context, a SyncRun or a frontier
         // advance for a Session that has no Workstream to route into.
         let Some(run_workstream) = pre.owner_workstream_id.clone() else {
             return Ok(SyncJobOutput {
@@ -331,10 +324,10 @@ impl SyncEngine {
         db.tx(|tx| {
             // §43 — commit-time trash guard, FIRST of the re-checks: a run
             // prepared against a session that was trashed while its
-            // extraction ran must not write events-derived context, a
-            // SyncRun, or a processed-cursor advance. The session keeps its
+            // extraction ran must not write message-derived context, a
+            // SyncRun, or a frontier advance. The session keeps its
             // data frozen at the moment of trashing; a Restore re-syncs from
-            // the unchanged processed cursor.
+            // the unchanged frontier.
             //
             // Type note: the turbofish pins the column reader to Option<String>
             // so `.optional()`'s outer Option means ROW PRESENCE — Some(None)
@@ -362,13 +355,13 @@ impl SyncEngine {
             }
 
             let current_processed: i64 = tx.query_row(
-                "SELECT COALESCE((SELECT processed_sequence FROM session_cursors WHERE session_id = ?1), 0)",
+                "SELECT COALESCE((SELECT processed_message_sequence FROM session_context_state WHERE session_id = ?1), 0)",
                 rusqlite::params![session.id],
                 |r| r.get(0),
             )?;
             if current_processed != pre.from_sequence {
                 eprintln!(
-                    "[sync] run {} stale: processed moved {} → {} during extraction, discarding",
+                    "[sync] run {} stale: frontier moved {} → {} during extraction, discarding",
                     pre.run_id, pre.from_sequence, current_processed
                 );
                 return Ok(SyncJobOutput {
@@ -388,7 +381,7 @@ impl SyncEngine {
             // Workstream IS the Context routing decision. If the user changed
             // the Owner while the extractor ran without the lock, the prepared
             // mutations target a routing that no longer exists — discard the
-            // run WITHOUT advancing the processed cursor, so the next sync
+            // run WITHOUT advancing the frontier, so the next sync
             // re-prepares against the new Owner.
             let current_owner: Option<Option<String>> = tx
                 .query_row(
@@ -426,7 +419,9 @@ impl SyncEngine {
 
             let mut summary = format!(
                 "同步 {} 条新增消息：新增/更新 {} 项，跳过 {} 项",
-                pre.meaningful_count, applied, skipped
+                pre.messages.len(),
+                applied,
+                skipped
             );
             if !diagnostics.is_empty() {
                 summary.push_str(&format!("；诊断: {}", diagnostics.join("；")));
@@ -444,10 +439,9 @@ impl SyncEngine {
                 created_at: now(),
                 runtime: runtime.to_string(),
                 delta_fingerprint: Some(pre.fingerprint.clone()),
-                source_generation: pre.source_generation,
             };
             crate::storage::insert_sync_run_conn(tx, &run)?;
-            crate::storage::set_processed_sequence_conn(tx, &session.id, pre.to_sequence)?;
+            crate::storage::set_processed_message_sequence_conn(tx, &session.id, pre.to_sequence)?;
             Ok(SyncJobOutput {
                 run_id: pre.run_id.clone(),
                 status: "ok".into(),
@@ -458,7 +452,7 @@ impl SyncEngine {
             })
         })
         .map_err(|e| {
-            eprintln!("[sync] run {} rolled back, processed cursor unchanged: {}", pre.run_id, e);
+            eprintln!("[sync] run {} rolled back, frontier unchanged: {}", pre.run_id, e);
             e
         })
     }
@@ -469,18 +463,18 @@ impl SyncEngine {
         &self,
         db: &Db,
         session: &Session,
-        events: &[SessionEvent],
+        messages: &[SessionMessage],
         from_sequence: i64,
         to_sequence: i64,
     ) -> Result<SyncJobOutput> {
-        let Some(pre) = self.prepare(db, session, events, from_sequence, to_sequence)? else {
+        let Some(pre) = self.prepare(db, session, messages, from_sequence, to_sequence)? else {
             return Ok(SyncJobOutput {
                 run_id: new_id(),
                 status: "ok".into(),
                 applied: 0,
                 skipped: 0,
                 unclassified: 0,
-                summary: "该批次事件已由先前的 SyncRun 处理（幂等跳过）。".into(),
+                summary: "该批次消息已由先前的 SyncRun 处理（幂等跳过）。".into(),
             });
         };
         let (mutations, runtime, diagnostics) = self.extract(session, &pre)?;
@@ -488,14 +482,14 @@ impl SyncEngine {
     }
 }
 
-/// Stable fingerprint of a processed delta: ordered event ids. A completed
+/// Stable fingerprint of a processed delta: ordered message ids. A completed
 /// SyncRun with the same fingerprint means "this batch is already merged".
-pub fn delta_fingerprint(session_id: &str, events: &[SessionEvent]) -> String {
+pub fn delta_fingerprint(session_id: &str, messages: &[SessionMessage]) -> String {
     let mut h = Sha256::new();
     h.update(session_id);
-    for e in events {
+    for m in messages {
         h.update([0x1f]);
-        h.update(e.id.as_bytes());
+        h.update(m.id.as_bytes());
     }
     let d = h.finalize();
     d.iter().map(|b| format!("{:02x}", b)).collect::<String>()
@@ -569,7 +563,7 @@ pub fn create_item_conn(
                 || created_by.starts_with("sync:")
                 || sync_run_id.is_some()
                 || authority.starts_with("agent")
-                || source_type == "session_event"
+                || source_type == "session_message"
             {
                 "agent"
             } else {

@@ -22,10 +22,13 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::context::resolve_core_context;
-use crate::domain::{Agent, ContextItem, ContextItemRevision, Session, SessionEvent, Workstream};
+use crate::domain::{
+    Agent, ContextItem, ContextItemRevision, Session, SessionMemberRelation, SessionMessage,
+    SessionMessageRole, Workstream,
+};
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
-use crate::sync::extractor::{collect_prompt_inputs, parse_mutations, PromptEventRef};
+use crate::sync::extractor::{collect_prompt_inputs, parse_mutations, PromptMessageRef};
 use crate::sync::merge::MergeEngine;
 use crate::sync::{ContextExtractor, ContextMutation, MergeContext};
 
@@ -142,18 +145,19 @@ impl EvalReport {
 // Corpus setup
 // ---------------------------------------------------------------------------
 
-/// Database, session, events and prompt references materialized from one
-/// fixture, ready to be driven by the Layer A / Layer B runners.
+/// Database, session, conversation messages and prompt references
+/// materialized from one fixture, ready to be driven by the Layer A / Layer B
+/// runners.
 pub struct FixtureEnv {
     pub db: Db,
     pub session: Session,
-    pub session_events: Vec<SessionEvent>,
+    pub session_messages: Vec<SessionMessage>,
     /// The single Owner Workstream this fixture routes to (方案 §19): the
     /// first workstream of the fixture. A fixture with more than one
     /// workstream no longer describes a legal Session — a Session has at most
     /// one Owner — so only the first is ever the routing target.
     pub owner_workstream_id: String,
-    pub ref_map: Vec<PromptEventRef>,
+    pub ref_map: Vec<PromptMessageRef>,
 }
 
 fn open_eval_db(fixture_name: &str) -> Result<Db> {
@@ -223,63 +227,113 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
         })?;
     }
 
+    let agent = match fixture.input.session.agent.to_lowercase().as_str() {
+        "codex" => Agent::Codex,
+        "claude_code" | "claude" => Agent::ClaudeCode,
+        "pi" => Agent::Pi,
+        "qoder" | "qcoder" => Agent::Qoder,
+        "autoclaw" | "openclaw" => Agent::AutoClaw,
+        "workbuddy" | "work_buddy" => Agent::WorkBuddy,
+        "dsh" | "deepseek_harness" => Agent::Dsh,
+        "zcode" | "z_code" => Agent::ZCode,
+        _ => Agent::Codex,
+    };
+    let root_agent_session_id = format!("as-{name}");
+    let (session_id, _) = db
+        .upsert_logical_session(
+            agent,
+            &root_agent_session_id,
+            Some(&fixture.input.session.title),
+            None,
+            None,
+            None,
+            Some(&now()),
+            Some(&now()),
+        )
+        .map_err(|e| other(format!("fixture {name}: upsert session failed: {e}")))?;
+    let root_member_id = db
+        .upsert_session_member(
+            &session_id,
+            agent,
+            &root_agent_session_id,
+            SessionMemberRelation::Root,
+            None,
+            "eval_fixture",
+            &format!("/tmp/{name}.jsonl"),
+            None,
+            Some(&now()),
+            Some(&now()),
+            &serde_json::json!({}),
+        )
+        .map_err(|e| other(format!("fixture {name}: upsert root member failed: {e}")))?;
+
+    // The harness drives extraction directly with the fixture's single
+    // workstream id; the row itself is not consulted for routing.
     let session = Session {
-        id: format!("sess-{name}"),
-        agent: match fixture.input.session.agent.to_lowercase().as_str() {
-            "codex" => Agent::Codex,
-            "claude_code" | "claude" => Agent::ClaudeCode,
-            "pi" => Agent::Pi,
-            "qoder" | "qcoder" => Agent::Qoder,
-            "autoclaw" | "openclaw" => Agent::AutoClaw,
-            "workbuddy" | "work_buddy" => Agent::WorkBuddy,
-            "dsh" | "deepseek_harness" => Agent::Dsh,
-            "zcode" | "z_code" => Agent::ZCode,
-            _ => Agent::Codex,
-        },
-        agent_session_id: format!("as-{name}"),
+        id: session_id.clone(),
+        agent,
+        root_agent_session_id,
         title: Some(fixture.input.session.title.clone()),
         cwd: None,
         workspace_path_id: None,
         project_id: None,
-        // The harness drives extraction directly with the fixture's single
-        // workstream id; the row itself is not consulted for routing.
         owner_workstream_id: None,
-        raw_path: format!("/tmp/{name}.jsonl"),
-        parent_agent_session_id: None,
+        forked_from_session_id: None,
         started_at: Some(now()),
         last_activity_at: Some(now()),
+        last_conversation_at: None,
         trashed_at: None,
     };
-    db.upsert_session(&session)
-        .map_err(|e| other(format!("fixture {name}: upsert session failed: {e}")))?;
 
     // Prompt-local short refs follow the fixture's declared sequence numbers;
-    // they are positional labels into the recorded prompt, never event
-    // identity (that stays `ev-<fixture>-<seq>` / `session-event:<id>`).
-    let mut session_events = Vec::new();
+    // they are positional labels into the recorded prompt, never message
+    // identity (that stays `ev-<fixture>-<seq>` / `session-message:<id>`).
+    // Messages are seeded through the production commit path so the fixture
+    // conversation satisfies the same invariants a real ingest does.
+    let mut session_messages = Vec::new();
     let mut ref_map = Vec::new();
     for fe in &fixture.input.events {
         let ev_id = format!("ev-{name}-{}", fe.sequence);
         let short_ref = format!("#{}", fe.sequence);
-        session_events.push(SessionEvent {
-            id: ev_id.clone(),
-            session_id: session.id.clone(),
-            sequence: fe.sequence,
-            source_event_id: None,
-            source_generation: 0,
-            source_position: format!("line:{}", fe.sequence),
-            ts: None,
-            kind: fe.kind.clone(),
-            text: Some(fe.text.clone()),
-            raw_ref: format!("test#line:{}", fe.sequence),
-            metadata: serde_json::json!({}),
-        });
-        ref_map.push(PromptEventRef {
+        let role = if fe.kind == "user_message" {
+            SessionMessageRole::User
+        } else {
+            SessionMessageRole::Assistant
+        };
+        let stored = db
+            .commit_member_ingest(
+                &session_id,
+                &root_member_id,
+                &[crate::domain::ParsedSessionMessage {
+                    source_message_id: Some(ev_id.clone()),
+                    source_position: format!("line:{}", fe.sequence),
+                    ts: None,
+                    role,
+                    content: fe.text.clone(),
+                }],
+                None,
+                &crate::domain::SourceCursorUpdate {
+                    file_identity: format!("eval-{name}"),
+                    generation: 0,
+                    byte_offset: fe.sequence as u64,
+                    last_seen_size: fe.sequence as u64,
+                    mtime: None,
+                    start_byte_offset: 0,
+                    prefix_hash: String::new(),
+                },
+            )
+            .map_err(|e| other(format!("fixture {name}: seed message failed: {e}")))?;
+        let stored = stored
+            .last()
+            .cloned()
+            .ok_or_else(|| other(format!("fixture {name}: seeded message deduped away")))?;
+        ref_map.push(PromptMessageRef {
             short_ref,
-            event_id: ev_id,
-            sequence: fe.sequence,
-            kind: fe.kind.clone(),
+            message_id: stored.id.clone(),
+            sequence: stored.sequence,
+            role,
         });
+        session_messages.push(stored);
     }
 
     let owner_workstream_id = fixture
@@ -292,7 +346,7 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
     Ok(FixtureEnv {
         db,
         session,
-        session_events,
+        session_messages,
         owner_workstream_id,
         ref_map,
     })
@@ -483,9 +537,14 @@ pub fn evaluate_extractor(
             "fixture {name}: snapshot prompt inputs failed: {e}"
         ))
     })?;
-    let event_refs: Vec<&SessionEvent> = env.session_events.iter().collect();
+    let message_refs: Vec<&SessionMessage> = env.session_messages.iter().collect();
     let out = extractor
-        .extract(&env.session, &event_refs, &env.owner_workstream_id, &inputs)
+        .extract(
+            &env.session,
+            &message_refs,
+            &env.owner_workstream_id,
+            &inputs,
+        )
         .map_err(|e| {
             other(format!(
                 "fixture {name}: extractor '{}' failed: {e}",
@@ -525,9 +584,9 @@ fn evaluate_extractor_gold(
     let mut checks = Vec::new();
 
     let seq_to_event_id: HashMap<i64, String> = env
-        .session_events
+        .session_messages
         .iter()
-        .map(|e| (e.sequence, e.id.clone()))
+        .map(|m| (m.sequence, m.id.clone()))
         .collect();
     let views: Vec<MutationView<'_>> = mutations.iter().map(mutation_view).collect();
 
@@ -824,7 +883,7 @@ fn mutation_matches(
         let Some(event_id) = seq_to_event_id.get(seq) else {
             return false;
         };
-        let want = format!("session-event:{event_id}");
+        let want = format!("session-message:{event_id}");
         if !v.source_refs.iter().any(|r| r == &want) {
             return false;
         }

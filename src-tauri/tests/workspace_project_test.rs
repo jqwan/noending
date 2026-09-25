@@ -18,7 +18,8 @@ use std::sync::Mutex;
 mod support;
 
 use noending::domain::{
-    git_state, Agent, GitDetection, GitWorktreeKind, Project, WorkspaceObservation, WorkspacePath,
+    git_state, Agent, GitDetection, GitWorktreeKind, Project, Session, WorkspaceObservation,
+    WorkspacePath,
 };
 use noending::storage::workspace::{
     delete_zero_path_project_conn, insert_workspace_path_conn, rename_project_conn,
@@ -140,16 +141,22 @@ fn paths_of(db: &Db, project_id: &str) -> Vec<WorkspacePath> {
     db.list_workspace_paths_for_project(project_id).unwrap()
 }
 
-fn session(db: &Db, id: &str, cwd: &str, path_id: &str) {
-    let mut s = support::session(
-        id.into(),
-        Agent::Codex,
-        format!("src-{id}"),
-        format!("/raw/{id}.jsonl"),
-    );
-    s.cwd = Some(canon(cwd));
-    s.workspace_path_id = Some(path_id.into());
-    db.upsert_session(&s).unwrap();
+/// The row id is store-assigned (identity is the ROOT member's Agent-side
+/// id), so callers use the returned Session instead of a fixture id.
+fn session(db: &Db, id: &str, cwd: &str, path_id: &str) -> Session {
+    let (row_id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            &format!("src-{id}"),
+            None,
+            Some(&canon(cwd)),
+            Some(path_id),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    db.get_session(&row_id).unwrap().expect("session row")
 }
 
 fn workstream(db: &Db, id: &str, title: &str) {
@@ -448,7 +455,7 @@ fn path_project_upgrades_to_git_project_without_changing_project_id() {
     let path = ensure(&db, &plain("/work/repo", true));
     let project = project_of(&db, &path);
     assert_eq!(project.git_id, None);
-    session(&db, "s-up", "/work/repo", &path.id);
+    let s_up = session(&db, "s-up", "/work/repo", &path.id);
 
     // `git init` ran. The Project adopts the family; the row it owns does not move.
     let after = ensure(
@@ -471,7 +478,7 @@ fn path_project_upgrades_to_git_project_without_changing_project_id() {
         "an upgrade creates no second Project"
     );
     assert_eq!(
-        db.get_session("s-up")
+        db.get_session(&s_up.id)
             .unwrap()
             .unwrap()
             .project_id
@@ -497,7 +504,7 @@ fn git_missing_does_not_detach_the_path() {
         &repo("/work/repo", "/work/repo/.git", GitWorktreeKind::Main, &[]),
     );
     let project = project_of(&db, &path);
-    session(&db, "s-keep", "/work/repo", &path.id);
+    let s_keep = session(&db, "s-keep", "/work/repo", &path.id);
 
     // The `.git` directory vanished. §1.3 allows exactly one change: `git_state`.
     let missing = ensure(&db, &plain("/work/repo", true));
@@ -540,7 +547,7 @@ fn git_missing_does_not_detach_the_path() {
     assert_eq!(restored.git_state, git_state::DETECTED);
     assert_eq!(restored.project_id, project.id);
     assert_eq!(
-        db.get_session("s-keep")
+        db.get_session(&s_keep.id)
             .unwrap()
             .unwrap()
             .project_id
@@ -568,8 +575,8 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
     );
     assert_eq!(a.project_id, b.project_id);
     let g1 = family_of(&db, &a);
-    session(&db, "s-a", "/work/one", &a.id);
-    session(&db, "s-b", "/work/two", &b.id);
+    let s_a = session(&db, "s-a", "/work/one", &a.id);
+    let s_b = session(&db, "s-b", "/work/two", &b.id);
 
     // `/work/one` now sits inside a DIFFERENT repository. §8.5: a strong identity
     // change — this path moves, its sibling keeps its own family.
@@ -586,7 +593,7 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
         "evidence is per-path: the untouched worktree stays with G1"
     );
     assert_eq!(
-        db.get_session("s-a")
+        db.get_session(&s_a.id)
             .unwrap()
             .unwrap()
             .project_id
@@ -595,7 +602,7 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
         "§1.11: the derived cache followed its path in the same transaction"
     );
     assert_eq!(
-        db.get_session("s-b")
+        db.get_session(&s_b.id)
             .unwrap()
             .unwrap()
             .project_id
@@ -645,8 +652,8 @@ fn merge_deletes_the_zero_path_project() {
     let two = insert_plain(&db, "/legacy/two", &legacy);
     assert_eq!(one.project_id, two.project_id);
     let merged_away = one.project_id.clone();
-    session(&db, "s-1", "/legacy/one", &one.id);
-    session(&db, "s-2", "/legacy/two", &two.id);
+    let s1 = session(&db, "s-1", "/legacy/one", &one.id);
+    let s2 = session(&db, "s-2", "/legacy/two", &two.id);
     workstream(&db, "w-1", "keeps working");
     add_ws_path(&db, "w-1", &two.id);
 
@@ -678,9 +685,13 @@ fn merge_deletes_the_zero_path_project() {
         "§8.4: the merged Project is deleted, not left empty"
     );
     assert_eq!(paths_of(&db, &survivor).len(), 3, "its paths came too");
-    for id in ["s-1", "s-2"] {
+    for s in [&s1, &s2] {
         assert_eq!(
-            db.get_session(id).unwrap().unwrap().project_id.as_deref(),
+            db.get_session(&s.id)
+                .unwrap()
+                .unwrap()
+                .project_id
+                .as_deref(),
             Some(survivor.as_str()),
             "every Session behind a moved path follows it"
         );
@@ -873,7 +884,7 @@ fn gc_only_removes_paths_nothing_references_and_that_we_observed_gone() {
     let by_session = ensure(&db, &plain("/gone/session", true));
     let by_workstream = ensure(&db, &plain("/gone/workstream", true));
     let never_asked = ensure(&db, &plain("/still/here", true));
-    session(&db, "s-ref", "/gone/session", &by_session.id);
+    let s_ref = session(&db, "s-ref", "/gone/session", &by_session.id);
     workstream(&db, "w-ref", "still listed");
     add_ws_path(&db, "w-ref", &by_workstream.id);
 
@@ -895,7 +906,7 @@ fn gc_only_removes_paths_nothing_references_and_that_we_observed_gone() {
     assert!(db.get_workspace_path(&by_workstream.id).unwrap().is_some());
     assert!(db.get_workspace_path(&never_asked.id).unwrap().is_some());
     assert!(
-        db.get_session("s-ref").unwrap().is_some(),
+        db.get_session(&s_ref.id).unwrap().is_some(),
         "the Session survives"
     );
     assert_eq!(db.list_workstream_paths("w-ref").unwrap().len(), 1);
@@ -1281,7 +1292,7 @@ fn project_detail_has_the_frozen_shape() {
         path.project_id, sibling.project_id,
         "a plain directory inside a repository is still its own Project until Git says otherwise"
     );
-    session(&db, "s-det", "/work/repo", &path.id);
+    let s_det = session(&db, "s-det", "/work/repo", &path.id);
     workstream(&db, "w-primary", "primary here");
     workstream(&db, "w-related", "related here");
     add_ws_path(&db, "w-primary", &path.id);
@@ -1307,7 +1318,7 @@ fn project_detail_has_the_frozen_shape() {
             .iter()
             .map(|s| s.id.clone())
             .collect::<Vec<_>>(),
-        vec!["s-det".to_string()]
+        vec![s_det.id.clone()]
     );
     assert_eq!(
         detail
@@ -1838,10 +1849,10 @@ fn refresh_does_not_touch_session_history() {
     let observer = Scripted::new();
     observer.set("/work/a", plain("/work/a", false));
     let projection = ProjectProjection::new(&observer);
-    let wp = {
+    let (wp, s_hist) = {
         let wp = ensure(&db, &plain("/work/a", true));
-        session(&db, "s-hist", "/work/a", &wp.id);
-        wp
+        let s_hist = session(&db, "s-hist", "/work/a", &wp.id);
+        (wp, s_hist)
     };
     let before = count_rows(
         &db,
@@ -1860,7 +1871,7 @@ fn refresh_does_not_touch_session_history() {
         ),
         before
     );
-    let s = { db.get_session("s-hist").unwrap().expect("session intact") };
+    let s = { db.get_session(&s_hist.id).unwrap().expect("session intact") };
     assert!(s.trashed_at.is_none());
     assert_eq!(s.workspace_path_id.as_deref(), Some(wp.id.as_str()));
 }

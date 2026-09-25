@@ -1,16 +1,22 @@
 //! Pi Adapter: `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`.
 //! `PI_HOME` overrides the root. Pi sessions are plain JSONL trees, read-only
-//! during normal operation; the one exception is the adapter-owned,
-//! user-confirmed permanent source deletion below (方案 §39).
+//! always (重构方案 §2.6: NoEnding never deletes an Agent-owned source).
+//!
+//! Member mapping (§26.6): today's sources are single-root — one transcript,
+//! one ROOT member. The existing conversation filters stay: thinking blocks,
+//! tool traffic and runtime injections never become conversation (§2.3); a
+//! compaction marker is an observation. If a future source exposes child/side
+//! identities, Member discovery extends — the Conversation schema does not.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, AgentCommand, DiscoveredSession, ParsedLine, ReadDelta,
+    detect_format, read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind,
+    MemberObservation, ParsedLine, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceCursor};
+use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::Result;
 use crate::platform::exec_resolver::{self, AgentInstallation};
 
@@ -36,7 +42,7 @@ fn content_text(content: &Value) -> String {
 }
 
 impl PiAdapter {
-    fn parse_session_file(path: &Path) -> Result<Option<DiscoveredSession>> {
+    fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
         let lines = crate::adapters::read_jsonl_lines(path)?;
         let mut session_id: Option<String> = None;
         let mut cwd: Option<String> = None;
@@ -103,10 +109,14 @@ impl PiAdapter {
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
-        Ok(Some(DiscoveredSession {
+        Ok(Some(DiscoveredMember {
             agent: Agent::Pi,
-            agent_session_id: session_id,
-            path: path.to_path_buf(),
+            source_member_id: session_id,
+            kind: DiscoveredMemberKind::Root,
+            parent_source_member_id: None,
+            root_hint: None,
+            source_kind: "pi_session_transcript".into(),
+            source_path: path.to_path_buf(),
             cwd,
             started_at,
             last_activity_at: last_activity,
@@ -114,7 +124,7 @@ impl PiAdapter {
             native_title: None,
             first_user_text,
             first_agent_text,
-            parent_agent_session_id: None,
+            metadata: serde_json::json!({}),
         }))
     }
 }
@@ -144,11 +154,11 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         exec_resolver::resolve_quiet(Agent::Pi)
     }
 
-    fn discover_sessions_in(
+    fn discover_members_in(
         &self,
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<DiscoveredSession>> {
+    ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
@@ -179,8 +189,8 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                     );
                     continue;
                 }
-                match Self::parse_session_file(&p) {
-                    Ok(Some(s)) => out.push(s),
+                match Self::parse_member(&p) {
+                    Ok(Some(m)) => out.push(m),
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
@@ -189,41 +199,21 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
-        let path = PathBuf::from(&session.raw_path);
+    fn read_member_delta(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+    ) -> Result<crate::adapters::MemberReadDelta> {
+        let path = PathBuf::from(&member.source_path);
         read_jsonl_delta(&path, cursor, &|_idx, v| {
-            let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let source_event_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
-
-            let (kind, text) = match vtype {
-                "message" => {
-                    let msg = v.get("message").unwrap_or(&Value::Null);
-                    let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                    let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                    if text.trim().is_empty() {
-                        return None;
-                    }
-                    match role {
-                        "user" => ("user_message", text),
-                        "assistant" => ("assistant_message", text),
-                        // Tool output is a `toolResult` MESSAGE in pi, so it used
-                        // to land here as `system`. Not ingested (方案 §36.11).
-                        "toolResult" | "tool_result" => return None,
-                        _ => ("system", text),
-                    }
-                }
-                "compaction" | "compact" => ("compact", "conversation compacted".into()),
-                "session" => ("system", "session header".into()),
-                _ => return None,
-            };
-
-            Some(ParsedLine {
-                kind: kind.into(),
-                text: Some(text),
-                source_event_id,
-                metadata: serde_json::json!({ "agent": "pi", "type": vtype }),
-            })
+            parse_line(v, member.relation.as_str() == "root")
         })
+    }
+
+    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+        Ok(crate::adapters::inspect_file_source(Path::new(
+            &member.source_path,
+        )))
     }
 
     fn build_new_command(
@@ -279,28 +269,153 @@ impl crate::adapters::AgentAdapter for PiAdapter {
             cwd: None,
         })
     }
+}
 
-    /// Pi source deletion (方案 §15): the session source is the exact
-    /// discovered `*.jsonl` transcript at `raw_path`. Validation and removal
-    /// live here, in the adapter — Core never touches the file.
-    fn prepare_source_session_deletion(
-        &self,
-        session: &Session,
-    ) -> Result<crate::adapters::SourceDeletionPlan> {
-        crate::adapters::prepare_single_file_source_deletion(
-            session,
-            Agent::Pi,
-            "pi_session_transcript",
-            &|p| Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id)),
-        )
+/// One line's contribution. `toolResult` messages and every other role are
+/// machine traffic; thinking blocks are filtered by `content_text`.
+fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
+    let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let source_message_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
+
+    match vtype {
+        "message" => {
+            let msg = v.get("message").unwrap_or(&Value::Null);
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let text = content_text(msg.get("content").unwrap_or(&Value::Null));
+            if text.trim().is_empty() {
+                return None;
+            }
+            match (role, is_root) {
+                ("user", true) if !crate::adapters::is_injected_preamble(&text) => {
+                    Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                        source_message_id,
+                        SessionMessageRole::User,
+                        text,
+                    )))
+                }
+                ("assistant", true) => {
+                    Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                        source_message_id,
+                        SessionMessageRole::Assistant,
+                        text,
+                    )))
+                }
+                // Tool output is a `toolResult` MESSAGE in pi; every other
+                // non-conversation role is runtime chatter (§36.11).
+                _ => None,
+            }
+        }
+        "compaction" | "compact" => Some(ParsedLine::observation_only(MemberObservation {
+            compactions: 1,
+            ..Default::default()
+        })),
+        _ => None, // session headers and bookkeeping carry nothing
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::AgentAdapter;
+    use crate::domain::{SessionMemberRelation, StatsUpdate};
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("noending-pi-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    fn execute_source_session_deletion(
-        &self,
-        plan: &crate::adapters::SourceDeletionPlan,
-    ) -> Result<crate::adapters::SourceDeletionOutcome> {
-        crate::adapters::execute_single_file_source_deletion(plan, Agent::Pi, &|p| {
-            Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id))
-        })
+    fn root_member(path: &Path) -> SessionMember {
+        SessionMember {
+            id: "mem-pi".into(),
+            session_id: "sess-pi".into(),
+            agent: Agent::Pi,
+            source_member_id: "p1".into(),
+            relation: SessionMemberRelation::Root,
+            parent_source_member_id: None,
+            source_kind: "pi_session_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn session_lines() -> String {
+        [
+            r#"{"type":"session","id":"p1","cwd":"/repo","version":3,"timestamp":"2026-09-18T12:40:00.000Z"}"#,
+            r#"{"type":"message","id":"m1","parentId":"p1","timestamp":"2026-09-18T12:40:03.000Z","message":{"role":"user","content":[{"type":"text","text":"帮我看看这个"}]}}"#,
+            r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-09-18T12:40:05.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"…"},{"type":"text","text":"看完了。"}]}}"#,
+            r#"{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-09-18T12:40:06.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"file contents"}]}}"#,
+            r#"{"type":"compaction","id":"c1","parentId":"m3","timestamp":"2026-09-18T12:40:07.000Z"}"#,
+        ]
+        .join("\n")
+            + "\n"
+    }
+
+    #[test]
+    fn discovery_claims_pi_files_by_fingerprint() {
+        let dir = unique_dir("discover");
+        std::fs::write(dir.join("a.jsonl"), session_lines()).unwrap();
+        std::fs::write(dir.join("b.jsonl"), "{\"hello\":1}\n").unwrap();
+
+        let found = PiAdapter.discover_members_in(&[dir], &|_| false).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_member_id, "p1");
+        assert_eq!(found[0].kind, DiscoveredMemberKind::Root);
+        assert_eq!(found[0].cwd.as_deref(), Some("/repo"));
+    }
+
+    /// §32.2 — prose only; the injected env block and the toolResult message
+    /// are not conversation; the compaction marker is a count.
+    #[test]
+    fn the_root_read_keeps_prose_and_counts_compaction() {
+        let dir = unique_dir("parse");
+        let path = dir.join("a.jsonl");
+        std::fs::write(&path, session_lines()).unwrap();
+
+        let delta = PiAdapter
+            .read_member_delta(&root_member(&path), &SessionMemberCursor::default())
+            .unwrap();
+        let texts: Vec<(SessionMessageRole, &str)> = delta
+            .messages
+            .iter()
+            .map(|m| (m.role, m.content.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                (SessionMessageRole::User, "帮我看看这个"),
+                (SessionMessageRole::Assistant, "看完了。")
+            ],
+            "the toolResult message stays out of the conversation"
+        );
+        assert_eq!(delta.messages[0].source_message_id.as_deref(), Some("m1"));
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.compaction_count, 1);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_reports_missing_only_for_a_confirmed_absent_file() {
+        let dir = unique_dir("inspect");
+        let path = dir.join("a.jsonl");
+        std::fs::write(&path, session_lines()).unwrap();
+        let member = root_member(&path);
+        assert_eq!(
+            PiAdapter.inspect_member_source(&member).unwrap(),
+            SourceAvailability::Present
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            PiAdapter.inspect_member_source(&member).unwrap(),
+            SourceAvailability::Missing
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

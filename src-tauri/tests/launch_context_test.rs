@@ -7,11 +7,14 @@
 //! multi-workstream bundles.
 
 use noending::domain::{
-    launch_status, Agent, ContextDelivery, LaunchIntent, Session, SourceCursor,
+    launch_status, Agent, ContextDelivery, LaunchIntent, Session, SessionMessageRole,
+    SourceCursorUpdate,
 };
 use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
 use noending::{context, launcher};
+
+mod support;
 
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-launch-{}-{}", tag, new_id()));
@@ -46,26 +49,28 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
     p
 }
 
+/// A Logical Session keyed by its ROOT member's Resume identity, with a REAL
+/// root source file: resume preparation refuses a Session whose ROOT member
+/// source is not present on disk (§17.2), so every fixture session is
+/// resumable.
 fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<String>) -> Session {
+    let root_id = format!("root-{}", new_id());
     let raw = std::env::temp_dir().join(format!("noending-raw-{}.jsonl", new_id()));
-    let _ = std::fs::write(&raw, "");
-    let s = Session {
-        id: new_id(),
-        agent,
-        agent_session_id: format!("as-{}", new_id()),
-        title: None,
-        cwd,
-        workspace_path_id: None,
-        project_id: None,
-        owner_workstream_id: None,
-        raw_path: raw.to_string_lossy().to_string(),
-        parent_agent_session_id: None,
-        started_at: started_at.clone(),
-        last_activity_at: started_at,
-        trashed_at: None,
-    };
-    db.upsert_session(&s).unwrap();
-    s
+    std::fs::write(&raw, "").unwrap();
+    let (id, _) = db
+        .upsert_logical_session(
+            agent,
+            &root_id,
+            None,
+            cwd.as_deref(),
+            None,
+            None,
+            started_at.as_deref(),
+            started_at.as_deref(),
+        )
+        .unwrap();
+    support::ensure_root_member(db, &id, agent, &root_id, &raw.to_string_lossy());
+    db.get_session(&id).unwrap().unwrap()
 }
 
 /// A pending New Session intent carrying the user's single Owner selection.
@@ -417,8 +422,8 @@ fn resume_delta_shows_changes_and_disappearances() {
         "新决定：切换构建工具",
         "使用新的构建工具",
         "agent_inferred",
-        "session_event",
-        &["session-event:e9".into()],
+        "session_message",
+        &["session-message:e9".into()],
         None,
         "sync:heuristic",
     )
@@ -544,12 +549,13 @@ fn auto_created_workstream_may_have_no_project() {
         .expect("created");
 }
 
-/// get_event_by_ref resolves stable event ids and rejects unknown refs.
+/// get_message_by_ref resolves stable message ids and rejects unknown refs.
 #[test]
-fn event_ref_roundtrip() {
-    let db = open_db("event-ref");
+fn message_ref_roundtrip() {
+    let db = open_db("message-ref");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
-    let source = noending::domain::SourceCursorUpdate {
+    let root = db.root_member_for_session(&s.id).unwrap().unwrap();
+    let source = SourceCursorUpdate {
         file_identity: "dev:1:ino:3".into(),
         generation: 0,
         byte_offset: 10,
@@ -559,60 +565,84 @@ fn event_ref_roundtrip() {
         prefix_hash: String::new(),
     };
     let stored = db
-        .append_source_events(
+        .commit_member_ingest(
             &s.id,
-            &[noending::domain::ParsedEvent {
-                source_event_id: None,
-                source_position: "line:1".into(),
-                ts: Some("t".into()),
-                kind: "user_message".into(),
-                text: Some("ref target".into()),
-                metadata: serde_json::json!({}),
-            }],
+            &root.id,
+            &[support::parsed_message(
+                "src-1",
+                SessionMessageRole::User,
+                "ref target",
+            )],
+            None,
             &source,
-            "/x.jsonl",
         )
         .unwrap();
-    let ev = &stored[0];
+    let msg = &stored[0];
 
     // stable reference
     let by_id = db
-        .get_event_by_ref(&format!("session-event:{}", ev.id))
+        .get_message_by_ref(&format!("session-message:{}", msg.id))
         .unwrap()
         .unwrap();
-    assert_eq!(by_id.id, ev.id);
+    assert_eq!(by_id.id, msg.id);
     // unknown ref → None, never fabricated
     assert!(db
-        .get_event_by_ref("session-event:missing")
+        .get_message_by_ref("session-message:missing")
         .unwrap()
         .is_none());
 }
 
-/// A fresh cursor row exists per session with sane defaults.
+/// A member cursor row is written by the ingest commit and read back through
+/// `get_member_cursor`; the conversation frontier rides separately.
 #[test]
-fn source_cursor_roundtrip() {
+fn member_cursor_roundtrip() {
     let db = open_db("cursor-roundtrip");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
-    let c = SourceCursor {
-        session_id: s.id.clone(),
-        source_file_identity: "unix:dev:1:ino:42".into(),
+    let root = db.root_member_for_session(&s.id).unwrap().unwrap();
+    let source = SourceCursorUpdate {
+        file_identity: "unix:dev:1:ino:42".into(),
         generation: 3,
         byte_offset: 900,
         last_seen_size: 1000,
         mtime: Some(1234.5),
+        start_byte_offset: 0,
         prefix_hash: "abc123".into(),
-        identity_tail_hash: "deadbeef".into(),
-        last_sequence: 7,
     };
-    db.set_source_cursor(&c).unwrap();
-    let back = db.get_source_cursor(&s.id).unwrap();
-    assert_eq!(back.source_file_identity, c.source_file_identity);
+    let stored = db
+        .commit_member_ingest(
+            &s.id,
+            &root.id,
+            &[support::parsed_message(
+                "m1",
+                SessionMessageRole::User,
+                "hello",
+            )],
+            None,
+            &source,
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+
+    let back = db.get_member_cursor(&root.id).unwrap();
+    assert_eq!(back.member_id, root.id);
+    assert_eq!(back.source_file_identity, "unix:dev:1:ino:42");
     assert_eq!(back.generation, 3);
     assert_eq!(back.byte_offset, 900);
+    assert_eq!(back.last_seen_size, 1000);
+    assert_eq!(back.mtime, Some(1234.5));
     assert_eq!(back.prefix_hash, "abc123");
-    assert_eq!(back.identity_tail_hash, "deadbeef");
-    assert_eq!(back.last_sequence, 7);
-    assert_eq!(db.get_ingested_sequence(&s.id).unwrap(), 7);
+    assert!(
+        !back.identity_tail_hash.is_empty(),
+        "a committed message advances the member cursor's identity tail"
+    );
+    assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 1);
+    // The Context frontier is a separate, still-zero book.
+    assert_eq!(
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        0
+    );
 }
 
 /// A New Session launched with injected context RECEIVED that context:

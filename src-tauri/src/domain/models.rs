@@ -285,14 +285,20 @@ impl Agent {
     }
 }
 
-/// A normalized, agent-agnostic record of one external Session.
-/// Session may have no cwd / repository / workspace at all.
+/// A Logical Session: the one user-visible conversation plus every internal
+/// execution member (child agents, sidechains) it spawned (重构方案 §2.1/§4).
+///
+/// A Session is NOT an Agent thread — it is keyed by the ROOT member's real
+/// Resume identity (`root_agent_session_id`), while children/sides live on as
+/// [`SessionMember`] rows of the same Session and can never own, rename or
+/// resume it (§4.1).
 ///
 /// Workspace facts on a Session:
 /// - `workspace_path_id` is the authoritative link to the physical workspace;
-///   it is set only when the Session really has a cwd. A Session without one
-///   stays `None` — the default workspace is a *launch* convenience and is
-///   never retrofitted onto historical Sessions.
+///   it is set only when the ROOT member really has a cwd. A Session without
+///   one stays `None` — the default workspace is a *launch* convenience and is
+///   never retrofitted onto historical Sessions. Child/side cwds are execution
+///   facts on their member rows and never flow up (§4.1, §18).
 /// - `project_id` is a **derived cache** of
 ///   `workspace_path_id → workspace_paths.project_id`. It is written by exactly
 ///   two code paths (see `storage::session_paths`); a manual write into it is a
@@ -301,25 +307,31 @@ impl Agent {
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
     pub agent: Agent,
-    pub agent_session_id: String,
+    /// The ROOT member's Agent-side Resume identity (方案 §17.2). Authority for
+    /// LaunchIntent matching and `resume` — never a child's external id.
+    pub root_agent_session_id: String,
     pub title: Option<String>,
+    /// Semantic ownership: the one Workstream this Logical Session belongs to,
+    /// or `None`. At most one Owner (方案 §3.3). Only an explicit user action
+    /// or a matched LaunchIntent sets it — never fork inheritance (§2.2).
+    pub owner_workstream_id: Option<Id>,
     pub cwd: Option<String>,
     pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
-    /// Semantic ownership: the one Workstream this execution belongs to, or
-    /// `None`. A Session has at most one Owner Workstream (方案 §3.3); there is
-    /// no primary/related pair and no M:N relation. Physical Project membership
-    /// (above) and this semantic owner are independent and never mutate each
-    /// other (方案 §4, §5).
-    pub owner_workstream_id: Option<Id>,
-    pub raw_path: String,
-    pub parent_agent_session_id: Option<String>,
+    /// When this Session is an independently continuable fork, the Logical
+    /// Session its source forked from. Lifecycle, Owner, Conversation and
+    /// Context stay fully independent of that source (§2.2); this is a
+    /// provenance note, not a parent link in the old sense.
+    pub forked_from_session_id: Option<Id>,
     pub started_at: Option<String>,
+    /// Last activity across the WHOLE execution graph (root + child + side).
     pub last_activity_at: Option<String>,
+    /// Last real user/assistant message time of the ROOT conversation.
+    pub last_conversation_at: Option<String>,
     /// Session lifecycle authority. `None` = Normal; `Some(ts)` = Trash. This
     /// is the single lifecycle authority — there is no separate visibility
     /// flag. Trashing is reversible (Restore keeps the same Session id) and
-    /// never touches the Agent source file; permanent deletion removes the row
+    /// never touches the Agent source; permanent deletion removes the row
     /// entirely.
     pub trashed_at: Option<String>,
 }
@@ -330,6 +342,319 @@ impl Session {
     pub fn is_trashed(&self) -> bool {
         self.trashed_at.is_some()
     }
+}
+
+/// How a [`SessionMember`] relates to its Logical Session's root (§5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMemberRelation {
+    Root,
+    Child,
+    Side,
+}
+
+impl SessionMemberRelation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionMemberRelation::Root => "root",
+            SessionMemberRelation::Child => "child",
+            SessionMemberRelation::Side => "side",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<SessionMemberRelation> {
+        match s {
+            "root" => Some(SessionMemberRelation::Root),
+            "child" => Some(SessionMemberRelation::Child),
+            "side" => Some(SessionMemberRelation::Side),
+            _ => None,
+        }
+    }
+}
+
+/// One internal execution unit of a Logical Session — the Agent-side thread,
+/// subagent transcript or sidechain file that together make up the session
+/// (§5). Only the `root` member produces [`SessionMessage`]s; every member is
+/// an observation surface for stats.
+///
+/// `source_member_id` is the Adapter's stable execution identity and need not
+/// equal the Agent's native session id (§5.1): Qoder subagent transcripts
+/// repeat the parent's id, so the adapter derives `root-id:subagent:<stem>`.
+/// A source with no stable identity produces NO member — never a fabricated
+/// row just to make the topology look complete.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionMember {
+    pub id: Id,
+    pub session_id: Id,
+    pub agent: Agent,
+    pub source_member_id: String,
+    pub relation: SessionMemberRelation,
+    /// Source-side parent identity; may temporarily resolve to no member row
+    /// (the parent appears in a later discovery batch).
+    pub parent_source_member_id: Option<String>,
+    /// Adapter-owned descriptor of the source shape (`rollout_file`,
+    /// `transcript_file`, `sqlite_record`, `subagent_file`, …).
+    pub source_kind: String,
+    /// Where the member's source lives. For file-per-session Agents this is
+    /// the transcript path; for shared stores it is the store path.
+    pub source_path: String,
+    pub cwd: Option<String>,
+    pub started_at: Option<String>,
+    pub last_activity_at: Option<String>,
+    /// Adapter-specific, non-Conversation structural facts (thread_source,
+    /// delegation depth, …). Never conversation text.
+    pub metadata: serde_json::Value,
+}
+
+/// The role of a [`SessionMessage`] — the only two shapes a conversation has
+/// (§6). The database CHECK constraint is the last line of defense; adapters
+/// must already have dropped everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMessageRole {
+    User,
+    Assistant,
+}
+
+impl SessionMessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionMessageRole::User => "user",
+            SessionMessageRole::Assistant => "assistant",
+        }
+    }
+}
+
+/// One user-visible conversation turn of the ROOT member — the ONLY
+/// conversation store NoEnding keeps (§6). Thinking, tool traffic, system /
+/// developer prompts, compaction summaries and child/side transcripts never
+/// become rows here; every visible prose segment of an assistant turn is kept
+/// (no "final answer" guessing).
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionMessage {
+    pub id: Id,
+    pub session_id: Id,
+    /// Must reference the Session's ROOT member — enforced again at commit
+    /// time (`commit_member_ingest`), even though the FK chain would accept a
+    /// child: a stray child message is an ingestion bug, not silent data (§6).
+    pub member_id: Id,
+    /// NoEnding's own per-session monotonic sequence. Never a source line
+    /// number; never reused or rolled back.
+    pub sequence: i64,
+    pub role: SessionMessageRole,
+    pub content: String,
+    pub ts: Option<String>,
+    // ---- source provenance (Context Integrity) ----
+    pub source_message_id: Option<String>,
+    pub source_generation: i64,
+    pub source_position: String,
+    pub source_identity_hash: String,
+    pub raw_ref: String,
+}
+
+/// Per-member execution statistics, stored as a 1:1 snapshot (§7). This is
+/// "current observable source state", not an append-only telemetry log.
+///
+/// `NULL` = the source does not provide / cannot reliably compute the metric;
+/// `0` = observed zero. Unknown is never folded into 0 (§7.1).
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionMemberStats {
+    pub member_id: Id,
+    pub tool_call_count: Option<i64>,
+    pub tool_error_count: Option<i64>,
+    pub compaction_count: Option<i64>,
+    pub side_activity_count: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub effort: Option<String>,
+    pub updated_at: String,
+    pub extra: serde_json::Value,
+}
+
+/// Incremental stats for an append-only read (§7.3): each field is the number
+/// of new observations since the last commit. `None` = nothing observed this
+/// batch (the column is left untouched, not zeroed).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemberStatsDelta {
+    pub tool_call_count: Option<i64>,
+    pub tool_error_count: Option<i64>,
+    pub compaction_count: Option<i64>,
+    pub side_activity_count: Option<i64>,
+}
+
+impl MemberStatsDelta {
+    /// The delta of exactly one observation each — the spelling shared readers
+    /// produce from a single parsed line.
+    pub fn single(observation: MemberObservation) -> Self {
+        Self {
+            tool_call_count: (observation.tool_calls > 0).then_some(observation.tool_calls as i64),
+            tool_error_count: (observation.tool_errors > 0)
+                .then_some(observation.tool_errors as i64),
+            compaction_count: (observation.compactions > 0)
+                .then_some(observation.compactions as i64),
+            side_activity_count: (observation.side_activity > 0)
+                .then_some(observation.side_activity as i64),
+        }
+    }
+}
+
+/// Full-replace stats for a full rescan / rewrite (§7.3): the four observed
+/// counters describe the WHOLE source. Token/cost/model columns are outside
+/// the snapshot — no current source provides them, and an absent observation
+/// must never null a column another writer could legitimately have set.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionMemberStatsSnapshot {
+    pub tool_call_count: i64,
+    pub tool_error_count: i64,
+    pub compaction_count: i64,
+    pub side_activity_count: i64,
+}
+
+/// How a read updates member stats (§7.3).
+#[derive(Debug, Clone, Copy)]
+pub enum StatsUpdate {
+    Delta(MemberStatsDelta),
+    Snapshot(SessionMemberStatsSnapshot),
+}
+
+/// Counters one source portion contributes (shared-reader vocabulary). Plain
+/// counts, converted into a [`StatsUpdate`] by the adapter.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemberObservation {
+    pub tool_calls: u64,
+    pub tool_errors: u64,
+    pub compactions: u64,
+    pub side_activity: u64,
+}
+
+impl MemberObservation {
+    pub fn add(&mut self, other: &MemberObservation) {
+        self.tool_calls += other.tool_calls;
+        self.tool_errors += other.tool_errors;
+        self.compactions += other.compactions;
+        self.side_activity += other.side_activity;
+    }
+}
+
+/// Where a member's Agent source stands, as far as reading is concerned (§8.1).
+/// Belongs to the MEMBER, never to the Session — each member reads its own
+/// source at its own pace. The Context frontier is the separate
+/// [`SessionContextState`].
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SessionMemberCursor {
+    pub member_id: Id,
+    pub source_file_identity: String,
+    pub generation: i64,
+    pub byte_offset: u64,
+    pub last_seen_size: u64,
+    pub mtime: Option<f64>,
+    /// SHA-256 of the read prefix when the offset was recorded; an append is
+    /// only accepted while the stored prefix is still the file's prefix.
+    pub prefix_hash: String,
+    /// Identity hash of the last message on the CURRENT source chain — the
+    /// base the next append batch continues from. Only messages advance it;
+    /// stats-only batches keep the tail. Empty until a message exists.
+    pub identity_tail_hash: String,
+}
+
+impl SessionMemberCursor {
+    /// The cursor an adapter's just-observed source state produces — the
+    /// spelling tests and future callers need to chain a read onto a previous
+    /// one.
+    pub fn from_update(member_id: &str, u: &crate::domain::SourceCursorUpdate) -> Self {
+        Self {
+            member_id: member_id.to_string(),
+            source_file_identity: u.file_identity.clone(),
+            generation: u.generation,
+            byte_offset: u.byte_offset,
+            last_seen_size: u.last_seen_size,
+            mtime: u.mtime,
+            prefix_hash: u.prefix_hash.clone(),
+            identity_tail_hash: String::new(),
+        }
+    }
+}
+
+/// The Logical Session's Context frontier (§8.2): how far Sync has consumed
+/// ROOT conversation messages. Lifecycle is completely independent of the
+/// member cursors — Trash/Restore never touches it.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SessionContextState {
+    pub session_id: Id,
+    pub processed_message_sequence: i64,
+}
+
+/// An ingestion problem that is deliberately NOT a Session (§11): a child or
+/// side source whose root has not been seen. Diagnostics never enter the
+/// Sessions UI, Search, Context, ownership or lifecycle; when the root shows
+/// up and the member attaches, the row is deleted.
+#[derive(Debug, Clone, Serialize)]
+pub struct IngestionDiagnostic {
+    pub id: Id,
+    /// Stable identity of the problem, e.g. `<agent>:unresolved:<member id>`.
+    pub diagnostic_key: String,
+    pub agent: Agent,
+    pub kind: String,
+    pub source_member_id: Option<String>,
+    pub parent_source_member_id: Option<String>,
+    pub source_path: Option<String>,
+    pub reason: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub observation_count: i64,
+    pub details: serde_json::Value,
+}
+
+pub mod diagnostic_kind {
+    /// A discovered member that could not be resolved to any Logical Session
+    /// (no root, or the parent chain is broken for now).
+    pub const UNRESOLVED_SESSION_MEMBER: &str = "unresolved_session_member";
+}
+
+/// Adapter's strict verdict about one member's source (§9.1). The semantics
+/// are load-bearing for permanent deletion:
+///
+/// ```text
+/// Present    = Adapter currently confirms the source exists
+/// Missing    = Adapter currently confirms the source does not exist
+/// Unavailable = no permission, I/O error, format problem, cannot tell,
+///              store not accessible … ANY doubt
+/// ```
+///
+/// No exception may degrade to `Missing`: only a confirmed-missing ROOT makes
+/// a trashed Session permanently deletable (§20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceAvailability {
+    Present,
+    Missing,
+    Unavailable,
+}
+
+impl SourceAvailability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceAvailability::Present => "present",
+            SourceAvailability::Missing => "missing",
+            SourceAvailability::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// One parsed conversation message, before NoEnding assigns identity and
+/// sequence (adapter → core hand-off shape).
+#[derive(Debug, Clone)]
+pub struct ParsedSessionMessage {
+    pub source_message_id: Option<String>,
+    pub source_position: String,
+    pub ts: Option<String>,
+    pub role: SessionMessageRole,
+    pub content: String,
 }
 
 /// Listing scope for Sessions (方案 §11). Default projections (Sessions page,
@@ -361,114 +686,7 @@ impl SessionListScope {
     }
 }
 
-/// Transient coordination row for a prepared permanent Session deletion
-/// (方案 §4). Permanent deletion spans SQLite + the filesystem, so the frozen
-/// `SourceDeletionPlan` is stored here between prepare and execute.
-///
-/// This is NOT a tombstone / deletion history / blacklist: on success the job
-/// row is deleted in the same transaction that purges the Session, so
-/// NoEnding retains no record that the Agent session ever existed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionDeletionJob {
-    pub id: Id,
-    pub session_id: Id,
-    /// prepared | deleting_source | failed | stale
-    pub state: String,
-    /// Frozen `adapters::SourceDeletionPlan` (serde JSON).
-    pub plan_json: String,
-    pub last_error: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl SessionDeletionJob {
-    pub const STATE_PREPARED: &'static str = "prepared";
-    pub const STATE_DELETING_SOURCE: &'static str = "deleting_source";
-    pub const STATE_FAILED: &'static str = "failed";
-    pub const STATE_STALE: &'static str = "stale";
-}
-
-/// Normalized session event — the only shape Ingestion/Sync may consume.
-///
-/// Identity rules (Context Integrity):
-/// - `id` is the app-owned stable identity, never derived from the source;
-/// - `sequence` is a NoEnding-owned per-session monotonic counter. It is
-///   NEVER the JSONL line number and is never reused or rolled back;
-/// - `source_generation` / `source_position` / `source_event_id` describe
-///   where the event came from in the Agent's (mutable) source file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionEvent {
-    pub id: Id,
-    pub session_id: Id,
-    pub sequence: i64,
-    pub source_event_id: Option<String>,
-    pub source_generation: i64,
-    pub source_position: String, // e.g. "line:42"
-    pub ts: Option<String>,
-    /// Open event-kind discriminator.
-    ///
-    /// Current adapters produce message / compact / system / artifact events,
-    /// but the value intentionally stays a free string so a new Agent event
-    /// category does not need a SQLite enum or a schema change.
-    pub kind: String, // user_message | assistant_message | compact | system | artifact | unknown
-    pub text: Option<String>,
-    pub raw_ref: String,
-    pub metadata: serde_json::Value,
-}
-
-/// Where ingestion stopped reading an Agent source file.
-///
-/// `source_file_identity` distinguishes the same path being replaced by a
-/// different file (inode / creation metadata based). `generation` increases
-/// on every detected truncate / rewrite / replacement, so old history is
-/// never overwritten — later file states only ADD events.
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct SourceCursor {
-    pub session_id: Id,
-    pub source_file_identity: String,
-    pub generation: i64,
-    pub byte_offset: u64,
-    pub last_seen_size: u64,
-    pub mtime: Option<f64>,
-    /// SHA-256 of the file bytes [0..byte_offset] at the time the offset was
-    /// recorded. An append is only accepted when the stored prefix is still
-    /// the file's prefix — a same-size-or-larger rewrite is caught here.
-    /// Empty until a read has recorded one: without it append-only continuity
-    /// cannot be proven, so the source is conservatively re-scanned.
-    pub prefix_hash: String,
-    /// Identity hash of the last event on the CURRENT source chain — the
-    /// base the next append batch continues from. This lives on the cursor,
-    /// not "last event in the store": after a compact + dedup re-scan the
-    /// store's tail is NEWER than the source's tail (old events are kept,
-    /// append-only), and continuing the chain from it would make the next
-    /// append invisible to the following re-scan. Empty when the source has
-    /// produced no chain event yet; the commit then falls back to the last
-    /// stored event identity.
-    pub identity_tail_hash: String,
-    /// Max app-assigned event sequence ingested so far (read cursor).
-    pub last_sequence: i64,
-}
-
-/// What a parsed source line looks like before NoEnding assigns identity.
-#[derive(Debug, Clone)]
-pub struct ParsedEvent {
-    pub source_event_id: Option<String>,
-    pub source_position: String,
-    pub ts: Option<String>,
-    pub kind: String,
-    pub text: Option<String>,
-    pub metadata: serde_json::Value,
-}
-
-/// Result of one incremental adapter read. `source` always describes the
-/// file state AFTER reading; events carry no sequence yet (storage assigns).
-#[derive(Debug, Clone, Default)]
-pub struct ReadDelta {
-    pub events: Vec<ParsedEvent>,
-    pub source: Option<SourceCursorUpdate>,
-}
-
-/// File state observed by the adapter after reading.
+/// File state observed by the adapter after reading one member's source.
 #[derive(Debug, Clone, Default)]
 pub struct SourceCursorUpdate {
     pub file_identity: String,
@@ -582,8 +800,8 @@ pub struct ContextItemRevision {
     pub title: String,
     pub content: String,
     pub metadata: serde_json::Value,
-    pub source_type: Option<String>, // user_edit | session_event | manual | system | status_change
-    pub source_ref: Option<String>,  // e.g. "session-event:<event-id>" or "url:..."
+    pub source_type: Option<String>, // user_edit | session_message | manual | system | status_change
+    pub source_ref: Option<String>,  // e.g. "session-message:<message-id>" or "url:..."
     pub sync_run_id: Option<Id>,
     pub created_at: String,
 }
@@ -693,8 +911,8 @@ pub struct ContextSourceDetail {
     pub session_id: Option<Id>,
     pub session_title: Option<String>,
     pub agent: Option<Agent>,
-    pub event_sequence: Option<i64>,
-    pub event_ts: Option<String>,
+    pub message_sequence: Option<i64>,
+    pub message_ts: Option<String>,
     pub evidence: Option<String>,
 }
 
@@ -702,6 +920,7 @@ pub struct ContextSourceDetail {
 pub struct SyncRun {
     pub id: Id,
     pub session_id: Id,
+    /// SessionMessage sequence bounds of the processed delta.
     pub from_sequence: i64,
     pub to_sequence: i64,
     pub status: String, // ok | partial | error
@@ -712,10 +931,9 @@ pub struct SyncRun {
     /// Which extractor produced the mutations: heuristic | cli:<agent>:<model>
     /// | cli:<...>->heuristic (fallback) | none.
     pub runtime: String,
-    /// Fingerprint of the processed delta (event ids). A completed run with
+    /// Fingerprint of the processed delta (message ids). A completed run with
     /// the same fingerprint is never re-applied (idempotent retries).
     pub delta_fingerprint: Option<String>,
-    pub source_generation: i64,
 }
 
 /// Snapshot of what a session was actually delivered, recorded only after a

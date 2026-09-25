@@ -85,9 +85,9 @@ export default function SourceDetailModal({
             </div>
           )}
 
-          {/* 来源会话已永久删除（Session Lifecycle & Deletion §28）：这不是
+          {/* 来源会话已永久删除（Session Lifecycle §20）：这不是
               tombstone，只是「来源已不存在」的事实陈述。后端此时不再返回
-              Session / 事件 / 证据等字段，UI 也不该再尝试渲染它们。 */}
+              Session / 消息 / 证据等字段，UI 也不该再尝试渲染它们。 */}
           {detail.source_type === "deleted_session" ? (
             <div className="row-line">
               <div>
@@ -120,23 +120,23 @@ export default function SourceDetailModal({
                 </div>
               )}
 
-              {detail.event_sequence !== null && detail.event_sequence !== undefined && (
+              {detail.message_sequence !== null && detail.message_sequence !== undefined && (
                 <div className="row-line">
                   <div>
                     <div className="settings-row-label">消息序号</div>
-                    <div className="settings-row-hint">在原始转录记录中的事件序号</div>
+                    <div className="settings-row-hint">在会话消息序列中的序号</div>
                   </div>
-                  <span className="mono small">#{detail.event_sequence}</span>
+                  <span className="mono small">#{detail.message_sequence}</span>
                 </div>
               )}
 
-              {detail.event_ts && (
+              {detail.message_ts && (
                 <div className="row-line">
                   <div>
-                    <div className="settings-row-label">观测时间</div>
-                    <div className="settings-row-hint">{detail.event_ts}</div>
+                    <div className="settings-row-label">消息时间</div>
+                    <div className="settings-row-hint">{detail.message_ts}</div>
                   </div>
-                  <span className="small muted">{timeAgo(detail.event_ts)}</span>
+                  <span className="small muted">{timeAgo(detail.message_ts)}</span>
                 </div>
               )}
 
@@ -177,7 +177,7 @@ export default function SourceDetailModal({
             <div className="row-line">
               <div>
                 <div className="settings-row-label">内部引用</div>
-                <div className="settings-row-hint">指回原始记录的事件定位符</div>
+                    <div className="settings-row-hint">指回原始记录的消息定位符</div>
               </div>
               <span className="mono small">{detail.source_ref}</span>
             </div>

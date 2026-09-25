@@ -247,24 +247,25 @@ fn another_sessions_cwd_is_not_a_launch_authority() {
     let database = db("session-cwd");
     let w = workstream(&database, "W");
     let elsewhere = canonical(temp_root("session-cwd").join("elsewhere"));
-    let sid = new_id();
-    database
-        .upsert_session(&noending::domain::Session {
-            id: sid.clone(),
-            agent: Agent::Codex,
-            agent_session_id: sid.clone(),
-            title: None,
-            cwd: Some(elsewhere.clone()),
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: Some(w.clone()),
-            raw_path: "/tmp/fake/session-cwd.jsonl".into(),
-            parent_agent_session_id: None,
-            started_at: Some("2026-09-01T08:00:00Z".into()),
-            last_activity_at: Some("2026-09-12T09:00:00Z".into()),
-            trashed_at: None,
-        })
+    // A real Logical Session owning W, recorded in a directory of its own —
+    // keyed by its ROOT member's Resume identity (no raw_path on the row).
+    let root_id = new_id();
+    let (sid, _) = database
+        .upsert_logical_session(
+            Agent::Codex,
+            &root_id,
+            None,
+            Some(&elsewhere),
+            None,
+            None,
+            Some("2026-09-01T08:00:00Z"),
+            Some("2026-09-12T09:00:00Z"),
+        )
         .unwrap();
+    database.set_session_owner(&sid, Some(&w)).unwrap();
+    let stored = database.get_session(&sid).unwrap().unwrap();
+    assert_eq!(stored.cwd.as_deref(), Some(elsewhere.as_str()));
+    assert_eq!(stored.owner_workstream_id.as_deref(), Some(w.as_str()));
 
     assert_eq!(
         resolve_new_cwd(&database, Some(&w), None, &LaunchWorkspace::default())

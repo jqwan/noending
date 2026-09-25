@@ -1,16 +1,24 @@
 //! Agent Adapter layer.
 //!
-//! Each adapter owns: session directory layout, file format, session id,
-//! optional environment info, resume parameters, new-session invocation.
-//! Upper layers must never reference `~/.codex` / `~/.claude` / `~/.pi`
-//! directly — that is PlatformPaths' job.
+//! Each adapter owns: the member layout of its Agent's data directory, the
+//! file/record formats, member identity, optional environment info, resume
+//! parameters, new-session invocation. Upper layers must never reference
+//! `~/.codex` / `~/.claude` / `~/.pi` directly — that is PlatformPaths' job.
+//!
+//! The source unit is the **member** (`DiscoveredMember` / `SessionMember`),
+//! not the session: one Logical Session is the root member plus every child /
+//! side member that resolves to it (重构方案 §9).
 //!
 //! Context Integrity rules enforced here:
 //! - adapters never generate shell fragments (no `$(cat …)`): context is
 //!   passed as a real argv string produced by [`context_prompt`];
 //! - [`read_jsonl_delta`] classifies every read as append / truncate /
 //!   rewrite / file-replacement and only ever returns the *new* portion;
-//!   re-ingesting already-seen content is prevented by the storage layer's
+//! - adapters emit CONVERSATION (`role` user/assistant, user-visible prose
+//!   only) plus execution OBSERVATIONS (tool/compaction/side counts). Child
+//!   and side members never emit messages at all — the core's commit would
+//!   reject them, and adapter tests keep that from ever being relied on;
+//! - re-ingesting already-seen content is prevented by the storage layer's
 //!   content-identity dedup, so compaction can never overwrite history.
 
 pub mod autoclaw;
@@ -25,12 +33,13 @@ pub mod zcode;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use crate::domain::{Agent, ParsedEvent, Session, SourceCursor};
-use crate::error::{other, AppError, Result};
+use crate::domain::{
+    Agent, MemberObservation, MemberStatsDelta, ParsedSessionMessage, SessionMember,
+    SessionMemberCursor, SessionMemberStatsSnapshot, SessionMessageRole, SourceAvailability,
+    StatsUpdate,
+};
+use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
-
-// Re-export so adapter submodules and callers can share one import site.
-pub use crate::domain::ReadDelta;
 
 /// Declarative command produced by an adapter; execution is delegated to
 /// the PlatformLauncher so OS differences stay out of adapters.
@@ -60,29 +69,81 @@ impl AgentCommand {
     }
 }
 
-/// One discovered external session before ingestion.
+/// What a discovered member IS in the execution graph (重构方案 §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveredMemberKind {
+    /// Establishes / joins the Logical Session as its root conversation.
+    Root,
+    /// Internal execution (subagent thread); never conversation.
+    Child,
+    /// Side execution (sidechain / review thread); never conversation.
+    Side,
+    /// Itself a new, independently continuable Logical Session; the parent is
+    /// only fork provenance (`sessions.forked_from_session_id`).
+    ForkRoot,
+}
+
+impl DiscoveredMemberKind {
+    /// The member relation this discovery kind lands as. A ForkRoot becomes
+    /// the `root` member of its own new Logical Session.
+    pub fn relation(self) -> crate::domain::SessionMemberRelation {
+        use crate::domain::SessionMemberRelation as R;
+        match self {
+            DiscoveredMemberKind::Root | DiscoveredMemberKind::ForkRoot => R::Root,
+            DiscoveredMemberKind::Child => R::Child,
+            DiscoveredMemberKind::Side => R::Side,
+        }
+    }
+
+    pub fn is_logical_root(self) -> bool {
+        matches!(
+            self,
+            DiscoveredMemberKind::Root | DiscoveredMemberKind::ForkRoot
+        )
+    }
+}
+
+/// One discovered execution member before ingestion (重构方案 §9).
 #[derive(Debug, Clone)]
-pub struct DiscoveredSession {
+pub struct DiscoveredMember {
     pub agent: Agent,
-    pub agent_session_id: String,
-    pub path: PathBuf,
+    /// Adapter-stable execution identity. Not required to equal the Agent's
+    /// native session id (§5.1) — e.g. Qoder subagent transcripts repeat the
+    /// parent id, so the adapter derives `root-id:subagent:<file-stem>`.
+    pub source_member_id: String,
+    pub kind: DiscoveredMemberKind,
+    /// Source-side parent identity; may dangle until the parent's own batch
+    /// or a later reconcile resolves it.
+    pub parent_source_member_id: Option<String>,
+    /// When the adapter knows it, the root identity this member belongs to —
+    /// a cross-file shortcut for attribution, never an authority by itself.
+    pub root_hint: Option<String>,
+    /// Adapter-owned descriptor (`codex_rollout`, `transcript_file`,
+    /// `sqlite_record`, `subagent_file`, `zstd_rollup`, …).
+    pub source_kind: String,
+    pub source_path: PathBuf,
     pub cwd: Option<String>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
-    /// The transcript's OWN title, when the Agent writes one — dsh's
-    /// `session/title`, WorkBuddy's `ai-title`, ZCode's `session.title`. It
-    /// outranks anything NoEnding derives, because it is the Agent's own word
-    /// about the session (方案 §37.15).
+    /// Root only; child/side must leave it `None`.
     pub native_title: Option<String>,
-    /// First meaningful text in the USER role. `None` when the format has no
-    /// user turn (an internal thread whose only "user" text is a machine
-    /// prompt) — that is a fact about the session, not a parse failure.
+    /// Root only: first real user prose, for the title chain (§4.2).
     pub first_user_text: Option<String>,
-    /// First meaningful text in the AGENT role: the last resort for a title,
-    /// so a session that starts with the agent (a review thread answering a
-    /// prompt nobody typed) still gets named after what it said.
+    /// Root only: first visible assistant prose — the last title resort.
     pub first_agent_text: Option<String>,
-    pub parent_agent_session_id: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+impl DiscoveredMember {
+    /// Root identity for Logical-Session creation. Only Root/ForkRoot carry
+    /// one; calling this on a child/side is a caller bug.
+    pub fn root_agent_session_id(&self) -> &str {
+        debug_assert!(
+            self.kind.is_logical_root(),
+            "root_agent_session_id requested for a non-root member"
+        );
+        &self.source_member_id
+    }
 }
 
 /// Options for a headless ("exec"/print-mode) invocation of the agent CLI.
@@ -136,12 +197,45 @@ pub fn context_prompt(context_file: Option<&Path>) -> Result<Option<String>> {
     }
 }
 
-/// A parsed source line, before NoEnding assigns sequence/identity.
+/// One parsed source line's contribution: at most one conversation message
+/// plus the execution observations the line carries. Lines that are neither
+/// (reasoning bodies, bookkeeping, session meta) return `None` from the
+/// adapter closure and never reach storage.
 pub struct ParsedLine {
-    pub kind: String,
-    pub text: Option<String>,
-    pub source_event_id: Option<String>,
-    pub metadata: serde_json::Value,
+    /// The conversation message this line contributes, if any.
+    pub message: Option<ParsedSessionMessage>,
+    /// Execution observations (tool calls, compactions, side activity) this
+    /// line contributes — counted even on lines that carry no message.
+    pub observation: MemberObservation,
+}
+
+impl ParsedLine {
+    /// A line that carries only observations (tool call, compaction marker,
+    /// side chatter).
+    pub fn observation_only(observation: MemberObservation) -> Self {
+        Self {
+            message: None,
+            observation,
+        }
+    }
+
+    /// A line that carries one conversation message and no counters.
+    pub fn message_only(message: ParsedSessionMessage) -> Self {
+        Self {
+            message: Some(message),
+            observation: MemberObservation::default(),
+        }
+    }
+}
+
+/// Result of one incremental member read: conversation messages (root members
+/// only), how the read updates stats, and the source state AFTER reading.
+/// Messages carry no sequence — the storage layer assigns stable identities.
+#[derive(Debug, Clone, Default)]
+pub struct MemberReadDelta {
+    pub messages: Vec<ParsedSessionMessage>,
+    pub stats: Option<StatsUpdate>,
+    pub source: Option<crate::domain::SourceCursorUpdate>,
 }
 
 /// Stable identity of the file itself (not its content): inode/device on
@@ -177,6 +271,18 @@ pub fn file_identity(path: &Path) -> String {
             }
         }
         Err(_) => String::new(),
+    }
+}
+
+/// Strict source availability for a FILE-backed member (§9.1). `NotFound` is
+/// the only missing; every other failure is `Unavailable` — an unreadable
+/// path must never read as an absent source.
+pub fn inspect_file_source(path: &Path) -> SourceAvailability {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => SourceAvailability::Present,
+        Ok(_) => SourceAvailability::Unavailable,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SourceAvailability::Missing,
+        Err(_) => SourceAvailability::Unavailable,
     }
 }
 
@@ -331,9 +437,45 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
         })
 }
 
-/// Shared incremental JSONL reader used by every adapter.
+/// Turn the observations of one read into the right [`StatsUpdate`] (§7.3):
+/// a read that starts at genesis IS a full scan of the observable source, so
+/// its counts REPLACE the snapshot; an append only ADDS its counts.
+/// `None` when the portion observed nothing — absent evidence must not zero
+/// anything.
+pub fn stats_update_from(
+    observation: &MemberObservation,
+    source: &crate::domain::SourceCursorUpdate,
+) -> Option<StatsUpdate> {
+    let empty = observation.tool_calls == 0
+        && observation.tool_errors == 0
+        && observation.compactions == 0
+        && observation.side_activity == 0;
+    if empty {
+        return None;
+    }
+    if source.start_byte_offset == 0 {
+        Some(StatsUpdate::Snapshot(SessionMemberStatsSnapshot {
+            tool_call_count: observation.tool_calls as i64,
+            tool_error_count: observation.tool_errors as i64,
+            compaction_count: observation.compactions as i64,
+            side_activity_count: observation.side_activity as i64,
+        }))
+    } else {
+        Some(StatsUpdate::Delta(MemberStatsDelta {
+            tool_call_count: (observation.tool_calls > 0).then_some(observation.tool_calls as i64),
+            tool_error_count: (observation.tool_errors > 0)
+                .then_some(observation.tool_errors as i64),
+            compaction_count: (observation.compactions > 0)
+                .then_some(observation.compactions as i64),
+            side_activity_count: (observation.side_activity > 0)
+                .then_some(observation.side_activity as i64),
+        }))
+    }
+}
+
+/// Shared incremental JSONL reader used by every file-backed adapter.
 ///
-/// Classification of the read (compared against the stored cursor):
+/// Classification of the read (compared against the stored member cursor):
 /// - append:      same file, size grew AND the stored prefix fingerprint
 ///                still matches the file's prefix → parse only new complete
 ///                lines. A rewrite that GREW the file diverges here and is
@@ -343,16 +485,16 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 /// - rewrite:     same file, same size, mtime changed → new generation, full rescan
 /// - replacement: different file identity       → new generation, full rescan
 ///
-/// Rescans are safe because storage dedups by event identity: unchanged
-/// events are skipped, changed/new ones are added as new events, and
-/// previously ingested history is never touched. A cursor without a usable
-/// prefix fingerprint cannot prove append-only continuity, so the source is
-/// conservatively treated as a rewrite and fully re-scanned.
+/// Rescans are safe because storage dedups messages by identity and stats
+/// snapshots replace: unchanged messages are skipped, changed/new ones are
+/// added, and previously ingested history is never touched. A cursor without
+/// a usable prefix fingerprint cannot prove append-only continuity, so the
+/// source is conservatively treated as a rewrite and fully re-scanned.
 pub fn read_jsonl_delta(
     path: &Path,
-    cursor: &SourceCursor,
+    cursor: &SessionMemberCursor,
     parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
-) -> Result<ReadDelta> {
+) -> Result<MemberReadDelta> {
     let (obs, text) = observe(path)?;
     // Prefix fingerprint over the (deterministic) lossy-decoded bytes; the
     // reader's offsets live in these coordinates too.
@@ -376,8 +518,9 @@ pub fn read_jsonl_delta(
         };
         if !mtime_changed {
             // nothing new at all
-            return Ok(ReadDelta {
-                events: vec![],
+            return Ok(MemberReadDelta {
+                messages: vec![],
+                stats: None,
                 source: Some(crate::domain::SourceCursorUpdate {
                     file_identity: obs.identity,
                     generation: cursor.generation,
@@ -411,7 +554,8 @@ pub fn read_jsonl_delta(
         text.rfind('\n').map(|i| i + 1).unwrap_or(0)
     };
 
-    let mut events: Vec<ParsedEvent> = Vec::new();
+    let mut messages: Vec<ParsedSessionMessage> = Vec::new();
+    let mut observation = MemberObservation::default();
     let start_offset = start_offset as usize;
     let mut offset = 0usize;
     for (idx, line) in text.lines().enumerate() {
@@ -436,50 +580,51 @@ pub fn read_jsonl_delta(
             _ => None,
         };
         if let Some(p) = parse_line(idx, &v) {
-            if p.text
-                .as_deref()
-                .map(|t| t.trim().is_empty())
-                .unwrap_or(true)
-            {
-                continue;
+            observation.add(&p.observation);
+            if let Some(mut m) = p.message {
+                if m.content.trim().is_empty() {
+                    continue;
+                }
+                if m.source_position.is_empty() {
+                    m.source_position = format!("line:{}", idx + 1);
+                }
+                if m.ts.is_none() {
+                    m.ts = ts;
+                }
+                messages.push(m);
             }
-            events.push(ParsedEvent {
-                source_event_id: p.source_event_id,
-                source_position: format!("line:{}", idx + 1),
-                ts,
-                kind: p.kind,
-                text: p.text,
-                metadata: p.metadata,
-            });
         }
     }
 
-    Ok(ReadDelta {
-        events,
-        source: Some(crate::domain::SourceCursorUpdate {
-            file_identity: obs.identity,
-            generation,
-            byte_offset: complete_end as u64,
-            last_seen_size: obs.size,
-            mtime: obs.mtime,
-            start_byte_offset: start_offset as u64,
-            prefix_hash: prefix_hash_of(complete_end),
-        }),
+    let source = crate::domain::SourceCursorUpdate {
+        file_identity: obs.identity,
+        generation,
+        byte_offset: complete_end as u64,
+        last_seen_size: obs.size,
+        mtime: obs.mtime,
+        start_byte_offset: start_offset as u64,
+        prefix_hash: prefix_hash_of(complete_end),
+    };
+    Ok(MemberReadDelta {
+        stats: stats_update_from(&observation, &source),
+        messages,
+        source: Some(source),
     })
 }
 
 /// Cursor update for readers that replay the whole source on every read (dsh's
-/// zstd frames — 方案 §37.8).
+/// zstd frames — 方案 §37.8; ZCode's live store).
 ///
-/// Their offsets must stay in the file's OWN coordinates: that is what the
+/// Their offsets must stay in the source's OWN coordinates: that is what the
 /// reconcile pre-filter stats, and it is the only thing known without decoding
-/// or replaying. A replay therefore always starts at genesis, and event
-/// identity — the writer's own ids in both formats — absorbs it: re-reading a
-/// source stores nothing. A new generation is a change of shape (the file was
-/// replaced, or truncation removed bytes), never a mere append.
+/// or replaying. A replay therefore always starts at genesis, and message
+/// identity — the writer's own ids — absorbs it: re-reading a source stores
+/// nothing. A new generation is a change of shape (the file was replaced, or
+/// truncation removed bytes), never a mere append. Because every replay is a
+/// full scan, its observations become a stats SNAPSHOT (§7.3).
 pub fn replay_cursor_update(
     path: &Path,
-    cursor: &SourceCursor,
+    cursor: &SessionMemberCursor,
     raw: &[u8],
 ) -> Result<crate::domain::SourceCursorUpdate> {
     let meta = std::fs::metadata(path)?;
@@ -511,100 +656,40 @@ pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a s
     v.get(key).and_then(|s| s.as_str())
 }
 
-// Source session deletion contract (方案 §13–§18, Hardening §2–§4) --------
-
-/// Current frozen-plan format. A stored job whose version differs is stale.
-/// v2 added `source` (verified-present vs confirmed-absent preparation).
-pub const SOURCE_DELETION_PLAN_VERSION: u32 = 2;
-
-/// What prepare concluded about the raw source (Hardening §2/§4):
-/// - `VerifiedPresent`: the file existed and passed the full §16 proof;
-/// - `ConfirmedAbsent`: the file was definitively gone;
-/// - `Unverified`: the source could not be safely validated. The caller may
-///   still purge NoEnding data, but execute must not touch the source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceDeletionState {
-    VerifiedPresent,
-    ConfirmedAbsent,
-    Unverified,
-}
-
-impl SourceDeletionState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SourceDeletionState::VerifiedPresent => "verified_present",
-            SourceDeletionState::ConfirmedAbsent => "confirmed_absent",
-            SourceDeletionState::Unverified => "unverified",
-        }
-    }
-}
-
-/// One file that a permanent deletion will remove from disk.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SourceDeletionTarget {
-    pub path: String,
-    /// Adapter-owned descriptor of what this file is (e.g. "codex_rollout").
-    pub kind: String,
-    /// Identity of the file itself (see [`file_identity`]), frozen at prepare.
-    pub file_identity: String,
-    pub size: u64,
-    /// Full-file SHA-256 frozen at prepare time. Permanent deletion is a
-    /// low-frequency operation: completeness beats the saved milliseconds.
-    pub sha256: String,
-}
-
-/// Frozen deletion plan — "what you confirm is what gets deleted" (方案 §19).
-/// Built only by the owning adapter, stored as JSON in `session_deletion_jobs`,
-/// and revalidated against the live file before anything is removed. The
-/// frontend only ever submits the job id; paths never travel from the UI.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SourceDeletionPlan {
-    pub version: u32,
-    pub agent: Agent,
-    pub agent_session_id: String,
-    pub source: SourceDeletionState,
-    /// The recorded source path(s); exactly one here. The identity fields are
-    /// zeroed when the source is `ConfirmedAbsent` or `Unverified`; the path
-    /// is still kept for the preview.
-    pub targets: Vec<SourceDeletionTarget>,
-}
-
-/// Outcome of the adapter-owned source deletion (方案 §24). The lifecycle
-/// layer records other adapter errors while still purging NoEnding data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceDeletionOutcome {
-    /// The file existed, validated exactly, and was removed.
-    Deleted,
-    /// The file was already gone (crash between remove and purge, or a
-    /// concurrent deletion). Treated as success — the purge may proceed.
-    AlreadyAbsent,
-}
-
 pub trait AgentAdapter: Send + Sync {
     fn agent(&self) -> Agent;
 
     /// CLI detect() via ExecutableResolver + data-dir presence.
     fn detect(&self) -> Option<AgentInstallation>;
 
-    /// Discover external sessions under the given roots (the user-enabled
+    /// Discover execution members under the given roots (the user-enabled
     /// ingest sources). Each root is scanned recursively with the adapter's
-    /// own file-matching rules; missing directories are skipped quietly.
+    /// own matching rules; missing directories are skipped quietly.
     ///
-    /// `unchanged` is the store's "this transcript is already fully ingested
-    /// and its cursor still matches the file on disk" verdict: a candidate
-    /// that passes it is skipped WITHOUT being read or parsed, so a steady-
-    /// state reconcile pass touches only files that actually changed.
-    fn discover_sessions_in(
+    /// `unchanged` is the store's "this member's source is already fully
+    /// ingested and its cursor still matches the source on disk" verdict: a
+    /// candidate that passes it is skipped WITHOUT being read or parsed, so a
+    /// steady-state reconcile pass touches only sources that actually changed.
+    fn discover_members_in(
         &self,
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<DiscoveredSession>>;
+    ) -> Result<Vec<DiscoveredMember>>;
 
-    /// Read only the delta since `cursor`, detecting append / truncate /
-    /// rewrite / file-replacement. The returned events carry no sequence —
-    /// the storage layer assigns stable identities.
-    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta>;
+    /// Read only the delta since `cursor` for THIS member, detecting append /
+    /// truncate / rewrite / replacement. Only Root members may return
+    /// messages; child/side members contribute observations only — the core
+    /// commit rejects any message whose member is not the root (§6).
+    fn read_member_delta(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+    ) -> Result<MemberReadDelta>;
+
+    /// Strict availability verdict for the member's source (§9.1). For a
+    /// ROOT member this is the permanent-delete and Resume authority: only a
+    /// fresh `Missing` may ever enable a local purge (§20).
+    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability>;
 
     /// Build the command line for a New Session. `context_file` is None when
     /// the user chose to start without any Workstream Context — adapters then
@@ -638,38 +723,6 @@ pub trait AgentAdapter: Send + Sync {
         opts: &ExecOptions,
         prompt: &str,
     ) -> Result<AgentCommand>;
-
-    /// Freeze a verifiable plan for permanently deleting this session's raw
-    /// Agent source (方案 §13). The adapter must fully prove the source before
-    /// returning a plan (§16): regular file, not a symlink, content
-    /// fingerprint belongs to this agent, parsed session id equals
-    /// `session.agent_session_id`, and the file is exactly what discovery
-    /// would recognize. Any doubt is an error, never a best guess.
-    fn prepare_source_session_deletion(&self, session: &Session) -> Result<SourceDeletionPlan> {
-        let _ = session;
-        Err(other(format!(
-            "{} 暂不支持安全的源会话删除",
-            self.agent().display_name()
-        )))
-    }
-
-    /// Execute a previously frozen plan. Must revalidate identity, size,
-    /// sha256 and the parsed session id against the live file first (§21):
-    /// exact match → delete; already absent → [`SourceDeletionOutcome::
-    /// AlreadyAbsent`]; anything else → stale error WITHOUT deleting (a same
-    /// path holding different content must never be removed). Only adapter
-    /// code may remove raw Agent files — Core never calls `remove_file` on a
-    /// session's `raw_path`.
-    fn execute_source_session_deletion(
-        &self,
-        plan: &SourceDeletionPlan,
-    ) -> Result<SourceDeletionOutcome> {
-        let _ = plan;
-        Err(other(format!(
-            "{} 暂不支持安全的源会话删除",
-            self.agent().display_name()
-        )))
-    }
 }
 
 pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
@@ -742,8 +795,9 @@ pub fn truncate_text(s: &str, max: usize) -> String {
 /// The test is on the trimmed text because the runtime does not always put the
 /// marker first: Codex writes the pasted-file block as `"\n# Files pasted by
 /// the user: …"`, and testing the raw text let exactly that become a title
-/// (§37.15). Adapters call this when picking their first human turn; it never
-/// gates ingestion.
+/// (§37.15). Adapters call this when picking their first human turn AND when
+/// deciding what is Conversation (§2.3: injected context never becomes a
+/// SessionMessage).
 pub fn is_injected_preamble(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with('<') || t.starts_with('#')
@@ -772,200 +826,19 @@ pub fn title_from_text(text: &str) -> Option<String> {
     }
 }
 
-// Shared single-file source-deletion machinery (方案 §15) ----------------
-//
-// All three current adapters model a session as ONE JSONL transcript, so
-// v0.1 shares the freeze / validate / delete logic below. It is still
-// INVOKED BY each adapter with its own parser — Core never assumes every
-// Agent is single-file JSONL, and Core never removes a file itself. The
-// safety boundary is "the adapter can strictly prove this file IS that
-// Agent session", not "the file happens to live under ~/.codex" (§17), so
-// custom ingest sources are deletable too.
-
-/// Freeze a one-file deletion plan after full §16 validation.
-///
-/// `parse_session_id` must be the adapter's own discovery parser (by
-/// construction: a file whose parsed id matches is a file discovery would
-/// identify — §16.5).
-///
-/// A bare `io::ErrorKind::NotFound` produces a `ConfirmedAbsent` plan. Other
-/// lookup or read failures are handled as an unverified best-effort deletion.
-pub(crate) fn prepare_single_file_source_deletion(
-    session: &Session,
-    expected_agent: Agent,
-    kind: &str,
-    parse_session_id: &dyn Fn(&Path) -> Result<Option<String>>,
-) -> Result<SourceDeletionPlan> {
-    if session.agent != expected_agent {
-        return Err(other("源会话文件所属 Agent 与该会话不一致"));
-    }
-    let path = PathBuf::from(&session.raw_path);
-
-    // Definitively gone → confirmed-absent plan; other errors are handled as
-    // an unverified best-effort deletion by the lifecycle layer.
-    let link_meta = match std::fs::symlink_metadata(&path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SourceDeletionPlan {
-                version: SOURCE_DELETION_PLAN_VERSION,
-                agent: expected_agent,
-                agent_session_id: session.agent_session_id.clone(),
-                source: SourceDeletionState::ConfirmedAbsent,
-                targets: vec![SourceDeletionTarget {
-                    path: path.to_string_lossy().to_string(),
-                    kind: kind.to_string(),
-                    // Nothing provable about bytes that do not exist.
-                    file_identity: String::new(),
-                    size: 0,
-                    sha256: String::new(),
-                }],
-            });
-        }
-        Err(e) => {
-            return Err(other(format!(
-                "无法确认源会话文件状态 {}: {}（不将其视为已删除）",
-                path.display(),
-                e
-            )))
-        }
-    };
-
-    // §16.1/§16.2 + §18: regular file only, never a symlink. symlink_metadata
-    // does not follow the link, so a link pointing at a regular file is
-    // still refused — v0.1 does not guess "link or target?".
-    if link_meta.file_type().is_symlink() {
-        return Err(other("源会话文件是符号链接，永久删除暂不支持"));
-    }
-    if !link_meta.is_file() {
-        return Err(other("源会话路径不是常规文件，拒绝永久删除"));
-    }
-
-    // §16.3: the content fingerprint must belong to the session's agent.
-    let detected = detect_format(&path).ok_or_else(|| other("无法识别源会话文件格式"))?;
-    if detected != expected_agent {
-        return Err(other("源会话文件内容不属于该 Agent，拒绝永久删除"));
-    }
-
-    // §16.4: the file must parse to the very session being deleted.
-    let parsed_id =
-        parse_session_id(&path)?.ok_or_else(|| other("无法从源会话文件解析出会话 id"))?;
-    if parsed_id != session.agent_session_id {
-        return Err(other("源会话文件解析出的会话 id 不一致，拒绝永久删除"));
-    }
-
-    let data = std::fs::read(&path)?;
-    let meta = std::fs::metadata(&path)?;
-    let size = meta.len();
-    if size != data.len() as u64 {
-        return Err(other("源会话文件在校验期间发生变化，请重试"));
-    }
-
-    Ok(SourceDeletionPlan {
-        version: SOURCE_DELETION_PLAN_VERSION,
-        agent: expected_agent,
-        agent_session_id: session.agent_session_id.clone(),
-        source: SourceDeletionState::VerifiedPresent,
-        targets: vec![SourceDeletionTarget {
-            path: path.to_string_lossy().to_string(),
-            kind: kind.to_string(),
-            file_identity: file_identity(&path),
-            size,
-            sha256: sha256_hex(&data),
-        }],
-    })
-}
-
-/// Revalidate a frozen one-file plan against the live file (§21) and remove
-/// it. Classification:
-/// - absent at any check point → [`SourceDeletionOutcome::AlreadyAbsent`];
-/// - present but identity / size / sha256 / session id diverge → stale error
-///   (file type changed to something else counts as divergence — never
-///   delete a path that no longer holds the confirmed bytes);
-/// - exact match → remove and report [`SourceDeletionOutcome::Deleted`].
-///
-/// Hardening §2: a `ConfirmedAbsent` plan has nothing to delete. Execute
-/// only re-confirms the absence — still absent → AlreadyAbsent; an
-/// indeterminable or reappeared file returns an error and is never removed.
-/// The lifecycle layer may still purge NoEnding data after that error.
-pub(crate) fn execute_single_file_source_deletion(
-    plan: &SourceDeletionPlan,
-    expected_agent: Agent,
-    parse_session_id: &dyn Fn(&Path) -> Result<Option<String>>,
-) -> Result<SourceDeletionOutcome> {
-    if plan.version != SOURCE_DELETION_PLAN_VERSION {
-        return Err(other("源删除计划版本不受支持，请重新准备"));
-    }
-    if plan.agent != expected_agent {
-        return Err(other("源删除计划与适配器能力不一致，请重新准备"));
-    }
-    if plan.targets.len() != 1 {
-        return Err(other("源删除计划与适配器能力不一致，请重新准备"));
-    }
-    if plan.source == SourceDeletionState::Unverified {
-        return Err(other("源会话文件未能安全验证，跳过源文件删除"));
-    }
-    if plan.source == SourceDeletionState::ConfirmedAbsent {
-        // Re-confirm the absence at the SAME path (Hardening §2): still gone
-        // → AlreadyAbsent; indeterminable → failure; reappeared → stale,
-        // because bytes that were never confirmed are never removed.
-        let path = PathBuf::from(&plan.targets[0].path);
-        return match std::fs::symlink_metadata(&path) {
-            Ok(_) => Err(AppError::SourceDeletionStale(
-                "源会话文件在准备删除后重新出现，请重新准备".to_string(),
-            )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok(SourceDeletionOutcome::AlreadyAbsent)
-            }
-            Err(e) => Err(other(format!(
-                "无法确认源会话文件状态: {}（不视为已删除）",
-                e
-            ))),
-        };
-    }
-    let target = &plan.targets[0];
-    let path = PathBuf::from(&target.path);
-
-    let data = match std::fs::read(&path) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SourceDeletionOutcome::AlreadyAbsent)
-        }
-        Err(e) => return Err(other(format!("源会话文件不可访问: {}", e))),
-    };
-    let link_meta = std::fs::symlink_metadata(&path)
-        .map_err(|e| other(format!("源会话文件不可访问: {}", e)))?;
-    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
-        return Err(AppError::SourceDeletionStale(
-            "源会话路径的文件类型已改变".to_string(),
-        ));
-    }
-
-    let stale = |why: String| AppError::SourceDeletionStale(why);
-    if file_identity(&path) != target.file_identity {
-        return Err(stale("源会话文件已被替换（文件身份不一致）".to_string()));
-    }
-    if data.len() as u64 != target.size {
-        return Err(stale("源会话文件大小已改变".to_string()));
-    }
-    if sha256_hex(&data) != target.sha256 {
-        return Err(stale("源会话文件内容已改变".to_string()));
-    }
-    let parsed_id = parse_session_id(&path)?
-        .ok_or_else(|| stale("源会话文件已无法解析出会话 id".to_string()))?;
-    if parsed_id != plan.agent_session_id {
-        return Err(stale("源会话文件内容已是另一个会话".to_string()));
-    }
-
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(SourceDeletionOutcome::Deleted),
-        // Raced with an external removal between validation and unlink —
-        // the confirmed bytes are gone, which is the goal.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(SourceDeletionOutcome::AlreadyAbsent)
-        }
-        // Windows sharing violation, read-only/permission failure, …: the
-        // caller keeps the Session in Trash with NoEnding data intact.
-        Err(e) => Err(other(format!("删除源会话文件失败: {}", e))),
+/// A conversation message out of one parsed line — the spelling every
+/// adapter's closure constructs.
+pub fn parsed_message(
+    source_message_id: Option<String>,
+    role: SessionMessageRole,
+    content: String,
+) -> ParsedSessionMessage {
+    ParsedSessionMessage {
+        source_message_id,
+        source_position: String::new(),
+        ts: None,
+        role,
+        content,
     }
 }
 
@@ -1105,7 +978,7 @@ mod fingerprint_tests {
     /// `cargo test real_agent_files_match_fingerprints -- --ignored --nocapture`
     ///
     /// The guarantee asserted here is the one that matters: **discovery never
-    /// returns a session belonging to another agent**. It is stated at the
+    /// returns a member belonging to another agent**. It is stated at the
     /// discovery level rather than per file, because a file's content can be
     /// genuinely ambiguous — Qoder's sub-agent transcripts repeat Claude
     /// Code's line shapes and are therefore claimed by nobody (方案 §37.5) —
@@ -1122,24 +995,24 @@ mod fingerprint_tests {
                 continue;
             }
             let discovered = adapter_for(*agent)
-                .discover_sessions_in(&[root.clone()], &|_| false)
+                .discover_members_in(&[root.clone()], &|_| false)
                 .unwrap_or_else(|e| panic!("{} discovery failed: {e}", agent.display_name()));
-            for s in &discovered {
+            for m in &discovered {
                 assert_eq!(
-                    s.agent,
+                    m.agent,
                     *agent,
                     "cross-agent misattribution: {}",
-                    s.path.display()
+                    m.source_path.display()
                 );
                 assert!(
-                    !s.agent_session_id.is_empty() && s.path.starts_with(&root),
+                    !m.source_member_id.is_empty() && m.source_path.starts_with(&root),
                     "{}: bad discovery result {:?}",
                     agent.display_name(),
-                    s.path
+                    m.source_path
                 );
             }
             eprintln!(
-                "[fingerprint] {}: {} sessions discovered under {}",
+                "[fingerprint] {}: {} members discovered under {}",
                 agent.display_name(),
                 discovered.len(),
                 root.display()

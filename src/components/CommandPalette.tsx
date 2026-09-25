@@ -70,17 +70,25 @@ export default function CommandPalette({ onClose, navigate }: {
     }
     for (const s of sessions) {
       if (!ql || (s.title ?? "").toLowerCase().includes(ql) || (s.cwd ?? "").toLowerCase().includes(ql)) {
-        out.push({ key: `s-${s.id}`, kind: "会话", label: s.title ?? s.agent_session_id, hint: s.cwd ?? undefined, route: { view: "session", sessionId: s.id } });
+        out.push({ key: `s-${s.id}`, kind: "会话", label: s.title ?? s.root_agent_session_id, hint: s.cwd ?? undefined, route: { view: "session", sessionId: s.id } });
       }
     }
     for (const h of hits) {
       const route: Route =
         h.kind === "workstream" ? { view: "workstream", workstreamId: h.ref_id }
         : h.kind === "item" ? { view: "workstream", workstreamId: h.parent_id }
-        : h.kind === "event" ? { view: "session", sessionId: h.parent_id }
+        // 消息命中（逻辑会话重构后 kind=message）：打开它所在的会话，
+        // ref_id 是消息 id，parent_id 才是会话 id。
+        : h.kind === "message" ? { view: "session", sessionId: h.parent_id }
         : h.kind === "project" ? { view: "project", projectId: h.ref_id }
         : { view: "sessions" };
-      out.push({ key: `h-${h.kind}-${h.ref_id}`, kind: h.kind === "event" ? "消息" : h.kind === "item" ? "Context" : h.kind, label: h.title.slice(0, 80), hint: "全文匹配", route });
+      out.push({
+        key: `h-${h.kind}-${h.ref_id}`,
+        kind: h.kind === "message" ? "消息" : h.kind === "item" ? "Context" : h.kind,
+        label: h.title.slice(0, 80),
+        hint: h.kind === "message" ? "定位到所在会话" : "全文匹配",
+        route,
+      });
     }
     // dedupe by key, cap
     const seen = new Set<string>();

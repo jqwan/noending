@@ -39,8 +39,8 @@
 //! `context_items` → `context_deliveries` → `workstream_paths` →
 //! `workstream_review_state` (cascades) → `workstreams`.
 //!
-//! Never touched: `sessions`, `session_events`, `session_cursors`,
-//! `launch_intents`, `workspace_paths`, and the Agents' raw transcript files.
+//! Never touched: `sessions`, `session_members`, `session_messages`,
+//! `launch_intents`, `workspace_paths`, and the Agents' raw source data.
 //! A Session survives the Workstream that referenced it; its
 //! `owner_workstream_id` is cleared by the `ON DELETE SET NULL` FK when the
 //! `workstreams` row goes (方案 §13, §37).

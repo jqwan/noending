@@ -1,4 +1,4 @@
-//! Database format contract (方案 §1–§4).
+//! Database format contract (Logical Session refactor, 重构方案 §24).
 //!
 //! NoEnding supports exactly one SQLite format generation at a time, identified
 //! by the header pair (`application_id`, `user_version`) that creation stamps.
@@ -6,8 +6,18 @@
 //! also still have the full structure; anything else — a foreign SQLite file, an
 //! older generation, or an incomplete current-format database — is refused
 //! instead of migrated or repaired.
+//!
+//! Format v2 is the Logical Session shape: `sessions` is keyed by the root
+//! member's Resume identity, execution lives in `session_members`, conversation
+//! in `session_messages` (root only), reading in `session_member_cursors`,
+//! observation in `session_member_stats`, the Sync frontier in
+//! `session_context_state`, and unattachable sources in
+//! `ingestion_diagnostics`. `session_events`, `session_cursors` and
+//! `session_deletion_jobs` are gone.
 
-use noending::storage::{Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
+use noending::domain::{Agent, SessionMemberRelation, SessionMessageRole};
+use noending::domain::{ParsedSessionMessage, SourceCursorUpdate};
+use noending::storage::{new_id, Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
@@ -71,8 +81,6 @@ fn object_exists(conn: &Connection, name: &str) -> bool {
     .unwrap()
 }
 
-/// Every object the file holds, including SQLite's own (`sqlite_master` rows
-/// for an FTS5 table include its shadow tables).
 fn object_count(conn: &Connection) -> i64 {
     conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
         .unwrap()
@@ -101,10 +109,13 @@ fn fresh_database_uses_current_format_generation() {
     assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
     assert_eq!(user_version(&db.read()), DATABASE_FORMAT_VERSION);
 
-    // 方案 §6.1 — the Session↔Workstream binding tables are gone, not carried
-    // forward: a Session has at most one Owner Workstream, held on the Session
-    // row itself.
+    // 重构方案 §24/§33 — the old-generation tables are gone, not carried
+    // forward: one conversation store, member-owned cursors, and no deletion
+    // job machinery (NoEnding never deletes an Agent-owned source).
     for table in [
+        "session_events",
+        "session_cursors",
+        "session_deletion_jobs",
         "project_resources",
         "project_affinity_evidence",
         "session_workstream_bindings",
@@ -116,14 +127,14 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
     for (table, column) in [
+        ("sessions", "agent_session_id"),
+        ("sessions", "raw_path"),
+        ("sessions", "parent_agent_session_id"),
+        ("sync_runs", "source_generation"),
         ("projects", "archived"),
         ("workstreams", "project_id"),
         ("workstreams", "default_cwd"),
-        ("session_events", "legacy_identity_hash"),
-        // §7 — WorkstreamPath.source existed only to record "session / launch
-        // created this path", a side effect the single-owner model removed.
         ("workstream_paths", "source"),
-        // §8.3 — a launch chooses ONE Owner Workstream, not a JSON array.
         ("launch_intents", "selected_workstream_ids"),
     ] {
         assert!(
@@ -132,40 +143,51 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
 
-    // 方案 §6.2 — the replacement is a single nullable column with an
-    // ON DELETE SET NULL FK, indexed for the Workstream detail query.
+    // The Logical Session graph is the replacement (重构方案 §5–§11): every
+    // table of the new model exists, and so does the one-root guard.
+    for object in [
+        "session_members",
+        "session_member_cursors",
+        "session_messages",
+        "session_context_state",
+        "session_member_stats",
+        "ingestion_diagnostics",
+        "idx_session_members_one_root",
+        "idx_session_messages_session",
+    ] {
+        assert!(
+            object_exists(&db.read(), object),
+            "Logical Session object is missing: {object}"
+        );
+    }
+
+    // A Session is keyed by (agent, root_agent_session_id) — the ROOT member's
+    // real Resume identity — and carries fork provenance only as a self-FK.
     {
         let conn = db.read();
+        let on_delete: String = conn
+            .query_row(
+                "SELECT \"table\" || '|' || on_delete FROM pragma_foreign_key_list('sessions')
+                  WHERE \"from\" = 'forked_from_session_id'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            on_delete, "sessions|SET NULL",
+            "fork provenance must be sessions(id) ON DELETE SET NULL"
+        );
+        assert!(
+            has_column(&conn, "sessions", "trashed_at"),
+            "sessions.trashed_at is the single lifecycle authority"
+        );
         assert!(
             has_column(&conn, "sessions", "owner_workstream_id"),
             "sessions.owner_workstream_id is missing"
         );
-        let on_delete: String = conn
-            .query_row("PRAGMA foreign_key_list(sessions)", [], |row| {
-                Ok(format!(
-                    "{}|{}",
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(6)?
-                ))
-            })
-            .unwrap();
-        assert!(
-            on_delete.contains("workstreams") && on_delete.ends_with("SET NULL"),
-            "owner FK must be workstreams(id) ON DELETE SET NULL, got {on_delete}"
-        );
-        assert!(
-            object_exists(&conn, "idx_sessions_owner_workstream"),
-            "idx_sessions_owner_workstream is missing"
-        );
-    }
-
-    // 方案 §15.1 — a pending LaunchIntent's chosen Owner follows the same rule
-    // as a Session's: deleting the Workstream nulls it. Without the FK the
-    // intent would keep a dangling id, the match would fail forever and the
-    // discovered Session would be left permanently ownerless.
-    {
-        let intent_owner_fk: String = db
-            .read()
+        // A pending LaunchIntent's chosen Owner follows the same rule:
+        // deleting the Workstream nulls it instead of dangling.
+        let intent_owner_fk: String = conn
             .query_row(
                 "SELECT \"table\" || '|' || on_delete FROM pragma_foreign_key_list('launch_intents')
                   WHERE \"from\" = 'owner_workstream_id'",
@@ -178,6 +200,251 @@ fn fresh_database_uses_current_format_generation() {
             "launch_intents.owner_workstream_id must be workstreams(id) ON DELETE SET NULL"
         );
     }
+}
+
+/// The integrity rules the Logical Session tables promise are actually
+/// enforced by the schema itself, not only by the storage code (重构方案
+/// §5/§6/§13, doc §32.10): the relation/role CHECKs, the one-root partial
+/// unique index, member identity, sequence identity, session identity, and the
+/// cascade that keeps a purge atomic.
+#[test]
+fn logical_session_schema_enforces_its_invariants() {
+    let path = db_path("invariants");
+    let db = Db::open(path.path()).unwrap();
+
+    let insert_session = |db: &Db, id: &str, root: &str| {
+        db.write()
+            .execute(
+                "INSERT INTO sessions (id, agent, root_agent_session_id)
+                 VALUES (?1, 'codex', ?2)",
+                rusqlite::params![id, root],
+            )
+            .unwrap();
+    };
+    let insert_member = |db: &Db, id: &str, session: &str, source: &str, relation: &str| {
+        db.write().execute(
+            "INSERT INTO session_members
+               (id, session_id, agent, source_member_id, relation, source_kind, source_path)
+             VALUES (?1, ?2, 'codex', ?3, ?4, 'test', '/tmp/source')",
+            rusqlite::params![id, session, source, relation],
+        )
+    };
+
+    insert_session(&db, "s1", "root-1");
+    insert_member(&db, "m-root", "s1", "root-1", "root").unwrap();
+    insert_member(&db, "m-child", "s1", "child-1", "child").unwrap();
+
+    // CHECK — a member relation outside root|child|side is rejected.
+    let bad_relation = db.write().execute(
+        "INSERT INTO session_members
+           (id, session_id, agent, source_member_id, relation, source_kind, source_path)
+         VALUES ('m-bad', 's1', 'codex', 'bad-1', 'cousin', 'test', '/tmp/source')",
+        [],
+    );
+    assert!(
+        bad_relation.is_err(),
+        "relation CHECK must reject values outside root|child|side"
+    );
+
+    // Partial unique index — exactly ONE root member per session.
+    let second_root = insert_member(&db, "m-root2", "s1", "root-2", "root");
+    assert!(
+        second_root.is_err(),
+        "idx_session_members_one_root must refuse a second root member"
+    );
+
+    // UNIQUE(agent, source_member_id) — a member identity exists once, even
+    // across sessions (this is what makes topology re-pointing an upsert).
+    insert_session(&db, "s2", "root-other");
+    let dup_member = insert_member(&db, "m-dup", "s2", "root-1", "child");
+    assert!(
+        dup_member.is_err(),
+        "a (agent, source_member_id) pair must be unique across sessions"
+    );
+
+    // CHECK + UNIQUE on the conversation store.
+    let insert_message = |db: &Db, id: &str, sequence: i64, role: &str, hash: &str| {
+        db.write().execute(
+            "INSERT INTO session_messages
+               (id, session_id, member_id, sequence, source_identity_hash, role, content, raw_ref)
+             VALUES (?1, 's1', 'm-root', ?2, ?3, ?4, 'content', 'test#1')",
+            rusqlite::params![id, sequence, hash, role],
+        )
+    };
+    insert_message(&db, "msg-1", 1, "user", "hash-1").unwrap();
+    let bad_role = insert_message(&db, "msg-role", 2, "system", "hash-role");
+    assert!(
+        bad_role.is_err(),
+        "role CHECK must reject values outside user|assistant"
+    );
+    let dup_sequence = insert_message(&db, "msg-seq", 1, "assistant", "hash-seq");
+    assert!(
+        dup_sequence.is_err(),
+        "UNIQUE(session_id, sequence) must refuse a reused sequence"
+    );
+    let dup_identity = insert_message(&db, "msg-hash", 3, "user", "hash-1");
+    assert!(
+        dup_identity.is_err(),
+        "UNIQUE(member_id, source_identity_hash) must refuse a re-ingested message"
+    );
+
+    // UNIQUE(agent, root_agent_session_id) — one Logical Session per root
+    // Resume identity; re-discovery updates in place instead of duplicating.
+    let dup_session = db.write().execute(
+        "INSERT INTO sessions (id, agent, root_agent_session_id)
+         VALUES ('s-dup', 'codex', 'root-1')",
+        [],
+    );
+    assert!(
+        dup_session.is_err(),
+        "a (agent, root_agent_session_id) pair must be unique"
+    );
+
+    // A member of ANOTHER session must survive s1's cascade.
+    insert_member(&db, "m-s2", "s2", "s2-own-member", "child").unwrap();
+
+    // CASCADE — deleting the session takes the whole graph with it in one
+    // step: members, messages, cursors, stats, and the Context frontier.
+    db.write()
+        .execute(
+            "INSERT INTO session_member_cursors
+               (member_id, source_file_identity, generation, byte_offset)
+             VALUES ('m-root', 'id', 1, 100)",
+            [],
+        )
+        .unwrap();
+    db.write()
+        .execute(
+            "INSERT INTO session_member_stats (member_id, updated_at) VALUES ('m-root', 't')",
+            [],
+        )
+        .unwrap();
+    db.write()
+        .execute(
+            "INSERT INTO session_context_state (session_id, processed_message_sequence)
+             VALUES ('s1', 1)",
+            [],
+        )
+        .unwrap();
+
+    db.write()
+        .execute("DELETE FROM sessions WHERE id = 's1'", [])
+        .unwrap();
+
+    for (table, key_column, what) in [
+        ("session_members", "session_id", "members"),
+        ("session_messages", "session_id", "messages"),
+        ("session_context_state", "session_id", "context frontier"),
+        ("session_member_cursors", "member_id", "cursors"),
+        ("session_member_stats", "member_id", "stats"),
+    ] {
+        let n: i64 = db
+            .read()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {key_column} IN ('s1', 'm-root', 'm-child')"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "cascade delete must remove {what} ({table})");
+    }
+    // The other session is untouched by s1's cascade.
+    let s2_members: i64 = db
+        .read()
+        .query_row(
+            "SELECT COUNT(*) FROM session_members WHERE session_id = 's2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(s2_members, 1, "another session's members must survive");
+}
+
+/// The storage-layer round trip over the same invariants: a member ingest
+/// commits messages with NoEnding's own sequence, dedups re-scans by identity,
+/// and refuses a second root.
+#[test]
+fn storage_round_trip_matches_the_schema_promises() {
+    let path = db_path("round-trip");
+    let db = Db::open(path.path()).unwrap();
+
+    let (s_id, _) = db
+        .upsert_logical_session(Agent::Codex, "root-1", None, None, None, None, None, None)
+        .unwrap();
+    let member = db
+        .upsert_session_member(
+            &s_id,
+            Agent::Codex,
+            "root-1",
+            SessionMemberRelation::Root,
+            None,
+            "test",
+            "/tmp/source",
+            None,
+            None,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+    let messages = [
+        ParsedSessionMessage {
+            source_message_id: Some("m1".into()),
+            source_position: "0".into(),
+            ts: None,
+            role: SessionMessageRole::User,
+            content: "first".into(),
+        },
+        ParsedSessionMessage {
+            source_message_id: Some("m2".into()),
+            source_position: "1".into(),
+            ts: None,
+            role: SessionMessageRole::Assistant,
+            content: "second".into(),
+        },
+    ];
+    let source = SourceCursorUpdate {
+        file_identity: "identity".into(),
+        generation: 1,
+        byte_offset: 100,
+        last_seen_size: 100,
+        mtime: None,
+        start_byte_offset: 0,
+        prefix_hash: String::new(),
+    };
+    let stored = db
+        .commit_member_ingest(&s_id, &member, &messages, None, &source)
+        .unwrap();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(
+        stored.iter().map(|m| m.sequence).collect::<Vec<_>>(),
+        vec![1, 2],
+        "sequence is NoEnding's own per-session counter starting at 1"
+    );
+
+    // A full re-scan of the same source dedups by identity.
+    let replay = db
+        .commit_member_ingest(&s_id, &member, &messages, None, &source)
+        .unwrap();
+    assert!(replay.is_empty(), "a re-scan must not duplicate messages");
+    assert_eq!(db.message_count(&s_id).unwrap(), 2);
+    assert_eq!(db.ingested_message_sequence(&s_id).unwrap(), 2);
+
+    // A second root member for the same session is refused through the API too.
+    let second_root = db.upsert_session_member(
+        &s_id,
+        Agent::Codex,
+        "root-1b",
+        SessionMemberRelation::Root,
+        None,
+        "test",
+        "/tmp/source-b",
+        None,
+        None,
+        None,
+        &serde_json::json!({}),
+    );
+    assert!(second_root.is_err(), "one root member per session, always");
+    let _ = new_id();
 }
 
 /// Reopening a current-format database reads the format marker and checks the
@@ -271,8 +538,8 @@ fn incomplete_current_format_database_is_refused_without_repair() {
         ),
         (
             "missing-index",
-            vec!["DROP INDEX idx_sessions_owner_workstream"],
-            "idx_sessions_owner_workstream",
+            vec!["DROP INDEX idx_session_members_one_root"],
+            "idx_session_members_one_root",
         ),
         (
             "missing-fts",

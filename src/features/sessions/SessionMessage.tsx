@@ -6,14 +6,17 @@ import { Modal, copyToClipboard } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import { formatDateTime } from "./SessionTable";
 
+/**
+ * 一条会话消息（重构方案 §6/§22.1）：Conversation 只剩 user | assistant 两种
+ * role 的 prose——compact / system / agent_message / sidechain 这些概念不再
+ * 进入 UI，`who` 由调用方给出（用户 / Codex / …）。
+ */
 export interface SessionMessageData {
   sequence: number;
-  kind: string;
-  text: string | null;
+  role: "user" | "assistant";
+  content: string;
   ts: string | null;
   who: string;
-  /** 事件 metadata 原样透传（§37.13：跨线程信封的对方身份在这里）。 */
-  meta?: Record<string, unknown>;
 }
 
 /**
@@ -26,44 +29,19 @@ export interface SessionMessageData {
  */
 const TRUNCATE_AT = 240;
 
-/**
- * 技术性事件 kind 的中文显示名。工具事件已从摄入里撤下（方案 §36.11），历史行也已清除，
- * 所以这里不再有 tool_call / tool_result。
- * user_message / assistant_message 由调用方给的 `who` 承担（用户 / Codex / …）。
- * 原始 kind 保留在 title 提示里，报障时仍能对上转录证据（AGENTS.md: Provenance Fidelity）。
- */
-const EVENT_KIND_LABELS: Record<string, string> = {
-  system: "系统",
-  compact: "上下文压缩",
-  // 跨线程信封（§37.13）：Codex 的子 Agent 之间互发的任务/答复。
-  agent_message: "子 Agent 消息",
-  unknown: "未知事件",
-};
-
-/** 统一三种 Agent 的消息视觉（整体设计方案 §43/§44）：
- * user / assistant 普通正文；tool 小型 mono block；system 弱提示。
- * 视觉差异保持克制。 */
+/** 两种气泡（§22.1）：用户右、Agent 左。 */
 export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   const [open, setOpen] = useState(false);
   const [clamped, setClamped] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   // 转录里的正文常带首尾空行（Codex 的尾部换行、pi 的一条前后各两个），
   // 而 `.event .body` 是 pre-wrap，不 trim 就会在上下渲染出空白行。
-  const text = (msg.text ?? "").trim();
+  const text = msg.content.trim();
   const readable = text !== "";
 
-  // 三种观感（§36.23）：用户右、Agent 左，都是气泡；其余是「系统噪音」，保持弱化的整行。
-  const isProse = msg.kind === "user_message" || msg.kind === "assistant_message";
-  const cls =
-    isProse
-      ? msg.kind === "user_message" ? "is-user" : "is-agent"
-      : msg.kind.startsWith("system")
-        ? "tool system is-tech"
-        : "tool is-tech";
+  const cls = msg.role === "user" ? "is-user" : "is-agent";
 
-  // 气泡里显示的就是 Markdown 预览（§36.24）。判断只认内容、不认 kind（§36.25）：
-  // 库里最像 Markdown 的恰恰是 system 事件——Codex 把整份 preamble 灌进来（实测 44KB、
-  // 32 个标题、8 个围栏），而 compact 里装的是 Claude 的压缩摘要，也是正经散文。
+  // 气泡里显示的就是 Markdown 预览（§36.24）。判断只认内容、不认来源。
   const md = looksLikeMarkdown(text);
 
   // 只有真的收了角才渐隐。内容本来就短的时候挂一层渐隐，会把最后两行擦掉。
@@ -72,12 +50,6 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
     setClamped(el !== null && el.scrollHeight > el.clientHeight + 1);
   }, [text, md]);
 
-  const kindLabel = EVENT_KIND_LABELS[msg.kind] ?? null;
-  const who =
-    msg.kind === "user_message" ? "用户"
-      : msg.kind === "assistant_message" ? msg.who
-      : kindLabel ?? "其他事件";
-  const from = counterpartOf(msg);
   const stamp = `#${msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
 
   // 整行可点会让「悬停到哪儿」变成一条与内容无关的宽条，而点开这件事属于这条消息本身，
@@ -87,8 +59,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
     <>
       <div className={`event ${cls}`}>
         <div className="head">
-          <span className="who" title={msg.kind}>{who}</span>
-          {from && <span className="from" title={from.hint}>{from.text}</span>}
+          <span className="who">{msg.who}</span>
           <span className="when mono">{stamp}</span>
         </div>
         <div
@@ -109,56 +80,24 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
           } : undefined}
         >
           {!readable
-            ? <span className="muted">（该事件没有可读文本）</span>
+            ? <span className="muted">（该消息没有可读文本）</span>
             : md
               ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{text}</ReactMarkdown>
               : (text.length > TRUNCATE_AT ? text.slice(0, TRUNCATE_AT) + "…" : text)}
         </div>
       </div>
       {open && (
-        <MessageModal who={who} stamp={stamp} text={text} mono={!isProse} previewable={md} onClose={() => setOpen(false)} />
+        <MessageModal who={msg.who} stamp={stamp} text={text} previewable={md} onClose={() => setOpen(false)} />
       )}
     </>
   );
 }
 
-/**
- * 跨线程信封的对方（§37.13）：先说清是哪一侧——读子线程转录的人第一个问题就是
- * 「这条是启动我的任务，还是我交回去的答复」。方向由适配器从两条 agent 路径算出，
- * 解不出对方的会话 id 也照样有方向（两件事互不依赖）。
- */
-const COUNTERPART_ROLE_LABELS: Record<string, string> = {
-  parent: "来自父 Agent",
-  child: "来自子 Agent",
-  sibling: "来自同级 Agent",
-};
-
-/**
- * 显示用的两段：`text` 是「来自谁」，`hint` 是溯源信息（源自己的 message_type、
- * NoEnding 的 session id、完整 agent 路径）——对方优先显示会话标题（人读得懂），
- * 退到源里的路径；id 不是给人扫的，放在悬停提示里。两者都解不出时返回 null。
- */
-function counterpartOf(msg: SessionMessageData): { text: string; hint: string } | null {
-  if (msg.kind !== "agent_message") return null;
-  const str = (k: string) => (typeof msg.meta?.[k] === "string" ? (msg.meta[k] as string) : null);
-  const path = str("counterpart_agent_path");
-  const label = str("counterpart_title") ?? path;
-  const role = COUNTERPART_ROLE_LABELS[str("counterpart_role") ?? ""];
-  const text = role
-    ? label ? `${role} · ${label}` : role
-    : label ? `来自 ${label}` : null;
-  const hint = [str("message_type"), str("counterpart_session_id"), path]
-    .filter((b): b is string => !!b)
-    .join(" · ");
-  return text ? { text, hint } : null;
-}
-
 /** 全文弹窗：整块宽度显示，可复制；是 Markdown 的话默认就停在预览上（§36.24）。 */
-function MessageModal({ who, stamp, text, mono, previewable, onClose }: {
+function MessageModal({ who, stamp, text, previewable, onClose }: {
   who: string;
   stamp: string;
   text: string;
-  mono: boolean;
   previewable: boolean;
   onClose: () => void;
 }) {
@@ -184,7 +123,7 @@ function MessageModal({ who, stamp, text, mono, previewable, onClose }: {
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{text}</ReactMarkdown>
         </div>
       ) : (
-        <div className={`msg-full${mono ? " mono" : ""}`}>{text}</div>
+        <div className="msg-full">{text}</div>
       )}
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
         <button className="btn" onClick={copyAll}>复制全文</button>

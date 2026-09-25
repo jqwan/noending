@@ -371,6 +371,22 @@ impl SessionLauncher {
         if session.is_trashed() {
             return Err(other("会话已在回收站，无法继续；请先恢复会话"));
         }
+        // §17.2 — Resume targets `sessions.root_agent_session_id` through the
+        // ROOT member's source; a source the adapter cannot confirm present is
+        // a refusal with an explicit reason, never a launch into a dead
+        // thread. Unavailable (permission, parse, store problems) is NOT
+        // missing — the refusal says so.
+        match crate::lifecycle::root_source_status(db, &session)? {
+            Some(crate::domain::SourceAvailability::Present) => {}
+            Some(crate::domain::SourceAvailability::Missing) => {
+                return Err(other("源会话已不存在，无法继续该会话"));
+            }
+            _ => {
+                return Err(other(
+                    "无法确认源会话当前可用（可能无权限或源不可读），已拒绝继续",
+                ));
+            }
+        }
 
         let engine = crate::sync::SyncEngine::from_settings(db);
         sync_one_session_with_engine(db, &engine, &session)?;
@@ -677,10 +693,12 @@ impl SessionLauncher {
             // violation: discovery could rewrite it between Preview and Launch
             // and the Agent silently opened somewhere else.
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
+            // §17.2 — the resume identity is the ROOT's, never a member's
+            // arbitrary external id.
             let cmd = adapter.build_resume_command(
                 &install,
                 &runtime_opts,
-                &session.agent_session_id,
+                &session.root_agent_session_id,
                 ctx_file.as_deref(),
                 cwd_path.as_deref(),
             )?;
@@ -933,10 +951,20 @@ pub fn compute_state_fingerprint_in(
                     hasher.update(path_id.as_bytes());
                 }
                 hasher.update(b"|");
-                if let Ok(cursor) = db.get_source_cursor(sid) {
-                    hasher.update(&cursor.last_sequence.to_le_bytes());
-                    hasher.update(&cursor.byte_offset.to_le_bytes());
-                    hasher.update(cursor.identity_tail_hash.as_bytes());
+                // §8 — the read state is the ROOT member's cursor; the
+                // ingested conversation frontier rides with it, so a preview
+                // made before a member ingest cannot silently launch against
+                // a different conversation.
+                if let Some(root) = db.root_member_for_session(sid).ok().flatten() {
+                    if let Ok(cursor) = db.get_member_cursor(&root.id) {
+                        hasher.update(&cursor.generation.to_le_bytes());
+                        hasher.update(&cursor.byte_offset.to_le_bytes());
+                        hasher.update(cursor.identity_tail_hash.as_bytes());
+                        hasher.update(b"|");
+                    }
+                }
+                if let Ok(seq) = db.ingested_message_sequence(sid) {
+                    hasher.update(&seq.to_le_bytes());
                     hasher.update(b"|");
                 }
             } else {
@@ -1688,73 +1716,15 @@ pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
 // Ingest + Sync single path
 // ---------------------------------------------------------------------------
 
-/// Single-path ingest+sync:
-/// 1. ingest: adapter reads the delta (append/truncate/rewrite aware);
-///    events + read cursor commit atomically (content-deduped).
-/// 2. sync: every event with sequence > processed_cursor is handed to the
-///    sync engine; mutations + SyncRun + processed cursor commit atomically.
-/// A crash between (1) and (2) self-heals: the events are already durable
-/// and the next run picks them up from the processed cursor.
-///
-/// With Context Intelligence off, step 2 never starts — launch flows still
-/// observe freshly ingested events (so cwd / staleness / fingerprints stay
-/// true) while `processed_sequence` is left untouched for a later replay.
-/// Returns (events_ingested, mutations_applied).
+/// Ingest + sync one session's members and pending root conversation. The
+/// single path lives in `ingestion` (§12); the launcher only needs its result
+/// for the pre-sync steps of New / Resume.
 pub fn ingest_and_sync_session(
     db: &Db,
     engine: &crate::sync::SyncEngine,
     session: &Session,
 ) -> Result<(i64, usize)> {
-    // §9 — same lifecycle re-read as the ingestion twin: the caller's struct
-    // may predate a concurrent Trash. (The commit guards below are the
-    // authoritative no-op; this just skips the doomed work up front.)
-    if !db
-        .get_session(&session.id)?
-        .map(|s| !s.is_trashed())
-        .unwrap_or(false)
-    {
-        return Ok((0, 0));
-    }
-    let adapter = crate::adapters::adapter_for(session.agent);
-    let cursor = db.get_source_cursor(&session.id)?;
-    let delta = adapter.read_delta(session, &cursor)?;
-    let source = delta
-        .source
-        .clone()
-        .ok_or_else(|| other("adapter returned no source state"))?;
-    let stored = db.append_source_events(&session.id, &delta.events, &source, &session.raw_path)?;
-    if !stored.is_empty() {
-        if let Err(e) = db.index_new_events(&stored) {
-            eprintln!("[sync] index_events failed: {}", e);
-        }
-    }
-    if !crate::settings::context_intelligence_enabled(db)? {
-        return Ok((stored.len() as i64, 0));
-    }
-
-    // 方案 §21 — Ingestion and Context processing are separate. A Session with
-    // no Owner Workstream keeps ingesting events, but Context extraction does
-    // not run and `processed_sequence` is NOT advanced: once an Owner is set,
-    // processing resumes from the first unconsumed message.
-    if db
-        .get_session(&session.id)?
-        .and_then(|s| s.owner_workstream_id)
-        .is_none()
-    {
-        return Ok((stored.len() as i64, 0));
-    }
-
-    // Sync everything not yet processed (may include events ingested by an
-    // earlier crashed run — the read/processed split makes that recoverable).
-    let processed = db.get_processed_sequence(&session.id)?;
-    let pending = db.get_events(&session.id, Some(processed), 10_000)?;
-    let mut applied = 0usize;
-    if !pending.is_empty() {
-        let to = pending.last().map(|e| e.sequence).unwrap_or(processed);
-        let out = engine.run_session_sync(db, session, &pending, processed, to)?;
-        applied = out.applied;
-    }
-    Ok((stored.len() as i64, applied))
+    crate::ingestion::ingest_and_sync_session(db, engine, session)
 }
 
 /// Ingest + sync a single session delta. Returns number of applied mutations.

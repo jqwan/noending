@@ -1,17 +1,19 @@
 use noending::domain::{
-    Agent, ContextConflict, ContextItem, ContextItemEditPayload, ContextItemRevision, Session,
-    SessionEvent,
+    Agent, ContextConflict, ContextItem, ContextItemEditPayload, ContextItemRevision,
+    SessionMessageRole, Workstream,
 };
 use noending::storage::{new_id, now, Db};
 use rusqlite::params;
+
+mod support;
 
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-workbench-{}-{}", tag, new_id()));
     Db::open(&dir.join("test.db")).unwrap()
 }
 
-fn ws_row(db: &Db, title: &str) -> noending::domain::Workstream {
-    let w = noending::domain::Workstream {
+fn ws_row(db: &Db, title: &str) -> Workstream {
+    let w = Workstream {
         id: new_id(),
         title: title.into(),
         description: String::new(),
@@ -24,26 +26,23 @@ fn ws_row(db: &Db, title: &str) -> noending::domain::Workstream {
     w
 }
 
-fn session_row(db: &Db, agent: Agent) -> Session {
-    let raw = std::env::temp_dir().join(format!("noending-raw-{}.jsonl", new_id()));
-    let _ = std::fs::write(&raw, "");
-    let s = Session {
-        id: new_id(),
-        agent,
-        agent_session_id: format!("as-{}", new_id()),
-        title: Some("Implement Context Delivery".into()),
-        cwd: None,
-        workspace_path_id: None,
-        project_id: None,
-        raw_path: raw.to_string_lossy().to_string(),
-        parent_agent_session_id: None,
-        started_at: Some(now()),
-        last_activity_at: Some(now()),
-        trashed_at: None,
-        owner_workstream_id: None,
-    };
-    db.upsert_session(&s).unwrap();
-    s
+/// A Logical Session keyed by its ROOT member's Resume identity — the row the
+/// store assigns; there is no app-chosen id or raw path anymore.
+fn session_row(db: &Db, agent: Agent) -> noending::domain::Session {
+    let root_id = format!("as-{}", new_id());
+    let (id, _) = db
+        .upsert_logical_session(
+            agent,
+            &root_id,
+            Some("Implement Context Delivery"),
+            None,
+            None,
+            None,
+            Some(&now()),
+            Some(&now()),
+        )
+        .unwrap();
+    db.get_session(&id).unwrap().unwrap()
 }
 
 #[test]
@@ -182,23 +181,36 @@ fn get_context_revision_source_resolution() {
     let ws = ws_row(&db, "Source WS");
     let session = session_row(&db, Agent::Codex);
 
-    let event_id = new_id();
-    let event = SessionEvent {
-        id: event_id.clone(),
-        session_id: session.id.clone(),
-        sequence: 42,
-        source_event_id: Some("codex-ev-42".into()),
-        source_generation: 0,
+    // Seed one root-conversation message through the production commit path.
+    // The message ROW id is store-assigned; the reference is built from the
+    // returned row, never hardcoded.
+    let member_id = support::ensure_root_member(
+        &db,
+        &session.id,
+        Agent::Codex,
+        &session.root_agent_session_id,
+        "/tmp/workbench-test.jsonl",
+    );
+    let parsed = noending::domain::ParsedSessionMessage {
+        source_message_id: Some("codex-ev-42".into()),
         source_position: "42".into(),
         ts: Some("2026-09-17T20:14:00Z".into()),
-        kind: "agent_message".into(),
-        text: Some("Evidence: Migration implementation completed.".into()),
-        raw_ref: "raw".into(),
-        metadata: serde_json::json!({}),
+        role: SessionMessageRole::Assistant,
+        content: "Evidence: Migration implementation completed.".into(),
     };
-    db.append_events(&[event]).unwrap();
+    let stored = db
+        .commit_member_ingest(
+            &session.id,
+            &member_id,
+            &[parsed],
+            None,
+            &support::seed_source(0),
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 1, "seed message must be stored");
+    let message = &stored[0];
 
-    let sref = format!("session-event:{}", event_id);
+    let sref = format!("session-message:{}", message.id);
     let item = noending::sync::create_item(
         &db,
         &ws.id,
@@ -206,7 +218,7 @@ fn get_context_revision_source_resolution() {
         "API migration done",
         "Windows verification remaining",
         "agent_statement",
-        "session_event",
+        "session_message",
         &[sref.clone()],
         Some("sync-run-123"),
         "sync:heuristic",
@@ -221,7 +233,7 @@ fn get_context_revision_source_resolution() {
 
     assert_eq!(detail.revision_id, rev_id);
     assert_eq!(detail.authority, "agent_statement");
-    assert_eq!(detail.source_type.as_deref(), Some("session_event"));
+    assert_eq!(detail.source_type.as_deref(), Some("session_message"));
     assert_eq!(detail.source_ref.as_deref(), Some(sref.as_str()));
     assert_eq!(detail.sync_run_id.as_deref(), Some("sync-run-123"));
     assert_eq!(detail.session_id.as_deref(), Some(session.id.as_str()));
@@ -230,8 +242,8 @@ fn get_context_revision_source_resolution() {
         Some("Implement Context Delivery")
     );
     assert_eq!(detail.agent, Some(Agent::Codex));
-    assert_eq!(detail.event_sequence, Some(42));
-    assert_eq!(detail.event_ts.as_deref(), Some("2026-09-17T20:14:00Z"));
+    assert_eq!(detail.message_sequence, Some(message.sequence));
+    assert_eq!(detail.message_ts.as_deref(), Some("2026-09-17T20:14:00Z"));
     assert_eq!(
         detail.evidence.as_deref(),
         Some("Evidence: Migration implementation completed.")
@@ -394,8 +406,8 @@ fn test_historical_provenance_freeze() {
         "Architecture Style",
         "Use SQLite for local persistence",
         "agent_statement",
-        "session_event",
-        &["session-event:100".into()],
+        "session_message",
+        &["session-message:100".into()],
         None,
         "agent",
     )
@@ -406,7 +418,7 @@ fn test_historical_provenance_freeze() {
     // Verify revision 1 source before any edits
     let src1_before = db.get_context_revision_source(&rev1_id).unwrap().unwrap();
     assert_eq!(src1_before.authority, "agent_statement");
-    assert_eq!(src1_before.source_type.as_deref(), Some("session_event"));
+    assert_eq!(src1_before.source_type.as_deref(), Some("session_message"));
 
     // 2. User edits the item, elevating item authority to user_edit
     let rev2 = ContextItemRevision {
@@ -466,7 +478,7 @@ fn test_conflict_snapshots_freeze() {
         "Deploy to Cloud",
         "Initial proposal",
         "agent_statement",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -507,11 +519,11 @@ fn test_conflict_snapshots_freeze() {
             "provenance": {
                 "authority": "agent_statement",
                 "actor": "agent",
-                "source_type": "session_event",
+                "source_type": "session_message",
                 "source_ref": serde_json::Value::Null,
             }
         }),
-        source_type: Some("session_event".into()),
+        source_type: Some("session_message".into()),
         source_ref: None,
         sync_run_id: None,
         created_at: now(),
@@ -560,8 +572,8 @@ fn test_resolve_conflict_with_edit_atomic_transaction() {
         "Max Memory",
         "Max memory is 2GB",
         "agent_statement",
-        "session_event",
-        &["session-event:1".into()],
+        "session_message",
+        &["session-message:1".into()],
         None,
         "agent",
     )
@@ -716,8 +728,8 @@ fn test_conflict_review_case_frozen_vs_current() {
         "A1 Title",
         "A1 Content",
         "agent_statement",
-        "session_event",
-        &["session-event:a1".into()],
+        "session_message",
+        &["session-message:a1".into()],
         None,
         "agent",
     )
@@ -732,8 +744,8 @@ fn test_conflict_review_case_frozen_vs_current() {
         "B1 Title",
         "B1 Content",
         "agent_statement",
-        "session_event",
-        &["session-event:b1".into()],
+        "session_message",
+        &["session-message:b1".into()],
         None,
         "agent",
     )
@@ -790,11 +802,11 @@ fn test_conflict_review_case_frozen_vs_current() {
             "provenance": {
                 "authority": "agent_statement",
                 "actor": "agent",
-                "source_type": "session_event",
+                "source_type": "session_message",
                 "source_ref": serde_json::Value::Null,
             }
         }),
-        source_type: Some("session_event".into()),
+        source_type: Some("session_message".into()),
         source_ref: None,
         sync_run_id: None,
         created_at: now(),
@@ -867,8 +879,8 @@ fn test_fts_failure_rolls_back_entire_conflict_transaction() {
         "Initial Decision",
         "Some details",
         "agent_statement",
-        "session_event",
-        &["session-event:1".into()],
+        "session_message",
+        &["session-message:1".into()],
         None,
         "agent",
     )
@@ -952,7 +964,7 @@ fn revision_authority_is_never_polluted_by_item_authority() {
     // Revision metadata is completely empty (no provenance object)
     db.write().execute(
         "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
-         VALUES (?1, ?2, 'Historical Agent Goal', 'Extracted by agent', '{}', 'session_event', 'sync-run-1', ?3)",
+         VALUES (?1, ?2, 'Historical Agent Goal', 'Extracted by agent', '{}', 'session_message', 'sync-run-1', ?3)",
         params![rev1_id, item_id, ts],
     ).unwrap();
 

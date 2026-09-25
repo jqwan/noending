@@ -231,7 +231,7 @@ export default function ProjectDetail({ projectId, navigate }: {
         {sessions.slice(0, showAllSessions ? undefined : 12).map((s) => (
           <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
             <div className="grow">
-              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
+              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
                 {sessionDisplayTitle(s.title)}
               </div>
               <div className="meta mono" title={s.cwd ?? undefined}>

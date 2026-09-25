@@ -160,26 +160,30 @@ fn fake_spawn(cmd: &AgentCommand) -> Result<LaunchOutcome> {
     })
 }
 
+/// A Logical Session keyed by its ROOT member's Resume identity, with a REAL
+/// root source file: resume preparation refuses a Session whose ROOT member
+/// source is not present on disk (§17.2), so every fixture session is
+/// resumable. `workspace_path_id` goes through the production upsert, which
+/// derives `project_id` from the path row in the same statement.
 fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> Session {
+    let root_id = format!("as-{}", new_id());
     let raw = std::env::temp_dir().join(format!("noending-lws-raw-{}.jsonl", new_id()));
-    let _ = std::fs::write(&raw, "");
-    let s = Session {
-        id: new_id(),
-        agent: Agent::Codex,
-        agent_session_id: format!("as-{}", new_id()),
-        title: None,
-        cwd: cwd.map(|s| s.to_string()),
-        workspace_path_id: workspace_path_id.map(|s| s.to_string()),
-        project_id: None,
-        owner_workstream_id: None,
-        raw_path: raw.to_string_lossy().to_string(),
-        parent_agent_session_id: None,
-        started_at: Some(now()),
-        last_activity_at: Some(now()),
-        trashed_at: None,
-    };
-    db.upsert_session(&s).unwrap();
-    db.get_session(&s.id).unwrap().unwrap()
+    std::fs::write(&raw, "").unwrap();
+    let ts = now();
+    let (id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            &root_id,
+            None,
+            cwd,
+            workspace_path_id,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_root_member(db, &id, Agent::Codex, &root_id, &raw.to_string_lossy());
+    db.get_session(&id).unwrap().unwrap()
 }
 
 fn is_stale(err: &str) -> bool {
@@ -401,11 +405,21 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
         .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
 
-    // Discovery rewrites the cwd (§7.2: the transcript is the source of truth).
+    // Discovery rewrites the cwd (§7.2: the transcript is the source of truth)
+    // through the production upsert, keyed by the ROOT Resume identity.
     let moved = real_dir("resume-drift", "moved");
-    let mut drifted = db.get_session(&s.id).unwrap().unwrap();
-    drifted.cwd = Some(moved.clone());
-    db.upsert_session(&drifted).unwrap();
+    let drifted = db.get_session(&s.id).unwrap().unwrap();
+    db.upsert_logical_session(
+        drifted.agent,
+        &drifted.root_agent_session_id,
+        None,
+        Some(&moved),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     let err = launcher
         .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())

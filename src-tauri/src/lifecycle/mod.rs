@@ -1,83 +1,72 @@
-//! Session lifecycle orchestration: Trash, Restore and prepared permanent
-//! deletion (Session Lifecycle & Deletion v0.1).
+//! Session lifecycle orchestration: Trash, Restore and permanent LOCAL delete
+//! (重构方案 §19 / §20).
 //!
 //! Division of labor, mirroring the architecture boundaries:
 //! - **this module** owns the rules — which transitions are legal, when a
-//!   deletion job may advance, what the preview must contain;
-//! - **storage::session_jobs** owns the SQL (jobs, purge, redaction);
-//! - **the Agent adapter** owns source validation and the actual file
-//!   removal — this module NEVER calls `remove_file` on a `raw_path` (§7):
-//!   source deletion flows exclusively through
-//!   `AgentAdapter::{prepare,execute}_source_session_deletion`.
+//!   local purge is allowed, what the preview must contain;
+//! - **storage::session_lifecycle** owns the SQL (guarded flips, redaction,
+//!   purge);
+//! - **the Agent adapter** owns the source verdict — this module NEVER
+//!   touches the Agent's files, because there is nothing to touch:
+//!   ```text
+//!   NoEnding never deletes Agent-owned session sources.
+//!   ```
 //!
-//! Permanent deletion purges NoEnding data after a best-effort attempt to
-//! remove the Agent source. A source deletion failure is reported, but does
-//! not block the NoEnding purge.
+//! Permanent delete is a NoEnding-LOCAL purge and nothing else. It is allowed
+//! only for a TRASHED session whose ROOT source the adapter freshly confirmed
+//! Missing — `Present` and `Unavailable` both refuse (§20.1). There is no
+//! deletion job, no crash recovery and no filesystem step: the whole purge is
+//! one SQLite transaction. If the source reappears afterwards, it is simply
+//! re-ingested as a new Session (§20.4 — no tombstone).
 
-use crate::adapters::{adapter_for, SourceDeletionPlan, SourceDeletionState, SourceDeletionTarget};
-use crate::domain::{Agent, Session, SessionDeletionJob};
+use crate::adapters::adapter_for;
+use crate::domain::SourceAvailability;
+use crate::domain::{Agent, Session};
 use crate::error::{other, Result};
-use crate::storage::{session_jobs, Db, PermanentDeletionCounts};
+use crate::storage::{session_lifecycle, Db, PermanentDeletionCounts};
 
-/// Impact preview returned by `prepare_session_permanent_delete` (§20): the
-/// frozen plan plus the counts the confirmation dialog shows. Everything is
-/// backend-computed; the frontend submits back only the job id (§19).
+/// Impact preview returned by `get_session_local_delete_preview` (§20.2):
+/// the fresh ROOT source verdict plus the counts the confirmation dialog
+/// shows. Everything is backend-computed and stateless — there is no job row
+/// between preview and execute; the frontend submits the session id again.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct PermanentDeletionPreview {
-    pub job_id: String,
+pub struct LocalDeletePreview {
     pub session_id: String,
     pub session_title: Option<String>,
     pub agent: Agent,
-    pub agent_session_id: String,
-    pub source_targets: Vec<crate::adapters::SourceDeletionTarget>,
-    /// `verified_present` | `confirmed_absent` | `unverified` — what prepare
-    /// concluded about the raw source. The confirmation copy keys off this.
-    pub source_state: &'static str,
+    pub root_agent_session_id: String,
+    /// Fresh verdict on the ROOT source at preview time. The confirmation
+    /// copy keys off this; execute re-checks it again (§20.3).
+    pub root_source_status: SourceAvailability,
+    pub can_permanently_delete: bool,
     #[serde(flatten)]
     pub counts: PermanentDeletionCounts,
 }
 
-/// Outcome of `execute_session_permanent_delete` (§21/§22). NoEnding data is
-/// purged even when best-effort source deletion reports an error; `error` then
-/// explains that the source file was left untouched.
+/// Outcome of `permanently_delete_session` (§20.3).
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct PermanentDeletionResult {
+pub struct PermanentDeleteResult {
     pub purged: bool,
     pub redacted_revisions: usize,
-    pub job: Option<SessionDeletionJob>,
-    pub error: Option<String>,
 }
 
-fn unverified_source_plan(session: &Session) -> SourceDeletionPlan {
-    SourceDeletionPlan {
-        version: crate::adapters::SOURCE_DELETION_PLAN_VERSION,
-        agent: session.agent,
-        agent_session_id: session.agent_session_id.clone(),
-        source: SourceDeletionState::Unverified,
-        targets: vec![SourceDeletionTarget {
-            path: session.raw_path.clone(),
-            kind: "unverified".into(),
-            file_identity: String::new(),
-            size: 0,
-            sha256: String::new(),
-        }],
-    }
-}
-
-/// Normal → Trash (§6). Reversible; never touches the Agent source file.
+/// Normal → Trash (§19.1). Reversible; never touches the Agent source.
 ///
-/// Hardening §1-B: the FTS unindex commits INSIDE the same transaction as
-/// the lifecycle flip. A crash can no longer leave a trashed session
-/// searchable — there is no post-commit window and no reliance on eventual
-/// self-heal. (FTS-less builds keep working: the index helpers swallow the
-/// missing-table error exactly as `unindex_conn` always has.)
+/// The FTS unindex commits INSIDE the same transaction as the lifecycle flip
+/// (review P1-1): a crash can no longer leave a trashed session searchable —
+/// there is no post-commit window and no reliance on eventual self-heal.
+///
+/// Trash freezes the session: member cursors are not touched, so ingestion
+/// commits against it are refused by the commit-time guard and a Restore
+/// resumes from exactly where things stopped.
 pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
     let changed = db.tx(|tx| {
-        let changed = session_jobs::trash_session_conn(tx, session_id, &crate::storage::now())?;
+        let changed =
+            session_lifecycle::trash_session_conn(tx, session_id, &crate::storage::now())?;
         if changed {
-            // §12: a trashed session leaves the search index, atomically
+            // §21: a trashed session leaves the search index, atomically
             // with the flip that hides it — an index failure rolls BOTH back.
-            session_jobs::unindex_session_conn(tx, session_id)?;
+            session_lifecycle::unindex_session_conn(tx, session_id)?;
         }
         Ok(changed)
     })?;
@@ -88,18 +77,14 @@ pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
         .ok_or_else(|| other("Session 不存在"))
 }
 
-/// Trash → Normal (§7): same Session id; Owner, events and cursors were
-/// never touched. Refused while a deletion job exists — the user cancels the
-/// deletion first (§42).
-///
-/// Hardening §1-B: the FTS reindex commits INSIDE the restore transaction —
-/// a restored session is searchable exactly when it is visible again, with
-/// no crash window in between.
+/// Trash → Normal (§19.2): same Session id; Owner, members, messages,
+/// cursors and the Context frontier were never touched. The next reconcile
+/// simply resumes (and re-indexes the restored conversation).
 pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {
     let restored = db.tx(|tx| {
-        let restored = session_jobs::restore_session_conn(tx, session_id)?;
+        let restored = session_lifecycle::restore_session_conn(tx, session_id)?;
         if restored {
-            session_jobs::reindex_session_conn(tx, session_id)?;
+            session_lifecycle::reindex_session_conn(tx, session_id)?;
         }
         Ok(restored)
     })?;
@@ -110,147 +95,79 @@ pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {
         .ok_or_else(|| other("Session 不存在"))
 }
 
-/// Freeze a permanent deletion plan for a trashed Session (§19–§20).
-///
-/// The adapter validates the source and returns the plan; the preview counts
-/// are read while the store is still complete; the job row lands in its own
-/// transaction. Re-prepare over a `failed` / `stale` job replaces it; a
-/// `deleting_source` job is never clobbered (§42).
-pub fn prepare_session_permanent_delete(
-    db: &Db,
-    session_id: &str,
-) -> Result<PermanentDeletionPreview> {
+/// The fresh ROOT source verdict for a session (§20.1). `None` when the
+/// session has no root member row (it never completed discovery).
+pub fn root_source_status(db: &Db, session: &Session) -> Result<Option<SourceAvailability>> {
+    let Some(root) = db.root_member_for_session(&session.id)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        adapter_for(session.agent).inspect_member_source(&root)?,
+    ))
+}
+
+/// Stateless preview of the permanent LOCAL deletion (§20.2). Only a TRASHED
+/// session may be previewed; the verdict on the ROOT source is taken fresh
+/// right here, and the counts are read while the store is still complete.
+pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<LocalDeletePreview> {
     let session = db
         .get_session(session_id)?
         .ok_or_else(|| other("Session 不存在"))?;
-    // §42: only Trash may prepare a permanent deletion.
+    // §42-equivalent of the old rule: only Trash may head toward a permanent
+    // deletion; an Active session is never purgeable, whatever its source.
     if !session.is_trashed() {
         return Err(other("只有回收站中的会话才能永久删除"));
     }
-    // Bound, not in the `if let` scrutinee: a scrutinee temporary would hold
-    // the reader lock across the whole branch body.
-    let existing = session_jobs::get_job_for_session_conn(&db.read(), session_id)?;
-    if let Some(job) = existing {
-        if job.state == SessionDeletionJob::STATE_DELETING_SOURCE {
-            return Err(other("永久删除正在执行中，请等待完成或重启应用后重试"));
-        }
-        // prepared / failed / stale → replaced below (re-prepare).
-    }
-
-    // Source deletion is best-effort. A failed or unsupported adapter check
-    // must not block removal of NoEnding's own Session data.
-    let plan = match adapter_for(session.agent).prepare_source_session_deletion(&session) {
-        Ok(plan) => plan,
-        Err(error) => {
-            eprintln!("[lifecycle] source deletion unavailable: {error}");
-            unverified_source_plan(&session)
-        }
-    };
-
+    let status = root_source_status(db, &session)?;
+    let can_delete = status == Some(SourceAvailability::Missing);
     let counts = PermanentDeletionCounts::collect(&db.read(), session_id)?;
-
-    let job = SessionDeletionJob {
-        id: crate::storage::new_id(),
-        session_id: session.id.clone(),
-        state: SessionDeletionJob::STATE_PREPARED.to_string(),
-        plan_json: serde_json::to_string(&plan)?,
-        last_error: None,
-        created_at: crate::storage::now(),
-        updated_at: crate::storage::now(),
-    };
-    db.tx(|tx| session_jobs::insert_deletion_job_conn(tx, &job))?;
-
-    Ok(PermanentDeletionPreview {
-        job_id: job.id,
+    Ok(LocalDeletePreview {
         session_id: session.id,
         session_title: session.title,
         agent: session.agent,
-        agent_session_id: session.agent_session_id,
-        source_state: plan.source.as_str(),
-        source_targets: plan.targets,
+        root_agent_session_id: session.root_agent_session_id,
+        root_source_status: status.unwrap_or(SourceAvailability::Unavailable),
+        can_permanently_delete: can_delete,
         counts,
     })
 }
 
-/// Execute a prepared permanent deletion (§21–§24).
+/// Execute the permanent LOCAL deletion (§20.3). Guards, in order:
 ///
-/// Source deletion failures are returned in `error`, while NoEnding data is
-/// still purged. `Err` is reserved for broken transitions (unknown job,
-/// malformed plan, or wrong state).
-pub fn execute_session_permanent_delete(db: &Db, job_id: &str) -> Result<PermanentDeletionResult> {
-    let mut job = session_jobs::get_deletion_job_conn(&db.read(), job_id)?
-        .ok_or_else(|| other("永久删除任务不存在"))?;
-    match job.state.as_str() {
-        SessionDeletionJob::STATE_PREPARED | SessionDeletionJob::STATE_FAILED => {}
-        SessionDeletionJob::STATE_STALE => {
-            return Err(other("源会话已发生变化，请重新准备后再执行"));
-        }
-        _ => return Err(other("永久删除正在执行中，请等待完成或重启应用后重试")),
+/// 1. the session exists;
+/// 2. it is TRASHED;
+/// 3. it still has a ROOT member;
+/// 4. the adapter's FRESH verdict on the root source is `Missing` — taken
+///    again right here, so a file that reappeared between preview and
+///    execute aborts the purge;
+///
+/// then ONE SQLite transaction redacts provenance and deletes every
+/// session-owned row (§20.3's fixed order). Child sources are irrelevant by
+/// design: only the root is the deletion authority (§2.6).
+pub fn permanently_delete_session(db: &Db, session_id: &str) -> Result<PermanentDeleteResult> {
+    let session = db
+        .get_session(session_id)?
+        .ok_or_else(|| other("Session 不存在"))?;
+    if !session.is_trashed() {
+        return Err(other("只有回收站中的会话才能永久删除"));
     }
-    let session = match db.get_session(&job.session_id)? {
-        Some(s) => s,
-        None => {
-            // Purge and job row die in one transaction, so a job without its
-            // session means a foreign row — clean it up.
-            session_jobs::delete_deletion_job_conn(&db.write(), &job.id)?;
-            return Err(other("Session 不存在"));
-        }
-    };
+    let root = db
+        .root_member_for_session(&session.id)?
+        .ok_or_else(|| other("该会话尚未完成摄入（没有 root member），无法永久删除"))?;
+    // Fresh re-check at execute time — the preview's verdict is advice, this
+    // one is the gate. Only a confirmed-absent root may pass; Unavailable
+    // (permission denied, parse error, store unreadable) never equals missing.
+    let status = adapter_for(session.agent).inspect_member_source(&root)?;
+    if status != SourceAvailability::Missing {
+        return Err(other(format!(
+            "Root 源当前状态为 {}，只有确认不存在（missing）才允许永久删除",
+            status.as_str()
+        )));
+    }
 
-    // Parse the frozen plan BEFORE marking in-flight: a malformed job must
-    // not enter `deleting_source` (it would sit there until the next startup
-    // recovery flips it). From here on the plan is guaranteed well-formed.
-    let plan: SourceDeletionPlan = serde_json::from_str(&job.plan_json)?;
-
-    // Mark in-flight BEFORE touching the filesystem, so a crash during the
-    // delete is diagnosable (§23 converts it to `failed` on next startup).
-    session_jobs::set_job_state_conn(
-        &db.write(),
-        &job.id,
-        SessionDeletionJob::STATE_DELETING_SOURCE,
-        None,
-    )?;
-    job.state = SessionDeletionJob::STATE_DELETING_SOURCE.to_string();
-
-    // Adapter-owned, revalidated deletion (§21). Core never removes the file.
-    // A source failure is reported but does not block the NoEnding purge.
-    let source_error = adapter_for(session.agent)
-        .execute_source_session_deletion(&plan)
-        .err()
-        .map(|error| error.to_string());
-
-    // One transaction purges NoEnding's copy of the session, including this
-    // job row. No tombstone survives (§5).
-    let redacted = db.tx(|tx| session_jobs::purge_session_data_conn(tx, &session.id))?;
-
-    Ok(PermanentDeletionResult {
+    let redacted = db.tx(|tx| session_lifecycle::purge_session_data_conn(tx, &session.id))?;
+    Ok(PermanentDeleteResult {
         purged: true,
         redacted_revisions: redacted,
-        job: None,
-        error: source_error,
     })
-}
-
-/// Cancel a prepared permanent deletion (§42): drop the coordination row,
-/// the Session stays in Trash. Refused only while the deletion is actually
-/// in flight (after a crash, startup recovery has already flipped the state).
-pub fn cancel_session_permanent_delete(db: &Db, job_id: &str) -> Result<()> {
-    let job = session_jobs::get_deletion_job_conn(&db.read(), job_id)?
-        .ok_or_else(|| other("永久删除任务不存在"))?;
-    if job.state == SessionDeletionJob::STATE_DELETING_SOURCE {
-        return Err(other("永久删除正在执行中，无法取消"));
-    }
-    session_jobs::delete_deletion_job_conn(&db.write(), job_id)
-}
-
-/// Current coordination row for a session, if any (UI state source).
-pub fn get_session_deletion_job(db: &Db, session_id: &str) -> Result<Option<SessionDeletionJob>> {
-    session_jobs::get_job_for_session_conn(&db.read(), session_id)
-}
-
-/// §23 startup recovery: `deleting_source` jobs from a previous process are
-/// flipped to `failed` with a clear message — deletion is never silently
-/// continued, the user decides (retry → AlreadyAbsent → purge completes).
-pub fn recover_interrupted_deletions(db: &Db) -> Result<usize> {
-    session_jobs::recover_interrupted_deletion_jobs(&db.write())
 }

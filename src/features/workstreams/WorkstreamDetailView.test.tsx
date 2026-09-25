@@ -16,6 +16,26 @@ vi.mock("../../api", () => ({
     reorderWorkstreamPaths: vi.fn(),
     probeWorkspacePath: vi.fn().mockResolvedValue(null),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
+    // 挂载时读取的 Review 面板（SinceLastReview）默认空窗。
+    getWorkstreamReviewWindow: vi.fn().mockResolvedValue({
+      state: { workstream_id: "w1", frontier: { through_at: "", boundary_change_ids: [] }, reviewed_at: "" },
+      unseen_changes: [],
+      mark_through: { through_at: "", boundary_change_ids: [] },
+    }),
+    getWorkstreamReviewSummary: vi.fn().mockResolvedValue({
+      workstream_id: "w1",
+      unseen_change_count: 0,
+      open_conflict_count: 0,
+      new_facts: 0,
+      updated_facts: 0,
+      resolved_items: 0,
+      superseded_items: 0,
+      last_unseen_change_at: null,
+      reviewed_at: "",
+      has_updates: false,
+      needs_attention: false,
+    }),
+    markWorkstreamReviewed: vi.fn(),
   },
 }));
 
@@ -107,16 +127,16 @@ it("lists the sessions owned by this task and nothing else", async () => {
   ctx.sessions = [{
     id: "s1",
     agent: "codex",
-    agent_session_id: "s1-agent",
+    root_agent_session_id: "s1-agent",
     title: "归属于本任务的会话",
     cwd: "/repo/main",
     project_id: "pr",
     workspace_path_id: "p-main",
     owner_workstream_id: "w1",
-    raw_path: "/s1.jsonl",
-    parent_agent_session_id: null,
+    forked_from_session_id: null,
     started_at: "2026-09-21T00:00:00+00:00",
     last_activity_at: "2026-09-21T00:00:00+00:00",
+    last_conversation_at: null,
     trashed_at: null,
   }];
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);

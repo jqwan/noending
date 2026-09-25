@@ -7,16 +7,20 @@
 //!   SyncEngine can fall back to the heuristic — sync never breaks because
 //!   the model had a bad day.
 //!
-//! SourceReference integrity (Issue #2): the prompt numbers events #1..#N
-//! but those numbers are *prompt-local*. A `PromptEventRef` map is built
+//! SourceReference integrity (Issue #2): the prompt numbers messages #1..#N
+//! but those numbers are *prompt-local*. A `PromptMessageRef` map is built
 //! while composing the prompt and is the ONLY way a short ref resolves to a
-//! real event; unknown refs are dropped with a diagnostic instead of being
-//! misinterpreted as event sequences.
+//! real message; unknown refs are dropped with a diagnostic instead of being
+//! misinterpreted as message sequences.
+//!
+//! Input is `session_messages` only (§15): every message the store holds is
+//! already root user/assistant prose, so the extractor's one judgment call is
+//! "does this text carry Context value" — never "is this conversation".
 
 use serde::Deserialize;
 
 use crate::adapters::ExecOptions;
-use crate::domain::{Agent, Session, SessionEvent};
+use crate::domain::{Agent, Session, SessionMessage, SessionMessageRole};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
@@ -102,7 +106,7 @@ impl ContextExtractor for HeuristicExtractor {
     fn extract(
         &self,
         _session: &Session,
-        events: &[&SessionEvent],
+        messages: &[&SessionMessage],
         workstream_id: &str,
         _inputs: &PromptInputs,
     ) -> Result<ExtractOutput> {
@@ -112,24 +116,21 @@ impl ContextExtractor for HeuristicExtractor {
         }
         let primary = workstream_id.to_string();
 
-        for e in events {
-            let text = match &e.text {
-                Some(t) => t,
-                None => continue,
-            };
-            // Stable source reference: the event's app-owned identity, not a
+        for m in messages {
+            let text = &m.content;
+            // Stable source reference: the message's app-owned identity, not a
             // positional number.
-            let source_refs = vec![format!("session-event:{}", e.id)];
-            // Authority = whose word the content is. Text extracted from a
-            // user message is the USER's statement, whoever wrote the row.
-            // `created_by` (the extractor) is recorded separately.
-            let authority = if e.kind == "user_message" {
+            let source_refs = vec![format!("session-message:{}", m.id)];
+            // Authority = whose word the content is. Text from a user turn is
+            // the USER's statement, whoever wrote the row.
+            let is_user = m.role == SessionMessageRole::User;
+            let authority = if is_user {
                 "user_explicit"
             } else {
                 "agent_statement"
             };
 
-            if e.kind == "user_message" && text.len() > 20 && !looks_like_command(text) {
+            if is_user && text.len() > 20 && !looks_like_command(text) {
                 if contains_any(
                     text,
                     &[
@@ -296,13 +297,13 @@ impl ContextExtractor for CliExtractor {
     fn extract(
         &self,
         session: &Session,
-        events: &[&SessionEvent],
+        messages: &[&SessionMessage],
         workstream_id: &str,
         inputs: &PromptInputs,
     ) -> Result<ExtractOutput> {
         let install = crate::platform::exec_resolver::resolve(self.agent)?;
         let adapter = crate::adapters::adapter_for(self.agent);
-        let (prompt, ref_map) = build_extraction_prompt(session, events, inputs)?;
+        let (prompt, ref_map) = build_extraction_prompt(session, messages, inputs)?;
         let cmd = adapter.build_exec_command(&install, &self.opts, &prompt)?;
         let out = crate::platform::exec_runner::run_headless(&cmd, self.timeout_secs)?;
         let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
@@ -311,15 +312,15 @@ impl ContextExtractor for CliExtractor {
 }
 
 /// One entry of the prompt-local reference map: "#N" as shown to the model
-/// → the real, stable event identity behind it.
+/// → the real, stable message identity behind it.
 #[derive(Debug, Clone)]
-pub struct PromptEventRef {
+pub struct PromptMessageRef {
     pub short_ref: String,
-    pub event_id: String,
+    pub message_id: String,
     pub sequence: i64,
-    /// The event's kind ("user_message" | "assistant_message" | …): the raw
-    /// material for deterministic authority derivation after parsing.
-    pub kind: String,
+    /// The message's role: the raw material for deterministic authority
+    /// derivation after parsing.
+    pub role: SessionMessageRole,
 }
 
 /// Raw mutation shape we ask the model for. Short refs ("#1") map back to
@@ -361,31 +362,31 @@ const ALLOWED_KINDS: [&str; 15] = [
 
 fn build_extraction_prompt(
     session: &Session,
-    events: &[&SessionEvent],
+    messages: &[&SessionMessage],
     inputs: &PromptInputs,
-) -> Result<(String, Vec<PromptEventRef>)> {
+) -> Result<(String, Vec<PromptMessageRef>)> {
     let ws_lines = &inputs.ws_lines;
     let item_lines = &inputs.item_lines;
 
-    let mut ev_lines = Vec::new();
+    let mut msg_lines = Vec::new();
     let mut ref_map = Vec::new();
-    for (i, e) in events.iter().enumerate() {
+    for (i, m) in messages.iter().enumerate() {
         let short_ref = format!("#{}", i + 1);
-        ev_lines.push(format!(
+        msg_lines.push(format!(
             "{} [{}] {}",
             short_ref,
-            if e.kind == "user_message" {
+            if m.role == SessionMessageRole::User {
                 "user"
             } else {
                 "agent"
             },
-            crate::adapters::truncate_text(e.text.as_deref().unwrap_or(""), 600)
+            crate::adapters::truncate_text(&m.content, 600)
         ));
-        ref_map.push(PromptEventRef {
+        ref_map.push(PromptMessageRef {
             short_ref,
-            event_id: e.id.clone(),
-            sequence: e.sequence,
-            kind: e.kind.clone(),
+            message_id: m.id.clone(),
+            sequence: m.sequence,
+            role: m.role,
         });
     }
 
@@ -399,7 +400,7 @@ fn build_extraction_prompt(
 {items}
 
 新增消息（ref 编号见行首）：
-{events}
+{messages}
 
 只输出一个 JSON 数组，每个元素形如：
 {{"op":"add","workstream_id":"<所属id>","item_kind":"decision|constraint|todo|open_question|goal|current_state|note|finding|risk|issue|reference","title":"不超过60字","content":"原文或简述","refs":["#1"]}}
@@ -418,9 +419,9 @@ Session: {agent} / {sid}"##,
         } else {
             item_lines.join("\n")
         },
-        events = ev_lines.join("\n"),
+        messages = msg_lines.join("\n"),
         agent = session.agent.display_name(),
-        sid = session.agent_session_id,
+        sid = session.root_agent_session_id,
     );
     Ok((prompt, ref_map))
 }
@@ -455,11 +456,11 @@ pub fn extract_json_array(text: &str) -> Option<String> {
 }
 
 /// Resolve short refs through the prompt's reference map. The map is the
-/// only bridge between "#N" and a real event: an unknown ref is dropped
-/// with a diagnostic, never misread as an event sequence.
+/// only bridge between "#N" and a real message: an unknown ref is dropped
+/// with a diagnostic, never misread as a message sequence.
 fn resolve_refs(
     refs: &[String],
-    ref_map: &[PromptEventRef],
+    ref_map: &[PromptMessageRef],
     diagnostics: &mut Vec<String>,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -467,7 +468,7 @@ fn resolve_refs(
         let key = r.trim().trim_start_matches('#');
         let short = format!("#{}", key);
         if let Some(m) = ref_map.iter().find(|m| m.short_ref == short) {
-            let reference = format!("session-event:{}", m.event_id);
+            let reference = format!("session-message:{}", m.message_id);
             if !out.contains(&reference) {
                 out.push(reference);
             }
@@ -480,30 +481,27 @@ fn resolve_refs(
 
 /// Deterministic authority derivation (Issue: authority is NEVER the
 /// model's call). The LLM decides WHAT to extract; NoEnding decides whose
-/// word it is, from the events the mutation actually cites:
-/// - all cited events are user messages        → `user_explicit`
-/// - all cited events are assistant messages   → `agent_statement`
+/// word it is, from the messages the mutation actually cites:
+/// - all cited messages are user turns         → `user_explicit`
+/// - all cited messages are assistant turns    → `agent_statement`
 /// - mixed citations (user participated)       → `user_explicit` (conservative:
 ///   the item is protected from silent agent modification)
 /// - no resolvable citation                    → `agent_inferred`
-pub fn derive_authority(source_refs: &[String], ref_map: &[PromptEventRef]) -> String {
+pub fn derive_authority(source_refs: &[String], ref_map: &[PromptMessageRef]) -> String {
     if source_refs.is_empty() {
         return "agent_inferred".into();
     }
-    let kinds: Vec<&str> = source_refs
+    let roles: Vec<SessionMessageRole> = source_refs
         .iter()
         .filter_map(|r| {
-            let id = r.strip_prefix("session-event:")?;
-            ref_map
-                .iter()
-                .find(|m| m.event_id == id)
-                .map(|m| m.kind.as_str())
+            let id = r.strip_prefix("session-message:")?;
+            ref_map.iter().find(|m| m.message_id == id).map(|m| m.role)
         })
         .collect();
-    if kinds.is_empty() {
+    if roles.is_empty() {
         return "agent_inferred".into();
     }
-    if kinds.iter().all(|k| *k == "assistant_message") {
+    if roles.iter().all(|r| *r == SessionMessageRole::Assistant) {
         "agent_statement".into()
     } else {
         // all user, or mixed → user participates in the claim
@@ -515,7 +513,7 @@ pub fn derive_authority(source_refs: &[String], ref_map: &[PromptEventRef]) -> S
 /// dropped individually (with diagnostics); the rest still merges.
 pub fn parse_mutations(
     text: &str,
-    ref_map: &[PromptEventRef],
+    ref_map: &[PromptMessageRef],
     workstream_id: &str,
     _session: &Session,
 ) -> Result<ExtractOutput> {
@@ -654,42 +652,42 @@ fn find_hint_line<'a>(text: &'a str, hints: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::SessionEvent;
+    use crate::domain::SessionMessage;
 
     fn session() -> Session {
         Session {
             id: "s1".into(),
             agent: Agent::Codex,
-            agent_session_id: "a1".into(),
+            root_agent_session_id: "a1".into(),
             title: None,
             cwd: None,
             workspace_path_id: None,
             project_id: None,
             owner_workstream_id: None,
-            raw_path: "/tmp/x".into(),
-            parent_agent_session_id: None,
+            forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,
+            last_conversation_at: None,
             trashed_at: None,
         }
     }
 
-    /// Events with non-1-starting, non-contiguous sequences — the map must
-    /// translate "#1" to the FIRST prompt event (sequence 101), never to
+    /// Messages with non-1-starting, non-contiguous sequences — the map must
+    /// translate "#1" to the FIRST prompt message (sequence 101), never to
     /// "sequence 1".
-    fn ref_map() -> Vec<PromptEventRef> {
+    fn ref_map() -> Vec<PromptMessageRef> {
         vec![
-            PromptEventRef {
+            PromptMessageRef {
                 short_ref: "#1".into(),
-                event_id: "e-aaa".into(),
+                message_id: "m-aaa".into(),
                 sequence: 101,
-                kind: "user_message".into(),
+                role: SessionMessageRole::User,
             },
-            PromptEventRef {
+            PromptMessageRef {
                 short_ref: "#2".into(),
-                event_id: "e-bbb".into(),
+                message_id: "m-bbb".into(),
                 sequence: 105,
-                kind: "assistant_message".into(),
+                role: SessionMessageRole::Assistant,
             },
         ]
     }
@@ -711,8 +709,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(workstream_id, "ws1");
-                assert_eq!(source_refs, &vec!["session-event:e-bbb".to_string()]);
-                // #2 is an assistant message: agent's own statement.
+                assert_eq!(source_refs, &vec!["session-message:m-bbb".to_string()]);
+                // #2 is an assistant turn: agent's own statement.
                 assert_eq!(authority, "agent_statement");
             }
             other => panic!("unexpected mutation: {:?}", other),
@@ -757,13 +755,13 @@ mod tests {
     }
 
     #[test]
-    fn short_ref_maps_to_real_event_not_prompt_position() {
+    fn short_ref_maps_to_real_message_not_prompt_position() {
         let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"第一条","content":"c","refs":["#1"]}]"##;
         let out = parse(text);
         match &out.mutations[0] {
             ContextMutation::Add { source_refs, .. } => {
-                // "#1" is the first PROMPT event: id e-aaa / sequence 101.
-                assert_eq!(source_refs, &vec!["session-event:e-aaa".to_string()]);
+                // "#1" is the first PROMPT message: id m-aaa / sequence 101.
+                assert_eq!(source_refs, &vec!["session-message:m-aaa".to_string()]);
             }
             other => panic!("unexpected mutation: {:?}", other),
         }
@@ -782,7 +780,7 @@ mod tests {
         match &out.mutations[1] {
             ContextMutation::Add { source_refs, .. } => {
                 assert_eq!(source_refs.len(), 1);
-                assert_eq!(source_refs[0], "session-event:e-bbb");
+                assert_eq!(source_refs[0], "session-message:m-bbb");
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -798,33 +796,40 @@ mod tests {
         let out = parse(text);
         match &out.mutations[0] {
             ContextMutation::Add { source_refs, .. } => {
-                assert_eq!(source_refs.len(), 2, "duplicates removed, both events kept");
+                assert_eq!(
+                    source_refs.len(),
+                    2,
+                    "duplicates removed, both messages kept"
+                );
             }
             other => panic!("unexpected: {:?}", other),
         }
     }
 
+    /// §32.6 — a short user message reaches the extractor untouched: there is
+    /// no length pre-filter between the store and extraction (§2.4).
     #[test]
     fn heuristic_uses_user_authority_for_user_messages() {
         let db_dir = std::env::temp_dir().join(format!("noending-ext-{}", uuid::Uuid::new_v4()));
         let db = Db::open(&db_dir.join("t.db")).unwrap();
         let s = session();
-        let ev = SessionEvent {
-            id: "e-1".into(),
+        let msg = SessionMessage {
+            id: "m-1".into(),
             session_id: s.id.clone(),
+            member_id: "mem-1".into(),
             sequence: 42,
-            source_event_id: None,
+            source_message_id: None,
             source_generation: 0,
             source_position: "line:42".into(),
+            source_identity_hash: "h".into(),
             ts: None,
-            kind: "user_message".into(),
-            text: Some("我们决定采用 SQLite，不再引入向量数据库，这个方案就这么定了。".into()),
+            role: SessionMessageRole::User,
+            content: "我们决定采用 SQLite，不再引入向量数据库，这个方案就这么定了。".into(),
             raw_ref: "x#line:42".into(),
-            metadata: serde_json::json!({}),
         };
         let inputs = collect_prompt_inputs(&db, "ws1").unwrap();
         let out = HeuristicExtractor
-            .extract(&s, &[&ev], "ws1", &inputs)
+            .extract(&s, &[&msg], "ws1", &inputs)
             .unwrap();
         assert!(!out.mutations.is_empty());
         for m in &out.mutations {
@@ -835,7 +840,7 @@ mod tests {
                     ..
                 } => {
                     assert_eq!(authority, "user_explicit", "user words keep user authority");
-                    assert_eq!(source_refs[0], "session-event:e-1");
+                    assert_eq!(source_refs[0], "session-message:m-1");
                 }
                 other => panic!("unexpected: {:?}", other),
             }

@@ -21,7 +21,7 @@ use noending::commands::workstream_cards;
 use noending::domain::{workstream_lifecycle, workstream_visibility, Agent, Session, Workstream};
 use noending::error::{other, Result};
 use noending::storage::workspace::insert_workspace_path_conn;
-use noending::storage::{new_id, now, Db};
+use noending::storage::{now, Db};
 use noending::workspace::workstream::{
     add_workstream_path, create_workstream, list_workstream_path_views, remove_workstream_path,
     reorder_workstream_paths, workstream_launch_paths, WorkstreamLaunchPaths,
@@ -164,15 +164,22 @@ fn ordered_path_ids(db: &Db, workstream_id: &str) -> Vec<String> {
         .collect()
 }
 
+/// The row id is store-assigned (identity is the ROOT member's Agent-side
+/// id), so callers use the returned Session instead of a fixture id.
 fn session(db: &Db, tag: &str) -> Session {
-    let s = support::session(
-        new_id(),
-        Agent::Codex,
-        format!("src-{tag}"),
-        format!("/raw/{tag}.jsonl"),
-    );
-    db.upsert_session(&s).unwrap();
-    s
+    let (row_id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            &format!("src-{tag}"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    db.get_session(&row_id).unwrap().expect("session row")
 }
 
 fn search_parent(db: &Db, workstream_id: &str) -> Option<String> {
@@ -538,16 +545,25 @@ fn adding_a_path_imports_no_sessions() {
         .workstream;
 
     // A Session already working in that directory, owned by no Workstream.
-    let mut s = session(&db, "in-dir");
-    s.workspace_path_id = Some(path_id_of("/repo/main"));
-    s.cwd = Some(canonical("/repo/main"));
-    db.upsert_session(&s).unwrap();
+    // The WorkspacePath row does not exist yet — that is the point.
+    let (s_id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            "src-in-dir",
+            None,
+            Some(&canonical("/repo/main")),
+            Some(&path_id_of("/repo/main")),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     add_workstream_path(&db, &attacher, &w.id, "/repo/main").unwrap();
 
     assert_eq!(db.workstream_session_stats(&w.id).unwrap().0, 0);
     assert!(db
-        .get_session(&s.id)
+        .get_session(&s_id)
         .unwrap()
         .unwrap()
         .owner_workstream_id

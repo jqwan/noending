@@ -7,6 +7,14 @@
 //! `sessions.owner_workstream_id` and nothing else — it never touches the
 //! Workstream's ordered path list, the Session's cwd or its Project (§5.1).
 //!
+//! The detail shape is the Logical Session view (重构方案 §28): the
+//! conversation (`session_messages` only — the UI never sees compact/system/
+//! sidechain kinds), the execution graph as MEMBERS (not other Sessions),
+//! query-time aggregate stats, the two frontiers, and the source/lifecycle
+//! facts (fresh root source status, resume and permanent-delete eligibility).
+//! There is no parent/children pair any more: members are execution info, not
+//! navigable Sessions.
+
 use serde::Serialize;
 use tauri::State;
 
@@ -17,29 +25,46 @@ use super::{with_db, AppState};
 
 // ---------------- Sessions ----------------
 
+/// One member of the execution graph, as the detail page shows it: the
+/// member facts plus its own stats snapshot when one exists.
+#[derive(Serialize)]
+pub struct SessionMemberView {
+    #[serde(flatten)]
+    pub member: SessionMember,
+    pub stats: Option<SessionMemberStats>,
+}
+
 #[derive(Serialize)]
 pub struct SessionDetail {
     pub session: Session,
-    pub events: Vec<SessionEvent>,
+    /// The Conversation: root user/assistant messages only (§22.1).
+    pub messages: Vec<SessionMessage>,
     /// The one Workstream this Session belongs to, or `None` (方案 §24).
     pub owner_workstream: Option<Workstream>,
-    pub cursor: i64,
-    pub processed_cursor: i64,
-    /// Read-only observation of the Agent source file at detail-load time.
-    /// `missing` means NotFound; other filesystem errors stay `unavailable`.
-    pub raw_path_status: &'static str,
     /// §22: Session Detail shows the WorkspacePath and the Project behind it,
     /// read-only. They travel as display strings because `workspace_path_id`
     /// alone would make the UI join a table it has no command for — and the
     /// Project shown here is derived through that path, never picked by a user.
     pub workspace_path: Option<SessionWorkspacePath>,
-    /// §37.20 — the other sessions this execution belongs to, as whole rows so
-    /// the UI needs no second lookup. The parent is resolved in the source's own
-    /// id space (`session.parent_agent_session_id` is an Agent-side id) and is
-    /// simply `None` when that thread was never discovered — the field on
-    /// `session` still says a parent exists, and the UI says so honestly.
-    pub parent: Option<Session>,
-    pub children: Vec<Session>,
+    /// The execution graph (§22.2): root / children / sides. Execution info,
+    /// never other user-visible Sessions.
+    pub members: Vec<SessionMemberView>,
+    /// Query-time aggregate over the whole graph (§7.4 — no cache to drift).
+    pub stats: crate::storage::SessionAggregateStats,
+    /// The two frontiers the detail page shows: messages ingested, and how
+    /// far Context processing has consumed them.
+    pub ingested_message_sequence: i64,
+    pub processed_message_sequence: i64,
+    /// Fresh (detail-load time) verdict on the ROOT source (§20.1).
+    /// `missing` means the adapter confirmed it absent; every other failure
+    /// stays `unavailable`.
+    pub root_source_status: SourceAvailability,
+    /// Resume eligibility: active session + a present root source.
+    pub can_resume: bool,
+    /// Permanent-delete eligibility: trashed + fresh root `missing` (§20.1).
+    pub can_permanently_delete: bool,
+    /// §22.3 — when this session is a fork, its source Session summary.
+    pub forked_from: Option<Session>,
 }
 
 #[derive(Serialize)]
@@ -49,14 +74,6 @@ pub struct SessionWorkspacePath {
     pub exists: bool,
     pub project_id: String,
     pub project_name: String,
-}
-
-fn raw_path_status(path: &str) -> &'static str {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() => "present",
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
-        _ => "unavailable",
-    }
 }
 
 // scope: active (default) | trash | all — 方案 §11; the recycle bin passes "trash".
@@ -87,17 +104,33 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        let mut events = db.get_events(&session_id, None, 500)?;
-        db.resolve_event_counterparts(&session, &mut events)?;
-        // The two frontiers the detail page shows: events ingested, and how
+        let messages = db.get_messages(&session_id, None, 500)?;
+        let members = db.members_for_session(&session_id)?;
+        let member_views = members
+            .iter()
+            .map(|m| {
+                Ok(SessionMemberView {
+                    member: m.clone(),
+                    stats: db.get_member_stats(&m.id)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let stats = db.aggregate_session_stats(&session_id)?;
+        // The two frontiers the detail page shows: messages ingested, and how
         // far Context processing has consumed them.
-        let cursor = db.get_ingested_sequence(&session_id)?;
-        let processed_cursor = db.get_processed_sequence(&session_id)?;
+        let ingested_message_sequence = db.ingested_message_sequence(&session_id)?;
+        let processed_message_sequence = db
+            .get_context_state(&session_id)?
+            .processed_message_sequence;
         let owner_workstream = match session.owner_workstream_id.as_deref() {
             Some(id) => db.get_workstream(id)?,
             None => None,
         };
-        let raw_path_status = raw_path_status(&session.raw_path);
+        let root_source_status = crate::lifecycle::root_source_status(db, &session)?
+            .unwrap_or(SourceAvailability::Unavailable);
+        let can_resume = !session.is_trashed() && root_source_status == SourceAvailability::Present;
+        let can_permanently_delete =
+            session.is_trashed() && root_source_status == SourceAvailability::Missing;
         let workspace_path = match session.workspace_path_id.as_deref() {
             Some(id) => db.get_workspace_path(id)?.map(|wp| {
                 Ok::<_, crate::error::AppError>(SessionWorkspacePath {
@@ -113,24 +146,25 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             }),
             None => None,
         };
-        // §37.20 — the session tree, read in the source's own id space. A
-        // child's `parent_agent_session_id` is an Agent-side id, so the lookup
-        // is scoped to the same agent (a Codex thread id means nothing to dsh).
-        let parent = match session.parent_agent_session_id.as_deref() {
-            Some(id) => db.find_session_by_agent_id(session.agent, id)?,
+        // §22.3 — the fork provenance, resolved to a summary when the source
+        // session still exists locally.
+        let forked_from = match session.forked_from_session_id.as_deref() {
+            Some(id) => db.get_session(id)?,
             None => None,
         };
-        let children = db.child_sessions(session.agent, &session.agent_session_id)?;
         Ok(SessionDetail {
             session,
-            events,
+            messages,
             owner_workstream,
-            cursor,
-            processed_cursor,
-            raw_path_status,
             workspace_path: workspace_path.transpose()?,
-            parent,
-            children,
+            members: member_views,
+            stats,
+            ingested_message_sequence,
+            processed_message_sequence,
+            root_source_status,
+            can_resume,
+            can_permanently_delete,
+            forked_from,
         })
     })
 }
@@ -147,5 +181,20 @@ pub fn set_session_owner_workstream(
 ) -> Result<Session> {
     with_db(&state, |db| {
         crate::workspace::session::set_session_owner(db, &session_id, workstream_id.as_deref())
+    })
+}
+
+// ---------------- Ingestion diagnostics (§11) ----------------
+
+/// The Settings → Ingestion Diagnostics list: repeat offenders only by
+/// default (`observation_count >= 2`). Diagnostics are NOT sessions — they
+/// have no Owner, no Resume, no Trash, no Context.
+#[tauri::command]
+pub fn list_ingestion_diagnostics(
+    state: State<AppState>,
+    min_observations: Option<i64>,
+) -> Result<Vec<IngestionDiagnostic>> {
+    with_db(&state, |db| {
+        db.list_ingestion_diagnostics(min_observations.unwrap_or(2))
     })
 }

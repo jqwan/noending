@@ -7,7 +7,7 @@
 //! (95; role `user` / `assistant`, content blocks typed `input_text` /
 //! `output_text`), `function_call` / `function_call_result` (237 each),
 //! `reasoning` (101), `file-history-snapshot` (35) and `ai-title` (7) — machine
-//! traffic that is not ingested (方案 §36.11).
+//! traffic that is counted, not ingested (方案 §36.11).
 //!
 //! The one shape that needs real work is the user turn. WorkBuddy wraps every
 //! human turn in a `<system-reminder data-role="user-context">` envelope and
@@ -16,16 +16,18 @@
 //! preamble (`SOUL.md` and friends) that no human typed. Three consequences:
 //! - the human text is the `<user_query>` body, not the envelope;
 //! - the compaction replays (`<conversation_history_summary>`, `<cb_summary>`)
-//!   are also `user`-role messages but no human wrote them → `compact`, and
-//!   only a marker is kept, never the tens of KB of machine summary;
+//!   are also `user`-role messages but no human wrote them → compaction
+//!   observation, and only a count is kept, never the tens of KB of machine
+//!   summary;
 //! - anything else that starts with `<` is system noise → dropped.
 //!
+//! Member mapping (§26.6): one transcript, one ROOT member.
+//!
 //! Two things this adapter deliberately does not use:
-//! - `ai-title` carries the app's own AI-generated title (`aiTitle`). NoEnding's
-//!   session title is derived from the first user message and is write-once, so
-//!   folding this in would be a separate decision, not a parsing detail.
+//! - `ai-title` carries the app's own AI-generated title (`aiTitle`) — it IS
+//!   reported as the native title (§37.15), the last one written wins.
 //! - `function_call` / `function_call_result` have `name` / `arguments` /
-//!   `output`; per §36.11 they are dropped rather than folded into the text.
+//!   `output`; per §36.11 they are observations, not text.
 //!
 //! There is no CLI (the bundle's only executable is Electron), so this adapter
 //! ingests history only: `detect()` never succeeds and no command is built.
@@ -35,10 +37,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, ms_epoch_to_rfc3339, read_jsonl_delta, AgentCommand, DiscoveredSession,
-    ExecOptions, ParsedLine, ReadDelta,
+    detect_format, ms_epoch_to_rfc3339, read_jsonl_delta, AgentCommand, DiscoveredMember,
+    DiscoveredMemberKind, ExecOptions, MemberObservation, ParsedLine, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceCursor};
+use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
 
 pub struct WorkBuddyAdapter;
@@ -111,7 +113,7 @@ fn classify_user_turn(raw: &str) -> UserTurn {
 }
 
 impl WorkBuddyAdapter {
-    fn parse_session_file(path: &Path) -> Result<Option<DiscoveredSession>> {
+    fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
         let file_name = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -188,17 +190,21 @@ impl WorkBuddyAdapter {
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
-        Ok(Some(DiscoveredSession {
+        Ok(Some(DiscoveredMember {
             agent: Agent::WorkBuddy,
-            agent_session_id: session_id.unwrap_or(file_name),
-            path: path.to_path_buf(),
+            source_member_id: session_id.unwrap_or(file_name),
+            kind: DiscoveredMemberKind::Root,
+            parent_source_member_id: None,
+            root_hint: None,
+            source_kind: "workbuddy_transcript".into(),
+            source_path: path.to_path_buf(),
             cwd,
             started_at,
             last_activity_at: last_activity.or(last_ts),
             native_title,
             first_user_text,
             first_agent_text,
-            parent_agent_session_id: None,
+            metadata: serde_json::json!({}),
         }))
     }
 }
@@ -213,11 +219,11 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         None
     }
 
-    fn discover_sessions_in(
+    fn discover_members_in(
         &self,
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<DiscoveredSession>> {
+    ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
@@ -240,8 +246,8 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
                 if detect_format(&p) != Some(Agent::WorkBuddy) {
                     continue;
                 }
-                match Self::parse_session_file(&p) {
-                    Ok(Some(s)) => out.push(s),
+                match Self::parse_member(&p) {
+                    Ok(Some(m)) => out.push(m),
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
@@ -250,33 +256,21 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
-        let path = PathBuf::from(&session.raw_path);
+    fn read_member_delta(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+    ) -> Result<crate::adapters::MemberReadDelta> {
+        let path = PathBuf::from(&member.source_path);
         read_jsonl_delta(&path, cursor, &|_idx, v| {
-            if v.get("type").and_then(|t| t.as_str()) != Some("message") {
-                return None;
-            }
-            let source_event_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
-            let raw = content_text(v.get("content").unwrap_or(&Value::Null));
-            if raw.trim().is_empty() {
-                return None;
-            }
-            let (kind, text) = match v.get("role").and_then(|r| r.as_str()).unwrap_or("") {
-                "user" => match classify_user_turn(&raw) {
-                    UserTurn::Prompt(p) => ("user_message", p),
-                    UserTurn::Compaction => ("compact", "conversation compacted".into()),
-                    UserTurn::Envelope => return None,
-                },
-                "assistant" => ("assistant_message", raw),
-                _ => ("system", raw),
-            };
-            Some(ParsedLine {
-                kind: kind.into(),
-                text: Some(text),
-                source_event_id,
-                metadata: serde_json::json!({ "agent": "workbuddy", "type": "message" }),
-            })
+            parse_line(v, member.relation.as_str() == "root")
         })
+    }
+
+    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+        Ok(crate::adapters::inspect_file_source(Path::new(
+            &member.source_path,
+        )))
     }
 
     fn build_new_command(
@@ -310,16 +304,67 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
     }
 }
 
+/// One line's contribution (§26.6): message lines only, prose only, machine
+/// traffic counted.
+fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("message") {
+        return None;
+    }
+    let source_message_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
+    let raw = content_text(v.get("content").unwrap_or(&Value::Null));
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let observation = MemberObservation::default();
+    match v.get("role").and_then(|r| r.as_str()).unwrap_or("") {
+        "user" => match classify_user_turn(&raw) {
+            UserTurn::Prompt(p) if is_root => Some(ParsedLine::message_only(
+                crate::adapters::parsed_message(source_message_id, SessionMessageRole::User, p),
+            )),
+            // A compaction replay is a boundary count, never content (§7.2).
+            UserTurn::Compaction => Some(ParsedLine::observation_only(MemberObservation {
+                compactions: 1,
+                ..Default::default()
+            })),
+            _ => Some(ParsedLine::observation_only(observation)),
+        },
+        "assistant" if is_root => Some(ParsedLine::message_only(crate::adapters::parsed_message(
+            source_message_id,
+            SessionMessageRole::Assistant,
+            raw,
+        ))),
+        _ => Some(ParsedLine::observation_only(observation)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
+    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("noending-workbuddy-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn root_member(path: &Path) -> SessionMember {
+        SessionMember {
+            id: "mem-wb".into(),
+            session_id: "sess-wb".into(),
+            agent: Agent::WorkBuddy,
+            source_member_id: "s1".into(),
+            relation: SessionMemberRelation::Root,
+            parent_source_member_id: None,
+            source_kind: "workbuddy_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        }
     }
 
     /// The shape measured on the real files: an enveloped opener whose prompt
@@ -346,22 +391,23 @@ mod tests {
         std::fs::write(&file, session_lines()).unwrap();
 
         let found = WorkBuddyAdapter
-            .discover_sessions_in(&[dir], &|_| false)
+            .discover_members_in(&[dir], &|_| false)
             .unwrap();
         assert_eq!(found.len(), 1, "{found:#?}");
-        let s = &found[0];
-        assert_eq!(s.agent, Agent::WorkBuddy);
-        assert_eq!(s.agent_session_id, "s1");
-        assert_eq!(s.cwd.as_deref(), Some("/Users/jqk/Workbuddy/x"));
-        assert_eq!(s.first_user_text.as_deref(), Some("整理一下昨天的会议纪要"));
+        let m = &found[0];
+        assert_eq!(m.agent, Agent::WorkBuddy);
+        assert_eq!(m.source_member_id, "s1");
+        assert_eq!(m.kind, DiscoveredMemberKind::Root);
+        assert_eq!(m.cwd.as_deref(), Some("/Users/jqk/Workbuddy/x"));
+        assert_eq!(m.first_user_text.as_deref(), Some("整理一下昨天的会议纪要"));
         assert_eq!(
-            s.native_title.as_deref(),
+            m.native_title.as_deref(),
             Some("整理会议纪要"),
             "WorkBuddy titles the session itself"
         );
         // Epoch millis are normalized to the spelling every other agent uses.
         assert_eq!(
-            s.started_at.as_deref(),
+            m.started_at.as_deref(),
             Some("2026-07-04T03:57:29.113+00:00")
         );
     }
@@ -387,56 +433,48 @@ mod tests {
         .unwrap();
 
         let found = WorkBuddyAdapter
-            .discover_sessions_in(&[dir.clone()], &|_| false)
+            .discover_members_in(&[dir.clone()], &|_| false)
             .unwrap();
         assert_eq!(found[0].native_title.as_deref(), Some("分析国轩高科股票"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// §32.2 — prose survives the envelope; the compaction replay is a count;
+    /// reasoning and function traffic never appear.
     #[test]
-    fn ingest_keeps_prose_and_drops_reasoning_and_tool_traffic() {
+    fn ingest_keeps_prose_and_counts_the_machine_traffic() {
         let dir = unique_dir("delta");
         let file = dir.join("s1.jsonl");
         std::fs::write(&file, session_lines()).unwrap();
 
-        let session = Session {
-            id: "sess-1".into(),
-            agent: Agent::WorkBuddy,
-            agent_session_id: "s1".into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: file.to_string_lossy().to_string(),
-            parent_agent_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            trashed_at: None,
-        };
         let delta = WorkBuddyAdapter
-            .read_delta(&session, &SourceCursor::default())
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
             .unwrap();
-        let kinds: Vec<(&str, &str)> = delta
-            .events
+        let roles: Vec<(SessionMessageRole, &str)> = delta
+            .messages
             .iter()
-            .map(|e| (e.kind.as_str(), e.text.as_deref().unwrap_or("")))
+            .map(|m| (m.role, m.content.as_str()))
             .collect();
         assert_eq!(
-            kinds,
+            roles,
             vec![
                 // the envelope is stripped to the prompt, not ingested whole
-                ("user_message", "整理一下昨天的会议纪要"),
-                ("compact", "conversation compacted"),
-                ("assistant_message", "整理好了。"),
+                (SessionMessageRole::User, "整理一下昨天的会议纪要"),
+                (SessionMessageRole::Assistant, "整理好了。"),
             ],
-            "got {kinds:?}"
+            "got {roles:?}"
         );
-        // The event timestamp survives the millis → RFC3339 normalization.
+        // The message timestamp survives the millis → RFC3339 normalization.
         assert_eq!(
-            delta.events[0].ts.as_deref(),
+            delta.messages[0].ts.as_deref(),
             Some("2026-07-04T03:57:29.113+00:00")
         );
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.compaction_count, 1, "the cb_summary replay");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
     }
 
     /// The user turn is the app's envelope, not the human's words (§37.7).
@@ -486,7 +524,7 @@ mod tests {
         )
         .unwrap();
         let found = WorkBuddyAdapter
-            .discover_sessions_in(&[dir], &|_| false)
+            .discover_members_in(&[dir], &|_| false)
             .unwrap();
         assert!(found.is_empty(), "{found:#?}");
     }

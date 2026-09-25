@@ -9,8 +9,15 @@
 //! The point of the file is not the happy path alone — it is that the two
 //! directions stay INDEPENDENT: setting an Owner never mutates the Workstream's
 //! path list, and mutating the path list never changes an Owner (§5).
+//!
+//! Logical-Session shape (重构方案): a Session is keyed by its ROOT member's
+//! Resume identity (`root_agent_session_id`); conversation is seeded through
+//! the production commit path (`commit_member_ingest`) and read back through
+//! `get_messages` — there are no session events any more.
 
-use noending::domain::{Agent, ParsedEvent, Session, Workstream};
+use noending::domain::{
+    Agent, ParsedSessionMessage, Session, SessionMessage, SessionMessageRole, Workstream,
+};
 use noending::launcher::{LaunchWorkspace, SessionLauncher};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
@@ -111,30 +118,33 @@ fn workstream(db: &Db, title: &str) -> Workstream {
     w
 }
 
+/// A Logical Session + its ROOT member. The root source is a REAL file inside
+/// the test's temp dir, because resume preparation refuses a Session whose
+/// ROOT member source is not present on disk (§17.2) — a resumable fixture
+/// must be resumable.
 fn session(db: &TestDb, cwd: Option<&str>) -> Session {
     session_of_agent(db, Agent::Codex, cwd)
 }
 
 fn session_of_agent(db: &TestDb, agent: Agent, cwd: Option<&str>) -> Session {
+    let root_id = format!("root-{}", new_id());
     let raw = db.dir.join(format!("raw-{}.jsonl", new_id()));
-    let _ = std::fs::write(&raw, "");
-    let s = Session {
-        id: new_id(),
-        agent,
-        agent_session_id: format!("as-{}", new_id()),
-        title: Some("Owner Model".into()),
-        cwd: cwd.map(str::to_string),
-        workspace_path_id: None,
-        project_id: None,
-        owner_workstream_id: None,
-        raw_path: raw.to_string_lossy().to_string(),
-        parent_agent_session_id: None,
-        started_at: Some(now()),
-        last_activity_at: Some(now()),
-        trashed_at: None,
-    };
-    db.upsert_session(&s).unwrap();
-    s
+    std::fs::write(&raw, "").unwrap();
+    let ts = now();
+    let (id, _) = db
+        .upsert_logical_session(
+            agent,
+            &root_id,
+            Some("Owner Model"),
+            cwd,
+            None,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_root_member(db, &id, agent, &root_id, &raw.to_string_lossy());
+    db.get_session(&id).unwrap().unwrap()
 }
 
 fn owner_of(db: &Db, session_id: &str) -> Option<String> {
@@ -475,7 +485,8 @@ fn resume_falls_back_to_the_owners_path_when_the_session_cwd_is_gone() {
     let w = create_workstream(&db, &paths, "A", "", &[dir.clone()])
         .unwrap()
         .workstream;
-    // A recorded cwd that no longer exists on disk.
+    // A recorded cwd that no longer exists on disk. The ROOT SOURCE is still
+    // present (the fixture writes a real file) — only the cwd is gone.
     let s = session(&db, Some(&db.dir.join("vanished").to_string_lossy()));
     db.set_session_owner(&s.id, Some(&w.id)).unwrap();
 
@@ -520,7 +531,7 @@ impl ContextExtractor for RoutingProbe {
     fn extract(
         &self,
         _session: &Session,
-        _events: &[&noending::domain::SessionEvent],
+        _messages: &[&SessionMessage],
         workstream_id: &str,
         _inputs: &noending::sync::extractor::PromptInputs,
     ) -> noending::error::Result<ExtractOutput> {
@@ -536,36 +547,28 @@ impl ContextExtractor for RoutingProbe {
     }
 }
 
-/// Write `texts` through the production ingestion door, so the stored events
-/// carry app-assigned identity exactly like a real ingest.
-fn seed_events(
-    db: &Db,
-    s: &Session,
-    texts: &[(&str, &str)],
-) -> Vec<noending::domain::SessionEvent> {
-    let parsed: Vec<ParsedEvent> = texts
+/// Write `texts` through the production ingestion door (`commit_member_ingest`
+/// on the Session's ROOT member), so the stored messages carry app-assigned
+/// identity and sequence exactly like a real ingest.
+fn seed_messages(db: &Db, s: &Session, texts: &[&str]) -> Vec<SessionMessage> {
+    let root = db
+        .root_member_for_session(&s.id)
+        .unwrap()
+        .expect("fixture session has a ROOT member");
+    let parsed: Vec<ParsedSessionMessage> = texts
         .iter()
         .enumerate()
-        .map(|(i, (kind, text))| ParsedEvent {
-            source_event_id: Some(format!("src-{}", i + 1)),
-            source_position: format!("line:{}", i + 1),
-            ts: Some(now()),
-            kind: (*kind).into(),
-            text: Some((*text).to_string()),
-            metadata: serde_json::json!({}),
+        .map(|(i, text)| {
+            support::parsed_message(format!("src-{}", i + 1), SessionMessageRole::User, *text)
         })
         .collect();
-    let source = noending::domain::SourceCursorUpdate {
-        file_identity: "f1".into(),
-        generation: 0,
-        byte_offset: 4096,
-        last_seen_size: 4096,
-        mtime: None,
-        start_byte_offset: 0,
-        prefix_hash: "h".into(),
-    };
-    db.append_source_events(&s.id, &parsed, &source, &s.raw_path)
+    db.commit_member_ingest(&s.id, &root.id, &parsed, None, &support::seed_source(0))
         .unwrap()
+}
+
+/// The whole stored conversation, in sequence order.
+fn conversation(db: &Db, s: &Session) -> Vec<SessionMessage> {
+    db.get_messages(&s.id, None, 10_000).unwrap()
 }
 
 /// Drive one full prepare → extract → commit cycle with an injected extractor,
@@ -575,12 +578,13 @@ fn run_with_probe(
     engine: &SyncEngine,
     probe: &RoutingProbe,
     s: &Session,
-    events: &[noending::domain::SessionEvent],
 ) -> noending::error::Result<Option<noending::sync::SyncJobOutput>> {
-    let Some(pre) = engine.prepare(db, s, events, 0, events.len() as i64)? else {
+    let messages = conversation(db, s);
+    let to = messages.last().map(|m| m.sequence).unwrap_or(0);
+    let Some(pre) = engine.prepare(db, s, &messages, 0, to)? else {
         return Ok(None);
     };
-    let refs: Vec<&noending::domain::SessionEvent> = pre.meaningful.iter().collect();
+    let refs: Vec<&SessionMessage> = pre.messages.iter().collect();
     let ws = pre.owner_workstream_id.clone().unwrap_or_default();
     let out = probe.extract(s, &refs, &ws, &pre.inputs)?;
     let job = engine.commit(db, s, &pre, out.mutations, "probe", out.diagnostics)?;
@@ -594,20 +598,17 @@ fn sync_routes_to_the_owner_only_and_never_defaults_it() {
     let b = workstream(&db, "B");
     let s = session(&db, None);
     db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    let events = seed_events(
+    seed_messages(
         &db,
         &s,
-        &[(
-            "user_message",
-            "我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。",
-        )],
+        &["我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。"],
     );
 
     let engine = SyncEngine::default();
     let probe = RoutingProbe {
         seen: std::sync::Mutex::new(Vec::new()),
     };
-    let job = run_with_probe(&db, &engine, &probe, &s, &events)
+    let job = run_with_probe(&db, &engine, &probe, &s)
         .unwrap()
         .expect("run happens");
     assert_eq!(job.status, "ok");
@@ -618,26 +619,49 @@ fn sync_routes_to_the_owner_only_and_never_defaults_it() {
 }
 
 #[test]
-fn ownerless_session_does_not_run_context_processing_or_advance_the_cursor() {
+fn ownerless_session_does_not_run_context_processing_or_advance_the_frontier() {
     let db = open_db("sync-ownerless");
     let s = session(&db, None);
-    let events = seed_events(
+    let messages = seed_messages(
         &db,
         &s,
-        &[(
-            "user_message",
-            "我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。",
-        )],
+        &["我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。"],
     );
     let engine = SyncEngine::default();
 
+    // The messages ARE stored: an ownerless session keeps ingesting (§21).
+    assert_eq!(messages.len(), 1);
+    assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 1);
+
     // prepare() itself refuses to produce a plan without an Owner.
-    let prepared = engine.prepare(&db, &s, &events, 0, 1).unwrap();
+    let prepared = engine.prepare(&db, &s, &messages, 0, 1).unwrap();
     assert!(prepared.is_none(), "no owner ⇒ no extraction plan");
 
-    let out = engine.run_session_sync(&db, &s, &events, 0, 1).unwrap();
+    let out = engine.run_session_sync(&db, &s, &messages, 0, 1).unwrap();
     assert_eq!(out.applied, 0);
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0);
+    assert_eq!(
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        0,
+        "the Context frontier stays frozen while the Session is ownerless"
+    );
+
+    // Assigning an Owner replays the backlog from the frozen frontier.
+    let a = workstream(&db, "A");
+    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
+    let replay = engine.run_session_sync(&db, &s, &messages, 0, 1).unwrap();
+    assert_eq!(replay.status, "ok");
+    assert!(
+        replay.applied >= 1,
+        "the frozen backlog is processed once an Owner exists"
+    );
+    assert_eq!(
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        1
+    );
 }
 
 #[test]
@@ -647,18 +671,15 @@ fn owner_change_during_extraction_makes_the_run_stale() {
     let b = workstream(&db, "B");
     let s = session(&db, None);
     db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    let events = seed_events(
+    let messages = seed_messages(
         &db,
         &s,
-        &[(
-            "user_message",
-            "我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。",
-        )],
+        &["我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。"],
     );
     let engine = SyncEngine::default();
 
     let pre = engine
-        .prepare(&db, &s, &events, 0, 1)
+        .prepare(&db, &s, &messages, 0, 1)
         .unwrap()
         .expect("plan");
     assert_eq!(pre.owner_workstream_id.as_deref(), Some(a.id.as_str()));
@@ -685,10 +706,15 @@ fn owner_change_during_extraction_makes_the_run_stale() {
         .unwrap();
     assert_eq!(job.status, "stale");
     assert_eq!(job.applied, 0);
-    // §20 — a stale run must not write Context and must not move the cursor.
+    // §20 — a stale run must not write Context and must not move the frontier.
     assert!(db.items_for_workstream(&a.id, false).unwrap().is_empty());
     assert!(db.items_for_workstream(&b.id, false).unwrap().is_empty());
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0);
+    assert_eq!(
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        0
+    );
 }
 
 #[test]
@@ -696,19 +722,16 @@ fn sync_never_invents_an_owner() {
     let db = open_db("sync-no-auto");
     let a = workstream(&db, "单 Owner 模型重构");
     let s = session(&db, None);
-    let events = seed_events(
+    let messages = seed_messages(
         &db,
         &s,
-        &[(
-            "user_message",
-            "单 Owner 模型重构：我们决定采用单 Owner 模型，这个方案就这么定了。",
-        )],
+        &["单 Owner 模型重构：我们决定采用单 Owner 模型，这个方案就这么定了。"],
     );
     let engine = SyncEngine::default();
 
     // Even though the transcript mentions the Workstream title verbatim, the
     // old keyword auto-classification is gone: a run cannot mint an Owner.
-    assert!(engine.prepare(&db, &s, &events, 0, 1).unwrap().is_none());
+    assert!(engine.prepare(&db, &s, &messages, 0, 1).unwrap().is_none());
     assert!(owner_of(&db, &s.id).is_none());
     assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
 }
@@ -850,7 +873,7 @@ fn mutations_outside_the_owner_are_skipped_not_written() {
         "属于 B 的决定",
         "B 的内容",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "sync:other",
@@ -967,7 +990,8 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
 
     // The Session's own cwd is gone, so the OWNER decides the launch
     // directory — the only way the result can be evidence of which Owner was
-    // used (§13 tier 2).
+    // used (§13 tier 2). The ROOT SOURCE is present (real fixture file), so
+    // the resume gate passes.
     let s = session(&db, Some("/gone/workspace"));
     db.set_session_owner(&s.id, Some(&a.id)).unwrap();
 
@@ -1078,10 +1102,8 @@ fn source_scoped_reconcile_lets_a_first_discovery_claim_its_intent() {
     assert_eq!(discovered, 1, "the rollout fixture is discoverable");
 
     let stored = db
-        .list_sessions(Default::default())
+        .find_session_by_root_agent_id(Agent::Codex, "rollout-thread-1")
         .unwrap()
-        .into_iter()
-        .find(|s| s.agent_session_id == "rollout-thread-1")
         .expect("discovery created the Session row");
     assert_eq!(
         stored.owner_workstream_id.as_deref(),
@@ -1092,6 +1114,14 @@ fn source_scoped_reconcile_lets_a_first_discovery_claim_its_intent() {
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
         launch_status::MATCHED
     );
+    // The discovered root's conversation arrived through the member commit.
+    assert_eq!(
+        db.ingested_message_sequence(&stored.id).unwrap(),
+        1,
+        "the rollout's user turn is ingested"
+    );
+    let root = db.root_member_for_session(&stored.id).unwrap().unwrap();
+    assert_eq!(root.source_member_id, "rollout-thread-1");
 }
 
 // ---------------------- §43 a match is one atomic ownership handover
@@ -1128,16 +1158,16 @@ fn a_failed_match_leaves_the_intent_pending() {
     let ghost = Session {
         id: "no-such-session".into(),
         agent: Agent::Codex,
-        agent_session_id: "ghost".into(),
+        root_agent_session_id: "ghost".into(),
         title: None,
         cwd: None,
         workspace_path_id: None,
         project_id: None,
         owner_workstream_id: None,
-        raw_path: "/tmp/ghost.jsonl".into(),
-        parent_agent_session_id: None,
+        forked_from_session_id: None,
         started_at: None,
         last_activity_at: None,
+        last_conversation_at: None,
         trashed_at: None,
     };
     assert!(apply_match(&db, &intent.id, &ghost, &LaunchWorkspace::default()).is_err());
@@ -1433,7 +1463,7 @@ fn matching_refuses_a_foreign_agent_or_a_trashed_session() {
 #[test]
 fn an_ownerless_session_can_still_claim_its_intent_later() {
     use noending::domain::{launch_status, LaunchIntent};
-    use noending::ingestion::finalize_newly_discovered_session;
+    use noending::ingestion::finalize_newly_discovered_root;
 
     let db = open_db("intent-retry");
     let a = workstream(&db, "A");
@@ -1458,7 +1488,7 @@ fn an_ownerless_session_can_still_claim_its_intent_later() {
     let s = session(&db, None);
     // NOT a first discovery (`is_new = false`): this is the retry the seam has
     // to allow, because the row already exists and the Owner is still unset.
-    finalize_newly_discovered_session(&db, &s, false, &LaunchWorkspace::default()).unwrap();
+    finalize_newly_discovered_root(&db, &s, false, &LaunchWorkspace::default()).unwrap();
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
@@ -1472,7 +1502,7 @@ fn an_ownerless_session_can_still_claim_its_intent_later() {
 #[test]
 fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     use noending::domain::{launch_status, LaunchIntent};
-    use noending::ingestion::finalize_newly_discovered_session;
+    use noending::ingestion::finalize_newly_discovered_root;
 
     let db = open_db("intent-retry-scope");
     let a = workstream(&db, "A");
@@ -1498,7 +1528,7 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     // Already owned: the retry must not re-route a decided Session.
     let owned = session(&db, None);
     db.set_session_owner(&owned.id, Some(&b.id)).unwrap();
-    finalize_newly_discovered_session(&db, &owned, false, &LaunchWorkspace::default()).unwrap();
+    finalize_newly_discovered_root(&db, &owned, false, &LaunchWorkspace::default()).unwrap();
     assert_eq!(owner_of(&db, &owned.id).as_deref(), Some(b.id.as_str()));
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
@@ -1509,7 +1539,7 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     // A trashed Session is never a candidate.
     let trashed = session(&db, None);
     noending::lifecycle::trash_session(&db, &trashed.id).unwrap();
-    finalize_newly_discovered_session(&db, &trashed, true, &LaunchWorkspace::default()).unwrap();
+    finalize_newly_discovered_root(&db, &trashed, true, &LaunchWorkspace::default()).unwrap();
     assert!(owner_of(&db, &trashed.id).is_none());
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
@@ -1527,7 +1557,7 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
         )
     })
     .unwrap();
-    finalize_newly_discovered_session(&db, &stray, false, &LaunchWorkspace::default()).unwrap();
+    finalize_newly_discovered_root(&db, &stray, false, &LaunchWorkspace::default()).unwrap();
     assert!(owner_of(&db, &stray.id).is_none());
 }
 
@@ -1545,18 +1575,34 @@ fn session_search_documents_follow_workstream_and_project_renames() {
     db.upsert_project(&support::project("p1".to_string(), "ProjX".to_string()))
         .unwrap();
     let a = workstream(&db, "Alpha");
-    let mut s = session(&db, None);
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    // The Project a Session projects onto, set through the production door: a
-    // Session with no WorkspacePath honors the caller's value.
-    s.project_id = Some("p1".into());
-    db.upsert_session(&s).unwrap();
+    // A real directory + WorkspacePath row, so the Project membership comes
+    // from the authoritative chain (`workspace_path_id → project_id`, §1.10).
+    let dir = db.dir.join("repo-search");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_str = dir.to_string_lossy().to_string();
+    let path_id = db
+        .tx(|tx| insert_workspace_path_conn(tx, &dir_str, "p1"))
+        .unwrap();
+    let root_id = format!("root-{}", new_id());
+    let (s_id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            &root_id,
+            None,
+            Some(&dir_str),
+            Some(&path_id),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    db.set_session_owner(&s_id, Some(&a.id)).unwrap();
 
     let hits_session = |query: &str| {
         search(&db, query, 40)
             .unwrap()
             .into_iter()
-            .any(|h| h.kind == "session" && h.ref_id == s.id)
+            .any(|h| h.kind == "session" && h.ref_id == s_id)
     };
     assert!(
         hits_session("Alpha"),

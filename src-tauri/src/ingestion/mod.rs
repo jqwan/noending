@@ -1,119 +1,44 @@
-//! Session ingestion: discovery → upsert → incremental read → cursor.
+//! Session ingestion: discover members → resolve the logical graph → ensure
+//! Sessions + SessionMembers → ingest changed members → Context sync
+//! (重构方案 §10 / §12).
 //!
 //! Invariants (Context Integrity):
-//! - raw agent files are never modified;
-//! - already-ingested history is never auto-deleted or overwritten, even
-//!   when the source file is truncated / compacted / replaced: the source
-//!   cursor tracks file identity + generation + byte offset, and re-scans
-//!   dedup by content identity;
-//! - the read cursor only advances in the same transaction that durably
-//!   stored the events.
+//! - raw agent sources are never modified;
+//! - already-ingested conversation is never auto-deleted or overwritten, even
+//!   when the source is truncated / compacted / replaced: member cursors track
+//!   source identity + generation + offset, and re-scans dedup by message
+//!   identity;
+//! - a member's messages, stats and cursor advance only in the ONE
+//!   transaction inside `Db::commit_member_ingest`, which re-checks the
+//!   session's lifecycle and the member's attachment first.
+//!
+//! Graph resolution never lets scan order decide identity (§10): the batch is
+//! resolved in two passes — roots first, then children/sides walk their
+//! parent chain against the batch AND the database — so a parent that appears
+//! later in the same batch still attaches. A child/side that resolves to
+//! nothing is an ingestion diagnostic, never a Session (§2.5/§11).
 //!
 //! Concurrency: the storage layer owns it (`Db` = one writer + a WAL reader),
 //! so ingestion just reads files and calls the store; a (possibly minutes-long,
-//! LLM-backed) sync cannot stall UI commands. Discovery skips transcripts
-//! whose stored cursor still matches the file on disk, so a reconcile pass
-//! costs O(changed files), not O(all history).
+//! LLM-backed) sync cannot stall UI commands.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::adapters::AgentAdapter;
-use crate::domain::{IngestSource, Session};
+use crate::adapters::{AgentAdapter, DiscoveredMember, DiscoveredMemberKind};
+use crate::domain::{Agent, Session};
 use crate::error::Result;
-use crate::storage::{new_id, now, Db};
+use crate::storage::Db;
 use crate::sync::SyncEngine;
 
-/// Ingest one session incrementally (caller holds the DB lock).
-/// Returns number of newly stored events.
-pub fn ingest_session(db: &Db, adapter: &dyn AgentAdapter, session: &mut Session) -> Result<i64> {
-    let stored = ingest_delta(db, adapter, session)?;
-    if !stored.is_empty() {
-        session.last_activity_at = Some(now());
-    }
-    Ok(stored.len() as i64)
-}
-
-/// Read the file delta and durably store it (content-deduped, read cursor
-/// advanced atomically). Returns the newly stored events.
-pub(crate) fn ingest_delta(
-    db: &Db,
-    adapter: &dyn AgentAdapter,
-    session: &Session,
-) -> Result<Vec<crate::domain::SessionEvent>> {
-    let cursor = db.get_source_cursor(&session.id)?;
-    let delta = adapter.read_delta(session, &cursor)?;
-    let source = delta
-        .source
-        .clone()
-        .ok_or_else(|| crate::error::other("adapter returned no source state"))?;
-    let stored = db.append_source_events(&session.id, &delta.events, &source, &session.raw_path)?;
-    if !stored.is_empty() {
-        if let Err(e) = db.index_new_events(&stored) {
-            eprintln!("[ingest] index_events failed: {}", e);
-        }
-    }
-    Ok(stored)
-}
-
-/// Ingest + sync one session: read the file delta, then extract and commit
-/// the pending events. Shared by interactive single-session flows (resume,
-/// per-session sync) and background reconcile alike — file parsing needs no
-/// database lock, and the storage layer serializes the writes itself.
-///
-/// With Context Intelligence off this stops after ingestion: events are stored
-/// and indexed, the read cursor advances, and nothing is prepared, extracted
-/// or committed, so `processed_sequence` stays frozen for a later replay.
-pub fn ingest_and_sync_session(
-    db: &Db,
-    engine: &SyncEngine,
-    session: &Session,
-) -> Result<(i64, usize)> {
-    // §9 — re-read the lifecycle state: the caller's struct may predate a
-    // concurrent Trash. The authoritative guard lives inside
-    // `append_source_events` anyway; this just avoids preparing work that
-    // cannot commit.
-    if !db
-        .get_session(&session.id)?
-        .map(|s| !s.is_trashed())
-        .unwrap_or(false)
-    {
-        return Ok((0, 0));
-    }
-    let adapter = crate::adapters::adapter_for(session.agent);
-    let stored = ingest_delta(db, adapter, session)?;
-    if !crate::settings::context_intelligence_enabled(db)? {
-        return Ok((stored.len() as i64, 0));
-    }
-    let processed = db.get_processed_sequence(&session.id)?;
-    let pending = db.get_events(&session.id, Some(processed), 10_000)?;
-    let mut applied = 0usize;
-    if !pending.is_empty() {
-        let to = pending.last().map(|e| e.sequence).unwrap_or(processed);
-        let out = engine.run_session_sync(db, session, &pending, processed, to)?;
-        applied = out.applied;
-    }
-    Ok((stored.len() as i64, applied))
-}
-
-/// Ensure a session row exists for a discovered session, attaching its
-/// WorkspacePath through the app-wide seam (see
-/// [`crate::workspace::session::workspace_attacher`]).
-pub fn ensure_session_row(
-    db: &Db,
-    d: &crate::adapters::DiscoveredSession,
-) -> Result<(Session, bool)> {
-    let attacher = crate::workspace::session::workspace_attacher();
-    ensure_session_row_with(db, d, attacher.as_ref())
-}
-
 /// A Session's display title: the first of the three sources that has one, in
-/// this order (§37.15) — the transcript's own title, the first user text, the
-/// first agent text. The rule lives here and only here; adapters report the
-/// three sources, they do not decide between them.
+/// this order (§4.2 / §37.15) — the root's native title, the first real user
+/// text, the first visible assistant text. Child / side members can never
+/// rename a Logical Session because they never reach this function.
 ///
-/// Public because a one-off re-derive has to produce exactly what a fresh
-/// discovery would: two implementations of this order would be two rules.
-pub fn session_title(d: &crate::adapters::DiscoveredSession) -> Option<String> {
+/// The rule lives here and only here; adapters report the three sources, they
+/// do not decide between them.
+pub fn session_title(d: &DiscoveredMember) -> Option<String> {
     d.native_title
         .as_deref()
         .or(d.first_user_text.as_deref())
@@ -121,131 +46,148 @@ pub fn session_title(d: &crate::adapters::DiscoveredSession) -> Option<String> {
         .and_then(crate::adapters::title_from_text)
 }
 
-/// Ensure a session row exists for a discovered session, resolving its cwd
-/// against the injected [`WorkspaceAttaching`] seam.
-///
-/// Returns the internal row and whether this session is NEW to us — new
-/// sessions are the only ones allowed to claim a pending LaunchIntent.
+/// One reconcile batch for one agent: the discovered members plus the index
+/// resolution walks against.
+struct DiscoveryBatch<'a> {
+    by_id: HashMap<&'a str, &'a DiscoveredMember>,
+}
+
+impl<'a> DiscoveryBatch<'a> {
+    fn new(discovered: &'a [DiscoveredMember]) -> Self {
+        Self {
+            by_id: discovered
+                .iter()
+                .map(|m| (m.source_member_id.as_str(), m))
+                .collect(),
+        }
+    }
+}
+
+/// Depth cap for parent-chain walks: a defensive bound, not a semantic one —
+/// real graphs are a few levels deep, and a cyclic or absurdly long source
+/// chain must end in "unresolved", never in a hang.
+const MAX_CHAIN_DEPTH: usize = 32;
+
+/// The Logical Session a child/side member belongs to, walked through the
+/// source's own parent chain (§10.2). Resolution order per step:
+/// 1. the parent sits in THIS batch → keep walking (roots resolve below);
+/// 2. the parent is already a member row in the DB → its session is the
+///    answer (attached in an earlier pass, possibly under a diagnostic the
+///    moment it resolves);
+/// 3. otherwise unresolved — the caller records the diagnostic.
+fn resolve_logical_session(
+    db: &Db,
+    agent: Agent,
+    batch: &DiscoveryBatch,
+    member: &DiscoveredMember,
+) -> Result<Option<String>> {
+    let mut current: Option<&str> = member.parent_source_member_id.as_deref();
+    for _ in 0..MAX_CHAIN_DEPTH {
+        let Some(parent_id) = current else {
+            break;
+        };
+        if let Some(parent) = batch.by_id.get(parent_id).copied() {
+            if parent.kind.is_logical_root() {
+                return Ok(db
+                    .find_session_by_root_agent_id(agent, &parent.source_member_id)?
+                    .map(|s| s.id));
+            }
+            current = parent.parent_source_member_id.as_deref();
+            continue;
+        }
+        // Not in this batch: is the parent already a stored member?
+        if let Some(stored) = db.find_member_by_source_id(agent, parent_id)? {
+            return Ok(Some(stored.session_id));
+        }
+        break;
+    }
+    // The strict chain failed. `root_hint` is the adapter's cross-file
+    // shortcut — never an authority on its own, but enough when the parent
+    // file names the root directly (e.g. a hint that IS a known root).
+    if let Some(hint) = member.root_hint.as_deref() {
+        if let Some(stored) = db.find_member_by_source_id(agent, hint)? {
+            return Ok(Some(stored.session_id));
+        }
+    }
+    Ok(None)
+}
+
+/// Ensure the Logical Session row for a Root/ForkRoot discovery (§10.1/§10.3):
+/// create or refresh keyed by the root's Resume identity, attach its
+/// WorkspacePath through the app-wide seam, and resolve fork provenance.
 ///
 /// The Session→WorkspacePath attach is discovery's only piece of workspace
-/// work, and it is deliberately not per-event: `workspace_path_id` is re-resolved
-/// only when the row is created, when its cwd moved, or when a Session with a cwd
-/// has never been attached. Ordinary ingestion performs none of it (§1.11).
-pub fn ensure_session_row_with(
+/// work, and it is deliberately not per-message: `workspace_path_id` is
+/// re-resolved only when the row is created, when its cwd moved, or when a
+/// Session with a cwd has never been attached (§1.11).
+fn ensure_logical_session(
     db: &Db,
-    d: &crate::adapters::DiscoveredSession,
+    d: &DiscoveredMember,
     attacher: &dyn crate::workspace::WorkspaceAttaching,
 ) -> Result<(Session, bool)> {
     let title = session_title(d);
-    let existing = db.find_session_by_agent_id(d.agent, &d.agent_session_id)?;
-    let raw_path = d.path.to_string_lossy().to_string();
-    if let Some(s) = existing {
-        // §8 — a trashed Session is inactive: discovery may observe it, but it
-        // MUST NOT refresh metadata, re-attach paths, ingest or sync it. The
-        // row is returned unchanged so the caller can skip it; after a
-        // Restore, the next reconcile continues from the untouched cursor.
-        if s.is_trashed() {
-            return Ok((s, false));
-        }
-        // Discovery just read the transcript, so it is the source of truth
-        // for source-derived fields; refresh the row when it learned
-        // something new (e.g. cwd read from file content after an older
-        // ingestion stored a different value). id stays as-is, and so does
-        // project_id — it is derived from the WorkspacePath inside the
-        // statement, never taken from here (§42.3-M3).
-        let dirty = title.is_some() && s.title.is_none()
-            || d.cwd.is_some() && s.cwd != d.cwd
-            || s.raw_path != raw_path
-            || d.started_at.is_some() && s.started_at.is_none()
-            || d.last_activity_at.is_some() && s.last_activity_at != d.last_activity_at;
-        // §42.3-M2 — cwd is authoritative, so the WorkspacePath it names follows
-        // it. Re-resolve only when the cwd moved or the row has never been
-        // attached: a steady-state scan performs no workspace work at all, so
-        // the seam (which may create a WorkspacePath row) is not called per
-        // session per pass (§1.11).
-        let observed_cwd = d.cwd.as_deref().map(str::trim).filter(|p| !p.is_empty());
-        let needs_path =
-            observed_cwd.is_some() && (d.cwd != s.cwd || s.workspace_path_id.is_none());
-        let path_id = if needs_path {
-            crate::workspace::session::resolve_session_path(&db.write(), attacher, observed_cwd)?
-        } else {
-            None
-        };
-        let moved: Option<String> = match (&path_id, &s.workspace_path_id) {
-            (Some(p), current) if Some(p.as_str()) != current.as_deref() => Some(p.clone()),
-            _ => None,
-        };
-        if dirty || moved.is_some() {
-            let mut updated = s;
-            if updated.title.is_none() {
-                updated.title = title;
-            }
-            if d.cwd.is_some() {
-                updated.cwd = d.cwd.clone();
-            }
-            updated.raw_path = raw_path;
-            if updated.started_at.is_none() {
-                updated.started_at = d.started_at.clone();
-            }
-            updated.last_activity_at = d.last_activity_at.clone().or(updated.last_activity_at);
-            // The path itself is deliberately NOT handed to upsert here: the
-            // attachment moves in the one transaction below, so an interrupted
-            // pass can never leave the row claiming a path it no longer has —
-            // and `moved` stays true until it is done, which makes the retry
-            // converge instead of double-applying.
-            db.upsert_session(&updated)?;
-            if let Some(new_path) = moved {
-                let session_id = updated.id.clone();
+    let raw_path = d.source_path.to_string_lossy().to_string();
+    let observed_cwd = d.cwd.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let path_id =
+        crate::workspace::session::resolve_session_path(&db.write(), attacher, observed_cwd)?;
+
+    let (session_id, is_new) = db.upsert_logical_session(
+        d.agent,
+        &d.source_member_id,
+        title.as_deref(),
+        d.cwd.as_deref(),
+        path_id.as_deref(),
+        None, // fork provenance is resolved separately, below
+        d.started_at.as_deref(),
+        d.last_activity_at.as_deref(),
+    )?;
+
+    // The member row: relation root, identity = the session's Resume identity.
+    db.upsert_session_member(
+        &session_id,
+        d.agent,
+        &d.source_member_id,
+        crate::domain::SessionMemberRelation::Root,
+        d.parent_source_member_id.as_deref(),
+        &d.source_kind,
+        &raw_path,
+        d.cwd.as_deref(),
+        d.started_at.as_deref(),
+        d.last_activity_at.as_deref(),
+        &d.metadata,
+    )?;
+
+    // A topology refresh may have moved the root's cwd: the attachment moves
+    // in the one transaction below, so an interrupted pass can never leave the
+    // row claiming a path it no longer has.
+    if !is_new {
+        if let Some(new_path) = path_id {
+            let s = db
+                .get_session(&session_id)?
+                .unwrap_or_else(|| unreachable!());
+            if s.workspace_path_id.as_deref() != Some(new_path.as_str()) {
                 db.tx(|tx| {
                     crate::workspace::session::move_session_to_path_conn(tx, &session_id, &new_path)
                 })?;
             }
-            // Re-read: the cached Project is whatever the path says it is now,
-            // which is not necessarily what the caller handed us.
-            let stored = db.get_session(&updated.id)?.unwrap_or(updated);
-            return Ok((stored, false));
         }
-        return Ok((s, false));
     }
-    let s = Session {
-        id: new_id(),
-        agent: d.agent,
-        agent_session_id: d.agent_session_id.clone(),
-        title,
-        cwd: d.cwd.clone(),
-        // §19-1/2 — resolved from the observed cwd by the seam. A Session
-        // discovered with no cwd keeps None and gets no fabricated path, and
-        // neither does one whose cwd resolves to nothing (§5.5, §7.2).
-        workspace_path_id: crate::workspace::session::resolve_session_path(
-            &db.write(),
-            attacher,
-            d.cwd.as_deref(),
-        )?,
-        // Never taken from the caller: `upsert_session` derives it from that
-        // WorkspacePath in the same statement (§42.3-M3).
-        project_id: None,
-        // Discovery never assigns semantic ownership (方案 §49): only an
-        // explicit user action or a matched LaunchIntent sets this.
-        owner_workstream_id: None,
-        raw_path,
-        parent_agent_session_id: d.parent_agent_session_id.clone(),
-        started_at: d.started_at.clone(),
-        last_activity_at: d.last_activity_at.clone(),
-        // A freshly discovered Session always starts Normal.
-        trashed_at: None,
-    };
-    db.upsert_session(&s)?;
-    let stored = db.get_session(&s.id)?.unwrap_or(s);
-    Ok((stored, true))
+
+    let stored = db
+        .get_session(&session_id)?
+        .unwrap_or_else(|| unreachable!());
+    Ok((stored, is_new))
 }
 
-/// The "file is unchanged since its last ingest" predicate discovery uses to
-/// skip re-parsing transcripts whose facts are already fully stored. A file
+/// The "source is unchanged since its last ingest" predicate discovery uses to
+/// skip re-parsing members whose facts are already fully stored. A source
 /// counts as unchanged when its stored cursor identity, size and mtime all
-/// still match the file on disk; anything else (new file, grown, touched,
-/// replaced) fails the check and gets parsed.
+/// still match the source on disk; anything else (new, grown, touched,
+/// replaced) fails the check and gets parsed. Only members of TITLED sessions
+/// are listed: an untitled row may just predate a title source, and re-parsing
+/// its (unchanged) file is exactly what heals it.
 fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> {
-    let skipset = db.discovery_skipset()?;
+    let skipset = db.member_source_skipset()?;
     Ok(move |path: &std::path::Path| {
         let Some((identity, size, mtime)) = skipset.get(&path.to_string_lossy().to_string()) else {
             return false;
@@ -268,33 +210,217 @@ fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> 
     })
 }
 
-/// Full reconcile over every agent's enabled sources. Discovery skips
-/// transcripts the stored cursors say are unchanged; the store itself
-/// serializes writes. `on_session` observes each session being processed.
+/// Record (or re-observe) an unattachable member, and clear the diagnostic of
+/// one that resolved (§11). Diagnostics never enter Sessions/Search/Context/
+/// lifecycle — they are a Settings page, nothing else.
+fn note_unresolved(db: &Db, d: &DiscoveredMember, reason: &str) -> Result<()> {
+    db.upsert_ingestion_diagnostic(
+        d.agent,
+        crate::domain::diagnostic_kind::UNRESOLVED_SESSION_MEMBER,
+        Some(&d.source_member_id),
+        d.parent_source_member_id.as_deref(),
+        Some(&d.source_path.to_string_lossy()),
+        reason,
+        &serde_json::json!({
+            "kind": format!("{:?}", d.kind),
+            "root_hint": d.root_hint,
+        }),
+    )
+}
+
+fn resolve_diagnostic(db: &Db, d: &DiscoveredMember) -> Result<()> {
+    db.resolve_ingestion_diagnostic(
+        d.agent,
+        crate::domain::diagnostic_kind::UNRESOLVED_SESSION_MEMBER,
+        &d.source_member_id,
+    )
+}
+
+/// One full discovery→resolve→attach pass for one agent's batch (§10). Roots
+/// first, children/sides second — so a parent discovered later in the same
+/// batch is still found, and scan order never decides identity.
+fn resolve_batch(
+    db: &Db,
+    adapter: &dyn AgentAdapter,
+    discovered: &[DiscoveredMember],
+) -> Result<Vec<(Session, bool)>> {
+    let agent = adapter.agent();
+    let batch = DiscoveryBatch::new(discovered);
+    let attacher = crate::workspace::session::workspace_attacher();
+    let mut roots = Vec::new();
+
+    // Pass 1 — Root / ForkRoot establish (or join) their Logical Session.
+    for d in discovered {
+        if !d.kind.is_logical_root() {
+            continue;
+        }
+        match ensure_logical_session(db, d, attacher.as_ref()) {
+            Ok((s, is_new)) => {
+                resolve_diagnostic(db, d)?;
+                roots.push((s, is_new));
+            }
+            Err(e) => eprintln!("[ingest] root {} failed: {}", d.source_member_id, e),
+        }
+    }
+
+    // Pass 1b — fork provenance (§10.3), resolved AFTER every root member of
+    // this batch exists: a fork whose source sits in the SAME batch must
+    // resolve no matter which file the walker saw first (§10 — scan order
+    // never decides identity). A fork whose source is still unknown keeps
+    // NULL provenance; the next reconcile's pass over ForkRoots fills it.
+    for d in discovered {
+        if d.kind != DiscoveredMemberKind::ForkRoot {
+            continue;
+        }
+        let Some(parent_id) = d.parent_source_member_id.as_deref() else {
+            continue;
+        };
+        let Ok(Some(parent_member)) = db.find_member_by_source_id(agent, parent_id) else {
+            continue;
+        };
+        let Ok(Some(fork_session)) = db.find_session_by_root_agent_id(agent, &d.source_member_id)
+        else {
+            continue;
+        };
+        if fork_session.forked_from_session_id.is_none()
+            && parent_member.session_id != fork_session.id
+        {
+            let _ = db.tx(|tx| {
+                tx.execute(
+                    "UPDATE sessions SET forked_from_session_id = ?2
+                     WHERE id = ?1 AND forked_from_session_id IS NULL",
+                    rusqlite::params![fork_session.id, parent_member.session_id],
+                )?;
+                Ok(())
+            });
+        }
+    }
+
+    // Pass 2 — Child / Side walk their parent chain. Only a resolved root
+    // attaches; everything else is a diagnostic (§2.5: no root, no Session —
+    // and never a promoted fake root).
+    for d in discovered {
+        if d.kind.is_logical_root() {
+            continue;
+        }
+        match resolve_logical_session(db, agent, &batch, d)? {
+            Some(session_id) => {
+                let raw_path = d.source_path.to_string_lossy().to_string();
+                db.upsert_session_member(
+                    &session_id,
+                    agent,
+                    &d.source_member_id,
+                    d.kind.relation(),
+                    d.parent_source_member_id.as_deref(),
+                    &d.source_kind,
+                    &raw_path,
+                    d.cwd.as_deref(),
+                    d.started_at.as_deref(),
+                    d.last_activity_at.as_deref(),
+                    &d.metadata,
+                )?;
+                resolve_diagnostic(db, d)?;
+            }
+            None => {
+                note_unresolved(db, d, "尚未发现其 Root 会话，无法归属到任何逻辑会话")?;
+            }
+        }
+    }
+
+    // A Session acquires its Owner in exactly two ways: a user action, or the
+    // LaunchIntent that started it (方案 §15.1 / §17.1). Matching is ROOT-only
+    // (§17.1) and happens in the caller's loop over `roots` — a child can
+    // never claim an intent.
+    Ok(roots)
+}
+
+/// Ingest + sync ONE logical session: read every changed member's delta,
+/// commit each atomically, then sync the root conversation (§12). Shared by
+/// interactive single-session flows (resume, per-session sync) and background
+/// reconcile alike — source parsing needs no database lock, and the storage
+/// layer serializes the writes itself.
 ///
-/// `workspace` is §13's tier-3 fact, needed because a freshly discovered
-/// Session may claim a pending LaunchIntent: matching it asks whether that
-/// Session's cwd is just the shared default workspace, which is not in the DB.
-/// What a Session owes the workspace the first time it is discovered, and the
-/// retry window after that.
-///
-/// A Session acquires its Owner in exactly two ways: a user action, or the
-/// LaunchIntent that started it (方案 §15.1/§21). Matching is the only one
-/// ingestion can do, and every discovery door (full reconcile, single source,
-/// re-ingest) has to run it — a source-scoped sync that discovers the Session
-/// first must offer the same chance, or the later full reconcile sees a known
-/// Session and the intent stays pending forever.
-///
-/// The gate is therefore "new OR still ownerless", not `is_new` alone: the
-/// Session ROW is already persisted by the time this runs, so `is_new` is true
-/// exactly once, and a single transient failure would burn that one chance for
-/// good. Re-attempting while the Session has no Owner keeps the recovery
-/// available; the matcher's own agent and time-window rules are what keep it
-/// from matching a Session that never had an intent.
-///
-/// A match failure is logged, never fatal: one bad intent must not abort the
-/// discovery pass that is ingesting everything else.
-pub fn finalize_newly_discovered_session(
+/// With Context Intelligence off this stops after ingestion: messages are
+/// stored and indexed, member cursors advance, and nothing is prepared,
+/// extracted or committed, so the context frontier stays frozen for a later
+/// replay. The same happens for an ownerless session — the sync engine's
+/// prepare refuses (§15.1: ownerless semantics preserved).
+pub fn ingest_and_sync_session(
+    db: &Db,
+    engine: &SyncEngine,
+    session: &Session,
+) -> Result<(i64, usize)> {
+    // §9 — re-read the lifecycle state: the caller's struct may predate a
+    // concurrent Trash. The authoritative guard lives inside
+    // `commit_member_ingest` anyway; this just avoids reading files that
+    // cannot commit.
+    if !db
+        .get_session(&session.id)?
+        .map(|s| !s.is_trashed())
+        .unwrap_or(false)
+    {
+        return Ok((0, 0));
+    }
+    let adapter = crate::adapters::adapter_for(session.agent);
+    let members = db.members_for_session(&session.id)?;
+    let mut stored_total = 0i64;
+    for member in &members {
+        // A member that raced a topology change mid-pass simply fails its
+        // membership re-check inside the commit and stores nothing.
+        let cursor = db.get_member_cursor(&member.id)?;
+        let delta = match adapter.read_member_delta(member, &cursor) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!(
+                    "[ingest] read member {} failed: {}",
+                    member.source_member_id, e
+                );
+                continue;
+            }
+        };
+        let Some(source) = delta.source else {
+            continue;
+        };
+        let stored = db.commit_member_ingest(
+            &session.id,
+            &member.id,
+            &delta.messages,
+            delta.stats,
+            &source,
+        )?;
+        if !stored.is_empty() {
+            stored_total += stored.len() as i64;
+            if let Err(e) = db.index_new_messages(&stored) {
+                eprintln!("[ingest] index_messages failed: {}", e);
+            }
+        }
+    }
+    if !crate::settings::context_intelligence_enabled(db)? {
+        return Ok((stored_total, 0));
+    }
+    // Sync everything not yet processed — ownerless sessions were already
+    // refused by prepare, so the frontier stays frozen until an Owner exists.
+    let processed = db
+        .get_context_state(&session.id)?
+        .processed_message_sequence;
+    let pending = db.get_messages_after(&session.id, processed, 10_000)?;
+    let mut applied = 0usize;
+    if !pending.is_empty() {
+        let to = pending.last().map(|m| m.sequence).unwrap_or(processed);
+        let out = engine.run_session_sync(db, session, &pending, processed, to)?;
+        applied = out.applied;
+    }
+    Ok((stored_total, applied))
+}
+
+/// Root-only LaunchIntent matching (§17.1). The gate is "new OR still
+/// ownerless", not `is_new` alone: the ROW is already persisted by the time
+/// this runs, so `is_new` is true exactly once, and a single transient failure
+/// would burn that one chance for good. Re-attempting while the session has no
+/// Owner keeps the recovery available; the matcher's own agent and time-window
+/// rules keep it from matching a session that never had an intent. A match
+/// failure is logged, never fatal.
+pub fn finalize_newly_discovered_root(
     db: &Db,
     session: &Session,
     is_new: bool,
@@ -324,6 +450,13 @@ pub fn finalize_newly_discovered_session(
     Ok(())
 }
 
+/// Full reconcile over every agent's enabled sources (§12): discover members,
+/// resolve the logical graph, then ingest + sync each active session.
+/// `on_session` observes each session being processed.
+///
+/// `workspace` is §13's tier-3 fact, needed because a freshly discovered
+/// root may claim a pending LaunchIntent: matching it asks whether that
+/// session's cwd is just the shared default workspace, which is not in the DB.
 pub fn reconcile_with_engine<F>(
     db: &Db,
     engine: &SyncEngine,
@@ -336,7 +469,7 @@ where
     let adapters = crate::adapters::all_adapters();
     let unchanged = unchanged_since_cursor(db)?;
     let mut total_discovered = 0usize;
-    let mut total_events = 0i64;
+    let mut total_messages = 0i64;
 
     // housekeeping: expire launch intents that never got a session
     let _ = crate::launcher::expire_stale_launch_intents(db);
@@ -347,7 +480,7 @@ where
             continue;
         }
         let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
-        let discovered = match adapter.discover_sessions_in(&roots, &unchanged) {
+        let discovered = match adapter.discover_members_in(&roots, &unchanged) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!(
@@ -359,29 +492,25 @@ where
             }
         };
         total_discovered += discovered.len();
-        for d in discovered {
-            let (s, is_new) = match ensure_session_row(db, &d) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[reconcile] ensure row failed: {}", e);
-                    continue;
-                }
-            };
-            // A brand-new external session may claim a pending LaunchIntent
-            // (crash recovery included); a still-ownerless one gets the retry.
-            //
-            // §42.2-E11 — no name-substring Project evidence is recorded any
-            // more. A Project is derived from the Session's WorkspacePath
-            // (§1.10), which `ensure_session_row` has just resolved, so this
-            // hot path does no Project work.
-            finalize_newly_discovered_session(db, &s, is_new, workspace)?;
-            // §8 — trashed sessions are skipped entirely: no ingest, no sync.
+        let logical_roots = match resolve_batch(db, adapter.as_ref(), &discovered) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[reconcile] resolve failed: {}", e);
+                continue;
+            }
+        };
+        for (s, is_new) in logical_roots {
+            // A brand-new root may claim a pending LaunchIntent (crash
+            // recovery included); a still-ownerless one gets the retry.
+            finalize_newly_discovered_root(db, &s, is_new, workspace)?;
+            // §19 — a trashed session is inactive: no ingest, no sync. Its
+            // member cursors stay untouched, so a Restore resumes cleanly.
             if s.is_trashed() {
                 continue;
             }
             on_session(&s);
             match ingest_and_sync_session(db, engine, &s) {
-                Ok((events, _applied)) => total_events += events,
+                Ok((messages, _applied)) => total_messages += messages,
                 Err(e) => eprintln!("[reconcile] ingest {} failed: {}", s.id, e),
             }
         }
@@ -396,19 +525,17 @@ where
         Ok(n) => eprintln!("[reconcile] 补绑 {} 个会话到已注册的 workspace 路径", n),
         Err(e) => eprintln!("[reconcile] workspace 补绑失败: {e}"),
     }
-    Ok((total_discovered, total_events))
+    Ok((total_discovered, total_messages))
 }
 
-/// Sync one specific ingest source: discover sessions under that source's
-/// own path only, ingest + sync them.
-///
-/// Takes the [`crate::launcher::LaunchWorkspace`] because first discovery can
-/// happen here as easily as in a full reconcile, and a Session's Owner is
-/// decided once per Session — see [`finalize_newly_discovered_session`].
+/// Sync one specific ingest source: discover members under that source's own
+/// path only, resolve + ingest + sync them. Takes the
+/// [`crate::launcher::LaunchWorkspace`] because first discovery can happen
+/// here as easily as in a full reconcile.
 pub fn reconcile_source<F>(
     db: &Db,
     engine: &SyncEngine,
-    source: &IngestSource,
+    source: &crate::domain::IngestSource,
     workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
 ) -> Result<(usize, i64)>
@@ -418,41 +545,38 @@ where
     let adapter = crate::adapters::adapter_for(source.agent);
     let unchanged = unchanged_since_cursor(db)?;
     let roots = vec![PathBuf::from(&source.path)];
-    let discovered = adapter.discover_sessions_in(&roots, &unchanged)?;
+    let discovered = adapter.discover_members_in(&roots, &unchanged)?;
     let discovered_count = discovered.len();
-    let mut total_events = 0i64;
-    for d in &discovered {
-        let (s, is_new) = ensure_session_row(db, d)?;
-        finalize_newly_discovered_session(db, &s, is_new, workspace)?;
-        // §8 — trashed sessions are skipped entirely.
+    let mut total_messages = 0i64;
+    let logical_roots = resolve_batch(db, adapter, &discovered)?;
+    for (s, is_new) in logical_roots {
+        finalize_newly_discovered_root(db, &s, is_new, workspace)?;
+        // §19 — trashed sessions are skipped entirely.
         if s.is_trashed() {
             continue;
         }
         on_session(&s);
         match ingest_and_sync_session(db, engine, &s) {
-            Ok((events, _)) => total_events += events,
+            Ok((messages, _)) => total_messages += messages,
             Err(e) => eprintln!("[reconcile] ingest {} failed: {}", s.id, e),
         }
     }
-    Ok((discovered_count, total_events))
+    Ok((discovered_count, total_messages))
 }
 
-/// Re-ingest one source: rewind the read cursor of every session found
-/// under its path (generation bump, offset 0) and re-scan from scratch.
-/// The EVENT STORE IS NEVER DELETED — event ids and every SourceReference
-/// in context revisions stay valid, because unchanged content dedups by
-/// identity and only genuinely new/changed source content appends.
-/// Context items and audit history are untouched.
+/// Re-ingest one source: rewind the member cursors of every session found
+/// under its path and re-scan from scratch (§23.1). THE MESSAGE STORE IS
+/// NEVER DELETED — message ids and every provenance ref stay valid, because
+/// unchanged content dedups by identity and only genuinely new/changed source
+/// content appends. Stats snapshots replace on the re-scan; Context items,
+/// Owner and audit history are untouched.
 ///
-/// Deliberately passes the all-false "unchanged" predicate: a re-ingest
-/// WANTS to re-read every file, cursor match or not.
-///
-/// Like [`reconcile_source`], it takes the launch workspace so a Session it
-/// discovers first still gets the chance to claim its LaunchIntent.
+/// Deliberately passes the all-false "unchanged" predicate: a re-ingest WANTS
+/// to re-read every source, cursor match or not.
 pub fn reingest_source<F>(
     db: &Db,
     engine: &SyncEngine,
-    source: &IngestSource,
+    source: &crate::domain::IngestSource,
     workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
 ) -> Result<(usize, i64)>
@@ -461,53 +585,57 @@ where
 {
     let adapter = crate::adapters::adapter_for(source.agent);
     let roots = vec![PathBuf::from(&source.path)];
-    let discovered = adapter.discover_sessions_in(&roots, &|_| false)?;
+    let discovered = adapter.discover_members_in(&roots, &|_| false)?;
     let discovered_count = discovered.len();
-    let mut total_events = 0i64;
-    for d in &discovered {
-        let (s, is_new) = ensure_session_row(db, d)?;
-        finalize_newly_discovered_session(db, &s, is_new, workspace)?;
-        // §8 — a trashed session keeps its cursor untouched: no rewind,
-        // no re-scan. (Its source file is also invisible to discovery
-        // updates, so a rewind would be a mutation with no consumer.)
+    let mut total_messages = 0i64;
+    let logical_roots = resolve_batch(db, adapter, &discovered)?;
+    for (s, is_new) in logical_roots {
+        finalize_newly_discovered_root(db, &s, is_new, workspace)?;
+        // §23.1 — a trashed session keeps its cursors untouched: no rewind,
+        // no re-scan.
         if s.is_trashed() {
             continue;
         }
-        // overwrite/refresh: re-read the source from position 0
-        db.reset_session_source_cursor(&s.id)?;
+        db.reset_member_cursors(&s.id)?;
         on_session(&s);
         match ingest_and_sync_session(db, engine, &s) {
-            Ok((events, _)) => total_events += events,
+            Ok((messages, _)) => total_messages += messages,
             Err(e) => eprintln!("[reingest] ingest {} failed: {}", s.id, e),
         }
     }
-    Ok((discovered_count, total_events))
+    Ok((discovered_count, total_messages))
 }
 
 /// Sessions with pending (un-ingested) activity, used by "sync stale" flows.
 ///
 /// Scoped to the Sessions that OWN this Workstream (方案 §40) — a Session
 /// belongs to at most one, so it can never be synced twice under this rule.
-/// "Stale" = the Agent source file was modified after the Session's last
-/// recorded activity, so there may be a delta the processed cursor has not
-/// seen. Read-only observation; nothing is written here.
+/// "Stale" = any member's source was modified after the Session's last
+/// recorded activity, so there may be a delta the cursors have not seen.
+/// Read-only observation; nothing is written here.
 pub fn stale_sessions(db: &Db, workstream_id: &str) -> Result<Vec<Session>> {
     let mut out = Vec::new();
     for s in db.sessions_for_workstream(workstream_id)? {
-        if let Ok(meta) = std::fs::metadata(&s.raw_path) {
-            if let Ok(modified) = meta.modified() {
-                let m: chrono::DateTime<chrono::Utc> = modified.into();
-                let last_used = s
-                    .last_activity_at
-                    .as_deref()
-                    .or(s.started_at.as_deref())
-                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(chrono::Utc::now);
-                if m > last_used {
-                    out.push(s);
-                }
-            }
+        let members = db.members_for_session(&s.id)?;
+        let last_used = s
+            .last_activity_at
+            .as_deref()
+            .or(s.started_at.as_deref())
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+        let stale = members.iter().any(|m| {
+            std::fs::metadata(&m.source_path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .map(|modified| {
+                    let m: chrono::DateTime<chrono::Utc> = modified.into();
+                    m > last_used
+                })
+                .unwrap_or(false)
+        });
+        if stale {
+            out.push(s);
         }
     }
     Ok(out)

@@ -17,6 +17,8 @@ use noending::{ingestion, launcher, search, settings, sync};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod support;
+
 fn unique_dir(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -60,24 +62,31 @@ fn write_transcript(dir: &std::path::Path, n: usize) -> PathBuf {
     file
 }
 
+/// A Logical Session whose ROOT member's source is the transcript at `path`,
+/// both written through the production discovery path — `ingest_and_sync_session`
+/// reads the member's `source_path`, never a session-level raw_path.
 fn session_row(db: &Db, path: &std::path::Path) -> Session {
-    let s = Session {
-        id: new_id(),
-        agent: Agent::ClaudeCode,
-        agent_session_id: format!("as-{}", new_id()),
-        title: None,
-        cwd: None,
-        workspace_path_id: None,
-        project_id: None,
-        raw_path: path.to_string_lossy().to_string(),
-        parent_agent_session_id: None,
-        started_at: Some(now()),
-        last_activity_at: Some(now()),
-        trashed_at: None,
-        owner_workstream_id: None,
-    };
-    db.upsert_session(&s).unwrap();
-    s
+    let root_agent_session_id = format!("as-{}", new_id());
+    let (id, _) = db
+        .upsert_logical_session(
+            Agent::ClaudeCode,
+            &root_agent_session_id,
+            None,
+            None,
+            None,
+            None,
+            Some(&now()),
+            Some(&now()),
+        )
+        .unwrap();
+    support::ensure_root_member(
+        db,
+        &id,
+        Agent::ClaudeCode,
+        &root_agent_session_id,
+        &path.to_string_lossy(),
+    );
+    db.get_session(&id).unwrap().unwrap()
 }
 
 fn ws_row(db: &Db, title: &str) -> Workstream {
@@ -166,14 +175,16 @@ fn off_stops_after_ingestion_on_the_launch_and_refresh_path() {
     );
     assert_eq!(applied, 0, "no extraction ran");
 
-    assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 3);
+    assert_eq!(db.message_count(&s.id).unwrap(), 3);
     assert_eq!(
-        db.get_source_cursor(&s.id).unwrap().last_sequence,
+        db.ingested_message_sequence(&s.id).unwrap(),
         3,
         "read cursor advances normally while off"
     );
     assert_eq!(
-        db.get_processed_sequence(&s.id).unwrap(),
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
         0,
         "context processing frontier must not move while intelligence is off"
     );
@@ -182,7 +193,7 @@ fn off_stops_after_ingestion_on_the_launch_and_refresh_path() {
         search::search(&db, "postgres-primary-store", 10)
             .unwrap()
             .iter()
-            .any(|h| h.kind == "event" && h.parent_id == s.id),
+            .any(|h| h.kind == "message" && h.parent_id == s.id),
         "search indexing stays on (§6)"
     );
 }
@@ -201,8 +212,13 @@ fn off_stops_after_ingestion_on_the_reconcile_path() {
     assert_eq!(ingested, 3);
     assert_eq!(applied, 0, "reconcile must stop before SyncEngine::prepare");
 
-    assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 3);
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0);
+    assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert_eq!(
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        0
+    );
     assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 }
 
@@ -241,8 +257,10 @@ fn delivery_level_never_gates_extraction() {
     );
     assert!(context_footprint(&db).0 > 0, "Context evolved");
     assert_eq!(
-        db.get_processed_sequence(&s.id).unwrap(),
-        db.get_source_cursor(&s.id).unwrap().last_sequence,
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        db.ingested_message_sequence(&s.id).unwrap(),
         "the frontier caught up"
     );
 }
@@ -268,8 +286,13 @@ fn backlog_ingested_while_off_is_replayed_after_reenabling() {
             assert_eq!(ingested, 1, "the third message arrives as one new event");
         }
     }
-    assert_eq!(db.get_events(&s.id, None, 100).unwrap().len(), 3);
-    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0);
+    assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert_eq!(
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        0
+    );
     assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 
     // Re-enable: no re-ingestion needed, the frozen frontier drives the replay.
@@ -283,14 +306,12 @@ fn backlog_ingested_while_off_is_replayed_after_reenabling() {
         "the whole Off-period backlog must be consumable in one sync"
     );
     assert_eq!(
-        db.get_processed_sequence(&s.id).unwrap(),
-        db.get_source_cursor(&s.id).unwrap().last_sequence,
+        db.get_context_state(&s.id)
+            .unwrap()
+            .processed_message_sequence,
+        db.ingested_message_sequence(&s.id).unwrap(),
         "frontier caught up with the read cursor"
     );
-    assert_eq!(
-        db.get_events(&s.id, None, 100).unwrap().len(),
-        3,
-        "history intact"
-    );
+    assert_eq!(db.message_count(&s.id).unwrap(), 3, "history intact");
     assert!(context_footprint(&db).0 > 0);
 }

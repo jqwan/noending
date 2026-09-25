@@ -44,9 +44,9 @@ pub fn run() {
             eprintln!("[noending] db at {}", db_path.display());
 
             // The physical layer behind the one `WorkspaceAttaching` door.
-            // Managed as state for the
-            // commands, and registered for ingestion, which keeps a plain
-            // `ensure_session_row` signature (§19).
+            // Managed as state for the commands, and registered for
+            // ingestion, whose discovery resolves Session cwds through it
+            // (§19).
             app.manage(home.clone());
             let layer = std::sync::Arc::new(workspace::wiring::WorkspaceLayer::new(&home));
             app.manage(layer.clone());
@@ -80,20 +80,11 @@ pub fn run() {
                 prepared_launches: Mutex::new(std::collections::HashMap::new()),
             });
 
-            // make pre-existing events searchable (idempotent)
+            // make pre-existing messages searchable (idempotent)
             {
                 let state: tauri::State<commands::AppState> = app.state();
                 if let Err(e) = state.db.backfill_search_index() {
                     eprintln!("[noending] search backfill failed: {}", e);
-                }
-                // §23 deletion crash recovery: an interrupted permanent
-                // deletion never auto-continues — it becomes a failed job the
-                // user retries (source already absent → purge completes) or
-                // cancels (session stays in Trash).
-                match lifecycle::recover_interrupted_deletions(&state.db) {
-                    Ok(0) => {}
-                    Ok(n) => eprintln!("[noending] recovered {n} interrupted deletion job(s)"),
-                    Err(e) => eprintln!("[noending] deletion recovery failed: {}", e),
                 }
             }
 
@@ -218,14 +209,13 @@ pub fn run() {
             commands::session_workspace::list_sessions,
             commands::session_workspace::get_session_detail,
             commands::session_workspace::set_session_owner_workstream,
-            // Session Lifecycle & Deletion v0.1: Trash / Restore and the
-            // prepared permanent deletion flow. The UI submits ids only.
+            commands::session_workspace::list_ingestion_diagnostics,
+            // Session Lifecycle (重构方案 §19/§20): Trash / Restore and the
+            // stateless permanent LOCAL deletion. The UI submits ids only.
             commands::session_lifecycle::trash_session,
             commands::session_lifecycle::restore_session,
-            commands::session_lifecycle::prepare_session_permanent_delete,
-            commands::session_lifecycle::execute_session_permanent_delete,
-            commands::session_lifecycle::cancel_session_permanent_delete,
-            commands::session_lifecycle::get_session_deletion_job,
+            commands::session_lifecycle::get_session_local_delete_preview,
+            commands::session_lifecycle::permanently_delete_session,
             commands::sync_all,
             commands::sync_source,
             commands::reingest_source,

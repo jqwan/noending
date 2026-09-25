@@ -152,13 +152,13 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       })
       .filter((s) => {
         if (q === "") return true;
-        // 无标题 Session 也要被找到：占位文案与 agent_session_id / id 都进搜索面，
-        // 用户照着报障里的 Session ID 能直接定位（AGENTS.md: provenance 可解析）。
+        // 无标题 Session 也要被找到：占位文案与 root_agent_session_id / id 都进
+        // 搜索面，用户照着报障里的 Session ID 能直接定位（AGENTS.md: provenance 可解析）。
         return [
           s.title,
           sessionDisplayTitle(s.title),
           s.cwd,
-          s.agent_session_id,
+          s.root_agent_session_id,
           s.id,
           agentDisplayLabel(s.agent),
           s.project_id ? projectNameById.get(s.project_id) : null,
@@ -195,22 +195,27 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     }
   };
 
+  /**
+   * 全部永久删除（§20）：无状态的本地清除。逐个读预览，只有
+   * can_permanently_delete（trashed + fresh root missing）的会话才执行；
+   * Root 源仍存在或无法确认的会话原地保留——NoEnding 不删除 Agent 数据。
+   */
   const bulkPurge = async () => {
     if (!trashMode || !sessions || sessions.length === 0 || bulkPurgeBusy) return;
     const targets = [...sessions];
     let purged = 0;
-    let sourceFailed = 0;
+    let skipped = 0;
     let failed = 0;
     setBulkPurgeBusy(true);
     for (const session of targets) {
       try {
-        const preview = await api.prepareSessionPermanentDelete(session.id);
-        const result = await api.executeSessionPermanentDelete(preview.job_id);
-        if (result.purged) {
-          purged += 1;
-          if (result.error) sourceFailed += 1;
+        const preview = await api.getSessionLocalDeletePreview(session.id);
+        if (!preview.can_permanently_delete) {
+          skipped += 1;
+          continue;
         }
-        else failed += 1;
+        await api.permanentlyDeleteSession(session.id);
+        purged += 1;
       } catch (e) {
         failed += 1;
         console.error(`永久删除会话失败：${session.id}`, e);
@@ -220,13 +225,13 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     setBulkPurgeOpen(false);
     refresh();
     showToast(
-      failed === 0 && sourceFailed === 0
+      failed === 0 && skipped === 0
         ? `已永久删除 ${purged} 个会话`
-        : `已清理 ${purged} 个会话${sourceFailed > 0 ? `，其中 ${sourceFailed} 个原始文件未删除` : ""}${failed > 0 ? `，${failed} 个仍保留在回收站` : ""}`,
+        : `已清理 ${purged} 个会话${skipped > 0 ? `，${skipped} 个因 Root 源仍存在或无法确认而保留` : ""}${failed > 0 ? `，${failed} 个处理失败` : ""}`,
     );
   };
 
-  /** 恢复失败要把后端的拒绝原因原样给出（例如还有未取消的删除任务）。 */
+  /** 恢复失败要把后端的拒绝原因原样给出。 */
   const restoreFromTrash = async (s: Session) => {
     try {
       await api.restoreSession(s.id);
@@ -402,8 +407,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       {trashMode && (
         <>
           <div className="muted small" style={{ margin: "4px 0 14px", maxWidth: "72ch" }}>
-            回收站里的会话不出现在会话列表、搜索与继续入口中。Agent 原始会话与
-            NoEnding 数据都原样保留；只有「永久删除」会连同 Agent 保存的原始会话一起删除。
+            回收站里的会话不出现在会话列表、搜索与继续入口中。Agent 原始会话始终保留；
+            「永久删除」只清理 NoEnding 的本地数据，不会删除 Agent 数据。
           </div>
 
           {sessions === null && !loadFailed && <div className="muted">加载中…</div>}
@@ -462,11 +467,11 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
             确定要永久删除回收站中的 <b>{sessions.length} 个会话</b> 吗？
           </p>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
-            此操作会尝试删除 Agent 保存的原始会话，且 NoEnding 数据不可恢复。
+            只删除 NoEnding 本地数据，不会删除 Agent 数据。
           </div>
           <p className="small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
-            每个会话会单独执行安全校验。源文件不可访问、已变化或删除失败的会话
-            仍会清理 NoEnding 中的会话数据，但原始文件可能保留；真正的处理错误才会保留在回收站。
+            每个会话会先读取删除预览：Root 源会话已不存在的才执行；
+            Root 源仍存在或无法确认的会话原地保留在回收站。
           </p>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>

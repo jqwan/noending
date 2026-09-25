@@ -49,7 +49,7 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
         <div className="rail-row" role="link" tabIndex={0} onKeyDown={e => { if (e.key === "Enter" && e.target === e.currentTarget) navigate({ view: "session", sessionId: s.id }); }} key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
           <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
           <div className="rail-main">
-            <div className="rail-title" title={s.title ?? `${UNTITLED_SESSION} · ${s.agent_session_id}`}>
+            <div className="rail-title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
               {sessionDisplayTitle(s.title)}
             </div>
             <div className="rail-sub">{timeAgo(s.last_activity_at ?? s.started_at)}</div>

@@ -1,12 +1,18 @@
 //! SQLite storage: current schema and repository helpers.
-//! Owns: domain data, session index, cursors, context items, FTS search.
+//! Owns: domain data, the Logical Session graph (members / messages / cursors
+//! / stats / context frontier / diagnostics), context items, FTS search.
 //!
 //! History integrity rules:
-//! - `session_events` is append-only: the row identity is an app-owned `id`,
-//!   and a stable `(session_id, source_identity_hash)` unique index makes
-//!   re-scans idempotent. Rows are never replaced or overwritten.
-//! - Cursors distinguish the *read* position (events durably ingested) from
-//!   the *processed* position (events consumed by a committed SyncRun).
+//! - `session_messages` is the ONLY conversation store (root members only)
+//!   and is append-only: the row identity is an app-owned `id`, and a stable
+//!   `(member_id, source_identity_hash)` unique index makes re-scans
+//!   idempotent. Rows are never replaced or overwritten.
+//! - Member cursors track the *read* position per member; the session's
+//!   `session_context_state.processed_message_sequence` is the separate
+//!   *processed* position of Context consumption (重构方案 §8).
+//! - One member ingest = messages + stats + cursor + activity in ONE
+//!   transaction (`commit_member_ingest`), guarded by trash / membership
+//!   re-checks inside it.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -18,13 +24,13 @@ use crate::error::{other, Result};
 // The WorkspacePath registry, ordered WorkstreamPath list and Session→path
 // attach each live in their own impl file rather than growing this monolith.
 pub mod schema;
-pub mod session_jobs;
+pub mod session_lifecycle;
 pub mod session_paths;
 pub mod workspace;
 pub mod workstream_paths;
 
 pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
-pub use session_jobs::PermanentDeletionCounts;
+pub use session_lifecycle::PermanentDeletionCounts;
 
 /// Two connections to one SQLite file, so the UI's reads never queue behind a
 /// background sync's writes: WAL allows one writer plus concurrent readers,
@@ -45,38 +51,38 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Identity of the first event in a chain (no known predecessor).
+/// Identity of the first message in a chain (no known predecessor).
 pub const IDENTITY_GENESIS: &str = "genesis";
 
-/// Stable identity of a source event, used to make re-scans of the same
-/// Agent transcript idempotent.
+/// Stable identity of a ROOT conversation message, used to make re-scans of
+/// the same Agent source idempotent (重构方案 §14).
 ///
-/// - Events WITH a native Agent event id: content hash of
-///   `(native_id | kind | ts | text)` — the Agent guarantees the id is
-///   unique per logical event, so identity is position-independent.
-/// - Events WITHOUT one: chained hash `H(prev_event_hash | kind | ts | text)`.
-///   The chain encodes *adjacency*: re-scanning an unchanged file prefix
-///   reproduces the same chain (same logical event → dedup), while two
-///   genuinely identical messages ("继续" sent twice) link to different
+/// - Messages WITH a native Agent message id: content hash of
+///   `(native_id | role | ts | content)` — the Agent guarantees the id is
+///   unique per logical message, so identity is position-independent.
+/// - Messages WITHOUT one: chained hash
+///   `H(prev_hash | role | ts | content)`. The chain encodes *adjacency*:
+///   re-scanning an unchanged prefix reproduces the chain (same logical
+///   message → dedup), while two genuinely identical turns link to different
 ///   predecessors and stay distinct. A mid-file rewrite diverges the chain
 ///   exactly where content changed — everything after it is new evidence.
-pub fn event_identity_hash(
+pub fn message_identity_hash(
     prev_hash: &str,
-    source_event_id: Option<&str>,
-    kind: &str,
+    source_message_id: Option<&str>,
+    role: &str,
     ts: Option<&str>,
-    text: Option<&str>,
+    content: &str,
 ) -> String {
     use sha2::Digest;
     use std::fmt::Write;
-    let normalized = text.unwrap_or("").trim();
+    let normalized = content.trim();
     let mut h = sha2::Sha256::new();
-    match source_event_id {
+    match source_message_id {
         Some(id) => h.update(id.as_bytes()),
         None => h.update(prev_hash.as_bytes()),
     }
     h.update([0x1f]);
-    h.update(kind);
+    h.update(role);
     h.update([0x1f]);
     h.update(ts.unwrap_or("-"));
     h.update([0x1f]);
@@ -347,48 +353,92 @@ impl Db {
         Ok(())
     }
 
-    // ---------------- Sessions ----------------
+    // ---------------- Logical Sessions ----------------
 
-    /// Insert or refresh a Session row.
+    /// Everything discovery knows about a Logical Session, in one write. The
+    /// row is keyed by `(agent, root_agent_session_id)` — the ROOT member's
+    /// real Resume identity (重构方案 §10.1) — so re-discovering the same root
+    /// updates in place instead of duplicating.
     ///
-    /// `project_id` is NOT taken from the caller when the Session has a
-    /// WorkspacePath: it is derived from `workspace_paths.project_id` inside
-    /// this same statement, so the cache and its source can never be set apart
-    /// (方案 §42.3-M3). The caller's value is only honored for a Session with no
-    /// path at all. No other caller may write the cache independently.
-    pub fn upsert_session(&self, s: &Session) -> Result<bool> {
+    /// `project_id` is NOT taken from the caller: it is derived from
+    /// `workspace_paths.project_id` inside the statement, so the cache and its
+    /// source can never be set apart (方案 §42.3-M3). Title is write-once
+    /// (§4.2); a later discovery can fill an absent title but never overwrite
+    /// one. Fork provenance is only ever set while NULL (§2.2), and child /
+    /// side activity never touches these columns — this upsert runs for
+    /// Root/ForkRoot discoveries alone.
+    ///
+    /// Returns the row id and whether this session is NEW to us.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_logical_session(
+        &self,
+        agent: Agent,
+        root_agent_session_id: &str,
+        title: Option<&str>,
+        cwd: Option<&str>,
+        workspace_path_id: Option<&str>,
+        forked_from_session_id: Option<&str>,
+        started_at: Option<&str>,
+        last_activity_at: Option<&str>,
+    ) -> Result<(String, bool)> {
         let conn = self.write();
-        let existed = conn
+        let existing: Option<String> = conn
             .query_row(
-                "SELECT 1 FROM sessions WHERE id = ?1",
-                params![s.id],
-                |_| Ok(()),
+                "SELECT id FROM sessions WHERE agent = ?1 AND root_agent_session_id = ?2",
+                params![agent.as_str(), root_agent_session_id],
+                |r| r.get(0),
             )
-            .optional()?
-            .is_some();
+            .optional()?;
+        if let Some(id) = existing {
+            conn.execute(
+                "UPDATE sessions SET
+                   title = COALESCE(title, ?2),
+                   cwd = COALESCE(?3, cwd),
+                   workspace_path_id = COALESCE(?4, workspace_path_id),
+                   project_id = COALESCE(
+                     (SELECT wp.project_id FROM workspace_paths wp
+                       WHERE wp.id = COALESCE(?4, workspace_path_id)),
+                     (SELECT wp.project_id FROM workspace_paths wp
+                       WHERE wp.id = workspace_path_id)),
+                   forked_from_session_id = COALESCE(forked_from_session_id, ?5),
+                   started_at = COALESCE(started_at, ?6),
+                   last_activity_at = COALESCE(?7, last_activity_at)
+                 WHERE id = ?1",
+                params![
+                    id,
+                    title,
+                    cwd,
+                    workspace_path_id,
+                    forked_from_session_id,
+                    started_at,
+                    last_activity_at
+                ],
+            )?;
+            index_session_conn(&conn, &id)?;
+            return Ok((id, false));
+        }
+        let id = new_id();
         conn.execute(
-            "INSERT INTO sessions (id, agent, agent_session_id, title, cwd, workspace_path_id, project_id, raw_path, parent_agent_session_id, started_at, last_activity_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?11,
-                     COALESCE((SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = ?11), ?6),
-                     ?7, ?8, ?9, ?10)
-             ON CONFLICT(agent, agent_session_id) DO UPDATE SET
-               title = COALESCE(?4, title),
-               cwd = COALESCE(?5, cwd),
-               workspace_path_id = COALESCE(?11, workspace_path_id),
-               project_id = COALESCE(
-                 (SELECT wp.project_id FROM workspace_paths wp
-                   WHERE wp.id = COALESCE(?11, workspace_path_id)), ?6),
-               raw_path = ?7,
-               last_activity_at = COALESCE(?10, last_activity_at),
-               started_at = COALESCE(?9, started_at)",
+            "INSERT INTO sessions
+               (id, agent, root_agent_session_id, title, cwd, workspace_path_id, project_id,
+                forked_from_session_id, started_at, last_activity_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                     (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = ?6),
+                     ?7, ?8, ?9)",
             params![
-                s.id, s.agent.as_str(), s.agent_session_id, s.title, s.cwd,
-                s.project_id, s.raw_path, s.parent_agent_session_id, s.started_at, s.last_activity_at,
-                s.workspace_path_id
+                id,
+                agent.as_str(),
+                root_agent_session_id,
+                title,
+                cwd,
+                workspace_path_id,
+                forked_from_session_id,
+                started_at,
+                last_activity_at
             ],
         )?;
-        index_session_conn(&conn, &s.id)?;
-        Ok(existed)
+        index_session_conn(&conn, &id)?;
+        Ok((id, true))
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
@@ -402,41 +452,21 @@ impl Db {
             .optional()?)
     }
 
-    pub fn find_session_by_agent_id(
+    /// The Logical Session for a root Resume identity (§10.1). This is THE
+    /// session lookup for LaunchIntent matching and Resume.
+    pub fn find_session_by_root_agent_id(
         &self,
         agent: Agent,
-        agent_session_id: &str,
+        root_agent_session_id: &str,
     ) -> Result<Option<Session>> {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT * FROM sessions WHERE agent = ?1 AND agent_session_id = ?2",
-                params![agent.as_str(), agent_session_id],
+                "SELECT * FROM sessions WHERE agent = ?1 AND root_agent_session_id = ?2",
+                params![agent.as_str(), root_agent_session_id],
                 row_session,
             )
             .optional()?)
-    }
-
-    /// §37.20 — the Sessions that name this one as their parent, in the source's
-    /// own id space (so the same `agent`, like every other id lookup). Trashed
-    /// rows are included: the link is a fact about the execution, and the child's
-    /// own page says whether it is in the recycle bin.
-    pub fn child_sessions(
-        &self,
-        agent: Agent,
-        parent_agent_session_id: &str,
-    ) -> Result<Vec<Session>> {
-        let conn = self.read();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM sessions
-              WHERE agent = ?1 AND parent_agent_session_id = ?2
-              ORDER BY started_at, id",
-        )?;
-        let rows = stmt.query_map(
-            params![agent.as_str(), parent_agent_session_id],
-            row_session,
-        )?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Sessions discovered but not yet seen by us. Used by LaunchIntent
@@ -497,7 +527,9 @@ impl Db {
             SessionListScope::Trash => sql.push_str(" AND trashed_at IS NOT NULL"),
             SessionListScope::All => {}
         }
-        sql.push_str(" ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 500");
+        sql.push_str(
+            " ORDER BY COALESCE(last_conversation_at, last_activity_at, started_at) DESC LIMIT 500",
+        );
         let mut st = conn.prepare(&sql)?;
         let refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         let rows = st
@@ -506,50 +538,201 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Events (append-only, identity-based) ----------------
+    // ---------------- Session Members ----------------
 
-    /// Persist a batch of parsed source events inside one transaction:
-    /// identity dedup (INSERT-or-SKIP, never REPLACE), app-owned monotonic
-    /// sequence allocation, and the read-cursor advance commit together.
-    /// Returns the events that were actually newly stored.
-    ///
-    /// The identity chain starts from genesis when the batch is a full
-    /// re-scan (start_byte_offset == 0); an append continues from the
-    /// cursor's `identity_tail_hash` — the tail of the CURRENT source chain,
-    /// never "last event in the store" (after a compact + dedup the store
-    /// holds newer history the source no longer has) — see
-    /// [`event_identity_hash`]. The tail advances with every batch whether
-    /// or not rows were new (dedup reproduces the same hash), so the cursor
-    /// always describes the source, not the store.
-    ///
-    pub fn append_source_events(
+    /// Insert or refresh one execution member (§5). The identity is
+    /// `(agent, source_member_id)`; a member whose topology resolution moved
+    /// to another Logical Session is re-pointed by the same upsert.
+    /// Child / side cwds land on the MEMBER row only — they can never reach
+    /// `sessions.cwd` / `project_id` (§4.1, §18).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_session_member(
         &self,
         session_id: &str,
-        parsed: &[ParsedEvent],
+        agent: Agent,
+        source_member_id: &str,
+        relation: SessionMemberRelation,
+        parent_source_member_id: Option<&str>,
+        source_kind: &str,
+        source_path: &str,
+        cwd: Option<&str>,
+        started_at: Option<&str>,
+        last_activity_at: Option<&str>,
+        metadata: &serde_json::Value,
+    ) -> Result<String> {
+        let conn = self.write();
+        upsert_session_member_conn(
+            &conn,
+            session_id,
+            agent,
+            source_member_id,
+            relation,
+            parent_source_member_id,
+            source_kind,
+            source_path,
+            cwd,
+            started_at,
+            last_activity_at,
+            metadata,
+        )
+    }
+
+    /// The member with this Adapter identity, in ANY session — the anchor for
+    /// topology resolution and diagnostics cleanup.
+    pub fn find_member_by_source_id(
+        &self,
+        agent: Agent,
+        source_member_id: &str,
+    ) -> Result<Option<SessionMember>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM session_members WHERE agent = ?1 AND source_member_id = ?2",
+                params![agent.as_str(), source_member_id],
+                row_member,
+            )
+            .optional()?)
+    }
+
+    pub fn get_member(&self, member_id: &str) -> Result<Option<SessionMember>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM session_members WHERE id = ?1",
+                params![member_id],
+                row_member,
+            )
+            .optional()?)
+    }
+
+    /// Every execution member of a Logical Session, root first.
+    pub fn members_for_session(&self, session_id: &str) -> Result<Vec<SessionMember>> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT * FROM session_members WHERE session_id = ?1
+             ORDER BY CASE relation WHEN 'root' THEN 0 ELSE 1 END, started_at, id",
+        )?;
+        let rows = st
+            .query_map(params![session_id], row_member)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The one ROOT member of a Logical Session. The partial unique index
+    /// guarantees at most one; `None` means the session has no root member
+    /// row yet.
+    pub fn root_member_for_session(&self, session_id: &str) -> Result<Option<SessionMember>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM session_members WHERE session_id = ?1 AND relation = 'root'",
+                params![session_id],
+                row_member,
+            )
+            .optional()?)
+    }
+
+    // ---------------- Member Cursors ----------------
+
+    pub fn get_member_cursor(&self, member_id: &str) -> Result<SessionMemberCursor> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash
+                 FROM session_member_cursors WHERE member_id = ?1",
+                params![member_id],
+                |r| {
+                    Ok(SessionMemberCursor {
+                        member_id: r.get(0)?,
+                        source_file_identity: r.get(1)?,
+                        generation: r.get(2)?,
+                        byte_offset: r.get::<_, i64>(3)?.max(0) as u64,
+                        last_seen_size: r.get::<_, i64>(4)?.max(0) as u64,
+                        mtime: r.get(5)?,
+                        prefix_hash: r.get(6)?,
+                        identity_tail_hash: r.get(7)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or(SessionMemberCursor {
+                member_id: member_id.to_string(),
+                ..Default::default()
+            }))
+    }
+
+    /// Rewind every member cursor of a session so the next ingest re-scans
+    /// from the start (Re-ingest Source, §23.1). MESSAGES ARE NOT TOUCHED:
+    /// their app-owned ids and every provenance ref stay valid — unchanged
+    /// content dedups by identity on the re-scan. Stats snapshots replace on
+    /// the rescan; the Context frontier is preserved.
+    pub fn reset_member_cursors(&self, session_id: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE session_member_cursors
+             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = ''
+             WHERE member_id IN (SELECT id FROM session_members WHERE session_id = ?1)",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    // ---------------- Conversation Messages ----------------
+
+    /// The atomic member-ingest commit (重构方案 §13). Messages, stats, the
+    /// member cursor and the activity stamps commit or not at all.
+    ///
+    /// Guards, in order, inside the transaction:
+    /// 1. the Logical Session exists and is not trashed;
+    /// 2. the member still belongs to that session;
+    /// 3. messages require `member.relation == root` — an adapter that hands
+    ///    child text to the conversation is a bug, never silently stored (§6).
+    ///
+    /// A failed guard stores NOTHING (no messages, no stats, no cursor move),
+    /// so a Trash racing a parse cannot produce a half commit. The identity
+    /// chain starts from genesis on a full re-scan (start offset 0) and
+    /// otherwise continues from the cursor's `identity_tail_hash` — the tail
+    /// of the CURRENT source chain, never "last message in the store" (§14).
+    pub fn commit_member_ingest(
+        &self,
+        session_id: &str,
+        member_id: &str,
+        messages: &[ParsedSessionMessage],
+        stats: Option<StatsUpdate>,
         source: &SourceCursorUpdate,
-        raw_path: &str,
-    ) -> Result<Vec<SessionEvent>> {
+    ) -> Result<Vec<SessionMessage>> {
         self.tx(|tx| {
-            // §9 — commit-time trash guard (方案 §43). Ingestion is staged
-            // outside the write transaction, so a Trash racing a multi-stage
-            // ingest would otherwise still land events + cursor advance on a
-            // session the user just hid. The re-check inside the transaction
-            // makes the no-op atomic with the write it skips: a trashed (or
-            // vanished) session takes NOTHING — no events, no cursor move —
-            // and the next Restore resumes from the untouched cursor.
-            if !session_jobs::session_is_writable_conn(tx, session_id)? {
+            // 1. commit-time trash guard (方案 §43 / §13.1). A trashed (or
+            // vanished) session takes NOTHING — the next Restore resumes from
+            // the untouched cursor.
+            if !session_lifecycle::session_is_writable_conn(tx, session_id)? {
                 return Ok(Vec::new());
             }
-            let max_seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE session_id = ?1",
-                params![session_id],
-                |r| r.get::<_, i64>(0),
-            )?;
-            let mut next_seq: i64 = max_seq + 1;
+            // 2. the member must still belong to THIS session (§13.2). A
+            // topology correction that moved it mid-parse invalidates the
+            // whole prepared batch.
+            let relation: Option<String> = tx
+                .query_row(
+                    "SELECT relation FROM session_members WHERE id = ?1 AND session_id = ?2",
+                    params![member_id, session_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(relation) = relation else {
+                return Ok(Vec::new());
+            };
+            // 3. only the ROOT member may write Conversation (§13.3 / §6).
+            let is_root = relation == SessionMemberRelation::Root.as_str();
+            if !messages.is_empty() && !is_root {
+                return Err(other(format!(
+                    "member {member_id} (relation={relation}) 不是 root，拒绝写入会话消息"
+                )));
+            }
+
             let stored_tail: Option<String> = tx
                 .query_row(
-                    "SELECT identity_tail_hash FROM session_cursors WHERE session_id = ?1",
-                    params![session_id],
+                    "SELECT identity_tail_hash FROM session_member_cursors WHERE member_id = ?1",
+                    params![member_id],
                     |r| r.get::<_, String>(0),
                 )
                 .optional()?
@@ -559,85 +742,103 @@ impl Db {
             } else {
                 match stored_tail.clone() {
                     Some(tail) => tail,
-                    // No chain tail is available for the current cursor:
-                    // fall back to the last stored event identity, and to
-                    // genesis when the session has no event at all.
+                    // No chain tail is available for this cursor: fall back to
+                    // the last stored message identity, and to genesis when
+                    // the member has no message at all.
                     None => tx
                         .query_row(
-                            "SELECT source_identity_hash FROM session_events
-                             WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
-                            params![session_id],
+                            "SELECT source_identity_hash FROM session_messages
+                             WHERE member_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                            params![member_id],
                             |r| r.get::<_, String>(0),
                         )
                         .optional()?
                         .unwrap_or_else(|| IDENTITY_GENESIS.to_string()),
                 }
             };
-            let mut stored = Vec::with_capacity(parsed.len());
+
+            let mut next_seq: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(sequence), 0) FROM session_messages WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get::<_, i64>(0),
+            )?;
+            next_seq += 1;
+
+            let mut stored = Vec::with_capacity(messages.len());
+            let raw_path = {
+                let p: String = tx.query_row(
+                    "SELECT source_path FROM session_members WHERE id = ?1",
+                    params![member_id],
+                    |r| r.get(0),
+                )?;
+                p
+            };
             {
                 let mut ins = tx.prepare(
-                    "INSERT INTO session_events
-                     (id, session_id, sequence, source_event_id, source_generation, source_position, source_identity_hash, ts, kind, text, raw_ref, metadata)
+                    "INSERT INTO session_messages
+                     (id, session_id, member_id, sequence, source_message_id, source_generation,
+                      source_position, source_identity_hash, ts, role, content, raw_ref)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                     ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
+                     ON CONFLICT(member_id, source_identity_hash) DO NOTHING",
                 )?;
-                for p in parsed {
+                for m in messages {
                     // On conflict the computed hash IS the stored one (the
                     // unique index matches on it), so the chain stays
                     // continuous whether or not the row is new.
-                    let hash = event_identity_hash(
+                    let hash = message_identity_hash(
                         &prev_hash,
-                        p.source_event_id.as_deref(),
-                        &p.kind,
-                        p.ts.as_deref(),
-                        p.text.as_deref(),
+                        m.source_message_id.as_deref(),
+                        m.role.as_str(),
+                        m.ts.as_deref(),
+                        &m.content,
                     );
                     prev_hash = hash.clone();
                     let id = new_id();
                     let n = ins.execute(params![
                         id,
                         session_id,
+                        member_id,
                         next_seq,
-                        p.source_event_id,
+                        m.source_message_id,
                         source.generation,
-                        p.source_position,
+                        m.source_position,
                         hash,
-                        p.ts,
-                        p.kind,
-                        p.text,
-                        format!("{}#{}", raw_path, p.source_position),
-                        p.metadata.to_string(),
+                        m.ts,
+                        m.role.as_str(),
+                        m.content,
+                        format!("{}#{}", raw_path, m.source_position),
                     ])?;
                     if n > 0 {
-                        stored.push(SessionEvent {
+                        stored.push(SessionMessage {
                             id: id.clone(),
                             session_id: session_id.to_string(),
+                            member_id: member_id.to_string(),
                             sequence: next_seq,
-                            source_event_id: p.source_event_id.clone(),
+                            role: m.role,
+                            content: m.content.clone(),
+                            ts: m.ts.clone(),
+                            source_message_id: m.source_message_id.clone(),
                             source_generation: source.generation,
-                            source_position: p.source_position.clone(),
-                            ts: p.ts.clone(),
-                            kind: p.kind.clone(),
-                            text: p.text.clone(),
-                            raw_ref: format!("{}#{}", raw_path, p.source_position),
-                            metadata: p.metadata.clone(),
+                            source_position: m.source_position.clone(),
+                            source_identity_hash: hash,
+                            raw_ref: format!("{}#{}", raw_path, m.source_position),
                         });
                         next_seq += 1;
                     }
                 }
             }
-            // Tail of the source chain after this batch: the last computed
-            // hash when the batch had events (inserted or deduped — identical
-            // either way), otherwise whatever the cursor already held.
-            let new_tail = if parsed.is_empty() {
+
+            // 5. stats delta / snapshot (§7.3), then 6. the cursor advance.
+            apply_stats_conn(tx, member_id, stats)?;
+            let new_tail = if messages.is_empty() {
                 stored_tail.unwrap_or_default()
             } else {
                 prev_hash
             };
-            upsert_source_cursor_conn(
+            upsert_member_cursor_conn(
                 tx,
-                &SourceCursor {
-                    session_id: session_id.to_string(),
+                &SessionMemberCursor {
+                    member_id: member_id.to_string(),
                     source_file_identity: source.file_identity.clone(),
                     generation: source.generation,
                     byte_offset: source.byte_offset,
@@ -645,198 +846,325 @@ impl Db {
                     mtime: source.mtime,
                     prefix_hash: source.prefix_hash.clone(),
                     identity_tail_hash: new_tail,
-                    last_sequence: if stored.is_empty() {
-                        // keep previous max; nothing new was appended
-                        tx.query_row(
-                            "SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE session_id = ?1",
-                            params![session_id],
-                            |r| r.get::<_, i64>(0),
-                        )?
-                    } else {
-                        next_seq - 1
-                    },
                 },
             )?;
+
+            // 7/8/9. activity stamps: the member moved, the session moved, and
+            // real conversation moves `last_conversation_at` — but only for
+            // NEW root messages, and only forward (COALESCE-guarded).
+            let ts = now();
+            tx.execute(
+                "UPDATE session_members SET last_activity_at = ?2 WHERE id = ?1",
+                params![member_id, ts],
+            )?;
+            tx.execute(
+                "UPDATE sessions SET last_activity_at = ?2 WHERE id = ?1",
+                params![session_id, ts],
+            )?;
+            if let Some(latest) = stored.last() {
+                tx.execute(
+                    "UPDATE sessions
+                     SET last_conversation_at = COALESCE(?2, ?3)
+                     WHERE id = ?1",
+                    params![session_id, latest.ts, ts],
+                )?;
+            }
             Ok(stored)
         })
     }
 
-    /// Insert fully-formed events as-is (backfill / test seeding only).
-    /// The identity unique index still guards against duplicates.
-    pub fn append_events(&self, events: &[SessionEvent]) -> Result<()> {
-        self.tx(|tx| {
-            insert_events_conn(tx, events)?;
-            Ok(())
-        })
-    }
-
-    pub fn get_events(
+    pub fn get_messages(
         &self,
         session_id: &str,
         after: Option<i64>,
         limit: i64,
-    ) -> Result<Vec<SessionEvent>> {
+    ) -> Result<Vec<SessionMessage>> {
         let conn = self.read();
-        get_events_conn(&conn, session_id, after, limit)
+        get_messages_conn(&conn, session_id, after, limit)
     }
 
-    /// §37.13 — an `agent_message` names its counterpart by the SOURCE's own id
-    /// (`metadata.counterpart_source_id`: a Codex thread id, a dsh session id…),
-    /// which adapters can supply without a database. Turning that into a
-    /// NoEnding Session id happens here, at read time, and never at write time:
-    /// `session_events` is append-only, so a resolved id could not be written
-    /// back, and when the event is ingested the counterpart's row may not exist
-    /// yet — it can be discovered later, or never (its source file may already
-    /// be gone). Resolving on read is additive and self-healing; unresolvable
-    /// counterparts keep the source-supplied path and get no id, never a guess.
-    ///
-    /// The returned events carry the resolved pair, so the caller needs no
-    /// second lookup, and nothing here is persisted.
-    pub fn resolve_event_counterparts(
+    /// The Context frontier read (§15): root conversation messages after the
+    /// processed sequence, in order.
+    pub fn get_messages_after(
         &self,
-        session: &Session,
-        events: &mut [SessionEvent],
-    ) -> Result<()> {
-        for event in events.iter_mut() {
-            if event.kind != "agent_message" {
-                continue;
-            }
-            // Owned, because the metadata is borrowed mutably below.
-            let Some(source_id) = event
-                .metadata
-                .get("counterpart_source_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-            else {
-                continue;
-            };
-            // A source's id space is its own: a Codex thread id means nothing
-            // to dsh, so the counterpart is looked up under the same agent.
-            let Some(counterpart) = self.find_session_by_agent_id(session.agent, &source_id)?
-            else {
-                continue;
-            };
-            let Some(meta) = event.metadata.as_object_mut() else {
-                continue;
-            };
-            meta.insert(
-                "counterpart_session_id".into(),
-                serde_json::Value::String(counterpart.id),
-            );
-            if let Some(title) = counterpart.title {
-                meta.insert("counterpart_title".into(), serde_json::Value::String(title));
-            }
-            // A role the adapter did not know: which side of the tree the
-            // counterpart sits on is a fact about the session graph, not about
-            // the message, so it is read from the parent links here (§37.17).
-            // Codex fills this at ingest from the agent paths in its transcript
-            // — information it has even when the counterpart has no row — and
-            // that value stands.
-            if !meta.contains_key("counterpart_role") {
-                let me = session.agent_session_id.as_str();
-                let role = if counterpart.parent_agent_session_id.as_deref() == Some(me) {
-                    "child"
-                } else if session.parent_agent_session_id.as_deref() == Some(source_id.as_str()) {
-                    "parent"
-                } else if counterpart.parent_agent_session_id.is_some()
-                    && counterpart.parent_agent_session_id == session.parent_agent_session_id
-                {
-                    "sibling"
-                } else {
-                    // Nothing in the graph relates them; a label would be a guess.
-                    continue;
-                };
-                meta.insert(
-                    "counterpart_role".into(),
-                    serde_json::Value::String(role.into()),
-                );
-            }
-        }
-        Ok(())
+        session_id: &str,
+        processed_sequence: i64,
+        limit: i64,
+    ) -> Result<Vec<SessionMessage>> {
+        self.get_messages(session_id, Some(processed_sequence), limit)
     }
 
-    pub fn get_event_by_ref(&self, source_ref: &str) -> Result<Option<SessionEvent>> {
-        if let Some(id) = source_ref.strip_prefix("session-event:") {
-            return self.query_event(
-            "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata FROM session_events WHERE id = ?1",
-            params![id],
-        );
-        }
-        Ok(None)
-    }
-
-    fn query_event(&self, sql: &str, p: impl rusqlite::Params) -> Result<Option<SessionEvent>> {
-        let conn = self.read();
-        Ok(conn.query_row(sql, p, row_event).optional()?)
-    }
-
-    pub fn event_count(&self, session_id: &str) -> Result<i64> {
+    /// The session's ingested conversation frontier: the highest message
+    /// sequence durably stored. Distinct from
+    /// [`Self::get_context_state`], which is how far Sync has consumed.
+    pub fn ingested_message_sequence(&self, session_id: &str) -> Result<i64> {
         let conn = self.read();
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM session_events WHERE session_id = ?1",
+            "SELECT COALESCE(MAX(sequence), 0) FROM session_messages WHERE session_id = ?1",
             params![session_id],
             |r| r.get(0),
         )?)
     }
 
-    // ---------------- Cursors ----------------
-
-    pub fn get_source_cursor(&self, session_id: &str) -> Result<SourceCursor> {
+    pub fn message_count(&self, session_id: &str) -> Result<i64> {
         let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT session_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash, last_sequence
-                 FROM session_cursors WHERE session_id = ?1",
-                params![session_id],
-                |r| {
-                    Ok(SourceCursor {
-                        session_id: r.get(0)?,
-                        source_file_identity: r.get(1)?,
-                        generation: r.get(2)?,
-                        byte_offset: r.get::<_, i64>(3)?.max(0) as u64,
-                        last_seen_size: r.get::<_, i64>(4)?.max(0) as u64,
-                        mtime: r.get(5)?,
-                        prefix_hash: r.get(6)?,
-                        identity_tail_hash: r.get(7)?,
-                        last_sequence: r.get(8)?,
-                    })
-                },
-            )
-            .optional()?
-            .unwrap_or_default())
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?)
     }
 
-    pub fn set_source_cursor(&self, c: &SourceCursor) -> Result<()> {
-        self.tx(|tx| upsert_source_cursor_conn(tx, c))
+    /// Resolve a stable provenance reference (`session-message:<id>`) to its
+    /// message.
+    pub fn get_message_by_ref(&self, source_ref: &str) -> Result<Option<SessionMessage>> {
+        if let Some(id) = source_ref.strip_prefix("session-message:") {
+            let conn = self.read();
+            return Ok(conn
+                .query_row(
+                    "SELECT * FROM session_messages WHERE id = ?1",
+                    params![id],
+                    row_message,
+                )
+                .optional()?);
+        }
+        Ok(None)
     }
 
-    /// The Session's ingested frontier: the highest source sequence durably
-    /// stored. Distinct from [`Self::get_processed_sequence`], which is how far
-    /// Context processing has consumed.
-    pub fn get_ingested_sequence(&self, session_id: &str) -> Result<i64> {
-        Ok(self.get_source_cursor(session_id)?.last_sequence)
-    }
+    // ---------------- Context Frontier ----------------
 
-    pub fn get_processed_sequence(&self, session_id: &str) -> Result<i64> {
+    /// The Logical Session's Context frontier (§8.2). Zero when nothing has
+    /// been processed — including before the first message exists.
+    pub fn get_context_state(&self, session_id: &str) -> Result<SessionContextState> {
         let conn = self.read();
-        Ok(conn
+        let processed: i64 = conn
             .query_row(
-                "SELECT processed_sequence FROM session_cursors WHERE session_id = ?1",
+                "SELECT processed_message_sequence FROM session_context_state WHERE session_id = ?1",
                 params![session_id],
                 |r| r.get(0),
             )
             .optional()?
-            .unwrap_or(0))
+            .unwrap_or(0);
+        Ok(SessionContextState {
+            session_id: session_id.to_string(),
+            processed_message_sequence: processed,
+        })
     }
 
-    pub fn set_processed_sequence(&self, session_id: &str, seq: i64) -> Result<()> {
+    pub fn set_processed_message_sequence(&self, session_id: &str, seq: i64) -> Result<()> {
+        let conn = self.write();
+        set_processed_message_sequence_conn(&conn, session_id, seq)
+    }
+
+    // ---------------- Member Stats ----------------
+
+    pub fn get_member_stats(&self, member_id: &str) -> Result<Option<SessionMemberStats>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT member_id, tool_call_count, tool_error_count, compaction_count,
+                        side_activity_count, input_tokens, output_tokens, cached_tokens,
+                        reasoning_tokens, cost, model, provider, effort, updated_at, extra
+                 FROM session_member_stats WHERE member_id = ?1",
+                params![member_id],
+                row_member_stats,
+            )
+            .optional()?)
+    }
+
+    /// Query-time aggregate over the whole execution graph (§7.4): no cache
+    /// table — the member count is small and this can never drift.
+    pub fn aggregate_session_stats(&self, session_id: &str) -> Result<SessionAggregateStats> {
+        let members = self.members_for_session(session_id)?;
+        let mut agg = SessionAggregateStats {
+            member_count: members.len() as i64,
+            ..Default::default()
+        };
+        let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
+        {
+            let conn = self.read();
+            for id in &ids {
+                let rel: &str = members
+                    .iter()
+                    .find(|m| &m.id == id)
+                    .map(|m| m.relation.as_str())
+                    .unwrap_or("");
+                match rel {
+                    "child" => agg.child_count += 1,
+                    "side" => agg.side_count += 1,
+                    _ => {}
+                }
+                if let Some(s) = conn
+                    .query_row(
+                        "SELECT tool_call_count, tool_error_count, compaction_count,
+                                side_activity_count, input_tokens, output_tokens,
+                                cached_tokens, reasoning_tokens, cost, model, provider, effort
+                         FROM session_member_stats WHERE member_id = ?1",
+                        params![id],
+                        |r| {
+                            Ok((
+                                r.get::<_, Option<i64>>(0)?,
+                                r.get::<_, Option<i64>>(1)?,
+                                r.get::<_, Option<i64>>(2)?,
+                                r.get::<_, Option<i64>>(3)?,
+                                r.get::<_, Option<i64>>(4)?,
+                                r.get::<_, Option<i64>>(5)?,
+                                r.get::<_, Option<i64>>(6)?,
+                                r.get::<_, Option<i64>>(7)?,
+                                r.get::<_, Option<f64>>(8)?,
+                                r.get::<_, Option<String>>(9)?,
+                                r.get::<_, Option<String>>(10)?,
+                                r.get::<_, Option<String>>(11)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                {
+                    agg.tool_call_count += s.0.unwrap_or(0);
+                    agg.tool_error_count += s.1.unwrap_or(0);
+                    agg.compaction_count += s.2.unwrap_or(0);
+                    agg.side_activity_count += s.3.unwrap_or(0);
+                    agg.input_tokens = or_add(agg.input_tokens, s.4);
+                    agg.output_tokens = or_add(agg.output_tokens, s.5);
+                    agg.cached_tokens = or_add(agg.cached_tokens, s.6);
+                    agg.reasoning_tokens = or_add(agg.reasoning_tokens, s.7);
+                    agg.cost = match (agg.cost, s.8) {
+                        (a, Some(b)) => Some(a.unwrap_or(0.0) + b),
+                        (a, None) => a,
+                    };
+                    // Root's own runtime facts win; members only fill gaps.
+                    let is_root = rel == "root";
+                    let take = |current: &mut Option<String>, next: Option<String>| {
+                        if next.is_some() && (current.is_none() || is_root) {
+                            if is_root {
+                                *current = next;
+                            } else {
+                                *current = current.take().or(next);
+                            }
+                        }
+                    };
+                    take(&mut agg.model, s.9);
+                    take(&mut agg.provider, s.10);
+                    take(&mut agg.effort, s.11);
+                }
+            }
+        }
+        // Depth over the parent chain (root = 0): member counts are tiny, so
+        // a plain walk beats a recursive SQL CTE.
+        let by_source: std::collections::HashMap<&str, &SessionMember> = members
+            .iter()
+            .map(|m| (m.source_member_id.as_str(), m))
+            .collect();
+        for m in &members {
+            let mut depth = 0i64;
+            let mut cursor: Option<&SessionMember> = Some(m);
+            let mut hops = 0usize;
+            while let Some(cur) = cursor {
+                if cur.relation.as_str() == "root" {
+                    break;
+                }
+                depth += 1;
+                hops += 1;
+                if hops > members.len() {
+                    break; // defensive: never loop on a cyclic source graph
+                }
+                cursor = cur
+                    .parent_source_member_id
+                    .as_deref()
+                    .and_then(|p| by_source.get(p).copied());
+            }
+            agg.max_depth = agg.max_depth.max(depth);
+        }
+        Ok(agg)
+    }
+
+    // ---------------- Ingestion Diagnostics ----------------
+
+    /// Record (or re-observe) an unattachable source (§11). The first sight
+    /// inserts quietly; every later reconcile bumps `observation_count` so the
+    /// Settings page can show only repeat offenders.
+    pub fn upsert_ingestion_diagnostic(
+        &self,
+        agent: Agent,
+        kind: &str,
+        source_member_id: Option<&str>,
+        parent_source_member_id: Option<&str>,
+        source_path: Option<&str>,
+        reason: &str,
+        details: &serde_json::Value,
+    ) -> Result<()> {
+        let conn = self.write();
+        let key = diagnostic_key(agent, kind, source_member_id);
+        let ts = now();
+        let n = conn.execute(
+            "UPDATE ingestion_diagnostics
+             SET last_seen_at = ?2, observation_count = observation_count + 1,
+                 reason = ?3, parent_source_member_id = COALESCE(?4, parent_source_member_id),
+                 source_path = COALESCE(?5, source_path), details = ?6
+             WHERE diagnostic_key = ?1",
+            params![
+                key,
+                ts,
+                reason,
+                parent_source_member_id,
+                source_path,
+                details.to_string()
+            ],
+        )?;
+        if n == 0 {
+            conn.execute(
+                "INSERT INTO ingestion_diagnostics
+                 (id, diagnostic_key, agent, kind, source_member_id, parent_source_member_id,
+                  source_path, reason, first_seen_at, last_seen_at, observation_count, details)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 1, ?10)",
+                params![
+                    new_id(),
+                    key,
+                    agent.as_str(),
+                    kind,
+                    source_member_id,
+                    parent_source_member_id,
+                    source_path,
+                    reason,
+                    ts,
+                    details.to_string()
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The member resolved: its diagnostic goes away (§11). Missing key is a
+    /// no-op — resolution must never depend on a diagnostic having existed.
+    pub fn resolve_ingestion_diagnostic(
+        &self,
+        agent: Agent,
+        kind: &str,
+        source_member_id: &str,
+    ) -> Result<()> {
         let conn = self.write();
         conn.execute(
-            "INSERT INTO session_cursors (session_id, processed_sequence) VALUES (?1, ?2)
-             ON CONFLICT(session_id) DO UPDATE SET processed_sequence = ?2",
-            params![session_id, seq],
+            "DELETE FROM ingestion_diagnostics WHERE diagnostic_key = ?1",
+            params![diagnostic_key(agent, kind, Some(source_member_id))],
         )?;
         Ok(())
+    }
+
+    /// The Settings page list: repeat offenders only by default (§11).
+    pub fn list_ingestion_diagnostics(
+        &self,
+        min_observation_count: i64,
+    ) -> Result<Vec<IngestionDiagnostic>> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT * FROM ingestion_diagnostics
+             WHERE observation_count >= ?1
+             ORDER BY last_seen_at DESC LIMIT 200",
+        )?;
+        let rows = st
+            .query_map(params![min_observation_count], row_diagnostic)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ---------------- Session Owner ----------------
@@ -1020,8 +1348,8 @@ impl Db {
                 session_id: None,
                 session_title: None,
                 agent: None,
-                event_sequence: None,
-                event_ts: None,
+                message_sequence: None,
+                message_ts: None,
                 evidence: None,
             }));
         }
@@ -1029,18 +1357,18 @@ impl Db {
         let mut session_id = None;
         let mut session_title = None;
         let mut agent = None;
-        let mut event_sequence = None;
-        let mut event_ts = None;
+        let mut message_sequence = None;
+        let mut message_ts = None;
         let mut evidence = None;
 
         if let Some(sref) = &rev.source_ref {
-            if let Some(ev) = self.get_event_by_ref(sref)? {
-                event_sequence = Some(ev.sequence);
-                event_ts = ev.ts;
-                evidence = ev.text;
-                let sid = ev.session_id;
+            if let Some(msg) = self.get_message_by_ref(sref)? {
+                message_sequence = Some(msg.sequence);
+                message_ts = msg.ts;
+                evidence = Some(msg.content);
+                let sid = msg.session_id;
                 if let Some(s) = self.get_session(&sid)? {
-                    session_title = s.title.or(Some(s.agent_session_id));
+                    session_title = s.title.or(Some(s.root_agent_session_id));
                     agent = Some(s.agent);
                 }
                 session_id = Some(sid);
@@ -1056,8 +1384,8 @@ impl Db {
             session_id,
             session_title,
             agent,
-            event_sequence,
-            event_ts,
+            message_sequence,
+            message_ts,
             evidence,
         }))
     }
@@ -1228,7 +1556,7 @@ impl Db {
     pub fn list_sync_runs(&self, limit: i64) -> Result<Vec<SyncRun>> {
         let conn = self.read();
         let mut st = conn.prepare(
-            "SELECT id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint, source_generation
+            "SELECT id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint
              FROM sync_runs ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = st
@@ -1367,23 +1695,6 @@ impl Db {
                 row_ingest_source,
             )
             .optional()?)
-    }
-
-    /// Rewind a session's read cursor so the next ingest re-scans the whole
-    /// source from the start. The EVENT STORE IS NOT TOUCHED: event rows,
-    /// their app-owned ids and every SourceReference pointing at them stay
-    /// intact (append-only history). Unchanged content dedups by identity on
-    /// the re-scan; only genuinely new/changed source content appends.
-    /// The processed (sync) cursor is preserved for the same reason.
-    pub fn reset_session_source_cursor(&self, session_id: &str) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE session_cursors
-             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = ''
-             WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
     }
 
     pub fn set_ingest_source_enabled(&self, id: &str, enabled: bool) -> Result<()> {
@@ -1629,55 +1940,44 @@ pub fn index_item_conn(
 }
 
 impl Db {
-    /// Index newly stored events. Insert-only per event ref: because event
-    /// identity dedup happens at the event layer, incremental batches never
-    /// need to wipe the session's earlier index rows.
-    pub fn index_new_events(&self, events: &[SessionEvent]) -> Result<()> {
+    /// Index newly stored conversation messages. Insert-only per message:
+    /// because message identity dedup happens at the message layer,
+    /// incremental batches never need to wipe the session's earlier index
+    /// rows. Every SessionMessage is indexed — messages ARE the curated
+    /// conversation (§21), so no length pre-filter stands between a short
+    /// constraint and findability.
+    pub fn index_new_messages(&self, messages: &[SessionMessage]) -> Result<()> {
         let conn = self.write();
-        for e in events {
-            unindex_conn(&conn, "event", &format!("{}:{}", e.session_id, e.sequence));
+        for m in messages {
+            unindex_conn(&conn, "message", &m.id);
         }
         let mut st = conn.prepare(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('event', ?1, ?2, ?3, ?4)",
+            "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('message', ?1, ?2, '', ?3)",
         )?;
-        for e in events {
-            if let Some(t) = &e.text {
-                // Character length, matching backfill_search_index's SQL
-                // `length()` — a byte-based cutoff here silently diverged
-                // from reindex for short CJK events.
-                if t.chars().count() < 20 {
-                    continue;
-                }
-                st.execute(params![
-                    format!("{}:{}", e.session_id, e.sequence),
-                    e.session_id,
-                    "",
-                    t
-                ])?;
-            }
+        for m in messages {
+            st.execute(params![m.id, m.session_id, m.content])?;
         }
         Ok(())
     }
 
-    /// Fill in the index rows no incremental write produced: events whose
+    /// Fill in the index rows no incremental write produced: messages whose
     /// ingestion-time indexing was skipped, and Session documents that no
     /// write has touched yet. Idempotent.
     ///
     /// Review P1-1: only ACTIVE sessions are indexed. This runs at every
     /// startup, so an unguarded run would silently re-index everything a
     /// Trash unindexed — the recycle bin would leak back into search after
-    /// every restart. `session_jobs::unindex_session_conn` and this WHERE
+    /// every restart. `session_lifecycle::unindex_session_conn` and this WHERE
     /// clause are two halves of one lifecycle invariant.
     pub fn backfill_search_index(&self) -> Result<()> {
         let conn = self.write();
         conn.execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-             SELECT 'event', session_id || ':' || sequence, session_id, '', text
-             FROM session_events
-             WHERE length(COALESCE(text, '')) >= 20
-               AND session_id IN (SELECT id FROM sessions WHERE trashed_at IS NULL)
-               AND session_id || ':' || sequence NOT IN (
-                   SELECT ref_id FROM search_index WHERE kind = 'event')",
+             SELECT 'message', m.id, m.session_id, '', m.content
+             FROM session_messages m
+             WHERE m.session_id IN (SELECT id FROM sessions WHERE trashed_at IS NULL)
+               AND m.id NOT IN (
+                   SELECT ref_id FROM search_index WHERE kind = 'message')",
             [],
         )?;
         // §39 — fill in the Session documents that are missing entirely. A
@@ -1710,21 +2010,22 @@ impl Db {
         Ok(())
     }
 
-    /// Files whose discovery facts are already fully stored: raw_path →
-    /// (source_file_identity, last_seen_size, mtime) for sessions that have a
-    /// cursor AND a title. Discovery uses this to skip re-parsing transcripts
+    /// Sources whose facts are already fully stored: source_path →
+    /// (source_file_identity, last_seen_size, mtime) for members whose owning
+    /// session has a title. Discovery uses this to skip re-parsing sources
     /// that cannot have changed since the last pass, so a reconcile pass costs
-    /// O(changed files), not O(all history). Only titled sessions are listed:
-    /// an untitled row may just predate the adapters' title extraction, and
-    /// re-parsing its (unchanged) file is exactly what heals it.
-    pub fn discovery_skipset(
+    /// O(changed sources), not O(all history). Only titled sessions are listed:
+    /// an untitled row may just predate a title source, and re-parsing its
+    /// (unchanged) file is exactly what heals it.
+    pub fn member_source_skipset(
         &self,
     ) -> Result<std::collections::HashMap<String, (String, i64, Option<f64>)>> {
         let conn = self.read();
         let mut st = conn.prepare(
-            "SELECT s.raw_path, c.source_file_identity, c.last_seen_size, c.mtime
-             FROM sessions s
-             JOIN session_cursors c ON c.session_id = s.id
+            "SELECT m.source_path, c.source_file_identity, c.last_seen_size, c.mtime
+             FROM session_members m
+             JOIN session_member_cursors c ON c.member_id = m.id
+             JOIN sessions s ON s.id = m.session_id
              WHERE s.title IS NOT NULL AND c.source_file_identity != ''",
         )?;
         let rows = st
@@ -2007,72 +2308,250 @@ pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Resu
     Ok(())
 }
 
-pub fn insert_events_conn(conn: &Connection, events: &[SessionEvent]) -> Result<()> {
-    let mut ins = conn.prepare(
-        "INSERT INTO session_events
-         (id, session_id, sequence, source_event_id, source_generation, source_position, source_identity_hash, ts, kind, text, raw_ref, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-         ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
-    )?;
-    // Test-seeding twin of append_source_events' chain: events are seeded in
-    // file order, so the chain restarts from genesis.
-    let mut prev_hash = IDENTITY_GENESIS.to_string();
-    for e in events {
-        let hash = event_identity_hash(
-            &prev_hash,
-            e.source_event_id.as_deref(),
-            &e.kind,
-            e.ts.as_deref(),
-            e.text.as_deref(),
-        );
-        prev_hash = hash.clone();
-        ins.execute(params![
-            e.id,
-            e.session_id,
-            e.sequence,
-            e.source_event_id,
-            e.source_generation,
-            e.source_position,
-            hash,
-            e.ts,
-            e.kind,
-            e.text,
-            e.raw_ref,
-            e.metadata.to_string()
-        ])?;
+/// Insert or refresh one execution member through a caller-held connection,
+/// so a graph-resolution pass can create members in the same transaction as
+/// the session they attach to.
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_session_member_conn(
+    conn: &Connection,
+    session_id: &str,
+    agent: Agent,
+    source_member_id: &str,
+    relation: SessionMemberRelation,
+    parent_source_member_id: Option<&str>,
+    source_kind: &str,
+    source_path: &str,
+    cwd: Option<&str>,
+    started_at: Option<&str>,
+    last_activity_at: Option<&str>,
+    metadata: &serde_json::Value,
+) -> Result<String> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM session_members WHERE agent = ?1 AND source_member_id = ?2",
+            params![agent.as_str(), source_member_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        conn.execute(
+            "UPDATE session_members SET
+               session_id = ?2,
+               relation = ?3,
+               parent_source_member_id = ?4,
+               source_kind = ?5,
+               source_path = ?6,
+               cwd = COALESCE(?7, cwd),
+               started_at = COALESCE(started_at, ?8),
+               last_activity_at = COALESCE(?9, last_activity_at),
+               metadata = ?10
+             WHERE id = ?1",
+            params![
+                id,
+                session_id,
+                relation.as_str(),
+                parent_source_member_id,
+                source_kind,
+                source_path,
+                cwd,
+                started_at,
+                last_activity_at,
+                metadata.to_string()
+            ],
+        )?;
+        return Ok(id);
     }
-    Ok(())
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO session_members
+         (id, session_id, agent, source_member_id, relation, parent_source_member_id,
+          source_kind, source_path, cwd, started_at, last_activity_at, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            id,
+            session_id,
+            agent.as_str(),
+            source_member_id,
+            relation.as_str(),
+            parent_source_member_id,
+            source_kind,
+            source_path,
+            cwd,
+            started_at,
+            last_activity_at,
+            metadata.to_string()
+        ],
+    )?;
+    Ok(id)
 }
 
-pub fn upsert_source_cursor_conn(conn: &Connection, c: &SourceCursor) -> Result<()> {
+pub fn upsert_member_cursor_conn(conn: &Connection, c: &SessionMemberCursor) -> Result<()> {
     conn.execute(
-        "INSERT INTO session_cursors
-         (session_id, last_sequence, last_seen_size, source_file_identity, generation, byte_offset, mtime, prefix_hash, identity_tail_hash, processed_sequence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                 COALESCE((SELECT processed_sequence FROM session_cursors WHERE session_id = ?1), 0))
-         ON CONFLICT(session_id) DO UPDATE SET
-           last_sequence = ?2, last_seen_size = ?3, source_file_identity = ?4,
-           generation = ?5, byte_offset = ?6, mtime = ?7, prefix_hash = ?8, identity_tail_hash = ?9",
-        params![c.session_id, c.last_sequence, c.last_seen_size as i64, c.source_file_identity, c.generation, c.byte_offset as i64, c.mtime, c.prefix_hash, c.identity_tail_hash],
+        "INSERT INTO session_member_cursors
+         (member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(member_id) DO UPDATE SET
+           source_file_identity = ?2, generation = ?3, byte_offset = ?4,
+           last_seen_size = ?5, mtime = ?6, prefix_hash = ?7, identity_tail_hash = ?8",
+        params![
+            c.member_id,
+            c.source_file_identity,
+            c.generation,
+            c.byte_offset as i64,
+            c.last_seen_size as i64,
+            c.mtime,
+            c.prefix_hash,
+            c.identity_tail_hash
+        ],
     )?;
     Ok(())
 }
 
-pub fn get_events_conn(
+/// Apply a stats update to one member's 1:1 snapshot row (§7.3). A DELTA adds
+/// its observed counts; a SNAPSHOT replaces the four observed counters. Never
+/// called with `None` from callers that had nothing to say — but treated as a
+/// no-op here so "no evidence" can never zero a column (§7.1).
+pub fn apply_stats_conn(
+    conn: &Connection,
+    member_id: &str,
+    update: Option<StatsUpdate>,
+) -> Result<bool> {
+    let Some(update) = update else {
+        return Ok(false);
+    };
+    // Ensure the snapshot row exists; DO NOTHING keeps an existing row's
+    // NULL-vs-0 meanings intact (§7.1).
+    conn.execute(
+        "INSERT INTO session_member_stats
+         (member_id, tool_call_count, tool_error_count, compaction_count, side_activity_count, updated_at)
+         VALUES (?1, 0, 0, 0, 0, ?2)
+         ON CONFLICT(member_id) DO NOTHING",
+        params![member_id, now()],
+    )?;
+    // Dynamic SET list: only the fields this update speaks for move, so an
+    // absent observation leaves the column (and its NULL-vs-0 meaning) alone.
+    // A delta adds over COALESCE: a NULL column (never observed) starts from 0.
+    let mut sets: Vec<String> = Vec::new();
+    match update {
+        StatsUpdate::Delta(d) => {
+            if let Some(v) = d.tool_call_count {
+                sets.push(format!(
+                    "tool_call_count = COALESCE(tool_call_count, 0) + {v}"
+                ));
+            }
+            if let Some(v) = d.tool_error_count {
+                sets.push(format!(
+                    "tool_error_count = COALESCE(tool_error_count, 0) + {v}"
+                ));
+            }
+            if let Some(v) = d.compaction_count {
+                sets.push(format!(
+                    "compaction_count = COALESCE(compaction_count, 0) + {v}"
+                ));
+            }
+            if let Some(v) = d.side_activity_count {
+                sets.push(format!(
+                    "side_activity_count = COALESCE(side_activity_count, 0) + {v}"
+                ));
+            }
+        }
+        StatsUpdate::Snapshot(s) => {
+            sets.push(format!("tool_call_count = {}", s.tool_call_count));
+            sets.push(format!("tool_error_count = {}", s.tool_error_count));
+            sets.push(format!("compaction_count = {}", s.compaction_count));
+            sets.push(format!("side_activity_count = {}", s.side_activity_count));
+        }
+    }
+    if sets.is_empty() {
+        return Ok(false);
+    }
+    let sql = format!(
+        "UPDATE session_member_stats SET {}, updated_at = ?1 WHERE member_id = ?2",
+        sets.join(", ")
+    );
+    conn.execute(&sql, params![now(), member_id])?;
+    Ok(true)
+}
+
+pub fn get_messages_conn(
     conn: &Connection,
     session_id: &str,
     after: Option<i64>,
     limit: i64,
-) -> Result<Vec<SessionEvent>> {
+) -> Result<Vec<SessionMessage>> {
     let mut st = conn.prepare(
-        "SELECT id, session_id, sequence, source_event_id, source_generation, source_position, ts, kind, text, raw_ref, metadata
-         FROM session_events WHERE session_id = ?1 AND sequence > ?2
+        "SELECT * FROM session_messages WHERE session_id = ?1 AND sequence > ?2
          ORDER BY sequence LIMIT ?3",
     )?;
     let rows = st
-        .query_map(params![session_id, after.unwrap_or(0), limit], row_event)?
+        .query_map(params![session_id, after.unwrap_or(0), limit], row_message)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+pub fn set_processed_message_sequence_conn(
+    conn: &Connection,
+    session_id: &str,
+    seq: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_context_state (session_id, processed_message_sequence) VALUES (?1, ?2)
+         ON CONFLICT(session_id) DO UPDATE SET processed_message_sequence = ?2",
+        params![session_id, seq],
+    )?;
+    Ok(())
+}
+
+/// The stable diagnostic identity of an unattachable member (§11): one row
+/// per (agent, kind, source member), so repeat sightings update instead of
+/// duplicating.
+pub fn diagnostic_key(agent: Agent, kind: &str, source_member_id: Option<&str>) -> String {
+    format!(
+        "{}:{}:{}",
+        agent.as_str(),
+        kind,
+        source_member_id.unwrap_or("-")
+    )
+}
+
+/// `Some(a) + Some(b)`; `None` never erases a known total (§7.1).
+fn or_add(current: Option<i64>, next: Option<i64>) -> Option<i64> {
+    match (current, next) {
+        (a, Some(b)) => Some(a.unwrap_or(0) + b),
+        (a, None) => a,
+    }
+}
+
+/// Query-time aggregate over a session's execution graph (§7.4).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SessionAggregateStats {
+    pub member_count: i64,
+    pub child_count: i64,
+    pub side_count: i64,
+    pub max_depth: i64,
+    pub tool_call_count: i64,
+    pub tool_error_count: i64,
+    pub compaction_count: i64,
+    pub side_activity_count: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub effort: Option<String>,
+}
+
+pub fn insert_sync_run_conn(conn: &Connection, run: &SyncRun) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_runs (id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![run.id, run.session_id, run.from_sequence, run.to_sequence, run.status,
+                run.mutations.to_string(), run.summary, run.error, run.created_at, run.runtime,
+                run.delta_fingerprint],
+    )?;
+    Ok(())
 }
 
 pub fn insert_item_conn(
@@ -2099,26 +2578,6 @@ pub fn insert_revision_conn(conn: &Connection, r: &ContextItemRevision) -> Resul
         "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![r.id, r.item_id, r.title, r.content, r.metadata.to_string(), r.source_type, r.source_ref, r.sync_run_id, r.created_at],
-    )?;
-    Ok(())
-}
-
-pub fn insert_sync_run_conn(conn: &Connection, run: &SyncRun) -> Result<()> {
-    conn.execute(
-        "INSERT INTO sync_runs (id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint, source_generation)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![run.id, run.session_id, run.from_sequence, run.to_sequence, run.status,
-                run.mutations.to_string(), run.summary, run.error, run.created_at, run.runtime,
-                run.delta_fingerprint, run.source_generation],
-    )?;
-    Ok(())
-}
-
-pub fn set_processed_sequence_conn(conn: &Connection, session_id: &str, seq: i64) -> Result<()> {
-    conn.execute(
-        "INSERT INTO session_cursors (session_id, processed_sequence) VALUES (?1, ?2)
-         ON CONFLICT(session_id) DO UPDATE SET processed_sequence = ?2",
-        params![session_id, seq],
     )?;
     Ok(())
 }
@@ -2350,7 +2809,7 @@ pub fn resolve_revision_authority(rev: &ContextItemRevision) -> String {
     }
     if rev.source_type.as_deref() == Some("user_edit") {
         crate::domain::authority::USER_EDIT.into()
-    } else if rev.source_type.as_deref() == Some("session_event") || rev.sync_run_id.is_some() {
+    } else if rev.source_type.as_deref() == Some("session_message") || rev.sync_run_id.is_some() {
         crate::domain::authority::AGENT_STATEMENT.into()
     } else {
         crate::domain::authority::UNKNOWN.into()
@@ -2494,33 +2953,94 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
     Ok(Session {
         id: r.get("id")?,
         agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
-        agent_session_id: r.get("agent_session_id")?,
+        root_agent_session_id: r.get("root_agent_session_id")?,
         title: r.get("title")?,
         cwd: r.get("cwd")?,
         workspace_path_id: r.get("workspace_path_id")?,
         project_id: r.get("project_id")?,
         owner_workstream_id: r.get("owner_workstream_id")?,
-        raw_path: r.get("raw_path")?,
-        parent_agent_session_id: r.get("parent_agent_session_id")?,
+        forked_from_session_id: r.get("forked_from_session_id")?,
         started_at: r.get("started_at")?,
         last_activity_at: r.get("last_activity_at")?,
+        last_conversation_at: r.get("last_conversation_at")?,
         trashed_at: r.get("trashed_at")?,
     })
 }
 
-fn row_event(r: &Row) -> rusqlite::Result<SessionEvent> {
-    Ok(SessionEvent {
-        id: r.get(0)?,
-        session_id: r.get(1)?,
-        sequence: r.get(2)?,
-        source_event_id: r.get(3)?,
-        source_generation: r.get(4)?,
-        source_position: r.get(5)?,
-        ts: r.get(6)?,
-        kind: r.get(7)?,
-        text: r.get(8)?,
-        raw_ref: r.get(9)?,
-        metadata: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
+fn row_member(r: &Row) -> rusqlite::Result<SessionMember> {
+    Ok(SessionMember {
+        id: r.get("id")?,
+        session_id: r.get("session_id")?,
+        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
+        source_member_id: r.get("source_member_id")?,
+        relation: SessionMemberRelation::parse(&r.get::<_, String>("relation")?)
+            .unwrap_or(SessionMemberRelation::Child),
+        parent_source_member_id: r.get("parent_source_member_id")?,
+        source_kind: r.get("source_kind")?,
+        source_path: r.get("source_path")?,
+        cwd: r.get("cwd")?,
+        started_at: r.get("started_at")?,
+        last_activity_at: r.get("last_activity_at")?,
+        metadata: serde_json::from_str(&r.get::<_, String>("metadata")?).unwrap_or_default(),
+    })
+}
+
+fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
+    Ok(SessionMessage {
+        id: r.get("id")?,
+        session_id: r.get("session_id")?,
+        member_id: r.get("member_id")?,
+        sequence: r.get("sequence")?,
+        source_message_id: r.get("source_message_id")?,
+        source_generation: r.get("source_generation")?,
+        source_position: r.get("source_position")?,
+        source_identity_hash: r.get("source_identity_hash")?,
+        ts: r.get("ts")?,
+        // The CHECK constraint only lets 'user' | 'assistant' through.
+        role: if r.get::<_, String>("role")? == "assistant" {
+            SessionMessageRole::Assistant
+        } else {
+            SessionMessageRole::User
+        },
+        content: r.get("content")?,
+        raw_ref: r.get("raw_ref")?,
+    })
+}
+
+fn row_member_stats(r: &Row) -> rusqlite::Result<SessionMemberStats> {
+    Ok(SessionMemberStats {
+        member_id: r.get(0)?,
+        tool_call_count: r.get(1)?,
+        tool_error_count: r.get(2)?,
+        compaction_count: r.get(3)?,
+        side_activity_count: r.get(4)?,
+        input_tokens: r.get(5)?,
+        output_tokens: r.get(6)?,
+        cached_tokens: r.get(7)?,
+        reasoning_tokens: r.get(8)?,
+        cost: r.get(9)?,
+        model: r.get(10)?,
+        provider: r.get(11)?,
+        effort: r.get(12)?,
+        updated_at: r.get(13)?,
+        extra: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
+    })
+}
+
+fn row_diagnostic(r: &Row) -> rusqlite::Result<IngestionDiagnostic> {
+    Ok(IngestionDiagnostic {
+        id: r.get("id")?,
+        diagnostic_key: r.get("diagnostic_key")?,
+        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
+        kind: r.get("kind")?,
+        source_member_id: r.get("source_member_id")?,
+        parent_source_member_id: r.get("parent_source_member_id")?,
+        source_path: r.get("source_path")?,
+        reason: r.get("reason")?,
+        first_seen_at: r.get("first_seen_at")?,
+        last_seen_at: r.get("last_seen_at")?,
+        observation_count: r.get("observation_count")?,
+        details: serde_json::from_str(&r.get::<_, String>("details")?).unwrap_or_default(),
     })
 }
 
@@ -2636,7 +3156,6 @@ fn row_sync_run(r: &Row) -> rusqlite::Result<SyncRun> {
             .get::<_, Option<String>>(9)?
             .unwrap_or_else(|| "heuristic".into()),
         delta_fingerprint: r.get(10)?,
-        source_generation: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
     })
 }
 
@@ -2763,7 +3282,7 @@ fn parse_revision_context_change(
             "User".to_string()
         } else if sync_run_id.is_some()
             || created_by.starts_with("sync:")
-            || source_type.as_deref() == Some("session_event")
+            || source_type.as_deref() == Some("session_message")
         {
             "Agent".to_string()
         } else {

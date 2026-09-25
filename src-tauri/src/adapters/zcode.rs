@@ -14,14 +14,19 @@
 //!   `text` / `reasoning` / `tool` / `step-start` / `step-finish` / `timeline`
 //!   / `compaction` / `file`.
 //!
+//! Member mapping (§26.5): every live session row is a member; a row with a
+//! `parent_id` is a CHILD member of that parent. ZCode's source cannot express
+//! a genuine user fork, so the conservative rule (§26.5) applies and no member
+//! is ever a ForkRoot — only seeing an explicit fork marker would change that,
+//! and an adapter test pins the rule.
+//!
 //! What is ingested is therefore exactly the prose: the `text` parts of a
 //! message, joined in `sequence` order, under the message's own id as the
-//! native event id. Reasoning, tool traffic, step markers, timeline, and file
-//! references are machine chatter; a `compaction` part becomes the usual
-//! boundary marker. The user's prompt needs no unwrapping — dsh and WorkBuddy
-//! wrap theirs, ZCode keeps the environment snapshot in
-//! `message.data.contextSnapshot` and leaves `text` clean (measured: the first
-//! user text of a real session is the sentence the user typed).
+//! native message id — and only for the ROOT member. Reasoning, tool traffic,
+//! step markers, timeline, and file references are machine chatter (counted,
+//! not stored); a `compaction` part becomes a compaction observation. The
+//! user's prompt needs no unwrapping — the environment snapshot lives in
+//! `message.data.contextSnapshot` and leaves `text` clean.
 //!
 //! Three decisions worth recording:
 //! - **`role` is not who wrote it.** ZCode tags every message with
@@ -41,11 +46,7 @@
 //! - **Archived sessions are left alone.** `time_archived` is ZCode's own
 //!   "retired from the list" verdict, and dropping a source is the failure the
 //!   design tolerates; inventing sessions the app itself hides is the one it
-//!   does not. Sub-agent sessions, by contrast, are ordinary rows with a real
-//!   `parent_id`, so they are ingested with their parent link (15 of 27
-//!   locally). ZCode's own `title` is reported as the native title **only when
-//!   `title_source` is not `first_input`** — that value means the store itself
-//!   fell back to the first prompt, which NoEnding derives anyway (§37.15).
+//!   does not.
 //!
 //! There is no launchable CLI: ZCode is a desktop app (`~/.zcode/cli` is its
 //! own data dir, not a user-facing command), so `detect()` never succeeds and
@@ -58,10 +59,13 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    file_identity, ms_epoch_to_rfc3339, mtime_secs, AgentCommand, DiscoveredSession, ExecOptions,
-    ParsedEvent, ReadDelta,
+    file_identity, ms_epoch_to_rfc3339, mtime_secs, AgentCommand, DiscoveredMember,
+    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta,
 };
-use crate::domain::{Agent, Session, SourceCursor, SourceCursorUpdate};
+use crate::domain::{
+    Agent, ParsedSessionMessage, SessionMember, SessionMemberCursor, SessionMessageRole,
+    SourceAvailability,
+};
 use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
 
@@ -99,10 +103,18 @@ fn text_of(parts: &[Value]) -> String {
         .join("\n")
 }
 
-fn has_compaction(parts: &[Value]) -> bool {
-    parts
-        .iter()
-        .any(|p| p.pointer("/data/type").and_then(|t| t.as_str()) == Some("compaction"))
+/// Execution observations one message's parts contribute: tool parts are
+/// calls, a compaction part is a boundary.
+fn observation_of(parts: &[Value]) -> MemberObservation {
+    let mut obs = MemberObservation::default();
+    for p in parts {
+        match p.pointer("/data/type").and_then(|t| t.as_str()) {
+            Some("tool") => obs.tool_calls += 1,
+            Some("compaction") => obs.compactions += 1,
+            _ => {}
+        }
+    }
+    obs
 }
 
 /// The conversation kind of a message, or `None` for the runtime's own
@@ -177,60 +189,51 @@ fn conversation(conn: &Connection, session_id: &str) -> Result<Vec<(Value, Vec<V
     Ok(out)
 }
 
-/// The events one message contributes: its prose, then a compaction boundary
-/// if the message carries one.
-fn events_of(message: &Value, parts: &[Value]) -> Vec<ParsedEvent> {
-    let mut out = Vec::new();
+/// The conversation message one row contributes (root members only), plus its
+/// observations. A reply is only read once generation finished: the row
+/// appears when streaming starts and is rewritten in place, so an early read
+/// would freeze a truncated answer under its permanent message id.
+fn message_of(
+    message: &Value,
+    parts: &[Value],
+    is_root: bool,
+) -> (Option<ParsedSessionMessage>, MemberObservation) {
+    let observation = observation_of(parts);
     let id = message.get("id").and_then(|i| i.as_str()).unwrap_or("");
     let data = message.get("data").unwrap_or(&Value::Null);
-    // A reply is only read once generation finished: the row appears when
-    // streaming starts and is rewritten in place, so an early read would
-    // freeze a truncated answer under its permanent event id.
+    if !is_root {
+        return (None, observation);
+    }
     let kind = match message_kind(data) {
         Some("assistant_response") if !is_settled(data) => None,
         other => other,
     };
-    if let Some(kind) = kind {
-        let text = text_of(parts);
-        if !text.trim().is_empty() {
-            out.push(ParsedEvent {
-                source_event_id: Some(id.to_string()),
-                source_position: format!("msg:{id}"),
-                ts: data
-                    .pointer("/time/created")
-                    .and_then(|t| t.as_i64())
-                    .and_then(ms_epoch_to_rfc3339),
-                kind: if kind == "user_prompt" {
-                    "user_message".into()
-                } else {
-                    "assistant_message".into()
-                },
-                text: Some(text),
-                metadata: serde_json::json!({ "agent": "zcode", "type": kind }),
-            });
-        }
+    let Some(kind) = kind else {
+        return (None, observation);
+    };
+    let text = text_of(parts);
+    if text.trim().is_empty() {
+        return (None, observation);
     }
-    if has_compaction(parts) {
-        let part_id = parts
-            .iter()
-            .find(|p| p.pointer("/data/type").and_then(|t| t.as_str()) == Some("compaction"))
-            .and_then(|p| p.get("id"))
-            .and_then(|i| i.as_str())
-            .unwrap_or(id);
-        out.push(ParsedEvent {
-            source_event_id: Some(part_id.to_string()),
-            source_position: format!("part:{part_id}"),
-            ts: None,
-            kind: "compact".into(),
-            text: Some("conversation compacted".into()),
-            metadata: serde_json::json!({ "agent": "zcode", "type": "compaction" }),
-        });
-    }
-    out
+    let message = ParsedSessionMessage {
+        source_message_id: Some(id.to_string()),
+        source_position: format!("msg:{id}"),
+        ts: data
+            .pointer("/time/created")
+            .and_then(|t| t.as_i64())
+            .and_then(ms_epoch_to_rfc3339),
+        role: if kind == "user_prompt" {
+            SessionMessageRole::User
+        } else {
+            SessionMessageRole::Assistant
+        },
+        content: text,
+    };
+    (Some(message), observation)
 }
 
 impl ZCodeAdapter {
-    fn parse_session_row(row: &rusqlite::Row) -> rusqlite::Result<(DiscoveredSession, String)> {
+    fn parse_session_row(row: &rusqlite::Row) -> rusqlite::Result<(DiscoveredMember, String)> {
         let id: String = row.get(0)?;
         let parent_id: Option<String> = row.get(1)?;
         let directory: Option<String> = row.get(2)?;
@@ -238,6 +241,7 @@ impl ZCodeAdapter {
         let time_updated: Option<i64> = row.get(4)?;
         let title: Option<String> = row.get(5)?;
         let title_source: Option<String> = row.get(6)?;
+        let task_type: Option<String> = row.get(7)?;
         // ZCode says where each title came from. `generated` is a real title
         // (「实施 NoEnding 首页与 Workstream 看板设计方案」); `first_input` is
         // ZCode truncating the first input, which is the same naive derivation
@@ -246,19 +250,32 @@ impl ZCodeAdapter {
         // and our own derivation stands (§37.15).
         let native_title = title
             .filter(|t| !t.trim().is_empty() && title_source.as_deref() != Some("first_input"));
+        // §26.5 — the conservative rule: a parent_id makes this a CHILD member
+        // of that parent. The source cannot distinguish an internal child from
+        // a genuine user fork, so nothing here is ever a ForkRoot; `task_type`
+        // rides along as metadata for a future explicit fork marker.
+        let (kind, parent) = match parent_id.filter(|p| !p.is_empty()) {
+            Some(p) => (DiscoveredMemberKind::Child, Some(p)),
+            None => (DiscoveredMemberKind::Root, None),
+        };
+        let is_root = kind.is_logical_root();
         Ok((
-            DiscoveredSession {
+            DiscoveredMember {
                 agent: Agent::ZCode,
-                agent_session_id: id.clone(),
+                source_member_id: id.clone(),
+                kind,
+                parent_source_member_id: parent.clone(),
+                root_hint: parent,
+                source_kind: "zcode_store_record".into(),
                 // Filled by the caller, which knows the database path.
-                path: PathBuf::new(),
+                source_path: PathBuf::new(),
                 cwd: directory.filter(|d| !d.is_empty()),
                 started_at: time_created.and_then(ms_epoch_to_rfc3339),
                 last_activity_at: time_updated.and_then(ms_epoch_to_rfc3339),
-                native_title,
+                native_title: if is_root { native_title } else { None },
                 first_user_text: None,
                 first_agent_text: None,
-                parent_agent_session_id: parent_id,
+                metadata: serde_json::json!({ "task_type": task_type }),
             },
             id,
         ))
@@ -309,11 +326,11 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         None
     }
 
-    fn discover_sessions_in(
+    fn discover_members_in(
         &self,
         roots: &[PathBuf],
         _unchanged: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<DiscoveredSession>> {
+    ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
         let mut seen: Vec<PathBuf> = Vec::new();
         for root in roots {
@@ -324,20 +341,20 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
                 continue;
             }
             seen.push(db.clone());
-            // `unchanged` is deliberately NOT consulted. It is keyed by raw
-            // path, and every ZCode session shares this one path, so its verdict
-            // is "SOME session on this path is ingested" — not "all of them
+            // `unchanged` is deliberately NOT consulted. It is keyed by source
+            // path, and every ZCode member shares this one path, so its verdict
+            // is "SOME member on this path is ingested" — not "all of them
             // are". Worse, the store commits in WAL mode: rows can appear in
             // `db.sqlite-wal` while the main file's size and mtime stay
             // identical, so the stat-based check would call the store unchanged
             // and strand every new session until the next checkpoint. Reading
             // all live sessions every pass costs one indexed query per session
-            // and is absorbed by event-identity dedup, which is the right trade
-            // for never losing a session (方案 §37.10).
+            // and is absorbed by message-identity dedup, which is the right
+            // trade for never losing a session (方案 §37.10).
             let conn = open_read_only(&db)?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, parent_id, directory, time_created, time_updated, title, title_source
+                    "SELECT id, parent_id, directory, time_created, time_updated, title, title_source, task_type
                      FROM session WHERE time_archived IS NULL ORDER BY time_created",
                 )
                 .map_err(|e| other(format!("查询 ZCode session 失败: {e}")))?;
@@ -345,30 +362,42 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
                 .query_map([], Self::parse_session_row)
                 .map_err(|e| other(format!("查询 ZCode session 失败: {e}")))?;
             for row in rows {
-                let (mut discovered, id) =
+                let (mut member, id) =
                     row.map_err(|e| other(format!("读取 ZCode session 失败: {e}")))?;
-                discovered.path = db.clone();
-                discovered.first_user_text = Self::first_user_text(&conn, &id)?;
-                discovered.first_agent_text = Self::first_agent_text(&conn, &id)?;
-                out.push(discovered);
+                member.source_path = db.clone();
+                if member.kind.is_logical_root() {
+                    member.first_user_text = Self::first_user_text(&conn, &id)?;
+                    member.first_agent_text = Self::first_agent_text(&conn, &id)?;
+                }
+                out.push(member);
             }
         }
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
-        let path = PathBuf::from(&session.raw_path);
+    fn read_member_delta(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+    ) -> Result<MemberReadDelta> {
+        let path = PathBuf::from(&member.source_path);
         let conn = open_read_only(&path)?;
-        let mut events = Vec::new();
-        for (message, parts) in conversation(&conn, &session.agent_session_id)? {
-            events.extend(events_of(&message, &parts));
+        let is_root = member.relation.as_str() == "root";
+        let mut messages = Vec::new();
+        let mut observation = MemberObservation::default();
+        for (message, parts) in conversation(&conn, &member.source_member_id)? {
+            let (m, obs) = message_of(&message, &parts, is_root);
+            observation.add(&obs);
+            if let Some(m) = m {
+                messages.push(m);
+            }
         }
 
         // There is no file to seek into and no stable prefix to fingerprint:
         // the source is a database that changes under us. Identity is the
-        // framework's own event ids (message and part ids), so a re-read of the
-        // whole session stores nothing; a replaced database is the only shape
-        // change worth a generation bump.
+        // framework's own message ids, so a re-read of the whole session
+        // stores nothing; a replaced database is the only shape change worth a
+        // generation bump. Every replay is a full scan → stats SNAPSHOT (§7.3).
         let meta = std::fs::metadata(&path)?;
         let identity = file_identity(&path);
         let size = meta.len();
@@ -382,18 +411,51 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         } else {
             cursor.generation
         };
-        Ok(ReadDelta {
-            events,
-            source: Some(SourceCursorUpdate {
-                file_identity: identity,
-                generation,
-                byte_offset: size,
-                last_seen_size: size,
-                mtime: mtime_secs(&meta),
-                start_byte_offset: 0,
-                prefix_hash: String::new(),
-            }),
+        let source = crate::domain::SourceCursorUpdate {
+            file_identity: identity,
+            generation,
+            byte_offset: size,
+            last_seen_size: size,
+            mtime: mtime_secs(&meta),
+            start_byte_offset: 0,
+            prefix_hash: String::new(),
+        };
+        Ok(MemberReadDelta {
+            stats: crate::adapters::stats_update_from(&observation, &source),
+            messages,
+            source: Some(source),
         })
+    }
+
+    /// The store decides (§2.6): the member's record is present → Present;
+    /// the record is gone → Missing (a shared-store Adapter may confirm
+    /// missing by the record's absence — 重构方案 §2.6); a store that cannot
+    /// be opened or has an unexpected shape is NEVER missing, only
+    /// Unavailable.
+    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+        let path = PathBuf::from(&member.source_path);
+        let Ok(conn) = open_read_only(&path) else {
+            return Ok(SourceAvailability::Unavailable);
+        };
+        // Three verdicts, strictly: the record is there → Present; the store
+        // opened fine and does NOT hold the record → Missing (the shared-store
+        // form of confirmed absence, 重构方案 §2.6); anything the query could
+        // not answer (broken store, locked, wrong shape) → Unavailable — an
+        // unreadable store must never read as an absent source.
+        let record = match conn.query_row(
+            "SELECT 1 FROM session WHERE id = ?1",
+            [&member.source_member_id],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(_) => Some(()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(_) => return Ok(SourceAvailability::Unavailable),
+        };
+        if record.is_some() {
+            Ok(SourceAvailability::Present)
+        } else {
+            Ok(SourceAvailability::Missing)
+        }
     }
 
     fn build_new_command(
@@ -431,6 +493,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
+    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -575,35 +638,20 @@ mod tests {
         serde_json::json!({"type": "text", "text": text})
     }
 
-    fn session_of(db: &Path, id: &str) -> Session {
-        Session {
-            id: "sess-zcode".into(),
+    fn member_of(db: &Path, id: &str, relation: SessionMemberRelation) -> SessionMember {
+        SessionMember {
+            id: "mem-zcode".into(),
+            session_id: "sess-zcode".into(),
             agent: Agent::ZCode,
-            agent_session_id: id.into(),
-            title: None,
+            source_member_id: id.into(),
+            relation,
+            parent_source_member_id: None,
+            source_kind: "zcode_store_record".into(),
+            source_path: db.to_string_lossy().to_string(),
             cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: db.to_string_lossy().to_string(),
-            parent_agent_session_id: None,
             started_at: None,
             last_activity_at: None,
-            trashed_at: None,
-        }
-    }
-
-    fn cursor_of(u: &SourceCursorUpdate) -> SourceCursor {
-        SourceCursor {
-            session_id: "sess-zcode".into(),
-            source_file_identity: u.file_identity.clone(),
-            generation: u.generation,
-            byte_offset: u.byte_offset,
-            last_seen_size: u.last_seen_size,
-            mtime: u.mtime,
-            prefix_hash: u.prefix_hash.clone(),
-            identity_tail_hash: String::new(),
-            last_sequence: 0,
+            metadata: serde_json::json!({}),
         }
     }
 
@@ -616,8 +664,11 @@ mod tests {
         assert_eq!(db_path(&root.join("cli")), None, "not every dir is a store");
     }
 
+    /// §26.5 — a `parent_id` makes a live row a CHILD member of that parent,
+    /// never a fork: the source cannot express one, so the conservative rule
+    /// holds and the child carries no title source.
     #[test]
-    fn discovery_lists_live_sessions_with_cwd_and_parent_and_skips_archived() {
+    fn discovery_lists_live_sessions_and_maps_parents_to_children() {
         let root = unique_dir("discover");
         let db = store(&root);
         let conn = open(&db);
@@ -628,19 +679,24 @@ mod tests {
         drop(conn);
 
         let found = ZCodeAdapter
-            .discover_sessions_in(&[root], &|_| false)
+            .discover_members_in(&[root], &|_| false)
             .unwrap();
         // Newest first: the store's `ORDER BY time_created`, and the archived
         // row is ZCode's own "hidden" verdict — NoEnding does not resurrect it.
-        let ids: Vec<&str> = found.iter().map(|s| s.agent_session_id.as_str()).collect();
-        assert_eq!(ids, vec!["main", "root-child"]);
-        let child = &found[1];
-        assert_eq!(child.parent_agent_session_id.as_deref(), Some("main"));
+        let by_id: std::collections::HashMap<&str, &DiscoveredMember> = found
+            .iter()
+            .map(|m| (m.source_member_id.as_str(), m))
+            .collect();
+        assert_eq!(found.len(), 2, "the archived row stays hidden");
+        let child = by_id["root-child"];
+        assert_eq!(child.kind, DiscoveredMemberKind::Child);
+        assert_eq!(child.parent_source_member_id.as_deref(), Some("main"));
         assert_eq!(child.cwd.as_deref(), Some("/repo/sub"));
-        assert_eq!(child.agent, Agent::ZCode);
-        assert_eq!(child.path, db);
+        assert_eq!(child.native_title, None, "a child never carries a title");
+        let main = by_id["main"];
+        assert_eq!(main.kind, DiscoveredMemberKind::Root);
         assert_eq!(
-            child.native_title.as_deref(),
+            main.native_title.as_deref(),
             Some("app title"),
             "the session's own title column outranks anything derived from the messages"
         );
@@ -669,7 +725,7 @@ mod tests {
         drop(conn);
 
         let found = ZCodeAdapter
-            .discover_sessions_in(&[root], &|_| false)
+            .discover_members_in(&[root], &|_| false)
             .unwrap();
         assert_eq!(found[0].native_title, None);
         assert_eq!(found[0].first_user_text.as_deref(), Some("只看这一句"));
@@ -697,12 +753,14 @@ mod tests {
         drop(conn);
 
         let found = ZCodeAdapter
-            .discover_sessions_in(&[root], &|_| false)
+            .discover_members_in(&[root], &|_| false)
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].first_user_text.as_deref(), Some("真正的问题"));
     }
 
+    /// §32.2 — reminders, reasoning and tool traffic are observed, not stored;
+    /// only the `text` parts of a settled root conversation become messages.
     #[test]
     fn reminders_reasoning_and_tool_traffic_are_not_conversation() {
         let root = unique_dir("kinds");
@@ -739,27 +797,30 @@ mod tests {
         drop(conn);
 
         let delta = ZCodeAdapter
-            .read_delta(&session_of(&db, "s"), &SourceCursor::default())
+            .read_member_delta(
+                &member_of(&db, "s", SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
             .unwrap();
-        let got: Vec<(&str, &str, Option<&str>)> = delta
-            .events
+        let got: Vec<(SessionMessageRole, &str, Option<&str>)> = delta
+            .messages
             .iter()
-            .map(|e| {
-                (
-                    e.kind.as_str(),
-                    e.text.as_deref().unwrap_or(""),
-                    e.source_event_id.as_deref(),
-                )
-            })
+            .map(|m| (m.role, m.content.as_str(), m.source_message_id.as_deref()))
             .collect();
         assert_eq!(
             got,
             vec![
-                ("user_message", "人写的", Some("m3")),
-                ("assistant_message", "回答\n尾部", Some("m4")),
+                (SessionMessageRole::User, "人写的", Some("m3")),
+                (SessionMessageRole::Assistant, "回答\n尾部", Some("m4")),
             ]
         );
-        // The cursor stays in the file's own coordinates: nothing was seeked.
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.tool_call_count, 1, "the tool part is observed");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        // The cursor stays in the store's own coordinates: nothing was seeked.
         assert_eq!(
             delta.source.unwrap().byte_offset,
             std::fs::metadata(&db).unwrap().len()
@@ -778,14 +839,14 @@ mod tests {
         part_row(&conn, "p2", "m2", "s", 0, text_part("半句"));
         drop(conn);
 
-        let session = session_of(&db, "s");
+        let member = member_of(&db, "s", SessionMemberRelation::Root);
         let first = ZCodeAdapter
-            .read_delta(&session, &SourceCursor::default())
+            .read_member_delta(&member, &SessionMemberCursor::default())
             .unwrap();
-        let ids = |d: &ReadDelta| -> Vec<String> {
-            d.events
+        let ids = |d: &MemberReadDelta| -> Vec<String> {
+            d.messages
                 .iter()
-                .filter_map(|e| e.source_event_id.clone())
+                .filter_map(|m| m.source_message_id.clone())
                 .collect()
         };
         assert_eq!(
@@ -799,10 +860,10 @@ mod tests {
         drop(conn);
 
         // The replay is unconditional, so the prompt comes back too — and that
-        // is fine: event identity is the message id, so the store keeps it once.
-        let second = ZCodeAdapter
-            .read_delta(&session, &cursor_of(first.source.as_ref().unwrap()))
-            .unwrap();
+        // is fine: message identity is the message id, so the store keeps it once.
+        let cursor =
+            SessionMemberCursor::from_update(member.id.as_str(), first.source.as_ref().unwrap());
+        let second = ZCodeAdapter.read_member_delta(&member, &cursor).unwrap();
         assert_eq!(ids(&second), vec!["m1", "m2"]);
         assert_eq!(
             second.source.unwrap().generation,
@@ -840,13 +901,69 @@ mod tests {
         drop(conn);
 
         let delta = ZCodeAdapter
-            .read_delta(&session_of(&db, "s"), &SourceCursor::default())
+            .read_member_delta(
+                &member_of(&db, "s", SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
             .unwrap();
-        let got: Vec<(&str, Option<&str>)> = delta
-            .events
+        assert!(delta.messages.is_empty());
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.compaction_count, 1);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    /// §26.5 — no ZCode member is ever a ForkRoot: the source cannot express a
+    /// genuine user fork, and only an explicit fork marker would change that.
+    #[test]
+    fn no_member_is_ever_a_fork_root() {
+        let root = unique_dir("no-fork");
+        let db = store(&root);
+        let conn = open(&db);
+        session_row(&conn, "main", None, "/repo", 100);
+        session_row(&conn, "branched", Some("main"), "/repo", 200);
+        drop(conn);
+        let found = ZCodeAdapter
+            .discover_members_in(&[root], &|_| false)
+            .unwrap();
+        assert!(found
             .iter()
-            .map(|e| (e.kind.as_str(), e.source_event_id.as_deref()))
-            .collect();
-        assert_eq!(got, vec![("compact", Some("cmp1"))]);
+            .all(|m| m.kind != DiscoveredMemberKind::ForkRoot));
+    }
+
+    /// §9.1 for a shared store: the record's absence is a confirmed Missing;
+    /// an unopenable store is only ever Unavailable (重构方案 §2.6).
+    #[test]
+    fn inspect_reads_the_record_not_the_file() {
+        let root = unique_dir("inspect");
+        let db = store(&root);
+        let conn = open(&db);
+        session_row(&conn, "alive", None, "/repo", 100);
+        drop(conn);
+
+        assert_eq!(
+            ZCodeAdapter
+                .inspect_member_source(&member_of(&db, "alive", SessionMemberRelation::Root))
+                .unwrap(),
+            SourceAvailability::Present
+        );
+        assert_eq!(
+            ZCodeAdapter
+                .inspect_member_source(&member_of(&db, "purged", SessionMemberRelation::Root))
+                .unwrap(),
+            SourceAvailability::Missing
+        );
+
+        // A file that exists but is not a usable store is Unavailable.
+        let broken = root.join("broken.sqlite");
+        std::fs::write(&broken, b"not a database").unwrap();
+        assert_eq!(
+            ZCodeAdapter
+                .inspect_member_source(&member_of(&broken, "s", SessionMemberRelation::Root))
+                .unwrap(),
+            SourceAvailability::Unavailable
+        );
     }
 }

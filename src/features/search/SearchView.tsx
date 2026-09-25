@@ -4,13 +4,13 @@ import { api } from "../../api";
 import type { Route } from "../../app/routes";
 import type { SearchHit } from "../../types";
 
-/** 结果类型徽标（search/mod.rs:12 的 kind 定义域）。领域词按 §2 词表保留。 */
+/** 结果类型徽标（search/mod.rs 的 kind 定义域）。领域词按 §2 词表保留。 */
 const HIT_KIND_LABELS: Record<string, string> = {
   item: "Context",
   workstream: "任务",
   project: "项目",
   session: "会话",
-  event: "消息",
+  message: "消息",
 };
 
 export default function SearchView({ query, navigate }: { query: string; navigate: (r: Route) => void }) {
@@ -51,7 +51,8 @@ export default function SearchView({ query, navigate }: { query: string; navigat
             if (h.kind === "workstream") navigate({ view: "workstream", workstreamId: h.ref_id });
             else if (h.kind === "session") navigate({ view: "session", sessionId: h.ref_id });
             else if (h.kind === "item") navigate({ view: "workstream", workstreamId: h.parent_id });
-            else if (h.kind === "event") navigate({ view: "session", sessionId: h.parent_id });
+            // 消息命中：ref_id 是消息 id，打开它所在的逻辑会话（parent_id）。
+            else if (h.kind === "message") navigate({ view: "session", sessionId: h.parent_id });
             else if (h.kind === "project") navigate({ view: "project", projectId: h.ref_id });
           }}>
           <div className="row">

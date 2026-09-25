@@ -46,7 +46,16 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// No database migrations or backwards compatibility are supported. A database
 /// whose format generation differs from this value must be discarded and
 /// rebuilt from Agent source data.
-pub const DATABASE_FORMAT_VERSION: i64 = 1;
+///
+/// v2 — the Logical Session refactor (重构方案 §24): `sessions` is keyed by the
+/// root member's Resume identity and owns lifecycle/Owner alone; execution
+/// lives in `session_members`, conversation in `session_messages`, reading in
+/// `session_member_cursors`, observation in `session_member_stats`, the Sync
+/// frontier in `session_context_state`, and unattachable sources in
+/// `ingestion_diagnostics`. `session_events`, `session_cursors` and
+/// `session_deletion_jobs` are gone: there is one conversation store, cursors
+/// belong to members, and NoEnding never deletes an Agent-owned source.
+pub const DATABASE_FORMAT_VERSION: i64 = 2;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -216,13 +225,6 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
 /// is NOT a random uuid — it is derived from the canonical path by
 /// `workspace::path_identity`, which is what makes `ensure_workspace_path`
 /// idempotent: observing the same directory twice cannot create two rows.
-///
-/// `session_deletion_jobs` is transient coordination for prepared permanent
-/// deletions. It spans SQLite + filesystem, which no single transaction can
-/// cover, so the plan is frozen there first and revalidated at execute time.
-/// This is NOT deletion history / tombstone / blacklist: the row is deleted in
-/// the same transaction that purges the Session, so a completed permanent
-/// deletion leaves nothing behind.
 const CURRENT_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
@@ -242,10 +244,13 @@ const CURRENT_SCHEMA: &str = r#"
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    -- The Logical Session: user-visible conversation + lifecycle + Owner.
+    -- Identity is (agent, root_agent_session_id): the ROOT member's real
+    -- Resume identity, not any child's external id (重构方案 §10.1).
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       agent TEXT NOT NULL,
-      agent_session_id TEXT NOT NULL,
+      root_agent_session_id TEXT NOT NULL,
       title TEXT,
       cwd TEXT,
       workspace_path_id TEXT,
@@ -254,40 +259,121 @@ const CURRENT_SCHEMA: &str = r#"
       -- (方案 §3.3). Deleting the Workstream clears this, never the row.
       owner_workstream_id TEXT
         REFERENCES workstreams(id) ON DELETE SET NULL,
-      raw_path TEXT NOT NULL,
-      parent_agent_session_id TEXT,
+      -- Fork provenance only (§2.2): lifecycle / Owner / Conversation stay
+      -- fully independent of the fork source.
+      forked_from_session_id TEXT
+        REFERENCES sessions(id) ON DELETE SET NULL,
       started_at TEXT,
       last_activity_at TEXT,
+      last_conversation_at TEXT,
       -- lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339).
       trashed_at TEXT,
-      UNIQUE(agent, agent_session_id)
+      UNIQUE(agent, root_agent_session_id)
     );
-    CREATE TABLE IF NOT EXISTS session_events (
+    -- One internal execution unit of a Logical Session (§5). Only relation
+    -- 'root' may produce session_messages; exactly one root per session is
+    -- enforced by the partial unique index below.
+    CREATE TABLE IF NOT EXISTS session_members (
       id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL REFERENCES sessions(id),
+      session_id TEXT NOT NULL
+        REFERENCES sessions(id) ON DELETE CASCADE,
+      agent TEXT NOT NULL,
+      source_member_id TEXT NOT NULL,
+      relation TEXT NOT NULL CHECK (relation IN ('root', 'child', 'side')),
+      parent_source_member_id TEXT,
+      source_kind TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      cwd TEXT,
+      started_at TEXT,
+      last_activity_at TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      UNIQUE(agent, source_member_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_members_one_root
+      ON session_members(session_id) WHERE relation = 'root';
+    CREATE INDEX IF NOT EXISTS idx_session_members_session
+      ON session_members(session_id);
+    CREATE INDEX IF NOT EXISTS idx_session_members_parent
+      ON session_members(agent, parent_source_member_id);
+    -- Where each member stopped reading ITS source (§8.1). Member-owned, never
+    -- session-owned; the Context frontier lives in session_context_state.
+    CREATE TABLE IF NOT EXISTS session_member_cursors (
+      member_id TEXT PRIMARY KEY
+        REFERENCES session_members(id) ON DELETE CASCADE,
+      source_file_identity TEXT NOT NULL DEFAULT '',
+      generation INTEGER NOT NULL DEFAULT 0,
+      byte_offset INTEGER NOT NULL DEFAULT 0,
+      last_seen_size INTEGER NOT NULL DEFAULT 0,
+      mtime REAL,
+      prefix_hash TEXT NOT NULL DEFAULT '',
+      identity_tail_hash TEXT NOT NULL DEFAULT ''
+    );
+    -- The ONLY conversation store (§6): user/assistant turns of the ROOT
+    -- member. Identity dedup is (member_id, source_identity_hash); sequence is
+    -- NoEnding's own per-session counter.
+    CREATE TABLE IF NOT EXISTS session_messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL
+        REFERENCES sessions(id) ON DELETE CASCADE,
+      member_id TEXT NOT NULL
+        REFERENCES session_members(id) ON DELETE CASCADE,
       sequence INTEGER NOT NULL,
-      source_event_id TEXT,
+      source_message_id TEXT,
       source_generation INTEGER NOT NULL DEFAULT 0,
       source_position TEXT NOT NULL DEFAULT '',
       source_identity_hash TEXT NOT NULL,
       ts TEXT,
-      kind TEXT NOT NULL,
-      text TEXT,
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+      content TEXT NOT NULL,
       raw_ref TEXT NOT NULL,
-      metadata TEXT NOT NULL DEFAULT '{}',
-      UNIQUE (session_id, source_identity_hash)
+      UNIQUE(session_id, sequence),
+      UNIQUE(member_id, source_identity_hash)
     );
-    CREATE TABLE IF NOT EXISTS session_cursors (
-      session_id TEXT PRIMARY KEY REFERENCES sessions(id),
-      last_sequence INTEGER NOT NULL DEFAULT 0,
-      last_seen_size INTEGER NOT NULL DEFAULT 0,
-      source_file_identity TEXT NOT NULL DEFAULT '',
-      generation INTEGER NOT NULL DEFAULT 0,
-      byte_offset INTEGER NOT NULL DEFAULT 0,
-      prefix_hash TEXT NOT NULL DEFAULT '',
-      identity_tail_hash TEXT NOT NULL DEFAULT '',
-      mtime REAL,
-      processed_sequence INTEGER NOT NULL DEFAULT 0
+    CREATE INDEX IF NOT EXISTS idx_session_messages_session
+      ON session_messages(session_id, sequence);
+    -- The Logical Session's Context frontier (§8.2): how far Sync has consumed
+    -- root conversation messages. Completely separate lifecycle from cursors.
+    CREATE TABLE IF NOT EXISTS session_context_state (
+      session_id TEXT PRIMARY KEY
+        REFERENCES sessions(id) ON DELETE CASCADE,
+      processed_message_sequence INTEGER NOT NULL DEFAULT 0
+    );
+    -- 1:1 execution snapshot per member (§7): current observable source state,
+    -- not an append-only log. NULL = source does not provide the metric.
+    CREATE TABLE IF NOT EXISTS session_member_stats (
+      member_id TEXT PRIMARY KEY
+        REFERENCES session_members(id) ON DELETE CASCADE,
+      tool_call_count INTEGER,
+      tool_error_count INTEGER,
+      compaction_count INTEGER,
+      side_activity_count INTEGER,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      cached_tokens INTEGER,
+      reasoning_tokens INTEGER,
+      cost REAL,
+      model TEXT,
+      provider TEXT,
+      effort TEXT,
+      updated_at TEXT NOT NULL,
+      extra TEXT NOT NULL DEFAULT '{}'
+    );
+    -- Ingestion problems that are deliberately NOT Sessions (§11): unattachable
+    -- child/side sources and the like. Never Search / Context / Owner /
+    -- lifecycle; deleted when the source resolves.
+    CREATE TABLE IF NOT EXISTS ingestion_diagnostics (
+      id TEXT PRIMARY KEY,
+      diagnostic_key TEXT NOT NULL UNIQUE,
+      agent TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      source_member_id TEXT,
+      parent_source_member_id TEXT,
+      source_path TEXT,
+      reason TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      observation_count INTEGER NOT NULL DEFAULT 1,
+      details TEXT NOT NULL DEFAULT '{}'
     );
     CREATE TABLE IF NOT EXISTS context_items (
       id TEXT PRIMARY KEY,
@@ -323,8 +409,7 @@ const CURRENT_SCHEMA: &str = r#"
       error TEXT,
       created_at TEXT NOT NULL,
       runtime TEXT NOT NULL DEFAULT 'heuristic',
-      delta_fingerprint TEXT,
-      source_generation INTEGER NOT NULL DEFAULT 0
+      delta_fingerprint TEXT
     );
     CREATE TABLE IF NOT EXISTS agent_installations (
       agent TEXT PRIMARY KEY,
@@ -388,7 +473,6 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
     CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
-    CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, sequence);
     CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_fingerprint
       ON sync_runs(session_id, delta_fingerprint)
@@ -461,16 +545,6 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_workstream_paths_ws ON workstream_paths(workstream_id, position);
     CREATE INDEX IF NOT EXISTS idx_workstream_paths_path ON workstream_paths(workspace_path_id);
 
-    CREATE TABLE IF NOT EXISTS session_deletion_jobs (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id),
-      state TEXT NOT NULL,          -- prepared | deleting_source | failed | stale
-      plan_json TEXT NOT NULL,
-      last_error TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
       ON projects(git_id)
       WHERE git_id IS NOT NULL;
@@ -509,8 +583,12 @@ mod tests {
             ("table", "projects"),
             ("table", "workstreams"),
             ("table", "sessions"),
-            ("table", "session_events"),
-            ("table", "session_cursors"),
+            ("table", "session_members"),
+            ("table", "session_member_cursors"),
+            ("table", "session_messages"),
+            ("table", "session_context_state"),
+            ("table", "session_member_stats"),
+            ("table", "ingestion_diagnostics"),
             ("table", "context_items"),
             ("table", "context_item_revisions"),
             ("table", "sync_runs"),
@@ -527,12 +605,14 @@ mod tests {
             ("table", "git_identities"),
             ("table", "workspace_paths"),
             ("table", "workstream_paths"),
-            ("table", "session_deletion_jobs"),
             ("table", "search_index"),
             ("index", "idx_sessions_project"),
             ("index", "idx_items_workstream"),
             ("index", "idx_sessions_owner_workstream"),
-            ("index", "idx_events_session"),
+            ("index", "idx_session_members_one_root"),
+            ("index", "idx_session_members_session"),
+            ("index", "idx_session_members_parent"),
+            ("index", "idx_session_messages_session"),
             ("index", "idx_intents_status"),
             ("index", "idx_sync_runs_fingerprint"),
             ("index", "idx_conflict_events_conflict"),
@@ -547,6 +627,6 @@ mod tests {
                 "required_objects() missed {kind} {name}"
             );
         }
-        assert_eq!(found.len(), 35, "required_objects() found an object twice");
+        assert_eq!(found.len(), 41, "required_objects() found an object twice");
     }
 }

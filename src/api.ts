@@ -2,9 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
   ContextDeliveryLevel, ContextItem, ContextItemRevision, CreateWorkstreamReport,
-  LaunchResult, PathProbe, PermanentDeletionPreview, PermanentDeletionResult,
+  IngestionDiagnostic, LaunchResult, LocalDeletePreview, PathProbe,
+  PermanentDeleteResult,
   Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow,
-  RecentWorkspacePath, SessionDeletionJob, WorkspaceSettings,
+  RecentWorkspacePath, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionDetail,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
@@ -145,19 +146,23 @@ export const api = {
       agent: agent ?? null,
       scope: scope ?? null,
     }),
-  // Session Lifecycle & Deletion v0.1: the UI submits ids only — the
-  // deletion plan and its targets never travel from the frontend.
+  // Session Lifecycle (重构方案 §19/§20): the UI submits session ids only —
+  // there is no deletion job and no source deletion anywhere: NoEnding never
+  // deletes Agent-owned sources; permanent delete is a LOCAL purge.
   trashSession: (sessionId: string) => invoke<Session>("trash_session", { sessionId }),
   restoreSession: (sessionId: string) => invoke<Session>("restore_session", { sessionId }),
-  prepareSessionPermanentDelete: (sessionId: string) =>
-    invoke<PermanentDeletionPreview>("prepare_session_permanent_delete", { sessionId }),
-  executeSessionPermanentDelete: (jobId: string) =>
-    invoke<PermanentDeletionResult>("execute_session_permanent_delete", { jobId }),
-  cancelSessionPermanentDelete: (jobId: string) =>
-    invoke<void>("cancel_session_permanent_delete", { jobId }),
-  getSessionDeletionJob: (sessionId: string) =>
-    invoke<SessionDeletionJob | null>("get_session_deletion_job", { sessionId }),
+  /** §20.2 无状态预览：fresh root source verdict + counts，没有 job。 */
+  getSessionLocalDeletePreview: (sessionId: string) =>
+    invoke<LocalDeletePreview>("get_session_local_delete_preview", { sessionId }),
+  /** §20.3 执行本地清除：trashed + fresh root missing 才允许。 */
+  permanentlyDeleteSession: (sessionId: string) =>
+    invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
+  /** §11 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */
+  listIngestionDiagnostics: (minObservations?: number) =>
+    invoke<IngestionDiagnostic[]>("list_ingestion_diagnostics", {
+      minObservations: minObservations ?? null,
+    }),
   /**
    * 设置 / 清空 Session 唯一的所属任务。`workstreamId === null` 即「未归属任务」。
    * 只写 `sessions.owner_workstream_id`，不碰 WorkstreamPath、cwd 或 Project。

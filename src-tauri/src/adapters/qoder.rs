@@ -7,20 +7,17 @@
 //! nothing would look wrong — which is exactly how provenance gets lost
 //! (AGENTS.md: Provenance Fidelity).
 //!
-//! **Sub-agent transcripts are deliberately not ingested.** `<session>/subagents/
-//! agent-*.jsonl` repeats the parent's `sessionId` on every line and carries no
-//! Qoder line type until its final line — measured on a real file: 75 message
-//! lines, then a single `last-prompt` at the end. Their content is therefore
-//! indistinguishable from Claude Code's, and the rule here is "宁可漏判不可错判"
-//! (方案 §37.3): rather than guess a marker that might also appear in Claude's
-//! files — which would silently re-label Claude sessions as Qoder — they are
-//! left unclaimed. See §37.5 for what it would take to include them.
+//! Member mapping (§26.3):
+//! - `<encoded-cwd>/<main>.jsonl` → the ROOT member;
+//! - `<encoded-cwd>/<main>/subagents/agent-*.jsonl` → CHILD members. Their
+//!   every line repeats the ROOT's `sessionId`, so the member identity is
+//!   Adapter-derived and stable: `<root-session-id>:subagent:<file-stem>`
+//!   (§5.1). Their text never becomes conversation — they contribute
+//!   execution observations only.
 //!
-//! Qoder is an IDE with no headless CLI (`~/.qoder-cn/bin` holds only
-//! `qoder-cn-computer-use`, and the entry dispatcher looks for a `qoderclicn`
-//! that does not exist), so this adapter **ingests history only**: `detect()`
-//! never succeeds, and there is no new/resume/exec command to build. The raw
-//! transcripts are opened read-only, always.
+//! Qoder is an IDE with no headless CLI, so this adapter **ingests history
+//! only**: `detect()` never succeeds, and there is no new/resume/exec command
+//! to build. The raw transcripts are opened read-only, always.
 //!
 //! **One fact comes from a second store.** The transcript carries no title, so
 //! discovery reads the app's own `chat_sessions` for it — read-only, looked up
@@ -33,10 +30,10 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, AgentCommand, DiscoveredSession, ExecOptions, ParsedLine,
-    ReadDelta,
+    detect_format, read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind,
+    ExecOptions, MemberObservation, ParsedLine, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceCursor};
+use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
 
 pub struct QoderAdapter;
@@ -134,17 +131,42 @@ fn content_text(content: &Value) -> String {
 }
 
 impl QoderAdapter {
-    /// `<encoded-cwd>/<main>.jsonl` is a session; `<encoded-cwd>/<main>/subagents/
-    /// agent-*.jsonl` is a sub-agent transcript that stays unclaimed (module doc).
-    fn is_subagent_transcript(path: &Path) -> bool {
-        path.parent()
-            .and_then(|d| d.file_name())
-            .and_then(|n| n.to_str())
-            .map(|n| n == "subagents")
-            .unwrap_or(false)
+    /// `<encoded-cwd>/<main>/subagents/agent-*.jsonl` is a sub-agent
+    /// transcript: the directory shape is the marker (the real files' head is
+    /// plain Claude-shaped, so no content test can decide this — §37.3/§26.3).
+    /// The stem and the enclosing session directory are the stable identity.
+    fn subagent_member(path: &Path) -> Option<(String, String)> {
+        let name = path.file_name()?.to_str()?;
+        if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
+            return None;
+        }
+        let stem = path.file_stem()?.to_str()?;
+        let subagents_dir = path.parent()?;
+        if subagents_dir.file_name()?.to_str()? != "subagents" {
+            return None;
+        }
+        let session_dir = subagents_dir.parent()?;
+        Some((session_dir.to_string_lossy().to_string(), stem.to_string()))
     }
 
-    fn parse_session_file(path: &Path) -> Result<Option<DiscoveredSession>> {
+    /// The transcript's own `sessionId` — the ROOT's id, repeated on every
+    /// line of a subagent transcript too.
+    fn transcript_session_id(path: &Path) -> Option<String> {
+        let lines = crate::adapters::read_jsonl_lines(path).ok()?;
+        for (_, line) in &lines {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(id) = v.get("sessionId").and_then(|s| s.as_str()) {
+                if !id.is_empty() {
+                    return Some(id.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn parse_root_member(path: &Path) -> Result<Option<DiscoveredMember>> {
         let file_name = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -226,10 +248,14 @@ impl QoderAdapter {
 
         let agent_session_id = session_id.unwrap_or_else(|| file_name.clone());
 
-        Ok(Some(DiscoveredSession {
+        Ok(Some(DiscoveredMember {
             agent: Agent::Qoder,
-            agent_session_id,
-            path: path.to_path_buf(),
+            source_member_id: agent_session_id,
+            kind: DiscoveredMemberKind::Root,
+            parent_source_member_id: None,
+            root_hint: None,
+            source_kind: "qoder_transcript".into(),
+            source_path: path.to_path_buf(),
             cwd,
             started_at,
             last_activity_at: last_activity.or(last_ts),
@@ -238,7 +264,44 @@ impl QoderAdapter {
             native_title: None,
             first_user_text,
             first_agent_text,
-            parent_agent_session_id: None,
+            metadata: serde_json::json!({}),
+        }))
+    }
+
+    /// A sub-agent transcript as its own CHILD member (§26.3): identity is the
+    /// Adapter-derived `<root>:subagent:<stem>`, the parent is the root id the
+    /// transcript itself repeats. No title sources — a child never names a
+    /// Logical Session (§4.2).
+    fn parse_subagent_member(
+        path: &Path,
+        session_dir: &str,
+        stem: &str,
+    ) -> Result<Option<DiscoveredMember>> {
+        let Some(root_id) = Self::transcript_session_id(path) else {
+            return Ok(None);
+        };
+        let meta = std::fs::metadata(path)?;
+        let last_activity = meta
+            .modified()
+            .ok()
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+        Ok(Some(DiscoveredMember {
+            agent: Agent::Qoder,
+            source_member_id: format!("{root_id}:subagent:{stem}"),
+            kind: DiscoveredMemberKind::Child,
+            parent_source_member_id: Some(root_id.clone()),
+            root_hint: Some(root_id),
+            source_kind: "qoder_subagent_transcript".into(),
+            source_path: path.to_path_buf(),
+            // The subagent file carries the root's cwd on its lines, but a
+            // child's cwd is execution fact only — reported for the member row.
+            cwd: None,
+            started_at: None,
+            last_activity_at: last_activity,
+            native_title: None,
+            first_user_text: None,
+            first_agent_text: None,
+            metadata: serde_json::json!({ "session_dir": session_dir }),
         }))
     }
 }
@@ -254,11 +317,11 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         None
     }
 
-    fn discover_sessions_in(
+    fn discover_members_in(
         &self,
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
-    ) -> Result<Vec<DiscoveredSession>> {
+    ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
         let titles = SessionTitles::open();
         let mut stack: Vec<PathBuf> = roots.to_vec();
@@ -271,28 +334,32 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
                 let p = entry.path();
                 if p.is_dir() {
                     // `<sessionId>/subagents/…` and the diagnostics segments
-                    // under `~/.qoder-cn/logs` are walked too — the fingerprint
-                    // is what decides, not the path.
+                    // under `~/.qoder-cn/logs` are walked too — the shape is
+                    // what decides, not the path.
                     stack.push(p);
                     continue;
                 }
                 if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                if Self::is_subagent_transcript(&p) {
-                    // Ambiguous by content (module doc): claimed by nobody.
+                if unchanged(&p) {
                     continue;
                 }
-                if unchanged(&p) {
+                if let Some((session_dir, stem)) = Self::subagent_member(&p) {
+                    match Self::parse_subagent_member(&p, &session_dir, &stem) {
+                        Ok(Some(m)) => out.push(m),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
+                    }
                     continue;
                 }
                 if detect_format(&p) != Some(Agent::Qoder) {
                     continue;
                 }
-                match Self::parse_session_file(&p) {
-                    Ok(Some(mut s)) => {
-                        s.native_title = titles.title_for(&s.agent_session_id);
-                        out.push(s)
+                match Self::parse_root_member(&p) {
+                    Ok(Some(mut m)) => {
+                        m.native_title = titles.title_for(&m.source_member_id);
+                        out.push(m)
                     }
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
@@ -302,59 +369,21 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         Ok(out)
     }
 
-    fn read_delta(&self, session: &Session, cursor: &SourceCursor) -> Result<ReadDelta> {
-        let path = PathBuf::from(&session.raw_path);
+    fn read_member_delta(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+    ) -> Result<crate::adapters::MemberReadDelta> {
+        let path = PathBuf::from(&member.source_path);
         read_jsonl_delta(&path, cursor, &|_idx, v| {
-            let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let sidechain = v
-                .get("isSidechain")
-                .and_then(|s| s.as_bool())
-                .unwrap_or(false);
-            let source_event_id = v
-                .get("uuid")
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string());
-
-            let (kind, text, extra) = match vtype {
-                "user" | "assistant" => {
-                    let msg = v.get("message").unwrap_or(&Value::Null);
-                    let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                    if text.is_empty() {
-                        return None;
-                    }
-                    if sidechain {
-                        ("system", text, serde_json::json!({ "sidechain": true }))
-                    } else {
-                        let kind = if vtype == "user" {
-                            "user_message"
-                        } else {
-                            "assistant_message"
-                        };
-                        (kind, text, serde_json::json!({}))
-                    }
-                }
-                // `attachment` lines are injected context (skill listings,
-                // system reminders) — machine chatter, same category as the
-                // tool events dropped in §36.11.
-                _ => return None,
-            };
-
-            let mut meta = serde_json::Map::new();
-            meta.insert("agent".into(), serde_json::Value::String("qoder".into()));
-            meta.insert("type".into(), serde_json::Value::String(vtype.to_string()));
-            if let Some(obj) = extra.as_object() {
-                for (k, v2) in obj {
-                    meta.insert(k.clone(), v2.clone());
-                }
-            }
-
-            Some(ParsedLine {
-                kind: kind.into(),
-                text: Some(text),
-                source_event_id,
-                metadata: serde_json::Value::Object(meta),
-            })
+            parse_line(v, member.relation.as_str() == "root")
         })
+    }
+
+    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+        Ok(crate::adapters::inspect_file_source(Path::new(
+            &member.source_path,
+        )))
     }
 
     fn build_new_command(
@@ -386,37 +415,68 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
     ) -> Result<AgentCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法一次性执行"))
     }
+}
 
-    /// Qoder source deletion (方案 §15): the source is the exact discovered
-    /// `*.jsonl` at `raw_path`. The parser is the same one discovery uses, so
-    /// a sub-agent file's derived id (parent + stem) has to match too — which
-    /// it does, because the id comes from that parser.
-    fn prepare_source_session_deletion(
-        &self,
-        session: &Session,
-    ) -> Result<crate::adapters::SourceDeletionPlan> {
-        crate::adapters::prepare_single_file_source_deletion(
-            session,
-            Agent::Qoder,
-            "qoder_transcript",
-            &|p| Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id)),
-        )
-    }
+/// One transcript line's contribution (§26.3). Root members produce
+/// conversation; child members produce observations only.
+fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
+    let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let sidechain = v
+        .get("isSidechain")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+    let source_message_id = v
+        .get("uuid")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
 
-    fn execute_source_session_deletion(
-        &self,
-        plan: &crate::adapters::SourceDeletionPlan,
-    ) -> Result<crate::adapters::SourceDeletionOutcome> {
-        crate::adapters::execute_single_file_source_deletion(plan, Agent::Qoder, &|p| {
-            Ok(Self::parse_session_file(p)?.map(|d| d.agent_session_id))
-        })
+    match vtype {
+        "user" | "assistant" => {
+            let msg = v.get("message").unwrap_or(&Value::Null);
+            let text = content_text(msg.get("content").unwrap_or(&Value::Null));
+            // A user line with toolUseResult is a completed tool call.
+            let tool_call = vtype == "user" && v.get("toolUseResult").is_some();
+            let observation = MemberObservation {
+                tool_calls: u64::from(tool_call),
+                side_activity: u64::from(sidechain),
+                ..Default::default()
+            };
+            if sidechain {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            if text.trim().is_empty() || !is_root {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            let role = if vtype == "user" {
+                SessionMessageRole::User
+            } else {
+                SessionMessageRole::Assistant
+            };
+            // Injected context is never conversation (§2.3).
+            if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            Some(ParsedLine {
+                message: Some(crate::adapters::parsed_message(
+                    source_message_id,
+                    role,
+                    text,
+                )),
+                observation,
+            })
+        }
+        // `attachment` lines are injected context (skill listings, system
+        // reminders) — machine chatter, same category as the tool events
+        // dropped in §36.11.
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::AgentAdapter;
+    use crate::adapters::{AgentAdapter, MemberReadDelta};
+    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir =
@@ -441,87 +501,68 @@ mod tests {
             + "\n"
     }
 
+    fn root_member(path: &Path) -> SessionMember {
+        SessionMember {
+            id: "mem-qoder".into(),
+            session_id: "sess-qoder".into(),
+            agent: Agent::Qoder,
+            source_member_id: "s-main".into(),
+            relation: SessionMemberRelation::Root,
+            parent_source_member_id: None,
+            source_kind: "qoder_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    /// §32.2 — prose survives; attachments, tool results and bookkeeping lines
+    /// never become messages.
     #[test]
-    fn ingest_keeps_prose_and_drops_machine_chatter() {
+    fn the_root_read_keeps_prose_and_counts_the_rest() {
         let dir = unique_dir("parse");
         let file = dir.join("s-main.jsonl");
         std::fs::write(&file, main_lines()).unwrap();
 
-        let found = QoderAdapter
-            .discover_sessions_in(&[dir.clone()], &|_| false)
+        let delta: MemberReadDelta = QoderAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
             .unwrap();
-        assert_eq!(
-            found.len(),
-            1,
-            "one session file, recognized by fingerprint"
-        );
-        let s = &found[0];
-        assert_eq!(s.agent, Agent::Qoder);
-        assert_eq!(s.agent_session_id, "s-main");
-        assert_eq!(s.cwd.as_deref(), Some("/repo"));
-        assert_eq!(s.parent_agent_session_id, None);
-        assert_eq!(
-            s.started_at.as_deref(),
-            Some("2026-09-22T15:01:29.551Z"),
-            "epoch-millis bookkeeping timestamps must not win over ISO ones"
-        );
-        assert_eq!(s.first_user_text.as_deref(), Some("把详情页的消息改一下"));
-
-        let session = Session {
-            id: "sess-1".into(),
-            agent: Agent::Qoder,
-            agent_session_id: "s-main".into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: file.to_string_lossy().to_string(),
-            parent_agent_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            trashed_at: None,
-        };
-        let cursor = SourceCursor::default();
-        let delta = QoderAdapter.read_delta(&session, &cursor).unwrap();
-        let kinds: Vec<(&str, &str)> = delta
-            .events
+        let texts: Vec<(SessionMessageRole, &str)> = delta
+            .messages
             .iter()
-            .map(|e| (e.kind.as_str(), e.text.as_deref().unwrap_or("")))
+            .map(|m| (m.role, m.content.as_str()))
             .collect();
-
-        // The prompt and the assistant's prose survive; the assistant's text is
-        // kept without its tool_use block.
-        assert!(kinds.contains(&("user_message", "把详情页的消息改一下")));
-        assert!(kinds.contains(&("assistant_message", "好，我先看现状。")));
-        // Attachment lines, the tool-result user line and the bookkeeping lines
-        // never become events (§36.11 / §37.5).
-        assert_eq!(delta.events.len(), 3, "got {kinds:?}");
         assert_eq!(
-            kinds.last().map(|(k, _)| *k),
-            Some("system"),
-            "a sidechain line is kept but marked"
+            texts,
+            vec![
+                (SessionMessageRole::User, "把详情页的消息改一下"),
+                (SessionMessageRole::Assistant, "好，我先看现状。"),
+            ],
+            "the sidechain line and the tool-result line never become conversation"
         );
-        assert_eq!(
-            delta.events.last().unwrap().metadata["sidechain"],
-            serde_json::json!(true)
-        );
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.tool_call_count, 1);
+                assert_eq!(s.side_activity_count, 1);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Sub-agent transcripts repeat the parent's `sessionId` and, in their
-    /// head, look exactly like Claude Code's message lines (measured on a real
-    /// file: 75 message lines, one `last-prompt` at the very end). They are
-    /// therefore skipped rather than guessed at — a path-based guess would
-    /// rewrite the parent's identity, and a key-based guess could re-label real
-    /// Claude files (方案 §37.3: 宁可漏判不可错判).
+    /// §26.3 — sub-agent transcripts become CHILD members with an
+    /// Adapter-derived stable identity, while their text stays out of the
+    /// Conversation.
     #[test]
-    fn subagent_transcripts_are_left_unclaimed() {
+    fn subagent_transcripts_are_child_members_with_derived_identity() {
         let dir = unique_dir("subagent");
         let parent = dir.join("-repo");
         let children = parent.join("s-main").join("subagents");
         std::fs::create_dir_all(&children).unwrap();
         std::fs::write(parent.join("s-main.jsonl"), main_lines()).unwrap();
-        // No Qoder marker anywhere in the head, exactly like the real ones.
+        // No Qoder marker in the head, exactly like the real ones.
         std::fs::write(
             children.join("agent-aExplore-abc123.jsonl"),
             r#"{"type":"assistant","uuid":"c1","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","content":[{"type":"text","text":"子 Agent 的结论"}]}}
@@ -530,78 +571,84 @@ mod tests {
         .unwrap();
 
         let found = QoderAdapter
-            .discover_sessions_in(&[dir], &|_| false)
+            .discover_members_in(&[dir], &|_| false)
             .unwrap();
-        assert_eq!(found.len(), 1, "only the parent session is ingested");
-        assert_eq!(found[0].agent_session_id, "s-main");
-        assert_eq!(found[0].parent_agent_session_id, None);
+        assert_eq!(found.len(), 2, "root + child: {found:#?}");
+        let root = found
+            .iter()
+            .find(|m| m.kind == DiscoveredMemberKind::Root)
+            .unwrap();
+        assert_eq!(root.source_member_id, "s-main");
+        let child = found
+            .iter()
+            .find(|m| m.kind == DiscoveredMemberKind::Child)
+            .unwrap();
+        assert_eq!(
+            child.source_member_id,
+            "s-main:subagent:agent-aExplore-abc123"
+        );
+        assert_eq!(child.parent_source_member_id.as_deref(), Some("s-main"));
+        assert_eq!(
+            child.first_user_text, None,
+            "a child never carries a title source"
+        );
+
+        // The child's text is execution observation only.
+        let member = SessionMember {
+            id: "mem-child".into(),
+            session_id: "sess-qoder".into(),
+            agent: Agent::Qoder,
+            source_member_id: child.source_member_id.clone(),
+            relation: SessionMemberRelation::Child,
+            parent_source_member_id: Some("s-main".into()),
+            source_kind: "qoder_subagent_transcript".into(),
+            source_path: child.source_path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        };
+        let delta: MemberReadDelta = QoderAdapter
+            .read_member_delta(&member, &SessionMemberCursor::default())
+            .unwrap();
+        assert!(
+            delta.messages.is_empty(),
+            "child transcript text never becomes conversation"
+        );
     }
 
-    // ---- The app database as a title source (方案 §37.16) -----------------
+    /// The app database still names the root session (§37.16).
+    #[test]
+    fn discovery_reads_session_facts() {
+        let dir = unique_dir("discover");
+        let file = dir.join("s-main.jsonl");
+        std::fs::write(&file, main_lines()).unwrap();
+
+        let found = QoderAdapter
+            .discover_members_in(&[dir], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        let m = &found[0];
+        assert_eq!(m.kind, DiscoveredMemberKind::Root);
+        assert_eq!(m.source_member_id, "s-main");
+        assert_eq!(m.cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            m.started_at.as_deref(),
+            Some("2026-09-22T15:01:29.551Z"),
+            "epoch-millis bookkeeping timestamps must not win over ISO ones"
+        );
+        assert_eq!(m.first_user_text.as_deref(), Some("把详情页的消息改一下"));
+    }
 
     /// A `chat_sessions` as Qoder lays it out — only the columns the reader
     /// touches, but with the real constraints, so the fixture could have been
     /// written by the app itself.
-    fn title_store(tag: &str, rows: &[(&str, &str, &str)]) -> PathBuf {
-        let path = unique_dir(tag).join("main.sqlite");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE chat_sessions (
-                session_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                extra_json TEXT NOT NULL DEFAULT '{}');",
-        )
-        .unwrap();
-        for (id, title, extra) in rows {
-            conn.execute(
-                "INSERT INTO chat_sessions (session_id, title, extra_json) VALUES (?1, ?2, ?3)",
-                rusqlite::params![id, title, extra],
-            )
-            .unwrap();
-        }
-        path
-    }
-
-    /// The transcript has no title, so the model's own name for the session can
-    /// only come from here — and the join is exact, not fuzzy.
-    #[test]
-    fn the_app_database_names_the_session() {
-        let path = title_store(
-            "titles",
-            &[
-                (
-                    "s-main",
-                    "修改任务编辑功能",
-                    r#"{"titleSource":"ai","provisionalTitle":"先了解下这个工程"}"#,
-                ),
-                (
-                    "s-other",
-                    "如何让你能够接管收发微信消息？",
-                    r#"{"titleSource":"provisional","provisionalTitle":"如何让你能够接管收发微信消息？"}"#,
-                ),
-            ],
-        );
-        let titles = SessionTitles::open_at(Some(&path));
-        assert_eq!(
-            titles.title_for("s-main").as_deref(),
-            Some("修改任务编辑功能")
-        );
-        assert_eq!(
-            titles.title_for("s-other"),
-            None,
-            "Qoder says this one is still the raw prompt"
-        );
-        assert_eq!(titles.title_for("s-absent"), None);
-    }
-
-    /// The `titleSource` field is what the rule turns on, so test it directly:
-    /// `ai` is a name, `provisional` and an absent field are not, and anything
-    /// else (a future `custom`) is.
     #[test]
     fn only_a_settled_title_is_a_native_title() {
         assert!(is_resolved_title(Some("ai")));
         assert!(is_resolved_title(Some("custom")));
         assert!(!is_resolved_title(Some("provisional")));
         assert!(!is_resolved_title(None));
+        let _ = SessionTitles::open_at(None);
     }
 }

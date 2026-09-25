@@ -10,10 +10,10 @@
 //!   - Pi:    local qwen/qwen3.8-27b via LM Studio
 
 use noending::adapters::ExecOptions;
-use noending::domain::{Agent, Session, SessionEvent};
+use noending::domain::{Agent, Session, SessionMessage, SessionMessageRole};
 use noending::platform::exec_runner::{clean_exec_stdout, run_headless};
 use noending::storage::{new_id, Db};
-use noending::sync::extractor::{parse_mutations, CliExtractor, PromptEventRef};
+use noending::sync::extractor::{parse_mutations, CliExtractor, PromptMessageRef};
 use noending::sync::ContextExtractor;
 
 fn temp_db() -> Db {
@@ -25,47 +25,50 @@ fn fake_session() -> Session {
     Session {
         id: new_id(),
         agent: Agent::Codex,
-        agent_session_id: "llm-test".into(),
+        root_agent_session_id: "llm-test".into(),
         title: None,
         cwd: None,
         workspace_path_id: None,
         project_id: None,
-        raw_path: "/tmp/llm-test.jsonl".into(),
-        parent_agent_session_id: None,
+        owner_workstream_id: None,
+        forked_from_session_id: None,
         started_at: None,
         last_activity_at: None,
+        last_conversation_at: None,
         trashed_at: None,
-        owner_workstream_id: None,
     }
 }
 
-fn ev(session: &Session, seq: i64, kind: &str, text: &str) -> SessionEvent {
-    SessionEvent {
-        id: new_id(),
+/// A root-conversation message built by hand: unit-level extraction tests need
+/// no database, only the `&[&SessionMessage]` shape the extractor consumes.
+fn msg(session: &Session, seq: i64, role: SessionMessageRole, content: &str) -> SessionMessage {
+    SessionMessage {
+        id: format!("m-{}", seq),
         session_id: session.id.clone(),
+        member_id: "mem-root".into(),
         sequence: seq,
-        source_event_id: None,
+        role,
+        content: content.into(),
+        ts: None,
+        source_message_id: None,
         source_generation: 0,
         source_position: format!("line:{}", seq),
-        ts: None,
-        kind: kind.into(),
-        text: Some(text.into()),
+        source_identity_hash: String::new(),
         raw_ref: format!("test#line:{}", seq),
-        metadata: serde_json::json!({}),
     }
 }
 
 /// A prompt reference map whose sequences are non-1-starting and
 /// non-contiguous: exactly the case the mapping must get right.
-fn ref_map(events: &[SessionEvent]) -> Vec<PromptEventRef> {
-    events
+fn ref_map(messages: &[SessionMessage]) -> Vec<PromptMessageRef> {
+    messages
         .iter()
         .enumerate()
-        .map(|(i, e)| PromptEventRef {
+        .map(|(i, m)| PromptMessageRef {
             short_ref: format!("#{}", i + 1),
-            event_id: e.id.clone(),
-            sequence: e.sequence,
-            kind: e.kind.clone(),
+            message_id: m.id.clone(),
+            sequence: m.sequence,
+            role: m.role,
         })
         .collect()
 }
@@ -87,11 +90,11 @@ fn real_codex_extracts_mutations() {
     db.upsert_workstream(&ws).unwrap();
 
     let session = fake_session();
-    let e1 = ev(&session, 101, "user_message",
+    let m1 = msg(&session, 101, SessionMessageRole::User,
         "我们决定放弃 handoff 模型，改成 Workstream 上下文自动同步：每个 Session 维护 cursor，增量拉取新消息后由 Assistant 提取变更合并进 Workstream。");
-    let e2 = ev(&session, 105, "assistant_message",
+    let m2 = msg(&session, 105, SessionMessageRole::Assistant,
         "好的。注意一个约束：不能修改 Codex/Claude/Pi 的原始会话文件，只读摄取。另外待办：下一步要实现 SessionCursor 的 truncate 检测。");
-    let events = vec![e1, e2];
+    let messages = vec![m1, m2];
 
     let cli = CliExtractor {
         agent: Agent::Codex,
@@ -108,7 +111,7 @@ fn real_codex_extracts_mutations() {
     let out = cli
         .extract(
             &session,
-            &events.iter().collect::<Vec<_>>(),
+            &messages.iter().collect::<Vec<_>>(),
             &ws.id,
             &inputs,
         )
@@ -120,7 +123,7 @@ fn real_codex_extracts_mutations() {
         "expected at least one mutation from real model"
     );
 
-    // every resolved ref must point at a REAL event id from the prompt map
+    // every resolved ref must point at a REAL message id from the prompt map
     for m in &out.mutations {
         let refs = match m {
             noending::sync::ContextMutation::Add { source_refs, .. } => source_refs,
@@ -131,10 +134,12 @@ fn real_codex_extracts_mutations() {
             _ => continue,
         };
         for r in refs {
-            let id = r.strip_prefix("session-event:").expect("session-event ref");
+            let id = r
+                .strip_prefix("session-message:")
+                .expect("session-message ref");
             assert!(
-                events.iter().any(|e| &e.id == id),
-                "ref {} must resolve to a prompt event",
+                messages.iter().any(|e| &e.id == id),
+                "ref {} must resolve to a prompt message",
                 r
             );
         }
@@ -216,11 +221,11 @@ fn real_codex_assistant_chat_roundtrip() {
 #[test]
 fn parse_mutations_validates_candidate_ids() {
     let session = fake_session();
-    let map = vec![PromptEventRef {
+    let map = vec![PromptMessageRef {
         short_ref: "#1".into(),
-        event_id: "e-real-1".into(),
+        message_id: "m-real-1".into(),
         sequence: 101,
-        kind: "user_message".into(),
+        role: SessionMessageRole::User,
     }];
     let text = r##" [{"op":"add","workstream_id":"nope","item_kind":"decision","title":"x","content":"y","refs":["#1"]}] "##;
     let out = parse_mutations(text, &map, "ws1", &session).unwrap();
@@ -233,20 +238,20 @@ fn parse_mutations_validates_candidate_ids() {
 #[test]
 fn parse_mutations_maps_short_refs_through_prompt_map() {
     let session = fake_session();
-    // prompt events carry sequences 101 / 105 — "#2" must map to the event
-    // with id e-real-2 (sequence 105), never to "sequence 2".
+    // prompt messages carry sequences 101 / 105 — "#2" must map to the
+    // message with id m-real-2 (sequence 105), never to "sequence 2".
     let map = vec![
-        PromptEventRef {
+        PromptMessageRef {
             short_ref: "#1".into(),
-            event_id: "e-real-1".into(),
+            message_id: "m-real-1".into(),
             sequence: 101,
-            kind: "user_message".into(),
+            role: SessionMessageRole::User,
         },
-        PromptEventRef {
+        PromptMessageRef {
             short_ref: "#2".into(),
-            event_id: "e-real-2".into(),
+            message_id: "m-real-2".into(),
             sequence: 105,
-            kind: "assistant_message".into(),
+            role: SessionMessageRole::Assistant,
         },
     ];
     let text = r##"[
@@ -259,14 +264,14 @@ fn parse_mutations_maps_short_refs_through_prompt_map() {
 
     match &out.mutations[0] {
         noending::sync::ContextMutation::Add { source_refs, .. } => {
-            assert_eq!(source_refs, &vec!["session-event:e-real-2".to_string()]);
+            assert_eq!(source_refs, &vec!["session-message:m-real-2".to_string()]);
         }
         o => panic!("unexpected: {:?}", o),
     }
     match &out.mutations[1] {
         noending::sync::ContextMutation::Resolve { source_refs, .. } => {
             assert_eq!(source_refs.len(), 1, "invalid ref dropped, valid kept");
-            assert_eq!(source_refs[0], "session-event:e-real-1");
+            assert_eq!(source_refs[0], "session-message:m-real-1");
         }
         o => panic!("unexpected: {:?}", o),
     }

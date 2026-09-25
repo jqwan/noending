@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import SessionMessage, { looksLikeMarkdown } from "./SessionMessage";
+import type { SessionMessageData } from "./SessionMessage";
 
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
 
@@ -9,8 +10,18 @@ afterEach(cleanup);
 const LONG = "第一段说明。".repeat(50) + "结尾标记";
 const MD = "## 小节\n\n- 一\n- 二";
 
-function renderMessage(text: string, kind = "assistant_message") {
-  return render(<SessionMessage msg={{ sequence: 7, kind, text, ts: null, who: "Codex" }} />);
+function msg(content: string, role: SessionMessageData["role"] = "assistant"): SessionMessageData {
+  return {
+    sequence: 7,
+    role,
+    content,
+    ts: null,
+    who: role === "user" ? "用户" : "Codex",
+  };
+}
+
+function renderMessage(content: string, role: SessionMessageData["role"] = "assistant") {
+  return render(<SessionMessage msg={msg(content, role)} />);
 }
 
 it("列表里截断，点开弹窗才给全文", () => {
@@ -41,11 +52,11 @@ it("气泡里直接显示 Markdown 预览，不露出源码", () => {
   expect(body.getAttribute("role")).toBe("button");
 });
 
-it("没有可读文本的事件不开弹窗", () => {
-  renderMessage("   ", "system");
+it("没有可读文本的消息不开弹窗", () => {
+  renderMessage("   ");
 
-  expect(screen.getByText("（该事件没有可读文本）")).toBeTruthy();
-  fireEvent.click(screen.getByText("（该事件没有可读文本）"));
+  expect(screen.getByText("（该消息没有可读文本）")).toBeTruthy();
+  fireEvent.click(screen.getByText("（该消息没有可读文本）"));
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
@@ -77,80 +88,24 @@ it("looksLikeMarkdown 认代码块 / 标题 / 列表，不认普通句子", () =
   expect(looksLikeMarkdown("就是一段普通的话，没有别的。")).toBe(false);
 });
 
-it("系统事件里的 md 一样预览（判断只看内容，不看 kind）", () => {
-  // 库里最像 Markdown 的恰恰是 system / compact：Codex 的 preamble、Claude 的压缩摘要。
-  const { container } = renderMessage("## 规则\n\n- 一\n- 二", "system");
-  const body = container.querySelector(".event .body")!;
-
-  expect(container.querySelector(".event")!.className).toContain("is-tech");
-  expect(body.querySelector("h2")?.textContent).toBe("规则");
-
-  fireEvent.click(body);
-  const dialog = screen.getByRole("dialog");
-  expect(within(dialog).getByRole("button", { name: "预览" }).getAttribute("aria-pressed")).toBe("true");
-});
-
-it("用户消息右、Agent 左，技术事件保持整行", () => {
-  // 左右对齐全靠这三个类（§36.23）；CSS 挂了测试也看不出来，所以在这里钉住类名。
+it("用户消息右、Agent 左（§22.1：只有两种气泡）", () => {
+  // 左右对齐全靠这两个类（§36.23）；CSS 挂了测试也看不出来，所以在这里钉住类名。
   const { container } = render(
     <>
-      <SessionMessage msg={{ sequence: 1, kind: "user_message", text: "提问", ts: null, who: "用户" }} />
-      <SessionMessage msg={{ sequence: 2, kind: "assistant_message", text: "回答", ts: null, who: "Codex" }} />
-      <SessionMessage msg={{ sequence: 3, kind: "system", text: "系统提示", ts: null, who: "系统" }} />
+      <SessionMessage msg={msg("提问", "user")} />
+      <SessionMessage msg={msg("回答", "assistant")} />
     </>,
   );
 
   const rows = [...container.querySelectorAll(".event")].map((el) => el.className);
   expect(rows[0]).toContain("is-user");
   expect(rows[1]).toContain("is-agent");
-  expect(rows[2]).toContain("is-tech");
-  expect(rows[2]).not.toContain("is-user");
+  expect(rows[1]).not.toContain("is-user");
 });
 
-it("跨线程信封标明来源：先说方向，再给标题；NoEnding 的会话 id 在提示里", () => {
-  const { container } = render(
-    <SessionMessage msg={{
-      sequence: 9, kind: "agent_message", text: "改完了", ts: null, who: "Codex",
-      meta: {
-        counterpart_role: "parent",
-        counterpart_title: "设计评审",
-        counterpart_agent_path: "/root/design_prompt_review",
-        counterpart_session_id: "sess-1",
-        message_type: "FINAL_ANSWER",
-      },
-    }} />,
-  );
-
-  expect(screen.getByText("子 Agent 消息")).toBeTruthy();
-  const from = container.querySelector(".event .from")!;
-  expect(from.textContent).toBe("来自父 Agent · 设计评审");
-  // 溯源用的原值没有丢：源 id、NoEnding 会话 id、信封类型都在提示里。
-  expect(from.getAttribute("title")).toContain("sess-1");
-  expect(from.getAttribute("title")).toContain("FINAL_ANSWER");
-  expect(from.getAttribute("title")).toContain("/root/design_prompt_review");
-});
-
-it("子 Agent 发来的消息说成「来自子 Agent」", () => {
-  const { container } = render(
-    <SessionMessage msg={{
-      sequence: 9, kind: "agent_message", text: "改完了", ts: null, who: "Codex",
-      meta: { counterpart_role: "child", counterpart_agent_path: "/root/godot_prompt_review" },
-    }} />,
-  );
-
-  const from = container.querySelector(".event .from")!;
-  expect(from.textContent).toBe("来自子 Agent · /root/godot_prompt_review");
-});
-
-it("方向解不出时只说「来自谁」，路径就是全部；会话 id 不留空话", () => {
-  const { container } = render(
-    <SessionMessage msg={{
-      sequence: 9, kind: "agent_message", text: "给你两条", ts: null, who: "Codex",
-      meta: { counterpart_agent_path: "/root/boss_runtime_rebuild" },
-    }} />,
-  );
-
-  const from = container.querySelector(".event .from")!;
-  expect(from.textContent).toBe("来自 /root/boss_runtime_rebuild");
-  expect(from.getAttribute("title")).toBe("/root/boss_runtime_rebuild");
+it("头部显示调用方给出的 who 与序号", () => {
+  const { container } = renderMessage("回答");
+  const head = container.querySelector(".event .head")!;
+  expect(head.textContent).toContain("Codex");
+  expect(head.textContent).toContain("#7");
 });

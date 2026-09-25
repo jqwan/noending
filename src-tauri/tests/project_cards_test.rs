@@ -2,7 +2,7 @@
 //! plus the review P2-1 contract: search_paths covers EVERY workspace path
 //! while representative_paths stays a display-only truncation.
 
-use noending::domain::{Agent, Session, Workstream};
+use noending::domain::{Agent, Workstream};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::normalize_path;
@@ -42,26 +42,22 @@ fn workstream_with_path(db: &Db, id: &str, title: &str, workspace_path_id: &str)
 }
 
 fn session_at(db: &Db, id: &str, path_id: &str, trashed: bool) {
-    let mut s = Session {
-        id: new_id(),
-        agent: Agent::Codex,
-        agent_session_id: format!("as-{id}"),
-        title: Some(id.into()),
-        cwd: None,
-        workspace_path_id: Some(path_id.into()),
-        project_id: None,
-        raw_path: format!("/raw/{id}.jsonl"),
-        parent_agent_session_id: None,
-        started_at: Some(now()),
-        last_activity_at: Some(now()),
-        trashed_at: None,
-        owner_workstream_id: None,
-    };
-    s.cwd = None;
-    db.upsert_session(&s).unwrap();
+    // The Logical Session is keyed by (agent, root identity); project_id is
+    // derived from workspace_paths inside upsert_logical_session.
+    let (sid, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            &format!("root-{id}"),
+            Some(id),
+            None,
+            Some(path_id),
+            None,
+            Some(&now()),
+            Some(&now()),
+        )
+        .unwrap();
     if trashed {
-        // upsert_session 刻意不写生命周期列；回收站状态要显式落库。
-        let sid = s.id.clone();
+        // 发现路径不写生命周期列；回收站状态要显式落库。
         db.write()
             .execute(
                 "UPDATE sessions SET trashed_at = ?1 WHERE id = ?2",

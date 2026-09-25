@@ -16,15 +16,23 @@ Workstream 语义层：Session 会结束，Agent 会切换，Context 持续存�
 
 ## 领域模型
 
-三类实体的职责固定：
+四类实体的职责固定：
 
 - **Project** — 一组属于同一物理工作空间或 Git family 的 WorkspacePath。不是分类容器。
 - **Workstream** — 一项持续工作，可以拥有多个 WorkspacePath，因此可以跨越多个 Project。
-- **Session** — 一次具体 Agent 执行。所属 Project 由工作目录派生，语义归属由 Owner Workstream 表达，两者互相独立。
+- **Session** — 一个逻辑会话：一次用户可感知、可 Resume 的主会话，加上它派生出的内部执行
+  成员（子 Agent / side）。身份是 Root 成员真实的 Resume 身份（`root_agent_session_id`）。
+  只有 Root 会话产生会话消息（SessionMessage）；所属 Project 由 Root 工作目录派生，
+  语义归属由 Owner Workstream 表达，两者互相独立。
+- **SessionMember** — 会话内部的执行单元（root / child / side），是执行信息与统计的载体，
+  不是另一个 Session。
 
 核心 invariant：
 
 ```text
+A Logical Session has exactly one Root Member.
+Only the Root Member produces SessionMessages.
+
 A Session has at most one Owner Workstream.
 
 Session ownership never mutates Workstream workspace paths.
@@ -32,6 +40,10 @@ Session ownership never mutates Workstream workspace paths.
 Workstream path mutations never change Session ownership.
 
 Session physical Project membership and semantic Workstream ownership are independent.
+
+NoEnding never deletes Agent-owned session sources.
+(Permanent delete = NoEnding-local purge only,
+ available only for a trashed Session whose Root source is freshly confirmed absent.)
 ```
 
 ## 技术栈
@@ -44,15 +56,16 @@ Tauri 2 + React + TypeScript + Rust + SQLite (FTS5)
 
 | 能力 | 说明 |
 |---|---|
-| Agent Adapter | Codex / Claude Code / Pi 的 session discovery、JSONL 增量解析、raw_ref 溯源 |
-| Platform Abstraction | PlatformPaths（`CODEX_HOME`/`CLAUDE_CONFIG_DIR`/`PI_HOME` 覆盖）、ExecutableResolver、PlatformLauncher（macOS Terminal / Windows Terminal / PowerShell） |
-| Session Ingestion | 增量游标（append-only），原始 Agent 文件永不修改，已摄入历史不随源文件删除 |
-| Workstream | CRUD / archive；一个 Session 最多只有一个 Owner Workstream（所属任务） |
+| Agent Adapter | Codex / Claude Code / Qoder / DSH / ZCode / Pi / AutoClaw / WorkBuddy 的 member discovery、增量解析、raw_ref 溯源；Root 之外的执行（child/side）只进拓扑与统计 |
+| Platform Abstraction | PlatformPaths（`CODEX_HOME`/`CLAUDE_CONFIG_DIR`/`PI_HOME`/`DSH_HOME` 覆盖）、ExecutableResolver、PlatformLauncher（macOS Terminal / Windows Terminal / PowerShell） |
+| Session Ingestion | Member 图解析（Root/ForkRoot 建会话，child/side 沿父链归属，悬空源进摄入诊断）+ Member 级增量游标（append-only）；原始 Agent 数据永不修改，已摄入会话不随源文件压缩/截断消失；消息/统计/游标单事务原子提交 |
+| Workstream | CRUD / archive；一个 Session 最多只有一个 Owner Workstream（所属任务）；LaunchIntent 匹配只认 Root，fork 不继承 Owner |
 | Context (L1/L2/L3) | CoreContextResolver 投影 Goal/Current State/Constraints/Decisions/Open Questions；ContextItem + Revision 历史；Supersede 演进链 |
-| Sync Engine | SyncJob（delta → pre-filter → extract → merge → cursor），Context 路由只认 Session 的 Owner Workstream；确定性 Merge Engine（Dedup / Supersede / Resolve / Conflict 保留不自动覆盖），Authority 分级（user_edit 不可被 Agent 静默覆盖） |
+| Sync Engine | SyncJob（会话消息 → extract → merge → Context frontier），无 kind/长度二次过滤；Context 路由只认 Session 的 Owner Workstream（无 Owner 时 frontier 冻结，归属后重放）；确定性 Merge Engine（Dedup / Supersede / Resolve / Conflict 保留不自动覆盖），Authority 分级（user_edit 不可被 Agent 静默覆盖） |
 | Context Builder | New / Resume 两种模式的最小充分上下文 bundle + token budget |
-| Launcher | New Session / Resume Session（先同步 stale session，再注入 bundle 启动 CLI） |
-| Search | SQLite FTS5（token 内子串查询由 LIKE 兜底），优先 Current Context |
+| Launcher | New Session / Resume Session（Resume 前 fresh 检查 Root 源可用性，再同步成员并注入 bundle 启动 CLI） |
+| Lifecycle | Trash / Restore；永久删除 = 仅清除 NoEnding 本地数据，且只对「已入回收站 + Root 源确认不存在」的会话开放 |
+| Search | SQLite FTS5（token 内子串查询由 LIKE 兜底），只索引会话文档与 Root 会话消息 |
 | Workspace Assistant | Interactive Mode v0（基于 Domain API 检索）；Background Mode 即 Sync Engine，LLM Runtime 通过 trait 预留接入 |
 
 ## 运行
@@ -107,18 +120,19 @@ src/                      React UI
   features/assistant      Workspace Assistant 面板
   features/projects       Project 列表 / 详情 / Resources
   features/workstreams    Workstream 上下文页（L1 分区 + Extended Items + 历史）
-  features/sessions       Session 列表 / 标准化消息视图
+  features/sessions       Session 列表 / 会话消息视图（仅 user/assistant）
   features/launcher       New / Resume Session 启动器（含 bundle 预览）
 src-tauri/
-  domain/                 平台无关领域模型
-  adapters/               codex / claude / pi Adapter（trait + 注册表）
+  domain/                 平台无关领域模型（Session / SessionMember / SessionMessage / …）
+  adapters/               codex / claude / qoder / dsh / zcode / pi / autoclaw / workbuddy Adapter（member 契约 + 注册表）
   platform/               PlatformPaths / ExecutableResolver / PlatformLauncher
-  ingestion/              发现 → 入库 → 游标
+  ingestion/              Member 发现 → 逻辑图解析 → 成员原子提交 → Context sync
   sync/                   SyncJob + 启发式 Extractor + 确定性 MergeEngine
   context/                CoreContextResolver + ContextBuilder
   launcher/               Session Launcher（New / Resume 流程）
+  lifecycle/              Trash / Restore / 永久本地删除
   search/                 FTS5 检索
-  storage/                SQLite schema + 仓储
+  storage/                SQLite schema + 仓储（sessions / members / messages / cursors / stats / diagnostics）
 ```
 
 ## 测试

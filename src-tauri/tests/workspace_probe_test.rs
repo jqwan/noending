@@ -11,7 +11,7 @@ mod support;
 
 use noending::domain::{Agent, Session};
 use noending::storage::workspace::insert_workspace_path_conn;
-use noending::storage::{new_id, Db};
+use noending::storage::Db;
 use noending::workspace::home::NoEndingHome;
 use noending::workspace::probe::{list_recent_workspace_paths, probe_workspace_path, ProbeStatus};
 use noending::workspace::resolver::{ResolverContext, WorkspaceResolver};
@@ -51,17 +51,22 @@ fn canonical(raw: &str) -> String {
     normalize_path(raw).expect("fixture path is normalizable")
 }
 
+/// The row id is store-assigned (identity is the ROOT member's Agent-side
+/// id), so callers use the returned Session instead of a fixture id.
 fn session(db: &Db, tag: &str, cwd: &str, activity: &str) -> Session {
-    let mut s = support::session(
-        new_id(),
-        Agent::Codex,
-        format!("src-{tag}"),
-        format!("/raw/{tag}.jsonl"),
-    );
-    s.cwd = Some(cwd.to_string());
-    s.last_activity_at = Some(activity.to_string());
-    db.upsert_session(&s).unwrap();
-    s
+    let (row_id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            &format!("src-{tag}"),
+            None,
+            Some(cwd),
+            None,
+            None,
+            None,
+            Some(activity),
+        )
+        .unwrap();
+    db.get_session(&row_id).unwrap().expect("session row")
 }
 
 // --------------------------------------------------------------- rejections
@@ -177,10 +182,21 @@ fn recent_paths_union_the_registry_with_session_cwd_history() {
     // Two sessions in the same unknown directory: one entry, latest activity.
     session(&db, "a1", "/repo/alpha", "2026-03-01T00:00:00+00:00");
     session(&db, "a2", "/repo/alpha", "2026-02-01T00:00:00+00:00");
-    // A session working in the known path boosts its activity.
-    let mut s3 = session(&db, "m1", "/repo/main", "2026-01-05T00:00:00+00:00");
-    s3.workspace_path_id = Some(main_id.clone());
-    db.upsert_session(&s3).unwrap();
+    // A session working in the known path boosts its activity; its cwd
+    // resolved to the registered WorkspacePath.
+    let (s3_id, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            "src-m1",
+            None,
+            Some("/repo/main"),
+            Some(&main_id),
+            None,
+            None,
+            Some("2026-01-05T00:00:00+00:00"),
+        )
+        .unwrap();
+    let _ = s3_id;
     // Noise: a relative cwd can never be normalized, and a reserved app path
     // must never be offered as a working directory.
     session(&db, "bad", "relative/x", "2026-06-01T00:00:00+00:00");

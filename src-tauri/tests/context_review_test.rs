@@ -1,10 +1,11 @@
 use noending::domain::{
-    Agent, ContextConflict, ContextDelivery, ContextItemRevision, ReviewFrontier, Session,
-    Workstream,
+    Agent, ContextConflict, ContextDelivery, ContextItemRevision, ReviewFrontier, Workstream,
 };
 use noending::storage::{new_id, now, Db};
 use rusqlite::params;
 use std::ops::Deref;
+
+mod support;
 
 struct TestDb {
     db: Option<Db>,
@@ -46,26 +47,10 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
     w
 }
 
-fn session_row(db: &TestDb, agent: Agent) -> Session {
-    let raw = db.dir.join(format!("raw-{}.jsonl", new_id()));
-    let _ = std::fs::write(&raw, "");
-    let s = Session {
-        id: new_id(),
-        agent,
-        agent_session_id: format!("as-{}", new_id()),
-        title: Some("Session Review Isolation".into()),
-        cwd: None,
-        workspace_path_id: None,
-        project_id: None,
-        raw_path: raw.to_string_lossy().to_string(),
-        parent_agent_session_id: None,
-        started_at: Some(now()),
-        last_activity_at: Some(now()),
-        trashed_at: None,
-        owner_workstream_id: None,
-    };
-    db.upsert_session(&s).unwrap();
-    s
+/// A Logical Session created the way every production discovery is: keyed by
+/// the ROOT member's Resume identity, row id store-assigned.
+fn session_row(db: &TestDb, agent: Agent) -> noending::domain::Session {
+    support::ensure_session(db, new_id(), agent, format!("as-{}", new_id()))
 }
 
 fn set_item_time(db: &Db, item_id: &str, timestamp: &str) {
@@ -122,7 +107,7 @@ fn new_agent_change_is_unseen() {
         "Agent Inferred Goal",
         "Agent observed something",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         Some("sync-run-1"),
         "sync:agent",
@@ -161,7 +146,7 @@ fn user_edit_is_not_review_relevant() {
         "Initial State",
         "State from agent",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -303,7 +288,7 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "Goal A",
         "A",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -318,7 +303,7 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "Goal B",
         "B",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -338,7 +323,7 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "Goal C",
         "C",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -397,7 +382,7 @@ fn same_timestamp_boundary_is_lossless() {
         .unwrap();
         conn.execute(
             "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
-             VALUES (?1, ?2, 'Goal A', 'Same timestamp A', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_event', ?3)",
+             VALUES (?1, ?2, 'Goal A', 'Same timestamp A', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_message', ?3)",
             params![rev_a_id, item_a_id, ts],
         )
         .unwrap();
@@ -410,7 +395,7 @@ fn same_timestamp_boundary_is_lossless() {
         .unwrap();
         conn.execute(
             "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
-             VALUES (?1, ?2, 'Goal B', 'Same timestamp B', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_event', ?3)",
+             VALUES (?1, ?2, 'Goal B', 'Same timestamp B', '{\"provenance\":{\"actor\":\"agent\"}}', 'session_message', ?3)",
             params![rev_b_id, item_b_id, ts],
         )
         .unwrap();
@@ -444,12 +429,35 @@ fn same_timestamp_boundary_is_lossless() {
 
 /// 7. review_state_isolated_from_domain_state
 /// Marking reviewed is purely observational and MUST NOT mutate Context items,
-/// revisions, conflicts, ContextDelivery snapshots, or Session cursors.
+/// revisions, conflicts, ContextDelivery snapshots, or member cursors.
 #[test]
 fn review_state_isolated_from_domain_state() {
     let db = open_db("domain-isolation");
     let ws = ws_row(&db, "Isolation WS");
     let s = session_row(&db, Agent::Codex);
+
+    // The read position lives on the ROOT member, never on the session.
+    let member_id = support::ensure_root_member(
+        &db,
+        &s.id,
+        Agent::Codex,
+        &s.root_agent_session_id,
+        "/tmp/review-isolation",
+    );
+    noending::storage::upsert_member_cursor_conn(
+        &db.write(),
+        &noending::domain::SessionMemberCursor {
+            member_id: member_id.clone(),
+            source_file_identity: "identity-1".into(),
+            generation: 1,
+            byte_offset: 100,
+            last_seen_size: 100,
+            mtime: None,
+            prefix_hash: String::new(),
+            identity_tail_hash: String::new(),
+        },
+    )
+    .unwrap();
 
     let item = noending::sync::create_item(
         &db,
@@ -458,7 +466,7 @@ fn review_state_isolated_from_domain_state() {
         "Core Goal",
         "Mission",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -472,7 +480,7 @@ fn review_state_isolated_from_domain_state() {
         "Constraint",
         "Rule",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -505,13 +513,6 @@ fn review_state_isolated_from_domain_state() {
     };
     db.record_delivery(&delivery).unwrap();
 
-    let mut cursor = db.get_source_cursor(&s.id).unwrap();
-    cursor.session_id = s.id.clone();
-    cursor.last_sequence = 42;
-    cursor.byte_offset = 100;
-    cursor.generation = 1;
-    db.set_source_cursor(&cursor).unwrap();
-
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     // Snapshot all domain states before mark reviewed
@@ -519,7 +520,7 @@ fn review_state_isolated_from_domain_state() {
     let history_before = db.item_history(&item.id).unwrap();
     let conflict_before = db.get_conflict(&conflict.id).unwrap().unwrap();
     let deliveries_before = db.latest_deliveries(&s.id).unwrap();
-    let cursor_before = db.get_source_cursor(&s.id).unwrap();
+    let cursor_before = db.get_member_cursor(&member_id).unwrap();
     let owner_before = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
     // Perform mark_workstream_reviewed
@@ -534,7 +535,7 @@ fn review_state_isolated_from_domain_state() {
     let history_after = db.item_history(&item.id).unwrap();
     let conflict_after = db.get_conflict(&conflict.id).unwrap().unwrap();
     let deliveries_after = db.latest_deliveries(&s.id).unwrap();
-    let cursor_after = db.get_source_cursor(&s.id).unwrap();
+    let cursor_after = db.get_member_cursor(&member_id).unwrap();
     let owner_after = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
     assert_eq!(item_before.id, item_after.id);
@@ -571,9 +572,12 @@ fn review_state_isolated_from_domain_state() {
         deliveries_after[0].delivered_conflicts
     );
 
-    assert_eq!(cursor_before.last_sequence, cursor_after.last_sequence);
     assert_eq!(cursor_before.byte_offset, cursor_after.byte_offset);
     assert_eq!(cursor_before.generation, cursor_after.generation);
+    assert_eq!(
+        cursor_before.identity_tail_hash, cursor_after.identity_tail_hash,
+        "review must not touch the member cursor"
+    );
 
     assert_eq!(owner_before, owner_after, "review must not touch the owner");
 }
@@ -593,7 +597,7 @@ fn sync_status_change_is_review_relevant() {
         "Auto Resolvable Todo",
         "Will be resolved by sync",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -724,7 +728,7 @@ fn review_summary_category_breakdown() {
         "Task 1",
         "First task",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -740,7 +744,7 @@ fn review_summary_category_breakdown() {
         "Goal 2",
         "Initial goal content",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -757,10 +761,10 @@ fn review_summary_category_breakdown() {
             "provenance": {
                 "authority": "agent_inferred",
                 "actor": "agent",
-                "source_type": "session_event",
+                "source_type": "session_message",
             }
         }),
-        source_type: Some("session_event".into()),
+        source_type: Some("session_message".into()),
         source_ref: None,
         sync_run_id: Some("sync-run-2".into()),
         created_at: now(),
@@ -777,7 +781,7 @@ fn review_summary_category_breakdown() {
         "Task 3",
         "Will resolve",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -811,7 +815,7 @@ fn review_summary_category_breakdown() {
         "Decision 4",
         "Old decision",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",
@@ -985,7 +989,7 @@ fn review_summary_batch_list() {
         "WS1 Task",
         "Details",
         "agent_inferred",
-        "session_event",
+        "session_message",
         &[],
         None,
         "agent",

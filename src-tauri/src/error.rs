@@ -8,11 +8,6 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Other(String),
-    /// A prepared permanent deletion no longer matches the live Agent source
-    /// (方案 §21/§22). Carries the job to `stale` — the source is never
-    /// deleted on a fingerprint mismatch and the user must re-prepare.
-    #[error("源删除计划已过期: {0}")]
-    SourceDeletionStale(String),
 }
 
 impl serde::Serialize for AppError {

@@ -1,31 +1,39 @@
-//! Session workspace semantics (方案 §19).
+//! Session workspace semantics (重构方案 §1/§4/§18) and the storage ingredients
+//! of the Session detail view.
 //!
-//! Every test here pins one edge of the fact chain
+//! Every workspace test pins one edge of the fact chain
 //!
 //! ```text
-//! Session.cwd → workspace_path_id → workspace_paths.project_id → Project
+//! Session.cwd (the ROOT's) → workspace_path_id → workspace_paths.project_id → Project
 //! ```
 //!
 //! Two things are deliberately scripted rather than real:
 //!
 //! * the WorkspacePath creator is a [`Scripted`] stand-in for
 //!   `workspace::project`'s implementation of [`WorkspaceAttaching`], so Session
-//!   rules are testable without Git detection;
+//!   rules are testable without Git detection. Discovery reaches it through the
+//!   app-wide seam (`register_workspace_attacher`), so the shared instance is
+//!   created once per process and every test reads facts, not call counts;
 //! * every path is a plain `/repo/...` string — no temp-dir prefix is ever
 //!   asserted, because `std::env::temp_dir()` is a symlink on macOS (§42.3-M8).
+//!
+//! The Tauri detail command is a thin map over storage/lifecycle calls, so the
+//! detail-shape tests exercise exactly those calls (`members_for_session`,
+//! `aggregate_session_stats`, the two frontiers, `root_source_status`, …).
 //!
 //! Only temp databases are opened; no user Home, no real transcripts.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 mod support;
 
-use noending::adapters::{adapter_for, DiscoveredSession};
-use noending::domain::{Agent, Session};
+use noending::adapters::{adapter_for, DiscoveredMember, DiscoveredMemberKind};
+use noending::domain::{Agent, Session, SessionMemberRelation, SessionMessageRole};
 use noending::error::Result;
-use noending::ingestion::{ensure_session_row_with, ingest_session, reconcile_with_engine};
+use noending::ingestion::{ingest_and_sync_session, reconcile_with_engine, session_title};
 use noending::launcher::LaunchWorkspace;
+use noending::lifecycle;
 use noending::storage::session_paths::{
     attach_session_workspace_path_conn, refresh_sessions_project_for_path_conn,
 };
@@ -59,28 +67,23 @@ fn temp_db(tag: &str) -> (PathBuf, Db) {
 }
 
 /// The seam, scripted: every resolvable spelling becomes its deterministic
-/// WorkspacePath under one fixed Project, and every call is counted so "ordinary
-/// ingestion does no Project work" is a measurement instead of an intention.
+/// WorkspacePath under one fixed Project. The instance handed to the app-wide
+/// registry is created exactly once per process — later registrations are
+/// refused, so every reconcile-based test shares it and its project id.
 struct Scripted {
     project_id: String,
-    calls: AtomicUsize,
 }
 
 impl Scripted {
     fn new(project_id: &str) -> Self {
         Self {
             project_id: project_id.into(),
-            calls: AtomicUsize::new(0),
         }
-    }
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
     }
 }
 
 impl WorkspaceAttaching for Scripted {
     fn ensure_path(&self, conn: &rusqlite::Connection, raw: &str) -> Result<Option<String>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
         let Some(canonical) = normalize_path(raw) else {
             return Ok(None);
         };
@@ -92,47 +95,21 @@ impl WorkspaceAttaching for Scripted {
     }
 }
 
+/// The one shared seam of this test binary, registered on first use.
+fn shared_attacher() -> &'static Arc<Scripted> {
+    static SHARED: OnceLock<Arc<Scripted>> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let attacher = Arc::new(Scripted::new("p-repo"));
+        // This is the only registration point in the binary; the Result is
+        // ignored so a re-entrant init can never panic.
+        let _ = register_workspace_attacher(attacher.clone());
+        attacher
+    })
+}
+
 fn project(db: &Db, id: &str, name: &str) {
     db.upsert_project(&support::project(id.into(), name))
         .unwrap();
-}
-
-fn discovered(agent_session_id: &str, cwd: Option<&str>, raw_path: &Path) -> DiscoveredSession {
-    DiscoveredSession {
-        agent: Agent::Codex,
-        agent_session_id: agent_session_id.into(),
-        path: raw_path.to_path_buf(),
-        cwd: cwd.map(Into::into),
-        started_at: Some("2026-09-13T10:00:00Z".into()),
-        last_activity_at: Some("2026-09-13T10:05:00Z".into()),
-        first_user_text: Some("帮我看下这个模块".into()),
-        native_title: None,
-        first_agent_text: None,
-        parent_agent_session_id: None,
-    }
-}
-
-/// One discovery pass over a fake transcript location.
-fn discover(
-    db: &Db,
-    attacher: &dyn WorkspaceAttaching,
-    agent_session_id: &str,
-    cwd: Option<&str>,
-) -> (Session, bool) {
-    ensure_session_row_with(
-        db,
-        &discovered(
-            agent_session_id,
-            cwd,
-            &PathBuf::from(format!("/raw/{agent_session_id}.jsonl")),
-        ),
-        attacher,
-    )
-    .unwrap()
-}
-
-fn stored(db: &Db, id: &str) -> Session {
-    db.get_session(id).unwrap().expect("session row")
 }
 
 /// Codex rollout envelope: discovery fingerprints on `{ordinal, payload, type}`
@@ -149,62 +126,154 @@ fn codex_meta_line(session_id: &str, cwd: &str) -> String {
     )
 }
 
+/// Write a discoverable Codex transcript under `root` and run one reconcile
+/// pass over the enabled ingest sources. Returns the stored session.
+fn discover_via_reconcile(
+    db: &Db,
+    engine: &SyncEngine,
+    root: &Path,
+    file_name: &str,
+    agent_session_id: &str,
+    cwd: &str,
+    first_user_text: &str,
+) -> Session {
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(
+        root.join(file_name),
+        format!(
+            "{}\n{}\n",
+            codex_meta_line(agent_session_id, cwd),
+            codex_user_line(first_user_text)
+        ),
+    )
+    .unwrap();
+    let root_str = root.to_string_lossy().to_string();
+    if !db.enabled_roots(Agent::Codex).unwrap().contains(&root_str) {
+        db.add_ingest_source(Agent::Codex, &root_str, true).unwrap();
+    }
+    let _ = shared_attacher();
+    reconcile_with_engine(db, engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    db.find_session_by_root_agent_id(Agent::Codex, agent_session_id)
+        .unwrap()
+        .expect("discovered through the real adapter")
+}
+
+fn stored(db: &Db, id: &str) -> Session {
+    db.get_session(id).unwrap().expect("session row")
+}
+
 // ------------------------------------------- 1. discovery → WorkspacePath
 
 #[test]
 fn discovered_session_gets_a_workspace_path() {
     let (_d, db) = temp_db("discover");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
+    project(&db, "p-repo", "repo");
+    let engine = SyncEngine::default();
 
-    let (s, is_new) = discover(&db, &attacher, "s1", Some("/repo/app"));
-    assert!(is_new);
-    let stored = stored(&db, &s.id);
+    let s = discover_via_reconcile(
+        &db,
+        &engine,
+        &unique_dir("discover-raw"),
+        "rollout-2026-09-13-s-1-2-3-4.jsonl",
+        "discover-1",
+        "/repo/app",
+        "帮我看下这个模块",
+    );
+    let after = stored(&db, &s.id);
     assert_eq!(
-        stored.workspace_path_id,
+        after.workspace_path_id,
         path_identity_of("/repo/app"),
         "the observed cwd became its WorkspacePath, by deterministic identity"
     );
-    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
+    assert_eq!(
+        db.list_workspace_paths().unwrap().len(),
+        1,
+        "exactly one path exists"
+    );
 
-    // Re-discovery of the same transcript learns nothing new, so no second
-    // attach happens — the seam is free to write a row and must not be called.
-    discover(&db, &attacher, "s1", Some("/repo/app"));
-    assert_eq!(attacher.calls(), 1, "a steady-state scan does no path work");
-    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
+    // Re-discovery of the same transcript skips the unchanged source, so no
+    // second attach happens and no second path row can appear.
+    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    assert_eq!(
+        db.list_workspace_paths().unwrap().len(),
+        1,
+        "a steady-state scan creates no new path"
+    );
+    assert_eq!(
+        stored(&db, &s.id).workspace_path_id,
+        after.workspace_path_id
+    );
 }
 
+/// A trailing separator is the same directory, so the same path identity: an
+/// attach through another spelling cannot move the Session or duplicate the
+/// WorkspacePath (§42.3-M8: one directory, one identity).
 #[test]
 fn a_different_spelling_of_the_same_cwd_does_not_move_the_session() {
     let (_d, db) = temp_db("spell");
     project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
+    let (s, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            "spell-root",
+            Some("t"),
+            Some("/repo/app"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    {
+        let conn = db.write();
+        insert_workspace_path_conn(&conn, "/repo/app", "p1").unwrap();
+    }
 
-    let (s, _) = discover(&db, &attacher, "s1", Some("/repo/app"));
-    let before = stored(&db, &s.id);
-    // A trailing separator is the same directory, so the same identity: no
-    // second WorkspacePath and no "drift".
-    let (_, is_new) = discover(&db, &attacher, "s1", Some("/repo/app/"));
-    assert!(!is_new);
-    let after = stored(&db, &s.id);
-    assert_eq!(before.workspace_path_id, after.workspace_path_id);
-    assert_eq!(before.project_id, after.project_id);
-    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
+    // The explicit attach door with a differently-spelled cwd.
+    let moved = {
+        let conn = db.write();
+        noending::workspace::session::attach_session_conn(
+            &conn,
+            &Scripted::new("p1"),
+            &s,
+            Some("/repo/app/"),
+        )
+        .unwrap()
+    };
+    assert!(moved, "the unattached row moved onto the path");
+    let after = stored(&db, &s);
+    assert_eq!(after.workspace_path_id, path_identity_of("/repo/app"));
+    assert_eq!(after.project_id.as_deref(), Some("p1"));
+    assert_eq!(
+        db.list_workspace_paths().unwrap().len(),
+        1,
+        "the second spelling resolved to the same identity, not a new row"
+    );
 }
 
+/// The unwired seam answers "no path" to everything — an absent WorkspacePath
+/// is a fact we do not know, a fabricated one is a fact that is wrong (§5.5).
 #[test]
-fn an_unwired_workspace_layer_leaves_the_session_unattached() {
+fn an_unwired_workspace_layer_resolves_no_path() {
     let (_d, db) = temp_db("unwired");
-    let (s, _) = ensure_session_row_with(
-        &db,
-        &discovered("s1", Some("/repo/app"), &PathBuf::from("/raw/s1.jsonl")),
-        &UnattachedWorkspacePaths,
-    )
-    .unwrap();
-    let stored = stored(&db, &s.id);
-    assert_eq!(stored.workspace_path_id, None);
-    assert_eq!(stored.project_id, None);
-    assert!(db.list_workspace_paths().unwrap().is_empty());
+    let resolved = {
+        let conn = db.write();
+        noending::workspace::session::resolve_session_path(
+            &conn,
+            &UnattachedWorkspacePaths,
+            Some("/repo/app"),
+        )
+        .unwrap()
+    };
+    assert_eq!(resolved, None, "an unwired seam never invents a path");
+
+    // And a blank cwd is answered before the seam is consulted at all.
+    let scripted = {
+        let conn = db.write();
+        noending::workspace::session::resolve_session_path(&conn, &Scripted::new("p1"), Some("   "))
+            .unwrap()
+    };
+    assert_eq!(scripted, None);
 }
 
 // ------------------------------------------- 2/3. the derived Project
@@ -212,38 +281,30 @@ fn an_unwired_workspace_layer_leaves_the_session_unattached() {
 #[test]
 fn session_gets_a_derived_project() {
     let (_d, db) = temp_db("derived");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
+    project(&db, "p-repo", "repo");
+    let engine = SyncEngine::default();
 
-    let (s, _) = discover(&db, &attacher, "s1", Some("/repo/app"));
-    let stored = stored(&db, &s.id);
-    assert_eq!(stored.project_id.as_deref(), Some("p1"));
+    let s = discover_via_reconcile(
+        &db,
+        &engine,
+        &unique_dir("derived-raw"),
+        "rollout-2026-09-13-d-1-2-3-4.jsonl",
+        "derived-1",
+        "/repo/app",
+        "hello",
+    );
+    let after = stored(&db, &s.id);
+    assert_eq!(after.project_id.as_deref(), Some("p-repo"));
     // The cache agrees with its source, which is the whole invariant.
     let wp = db
-        .get_workspace_path(stored.workspace_path_id.as_ref().unwrap())
+        .get_workspace_path(after.workspace_path_id.as_ref().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(wp.project_id.as_str(), "p1");
-    // And what discovery hands back is the stored row, not a caller's guess:
-    // nothing in this flow ever supplied a Project at all.
-    assert_eq!(s.project_id, stored.project_id);
-    assert_eq!(s.workspace_path_id, stored.workspace_path_id);
-}
-
-#[test]
-fn a_standalone_session_still_gets_a_project() {
-    // §24 — no Workstream is involved: membership comes from the Session's own
-    // path, straight down the chain.
-    let (_d, db) = temp_db("standalone");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-
-    let (s, _) = discover(&db, &attacher, "s1", Some("/repo/app"));
+    assert_eq!(wp.project_id.as_str(), "p-repo");
     assert!(
-        stored(&db, &s.id).owner_workstream_id.is_none(),
+        after.owner_workstream_id.is_none(),
         "§3.3 — a standalone Session has no Owner Workstream"
     );
-    assert_eq!(stored(&db, &s.id).project_id.as_deref(), Some("p1"));
 }
 
 #[test]
@@ -253,16 +314,30 @@ fn an_explicit_attach_recomputes_the_cached_project_from_the_path() {
     let (_d, db) = temp_db("reattach");
     project(&db, "p1", "one");
     project(&db, "p2", "two");
-    let attacher = Scripted::new("p2");
-    let (s, _) = discover(&db, &attacher, "s1", Some("/repo/two"));
-    assert_eq!(stored(&db, &s.id).project_id.as_deref(), Some("p2"));
-
+    let (s, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            "reattach-root",
+            Some("t"),
+            Some("/repo/two"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    {
+        let conn = db.write();
+        insert_workspace_path_conn(&conn, "/repo/two", "p2").unwrap();
+        attach_session_workspace_path_conn(&conn, &s, None).unwrap();
+    }
+    // The row above was never attached; simulate the pre-attach state exactly.
     let first = db
         .tx(|tx| insert_workspace_path_conn(tx, &normalize_path("/repo/one").unwrap(), "p1"))
         .unwrap();
-    db.tx(|tx| attach_session_workspace_path_conn(tx, &s.id, Some(&first)))
+    db.tx(|tx| attach_session_workspace_path_conn(tx, &s, Some(&first)))
         .unwrap();
-    let after = stored(&db, &s.id);
+    let after = stored(&db, &s);
     assert_eq!(after.workspace_path_id.as_deref(), Some(first.as_str()));
     assert_eq!(after.project_id.as_deref(), Some("p1"));
 }
@@ -281,15 +356,15 @@ fn project_id_writers_are_confined_to_the_derived_doors() {
                 .to_string_lossy()
                 .replace('\\', "/");
             // The two sanctioned files: the derived doors in session_paths.rs,
-            // and storage/mod.rs (upsert_session's in-statement COALESCE plus
-            // the batch refresh and the referential cleanup on Project delete).
+            // and storage/mod.rs (upsert_logical_session's in-statement
+            // COALESCE plus the batch refresh and the referential cleanup).
             let allowed = rel == "src/storage/session_paths.rs" || rel == "src/storage/mod.rs";
             !allowed && writes_sessions_project_id(&std::fs::read_to_string(f).unwrap_or_default())
         })
         .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
-        "sessions.project_id may only be written by upsert_session's in-statement \
+        "sessions.project_id may only be written by upsert_logical_session's in-statement \
          derivation, the batch refresh and the referential cleanup: {offenders:?}"
     );
 }
@@ -340,24 +415,42 @@ fn changing_a_workspace_paths_project_refreshes_all_its_sessions() {
     let (_d, db) = temp_db("refresh");
     project(&db, "p1", "one");
     project(&db, "p2", "two");
-    let attacher = Scripted::new("p1");
 
-    let a = discover(&db, &attacher, "a", Some("/repo/app")).0;
-    let b = discover(&db, &attacher, "b", Some("/repo/app")).0;
-    let c = discover(&db, &attacher, "c", Some("/repo/other")).0;
+    let mk = |id: &str, cwd: &str| {
+        let path = {
+            let conn = db.write();
+            insert_workspace_path_conn(&conn, cwd, "p1").unwrap()
+        };
+        let (sid, _) = db
+            .upsert_logical_session(
+                Agent::Codex,
+                &format!("root-{id}"),
+                Some("t"),
+                Some(cwd),
+                Some(&path),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        sid
+    };
+    let a = mk("a", "/repo/app");
+    let b = mk("b", "/repo/app");
+    let c = mk("c", "/repo/other");
     for s in [&a, &b, &c] {
-        assert_eq!(stored(&db, &s.id).project_id.as_deref(), Some("p1"));
+        assert_eq!(stored(&db, s).project_id.as_deref(), Some("p1"));
     }
 
     let path = path_identity_of("/repo/app").unwrap();
     db.tx(|tx| reassign_workspace_path_project_conn(tx, &path, "p2"))
         .unwrap();
 
-    assert_eq!(stored(&db, &a.id).project_id.as_deref(), Some("p2"));
-    assert_eq!(stored(&db, &b.id).project_id.as_deref(), Some("p2"));
+    assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
+    assert_eq!(stored(&db, &b).project_id.as_deref(), Some("p2"));
     // Only the Sessions behind that path moved; the third still reads p1 through
     // its own path. A refresh is a projection, not a rename-everything.
-    assert_eq!(stored(&db, &c.id).project_id.as_deref(), Some("p1"));
+    assert_eq!(stored(&db, &c).project_id.as_deref(), Some("p1"));
 }
 
 #[test]
@@ -365,9 +458,22 @@ fn the_batch_refresh_is_alone_sufficient_and_idempotent() {
     let (_d, db) = temp_db("refresh2");
     project(&db, "p1", "one");
     project(&db, "p2", "two");
-    let attacher = Scripted::new("p1");
-    let a = discover(&db, &attacher, "a", Some("/repo/app")).0;
-    let path = path_identity_of("/repo/app").unwrap();
+    let path = {
+        let conn = db.write();
+        insert_workspace_path_conn(&conn, "/repo/app", "p1").unwrap()
+    };
+    let (a, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            "refresh-root",
+            Some("t"),
+            Some("/repo/app"),
+            Some(&path),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     db.tx(|tx| {
         tx.execute(
             "UPDATE workspace_paths SET project_id = 'p2' WHERE id = ?1",
@@ -383,65 +489,53 @@ fn the_batch_refresh_is_alone_sufficient_and_idempotent() {
         .tx(|tx| refresh_sessions_project_for_path_conn(tx, &path))
         .unwrap();
     assert_eq!(refreshed, 1);
-    assert_eq!(stored(&db, &a.id).project_id.as_deref(), Some("p2"));
+    assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
     // Running it again cannot apply the change twice.
     let again = db
         .tx(|tx| refresh_sessions_project_for_path_conn(tx, &path))
         .unwrap();
     assert_eq!(again, 1);
-    assert_eq!(stored(&db, &a.id).project_id.as_deref(), Some("p2"));
+    assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
 }
 
-// ------------------------------- 5. ordinary event ingestion does no Project work
+// ------------------------------- 5. ordinary member ingestion does no Project work
 
 #[test]
-fn event_ingestion_alone_does_not_change_a_project() {
+fn member_ingestion_alone_does_not_change_a_project() {
     let (_d, db) = temp_db("ingest");
-    project(&db, "p1", "repo");
-    let dir = unique_dir("ingest");
-    let file = dir.join("rollout-2026-09-13-t-1-2-3-4.jsonl");
-    std::fs::write(
-        &file,
-        format!(
-            "{}\n{}\n",
-            codex_meta_line("ingest-1", "/repo/app"),
-            codex_user_line("first message")
-        ),
-    )
-    .unwrap();
+    project(&db, "p-repo", "repo");
+    let engine = SyncEngine::default();
 
-    let attacher = Scripted::new("p1");
-    let (mut s, _) = ensure_session_row_with(
+    let s = discover_via_reconcile(
         &db,
-        &discovered("ingest-1", Some("/repo/app"), &file),
-        &attacher,
-    )
-    .unwrap();
-    assert_eq!(attacher.calls(), 1);
+        &engine,
+        &unique_dir("ingest-raw"),
+        "rollout-2026-09-13-i-1-2-3-4.jsonl",
+        "ingest-1",
+        "/repo/app",
+        "first message",
+    );
     let before = stored(&db, &s.id);
     let path_before = db
         .get_workspace_path(before.workspace_path_id.as_ref().unwrap())
         .unwrap()
         .unwrap();
 
-    // Real event ingestion through the real Codex adapter.
-    let ingested = ingest_session(&db, adapter_for(Agent::Codex), &mut s).unwrap();
-    assert!(ingested > 0, "the fixture really ingested events");
+    // Another ingest pass over the same (unchanged) source: the reconcile
+    // re-resolution is skipped by the cursor, and a direct member ingest has
+    // no workspace code path at all — the session's Project facts stay put.
+    let (stored_count, _) = ingest_and_sync_session(&db, &engine, &before).unwrap();
+    assert_eq!(stored_count, 0, "an unchanged source stores nothing");
 
     let after = stored(&db, &s.id);
     assert_eq!(after.project_id, before.project_id);
     assert_eq!(after.workspace_path_id, before.workspace_path_id);
-    assert_eq!(
-        attacher.calls(),
-        1,
-        "no Project work per event batch (§1.11)"
-    );
     let path_after = db
         .get_workspace_path(after.workspace_path_id.as_ref().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(path_after.last_seen_at, path_before.last_seen_at);
     assert_eq!(path_after.project_id, path_before.project_id);
+    assert_eq!(path_after.last_seen_at, path_before.last_seen_at);
 }
 
 // ------------------------------------------------ product-level discovery
@@ -450,79 +544,55 @@ fn event_ingestion_alone_does_not_change_a_project() {
 fn reconcile_discovers_and_attaches_sessions_to_workspace_paths() {
     let dir = unique_dir("reconcile");
     let root = dir.join("sessions");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("rollout-2026-09-13-x-1-2-3-4.jsonl"),
-        format!(
-            "{}\n{}\n",
-            codex_meta_line("reconciled-1", "/repo/app"),
-            codex_user_line("hello")
-        ),
-    )
-    .unwrap();
-
     let db = Db::open(&dir.join("noending.db")).unwrap();
     project(&db, "p-repo", "repo");
-    db.add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
-        .unwrap();
-    let attacher = Arc::new(Scripted::new("p-repo"));
-    // The one test that needs the app-wide seam; every other test injects one.
-    let _ = register_workspace_attacher(attacher.clone());
+    let engine = SyncEngine::default();
 
-    let engine = SyncEngine::from_settings(&db);
-    let seen = AtomicUsize::new(0);
-    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {
-        seen.fetch_add(1, Ordering::SeqCst);
-    })
-    .unwrap();
+    let s = discover_via_reconcile(
+        &db,
+        &engine,
+        &root,
+        "rollout-2026-09-13-r-1-2-3-4.jsonl",
+        "reconciled-1",
+        "/repo/app",
+        "hello",
+    );
 
-    let s = db
-        .find_session_by_agent_id(Agent::Codex, "reconciled-1")
-        .unwrap()
-        .expect("discovered through the real adapter");
-    assert_eq!(s.workspace_path_id, path_identity_of("/repo/app"));
-    assert_eq!(s.project_id.as_deref(), Some("p-repo"));
-    assert_eq!(s.cwd.as_deref(), Some("/repo/app"));
-    assert!(seen.load(Ordering::SeqCst) > 0);
-    assert!(attacher.calls() >= 1);
+    let after = stored(&db, &s.id);
+    assert_eq!(after.workspace_path_id, path_identity_of("/repo/app"));
+    assert_eq!(after.project_id.as_deref(), Some("p-repo"));
+    assert_eq!(after.cwd.as_deref(), Some("/repo/app"));
+    assert!(after.title.is_some(), "the fixture yields a title");
 }
 
 /// Discovery skips transcripts whose stored cursor still matches the file on
-/// disk: a skipped file produces no DiscoveredSession at all, so nothing may
+/// disk: a skipped file produces no DiscoveredMember at all, so nothing may
 /// refresh the row — observable by a sentinel `last_activity_at` surviving a
 /// second pass. A row WITHOUT a title is deliberately never in the skipset:
-/// re-parsing its (unchanged) file is what heals titles written by older
-/// builds that stopped scanning at session_meta.
+/// re-parsing its (unchanged) file is what heals titles written before the
+/// title source was seen.
 #[test]
 fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
     let dir = unique_dir("skip-unchanged");
     let root = dir.join("sessions");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("rollout-2026-09-13-a-b-c-d.jsonl"),
-        format!(
-            "{}\n{}\n",
-            codex_meta_line("skip-1", "/repo/app"),
-            codex_user_line("first user message")
-        ),
-    )
-    .unwrap();
-
     let db = Db::open(&dir.join("noending.db")).unwrap();
     // The global attacher is process state another test in this binary may
     // have registered; "p-repo" existing keeps that seam working here too.
     project(&db, "p-repo", "repo");
-    db.add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
-        .unwrap();
-    let engine = SyncEngine::from_settings(&db);
-    let reconcile = || reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {});
-
-    reconcile().unwrap();
-    let s = db
-        .find_session_by_agent_id(Agent::Codex, "skip-1")
-        .unwrap()
-        .expect("ingested on the first pass");
-    assert!(s.title.is_some(), "the fixture yields a title");
+    let engine = SyncEngine::default();
+    let s = discover_via_reconcile(
+        &db,
+        &engine,
+        &root,
+        "rollout-2026-09-13-k-1-2-3-4.jsonl",
+        "skip-1",
+        "/repo/app",
+        "first user message",
+    );
+    assert!(
+        stored(&db, &s.id).title.is_some(),
+        "the fixture yields a title"
+    );
 
     // Pass 2 over the unchanged file: discovery must skip the parse entirely,
     // so nothing overwrites the sentinel.
@@ -532,7 +602,7 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
             rusqlite::params![s.id],
         )
         .unwrap();
-    reconcile().unwrap();
+    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
     let after = stored(&db, &s.id);
     assert_eq!(
         after.last_activity_at.as_deref(),
@@ -548,7 +618,7 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
             rusqlite::params![s.id],
         )
         .unwrap();
-    reconcile().unwrap();
+    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
     let healed = stored(&db, &s.id);
     assert!(
         healed.title.is_some(),
@@ -834,26 +904,42 @@ fn noending_home_is_resolved_before_the_database_opens() {
 }
 
 /// §1.10 — a Session is a member of a Project because its own path says so.
-/// The derived cache is a cache: a row still holding only a v11 hand-attached
+/// The derived cache is a cache: a row still holding only a hand-attached
 /// label is not in that Project, and `list_sessions` must agree with
 /// `get_project_detail` instead of disagreeing with it (§42.3-M29).
 #[test]
 fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     let (_d, db) = temp_db("cache-is-not-membership");
-    project(&db, "p-real", "Real");
-    let attacher = Scripted::new("p-real");
-    let (member, _) = discover(&db, &attacher, "s-member", Some("/cache-authority/repo"));
-    let (ghost, _) = discover(&db, &attacher, "s-ghost", Some("/cache-authority/repo"));
-    // Make the second row look like what it is in a real upgraded database: a
-    // v11 Session whose only Project fact was the label a person attached by
-    // hand, and no resolvable path. `attach_session_workspace_path_conn(None)`
-    // is the door that clears both, so the label is re-written afterwards the
-    // way the v11 data already had it.
+    project(&db, "p-repo", "Real");
+    let engine = SyncEngine::default();
+    let raw = unique_dir("cache-authority-raw");
+    let member = discover_via_reconcile(
+        &db,
+        &engine,
+        &raw,
+        "rollout-2026-09-13-c-1-2-3-4.jsonl",
+        "s-member",
+        "/cache-authority/repo",
+        "member prompt",
+    );
+    let ghost = discover_via_reconcile(
+        &db,
+        &engine,
+        &raw,
+        "rollout-2026-09-13-c-5-6-7-8.jsonl",
+        "s-ghost",
+        "/cache-authority/repo",
+        "ghost prompt",
+    );
+    // Make the second row look like what a hand-cached label produces: a row
+    // whose only Project fact is the label, with no resolvable path.
+    // `attach_session_workspace_path_conn(None)` is the door that clears both,
+    // so the label is re-written afterwards the way stale caches had it.
     db.tx(|tx| attach_session_workspace_path_conn(tx, &ghost.id, None))
         .unwrap();
     db.write()
         .execute(
-            "UPDATE sessions SET project_id = 'p-real' WHERE id = ?1",
+            "UPDATE sessions SET project_id = 'p-repo' WHERE id = ?1",
             rusqlite::params![ghost.id],
         )
         .unwrap();
@@ -866,7 +952,7 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     let in_project = db
         .list_sessions(noending::storage::SessionFilter {
             scope: Default::default(),
-            project_id: Some("p-real".into()),
+            project_id: Some("p-repo".into()),
             agent: None,
         })
         .unwrap();
@@ -877,76 +963,70 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
         "the cached row must not be listed as a member the chain denies"
     );
     assert_eq!(
-        db.get_session(&ghost.id)
-            .unwrap()
-            .unwrap()
-            .project_id
-            .as_deref(),
-        Some("p-real"),
+        stored(&db, &ghost.id).project_id.as_deref(),
+        Some("p-repo"),
         "the stale cache value is left alone — this is a read-side fix, not a rewrite"
     );
 }
 
-/// §37.15 — a Session's title comes from the first source that has one:
-/// the transcript's own title, else the first user text, else the first agent
+/// §4.2/§37.15 — a Session's title comes from the first source that has one:
+/// the root's native title, else the first user text, else the first agent
 /// text. The order is the whole point (an Agent's own title beats a derived
-/// one, and a human prompt beats a machine reply), so it is pinned here rather
-/// than left to whichever adapter happens to fill which field.
+/// one, and a human prompt beats a machine reply), and the rule lives in
+/// exactly one function (`ingestion::session_title`).
 #[test]
 fn a_session_title_prefers_the_native_then_the_user_then_the_agent() {
-    let dir = unique_dir("title-order");
-    let db = Db::open(&dir.join("noending.db")).unwrap();
-    project(&db, "p-repo", "repo");
-    let raw = dir.join("raw.jsonl");
-
-    let with = |native: Option<&str>, user: Option<&str>, agent: Option<&str>| DiscoveredSession {
+    let member = |native: Option<&str>, user: Option<&str>, agent: Option<&str>| DiscoveredMember {
         agent: Agent::Codex,
-        agent_session_id: format!("t-{native:?}-{user:?}-{agent:?}"),
-        path: raw.clone(),
+        source_member_id: "title-root".into(),
+        kind: DiscoveredMemberKind::Root,
+        parent_source_member_id: None,
+        root_hint: None,
+        source_kind: "codex_rollout".into(),
+        source_path: PathBuf::from("/raw/title.jsonl"),
         cwd: None,
         started_at: None,
         last_activity_at: None,
         native_title: native.map(Into::into),
         first_user_text: user.map(Into::into),
         first_agent_text: agent.map(Into::into),
-        parent_agent_session_id: None,
+        metadata: serde_json::json!({}),
     };
 
-    let cases = [
+    let cases: [(DiscoveredMember, Option<String>); 5] = [
         (
-            with(
+            member(
                 Some("原生标题"),
                 Some("第一句用户话"),
                 Some("第一句 agent 话"),
             ),
-            Some("原生标题"),
+            Some("原生标题".into()),
         ),
         (
-            with(None, Some("第一句用户话"), Some("第一句 agent 话")),
-            Some("第一句用户话"),
+            member(None, Some("第一句用户话"), Some("第一句 agent 话")),
+            Some("第一句用户话".into()),
         ),
         (
-            with(None, None, Some("第一句 agent 话")),
-            Some("第一句 agent 话"),
+            member(None, None, Some("第一句 agent 话")),
+            Some("第一句 agent 话".into()),
         ),
-        (with(None, None, None), None),
-        // A machine blob is not a title, so the next source gets its turn.
-        (with(None, None, Some("{\"outcome\":\"allow\"}")), None),
+        (member(None, None, None), None),
+        // A machine blob is not a title, so the next source gets its turn —
+        // and when no source has prose, there is no title at all.
+        (member(None, None, Some("{\"outcome\":\"allow\"}")), None),
     ];
     for (d, expected) in cases {
-        let (session, _) = ensure_session_row_with(&db, &d, &Scripted::new("p-repo")).unwrap();
         assert_eq!(
-            session.title.as_deref(),
+            session_title(&d),
             expected,
-            "agent_session_id={}",
-            d.agent_session_id
+            "source_member_id={}",
+            d.source_member_id
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §37.19 — discovery skips a transcript whose cursor says "unchanged", so a
-/// Session ingested before its directory was registered used to keep
+/// Session ingested before its directory was registered keeps
 /// `workspace_path_id = NULL` forever: the branch that exists for exactly that
 /// case sits behind the gate. One cheap pass over the registered paths repairs
 /// it, and touching an unregistered directory stays a decision rather than a
@@ -960,39 +1040,41 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
         insert_workspace_path_conn(&conn, "/repo/late", "p1").unwrap()
     };
 
-    // A Session row as `ensure_session_row_with` leaves it when the seam had
-    // nothing to answer with — which is what a pre-registration ingest does.
-    let orphan = |cwd: &str, id: &str| Session {
-        id: id.into(),
-        agent: Agent::Codex,
-        agent_session_id: format!("a-{id}"),
-        title: Some("t".into()),
-        cwd: Some(cwd.into()),
-        workspace_path_id: None,
-        project_id: None,
-        owner_workstream_id: None,
-        raw_path: format!("/raw/{id}.jsonl"),
-        parent_agent_session_id: None,
-        started_at: None,
-        last_activity_at: None,
-        trashed_at: None,
+    // A Session row as discovery leaves it when the seam had nothing to answer
+    // with — cwd observed, no WorkspacePath attached.
+    let orphan = |root: &str, cwd: &str| {
+        let (id, _) = db
+            .upsert_logical_session(
+                Agent::Codex,
+                root,
+                Some("t"),
+                Some(cwd),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        id
     };
-    db.upsert_session(&orphan("/repo/late", "late")).unwrap();
-    db.upsert_session(&orphan("/repo/nobody-registered", "stranger"))
-        .unwrap();
-    assert_eq!(stored(&db, "late").workspace_path_id, None);
+    let late = orphan("late-root", "/repo/late");
+    let _stranger = orphan("stranger-root", "/repo/nobody-registered");
+    assert_eq!(stored(&db, &late).workspace_path_id, None);
 
     assert_eq!(attach_sessions_to_registered_paths(&db).unwrap(), 1);
 
-    let late = stored(&db, "late");
-    assert_eq!(late.workspace_path_id.as_deref(), Some(path_id.as_str()));
+    let attached = stored(&db, &late);
     assert_eq!(
-        late.project_id.as_deref(),
+        attached.workspace_path_id.as_deref(),
+        Some(path_id.as_str())
+    );
+    assert_eq!(
+        attached.project_id.as_deref(),
         Some("p1"),
         "the derived Project cache moves in the same statement, not after it"
     );
     assert_eq!(
-        stored(&db, "stranger").workspace_path_id,
+        stored(&db, &_stranger).workspace_path_id,
         None,
         "an unregistered directory is not registered as a side effect"
     );
@@ -1000,5 +1082,179 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
         attach_sessions_to_registered_paths(&db).unwrap(),
         0,
         "idempotent: once attached, the Session leaves the set"
+    );
+}
+
+// ------------------------------- 6. the detail ingredients (重构方案 §28) ----
+
+/// `get_session_detail` is a thin Tauri command over storage/lifecycle queries.
+/// This pins exactly the rows those queries hand it, so the detail page's
+/// facts cannot drift from the store: the member graph (root first), the
+/// aggregate stats, the two frontiers, and the fresh root source verdict.
+#[test]
+fn the_detail_ingredients_come_from_storage_queries() {
+    let dir = unique_dir("detail-src");
+    let file = dir.join("rollout-detail.jsonl");
+    std::fs::write(&file, "agent-owned transcript\n").unwrap();
+    let db = {
+        let (d, db) = {
+            let d = unique_dir("detail");
+            let db = Db::open(&d.join("noending.db")).unwrap();
+            (d, db)
+        };
+        let _ = d;
+        db
+    };
+    let root_id = "detail-root";
+    let (s, _) = db
+        .upsert_logical_session(
+            Agent::Codex,
+            root_id,
+            Some("detail title"),
+            Some("/repo/detail"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let root_member = db
+        .upsert_session_member(
+            &s,
+            Agent::Codex,
+            root_id,
+            SessionMemberRelation::Root,
+            None,
+            "test_root",
+            &file.to_string_lossy(),
+            Some("/repo/detail"),
+            None,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+    let child_member = db
+        .upsert_session_member(
+            &s,
+            Agent::Codex,
+            "detail-child",
+            SessionMemberRelation::Child,
+            Some(root_id),
+            "subagent_file",
+            "/raw/child.jsonl",
+            Some("/child/cwd"),
+            None,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+
+    // One root conversation batch with stats, then a child stats-only update.
+    let messages = vec![
+        support::parsed_message("m1", SessionMessageRole::User, "detail first"),
+        support::parsed_message("m2", SessionMessageRole::Assistant, "detail reply"),
+    ];
+    let stored_messages = db
+        .commit_member_ingest(
+            &s,
+            &root_member,
+            &messages,
+            Some(stats_delta(2, 1)),
+            &noending::domain::SourceCursorUpdate {
+                file_identity: "identity".into(),
+                generation: 1,
+                byte_offset: 100,
+                last_seen_size: 100,
+                mtime: None,
+                start_byte_offset: 0,
+                prefix_hash: String::new(),
+            },
+        )
+        .unwrap();
+    db.index_new_messages(&stored_messages).unwrap();
+
+    // The member graph, root first.
+    let members = db.members_for_session(&s).unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0].relation.as_str(), "root");
+    assert_eq!(members[0].id, root_member);
+    assert_eq!(members[1].id, child_member);
+    // Child cwd never reached the session (§4.1/§18).
+    assert_eq!(stored(&db, &s).cwd.as_deref(), Some("/repo/detail"));
+
+    // The aggregate is query-time and covers the whole graph.
+    let stats = db.aggregate_session_stats(&s).unwrap();
+    assert_eq!(stats.member_count, 2);
+    assert_eq!(stats.child_count, 1);
+    assert_eq!(stats.side_count, 0);
+    assert_eq!(stats.max_depth, 1, "the child hangs off the root");
+
+    // The two frontiers the detail page shows.
+    assert_eq!(db.ingested_message_sequence(&s).unwrap(), 2);
+    assert_eq!(
+        db.get_context_state(&s).unwrap().processed_message_sequence,
+        0
+    );
+    db.set_processed_message_sequence(&s, 1).unwrap();
+    assert_eq!(
+        db.get_context_state(&s).unwrap().processed_message_sequence,
+        1
+    );
+
+    // The fresh source verdict and the lifecycle flags it feeds.
+    let session = stored(&db, &s);
+    let status = lifecycle::root_source_status(&db, &session).unwrap();
+    assert_eq!(status, Some(noending::domain::SourceAvailability::Present));
+    assert!(!session.is_trashed());
+}
+
+/// A stats delta so the commit above reads like the observation batch it is.
+fn stats_delta(tool_calls: i64, tool_errors: i64) -> noending::domain::StatsUpdate {
+    noending::domain::StatsUpdate::Delta(noending::domain::MemberStatsDelta {
+        tool_call_count: Some(tool_calls),
+        tool_error_count: Some(tool_errors),
+        compaction_count: None,
+        side_activity_count: None,
+    })
+}
+
+/// The adapter resolved by `adapter_for` is the one the lifecycle verdicts
+/// consult: a Codex root pointing at a real file is Present, and pointing at
+/// a removed file is Missing — never something in between.
+#[test]
+fn the_source_verdict_follows_the_file_on_disk() {
+    let dir = unique_dir("verdict-src");
+    let file = dir.join("session.jsonl");
+    std::fs::write(&file, "transcript\n").unwrap();
+    let member = |path: &Path| noending::domain::SessionMember {
+        id: "m".into(),
+        session_id: "s".into(),
+        agent: Agent::Codex,
+        source_member_id: "root".into(),
+        relation: SessionMemberRelation::Root,
+        parent_source_member_id: None,
+        source_kind: "test".into(),
+        source_path: path.to_string_lossy().to_string(),
+        cwd: None,
+        started_at: None,
+        last_activity_at: None,
+        metadata: serde_json::json!({}),
+    };
+
+    let adapter = adapter_for(Agent::Codex);
+    assert_eq!(
+        adapter.inspect_member_source(&member(&file)).unwrap(),
+        noending::domain::SourceAvailability::Present
+    );
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(
+        adapter.inspect_member_source(&member(&file)).unwrap(),
+        noending::domain::SourceAvailability::Missing
+    );
+
+    // A directory is a non-regular file: Unavailable — any doubt ≠ missing.
+    assert_eq!(
+        adapter.inspect_member_source(&member(&dir)).unwrap(),
+        noending::domain::SourceAvailability::Unavailable
     );
 }
