@@ -99,10 +99,11 @@ fn probe_names_why_a_string_is_not_a_workspace_path() {
 #[test]
 fn probe_of_an_unknown_directory_predicts_a_new_project() {
     let (_dir, db) = temp_db();
-    let resolver = WorkspaceResolver::new(ResolverContext {
-        style: Some(PathStyle::Unix),
-        ..ResolverContext::inert()
-    });
+    // This fixture is a REAL host directory, so it must be resolved in the
+    // host's style — pinning Unix here made the probe normalize to forward
+    // slashes while the expectation below used the host's separators, which
+    // only agreed on Unix.
+    let resolver = WorkspaceResolver::new(ResolverContext::inert());
     let policy = HomePolicy::new(
         &NoEndingHome::new_with_style("/Users/tester/.noending", None, PathStyle::Unix).unwrap(),
     );
