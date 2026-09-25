@@ -10,7 +10,7 @@
 //! directions stay INDEPENDENT: setting an Owner never mutates the Workstream's
 //! path list, and mutating the path list never changes an Owner (§5).
 
-use noending::domain::{Agent, ParsedEvent, Project, Session, Workstream};
+use noending::domain::{Agent, ParsedEvent, Session, Workstream};
 use noending::launcher::{LaunchWorkspace, SessionLauncher};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
@@ -22,6 +22,7 @@ use noending::workspace::workstream::{
 use noending::workspace::WorkspaceAttaching;
 use rusqlite::Connection;
 use std::ops::Deref;
+mod support;
 
 // ---------------------------------------------------------------- harness
 
@@ -92,7 +93,7 @@ impl WorkspaceAttaching for TempPaths {
 }
 
 fn seed_project(db: &Db, id: &str) {
-    db.upsert_project(&Project::new(id.to_string(), "Owner Model Test"))
+    db.upsert_project(&support::project(id.to_string(), "Owner Model Test"))
         .unwrap();
 }
 
@@ -1541,7 +1542,7 @@ fn session_search_documents_follow_workstream_and_project_renames() {
     use noending::search::search;
 
     let db = open_db("search-projection");
-    db.upsert_project(&Project::new("p1".to_string(), "ProjX".to_string()))
+    db.upsert_project(&support::project("p1".to_string(), "ProjX".to_string()))
         .unwrap();
     let a = workstream(&db, "Alpha");
     let mut s = session(&db, None);

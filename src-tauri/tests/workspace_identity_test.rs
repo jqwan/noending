@@ -8,7 +8,7 @@
 //!
 //! Temp directories only; no user Home and no real transcript (§42.3-M13).
 
-use noending::domain::{GitDetection, GitWorktreeKind, Project, WorkspaceObservation};
+use noending::domain::{GitDetection, GitWorktreeKind, WorkspaceObservation};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::home::NoEndingHome;
@@ -19,6 +19,8 @@ use noending::workspace::{
     normalize_path, normalize_path_with, path_identity, path_identity_of, path_identity_with,
     NormalizeOpts, PathStyle,
 };
+
+mod support;
 
 fn canon(raw: &str) -> String {
     normalize_path(raw).expect("test paths are absolute")
@@ -73,13 +75,13 @@ fn repo(raw: &str, common: &str, kind: GitWorktreeKind) -> WorkspaceObservation 
 /// project_id) > 1`, which can never be non-zero because `id` is the PRIMARY
 /// KEY. An assertion that cannot fail is worse than none, because it reads as
 /// coverage. A row whose id is *not* `path_identity(its own canonical_path)` is
-/// reachable — a hand-written INSERT, a migration that derives the key
+/// reachable — a hand-written INSERT, a bulk derivation that computes the key
 /// differently, or a second normalizer (§42.3-M8: "禁止第二份实现") — and every
 /// join keeps agreeing with it, so the corruption stays silent.
 #[test]
 fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p1".to_string(), "One"))
+    db.upsert_project(&support::project("p1".to_string(), "One"))
         .unwrap();
     let canonical = canon("/identity-integrity/repo");
     let good = db
@@ -106,9 +108,9 @@ fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
 #[test]
 fn one_git_family_cannot_be_claimed_by_two_projects() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("fa".to_string(), "A"))
+    db.upsert_project(&support::project("fa".to_string(), "A"))
         .unwrap();
-    db.upsert_project(&Project::new("fb".to_string(), "B"))
+    db.upsert_project(&support::project("fb".to_string(), "B"))
         .unwrap();
     let err = db
         .write()
@@ -127,13 +129,14 @@ fn one_git_family_cannot_be_claimed_by_two_projects() {
 
 /// The Unix half of 方案 §42.3-M8.4, frozen as data rather than as a rule.
 ///
-/// macOS ships v12 rows keyed by these values, so an identity change here is a
-/// data migration and not a fix. The literals were produced by an independent
+/// Stored `workspace_paths.id` values are keyed by these strings, so changing
+/// the derivation would re-key every existing row — an identity change, not a
+/// fix. The literals were produced by an independent
 /// implementation of `sha256("noending:workspace-path:v1:" + path_key)` — not
 /// by running this module and copying what came out — so the test stays a check
 /// even if the module is wrong.
 #[test]
-fn unix_v12_path_identity_vectors_are_stable() {
+fn unix_path_identity_vectors_are_stable() {
     const VECTORS: [(&str, &str); 6] = [
         (
             "/Users/example/code/noending",

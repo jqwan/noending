@@ -1,4 +1,4 @@
-//! WorkstreamPath persistence: the ordered working-path list (schema v12).
+//! WorkstreamPath persistence: the ordered working-path list.
 //!
 //! The ordering IS the role — position 0 is the primary path, so there is no
 //! `is_primary` column to drift out of agreement with the list (方案 §1.5). The

@@ -19,9 +19,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+mod support;
 
 use noending::adapters::{adapter_for, DiscoveredSession};
-use noending::domain::{Agent, Project, Session};
+use noending::domain::{Agent, Session};
 use noending::error::Result;
 use noending::ingestion::{ensure_session_row_with, ingest_session, reconcile_with_engine};
 use noending::launcher::LaunchWorkspace;
@@ -92,7 +93,8 @@ impl WorkspaceAttaching for Scripted {
 }
 
 fn project(db: &Db, id: &str, name: &str) {
-    db.upsert_project(&Project::new(id.into(), name)).unwrap();
+    db.upsert_project(&support::project(id.into(), name))
+        .unwrap();
 }
 
 fn discovered(agent_session_id: &str, cwd: Option<&str>, raw_path: &Path) -> DiscoveredSession {
@@ -280,7 +282,7 @@ fn project_id_writers_are_confined_to_the_derived_doors() {
                 .replace('\\', "/");
             // The two sanctioned files: the derived doors in session_paths.rs,
             // and storage/mod.rs (upsert_session's in-statement COALESCE plus
-            // the v12 migration and the referential cleanup on Project delete).
+            // the batch refresh and the referential cleanup on Project delete).
             let allowed = rel == "src/storage/session_paths.rs" || rel == "src/storage/mod.rs";
             !allowed && writes_sessions_project_id(&std::fs::read_to_string(f).unwrap_or_default())
         })
@@ -288,7 +290,7 @@ fn project_id_writers_are_confined_to_the_derived_doors() {
     assert!(
         offenders.is_empty(),
         "sessions.project_id may only be written by upsert_session's in-statement \
-         derivation, the batch refresh and the migration: {offenders:?}"
+         derivation, the batch refresh and the referential cleanup: {offenders:?}"
     );
 }
 
@@ -678,11 +680,10 @@ fn balanced_paren(window: &str, from: usize) -> Option<&str> {
 }
 
 /// §42.5-T3 — every product write to `workstreams` names `lifecycle`
-/// explicitly (§42.2-E2: an upgraded database keeps the historical
-/// `DEFAULT 'open'`, so the column default is not a safety net), and nothing
-/// writes the retired vocabulary. `WHERE lifecycle = 'open'` in the v12
-/// migration is a *read* of the old value and is required, so the write form is
-/// matched as `SET lifecycle = …`.
+/// explicitly (§42.2-E2: the column default is not a safety net for a field the
+/// user sees), and nothing writes the retired vocabulary. Reading the old value
+/// is a different statement shape, so only the write form is matched, as
+/// `SET lifecycle = …`.
 #[test]
 fn workstream_writes_name_lifecycle_and_never_write_the_retired_vocabulary() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));

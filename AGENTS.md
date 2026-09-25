@@ -41,7 +41,7 @@ Key areas:
 
 * Keep changes small and scoped.
 * Follow the existing module boundaries and reuse existing APIs where practical.
-* Add migrations and regression tests for schema or behavior changes.
+* Add regression tests for schema or behavior changes.
 * Consider both macOS and Windows for platform-sensitive code.
 
 For domain-specific behavior, inspect the current code, tests, and relevant documentation before making changes.

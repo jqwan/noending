@@ -7,8 +7,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+mod support;
 
-use noending::domain::{Agent, Project, Session};
+use noending::domain::{Agent, Session};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, Db};
 use noending::workspace::home::NoEndingHome;
@@ -51,7 +52,7 @@ fn canonical(raw: &str) -> String {
 }
 
 fn session(db: &Db, tag: &str, cwd: &str, activity: &str) -> Session {
-    let mut s = Session::new(
+    let mut s = support::session(
         new_id(),
         Agent::Codex,
         format!("src-{tag}"),
@@ -133,7 +134,8 @@ fn probe_of_an_unknown_directory_predicts_a_new_project() {
 #[test]
 fn probe_of_a_registered_path_predicts_its_existing_project() {
     let (_dir, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let canonical = canonical("/repo/main");
     db.tx(|tx| insert_workspace_path_conn(tx, &canonical, "p1"))
         .unwrap();
@@ -166,7 +168,8 @@ fn probe_of_a_registered_path_predicts_its_existing_project() {
 fn recent_paths_union_the_registry_with_session_cwd_history() {
     let (_dir, db) = temp_db();
     let policy = home_policy("/Users/tester/.noending", "/Users/tester");
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let main_id = db
         .tx(|tx| insert_workspace_path_conn(tx, &canonical("/repo/main"), "p1"))
         .unwrap();

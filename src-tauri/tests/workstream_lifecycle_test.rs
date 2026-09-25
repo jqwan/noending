@@ -7,10 +7,11 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+mod support;
 
 use noending::domain::{
-    workstream_lifecycle, workstream_visibility, Agent, ContextConflict, ContextDelivery, Project,
-    Session, SessionEvent, Workstream,
+    workstream_lifecycle, workstream_visibility, Agent, ContextConflict, ContextDelivery, Session,
+    SessionEvent, Workstream,
 };
 use noending::error::Result;
 use noending::storage::{new_id, now, Db};
@@ -47,8 +48,9 @@ impl WorkspaceAttaching for FixedAttacher {
 }
 
 fn workstream(db: &Db, id: &str) -> Workstream {
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
-    let mut w = Workstream::new(id.into(), id);
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
+    let mut w = support::workstream(id.into(), id);
     w.id = id.into();
     db.upsert_workstream(&w).unwrap();
     add_workstream_path(db, &FixedAttacher, id, "/repo/main").unwrap();
@@ -56,7 +58,7 @@ fn workstream(db: &Db, id: &str) -> Workstream {
 }
 
 fn session(db: &Db, tag: &str) -> Session {
-    let s = Session::new(
+    let s = support::session(
         new_id(),
         Agent::Codex,
         format!("src-{tag}"),
@@ -127,8 +129,9 @@ fn active_to_completed_changes_nothing_else() {
 }
 
 /// §1.13 — the vocabulary is `active | completed` and nothing else. `open` and
-/// `abandoned` were folded by v12; a caller still writing them is a bug, and
-/// silently accepting them would re-open the migration (§42.2-E2/E10).
+/// `abandoned` are outside that closed set; a caller still writing one is a bug,
+/// and silently accepting it would put a value no reader understands in the
+/// column (§42.2-E2/E10).
 #[test]
 fn lifecycle_rejects_the_retired_vocabulary() {
     let (_d, db) = temp_db();
@@ -583,7 +586,8 @@ fn permanent_delete_leaves_a_sibling_alone() {
 #[test]
 fn created_archived_and_purged_leaves_no_trace_of_itself() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let w = create_workstream(&db, &FixedAttacher, "临时", "", &["/repo/tmp".into()])
         .unwrap()
         .workstream;
@@ -607,7 +611,7 @@ fn created_archived_and_purged_leaves_no_trace_of_itself() {
     }
 }
 
-/// The legacy whole-object write is what silently reverted an archive before:
+/// The whole-object write is what silently reverted an archive before:
 /// every screen echoes the object it loaded, so a stale one could restore or
 /// retire a Workstream nobody had asked about. Title and description still
 /// travel; the two state fields and the two frozen columns do not.
@@ -617,7 +621,7 @@ fn whole_object_write_cannot_change_lifecycle_or_visibility() {
     let w = workstream(&db, "w-edit");
     let mut stale = db.get_workstream(&w.id).unwrap().unwrap();
 
-    // A title edit through the legacy door still works.
+    // A title edit through the whole-object door still works.
     stale.title = "改过名".into();
     let edited = apply_whole_object_edit(&db, &stale).unwrap();
     db.upsert_workstream(&edited).unwrap();
@@ -642,7 +646,7 @@ fn whole_object_write_cannot_change_lifecycle_or_visibility() {
         .contains("set_workstream_lifecycle"));
 
     // A write of a row that does not exist is refused instead of creating one.
-    let ghost = Workstream::new("w-ghost".into(), "ghost");
+    let ghost = support::workstream("w-ghost".into(), "ghost");
     assert!(apply_whole_object_edit(&db, &ghost).is_err());
 }
 

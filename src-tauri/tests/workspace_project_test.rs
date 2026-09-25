@@ -15,10 +15,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+mod support;
 
 use noending::domain::{
-    git_state, Agent, GitDetection, GitWorktreeKind, Project, Session, WorkspaceObservation,
-    WorkspacePath, Workstream,
+    git_state, Agent, GitDetection, GitWorktreeKind, Project, WorkspaceObservation, WorkspacePath,
 };
 use noending::storage::workspace::{
     delete_zero_path_project_conn, insert_workspace_path_conn, rename_project_conn,
@@ -116,7 +116,7 @@ fn ensure(db: &Db, observation: &WorkspaceObservation) -> WorkspacePath {
     ensure_workspace_path(db, observation, &UnrestrictedWorkspace).expect("ensure")
 }
 
-/// Register a path under an existing Project the way the v12 migration does, so a
+/// Register a path under an existing Project the way a bulk import does, so a
 /// test can build the multi-path Project shape §8.2 itself never produces.
 fn insert_plain(db: &Db, raw: &str, project_id: &str) -> WorkspacePath {
     let id = db
@@ -141,7 +141,7 @@ fn paths_of(db: &Db, project_id: &str) -> Vec<WorkspacePath> {
 }
 
 fn session(db: &Db, id: &str, cwd: &str, path_id: &str) {
-    let mut s = Session::new(
+    let mut s = support::session(
         id.into(),
         Agent::Codex,
         format!("src-{id}"),
@@ -153,7 +153,7 @@ fn session(db: &Db, id: &str, cwd: &str, path_id: &str) {
 }
 
 fn workstream(db: &Db, id: &str, title: &str) {
-    db.upsert_workstream(&Workstream::new(id.into(), title))
+    db.upsert_workstream(&support::workstream(id.into(), title))
         .unwrap();
 }
 
@@ -298,8 +298,8 @@ fn ensuring_the_same_path_twice_is_idempotent() {
     assert_eq!(db.list_projects().unwrap().len(), 1);
 
     // Replaying the whole run changes nothing a caller can observe except
-    // `last_seen_at`, which is what makes a retried Sync or a replayed migration
-    // converge instead of oscillate (§42.2-E1).
+    // `last_seen_at`, which is what makes a retried Sync converge instead of
+    // oscillate (§42.2-E1).
     ensure(&db, &plain("/work/alpha", true));
     assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
     let projects = db.list_projects().unwrap();
@@ -635,12 +635,11 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
 fn merge_deletes_the_zero_path_project() {
     let (_d, db) = temp_db();
     // A path-backed Project holding two plain directories. §8.2 gives every new
-    // path its own Project, so this shape only arrives from the v12 migration (a
-    // legacy Project that had several cwds) — which is exactly the case that has
-    // to merge cleanly. `insert_workspace_path_conn` is what
-    // `ensure_migration_workspace_path` uses for the same purpose.
+    // path its own Project, so this shape only arrives when paths are registered
+    // onto one Project in bulk — which is exactly the case that has to merge
+    // cleanly. `insert_workspace_path_conn` registers a path directly.
     let legacy = "p-legacy".to_string();
-    db.upsert_project(&Project::new(legacy.clone(), "Legacy"))
+    db.upsert_project(&support::project(legacy.clone(), "Legacy"))
         .unwrap();
     let one = insert_plain(&db, "/legacy/one", &legacy);
     let two = insert_plain(&db, "/legacy/two", &legacy);
@@ -768,9 +767,9 @@ fn customized_project_name_survives_merge_and_reconcile() {
 #[test]
 fn one_workspace_path_never_belongs_to_two_projects() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p-mine".into(), "Mine"))
+    db.upsert_project(&support::project("p-mine".into(), "Mine"))
         .unwrap();
-    db.upsert_project(&Project::new("p-other".into(), "Other"))
+    db.upsert_project(&support::project("p-other".into(), "Other"))
         .unwrap();
 
     let id = db
@@ -1232,7 +1231,7 @@ fn user_rename_is_customized_and_automatic_naming_stops() {
         "a rename cannot touch family identity"
     );
 
-    // The whole-object write the legacy command used must not rename a customized
+    // The whole-object write Project creation uses must not rename a customized
     // row either — `upsert_project_conn`'s `CASE` db (§37).
     let mut lying = renamed.clone();
     lying.name = "Auto Renamed".into();
@@ -1449,7 +1448,7 @@ fn the_core_writes_no_index_rows_and_the_wrapper_does() {
 
 #[test]
 fn an_unregistered_home_policy_leaves_the_registry_open() {
-    // The default policy is what the v12 migration and every test here use:
+    // The default policy is what every creation path and every test here uses:
     // nothing reserved, no special name — so §8 is fully exercisable with no
     // filesystem and no Home at all (§42.3-M13).
     let (_d, db) = temp_db();

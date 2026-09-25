@@ -1,4 +1,4 @@
-//! Session ↔ WorkspacePath, and the derived Project cache (schema v12).
+//! Session ↔ WorkspacePath, and the derived Project cache.
 //!
 //! The fact chain is
 //!
@@ -94,7 +94,8 @@ pub fn refresh_sessions_project_for_path_conn(conn: &Connection, path_id: &str) 
 /// it cannot mint a membership the path chain does not imply. It lives here so
 /// the question "who may write `sessions.project_id`?" has one answer per file:
 /// `grep 'UPDATE sessions SET project_id'` finds this module and the
-/// derivation/migration statements in `storage/mod.rs`, nowhere else.
+/// authoritative project-cache derivation statements in `storage/mod.rs`,
+/// nowhere else.
 pub fn clear_sessions_project_for_project_conn(
     conn: &Connection,
     project_id: &str,

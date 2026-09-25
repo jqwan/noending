@@ -1,4 +1,4 @@
-//! Workspace Domain v0.2 — the physical side of the model.
+//! Workspace — the physical side of the model.
 //!
 //! ```text
 //! Filesystem path

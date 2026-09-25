@@ -53,18 +53,6 @@ pub fn run() {
             let _ = workspace::session::register_workspace_attacher(layer.clone());
             app.manage(workspace::workstream::PathService::new(layer));
 
-            // One-shot migration of the pre-runtime-Assistant model keys into
-            // Agent runtime overrides. Reads, writes, then clears the legacy
-            // keys — never a silent dual-write.
-            match agent_runtime::migrate_legacy_assistant_runtime(&db) {
-                Ok(Some(agent)) => eprintln!(
-                    "[noending] migrated legacy assistant runtime settings to {} overrides",
-                    agent.as_str()
-                ),
-                Ok(_) => {}
-                Err(e) => eprintln!("[noending] assistant runtime migration skipped: {e}"),
-            }
-
             // refresh + cache agent CLI detections (ExecutableResolver).
             // Snapshot semantics: a failed resolve REMOVES the cached row so
             // an uninstalled CLI is no longer reported as detected and can
@@ -150,10 +138,10 @@ pub fn run() {
                     }
 
                     // Workspace Reconcile (§8, §26, §42.3-M7): Git detection on
-                    // the paths the v12 migration could only see lexically. It
-                    // runs after ingestion because a Session's cwd is what tells
-                    // us a directory is real, and it re-observes per path instead
-                    // of holding the DB lock across a `git` call.
+                    // paths that so far exist only as strings. It runs after
+                    // ingestion because a Session's cwd is what tells us a
+                    // directory is real, and it re-observes per path instead of
+                    // holding the DB lock across a `git` call.
                     {
                         let layer: tauri::State<std::sync::Arc<workspace::wiring::WorkspaceLayer>> =
                             handle.state();

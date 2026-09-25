@@ -17,10 +17,11 @@
 //! [`SessionLauncher::launch_prepared_with`] so no real Terminal opens.
 
 use rusqlite::Connection;
+mod support;
 
 use noending::adapters::AgentCommand;
 use noending::context::{self, ContextDeliveryLevel};
-use noending::domain::{Agent, LaunchIntent, Project};
+use noending::domain::{Agent, LaunchIntent};
 use noending::error::Result;
 use noending::launcher::{CwdSource, LaunchWorkspace, PreparedLaunch, SessionLauncher};
 use noending::platform::exec_resolver::AgentInstallation;
@@ -35,7 +36,7 @@ const PROJECT: &str = "p-base-launch";
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-base-launch-{}-{}", tag, new_id()));
     let db = Db::open(&dir.join("test.db")).unwrap();
-    db.upsert_project(&Project::new(PROJECT.into(), "P"))
+    db.upsert_project(&support::project(PROJECT.into(), "P"))
         .unwrap();
     db
 }

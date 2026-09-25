@@ -349,9 +349,10 @@ pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<Wo
 
 // ------------------------------------------------------- lifecycle & trash (§1.13)
 
-/// `active | completed` and nothing else. The old vocabulary (`open`,
-/// `abandoned`) is not silently normalized here: v12 already folded it, and a
-/// caller still writing it is a bug worth surfacing.
+/// `active | completed` and nothing else. Other vocabularies (`open`,
+/// `abandoned`) are not normalized here: silently accepting one would leave the
+/// stored value outside the closed set, so a caller still writing it is a bug
+/// worth surfacing.
 ///
 /// Both values are a label only — no behavior differs, and switching must not
 /// touch paths, visibility or Context.
@@ -400,7 +401,7 @@ fn set_visibility(db: &Db, workstream_id: &str, visibility: &str) -> Result<Work
 ///
 /// `lifecycle` and `visibility` may not travel through it: they have commands of
 /// their own, and a stale object from another screen silently reverting an
-/// archive is exactly the double-authority failure v0.2 exists to remove.
+/// archive is exactly the double-authority failure this rule exists to remove.
 pub fn apply_whole_object_edit(db: &Db, payload: &Workstream) -> Result<Workstream> {
     let current = require_workstream(db, &payload.id)?;
     if payload.lifecycle != current.lifecycle {

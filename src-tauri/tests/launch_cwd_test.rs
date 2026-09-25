@@ -15,10 +15,11 @@
 //! (macOS would print a hint and quietly cd to `$HOME`).
 
 use std::path::{Path, PathBuf};
+mod support;
 
 use rusqlite::Connection;
 
-use noending::domain::{Agent, Project};
+use noending::domain::Agent;
 use noending::launcher::{resolve_new_cwd, CwdSource, LaunchWorkspace};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, Db};
@@ -31,7 +32,7 @@ fn db(tag: &str) -> Db {
     let dir = temp_root(tag);
     let database = Db::open(&dir.join("test.db")).unwrap();
     database
-        .upsert_project(&Project::new(PROJECT.into(), "P"))
+        .upsert_project(&support::project(PROJECT.into(), "P"))
         .unwrap();
     database
 }

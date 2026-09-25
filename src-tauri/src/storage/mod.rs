@@ -17,11 +17,13 @@ use crate::error::{other, Result};
 
 // The WorkspacePath registry, ordered WorkstreamPath list and Session→path
 // attach each live in their own impl file rather than growing this monolith.
+pub mod schema;
 pub mod session_jobs;
 pub mod session_paths;
 pub mod workspace;
 pub mod workstream_paths;
 
+pub use schema::DATABASE_FORMAT_VERSION;
 pub use session_jobs::PermanentDeletionCounts;
 
 /// Two connections to one SQLite file, so the UI's reads never queue behind a
@@ -34,10 +36,6 @@ pub struct Db {
     writer: Mutex<Connection>,
     reader: Mutex<Connection>,
 }
-
-/// Current database shape. New databases are created directly; an older or
-/// newer version must be rebuilt with the current application.
-pub const SCHEMA_VERSION: i64 = 16;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -142,360 +140,12 @@ impl Db {
         Ok(out)
     }
 
+    /// Open (or create) the database in the ONE format this build understands
+    /// — see [`schema`] for the rule and the refusal cases. There is no
+    /// in-place repair of an existing database.
     fn initialize_schema(&self) -> Result<()> {
         let conn = self.write();
-        // There is intentionally no in-place migration path. A versioned
-        // database must already have this exact application's schema.
-        let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current_version != 0 && current_version != SCHEMA_VERSION {
-            return Err(other(format!(
-                "数据库 schema 版本为 v{}，当前应用只支持 v{}；请备份后重建数据库。",
-                current_version, SCHEMA_VERSION
-            )));
-        }
-        if current_version == 0
-            && conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'sessions', 'workstreams'))",
-                [],
-                |r| r.get::<_, i64>(0),
-            )? != 0
-        {
-            return Err(other("未标记版本的旧数据库不受支持，请备份后重建数据库。"));
-        }
-
-        let tx = conn.unchecked_transaction()?;
-
-        tx.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS projects (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              description TEXT NOT NULL DEFAULT '',
-              git_id TEXT,
-              name_customized INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS workstreams (
-              id TEXT PRIMARY KEY,
-              title TEXT NOT NULL,
-              description TEXT NOT NULL DEFAULT '',
-              lifecycle TEXT NOT NULL DEFAULT 'active',
-              visibility TEXT NOT NULL DEFAULT 'normal',
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS sessions (
-              id TEXT PRIMARY KEY,
-              agent TEXT NOT NULL,
-              agent_session_id TEXT NOT NULL,
-              title TEXT,
-              cwd TEXT,
-              workspace_path_id TEXT,
-              project_id TEXT REFERENCES projects(id),
-              -- Semantic ownership: at most one Owner Workstream per Session
-              -- (方案 §3.3). Deleting the Workstream clears this, never the row.
-              owner_workstream_id TEXT
-                REFERENCES workstreams(id) ON DELETE SET NULL,
-              raw_path TEXT NOT NULL,
-              parent_agent_session_id TEXT,
-              started_at TEXT,
-              last_activity_at TEXT,
-              -- lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339).
-              trashed_at TEXT,
-              UNIQUE(agent, agent_session_id)
-            );
-            CREATE TABLE IF NOT EXISTS session_events (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL REFERENCES sessions(id),
-              sequence INTEGER NOT NULL,
-              source_event_id TEXT,
-              source_generation INTEGER NOT NULL DEFAULT 0,
-              source_position TEXT NOT NULL DEFAULT '',
-              source_identity_hash TEXT NOT NULL,
-              ts TEXT,
-              kind TEXT NOT NULL,
-              text TEXT,
-              raw_ref TEXT NOT NULL,
-              metadata TEXT NOT NULL DEFAULT '{}',
-              UNIQUE (session_id, source_identity_hash)
-            );
-            CREATE TABLE IF NOT EXISTS session_cursors (
-              session_id TEXT PRIMARY KEY REFERENCES sessions(id),
-              last_sequence INTEGER NOT NULL DEFAULT 0,
-              last_seen_size INTEGER NOT NULL DEFAULT 0,
-              source_file_identity TEXT NOT NULL DEFAULT '',
-              generation INTEGER NOT NULL DEFAULT 0,
-              byte_offset INTEGER NOT NULL DEFAULT 0,
-              prefix_hash TEXT NOT NULL DEFAULT '',
-              identity_tail_hash TEXT NOT NULL DEFAULT '',
-              mtime REAL,
-              processed_sequence INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS context_items (
-              id TEXT PRIMARY KEY,
-              workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-              kind TEXT NOT NULL,
-              status TEXT NOT NULL DEFAULT 'active',
-              authority TEXT NOT NULL DEFAULT 'system_observed',
-              created_by TEXT NOT NULL DEFAULT 'unknown',
-              current_revision_id TEXT,
-              supersedes_item_id TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS context_item_revisions (
-              id TEXT PRIMARY KEY,
-              item_id TEXT NOT NULL REFERENCES context_items(id),
-              title TEXT NOT NULL,
-              content TEXT NOT NULL DEFAULT '',
-              metadata TEXT NOT NULL DEFAULT '{}',
-              source_type TEXT,
-              source_ref TEXT,
-              sync_run_id TEXT,
-              created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS sync_runs (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL,
-              from_sequence INTEGER NOT NULL,
-              to_sequence INTEGER NOT NULL,
-              status TEXT NOT NULL,
-              mutations TEXT NOT NULL DEFAULT '[]',
-              summary TEXT NOT NULL DEFAULT '',
-              error TEXT,
-              created_at TEXT NOT NULL,
-              runtime TEXT NOT NULL DEFAULT 'heuristic',
-              delta_fingerprint TEXT,
-              source_generation INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS agent_installations (
-              agent TEXT PRIMARY KEY,
-              executable_path TEXT,
-              version TEXT,
-              source TEXT,
-              last_verified_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS settings (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS launch_intents (
-              id TEXT PRIMARY KEY,
-              launch_type TEXT NOT NULL DEFAULT 'new',
-              agent TEXT NOT NULL,
-              owner_workstream_id TEXT REFERENCES workstreams(id) ON DELETE SET NULL,
-              cwd TEXT,
-              context_bundle_markdown TEXT,
-              context_bundle_revisions TEXT,
-              process_id INTEGER,
-              launched_at TEXT NOT NULL,
-              matched_session_id TEXT,
-              status TEXT NOT NULL DEFAULT 'pending',
-              note TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS context_conflicts (
-              id TEXT PRIMARY KEY,
-              workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-              left_item_id TEXT NOT NULL REFERENCES context_items(id),
-              right_item_id TEXT,
-              conflict_type TEXT NOT NULL DEFAULT 'authority',
-              status TEXT NOT NULL DEFAULT 'open',
-              resolution TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              left_revision_id TEXT,
-              right_revision_id TEXT,
-              candidate_snapshot_json TEXT
-            );
-            CREATE TABLE IF NOT EXISTS context_deliveries (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL REFERENCES sessions(id),
-              workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-              bundle_id TEXT NOT NULL,
-              delivered_revisions TEXT NOT NULL DEFAULT '[]',
-              delivered_conflicts TEXT NOT NULL DEFAULT '[]',
-              delivered_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS ingest_sources (
-              id TEXT PRIMARY KEY,
-              agent TEXT NOT NULL,
-              path TEXT NOT NULL,
-              enabled INTEGER NOT NULL DEFAULT 0,
-              origin TEXT NOT NULL DEFAULT 'user',   -- default | user
-              created_at TEXT NOT NULL,
-              UNIQUE(agent, path)
-            );
-            CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-            CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
-            CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
-            CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, sequence);
-            CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_fingerprint
-              ON sync_runs(session_id, delta_fingerprint)
-              WHERE status = 'ok' AND delta_fingerprint IS NOT NULL;
-            "#,
-        )?;
-
-        tx.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS assistant_sessions (
-              id TEXT PRIMARY KEY,
-              title TEXT NOT NULL DEFAULT 'Assistant',
-              created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS assistant_messages (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL REFERENCES assistant_sessions(id),
-              role TEXT NOT NULL,              -- user | assistant
-              content TEXT NOT NULL DEFAULT '',
-              action_json TEXT,                -- proposed action (needs user confirm)
-              runtime TEXT,
-              created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS context_conflict_events (
-              id TEXT PRIMARY KEY,
-              conflict_id TEXT NOT NULL REFERENCES context_conflicts(id),
-              previous_status TEXT NOT NULL,
-              new_status TEXT NOT NULL,
-              resolution TEXT,
-              actor TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              snapshot_json TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_conflict_events_conflict ON context_conflict_events(conflict_id);
-            CREATE TABLE IF NOT EXISTS workstream_review_state (
-              workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id) ON DELETE CASCADE,
-              reviewed_through_at TEXT NOT NULL,
-              reviewed_boundary_change_ids TEXT NOT NULL DEFAULT '[]',
-              reviewed_at TEXT NOT NULL
-            );
-            "#,
-        )?;
-
-        // ---- Workspace Domain v0.2 ------------------------------------------
-        // `workspace_paths.id` is NOT a random uuid: it is derived from the
-        // canonical path by `workspace::path_identity`, which is what makes
-        // `ensure_workspace_path` replayable when the current schema is opened.
-        tx.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS git_identities (
-              id TEXT PRIMARY KEY,
-              common_dir TEXT NOT NULL UNIQUE,
-              first_seen_at TEXT NOT NULL,
-              last_seen_at TEXT NOT NULL,
-              metadata TEXT NOT NULL DEFAULT '{}'
-            );
-            CREATE TABLE IF NOT EXISTS workspace_paths (
-              id TEXT PRIMARY KEY,
-              canonical_path TEXT NOT NULL UNIQUE,
-              project_id TEXT NOT NULL REFERENCES projects(id),
-              git_state TEXT NOT NULL DEFAULT 'none',
-              git_kind TEXT,
-              -- Named `exists_on_disk`, not `exists`: EXISTS is a SQLite keyword and
-              -- `exists INTEGER NOT NULL` is a syntax error, so the spec's column name
-              -- would need quoting in every statement (方案 §42.2-E13). The domain
-              -- field stays `exists`.
-              exists_on_disk INTEGER NOT NULL DEFAULT 1,
-              first_seen_at TEXT NOT NULL,
-              last_seen_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS workstream_paths (
-              id TEXT PRIMARY KEY,
-              workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-              workspace_path_id TEXT NOT NULL REFERENCES workspace_paths(id),
-              position INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              UNIQUE(workstream_id, workspace_path_id),
-              UNIQUE(workstream_id, position)
-            );
-            CREATE INDEX IF NOT EXISTS idx_workspace_paths_project ON workspace_paths(project_id);
-            CREATE INDEX IF NOT EXISTS idx_workspace_paths_canonical ON workspace_paths(canonical_path);
-            CREATE INDEX IF NOT EXISTS idx_workstream_paths_ws ON workstream_paths(workstream_id, position);
-            CREATE INDEX IF NOT EXISTS idx_workstream_paths_path ON workstream_paths(workspace_path_id);
-            "#,
-        )?;
-
-        // ---- Session Lifecycle & Deletion v0.1 -------------------------------
-        // Transient coordination table for prepared permanent deletions. It
-        // spans SQLite + filesystem, which no single transaction can cover, so
-        // the plan is frozen here first and revalidated at execute time.
-        // This is NOT deletion history / tombstone / blacklist: the row is
-        // deleted in the same transaction that purges the Session, so a
-        // completed permanent deletion leaves nothing behind.
-        tx.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS session_deletion_jobs (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id),
-              state TEXT NOT NULL,          -- prepared | deleting_source | failed | stale
-              plan_json TEXT NOT NULL,
-              last_error TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            "#,
-        )?;
-
-        // FTS5 search index (external-content style: we manage rows manually).
-        // If the bundled build lacks FTS5, search falls back to LIKE at query time.
-        let fts_ok = tx
-            .execute_batch(
-                r#"
-                CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-                  kind, ref_id, parent_id, title, body, tokenize = 'unicode61'
-                );
-                "#,
-            )
-            .is_ok();
-        if !fts_ok {
-            eprintln!("[storage] FTS5 unavailable, search will use LIKE fallback");
-        }
-
-        // Seed the per-agent default source roots (~/.codex etc., honoring
-        // env overrides). They start DISABLED: whether a source is ingested
-        // is always the user's decision.
-        Self::ensure_default_ingest_sources_conn(&tx)?;
-
-        tx.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
-               ON projects(git_id)
-               WHERE git_id IS NOT NULL;",
-        )?;
-
-        let delivery_level: Option<String> = tx
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                params![crate::settings::CONTEXT_DELIVERY_LEVEL_KEY],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if delivery_level.is_none() {
-            tx.execute(
-                "INSERT INTO settings (key, value) VALUES (?1, ?2)",
-                params![crate::settings::CONTEXT_DELIVERY_LEVEL_KEY, "off"],
-            )?;
-        }
-
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Insert the standard agent data roots as disabled defaults. Idempotent.
-    fn ensure_default_ingest_sources_conn(conn: &Connection) -> Result<()> {
-        for agent in crate::domain::Agent::all() {
-            if let Some(root) = crate::platform::paths::resolve_agent_data_dir(*agent) {
-                conn.execute(
-                    "INSERT OR IGNORE INTO ingest_sources (id, agent, path, enabled, origin, created_at)
-                     VALUES (?1, ?2, ?3, 0, 'default', ?4)",
-                    params![new_id(), agent.as_str(), root.to_string_lossy().to_string(), now()],
-                )?;
-            }
-        }
-        Ok(())
+        schema::open_or_create(&conn)
     }
 
     // ---------------- Projects ----------------
@@ -901,8 +551,9 @@ impl Db {
             } else {
                 match stored_tail.clone() {
                     Some(tail) => tail,
-                    // Legacy cursor without a tail: fall back to the last
-                    // stored event; the next full re-scan self-heals anyway.
+                    // No chain tail is available for the current cursor:
+                    // fall back to the last stored event identity, and to
+                    // genesis when the session has no event at all.
                     None => tx
                         .query_row(
                             "SELECT source_identity_hash FROM session_events
@@ -1151,8 +802,10 @@ impl Db {
         self.tx(|tx| upsert_source_cursor_conn(tx, c))
     }
 
-    /// Legacy read accessor used by the UI: max ingested sequence.
-    pub fn get_cursor(&self, session_id: &str) -> Result<i64> {
+    /// The Session's ingested frontier: the highest source sequence durably
+    /// stored. Distinct from [`Self::get_processed_sequence`], which is how far
+    /// Context processing has consumed.
+    pub fn get_ingested_sequence(&self, session_id: &str) -> Result<i64> {
         Ok(self.get_source_cursor(session_id)?.last_sequence)
     }
 
@@ -2010,8 +1663,9 @@ impl Db {
         Ok(())
     }
 
-    /// One-time backfill so events ingested before the index existed (or
-    /// failed to index) become searchable. Idempotent.
+    /// Fill in the index rows no incremental write produced: events whose
+    /// ingestion-time indexing was skipped, and Session documents that no
+    /// write has touched yet. Idempotent.
     ///
     /// Review P1-1: only ACTIVE sessions are indexed. This runs at every
     /// startup, so an unguarded run would silently re-index everything a
@@ -2693,7 +2347,8 @@ pub fn get_conflict_conn(conn: &Connection, conflict_id: &str) -> Result<Option<
 /// Authoritative resolver for revision authority:
 /// 1. provenance authority stored directly in revision metadata
 /// 2. audit metadata / source_type / sync_run_id inference if determinable
-/// 3. legacy_unknown
+/// 3. [`authority::UNKNOWN`] — the provenance does not say
+///
 /// NEVER falls back to mutable item.authority!
 pub fn resolve_revision_authority(rev: &ContextItemRevision) -> String {
     if let Some(auth) = rev
@@ -2707,16 +2362,16 @@ pub fn resolve_revision_authority(rev: &ContextItemRevision) -> String {
     if let Some(audit) = rev.metadata.get("audit") {
         if let Some(actor) = audit.get("actor").and_then(|a| a.as_str()) {
             if actor == "user" {
-                return "user_edit".into();
+                return crate::domain::authority::USER_EDIT.into();
             }
         }
     }
     if rev.source_type.as_deref() == Some("user_edit") {
-        "user_edit".into()
+        crate::domain::authority::USER_EDIT.into()
     } else if rev.source_type.as_deref() == Some("session_event") || rev.sync_run_id.is_some() {
-        "agent_statement".into()
+        crate::domain::authority::AGENT_STATEMENT.into()
     } else {
-        "legacy_unknown".into()
+        crate::domain::authority::UNKNOWN.into()
     }
 }
 

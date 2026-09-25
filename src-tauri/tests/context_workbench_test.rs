@@ -933,11 +933,12 @@ fn test_fts_failure_rolls_back_entire_conflict_transaction() {
 }
 
 #[test]
-fn test_legacy_revision_authority_never_polluted_by_item_authority() {
-    let db = open_db("legacy-rev-authority");
-    let ws = ws_row(&db, "Legacy WS");
+fn revision_authority_is_never_polluted_by_item_authority() {
+    let db = open_db("rev-authority");
+    let ws = ws_row(&db, "Revision WS");
 
-    // 1. Manually insert an item and revision simulating pre-v9 data with NO metadata.provenance
+    // 1. Manually insert an item and revision whose metadata carries NO
+    //    provenance object
     let item_id = new_id();
     let rev1_id = new_id();
     let ts = now();
@@ -951,7 +952,7 @@ fn test_legacy_revision_authority_never_polluted_by_item_authority() {
     // Revision metadata is completely empty (no provenance object)
     db.write().execute(
         "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
-         VALUES (?1, ?2, 'Legacy Agent Goal', 'Extracted by agent', '{}', 'session_event', 'sync-run-1', ?3)",
+         VALUES (?1, ?2, 'Historical Agent Goal', 'Extracted by agent', '{}', 'session_event', 'sync-run-1', ?3)",
         params![rev1_id, item_id, ts],
     ).unwrap();
 
@@ -968,15 +969,15 @@ fn test_legacy_revision_authority_never_polluted_by_item_authority() {
     let src_after = db.get_context_revision_source(&rev1_id).unwrap().unwrap();
     assert_eq!(
         src_after.authority, "agent_statement",
-        "Legacy revision authority must NEVER fall back to mutable item.authority"
+        "A revision's recorded authority must NEVER fall back to mutable item.authority"
     );
     assert_ne!(src_after.authority, "user_edit");
 
-    // 5. Test completely un-inferrable revision falls back to legacy_unknown, NOT item.authority
+    // 5. A completely un-inferrable revision resolves to `unknown`, NOT item.authority
     let rev_unknown_id = new_id();
     db.write().execute(
         "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
-         VALUES (?1, ?2, 'Unknown Legacy', 'No source', '{}', NULL, NULL, ?3)",
+         VALUES (?1, ?2, 'Undetermined origin', 'No source', '{}', NULL, NULL, ?3)",
         params![rev_unknown_id, item_id, ts],
     ).unwrap();
 
@@ -984,6 +985,6 @@ fn test_legacy_revision_authority_never_polluted_by_item_authority() {
         .get_context_revision_source(&rev_unknown_id)
         .unwrap()
         .unwrap();
-    assert_eq!(src_unknown.authority, "legacy_unknown");
+    assert_eq!(src_unknown.authority, "unknown");
     assert_ne!(src_unknown.authority, "user_edit");
 }

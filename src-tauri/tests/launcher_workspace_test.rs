@@ -21,9 +21,10 @@
 //! starts; the fake echoes the directory it was handed.
 
 use rusqlite::Connection;
+mod support;
 
 use noending::adapters::AgentCommand;
-use noending::domain::{launch_status, Agent, LaunchIntent, Project, Session};
+use noending::domain::{launch_status, Agent, LaunchIntent, Session};
 use noending::error::Result;
 use noending::launcher::{
     apply_match, resolve_resume_cwd, try_match_launch_intents_in, CwdSource, LaunchWorkspace,
@@ -47,7 +48,7 @@ const PROJECT: &str = "p-launcher-ws";
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-lws-{}-{}", tag, new_id()));
     let db = Db::open(&dir.join("test.db")).unwrap();
-    db.upsert_project(&Project::new(PROJECT.into(), "P"))
+    db.upsert_project(&support::project(PROJECT.into(), "P"))
         .unwrap();
     db
 }

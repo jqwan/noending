@@ -365,7 +365,7 @@ impl SessionLauncher {
             .get_session(session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
         // §10 — a trashed session is inactive and must not resume. All resume
-        // entries (command layer, Assistant, legacy one-shot) funnel through
+        // entries (command layer, Assistant, one-shot launch) funnel through
         // here, so this is the single prepare-side gate. This first read is the
         // early exit only; the preparation below re-reads after the sync.
         if session.is_trashed() {

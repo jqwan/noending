@@ -345,8 +345,9 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 ///
 /// Rescans are safe because storage dedups by event identity: unchanged
 /// events are skipped, changed/new ones are added as new events, and
-/// previously ingested history is never touched. Legacy cursors without a
-/// stored prefix fingerprint take one full rescan to backfill it.
+/// previously ingested history is never touched. A cursor without a usable
+/// prefix fingerprint cannot prove append-only continuity, so the source is
+/// conservatively treated as a rewrite and fully re-scanned.
 pub fn read_jsonl_delta(
     path: &Path,
     cursor: &SourceCursor,
@@ -399,7 +400,7 @@ pub fn read_jsonl_delta(
         if prefix_ok {
             (cursor.generation, cursor.byte_offset.min(obs.size)) // append
         } else {
-            (cursor.generation + 1, 0) // rewrite-grow (or legacy cursor: backfill rescan)
+            (cursor.generation + 1, 0) // rewrite-grow: continuity unprovable
         }
     };
 

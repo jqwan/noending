@@ -28,7 +28,7 @@ pub use capabilities::{
     capabilities_of, validate_runtime_overrides, AgentRuntimeCapabilities, RuntimeFieldCapability,
 };
 pub use discovery::{discover_runtime_options, AgentRuntimeDiscovery, ModelCatalog, ModelOption};
-pub use store::{get_runtime_overrides, migrate_legacy_assistant_runtime, set_runtime_overrides};
+pub use store::{get_runtime_overrides, set_runtime_overrides};
 
 /// Explicit user overrides for one Agent. `None` = Agent default = no CLI argument.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

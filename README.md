@@ -68,6 +68,31 @@ pnpm tauri build   # 打包
 - macOS: `~/Library/Application Support/app.noending.desktop/noending.db`
 - Windows: `%APPDATA%\app.noending.desktop\noending.db`
 
+## 数据库兼容策略（无 Migration）
+
+NoEnding 只支持当前数据库格式，不提供任何数据库 migration：
+
+```text
+空数据库          → 按当前格式创建
+当前格式数据库     → 直接使用；启动时不执行任何 schema 修补
+其他格式数据库     → 拒绝打开，提示删除数据库后重启
+```
+
+SQLite 数据库是可重建的本地投影：Session 来自 Agent 源数据，删除数据库后重启会重新摄入。
+但 **Workstream / Context 等 NoEnding 自有状态无法从 Agent 源恢复**，重建会丢失这部分数据。
+
+破坏性 schema 修改的唯一流程：
+
+```text
+1. 修改 src-tauri/src/storage/schema.rs 中的完整当前 DDL
+2. 递增 DATABASE_FORMAT_VERSION
+3. 同步 schema 契约测试（src-tauri/tests/schema_test.rs）
+4. 删除本地数据库并重启，重新摄入 Session
+```
+
+不要为旧 NoEnding schema 增加兼容分支：`schema.rs` 之外不创建 schema，不使用
+`ALTER TABLE` migration，不保留只为读取旧 NoEnding 数据库而存在的 row mapping 或 fallback。
+
 ## 代码结构
 
 ```text

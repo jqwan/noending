@@ -345,7 +345,7 @@ fn revision_matches_provenance(
 /// The scrubbed metadata: session-derived references removed, authority /
 /// actor / status audit preserved (authority resolution reads
 /// `provenance.authority` and `audit.actor` — dropping those would degrade
-/// every redacted revision to `legacy_unknown`, 方案 §27 保留项).
+/// every redacted revision to `unknown`, 方案 §27 保留项).
 fn redacted_metadata(metadata: &serde_json::Value) -> String {
     let mut m = metadata.clone();
     if let Some(obj) = m.as_object_mut() {

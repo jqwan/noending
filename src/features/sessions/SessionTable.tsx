@@ -49,8 +49,8 @@ export function sessionDisplayTitle(title: string | null | undefined): string {
  * `sessions.project_id` 仍是缓存列，所以表格读它，但**读到什么就要说什么**：
  *
  * - 有 WorkspacePath → 名字是派生结果；
- * - 只有缓存值、没有 WorkspacePath → 那是 v0.2 之前手工指派留下的历史标签，
- *   弱化显示并说明它已经不决定任何事（历史不删，但也不再冒充事实）；
+ * - 只有缓存值、没有 WorkspacePath → 派生链无法验证这个缓存列，
+ *   弱化显示并说明它已经不决定任何事（值不删，但也不再冒充事实）；
  * - 有 cwd、还没有 WorkspacePath → 等目录扫描补上，说「待解析」；
  * - 什么都没有 → 空缺的原因是「没有记录过工作目录」，不是「没被归属」。
  */
@@ -78,8 +78,8 @@ export function projectCellFor(
   if (session.project_id) {
     const name = projectNameById.get(session.project_id);
     return {
-      text: name ?? "历史项目标签",
-      hint: "v0.2 之前手工指派留下的标签；这条会话没有可解析的工作路径，项目已经不由它决定。",
+      text: name ?? "未验证的项目",
+      hint: "会话行上缓存的 project_id；这条会话没有可解析的工作路径，项目已经不由它决定。",
       dim: true,
     };
   }

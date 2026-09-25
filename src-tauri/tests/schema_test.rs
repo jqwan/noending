@@ -1,6 +1,13 @@
-use noending::storage::{Db, SCHEMA_VERSION};
+//! Database format contract (方案 §1–§4).
+//!
+//! NoEnding supports exactly one SQLite format generation at a time: an empty
+//! file is created in the current format, a current-format database is used
+//! untouched (startup never repairs schema), and anything else is refused
+//! rather than upgraded.
+
+use noending::storage::{Db, DATABASE_FORMAT_VERSION};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 struct TempDb {
     dir: PathBuf,
@@ -8,7 +15,7 @@ struct TempDb {
 }
 
 impl TempDb {
-    fn path(&self) -> &std::path::Path {
+    fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -35,26 +42,30 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
         .unwrap();
-    let found = stmt
+    let names: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))
         .unwrap()
-        .any(|name| name.map(|value| value == column).unwrap_or(false));
-    found
+        .map(|name| name.unwrap())
+        .collect();
+    names.iter().any(|name| name == column)
 }
 
+fn user_version(conn: &Connection) -> i64 {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// A brand-new database carries the current format generation and the current
+/// structure — not an older shape that startup then has to reconcile.
 #[test]
-fn fresh_database_is_already_in_the_current_shape() {
+fn fresh_database_uses_current_format_generation() {
     let path = db_path("current");
     let db = Db::open(path.path()).unwrap();
-    let version: i64 = db
-        .read()
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(user_version(&db.read()), DATABASE_FORMAT_VERSION);
 
-    // 方案 §6.1 — the Session↔Workstream binding tables are gone, not
-    // migrated: a Session has at most one Owner Workstream, held on the
-    // Session row itself.
+    // 方案 §6.1 — the Session↔Workstream binding tables are gone, not carried
+    // forward: a Session has at most one Owner Workstream, held on the Session
+    // row itself.
     for table in [
         "project_resources",
         "project_affinity_evidence",
@@ -139,22 +150,31 @@ fn fresh_database_is_already_in_the_current_shape() {
             "launch_intents.owner_workstream_id must be workstreams(id) ON DELETE SET NULL"
         );
     }
+}
 
+/// Reopening a current-format database is a pure read of the format marker:
+/// the data survives and startup runs no DDL at all, so nothing that is
+/// missing can be silently "repaired" back into existence.
+#[test]
+fn current_format_database_reopens_without_reinitialization() {
+    let path = db_path("reopen");
+    let db = Db::open(path.path()).unwrap();
     db.write()
         .execute(
             "INSERT INTO settings (key, value) VALUES ('schema-test', 'persists')",
             [],
         )
         .unwrap();
+    // A table startup must NOT recreate: if `initialize_schema` re-ran its DDL
+    // batches on an existing database, `CREATE TABLE IF NOT EXISTS` would bring
+    // it back and this assertion would catch it.
+    db.write()
+        .execute("DROP TABLE context_deliveries", [])
+        .unwrap();
     drop(db);
+
     let reopened = Db::open(path.path()).unwrap();
-    assert_eq!(
-        reopened
-            .read()
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        SCHEMA_VERSION
-    );
+    assert_eq!(user_version(&reopened.read()), DATABASE_FORMAT_VERSION);
     assert_eq!(
         reopened
             .read()
@@ -166,57 +186,84 @@ fn fresh_database_is_already_in_the_current_shape() {
             .unwrap(),
         "persists"
     );
-    drop(reopened);
+    let recreated: i64 = reopened
+        .read()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'table' AND name = 'context_deliveries'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        recreated, 0,
+        "startup re-ran schema creation on an existing database"
+    );
 }
 
+/// A database built by another NoEnding generation is refused, never upgraded.
+/// The error names both sides so the log says exactly which format was found.
 #[test]
-fn unsupported_schema_versions_are_rejected_without_migration() {
-    for (tag, version) in [("older", SCHEMA_VERSION - 1), ("newer", SCHEMA_VERSION + 1)] {
-        let path = db_path(tag);
-        let conn = Connection::open(path.path()).unwrap();
-        conn.pragma_update(None, "user_version", version).unwrap();
-        drop(conn);
+fn non_current_database_format_is_rejected() {
+    let unsupported = DATABASE_FORMAT_VERSION + 1;
+    let path = db_path("unsupported");
+    let conn = Connection::open(path.path()).unwrap();
+    conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)", [])
+        .unwrap();
+    conn.pragma_update(None, "user_version", unsupported)
+        .unwrap();
+    drop(conn);
 
-        assert!(Db::open(path.path()).is_err());
-    }
+    let err = match Db::open(path.path()) {
+        Ok(_) => panic!("a database in the format {unsupported} must be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains(&format!("database_format={unsupported}"))
+            && err.contains(&format!("required_format={DATABASE_FORMAT_VERSION}")),
+        "refusal must name the found and required formats, got: {err}"
+    );
 }
 
+/// A non-empty SQLite file with no format marker is not an empty database: it
+/// belongs to something else and is refused instead of overwritten.
 #[test]
-fn unversioned_old_database_is_rejected() {
+fn unversioned_nonempty_database_is_rejected() {
     let path = db_path("unversioned");
     let conn = Connection::open(path.path()).unwrap();
     conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)", [])
         .unwrap();
     drop(conn);
 
-    let result = Db::open(path.path());
-    assert!(result.is_err());
+    assert!(Db::open(path.path()).is_err());
 }
 
+/// Creation is all-or-nothing. A file where one of the creation statements
+/// cannot run (here: `settings` is already taken by a view) must be left with
+/// no version marker and no half-created schema, so the next start refuses the
+/// file instead of trusting a partial database.
 #[test]
-fn schema_initialization_rolls_back_on_error() {
+fn failed_database_creation_rolls_back_completely() {
     let path = db_path("rollback");
     let conn = Connection::open(path.path()).unwrap();
-    conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)", [])
-        .unwrap();
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+    conn.execute("CREATE VIEW settings AS SELECT 1 AS value", [])
         .unwrap();
     drop(conn);
 
     assert!(Db::open(path.path()).is_err());
 
     let conn = Connection::open(path.path()).unwrap();
-    let workstreams: i64 = conn
+    let projects: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'workstreams'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(workstreams, 0, "failed initialization left partial schema");
+    assert_eq!(projects, 0, "failed creation left partial schema");
     assert_eq!(
-        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        SCHEMA_VERSION
+        user_version(&conn),
+        0,
+        "failed creation left a version marker"
     );
 }

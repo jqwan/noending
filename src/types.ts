@@ -692,5 +692,5 @@ export const AUTHORITY_LABELS: Record<string, string> = {
   system_observed: "系统观察",
   agent_statement: "Agent 陈述",
   agent_inferred: "Agent 推断",
-  legacy_unknown: "未知权威 (历史版本)",
+  unknown: "未知权威",
 };

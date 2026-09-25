@@ -1,4 +1,4 @@
-//! WorkspacePath / GitIdentity / Project-row persistence (schema v12).
+//! WorkspacePath / GitIdentity / Project-row persistence.
 //!
 //! These are the *mechanical* operations every workspace layer shares: read a
 //! row, insert a row, move a row's Project, and keep the derived Session cache
@@ -363,9 +363,9 @@ pub fn project_is_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
 
 // ---- Project writes (narrow, one column-set each) -------------------------
 //
-// `upsert_project_conn` is the *whole-object* write the legacy command used, and
-// v0.2 retires it from the product surface: a Project row is now app-owned, so
-// every write here changes one documented fact and nothing else. In particular
+// `upsert_project_conn` is the *whole-object* write Project creation uses, and
+// it is not a product surface: a Project row is app-owned, so every other write
+// here changes one documented fact and nothing else. In particular
 // no function here can clear `git_id` or `name_customized` — both are one-way.
 
 // Creating a Project lives in `workspace::project` (it needs the naming policy);

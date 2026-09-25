@@ -612,7 +612,7 @@ fn source_cursor_roundtrip() {
     assert_eq!(back.prefix_hash, "abc123");
     assert_eq!(back.identity_tail_hash, "deadbeef");
     assert_eq!(back.last_sequence, 7);
-    assert_eq!(db.get_cursor(&s.id).unwrap(), 7);
+    assert_eq!(db.get_ingested_sequence(&s.id).unwrap(), 7);
 }
 
 /// A New Session launched with injected context RECEIVED that context:
@@ -817,8 +817,8 @@ fn context_delivery_level_default_and_roundtrip() {
     let db = open_db("delivery-level-setting");
 
     // 1. Unset → Base Experience default is Off (nothing is injected until the
-    // user chooses a level; the v11 migration pins an explicit 'off' row for
-    // databases that predate it, and a missing row still means Off).
+    // user chooses a level; a fresh database is seeded with an explicit 'off'
+    // row, and a missing row still means Off).
     let lvl = noending::commands::context_delivery_level_of(&db).unwrap();
     assert_eq!(lvl, context::ContextDeliveryLevel::Off);
     db.delete_setting(noending::commands::CONTEXT_DELIVERY_LEVEL_KEY)

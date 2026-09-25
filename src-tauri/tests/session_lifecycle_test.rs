@@ -36,6 +36,7 @@ use noending::workspace::{normalize_path, WorkspaceAttaching};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+mod support;
 
 // ---- fixtures -------------------------------------------------------------
 
@@ -55,7 +56,7 @@ fn open_db(tag: &str) -> Db {
     let dir = unique_dir(tag);
     let db = Db::open(&dir.join("test.db")).unwrap();
     // The LexicalPaths seam inserts workspace paths under this project.
-    db.upsert_project(&noending::domain::Project::new(PROJECT.into(), "P"))
+    db.upsert_project(&support::project(PROJECT.into(), "P"))
         .unwrap();
     db
 }
@@ -1402,7 +1403,8 @@ fn codex_review_threads_store_their_own_replies_only() {
 /// written at ingest time:
 /// - the counterpart may not exist yet when the envelope is stored (it is
 ///   discovered later, or never) — the event must still be stored, and must
-///   resolve the moment the row appears, with no re-ingest and no migration;
+///   resolve the moment the row appears, with no re-ingest and no rewrite of
+///   stored history;
 /// - `session_events` is append-only, so a resolved id could never be written
 ///   back into it.
 #[test]
@@ -1781,7 +1783,7 @@ fn startup_backfill_skips_trashed_sessions() {
 #[test]
 fn search_filters_stale_trashed_rows() {
     let db = open_db("stale-rows");
-    // 一行陈旧的 event 索引：可能来自旧版本构建或崩溃窗口 —— 它的
+    // 一行陈旧的 event 索引：可能来自崩溃窗口 —— 它的
     // session 不存在（更不必说 active）。读侧守卫必须把它滤掉。
     db.write()
         .execute(

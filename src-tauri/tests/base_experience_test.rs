@@ -129,16 +129,16 @@ fn intelligence_is_off_until_explicitly_enabled() {
     assert!(settings::context_intelligence_enabled(&db).unwrap());
 }
 
-/// The switch never rewrites history: the migration pins delivery explicitly,
-/// while intelligence stays a pure "missing row = off" default.
+/// The switch never rewrites history: database creation seeds delivery
+/// explicitly, while intelligence stays a pure "missing row = off" default.
 #[test]
-fn migration_pins_delivery_level_but_not_intelligence() {
-    let db = open_db("v11-seed");
+fn creation_seeds_delivery_level_but_not_intelligence() {
+    let db = open_db("seed");
     assert_eq!(
         db.get_setting(settings::CONTEXT_DELIVERY_LEVEL_KEY)
             .unwrap(),
         Some("off".into()),
-        "v11 migration pins context.delivery_level as a real, editable row"
+        "creation seeds context.delivery_level as a real, editable row"
     );
     assert_eq!(
         db.get_setting(settings::CONTEXT_INTELLIGENCE_ENABLED_KEY)

@@ -13,13 +13,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+mod support;
 
 use rusqlite::{params, Connection};
 
 use noending::commands::workstream_cards;
-use noending::domain::{
-    workstream_lifecycle, workstream_visibility, Agent, Project, Session, Workstream,
-};
+use noending::domain::{workstream_lifecycle, workstream_visibility, Agent, Session, Workstream};
 use noending::error::{other, Result};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
@@ -121,7 +120,8 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let (_dir, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[
         ("/repo/main", "p1"),
         ("/repo/docs", "p1"),
@@ -165,7 +165,7 @@ fn ordered_path_ids(db: &Db, workstream_id: &str) -> Vec<String> {
 }
 
 fn session(db: &Db, tag: &str) -> Session {
-    let s = Session::new(
+    let s = support::session(
         new_id(),
         Agent::Codex,
         format!("src-{tag}"),
@@ -215,7 +215,8 @@ fn empty_path_list_is_valid() {
 #[test]
 fn first_path_becomes_primary_automatically() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1")]);
 
     let w = create_workstream(&db, &attacher, "Ship it", "  ", &["/repo/main".into()])
@@ -301,7 +302,8 @@ fn create_requires_a_title() {
 #[test]
 fn append_is_secondary() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1"), ("/repo/docs", "p1")]);
     let w = create_workstream(&db, &attacher, "Two paths", "", &["/repo/main".into()])
         .unwrap()
@@ -327,7 +329,8 @@ fn append_is_secondary() {
 #[test]
 fn appending_to_an_empty_list_makes_it_primary() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/late", "p1")]);
     let w = create_workstream(&db, &attacher, "Late path", "", &[])
         .unwrap()
@@ -445,7 +448,8 @@ fn reorder_is_deterministic() {
 #[test]
 fn duplicate_path_is_idempotent() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[
         ("/repo/main", "p1"),
         ("/repo/main/", "p1"),
@@ -526,7 +530,8 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
 #[test]
 fn adding_a_path_imports_no_sessions() {
     let (_d, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1")]);
     let w = create_workstream(&db, &attacher, "No import", "", &[])
         .unwrap()
@@ -621,10 +626,10 @@ fn a_path_row_of_another_workstream_is_not_accepted() {
 fn the_primary_path_projection_moves_the_search_row_and_the_card() {
     let (_d, db) = temp_db();
     for id in ["p_frozen", "p_real", "p_other"] {
-        db.upsert_project(&Project::new(id.into(), id.to_uppercase()))
+        db.upsert_project(&support::project(id.into(), id.to_uppercase()))
             .unwrap();
     }
-    let w = Workstream::new("w-proj".into(), "Projection");
+    let w = support::workstream("w-proj".into(), "Projection");
     db.upsert_workstream(&w).unwrap();
     let attacher =
         ScriptedAttacher::for_projects(&[("/real/one", "p_real"), ("/other/two", "p_other")]);
@@ -772,7 +777,8 @@ fn path_views_carry_the_facts_the_detail_page_needs() {
 #[test]
 fn initial_paths_keep_submission_order_and_report_each_entry() {
     let (_dir, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[
         ("/repo/main", "p1"),
         ("/repo/docs", "p1"),
@@ -817,7 +823,8 @@ fn initial_paths_keep_submission_order_and_report_each_entry() {
 #[test]
 fn first_accepted_path_wins_the_primary_seat_even_after_rejections() {
     let (_dir, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let mut attacher = ScriptedAttacher::default();
     attacher.unresolvable.insert("/repo/ghost".into());
     attacher.projects.insert("/repo/docs".into(), "p1".into());
@@ -861,7 +868,8 @@ fn first_accepted_path_wins_the_primary_seat_even_after_rejections() {
 #[test]
 fn duplicates_inside_one_call_are_reported_not_attached() {
     let (_dir, db) = temp_db();
-    db.upsert_project(&Project::new("p1".into(), "P1")).unwrap();
+    db.upsert_project(&support::project("p1".into(), "P1"))
+        .unwrap();
     let attacher = ScriptedAttacher::for_projects(&[("/repo/main", "p1"), ("/repo/main/", "p1")]);
 
     let report = create_workstream(

@@ -20,8 +20,8 @@ pub struct SearchHit {
 /// Review P1-1 — the read-side lifecycle authority: a Session's own document
 /// (`kind = 'session'`, `ref_id` is the session id) and its event rows surface
 /// only while that session is active. Belt and braces beside the write-side
-/// guards (trash unindex + guarded backfill): a stale row left by any older
-/// build or crash must not surface a trashed session in search.
+/// guards (trash unindex + guarded backfill): a stale row left behind by an
+/// interrupted write must not surface a trashed session in search.
 const ACTIVE_EVENT_GUARD: &str = "(
     search_index.kind NOT IN ('event', 'session')
     OR EXISTS (

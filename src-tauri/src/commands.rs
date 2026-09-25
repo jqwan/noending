@@ -228,8 +228,7 @@ pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<Con
         )?;
         // §42.3-M19 — the Project this activity belongs to is its position-0
         // path's Project. The current projection is read from the primary
-        // path: for a
-        // migrated Workstream it can name a Project §7.4 deleted or §8.3
+        // path: the derived cache can name a Project §7.4 deleted or §8.3
         // merged away, which would reorder `list_projects` (ORDER BY
         // updated_at) by a membership that no longer exists.
         let (pid, _) =

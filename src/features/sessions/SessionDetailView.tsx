@@ -51,9 +51,8 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const [trashBusy, setTrashBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
   /**
-   * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字——
-   * 那是 v0.2 之前手工指派留下的历史标签（§43.4-2）。派生链自带名字，
-   * 所以正常情况下不多这一次读取。
+   * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字
+   * （§43.4-2）。派生链自带名字，所以正常情况下不多这一次读取。
    */
   const [projects, setProjects] = useState<Project[] | null>(null);
 
@@ -65,11 +64,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  const needsLegacyName = !detail?.workspace_path && !!detail?.session.project_id;
+  const needsProjectName = !detail?.workspace_path && !!detail?.session.project_id;
   useEffect(() => {
-    if (!needsLegacyName || projects) return;
+    if (!needsProjectName || projects) return;
     api.listProjects().then(setProjects).catch(console.error);
-  }, [needsLegacyName, projects]);
+  }, [needsProjectName, projects]);
   const projectNameById = useMemo(
     () => new Map((projects ?? []).map((p) => [p.id, p.name])),
     [projects],
@@ -170,11 +169,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   };
   /** 派生链自带的路径与 Project（§43.3-M29：详情只承认这一种真相）。 */
   const workspacePath = detail.workspace_path;
-  const legacyProjectCell = projectCellFor(session, projectNameById);
+  const projectIdOnlyCell = projectCellFor(session, projectNameById);
   const derivedProjectName = workspacePath && workspacePath.project_name.trim() !== ""
     ? workspacePath.project_name
     : null;
-  /** 这条会话「属于」哪个项目：派生链优先，退回 v0.2 之前手工指派留下的 project_id。 */
+  /** 这条会话「属于」哪个项目：派生链优先，退回会话行上缓存的 project_id。 */
   const sessionProjectId = workspacePath?.project_id ?? session.project_id ?? null;
 
   /**
@@ -338,9 +337,9 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             )
           ) : session.project_id ? (
             <span className="muted small" style={{ wordBreak: "break-word" }}>
-              {legacyProjectCell.text}
+              {projectIdOnlyCell.text}
               {" —— "}
-              {legacyProjectCell.hint}
+              {projectIdOnlyCell.hint}
             </span>
           ) : (
             <span className="muted small">

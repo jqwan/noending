@@ -2,16 +2,14 @@
 //!
 //! Nothing here may depend on a specific Agent's data format.
 //!
-//! Workspace Domain v0.2 changed one long-standing rule deliberately: a
-//! physical working path IS now domain state (`WorkspacePath`, and the
-//! `workstream_paths` ordered list that replaced `default_cwd`). What did not
-//! change: an Agent's raw transcript layout, and the fact that a Workstream is
-//! not a path — it *has* an ordered list of paths, and a Session keeps its own
-//! authoritative cwd.
+//! Workspace invariant: a physical working path IS domain state
+//! (`WorkspacePath`, plus the ordered `workstream_paths` list). An Agent's raw
+//! transcript layout is separate, and a Workstream is not a path — it *has* an
+//! ordered list of paths, while a Session keeps its own authoritative cwd.
 //!
-//! Environment data (cwd etc.) is still optional metadata carried by Session:
-//! a Session with no cwd is legal and gets no WorkspacePath (v0.2 never
-//! fabricates one from a default).
+//! Environment data (cwd etc.) is optional metadata carried by Session: a
+//! Session with no cwd is legal and gets no WorkspacePath — nothing fabricates
+//! one from a default.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,36 +22,18 @@ pub type Id = String;
 /// [`WorkspacePath`]; the last path being deleted or reassigned deletes it.
 /// `git_id` is the optional Git anchor; `None` means the Project is currently
 /// only anchored by its path(s), which is a normal state, not a degraded one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Project {
     pub id: Id,
     pub name: String,
     pub description: String,
     /// References `git_identities.id`. UNIQUE across Projects when set.
-    #[serde(default)]
     pub git_id: Option<Id>,
     /// A user renamed this Project: automatic naming must stop overwriting it,
     /// including after a Project merge or worktree discovery.
-    #[serde(default)]
     pub name_customized: bool,
     pub created_at: String,
     pub updated_at: String,
-}
-
-impl Project {
-    /// Legacy / test constructor: path-backed, app-named.
-    pub fn new(id: Id, name: impl Into<String>) -> Self {
-        let ts = crate::storage::now();
-        Self {
-            id,
-            name: name.into(),
-            description: String::new(),
-            git_id: None,
-            name_customized: false,
-            created_at: ts.clone(),
-            updated_at: ts,
-        }
-    }
 }
 
 /// One observed physical working path — the bridge between the filesystem and
@@ -61,10 +41,10 @@ impl Project {
 ///
 /// Identity: `id` IS the path identity, derived deterministically from
 /// `canonical_path` (see `workspace::path_identity`) rather than being a random
-/// UUID, so re-ensuring the same path is idempotent by construction and the
-/// v12 migration can be replayed safely. Git presence does not affect it: the
-/// same directory stays the same WorkspacePath across `.git` appearing,
-/// disappearing, or `git init` running again.
+/// UUID, so re-ensuring the same path is idempotent by construction. Git
+/// presence does not affect it: the same directory stays the same
+/// WorkspacePath across `.git` appearing, disappearing, or `git init` running
+/// again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspacePath {
     pub id: Id,
@@ -79,8 +59,8 @@ pub struct WorkspacePath {
 }
 
 impl WorkspacePath {
-    /// Shared constructor for fixtures and migration code. The id is computed by
-    /// the same identity function production uses, so a fixture can never
+    /// Shared constructor for fixtures and domain creation. The id is computed
+    /// by the same identity function production uses, so a fixture can never
     /// disagree with the real `path-<sha>` rule.
     pub fn new(canonical_path: impl Into<String>, project_id: Id) -> Self {
         let canonical_path = canonical_path.into();
@@ -112,7 +92,7 @@ pub mod git_state {
 /// A recognized Git family, keyed by `common_dir`.
 ///
 /// `id` is app-assigned (not a hash of the directory) because a repository can
-/// move; v0.2 only promises "same recognized common dir → same git_id".
+/// move; the invariant is only "same recognized common dir → same git_id".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitIdentity {
     pub id: Id,
@@ -215,22 +195,6 @@ pub mod workstream_visibility {
     pub const ARCHIVED: &str = "archived";
 }
 
-impl Workstream {
-    /// Legacy / test constructor: no paths, active, visible.
-    pub fn new(id: Id, title: impl Into<String>) -> Self {
-        let ts = crate::storage::now();
-        Self {
-            id,
-            title: title.into(),
-            description: String::new(),
-            lifecycle: workstream_lifecycle::ACTIVE.into(),
-            visibility: workstream_visibility::NORMAL.into(),
-            created_at: ts.clone(),
-            updated_at: ts,
-        }
-    }
-}
-
 /// Every Agent NoEnding knows how to READ. Not every entry can be launched:
 /// Qoder ships no headless CLI and AutoClaw's CLI cannot be pointed at its own
 /// state directory from here, so those adapters ingest history only and
@@ -324,7 +288,7 @@ impl Agent {
 /// A normalized, agent-agnostic record of one external Session.
 /// Session may have no cwd / repository / workspace at all.
 ///
-/// Workspace facts on a Session (v0.2):
+/// Workspace facts on a Session:
 /// - `workspace_path_id` is the authoritative link to the physical workspace;
 ///   it is set only when the Session really has a cwd. A Session without one
 ///   stays `None` — the default workspace is a *launch* convenience and is
@@ -333,14 +297,13 @@ impl Agent {
 ///   `workspace_path_id → workspace_paths.project_id`. It is written by exactly
 ///   two code paths (see `storage::session_paths`); a manual write into it is a
 ///   domain violation, not a convenience.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
     pub agent: Agent,
     pub agent_session_id: String,
     pub title: Option<String>,
     pub cwd: Option<String>,
-    #[serde(default)]
     pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
     /// Semantic ownership: the one Workstream this execution belongs to, or
@@ -348,45 +311,20 @@ pub struct Session {
     /// no primary/related pair and no M:N relation. Physical Project membership
     /// (above) and this semantic owner are independent and never mutate each
     /// other (方案 §4, §5).
-    #[serde(default)]
     pub owner_workstream_id: Option<Id>,
     pub raw_path: String,
     pub parent_agent_session_id: Option<String>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
-    /// v13 lifecycle. `None` = Normal; `Some(ts)` = Trash. This is the single
-    /// lifecycle authority — there is no separate visibility flag. Trashing is
-    /// reversible (Restore keeps the same Session id) and never touches the
-    /// Agent source file; permanent deletion removes the row entirely.
-    #[serde(default)]
+    /// Session lifecycle authority. `None` = Normal; `Some(ts)` = Trash. This
+    /// is the single lifecycle authority — there is no separate visibility
+    /// flag. Trashing is reversible (Restore keeps the same Session id) and
+    /// never touches the Agent source file; permanent deletion removes the row
+    /// entirely.
     pub trashed_at: Option<String>,
 }
 
 impl Session {
-    /// Legacy / test constructor: an agent-owned Session with no workspace facts.
-    pub fn new(
-        id: Id,
-        agent: Agent,
-        agent_session_id: impl Into<String>,
-        raw_path: impl Into<String>,
-    ) -> Self {
-        Self {
-            id,
-            agent,
-            agent_session_id: agent_session_id.into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            raw_path: raw_path.into(),
-            parent_agent_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            trashed_at: None,
-        }
-    }
-
     /// A trashed Session is inactive inside NoEnding: hidden from default
     /// lists and search, not resumable, and not ingested or synced.
     pub fn is_trashed(&self) -> bool {
@@ -467,9 +405,12 @@ pub struct SessionEvent {
     pub source_generation: i64,
     pub source_position: String, // e.g. "line:42"
     pub ts: Option<String>,
-    // tool_call / tool_result are no longer produced (方案 §36.11); the value
-    // set stays open so rows ingested before that decision remain readable.
-    pub kind: String, // user_message | assistant_message | tool_call | tool_result | compact | system | artifact | unknown
+    /// Open event-kind discriminator.
+    ///
+    /// Current adapters produce message / compact / system / artifact events,
+    /// but the value intentionally stays a free string so a new Agent event
+    /// category does not need a SQLite enum or a schema change.
+    pub kind: String, // user_message | assistant_message | compact | system | artifact | unknown
     pub text: Option<String>,
     pub raw_ref: String,
     pub metadata: serde_json::Value,
@@ -492,15 +433,17 @@ pub struct SourceCursor {
     /// SHA-256 of the file bytes [0..byte_offset] at the time the offset was
     /// recorded. An append is only accepted when the stored prefix is still
     /// the file's prefix — a same-size-or-larger rewrite is caught here.
-    /// Empty on legacy cursors (forces one full re-scan to backfill).
+    /// Empty until a read has recorded one: without it append-only continuity
+    /// cannot be proven, so the source is conservatively re-scanned.
     pub prefix_hash: String,
     /// Identity hash of the last event on the CURRENT source chain — the
     /// base the next append batch continues from. This lives on the cursor,
     /// not "last event in the store": after a compact + dedup re-scan the
     /// store's tail is NEWER than the source's tail (old events are kept,
     /// append-only), and continuing the chain from it would make the next
-    /// append invisible to the following re-scan. Empty on legacy cursors
-    /// (falls back to the last stored event until the next full re-scan).
+    /// append invisible to the following re-scan. Empty when the source has
+    /// produced no chain event yet; the commit then falls back to the last
+    /// stored event identity.
     pub identity_tail_hash: String,
     /// Max app-assigned event sequence ingested so far (read cursor).
     pub last_sequence: i64,
@@ -595,6 +538,22 @@ pub mod launch_status {
     pub const FAILED: &str = "failed";
 }
 
+/// Where a piece of context came from and how strongly it is held. The values
+/// are the domain's own vocabulary: an authority is either known (the five
+/// origins below) or [`authority::UNKNOWN`], which says "this revision's origin
+/// cannot be determined" — a normal outcome, not a compatibility case.
+pub mod authority {
+    pub const USER_EXPLICIT: &str = "user_explicit";
+    pub const USER_EDIT: &str = "user_edit";
+    pub const SYSTEM_OBSERVED: &str = "system_observed";
+    pub const AGENT_STATEMENT: &str = "agent_statement";
+    pub const AGENT_INFERRED: &str = "agent_inferred";
+    /// The revision's provenance does not determine an authority. Callers must
+    /// never read this as permission to overwrite: it is the absence of a
+    /// statement, and the unified policy treats it as the weakest tier.
+    pub const UNKNOWN: &str = "unknown";
+}
+
 /// L2/L1 unit of Workstream context. History lives in revisions.
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextItem {
@@ -602,7 +561,7 @@ pub struct ContextItem {
     pub workstream_id: Id,
     pub kind: String,
     pub status: String,     // active | superseded | resolved | obsolete | deleted
-    pub authority: String, // user_explicit | user_edit | system_observed | agent_statement | agent_inferred
+    pub authority: String,  // see `authority`
     pub created_by: String, // user | sync:<runtime> | assistant | ...
     pub current_revision_id: Option<Id>,
     pub supersedes_item_id: Option<Id>,
@@ -677,7 +636,6 @@ pub struct CandidateSnapshot {
     pub title: String,
     pub content: String,
     pub authority: String,
-    #[serde(default)]
     pub source_refs: Vec<String>,
 }
 
@@ -877,9 +835,9 @@ mod agent_wire_spelling_tests {
         }
     }
 
-    /// `parse` is the third spelling and predates the enum's serde derive: it
-    /// accepts the legacy aliases too, and must keep accepting the canonical
-    /// one or a stored row could stop round-tripping.
+    /// `parse` is the third spelling beside `as_str` and serde: it also accepts
+    /// the short CLI aliases, and must keep accepting the canonical one or a
+    /// stored row could stop round-tripping.
     #[test]
     fn parse_accepts_the_canonical_spelling_of_every_agent() {
         for agent in Agent::all() {

@@ -26,7 +26,7 @@
 //! identity that kept it would give one directory two rows that every gate
 //! already agrees are the same location. Folding case into the Windows identity
 //! merges rather than splits — which is why 方案 §44 accepts it only while no
-//! Windows database exists to migrate.
+//! Windows installation has a populated database.
 
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
@@ -132,13 +132,14 @@ pub fn path_key(canonical: &str) -> String {
 /// gate could call two Windows spellings one location and the registry would
 /// keep them as two WorkspacePaths under two Projects. Folding the identity too
 /// was affordable only because no Windows database exists — `workspace_paths.id`
-/// is stored, so on a platform with data this is a migration, not a fix (§44.1).
+/// is stored, so on a platform with data this is a breaking identity change,
+/// not a fix (§44.1).
 ///
 /// Unix is returned unchanged: APFS is case-insensitive by default but
 /// case-preserving, folding there would make this module's output differ from
-/// the `canonical_path` the same code stores, and macOS v12 rows are already
-/// keyed by it — 方案 §44.5 pins those ids as literals rather than trusting the
-/// rule to look harmless.
+/// the `canonical_path` the same code stores, and stored `workspace_paths.id`
+/// values are already keyed by it — 方案 §44.5 pins those ids as literals rather
+/// than trusting the rule to look harmless.
 pub fn identity_key(canonical: &str, style: PathStyle) -> String {
     let key = path_key(canonical);
     if style.is_windows() {
@@ -705,9 +706,9 @@ mod tests {
         );
     }
 
-    /// The counter-check for the three above, and the reason macOS needed no
-    /// migration: a case difference stays two directories on Unix (§44.5 pins
-    /// the stored ids themselves).
+    /// The counter-check for the three above: a case difference stays two
+    /// directories on Unix, which is why folding case into the Unix identity is
+    /// never an option here (§44.5 pins the stored ids themselves).
     #[test]
     fn unix_case_variants_remain_distinct() {
         let u = PathStyle::Unix;

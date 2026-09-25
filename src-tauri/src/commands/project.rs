@@ -58,7 +58,7 @@ pub struct ProjectCardData {
     pub related_workstream_count: i64,
     /// Sessions through the authoritative
     /// `workspace_path_id → workspace_paths.project_id` chain (§1.10),
-    /// trashed sessions excluded (v13 lifecycle).
+    /// trashed sessions excluded (Trash lifecycle).
     pub session_count: i64,
     /// Up to two canonical paths in canonical order (方案 §4: primary +
     /// "另有 N 个目录").
@@ -160,7 +160,7 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
     }
 
     // Session reach + activity through the authoritative chain (§1.10),
-    // trashed sessions excluded (v13 lifecycle: §11).
+    // trashed sessions excluded (Trash lifecycle: §11).
     let mut session_count: BTreeMap<String, i64> = BTreeMap::new();
     let mut session_activity: BTreeMap<String, Option<String>> = BTreeMap::new();
     {

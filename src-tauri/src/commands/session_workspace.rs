@@ -89,7 +89,9 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             .ok_or_else(|| other("Session 不存在"))?;
         let mut events = db.get_events(&session_id, None, 500)?;
         db.resolve_event_counterparts(&session, &mut events)?;
-        let cursor = db.get_cursor(&session_id)?;
+        // The two frontiers the detail page shows: events ingested, and how
+        // far Context processing has consumed them.
+        let cursor = db.get_ingested_sequence(&session_id)?;
         let processed_cursor = db.get_processed_sequence(&session_id)?;
         let owner_workstream = match session.owner_workstream_id.as_deref() {
             Some(id) => db.get_workstream(id)?,
