@@ -23,14 +23,14 @@ import type { Agent, PreparedLaunch, WorkstreamCardData } from "../../types";
  * 后端在启动时会再次校验状态指纹。
  *
  * `workstreamId` 是可选预置入参：省略或 `"none"` 即
- * standalone（0 绑定完全合法）。预置后用户仍然可以改。
+ * standalone（0 个所属任务完全合法）。预置后用户仍然可以改。
  *
  * 下拉读的是 Workstream 卡片投影：标题相同的 Workstream 靠主路径才能分清，
  * 而 Session 的实际启动目录恰恰由主路径决定——选项里必须能看到它。
  */
 export type NewSessionModalProps = {
   onClose: () => void;
-  /** 预置选中的 Workstream；省略或 "none" = standalone。 */
+  /** 预置选中的所属任务；省略或 "none" = standalone。 */
   workstreamId?: string | null;
 };
 
@@ -53,7 +53,7 @@ export default function NewSessionModal({
   workstreamId,
 }: NewSessionModalProps) {
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
-  const [wsId, setWsId] = useState(
+  const [ownerWorkstreamId, setOwnerWorkstreamId] = useState(
     workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
   );
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
@@ -82,15 +82,15 @@ export default function NewSessionModal({
     if (!defaultAgent) return null;
     return api.prepareNewSession(
       defaultAgent,
-      wsId === STANDALONE ? [] : [wsId],
+      ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId,
     );
-  }, [defaultAgent, wsId]);
+  }, [defaultAgent, ownerWorkstreamId]);
   const { prepared, preparedRef, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
 
   const handleWsChange = (next: string) => {
     releasePrepared();
-    setWsId(next);
+    setOwnerWorkstreamId(next);
   };
 
   const handleClose = () => {
@@ -126,8 +126,8 @@ export default function NewSessionModal({
     <>
       <Modal title="新建会话" onClose={handleClose}>
         <label className="field">
-          <span>任务（可选）</span>
-          <select value={wsId} onChange={(e) => handleWsChange(e.target.value)}>
+          <span>所属任务（可选）</span>
+          <select value={ownerWorkstreamId} onChange={(e) => handleWsChange(e.target.value)}>
             <option value={STANDALONE}>无（直接开始）</option>
             {workstreams.map((w) => (
               <option key={w.id} value={w.id}>

@@ -1,6 +1,6 @@
 use noending::domain::{
     Agent, ContextConflict, ContextDelivery, ContextItemRevision, ReviewFrontier, Session,
-    SessionWorkstreamBinding, Workstream,
+    Workstream,
 };
 use noending::storage::{new_id, now, Db};
 use rusqlite::params;
@@ -62,6 +62,7 @@ fn session_row(db: &TestDb, agent: Agent) -> Session {
         started_at: Some(now()),
         last_activity_at: Some(now()),
         trashed_at: None,
+        owner_workstream_id: None,
     };
     db.upsert_session(&s).unwrap();
     s
@@ -443,7 +444,7 @@ fn same_timestamp_boundary_is_lossless() {
 
 /// 7. review_state_isolated_from_domain_state
 /// Marking reviewed is purely observational and MUST NOT mutate Context items,
-/// revisions, conflicts, ContextDelivery snapshots, Session cursors, or bindings.
+/// revisions, conflicts, ContextDelivery snapshots, or Session cursors.
 #[test]
 fn review_state_isolated_from_domain_state() {
     let db = open_db("domain-isolation");
@@ -511,19 +512,7 @@ fn review_state_isolated_from_domain_state() {
     cursor.generation = 1;
     db.set_source_cursor(&cursor).unwrap();
 
-    let binding = SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "primary".into(),
-        source: "explicit_launch_selection".into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    };
-    db.bind(&binding).unwrap();
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     // Snapshot all domain states before mark reviewed
     let item_before = db.get_item(&item.id).unwrap().unwrap();
@@ -531,7 +520,7 @@ fn review_state_isolated_from_domain_state() {
     let conflict_before = db.get_conflict(&conflict.id).unwrap().unwrap();
     let deliveries_before = db.latest_deliveries(&s.id).unwrap();
     let cursor_before = db.get_source_cursor(&s.id).unwrap();
-    let bindings_before = db.bindings_for_session(&s.id).unwrap();
+    let owner_before = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
     // Perform mark_workstream_reviewed
     let win = db.get_workstream_review_window(&ws.id).unwrap();
@@ -546,7 +535,7 @@ fn review_state_isolated_from_domain_state() {
     let conflict_after = db.get_conflict(&conflict.id).unwrap().unwrap();
     let deliveries_after = db.latest_deliveries(&s.id).unwrap();
     let cursor_after = db.get_source_cursor(&s.id).unwrap();
-    let bindings_after = db.bindings_for_session(&s.id).unwrap();
+    let owner_after = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
     assert_eq!(item_before.id, item_after.id);
     assert_eq!(item_before.kind, item_after.kind);
@@ -586,12 +575,7 @@ fn review_state_isolated_from_domain_state() {
     assert_eq!(cursor_before.byte_offset, cursor_after.byte_offset);
     assert_eq!(cursor_before.generation, cursor_after.generation);
 
-    assert_eq!(bindings_before.len(), bindings_after.len());
-    assert_eq!(
-        bindings_before[0].workstream_id,
-        bindings_after[0].workstream_id
-    );
-    assert_eq!(bindings_before[0].role, bindings_after[0].role);
+    assert_eq!(owner_before, owner_after, "review must not touch the owner");
 }
 
 /// 8. sync_status_change_is_review_relevant

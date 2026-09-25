@@ -37,7 +37,7 @@ pub struct Db {
 
 /// Current database shape. New databases are created directly; an older or
 /// newer version must be rebuilt with the current application.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -112,7 +112,6 @@ impl Db {
             // writer under WAL, but an external process touching the file
             // should cause a wait, not an error.
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
-            register_binding_rank_fn(&conn)?;
         }
         db.initialize_schema()?;
         Ok(db)
@@ -194,6 +193,10 @@ impl Db {
               cwd TEXT,
               workspace_path_id TEXT,
               project_id TEXT REFERENCES projects(id),
+              -- Semantic ownership: at most one Owner Workstream per Session
+              -- (方案 §3.3). Deleting the Workstream clears this, never the row.
+              owner_workstream_id TEXT
+                REFERENCES workstreams(id) ON DELETE SET NULL,
               raw_path TEXT NOT NULL,
               parent_agent_session_id TEXT,
               started_at TEXT,
@@ -228,28 +231,6 @@ impl Db {
               identity_tail_hash TEXT NOT NULL DEFAULT '',
               mtime REAL,
               processed_sequence INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS session_workstream_bindings (
-              session_id TEXT NOT NULL REFERENCES sessions(id),
-              workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-              role TEXT NOT NULL DEFAULT 'related',
-              source TEXT NOT NULL DEFAULT 'automatic_classification',
-              confidence REAL NOT NULL DEFAULT 0.5,
-              workstream_path_id TEXT,
-              last_seen_revision TEXT,
-              last_sync_cursor INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL,
-              last_used_at TEXT NOT NULL,
-              PRIMARY KEY (session_id, workstream_id)
-            );
-            -- Durable negative override: the user removed this (auto) binding.
-            -- Sync's auto-classification must not re-add it; a later strong
-            -- write to the same (session, workstream) clears the row.
-            CREATE TABLE IF NOT EXISTS session_binding_removals (
-              session_id TEXT NOT NULL,
-              workstream_id TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              PRIMARY KEY (session_id, workstream_id)
             );
             CREATE TABLE IF NOT EXISTS context_items (
               id TEXT PRIMARY KEY,
@@ -303,7 +284,7 @@ impl Db {
               id TEXT PRIMARY KEY,
               launch_type TEXT NOT NULL DEFAULT 'new',
               agent TEXT NOT NULL,
-              selected_workstream_ids TEXT NOT NULL DEFAULT '[]',
+              owner_workstream_id TEXT,
               cwd TEXT,
               context_bundle_markdown TEXT,
               context_bundle_revisions TEXT,
@@ -349,7 +330,7 @@ impl Db {
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
             CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
-            CREATE INDEX IF NOT EXISTS idx_bindings_ws ON session_workstream_bindings(workstream_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
             CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, sequence);
             CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_fingerprint
@@ -426,7 +407,6 @@ impl Db {
               workstream_id TEXT NOT NULL REFERENCES workstreams(id),
               workspace_path_id TEXT NOT NULL REFERENCES workspace_paths(id),
               position INTEGER NOT NULL,
-              source TEXT NOT NULL DEFAULT 'user',
               created_at TEXT NOT NULL,
               UNIQUE(workstream_id, workspace_path_id),
               UNIQUE(workstream_id, position)
@@ -583,27 +563,26 @@ impl Db {
     }
 
     /// Card stats for one Workstream: (session_count, latest session as
-    /// (id, agent), that session's activity timestamp). "Latest" follows the
-    /// transcript, not the binding: most recent activity wins. Trashed
-    /// sessions are inactive (方案 §11) and count for nothing here.
+    /// (id, agent), that session's activity timestamp). Only Sessions that own
+    /// this Workstream count (方案 §40); a Session can never be counted twice
+    /// across Workstreams. Trashed sessions are inactive (方案 §11) and count
+    /// for nothing here.
     pub fn workstream_session_stats(
         &self,
         workstream_id: &str,
     ) -> Result<(i64, Option<(String, String)>, Option<String>)> {
         let conn = self.read();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM session_workstream_bindings b
-             JOIN sessions s ON s.id = b.session_id AND s.trashed_at IS NULL
-             WHERE b.workstream_id = ?1",
+            "SELECT COUNT(*) FROM sessions
+             WHERE owner_workstream_id = ?1 AND trashed_at IS NULL",
             params![workstream_id],
             |r| r.get(0),
         )?;
         let latest = conn
             .query_row(
-                "SELECT s.id, s.agent, COALESCE(s.last_activity_at, s.started_at) AS act
-                 FROM session_workstream_bindings b
-                 JOIN sessions s ON s.id = b.session_id
-                 WHERE b.workstream_id = ?1 AND s.trashed_at IS NULL
+                "SELECT id, agent, COALESCE(last_activity_at, started_at) AS act
+                 FROM sessions
+                 WHERE owner_workstream_id = ?1 AND trashed_at IS NULL
                  ORDER BY act DESC
                  LIMIT 1",
                 params![workstream_id],
@@ -687,7 +666,7 @@ impl Db {
     /// Delete a Workstream and everything it owns — in the full FK order of
     /// §42.3-M6, which a bare `DELETE FROM workstreams` violates under
     /// `PRAGMA foreign_keys = ON` (it fails the moment the Workstream has ever
-    /// had a Context item, a binding or a path).
+    /// had a Context item or a path).
     ///
     /// This is the mechanical half only. The *product* door is
     /// `workspace::workstream::delete_workstream_permanently`, which additionally
@@ -738,6 +717,7 @@ impl Db {
                 s.workspace_path_id
             ],
         )?;
+        index_session_conn(&conn, &s.id)?;
         Ok(existed)
     }
 
@@ -1186,68 +1166,48 @@ impl Db {
         Ok(())
     }
 
-    // ---------------- Bindings ----------------
+    // ---------------- Session Owner ----------------
 
-    pub fn bind(&self, b: &SessionWorkstreamBinding) -> Result<()> {
+    /// Set (or clear) the single Owner Workstream of a Session (方案 §9.2).
+    /// This touches exactly one column: `sessions.owner_workstream_id`.
+    /// `None` clears ownership. No implicit WorkstreamPath / cwd / Project
+    /// mutation happens here (方案 §5.1).
+    pub fn set_session_owner(&self, session_id: &str, workstream_id: Option<&str>) -> Result<()> {
         let conn = self.write();
-        bind_conn(&conn, b)
-    }
-
-    /// User-initiated removal — leaves a durable tombstone so
-    /// auto-classification can never re-add the rejected workstream,
-    /// regardless of the removed binding's provenance.
-    pub fn unbind(&self, session_id: &str, workstream_id: &str) -> Result<()> {
-        self.tx(|tx| remove_binding_by_user_conn(tx, session_id, workstream_id))
-    }
-
-    /// Durable negative override lookup: has the user removed this binding?
-    pub fn binding_removal_exists(&self, session_id: &str, workstream_id: &str) -> Result<bool> {
-        let conn = self.read();
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_binding_removals WHERE session_id = ?1 AND workstream_id = ?2)",
+        if let Some(id) = workstream_id {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workstreams WHERE id = ?1)",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(other(format!("未知 Workstream: {id}")));
+            }
+        }
+        let changed = conn.execute(
+            "UPDATE sessions SET owner_workstream_id = ?2 WHERE id = ?1",
             params![session_id, workstream_id],
-            |r| r.get(0),
-        )?)
-    }
-
-    pub fn bindings_for_session(&self, session_id: &str) -> Result<Vec<SessionWorkstreamBinding>> {
-        let conn = self.read();
-        let mut st =
-            conn.prepare("SELECT * FROM session_workstream_bindings WHERE session_id = ?1")?;
-        let rows = st
-            .query_map(params![session_id], row_binding)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    pub fn bindings_for_workstream(
-        &self,
-        workstream_id: &str,
-    ) -> Result<Vec<SessionWorkstreamBinding>> {
-        let conn = self.read();
-        let mut st =
-            conn.prepare("SELECT * FROM session_workstream_bindings WHERE workstream_id = ?1")?;
-        let rows = st
-            .query_map(params![workstream_id], row_binding)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    pub fn update_binding_sync(
-        &self,
-        session_id: &str,
-        workstream_id: &str,
-        cursor: i64,
-        last_seen_revision: Option<&str>,
-    ) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE session_workstream_bindings
-             SET last_sync_cursor = ?3, last_seen_revision = COALESCE(?4, last_seen_revision)
-             WHERE session_id = ?1 AND workstream_id = ?2",
-            params![session_id, workstream_id, cursor, last_seen_revision],
         )?;
+        if changed == 0 {
+            return Err(other(format!("未知 Session: {session_id}")));
+        }
+        index_session_conn(&conn, session_id)?;
         Ok(())
+    }
+
+    /// Active Sessions that own `workstream_id`, most recent activity first
+    /// (方案 §9.2). A Session appears in at most one Workstream's list.
+    pub fn sessions_for_workstream(&self, workstream_id: &str) -> Result<Vec<Session>> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT * FROM sessions
+             WHERE owner_workstream_id = ?1 AND trashed_at IS NULL
+             ORDER BY COALESCE(last_activity_at, started_at) DESC",
+        )?;
+        let rows = st
+            .query_map(params![workstream_id], row_session)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ---------------- Context Items ----------------
@@ -1628,11 +1588,11 @@ impl Db {
         let conn = self.write();
         conn.execute(
             "INSERT INTO launch_intents
-             (id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, context_bundle_revisions, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
+             (id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, context_bundle_revisions, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 i.id, i.launch_type, i.agent.as_str(),
-                serde_json::to_string(&i.selected_workstream_ids)?,
+                i.owner_workstream_id,
                 i.cwd, i.context_bundle_markdown, i.context_bundle_revisions, i.process_id.map(|p| p as i64),
                 i.launched_at, i.matched_session_id, i.status, i.note, i.created_at, i.updated_at
             ],
@@ -1659,7 +1619,7 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
+                "SELECT id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
                  FROM launch_intents WHERE id = ?1",
                 params![id],
                 row_launch_intent,
@@ -1676,7 +1636,7 @@ impl Db {
             format!(" WHERE status IN ({})", placeholders)
         };
         let sql = format!(
-            "SELECT id, launch_type, agent, selected_workstream_ids, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
+            "SELECT id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
              FROM launch_intents{} ORDER BY created_at DESC LIMIT {}",
             filter, limit
         );
@@ -2114,6 +2074,22 @@ impl Db {
                    SELECT ref_id FROM search_index WHERE kind = 'event')",
             [],
         )?;
+        // §39 — fill in the Session documents that are missing entirely. A
+        // document whose body can change (title, Project, Owner Workstream) is
+        // refreshed at the write that changed it, so the backfill only has to
+        // cover rows no write ever touched.
+        let ids: Vec<String> = {
+            let mut st = conn.prepare(
+                "SELECT id FROM sessions
+                  WHERE trashed_at IS NULL
+                    AND id NOT IN (SELECT ref_id FROM search_index WHERE kind = 'session')",
+            )?;
+            let mapped = st.query_map([], |r| r.get::<_, String>(0))?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for id in ids {
+            index_session_conn(&conn, &id)?;
+        }
         Ok(())
     }
 
@@ -2211,105 +2187,47 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
     Ok(())
 }
 
-/// Remove a binding on behalf of the USER. Any user-initiated removal is a
-/// durable negative decision regardless of the removed binding's
-/// provenance: once the last strong binding goes away the session becomes
-/// auto-classifiable again, and without the tombstone the next
-/// classification could re-add the very workstream the user just rejected.
-/// The tombstone is written even when no binding row exists — an explicit
-/// "this session must not bind here" also works as a pure negative
-/// override. (Sync's own re-classification deletes AUTO rows directly in
-/// persist_auto_classification and must NOT route through here: an
-/// automatic replace is a guess being revised, not a user rejection.)
+/// §39 — write (or refresh) one Session's search document.
 ///
-/// Tombstones are permanent by authority decision — nothing expires them.
-/// `INSERT OR IGNORE` means `created_at` records the FIRST rejection and is
-/// NOT refreshed on re-rejection: never read it as "last rejected at". If
-/// an expiry or audit view is ever added, introduce `updated_at` first.
-pub fn remove_binding_by_user_conn(
-    conn: &Connection,
-    session_id: &str,
-    workstream_id: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO session_binding_removals (session_id, workstream_id, created_at)
-         VALUES (?1, ?2, ?3)",
-        params![session_id, workstream_id, now()],
-    )?;
-    conn.execute(
-        "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND workstream_id = ?2",
-        params![session_id, workstream_id],
-    )?;
-    Ok(())
-}
-
-pub fn bind_conn(conn: &Connection, b: &SessionWorkstreamBinding) -> Result<()> {
-    // Binding sources have an explicit PRECEDENCE, not just confidence:
-    // explicit launch selection (3) > user_assigned (2) > automatic (1).
-    // A later binding replaces the stored provenance only when it outranks
-    // it, or matches it in rank with >= confidence — so a user_assigned
-    // resume can never rewrite an explicit_launch_selection into a weaker
-    // provenance even at equal confidence, and role changes only when the
-    // binding itself is replaced.
-    //
-    // A strong write (explicit / user_assigned) also lifts any removal
-    // tombstone for the pair: the user re-established the binding, so the
-    // earlier "don't auto-classify here" decision no longer applies. Auto
-    // writes (sync re-classification) must NOT clear it.
-    if b.source == binding_source::EXPLICIT_LAUNCH || b.source == binding_source::USER_ASSIGNED {
-        conn.execute(
-            "DELETE FROM session_binding_removals WHERE session_id = ?1 AND workstream_id = ?2",
-            params![b.session_id, b.workstream_id],
-        )?;
+/// Title is the Session title (falling back to the Agent name); body is the
+/// Project name plus the ONE Owner Workstream title. A Session has a single
+/// Owner, so there is exactly one Workstream title to store. A no-op when FTS is unavailable (LIKE fallback covers it).
+pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
+    if conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE name = 'search_index'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_none()
+    {
+        return Ok(());
     }
+    let row: Option<(String, String, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT COALESCE(s.title, s.agent), COALESCE(p.name, ''), w.title, s.cwd
+               FROM sessions s
+               LEFT JOIN projects p ON p.id = s.project_id
+               LEFT JOIN workstreams w ON w.id = s.owner_workstream_id
+              WHERE s.id = ?1",
+            params![session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((title, project_name, owner_title, cwd)) = row else {
+        return Ok(());
+    };
+    unindex_conn(conn, "session", session_id);
+    let body = format!(
+        "{}\n{}\n{}",
+        project_name,
+        owner_title.unwrap_or_default(),
+        cwd.unwrap_or_default()
+    );
     conn.execute(
-        "INSERT INTO session_workstream_bindings
-         (session_id, workstream_id, role, source, confidence, workstream_path_id, last_seen_revision, last_sync_cursor, created_at, last_used_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?10, ?6, ?7, ?8, ?9)
-         ON CONFLICT(session_id, workstream_id) DO UPDATE SET
-           source = CASE WHEN binding_wins(?4, ?5, session_workstream_bindings.source, session_workstream_bindings.confidence)
-                         THEN ?4 ELSE session_workstream_bindings.source END,
-           confidence = CASE WHEN binding_wins(?4, ?5, session_workstream_bindings.source, session_workstream_bindings.confidence)
-                             THEN ?5 ELSE session_workstream_bindings.confidence END,
-           role = CASE WHEN binding_wins(?4, ?5, session_workstream_bindings.source, session_workstream_bindings.confidence)
-                       THEN ?3 ELSE session_workstream_bindings.role END,
-           -- Which WorkstreamPath brought this Session in. Never cleared by a
-           -- later binding that has no path to offer: NULL means unknown, and
-           -- unknown must not be used to destroy a provable fact (§42.3-M1).
-           workstream_path_id = COALESCE(?10, workstream_path_id),
-           last_seen_revision = COALESCE(?6, last_seen_revision),
-           last_used_at = ?9",
-        params![
-            b.session_id, b.workstream_id, b.role, b.source, b.confidence,
-            b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at,
-            b.workstream_path_id
-        ],
-    )?;
-    Ok(())
-}
-
-/// Register the precedence helper used by bind_conn (deterministic SQL
-/// expression of the binding-source ranking).
-fn register_binding_rank_fn(conn: &Connection) -> Result<()> {
-    conn.create_scalar_function(
-        "binding_wins",
-        4,
-        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            fn rank(source: &str) -> i64 {
-                match source {
-                    "explicit_launch_selection" => 3,
-                    "user_assigned" => 2,
-                    _ => 1,
-                }
-            }
-            let new_source = ctx.get_raw(0).as_str().unwrap_or("").to_string();
-            let new_conf: f64 = ctx.get(1)?;
-            let old_source = ctx.get_raw(2).as_str().unwrap_or("").to_string();
-            let old_conf: f64 = ctx.get(3)?;
-            let (rn, ro) = (rank(&new_source), rank(&old_source));
-            Ok(rn > ro || (rn == ro && new_conf >= old_conf))
-        },
+        "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('session', ?1, '', ?2, ?3)",
+        params![session_id, title, body],
     )?;
     Ok(())
 }
@@ -2805,6 +2723,7 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
         cwd: r.get("cwd")?,
         workspace_path_id: r.get("workspace_path_id")?,
         project_id: r.get("project_id")?,
+        owner_workstream_id: r.get("owner_workstream_id")?,
         raw_path: r.get("raw_path")?,
         parent_agent_session_id: r.get("parent_agent_session_id")?,
         started_at: r.get("started_at")?,
@@ -2826,21 +2745,6 @@ fn row_event(r: &Row) -> rusqlite::Result<SessionEvent> {
         text: r.get(8)?,
         raw_ref: r.get(9)?,
         metadata: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
-    })
-}
-
-fn row_binding(r: &Row) -> rusqlite::Result<SessionWorkstreamBinding> {
-    Ok(SessionWorkstreamBinding {
-        session_id: r.get("session_id")?,
-        workstream_id: r.get("workstream_id")?,
-        role: r.get("role")?,
-        source: r.get("source")?,
-        confidence: r.get("confidence")?,
-        workstream_path_id: r.get("workstream_path_id")?,
-        last_seen_revision: r.get("last_seen_revision")?,
-        last_sync_cursor: r.get("last_sync_cursor")?,
-        created_at: r.get("created_at")?,
-        last_used_at: r.get("last_used_at")?,
     })
 }
 
@@ -2915,7 +2819,7 @@ fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
         id: r.get(0)?,
         launch_type: r.get(1)?,
         agent: Agent::parse(&r.get::<_, String>(2)?).unwrap_or(Agent::Codex),
-        selected_workstream_ids: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+        owner_workstream_id: r.get(3)?,
         cwd: r.get(4)?,
         context_bundle_markdown: r.get(5)?,
         process_id: r.get::<_, Option<i64>>(6)?.map(|p| p as u32),

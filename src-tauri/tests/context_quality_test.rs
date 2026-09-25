@@ -23,9 +23,9 @@ const FIXTURE_DECISION_SUPERSEDE: &str =
 const FIXTURE_TODO_RESOLUTION: &str = include_str!("fixtures/context_quality/todo_resolution.json");
 const FIXTURE_CONSTRAINT_CONFLICT: &str =
     include_str!("fixtures/context_quality/constraint_conflict.json");
-const FIXTURE_MULTI_WS: &str =
-    include_str!("fixtures/context_quality/multi_workstream_classification.json");
-const FIXTURE_MULTI_WS_REVERSE: &str =
+/// Single-owner routing: a Session has exactly one Owner Workstream, so every
+/// extracted fact lands there and nowhere else (方案 §19, §43).
+const FIXTURE_OWNER_ROUTING: &str =
     include_str!("fixtures/context_quality/workstream_routing_reverse.json");
 
 // ---------------------------------------------------------------------------
@@ -100,35 +100,12 @@ fn domain_todo_resolution() {
 }
 
 #[test]
-fn domain_multi_workstream_classification() {
-    let fixture = load_fixture(FIXTURE_MULTI_WS).expect("valid fixture");
+fn domain_owner_routing() {
+    let fixture = load_fixture(FIXTURE_OWNER_ROUTING).expect("valid fixture");
     let db = run_domain_golden(&fixture).expect("domain golden run");
 
     let launcher_items = db.items_for_workstream("ws-launcher", false).unwrap();
     assert_eq!(launcher_items.len(), 1);
-
-    let sync_items = db.items_for_workstream("ws-sync", false).unwrap();
-    assert_eq!(
-        sync_items.len(),
-        0,
-        "Non-target workstream must remain clean"
-    );
-}
-
-#[test]
-fn domain_workstream_routing_reverse() {
-    let fixture = load_fixture(FIXTURE_MULTI_WS_REVERSE).expect("valid fixture");
-    let db = run_domain_golden(&fixture).expect("domain golden run");
-
-    let launcher_items = db.items_for_workstream("ws-launcher", false).unwrap();
-    assert_eq!(launcher_items.len(), 1);
-
-    let sync_items = db.items_for_workstream("ws-sync", false).unwrap();
-    assert_eq!(
-        sync_items.len(),
-        0,
-        "Sync-first candidate order must not attract the Launcher fact"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -191,13 +168,8 @@ fn heuristic_constraint_conflict() {
 }
 
 #[test]
-fn heuristic_multi_workstream_classification() {
-    assert_heuristic_baseline(FIXTURE_MULTI_WS);
-}
-
-#[test]
-fn heuristic_workstream_routing_reverse() {
-    assert_heuristic_baseline(FIXTURE_MULTI_WS_REVERSE);
+fn heuristic_owner_routing() {
+    assert_heuristic_baseline(FIXTURE_OWNER_ROUTING);
 }
 
 /// The quantified criterion-level heuristic baseline over the whole corpus.
@@ -206,13 +178,12 @@ fn heuristic_workstream_routing_reverse() {
 /// fixture, aggregated once at the end so the full report always prints).
 #[test]
 fn heuristic_baseline_report() {
-    let corpus: [(&str, &str); 6] = [
+    let corpus: [(&str, &str); 5] = [
         ("goal_evolution", FIXTURE_GOAL_EVOLUTION),
         ("decision_supersede", FIXTURE_DECISION_SUPERSEDE),
         ("todo_resolution", FIXTURE_TODO_RESOLUTION),
         ("constraint_conflict", FIXTURE_CONSTRAINT_CONFLICT),
-        ("multi_workstream_classification", FIXTURE_MULTI_WS),
-        ("workstream_routing_reverse", FIXTURE_MULTI_WS_REVERSE),
+        ("owner_routing", FIXTURE_OWNER_ROUTING),
     ];
 
     let mut rows: Vec<String> = Vec::new();

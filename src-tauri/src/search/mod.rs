@@ -9,7 +9,7 @@ use crate::storage::Db;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
-    pub kind: String, // item | workstream | project | event
+    pub kind: String, // item | workstream | project | session | event
     pub ref_id: String,
     pub parent_id: String,
     pub title: String,
@@ -17,11 +17,20 @@ pub struct SearchHit {
     pub rank: f64,
 }
 
-/// Review P1-1 — the read-side lifecycle authority: event rows surface only
-/// while their session is active. Belt and braces beside the write-side
+/// Review P1-1 — the read-side lifecycle authority: a Session's own document
+/// (`kind = 'session'`, `ref_id` is the session id) and its event rows surface
+/// only while that session is active. Belt and braces beside the write-side
 /// guards (trash unindex + guarded backfill): a stale row left by any older
 /// build or crash must not surface a trashed session in search.
-const ACTIVE_EVENT_GUARD: &str = "(search_index.kind != 'event' OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = search_index.parent_id AND s.trashed_at IS NULL))";
+const ACTIVE_EVENT_GUARD: &str = "(
+    search_index.kind NOT IN ('event', 'session')
+    OR EXISTS (
+        SELECT 1 FROM sessions s
+         WHERE s.id = CASE search_index.kind
+                        WHEN 'event' THEN search_index.parent_id
+                        ELSE search_index.ref_id
+                      END
+           AND s.trashed_at IS NULL))";
 
 pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let q = query.trim();

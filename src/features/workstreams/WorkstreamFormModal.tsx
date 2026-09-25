@@ -70,10 +70,9 @@ export default function WorkstreamFormModal({
   const pathsUntouched =
     draftRaws.length === existingRaws.length &&
     draftRaws.every((raw, i) => raw === existingRaws[i]);
-  /** 保存后会消失的已有路径，以及它们会带走的会话关联数。 */
+  /** 保存后会消失的已有路径。路径与 Session 归属不再联动，所以没有连带计数。 */
   const keptRaw = new Set(draftRaws);
   const dropping = existing.filter((p) => !keptRaw.has(p.canonical_path));
-  const droppingUnbound = dropping.reduce((n, p) => n + p.bound_session_count, 0);
 
   const dirty = editing
     ? titleTrimmed !== workstream.title ||
@@ -259,10 +258,7 @@ export default function WorkstreamFormModal({
         <PathListEditor entries={entries} onChange={setEntries} /></div>
       {editing && dropping.length > 0 && (
         <div className="badge warn" style={{ display: "block", marginBottom: 10, overflowWrap: "anywhere" }}>
-          保存后会从本任务移除 {dropping.length} 条工作目录
-          {droppingUnbound > 0
-            ? `，并解除由它们带来的 ${droppingUnbound} 个会话关联（会话本身与事件历史都保留）`
-            : "（这些目录没有带来会话关联）"}。
+          保存后会从当前任务移除 {dropping.length} 条工作目录。不会删除会话，也不会修改已有会话的所属任务。
         </div>
       )}
       {error && (

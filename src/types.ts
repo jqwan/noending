@@ -20,7 +20,6 @@ export type WorkstreamLifecycle = "active" | "completed";
 export type WorkstreamVisibility = "normal" | "archived";
 /** `missing` = used to be Git-backed; it never detaches the path from its Project. */
 export type WorkspaceGitState = "none" | "detected" | "missing";
-export type WorkstreamPathSource = "user" | "session" | "launch" | "migration";
 
 export interface Project {
   id: string;
@@ -73,7 +72,6 @@ export interface WorkstreamPathRow extends WorkstreamPath {
   project_id: string;
   project_name: string | null;
   exists: boolean;
-  bound_session_count: number;
 }
 
 // ---------------- Path picker (workspace::probe, read-only) ----------------
@@ -136,7 +134,6 @@ export interface WorkstreamPath {
   workstream_id: string;
   workspace_path_id: string;
   position: number;
-  source: WorkstreamPathSource;
   created_at: string;
 }
 
@@ -180,16 +177,6 @@ export interface LatestSessionInfo {
   agent: Agent;
 }
 
-/** Binding row with workstream title (backend: list_session_bindings). */
-export interface SessionBindingRow {
-  session_id: string;
-  workstream_id: string;
-  role: string;
-  workstream_title: string;
-  /** Which path brought the Session in; null once it no longer matches the list. */
-  workstream_path_id: string | null;
-}
-
 /** Card view for Home / Workstreams pages (backend: list_workstream_cards). */
 export interface WorkstreamCardData {
   id: string;
@@ -223,6 +210,11 @@ export interface Session {
   project_id: string | null;
   /** Null for a Session with no cwd — v0.2 never fabricates a path. */
   workspace_path_id: string | null;
+  /**
+   * 语义归属：这条执行属于哪项持续工作。`null` = 未归属任务。
+   * A Session has at most one Owner Workstream.
+   */
+  owner_workstream_id: string | null;
   raw_path: string;
   parent_agent_session_id: string | null;
   started_at: string | null;
@@ -263,7 +255,6 @@ export interface PermanentDeletionPreview {
   /** prepare 对源文件的结论：verified_present | confirmed_absent | unverified。 */
   source_state: "verified_present" | "confirmed_absent" | "unverified";
   event_count: number;
-  binding_count: number;
   sync_run_count: number;
   context_delivery_count: number;
   launch_intent_count: number;
@@ -320,16 +311,6 @@ export interface IngestSource {
   origin: "default" | "user";
   created_at: string;
   exists: boolean;
-}
-
-export interface SessionWorkstreamBinding {
-  session_id: string;
-  workstream_id: string;
-  role: string;
-  last_seen_revision: string | null;
-  last_sync_cursor: number;
-  created_at: string;
-  last_used_at: string;
 }
 
 export interface SyncRun {
@@ -479,7 +460,8 @@ export interface WorkstreamContext {
   project_name: string | null;
   core: ContextSection[];
   items: [ContextItem, ContextItemRevision][];
-  related_sessions: Session[];
+  /** owner_workstream_id == 当前 Workstream 的 Sessions（不再是 related）。 */
+  sessions: Session[];
   conflicts: ContextConflict[];
   conflict_cases?: ConflictReviewCase[];
   relations: ContextItemRelation[];
@@ -529,10 +511,10 @@ export interface SessionWorkspacePath {
 export interface SessionDetail {
   session: Session;
   events: SessionEvent[];
-  bindings: [SessionWorkstreamBinding, string | null][];
+  /** 唯一的所属任务；`null` = 未归属任务。 */
+  owner_workstream: Workstream | null;
   cursor: number;
   processed_cursor: number;
-  classification: string;
   /** Read-only status of `session.raw_path` when the detail was loaded. */
   raw_path_status: "present" | "missing" | "unavailable";
   workspace_path: SessionWorkspacePath | null;
@@ -564,7 +546,7 @@ export interface SessionContextBundle {
   bundle_id?: string;
   mode: string;
   delivery_level: ContextDeliveryLevel;
-  workstream_ids: string[];
+  workstream_id: string | null;
   sections: ContextSection[];
   markdown: string;
   approx_tokens: number;
@@ -604,8 +586,8 @@ export interface PreparedLaunch {
   mode: "new" | "resume";
   agent: Agent;
   session_id?: string | null;
-  workstream_ids: string[];
-  extra_workstream_ids: string[];
+  /** 这次启动唯一的所属任务；`null` = standalone。 */
+  owner_workstream_id: string | null;
   cwd?: string | null;
   /** `cwd` 由哪一层决定，以及发生 fallback 时的说明（§13）。 */
   cwd_resolution: CwdResolution;

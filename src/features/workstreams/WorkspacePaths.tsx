@@ -2,7 +2,6 @@ import { ellipsisPathMiddle } from "../sessions/SessionTable";
 import type {
   WorkspaceGitState,
   WorkstreamPathRow,
-  WorkstreamPathSource,
 } from "../../types";
 
 /**
@@ -12,7 +11,7 @@ import type {
  * 这一页同时是三个事实的展示位：
  *   1. 启动目录（§13：explicit cwd → WorkstreamPaths[0] → 默认 workspace）；
  *   2. Project 归属（§1.12：WorkstreamPath → WorkspacePath → Project 的投影）；
- *   3. Session 成员关系（§1.6：删一条路径会带走由它带来的 bindings）。
+ *   3. 增删路径只改这份配置：不删除会话，也不修改任何已有会话的所属任务。
  *
  * 所以任何一次动作都必须说清楚它连带动了什么，失败也留在原地说明原因，
  * 绝不静默回滚（AGENTS.md：宁可保住历史与用户意图，也不图省事）。
@@ -59,20 +58,6 @@ export function MissingBadge() {
       目录不存在
     </span>
   );
-}
-
-/**
- * 路径列表条目是怎么来的（`workstream_paths.source`）。
- * 这是**来源**，不是权威：四种来源都不改变位置语义。
- */
-export function pathSourceLabel(source: WorkstreamPathSource | string): string {
-  switch (source) {
-    case "user": return "由你添加";
-    case "session": return "由会话绑定带入";
-    case "launch": return "由启动带入";
-    case "migration": return "由旧版迁移带入";
-    default: return `来源：${source}`;
-  }
 }
 
 /** 完整路径：中段省略（末段才是识别信息），全串留在 title 上。 */

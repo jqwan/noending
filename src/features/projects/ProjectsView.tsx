@@ -249,7 +249,7 @@ function ProjectCard({ card, navigate }: {
 
       <div className="board-stats">
         <span title="工作目录"><Icon name="folder" />{card.path_count}<span>目录</span></span>
-        <span title="关联任务"><Icon name="tasks" />{card.primary_workstream_count + card.related_workstream_count}<span>任务</span></span>
+        <span title="与本项目有工作路径关联的任务"><Icon name="tasks" />{card.primary_workstream_count + card.related_workstream_count}<span>任务</span></span>
         <span title="会话"><Icon name="chat" />{card.session_count}<span>会话</span></span>
       </div>
       <div className="ws-card-meta muted small">{timeAgo(card.last_activity_at)}</div>

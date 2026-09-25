@@ -52,7 +52,15 @@ fn fresh_database_is_already_in_the_current_shape() {
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
 
-    for table in ["project_resources", "project_affinity_evidence"] {
+    // 方案 §6.1 — the Session↔Workstream binding tables are gone, not
+    // migrated: a Session has at most one Owner Workstream, held on the
+    // Session row itself.
+    for table in [
+        "project_resources",
+        "project_affinity_evidence",
+        "session_workstream_bindings",
+        "session_binding_removals",
+    ] {
         let exists: i64 = db
             .read()
             .query_row(
@@ -68,11 +76,48 @@ fn fresh_database_is_already_in_the_current_shape() {
         ("workstreams", "project_id"),
         ("workstreams", "default_cwd"),
         ("session_events", "legacy_identity_hash"),
+        // §7 — WorkstreamPath.source existed only to record "session / launch
+        // created this path", a side effect the single-owner model removed.
+        ("workstream_paths", "source"),
+        // §8.3 — a launch chooses ONE Owner Workstream, not a JSON array.
+        ("launch_intents", "selected_workstream_ids"),
     ] {
         assert!(
             !has_column(&db.read(), table, column),
             "retired column remains: {table}.{column}"
         );
+    }
+
+    // 方案 §6.2 — the replacement is a single nullable column with an
+    // ON DELETE SET NULL FK, indexed for the Workstream detail query.
+    {
+        let conn = db.read();
+        assert!(
+            has_column(&conn, "sessions", "owner_workstream_id"),
+            "sessions.owner_workstream_id is missing"
+        );
+        let on_delete: String = conn
+            .query_row("PRAGMA foreign_key_list(sessions)", [], |row| {
+                Ok(format!(
+                    "{}|{}",
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(6)?
+                ))
+            })
+            .unwrap();
+        assert!(
+            on_delete.contains("workstreams") && on_delete.ends_with("SET NULL"),
+            "owner FK must be workstreams(id) ON DELETE SET NULL, got {on_delete}"
+        );
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'idx_sessions_owner_workstream'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "idx_sessions_owner_workstream is missing");
     }
 
     db.write()

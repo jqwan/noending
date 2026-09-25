@@ -22,8 +22,8 @@ export type ResumeSessionModalProps = {
 
 /**
  * 打开即准备（后端会先摄入这个 Session 自己的最新消息），预览显示
- * Agent / 工作目录 / Workstream / Runtime；「继续」消费这份 PreparedLaunch。
- * 不要求用户重新选择任何已经确定的参数。
+ * Agent / 工作目录 / 所属任务 / Runtime；「继续」消费这份 PreparedLaunch。
+ * 不要求用户重新选择任何已经确定的参数，也不再有额外的 Workstream 入参（§16）。
  *
  * PreparedLaunch 是 single-use 能力令牌；关闭预览后会重新准备，卸载时会回收。
  */
@@ -50,7 +50,7 @@ export default function ResumeSessionModal({
   }, [sessionId]);
 
   const prepareLaunch = useCallback(async (isCurrent: () => boolean): Promise<PreparedLaunch> => {
-    const prepared = await api.prepareResumeSession(sessionId, []);
+    const prepared = await api.prepareResumeSession(sessionId);
     if (isCurrent()) await refreshDetail(isCurrent);
     return prepared;
   }, [refreshDetail, sessionId]);
@@ -101,19 +101,19 @@ export default function ResumeSessionModal({
     );
   }
 
-  const { session, bindings } = detail;
-  // PreparedLaunch 里的是这次启动真正生效的 Workstream 集合；未就绪时退回绑定列表
-  const effectiveWsIds = prepared
-    ? prepared.workstream_ids
-    : bindings.map(([b]) => b.workstream_id);
-  const wsDisplay =
-    effectiveWsIds.length === 0
-      ? "未关联任务"
-      : bindings
-          .filter(([b]) => effectiveWsIds.includes(b.workstream_id))
-          .map(([, title]) => title)
-          .filter(Boolean)
-          .join(" · ") || `${effectiveWsIds.length} 个关联任务`;
+  const { session, owner_workstream } = detail;
+  // 这次继续真正生效的所属任务：PreparedLaunch 冻结的那一个；未就绪时退回详情读到的 Owner。
+  const ownerWorkstreamId = prepared
+    ? prepared.owner_workstream_id
+    : session.owner_workstream_id;
+  // 详情里的名字只在这条任务确实就是本次生效的那一个时才拿来用（Preview-Launch Identity）。
+  const ownerTitle = owner_workstream && owner_workstream.id === ownerWorkstreamId
+    ? owner_workstream.title.trim() || "未命名任务"
+    : null;
+  // §33：一次只有零个或一个任务，不再出现多任务计数。
+  const ownerDisplay = ownerWorkstreamId === null
+    ? "未归属任务"
+    : ownerTitle ?? "未命名任务";
 
   return (
     <>
@@ -130,11 +130,11 @@ export default function ResumeSessionModal({
         />
 
         <PreviewRow
-          label="任务"
-          hint={wsDisplay}
+          label="所属任务"
+          hint={ownerDisplay}
         >
           <span className="badge">
-            {effectiveWsIds.length > 0 ? `${effectiveWsIds.length} 个` : "无"}
+            {ownerWorkstreamId === null ? "无" : "1 个"}
           </span>
         </PreviewRow>
 

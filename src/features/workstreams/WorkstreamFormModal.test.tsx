@@ -225,23 +225,21 @@ describe("WorkstreamFormModal edit mode", () => {
     };
   }
 
-  function row(id: string, position: number, canonicalPath: string, bound: number): WorkstreamPathRow {
+  function row(id: string, position: number, canonicalPath: string): WorkstreamPathRow {
     return {
       id,
       workstream_id: "w1",
       workspace_path_id: `p-${id}`,
       position,
-      source: "user",
       created_at: "",
       canonical_path: canonicalPath,
       project_id: "p",
       project_name: "Project",
       exists: true,
-      bound_session_count: bound,
     };
   }
 
-  const rows = [row("main", 0, "/repo/main", 0), row("docs", 1, "/repo/docs", 2)];
+  const rows = [row("main", 0, "/repo/main"), row("docs", 1, "/repo/docs")];
 
   /** 后端解析新加路径的 identity：只有用户新加的草稿才会走到这里。 */
   function resolveByPath(map: Record<string, string>) {
@@ -251,7 +249,6 @@ describe("WorkstreamFormModal edit mode", () => {
         workstream_id: "w1",
         workspace_path_id: map[path],
         position: 0,
-        source: "user",
         created_at: "",
       }),
     );
@@ -295,13 +292,14 @@ describe("WorkstreamFormModal edit mode", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("says what a dropped path takes with it, then removes it and reorders the rest", async () => {
+  it("says what a dropped path means, then removes it and reorders the rest", async () => {
     const { onSaved } = renderEdit();
-    expect(screen.queryByText(/保存后会从本任务移除/)).toBeNull();
+    expect(screen.queryByText(/保存后会从当前任务移除/)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "移除 /repo/docs" }));
-    screen.getByText(/保存后会从本任务移除 1 条工作目录/);
-    screen.getByText(/解除由它们带来的 2 个会话关联/);
+    // §35：删路径不再牵连 Session —— 只说移除目录，并说明不改会话归属。
+    screen.getByText(/保存后会从当前任务移除 1 条工作目录/);
+    screen.getByText(/不会删除会话，也不会修改已有会话的所属任务/);
 
     await act(async () => {
       fireEvent.click(saveButton());
@@ -343,7 +341,6 @@ describe("WorkstreamFormModal edit mode", () => {
           workstream_id: "w1",
           workspace_path_id: `p${path}`,
           position: 0,
-          source: "user",
           created_at: "",
         };
       },

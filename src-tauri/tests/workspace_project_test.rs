@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use noending::domain::{
-    git_state, workstream_path_source, Agent, GitDetection, GitWorktreeKind, Project, Session,
-    WorkspaceObservation, WorkspacePath, Workstream,
+    git_state, Agent, GitDetection, GitWorktreeKind, Project, Session, WorkspaceObservation,
+    WorkspacePath, Workstream,
 };
 use noending::storage::workspace::{
     delete_zero_path_project_conn, insert_workspace_path_conn, rename_project_conn,
@@ -158,15 +158,8 @@ fn workstream(db: &Db, id: &str, title: &str) {
 }
 
 fn add_ws_path(db: &Db, workstream_id: &str, workspace_path_id: &str) {
-    db.tx(|tx| {
-        append_workstream_path_conn(
-            tx,
-            workstream_id,
-            workspace_path_id,
-            workstream_path_source::USER,
-        )
-    })
-    .unwrap();
+    db.tx(|tx| append_workstream_path_conn(tx, workstream_id, workspace_path_id))
+        .unwrap();
 }
 
 fn count_rows(db: &Db, sql: &str, arg: &str) -> i64 {

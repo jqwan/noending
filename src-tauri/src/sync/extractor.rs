@@ -31,30 +31,29 @@ pub struct PromptInputs {
 }
 
 /// Snapshot the workstream / item context an extraction prompt needs.
-pub fn collect_prompt_inputs(db: &Db, candidates: &[String]) -> Result<PromptInputs> {
+/// Snapshot the prompt material for the ONE Workstream this extraction routes
+/// to (方案 §22). A Session has a single Owner, so there is no candidate set and
+/// no cross-workstream item stitching.
+pub fn collect_prompt_inputs(db: &Db, workstream_id: &str) -> Result<PromptInputs> {
     let mut ws_lines = Vec::new();
-    for id in candidates {
-        if let Some(w) = db.get_workstream(id)? {
-            ws_lines.push(format!(
-                "- id={} | {} | goal: {}",
-                w.id,
-                w.title,
-                if w.description.is_empty() {
-                    "(none)"
-                } else {
-                    &w.description
-                }
-            ));
-        }
+    if let Some(w) = db.get_workstream(workstream_id)? {
+        ws_lines.push(format!(
+            "- id={} | {} | goal: {}",
+            w.id,
+            w.title,
+            if w.description.is_empty() {
+                "(none)"
+            } else {
+                &w.description
+            }
+        ));
     }
     let mut item_lines = Vec::new();
-    for id in candidates {
-        for (item, rev) in db.items_for_workstream(id, false)? {
-            item_lines.push(format!(
-                "- item_id={} | {} | {}",
-                item.id, item.kind, rev.title
-            ));
-        }
+    for (item, rev) in db.items_for_workstream(workstream_id, false)? {
+        item_lines.push(format!(
+            "- item_id={} | {} | {}",
+            item.id, item.kind, rev.title
+        ));
     }
     Ok(PromptInputs {
         ws_lines,
@@ -104,14 +103,14 @@ impl ContextExtractor for HeuristicExtractor {
         &self,
         _session: &Session,
         events: &[&SessionEvent],
-        candidate_workstream_ids: &[String],
+        workstream_id: &str,
         _inputs: &PromptInputs,
     ) -> Result<ExtractOutput> {
         let mut out = Vec::new();
-        let primary = match candidate_workstream_ids.first().cloned() {
-            Some(p) if !p.is_empty() => p,
-            _ => return Ok(ExtractOutput::default()),
-        };
+        if workstream_id.is_empty() {
+            return Ok(ExtractOutput::default());
+        }
+        let primary = workstream_id.to_string();
 
         for e in events {
             let text = match &e.text {
@@ -298,17 +297,16 @@ impl ContextExtractor for CliExtractor {
         &self,
         session: &Session,
         events: &[&SessionEvent],
-        candidate_workstream_ids: &[String],
+        workstream_id: &str,
         inputs: &PromptInputs,
     ) -> Result<ExtractOutput> {
         let install = crate::platform::exec_resolver::resolve(self.agent)?;
         let adapter = crate::adapters::adapter_for(self.agent);
-        let (prompt, ref_map) =
-            build_extraction_prompt(session, events, candidate_workstream_ids, inputs)?;
+        let (prompt, ref_map) = build_extraction_prompt(session, events, inputs)?;
         let cmd = adapter.build_exec_command(&install, &self.opts, &prompt)?;
         let out = crate::platform::exec_runner::run_headless(&cmd, self.timeout_secs)?;
         let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
-        parse_mutations(&text, &ref_map, candidate_workstream_ids, session)
+        parse_mutations(&text, &ref_map, workstream_id, session)
     }
 }
 
@@ -364,7 +362,6 @@ const ALLOWED_KINDS: [&str; 15] = [
 fn build_extraction_prompt(
     session: &Session,
     events: &[&SessionEvent],
-    _candidates: &[String],
     inputs: &PromptInputs,
 ) -> Result<(String, Vec<PromptEventRef>)> {
     let ws_lines = &inputs.ws_lines;
@@ -395,22 +392,22 @@ fn build_extraction_prompt(
     let prompt = format!(
         r##"你是 NoEnding 的上下文提取器。任务：从 Agent 会话的新增消息中提取少量高价值的长期上下文变更。这不是对话，禁止自由发挥，只输出 JSON。
 
-候选 Workstream（只允许使用这些 id）：
+所属 Workstream（只允许使用这个 id）：
 {ws}
 
-这些 Workstream 已有的 active 条目（避免重复；若新信息实质更新了某条，输出 op=update）：
+该 Workstream 已有的 active 条目（避免重复；若新信息实质更新了某条，输出 op=update）：
 {items}
 
 新增消息（ref 编号见行首）：
 {events}
 
 只输出一个 JSON 数组，每个元素形如：
-{{"op":"add","workstream_id":"<候选id>","item_kind":"decision|constraint|todo|open_question|goal|current_state|note|finding|risk|issue|reference","title":"不超过60字","content":"原文或简述","refs":["#1"]}}
+{{"op":"add","workstream_id":"<所属id>","item_kind":"decision|constraint|todo|open_question|goal|current_state|note|finding|risk|issue|reference","title":"不超过60字","content":"原文或简述","refs":["#1"]}}
 可选 op："update"（需 item_id，取自已有条目列表）、"resolve"（需 item_id，表示已完成）、"conflict"（与用户约束冲突时保留双方，需 item_id）。
 
 规则：
 1. 最多 8 条；没有有价值信息就输出 []；
-2. workstream_id 必须来自候选列表；item_kind 必须来自上面的枚举；
+2. workstream_id 必须是上面给出的所属 id；item_kind 必须来自上面的枚举；
 3. refs 只能引用消息行首的 #编号；寒暄、工具输出、纯过程性内容一律忽略；
 4. 不要输出 JSON 以外的任何文字（不要 markdown 代码块标记）。
 
@@ -519,7 +516,7 @@ pub fn derive_authority(source_refs: &[String], ref_map: &[PromptEventRef]) -> S
 pub fn parse_mutations(
     text: &str,
     ref_map: &[PromptEventRef],
-    candidates: &[String],
+    workstream_id: &str,
     _session: &Session,
 ) -> Result<ExtractOutput> {
     let arr = extract_json_array(text).ok_or_else(|| other("模型输出中未找到 JSON 数组"))?;
@@ -533,7 +530,7 @@ pub fn parse_mutations(
 
         match r.op.as_str() {
             "add" => {
-                if !candidates.contains(&r.workstream_id)
+                if r.workstream_id != workstream_id
                     || !ALLOWED_KINDS.contains(&r.item_kind.as_str())
                     || r.title.trim().is_empty()
                 {
@@ -595,7 +592,7 @@ pub fn parse_mutations(
                 });
             }
             "conflict" => {
-                if !candidates.contains(&r.workstream_id) {
+                if r.workstream_id != workstream_id {
                     continue;
                 }
                 out.push(ContextMutation::Conflict {
@@ -668,6 +665,7 @@ mod tests {
             cwd: None,
             workspace_path_id: None,
             project_id: None,
+            owner_workstream_id: None,
             raw_path: "/tmp/x".into(),
             parent_agent_session_id: None,
             started_at: None,
@@ -697,7 +695,7 @@ mod tests {
     }
 
     fn parse(text: &str) -> ExtractOutput {
-        parse_mutations(text, &ref_map(), &["ws1".to_string()], &session()).unwrap()
+        parse_mutations(text, &ref_map(), "ws1", &session()).unwrap()
     }
 
     #[test]
@@ -824,9 +822,9 @@ mod tests {
             raw_ref: "x#line:42".into(),
             metadata: serde_json::json!({}),
         };
-        let inputs = collect_prompt_inputs(&db, &["ws1".to_string()]).unwrap();
+        let inputs = collect_prompt_inputs(&db, "ws1").unwrap();
         let out = HeuristicExtractor
-            .extract(&s, &[&ev], &["ws1".to_string()], &inputs)
+            .extract(&s, &[&ev], "ws1", &inputs)
             .unwrap();
         assert!(!out.mutations.is_empty());
         for m in &out.mutations {

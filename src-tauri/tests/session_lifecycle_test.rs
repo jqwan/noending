@@ -10,7 +10,7 @@
 //!   tombstone, no deletion-job remnant, and no surviving context provenance
 //!   pointing at the dead session.
 //! - A genuinely restored source is rediscovered as a NEW NoEnding session:
-//!   no old bindings, no provenance relink (§34).
+//!   no ownership row, no provenance relink (§34).
 //!
 //! All fixtures are temp files. The real ~/.codex / ~/.claude / ~/.pi are
 //! never touched (方案 §46).
@@ -288,16 +288,8 @@ fn workstream(db: &Db, title: &str) -> noending::domain::Workstream {
         .workstream
 }
 
-fn bind(db: &Db, session_id: &str, ws_id: &str) {
-    noending::workspace::session::record_user_binding(
-        db,
-        session_id,
-        ws_id,
-        "primary",
-        "user_assigned",
-        1.0,
-    )
-    .unwrap();
+fn set_owner(db: &Db, session_id: &str, ws_id: &str) {
+    noending::workspace::session::set_session_owner(db, session_id, Some(ws_id)).unwrap();
 }
 
 fn sync_run(db: &Db, session_id: &str) -> SyncRun {
@@ -337,7 +329,7 @@ fn launch_intent(db: &Db, session_id: &str, agent: Agent) {
         id: new_id(),
         launch_type: "new".into(),
         agent,
-        selected_workstream_ids: vec![],
+        owner_workstream_id: None,
         cwd: None,
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -383,14 +375,14 @@ fn trash_session_preserves_source_and_data() {
     let s = fixture_session(&db, Agent::Codex, "trash-preserves");
     ingest(&db, &adapter, &s);
     let ws = workstream(&db, "WS");
-    bind(&db, &s.id, &ws.id);
+    set_owner(&db, &s.id, &ws.id);
 
     let trashed = lifecycle::trash_session(&db, &s.id).unwrap();
     assert!(trashed.trashed_at.is_some());
 
     // Agent source untouched (方案 §2).
     assert!(Path::new(&s.raw_path).exists());
-    // NoEnding data untouched: events, bindings, cursor all survive.
+    // NoEnding data untouched: events, owner, cursor all survive.
     assert_eq!(
         count(
             &db,
@@ -400,12 +392,13 @@ fn trash_session_preserves_source_and_data() {
         2
     );
     assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_workstream_bindings WHERE session_id = ?",
-            &s.id
-        ),
-        1
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+            .as_deref(),
+        Some(ws.id.as_str()),
+        "trash keeps the Owner Workstream (§43: Trash Session → Owner 保留)"
     );
     assert!(db.get_source_cursor(&s.id).is_ok());
 }
@@ -415,7 +408,7 @@ fn restore_keeps_same_session_id_and_data() {
     let db = open_db("restore-keeps");
     let s = fixture_session(&db, Agent::Codex, "restore-keeps");
     let ws = workstream(&db, "WS");
-    bind(&db, &s.id, &ws.id);
+    set_owner(&db, &s.id, &ws.id);
 
     lifecycle::trash_session(&db, &s.id).unwrap();
     let restored = lifecycle::restore_session(&db, &s.id).unwrap();
@@ -424,12 +417,9 @@ fn restore_keeps_same_session_id_and_data() {
     assert_eq!(restored.id, s.id);
     assert!(restored.trashed_at.is_none());
     assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_workstream_bindings WHERE session_id = ?",
-            &s.id
-        ),
-        1
+        restored.owner_workstream_id.as_deref(),
+        Some(ws.id.as_str()),
+        "restore keeps the Owner Workstream (§43: Restore Session → Owner 保留)"
     );
 }
 
@@ -481,7 +471,7 @@ fn trash_is_hidden_from_project_and_workstream_projections() {
     let db = open_db("projection-hide");
     let s = fixture_session(&db, Agent::Codex, "projection-hide");
     let ws = workstream(&db, "WS");
-    bind(&db, &s.id, &ws.id);
+    set_owner(&db, &s.id, &ws.id);
 
     let (count_before, latest_before, _) = db.workstream_session_stats(&ws.id).unwrap();
     assert_eq!(count_before, 1);
@@ -640,7 +630,7 @@ fn trashed_session_cannot_resume() {
         default_workspace: None,
     };
     let err = launcher
-        .prepare_resume_in(&db, &s.id, &[], &workspace)
+        .prepare_resume_in(&db, &s.id, &workspace)
         .unwrap_err();
     assert!(err.to_string().contains("回收站"), "unexpected: {err}");
 }
@@ -665,21 +655,19 @@ fn restore_refused_while_deletion_job_exists() {
 
 // ---- permanent deletion: full flow ---------------------------------------
 
-/// Seeds a maximal session (events, bindings, a removal tombstone, sync run,
-/// delivery, matched launch intent, affinity evidence, session-linked context
-/// item) and asserts the purge removes exactly the session-owned rows while
-/// preserving Workstream context.
+/// Seeds a maximal session (events, an Owner Workstream, sync run, delivery,
+/// matched launch intent, affinity evidence, session-linked context item) and
+/// asserts the purge removes exactly the session-owned rows while preserving
+/// Workstream context.
 fn purge_flow_case(tag: &str, agent: Agent, adapter: &'static dyn AgentAdapter) {
     let db = open_db(tag);
     let s = fixture_session(&db, agent, tag);
     ingest(&db, adapter, &s);
     let ws = workstream(&db, "Surviving WS");
-    bind(&db, &s.id, &ws.id);
+    set_owner(&db, &s.id, &ws.id);
     let item_id = context_item_pointing_at(&db, &ws.id, &s.id);
     delivery(&db, &s.id, &ws.id);
     launch_intent(&db, &s.id, agent);
-    db.unbind(&s.id, &ws.id).unwrap(); // writes a removal tombstone… then re-bind
-    bind(&db, &s.id, &ws.id);
     sync_run(&db, &s.id);
 
     // … another session's context must NOT be redacted.
@@ -692,7 +680,6 @@ fn purge_flow_case(tag: &str, agent: Agent, adapter: &'static dyn AgentAdapter) 
     assert_eq!(preview.source_targets.len(), 1);
     assert_eq!(preview.source_targets[0].path, s.raw_path);
     assert!(preview.counts.event_count >= 1);
-    assert!(preview.counts.binding_count >= 1);
     assert!(preview.counts.sync_run_count >= 1);
     assert!(preview.counts.context_revision_redaction_count >= 1);
 
@@ -723,22 +710,6 @@ fn purge_flow_case(tag: &str, agent: Agent, adapter: &'static dyn AgentAdapter) 
         count(
             &db,
             "SELECT COUNT(*) FROM session_cursors WHERE session_id = ?",
-            &s.id
-        ),
-        0
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_workstream_bindings WHERE session_id = ?",
-            &s.id
-        ),
-        0
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_binding_removals WHERE session_id = ?",
             &s.id
         ),
         0
@@ -971,7 +942,7 @@ fn restored_source_is_discovered_again_as_a_new_session() {
     let s = fixture_session(&db, Agent::Codex, "rediscovery");
     ingest(&db, &adapter, &s);
     let ws = workstream(&db, "WS");
-    bind(&db, &s.id, &ws.id);
+    set_owner(&db, &s.id, &ws.id);
     let item_id = context_item_pointing_at(&db, &ws.id, &s.id);
 
     lifecycle::trash_session(&db, &s.id).unwrap();
@@ -998,9 +969,11 @@ fn restored_source_is_discovered_again_as_a_new_session() {
     assert!(is_new, "rediscovery creates a fresh ingestion lifecycle");
     assert_ne!(s2.id, s.id, "S1 != S2 (方案 §1.9)");
 
-    // No old bindings resurrect (§10/§33).
-    let bindings = db.bindings_for_session(&s2.id).unwrap();
-    assert!(bindings.is_empty());
+    // No old owner resurrects (§10/§33).
+    assert!(
+        s2.owner_workstream_id.is_none(),
+        "a rediscovered session starts with no Owner"
+    );
 
     // Old redacted provenance stays redacted — never relinked to S2 (§34).
     assert_eq!(head_revision_source_type(&db, &item_id), "deleted_session");
@@ -1065,7 +1038,7 @@ fn inflight_sync_cannot_commit_after_trash() {
     let db = open_db("sync-guard");
     let s = fixture_session(&db, Agent::Codex, "sync-guard");
     let ws = workstream(&db, "WS");
-    bind(&db, &s.id, &ws.id);
+    set_owner(&db, &s.id, &ws.id);
     let events = vec![raw_event(&s, 1, "决定使用 SQLite，方案已确认。")];
     db.append_events(&events).unwrap();
 
@@ -1107,7 +1080,7 @@ fn prepared_resume_becomes_stale_after_trash() {
     let ws = noending::launcher::LaunchWorkspace {
         default_workspace: None,
     };
-    let prepared = launcher.prepare_resume_in(&db, &s.id, &[], &ws).unwrap();
+    let prepared = launcher.prepare_resume_in(&db, &s.id, &ws).unwrap();
 
     // Prepare → Trash → launch_prepared must refuse (方案 §10).
     lifecycle::trash_session(&db, &s.id).unwrap();

@@ -1,14 +1,9 @@
 {
-  "name": "workstream_routing_reverse",
-  "description": "Candidate list is Sync-first while the transcript only discusses Launcher work; routing must follow content, never candidate order",
+  "name": "owner_routing",
+  "description": "A Session has exactly one Owner Workstream; every extracted fact routes to it and nowhere else",
   "dimension": "workstream_classification",
   "input": {
     "workstreams": [
-      {
-        "id": "ws-sync",
-        "title": "Sync Engine",
-        "description": "Incremental session event delta ingestion, extraction, and context merge"
-      },
       {
         "id": "ws-launcher",
         "title": "Launcher UI",
@@ -50,7 +45,6 @@
       }
     ],
     "effective_context": {
-      "ws-sync": [],
       "ws-launcher": [
         {
           "kind": "decision",
@@ -64,40 +58,43 @@
     "required_mutations": [
       {
         "id": "launcher-decision-added",
-        "op": ["add"],
+        "op": [
+          "add"
+        ],
         "workstream_id": "ws-launcher",
-        "item_kind": ["decision"],
-        "content_contains": ["prepare_resume"],
-        "source_events": [1],
+        "item_kind": [
+          "decision"
+        ],
+        "content_contains": [
+          "prepare_resume"
+        ],
+        "source_events": [
+          1
+        ],
         "authority": "user_explicit"
       }
     ],
     "forbidden_mutations": [
       {
         "id": "coffee-chatter-ignored",
-        "source_events": [2]
-      },
-      {
-        "id": "sync-stays-clean",
-        "workstream_id": "ws-sync"
+        "source_events": [
+          2
+        ]
       }
     ],
     "required_context": {
       "ws-launcher": [
-        { "id": "launcher-decision-effective", "kind": "decision", "title_contains": ["prepare_resume"] }
+        {
+          "id": "launcher-decision-effective",
+          "kind": "decision",
+          "title_contains": [
+            "prepare_resume"
+          ]
+        }
       ]
     },
-    "forbidden_context": {
-      "ws-sync": [
-        { "id": "ws-sync-no-decisions", "kind": "decision" }
-      ]
-    },
+    "forbidden_context": {},
     "conflicts_count": 0
   },
-  "heuristic_expected_failed_checks": [
-    "required:launcher-decision-added",
-    "forbidden:sync-stays-clean",
-    "required_context:launcher-decision-effective",
-    "forbidden_context:ws-sync-no-decisions"
-  ]
+  "heuristic_expected_failed_checks": []
 }

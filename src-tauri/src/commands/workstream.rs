@@ -13,8 +13,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::domain::*;
-use crate::error::{other, Result};
-use crate::storage::{now, Db};
+use crate::error::Result;
+use crate::storage::Db;
 use crate::workspace::workstream::{self, PathService};
 
 use super::{with_db, AppState};
@@ -125,14 +125,13 @@ pub fn add_workstream_path(
     })
 }
 
-/// §1.6 — remove one entry. Returns how many Sessions left the Workstream with
-/// it; the Sessions and their history are untouched.
+/// §1.6 — remove one entry. Sessions and their ownership are untouched.
 #[tauri::command]
 pub fn remove_workstream_path(
     state: State<AppState>,
     workstream_id: String,
     workstream_path_id: String,
-) -> Result<usize> {
+) -> Result<()> {
     with_db(&state, |db| {
         workstream::remove_workstream_path(db, &workstream_id, &workstream_path_id)
     })
@@ -172,7 +171,7 @@ pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Resu
     })
 }
 
-/// Move out of the recycle bin. Lifecycle, paths, bindings and Context are
+/// Move out of the recycle bin. Lifecycle, paths and Context are
 /// exactly what the user left, so no state has to be remembered to restore it.
 #[tauri::command]
 pub fn restore_workstream(state: State<AppState>, workstream_id: String) -> Result<Workstream> {
@@ -258,7 +257,7 @@ pub fn list_workstream_cards(state: State<AppState>) -> Result<Vec<WorkstreamCar
     with_db(&state, workstream_cards)
 }
 
-/// Compose card views from the real sources (bindings, items, workstreams).
+/// Compose card views from the real sources (sessions, items, workstreams).
 /// Also the testable core of `list_workstream_cards`.
 pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
     let project_names: std::collections::HashMap<String, String> = db
@@ -306,58 +305,4 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
         key(b).cmp(&key(a))
     });
     Ok(cards)
-}
-
-/// LEGACY — retired from the product API by 方案 §11 / §42.2-E10 and no longer
-/// registered in `lib.rs`. It is the former producer of `lifecycle = abandoned`
-/// and it moves Context items between Workstreams without a revision, which is
-/// the merge semantics v0.2 replaced with the recycle bin.
-///
-/// Kept compiling so nothing that still references it breaks silently; nothing
-/// new may call it. Delete it once no caller is left after Wave 3.
-#[tauri::command]
-pub fn merge_workstreams(
-    state: State<AppState>,
-    source_id: String,
-    target_id: String,
-) -> Result<()> {
-    with_db(&state, |db| {
-        let source = db
-            .get_workstream(&source_id)?
-            .ok_or_else(|| other("源 Workstream 不存在"))?;
-        let _target = db
-            .get_workstream(&target_id)?
-            .ok_or_else(|| other("目标 Workstream 不存在"))?;
-        // move items + bindings, mark source abandoned
-        let items = db.items_for_workstream(&source_id, true)?;
-        let bindings = db.bindings_for_workstream(&source_id)?;
-        {
-            // One writer guard for the batch; conn-level helpers only —
-            // a `Db` method here would re-lock the writer and deadlock.
-            let conn = db.write();
-            for (mut item, rev) in items {
-                item.workstream_id = target_id.clone();
-                item.updated_at = now();
-                crate::storage::index_item_conn(&conn, &item, &rev)?;
-                conn.execute(
-                    "UPDATE context_items SET workstream_id = ?2, updated_at = ?3 WHERE id = ?1",
-                    rusqlite::params![item.id, target_id, now()],
-                )?;
-            }
-            for b in bindings {
-                conn.execute(
-                    "INSERT OR IGNORE INTO session_workstream_bindings
-                     (session_id, workstream_id, role, source, confidence, last_seen_revision, last_sync_cursor, created_at, last_used_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    rusqlite::params![b.session_id, target_id, b.role, b.source, b.confidence, b.last_seen_revision, b.last_sync_cursor, b.created_at, b.last_used_at],
-                )?;
-            }
-        }
-        let mut src = source;
-        src.lifecycle = workstream_lifecycle::COMPLETED.into();
-        src.visibility = "archived".into();
-        src.updated_at = now();
-        db.upsert_workstream(&src)?;
-        Ok(())
-    })
 }

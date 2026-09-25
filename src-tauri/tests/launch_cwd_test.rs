@@ -2,13 +2,13 @@
 //!
 //! ```text
 //! explicit cwd
-//!     → the selected Workstreams' ordered WorkstreamPaths
-//!       (first usable one, in the user's selection order and then list order)
+//!     → the single Owner Workstream's ordered WorkstreamPaths
+//!       (first usable one, in list order)
 //!     → NoEnding Home's default workspace
 //! ```
 //!
-//! The ordered path list is the only Workstream workspace authority; a bound
-//! Session's cwd is never a suggestion for a new launch.
+//! The ordered path list is the only Workstream workspace authority; an owned
+//! Session's cwd is never a suggestion for a new launch (方案 §15).
 //!
 //! Every directory a test expects to be *chosen* is a real temp directory,
 //! because §42.3-M21 forbids handing the terminal a directory that is not there
@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use noending::domain::{binding_source, Agent, Project};
-use noending::launcher::{record_binding, resolve_new_cwd, CwdSource, LaunchWorkspace};
+use noending::domain::{Agent, Project};
+use noending::launcher::{resolve_new_cwd, CwdSource, LaunchWorkspace};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, Db};
 use noending::workspace::workstream::{add_workstream_path, create_workstream};
@@ -103,13 +103,13 @@ fn workspace(default_workspace: Option<&str>) -> LaunchWorkspace {
 
 fn new_cwd(
     database: &Db,
-    workstream_ids: &[String],
+    owner_workstream_id: Option<&str>,
     explicit: Option<&str>,
     default_workspace: Option<&str>,
 ) -> Option<String> {
     resolve_new_cwd(
         database,
-        workstream_ids,
+        owner_workstream_id,
         explicit,
         &workspace(default_workspace),
     )
@@ -127,7 +127,7 @@ fn explicit_cwd_wins_over_everything() {
     let w = workstream_with_paths(&database, "W", &[real_dir("explicit", "primary")]);
 
     assert_eq!(
-        new_cwd(&database, &[w], Some("/explicit/dir"), None).as_deref(),
+        new_cwd(&database, Some(&w), Some("/explicit/dir"), None).as_deref(),
         Some("/explicit/dir"),
     );
 }
@@ -143,7 +143,7 @@ fn primary_workstream_path_wins() {
 
     let resolution = resolve_new_cwd(
         &database,
-        &[w.clone()],
+        Some(&w.clone()),
         None,
         &workspace(Some(&real_dir("primary", "default"))),
     )
@@ -153,30 +153,6 @@ fn primary_workstream_path_wins() {
     assert_eq!(resolution.path_position, Some(0));
     assert!(!resolution.fallback, "position 0 is the expected answer");
     assert_eq!(resolution.workstream_id.as_deref(), Some(w.as_str()));
-}
-
-/// The selection order is still the user's, not the database's: the first
-/// selected Workstream that has a usable path wins, and reversing the
-/// selection reverses the answer.
-#[test]
-fn first_selected_workstream_with_a_usable_path_wins() {
-    let database = db("selection-order");
-    let a = workstream(&database, "A");
-    let b_paths = real_dir("selection-order", "b");
-    let b = workstream_with_paths(&database, "B", &[b_paths.clone()]);
-    let c_paths = real_dir("selection-order", "c");
-    let c = workstream_with_paths(&database, "C", &[c_paths.clone()]);
-
-    assert_eq!(
-        new_cwd(&database, &[a.clone(), b.clone(), c.clone()], None, None).as_deref(),
-        Some(b_paths.as_str()),
-        "selection order decides which Workstream answers"
-    );
-    assert_eq!(
-        new_cwd(&database, &[c.clone(), b], None, None).as_deref(),
-        Some(c_paths.as_str())
-    );
-    let _ = a;
 }
 
 /// §21 "no Workstream path → default workspace": a Workstream with zero paths
@@ -189,7 +165,8 @@ fn workstream_without_paths_falls_back_to_the_default_workspace() {
     let w = workstream(&database, "W");
     let default = missing_dir("no-paths", "workspace");
 
-    let resolution = resolve_new_cwd(&database, &[w], None, &workspace(Some(&default))).unwrap();
+    let resolution =
+        resolve_new_cwd(&database, Some(&w), None, &workspace(Some(&default))).unwrap();
     assert_eq!(resolution.source, CwdSource::DefaultWorkspace);
     assert_eq!(resolution.cwd.as_deref(), Some(default.as_str()));
     assert!(
@@ -211,7 +188,7 @@ fn standalone_new_session_uses_the_default_workspace() {
     let database = db("standalone");
     let default = real_dir("standalone", "workspace");
 
-    let resolution = resolve_new_cwd(&database, &[], None, &workspace(Some(&default))).unwrap();
+    let resolution = resolve_new_cwd(&database, None, None, &workspace(Some(&default))).unwrap();
     assert_eq!(resolution.cwd.as_deref(), Some(default.as_str()));
     assert_eq!(resolution.source, CwdSource::DefaultWorkspace);
     assert!(
@@ -231,7 +208,7 @@ fn an_unusable_primary_falls_to_the_next_path_and_says_so() {
 
     let resolution = resolve_new_cwd(
         &database,
-        &[w],
+        Some(&w),
         None,
         &workspace(Some(&real_dir("unusable-primary", "default"))),
     )
@@ -253,7 +230,8 @@ fn nothing_resolves_to_no_directory_at_all() {
     let database = db("nothing");
     let w = workstream(&database, "W");
 
-    let resolution = resolve_new_cwd(&database, &[w], None, &LaunchWorkspace::default()).unwrap();
+    let resolution =
+        resolve_new_cwd(&database, Some(&w), None, &LaunchWorkspace::default()).unwrap();
     assert_eq!(resolution.cwd, None);
     assert_eq!(resolution.source, CwdSource::Unresolved);
     assert!(
@@ -262,7 +240,7 @@ fn nothing_resolves_to_no_directory_at_all() {
     );
 }
 
-/// A bound Session's cwd is its own fact and never a suggestion for a new one.
+/// An owned Session's cwd is its own fact and never a suggestion for a new one.
 #[test]
 fn another_sessions_cwd_is_not_a_launch_authority() {
     let database = db("session-cwd");
@@ -278,6 +256,7 @@ fn another_sessions_cwd_is_not_a_launch_authority() {
             cwd: Some(elsewhere.clone()),
             workspace_path_id: None,
             project_id: None,
+            owner_workstream_id: Some(w.clone()),
             raw_path: "/tmp/fake/session-cwd.jsonl".into(),
             parent_agent_session_id: None,
             started_at: Some("2026-09-01T08:00:00Z".into()),
@@ -285,22 +264,13 @@ fn another_sessions_cwd_is_not_a_launch_authority() {
             trashed_at: None,
         })
         .unwrap();
-    record_binding(
-        &database,
-        &sid,
-        &w,
-        "related",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
 
     assert_eq!(
-        resolve_new_cwd(&database, &[w], None, &LaunchWorkspace::default())
+        resolve_new_cwd(&database, Some(&w), None, &LaunchWorkspace::default())
             .unwrap()
             .cwd,
         None,
-        "the bound Session's directory ({elsewhere}) must not leak into a New Session"
+        "the owned Session's directory ({elsewhere}) must not leak into a New Session"
     );
 }
 
@@ -316,7 +286,7 @@ fn explicit_tilde_cwd_expands_to_home_directory() {
 
     let resolution = resolve_new_cwd(
         &database,
-        &[],
+        None,
         Some("~/projects/noending"),
         &LaunchWorkspace::default(),
     )
@@ -334,7 +304,7 @@ fn bare_tilde_expands_to_home_root() {
     let home = dirs::home_dir().unwrap();
 
     assert_eq!(
-        resolve_new_cwd(&database, &[], Some("~"), &LaunchWorkspace::default())
+        resolve_new_cwd(&database, None, Some("~"), &LaunchWorkspace::default())
             .unwrap()
             .cwd
             .as_deref(),
@@ -351,7 +321,7 @@ fn tilde_expands_only_at_leading_position() {
     assert_eq!(
         resolve_new_cwd(
             &database,
-            &[],
+            None,
             Some("/opt/a~b/dir"),
             &LaunchWorkspace::default(),
         )
@@ -372,7 +342,7 @@ fn an_unusable_explicit_directory_is_honored_and_annotated() {
 
     let resolution = resolve_new_cwd(
         &database,
-        &[w],
+        Some(&w),
         Some("/definitely/not/here"),
         &workspace(Some(&real_dir("explicit-missing", "default"))),
     )

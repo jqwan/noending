@@ -1,9 +1,13 @@
 //! LaunchIntent, Resume Delta and Storage/Domain consistency tests
 //! (Issues #5, #6, #8).
+//!
+//! Refactored for the single-Owner model (方案 §14–§21): a Session has at most
+//! one Owner Workstream, so an intent's `owner_workstream_id` is inherited by
+//! the matched Session verbatim. There are no primary/related roles and no
+//! multi-workstream bundles.
 
 use noending::domain::{
-    binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, Session,
-    SessionClassificationState, SessionWorkstreamBinding, SourceCursor,
+    launch_status, Agent, ContextDelivery, LaunchIntent, Session, SourceCursor,
 };
 use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
@@ -53,6 +57,7 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
         cwd,
         workspace_path_id: None,
         project_id: None,
+        owner_workstream_id: None,
         raw_path: raw.to_string_lossy().to_string(),
         parent_agent_session_id: None,
         started_at: started_at.clone(),
@@ -63,12 +68,13 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
     s
 }
 
-fn pending_intent(db: &Db, agent: Agent, ws_ids: Vec<String>, cwd: Option<String>) -> LaunchIntent {
+/// A pending New Session intent carrying the user's single Owner selection.
+fn pending_intent(db: &Db, agent: Agent, owner: Option<&str>, cwd: Option<String>) -> LaunchIntent {
     let i = LaunchIntent {
         id: new_id(),
         launch_type: "new".into(),
         agent,
-        selected_workstream_ids: ws_ids,
+        owner_workstream_id: owner.map(str::to_string),
         cwd,
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -84,28 +90,29 @@ fn pending_intent(db: &Db, agent: Agent, ws_ids: Vec<String>, cwd: Option<String
     i
 }
 
+/// The Session's current Owner, straight from the store.
+fn owner_of(db: &Db, session_id: &str) -> Option<String> {
+    db.get_session(session_id)
+        .unwrap()
+        .unwrap()
+        .owner_workstream_id
+}
+
 // ---------------------------------------------------------------------------
 // Issue #5: LaunchIntent
 // ---------------------------------------------------------------------------
 
-/// Launch → discovery → binding: a pending intent matches a newly
-/// discovered session and the user's explicit Workstream selection becomes
-/// high-confidence bindings. This is also the crash-recovery path: the
-/// intent was persisted before the "crash", the session is discovered by a
-/// later reconcile.
+/// Launch → discovery → Owner: a pending intent matches a newly discovered
+/// session and the user's explicit Workstream selection becomes the Session's
+/// Owner Workstream. This is also the crash-recovery path: the intent was
+/// persisted before the "crash", the session is discovered by a later reconcile.
 #[test]
-fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
+fn pending_intent_matches_new_session_and_sets_owner() {
     let db = open_db("intent-match");
     let ws_a = ws_row(&db, "Workstream A");
-    let ws_b = ws_row(&db, "Workstream B");
 
-    // user picks A + B in the New Session dialog, then NoEnding launches
-    let intent = pending_intent(
-        &db,
-        Agent::Codex,
-        vec![ws_a.id.clone(), ws_b.id.clone()],
-        None,
-    );
+    // user picks A in the New Session dialog, then NoEnding launches
+    let intent = pending_intent(&db, Agent::Codex, Some(&ws_a.id), None);
 
     // the agent CLI creates its session; we discover it afterwards
     let session = session_row(&db, Agent::Codex, Some(now()), None);
@@ -114,13 +121,14 @@ fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
         "the fresh session must claim the pending intent"
     );
 
-    // both explicit selections are bound with confidence 1.0
-    let bindings = db.bindings_for_session(&session.id).unwrap();
-    assert_eq!(bindings.len(), 2, "A + B → two bindings");
-    assert!(bindings
-        .iter()
-        .all(|b| b.source == binding_source::EXPLICIT_LAUNCH));
-    assert!(bindings.iter().all(|b| b.confidence == 1.0));
+    // the explicit selection becomes the single Owner Workstream
+    assert_eq!(
+        owner_of(&db, &session.id).as_deref(),
+        Some(ws_a.id.as_str())
+    );
+    let owned = db.sessions_for_workstream(&ws_a.id).unwrap();
+    assert_eq!(owned.len(), 1, "exactly one owned Session");
+    assert_eq!(owned[0].id, session.id);
 
     let intent = db.get_launch_intent(&intent.id).unwrap().unwrap();
     assert_eq!(intent.status, launch_status::MATCHED);
@@ -128,28 +136,22 @@ fn pending_intent_matches_new_session_and_creates_explicit_bindings() {
         intent.matched_session_id.as_deref(),
         Some(session.id.as_str())
     );
-
-    // classification is derived as fully assigned
-    assert_eq!(
-        SessionClassificationState::derive(&bindings),
-        SessionClassificationState::Assigned
-    );
 }
 
-/// Zero selected workstreams is a valid state: the intent matches but
-/// creates no bindings (0 binding is allowed), and auto classification
-/// must not add anything to an explicitly launched session.
+/// Zero selected workstreams is a valid state: the intent matches but the
+/// Session stays unowned, and no classification adds an owner behind the
+/// user's back.
 #[test]
-fn contextless_launch_matches_but_stays_zero_binding() {
+fn contextless_launch_matches_but_stays_unowned() {
     let db = open_db("intent-zero");
     let _ws = ws_row(&db, "Unrelated");
-    let intent = pending_intent(&db, Agent::Pi, vec![], None);
+    let intent = pending_intent(&db, Agent::Pi, None, None);
 
     let session = session_row(&db, Agent::Pi, Some(now()), None);
     assert!(
         launcher::try_match_launch_intents_in(&db, &session, &LaunchWorkspace::default()).unwrap()
     );
-    assert!(db.bindings_for_session(&session.id).unwrap().is_empty());
+    assert_eq!(owner_of(&db, &session.id), None);
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
         launch_status::MATCHED
@@ -162,8 +164,8 @@ fn ambiguous_candidates_wait_for_the_user() {
     let db = open_db("intent-ambiguous");
     let ws = ws_row(&db, "WS");
     // two intents launched at nearly the same time for the same agent
-    let i1 = pending_intent(&db, Agent::ClaudeCode, vec![ws.id.clone()], None);
-    let i2 = pending_intent(&db, Agent::ClaudeCode, vec![ws.id.clone()], None);
+    let i1 = pending_intent(&db, Agent::ClaudeCode, Some(&ws.id), None);
+    let i2 = pending_intent(&db, Agent::ClaudeCode, Some(&ws.id), None);
     let _ = (&i1, &i2);
 
     let session = session_row(&db, Agent::ClaudeCode, Some(now()), None);
@@ -178,9 +180,10 @@ fn ambiguous_candidates_wait_for_the_user() {
         !ambiguous.is_empty(),
         "the best candidate is marked ambiguous"
     );
-    assert!(
-        db.bindings_for_session(&session.id).unwrap().is_empty(),
-        "no bindings before the user resolves"
+    assert_eq!(
+        owner_of(&db, &session.id),
+        None,
+        "no owner before the user resolves"
     );
 
     // user resolves manually
@@ -193,7 +196,7 @@ fn ambiguous_candidates_wait_for_the_user() {
     .unwrap();
     let resolved = db.get_launch_intent(&ambiguous[0].id).unwrap().unwrap();
     assert_eq!(resolved.status, launch_status::MATCHED);
-    assert_eq!(db.bindings_for_session(&session.id).unwrap().len(), 1);
+    assert_eq!(owner_of(&db, &session.id).as_deref(), Some(ws.id.as_str()));
 }
 
 /// Wrong agent / stale sessions never match; stale intents expire.
@@ -201,7 +204,7 @@ fn ambiguous_candidates_wait_for_the_user() {
 fn stale_intents_expire_and_wrong_agent_never_matches() {
     let db = open_db("intent-expire");
     let ws = ws_row(&db, "WS");
-    let intent = pending_intent(&db, Agent::Codex, vec![ws.id.clone()], None);
+    let intent = pending_intent(&db, Agent::Codex, Some(&ws.id), None);
 
     // a Claude session cannot claim a Codex intent
     let claude_session = session_row(&db, Agent::ClaudeCode, Some(now()), None);
@@ -238,7 +241,7 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
         Some((chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339()),
         None,
     );
-    let fresh = pending_intent(&db, Agent::Codex, vec![ws.id.clone()], None);
+    let fresh = pending_intent(&db, Agent::Codex, Some(&ws.id), None);
     assert!(
         !launcher::try_match_launch_intents_in(&db, &old_session, &LaunchWorkspace::default())
             .unwrap()
@@ -249,31 +252,18 @@ fn stale_intents_expire_and_wrong_agent_never_matches() {
     );
 }
 
-/// Resume keeps existing bindings — it never re-guesses them.
+/// Resume uses the stored Owner; discovery never re-derives it.
 #[test]
-fn resume_does_not_reguess_bindings() {
+fn resume_does_not_reguess_owner() {
     let db = open_db("resume-no-guess");
     let ws = ws_row(&db, "WS");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "primary".into(),
-        source: binding_source::EXPLICIT_LAUNCH.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
-    let bindings = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].source, binding_source::EXPLICIT_LAUNCH);
-    // resume path only *uses* bindings; there is no classification call
-    // (verified structurally: try_match only consumes PENDING intents and
-    // this session's intent (if any) is already MATCHED.)
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
+
+    // No pending intent exists, so the discovery path has nothing to match:
+    // the Owner is a stored fact and must survive untouched.
+    assert!(!launcher::try_match_launch_intents_in(&db, &s, &LaunchWorkspace::default()).unwrap());
+    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(ws.id.as_str()));
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +317,7 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
         &db,
         "resume",
         None,
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced
     )
     .is_err());
@@ -337,7 +327,7 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -367,7 +357,7 @@ fn resume_requires_session_and_first_delivery_is_full_context() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -390,7 +380,7 @@ fn resume_delta_shows_changes_and_disappearances() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -431,7 +421,7 @@ fn resume_delta_shows_changes_and_disappearances() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -453,79 +443,6 @@ fn resume_delta_shows_changes_and_disappearances() {
         .sections
         .iter()
         .any(|sec| sec.title == "决策甲" && sec.kind == "constraint"));
-}
-
-// ---------------------------------------------------------------------------
-// Issue #6: aggregation
-// ---------------------------------------------------------------------------
-
-#[test]
-fn multi_workstream_bundle_dedups_and_labels_primary_related() {
-    let db = open_db("aggregate");
-    let ws1 = ws_row(&db, "主 Workstream");
-    let ws2 = ws_row(&db, "相关 Workstream");
-
-    // the SAME constraint exists in both workstreams
-    for ws in [&ws1, &ws2] {
-        noending::sync::create_item(
-            &db,
-            &ws.id,
-            "constraint",
-            "保持 API 向后兼容",
-            "所有变更不得破坏现有 API",
-            "user_edit",
-            "user_edit",
-            &[],
-            None,
-            "user",
-        )
-        .unwrap();
-    }
-    // an open conflict in ws2
-    let item = noending::sync::create_item(
-        &db,
-        &ws2.id,
-        "decision",
-        "只支持 macOS",
-        "agent 观点",
-        "agent_inferred",
-        "session_event",
-        &[],
-        None,
-        "sync:heuristic",
-    )
-    .unwrap();
-    db.insert_conflict(&noending::domain::ContextConflict {
-        id: new_id(),
-        workstream_id: ws2.id.clone(),
-        left_item_id: item.id.clone(),
-        right_item_id: None,
-        conflict_type: "authority".into(),
-        status: "open".into(),
-        resolution: None,
-        created_at: now(),
-        updated_at: now(),
-        left_revision_id: None,
-        right_revision_id: None,
-        candidate_snapshot_json: None,
-    })
-    .unwrap();
-
-    let bundle = context::build_bundle(
-        &db,
-        "new",
-        None,
-        &[ws1.id.clone(), ws2.id.clone()],
-        context::ContextDeliveryLevel::Detailed,
-    )
-    .unwrap();
-    assert!(bundle.markdown.contains("## 主 Workstream"));
-    assert!(bundle.markdown.contains("Related Workstream"));
-    // dedup: the shared constraint appears once (primary wins)
-    let count = bundle.markdown.matches("保持 API 向后兼容").count();
-    assert_eq!(count, 1, "shared constraint deduped across workstreams");
-    // cross-workstream conflicts surface
-    assert!(bundle.markdown.contains("New Conflicts"));
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +629,7 @@ fn launch_intent_match_records_delivery_snapshot() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![ws.id.clone()],
+        owner_workstream_id: Some(ws.id.clone()),
         cwd: None,
         context_bundle_markdown: Some("full bundle".into()),
         context_bundle_revisions: Some(
@@ -734,11 +651,8 @@ fn launch_intent_match_records_delivery_snapshot() {
 
     assert!(launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).is_ok());
 
-    // binding established explicitly…
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert!(bound
-        .iter()
-        .any(|b| b.workstream_id == ws.id && b.source == binding_source::EXPLICIT_LAUNCH));
+    // the Owner is established explicitly…
+    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(ws.id.as_str()));
 
     // …and the delivery recorded per workstream from the snapshot
     let deliveries = db.latest_deliveries(&s.id).unwrap();
@@ -758,7 +672,7 @@ fn launch_intent_match_records_delivery_snapshot() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -767,53 +681,6 @@ fn launch_intent_match_records_delivery_snapshot() {
         "already-delivered content must not be re-sent, got: {}",
         bundle.markdown
     );
-}
-
-/// Deliveries are attributed per workstream: a multi-workstream resume
-/// records each workstream's OWN revisions, never the union.
-#[test]
-fn multi_workstream_delivery_groups_revisions_by_workstream() {
-    let db = open_db("delivery-grouping");
-    let ws_a = ws_row(&db, "ws a");
-    let ws_b = ws_row(&db, "ws b");
-    let a = &seed_context(&db, &ws_a.id, &["约束A"])[0];
-    let b = &seed_context(&db, &ws_b.id, &["约束B"])[0];
-    let s = session_row(&db, Agent::Codex, Some(now()), None);
-
-    // simulate what resume_session now records: grouped by section owner
-    let head_rev = |item_id: &str| {
-        db.get_item(item_id)
-            .unwrap()
-            .unwrap()
-            .current_revision_id
-            .unwrap()
-    };
-    let by_ws = std::collections::BTreeMap::from([
-        (ws_a.id.clone(), vec![head_rev(&a.id)]),
-        (ws_b.id.clone(), vec![head_rev(&b.id)]),
-    ]);
-    for (ws_id, revs) in &by_ws {
-        db.record_delivery(&ContextDelivery {
-            id: new_id(),
-            session_id: s.id.clone(),
-            workstream_id: ws_id.clone(),
-            bundle_id: "bundle-2".into(),
-            delivered_revisions: revs.clone(),
-            delivered_conflicts: vec![],
-            delivered_at: now(),
-        })
-        .unwrap();
-    }
-
-    for (ws, expected_rev) in [(&ws_a, a), (&ws_b, b)] {
-        let d = db
-            .latest_deliveries(&s.id)
-            .unwrap()
-            .into_iter()
-            .find(|d| d.workstream_id == ws.id)
-            .unwrap();
-        assert_eq!(d.delivered_revisions, vec![head_rev(&expected_rev.id)]);
-    }
 }
 
 /// The token budget filters SECTIONS before rendering, so `bundle.sections`
@@ -886,7 +753,7 @@ fn token_budget_limits_sections_to_actually_delivered_content() {
         &db,
         "new",
         None,
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         policy,
         "test_custom",
     )
@@ -1025,7 +892,7 @@ fn context_delivery_off_produces_empty_bundle() {
         &db,
         "new",
         None,
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Off,
     )
     .unwrap();
@@ -1041,7 +908,7 @@ fn context_delivery_off_produces_empty_bundle() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Off,
     )
     .unwrap();
@@ -1053,10 +920,10 @@ fn context_delivery_off_produces_empty_bundle() {
 }
 
 /// Invariant: New Session launched with Context Delivery = Off must STILL
-/// record selected_workstream_ids and create explicit bindings on discovery,
-/// but must NEVER record a ContextDelivery snapshot.
+/// record the Owner Workstream and set it on discovery, but must NEVER record
+/// a ContextDelivery snapshot.
 #[test]
-fn launch_intent_with_off_creates_bindings_but_no_delivery() {
+fn launch_intent_with_off_sets_owner_but_no_delivery() {
     let db = open_db("intent-off-delivery");
     let ws = ws_row(&db, "ws-off");
     seed_context(&db, &ws.id, &["约束"]);
@@ -1067,7 +934,7 @@ fn launch_intent_with_off_creates_bindings_but_no_delivery() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![ws.id.clone()],
+        owner_workstream_id: Some(ws.id.clone()),
         cwd: None,
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -1083,12 +950,8 @@ fn launch_intent_with_off_creates_bindings_but_no_delivery() {
 
     assert!(launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).is_ok());
 
-    // Explicit binding is preserved!
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(bound.len(), 1);
-    assert_eq!(bound[0].workstream_id, ws.id);
-    assert_eq!(bound[0].source, binding_source::EXPLICIT_LAUNCH);
-    assert_eq!(bound[0].confidence, 1.0);
+    // The Owner Workstream is preserved!
+    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(ws.id.as_str()));
 
     // But NO ContextDelivery is recorded!
     let deliveries = db.latest_deliveries(&s.id).unwrap();
@@ -1143,7 +1006,7 @@ fn balanced_off_balanced_preserves_revisions_in_delta() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Off,
     )
     .unwrap();
@@ -1164,7 +1027,7 @@ fn balanced_off_balanced_preserves_revisions_in_delta() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1279,7 +1142,7 @@ fn resume_preserves_cumulative_known_state_without_spurious_deltas() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1305,7 +1168,7 @@ fn resume_preserves_cumulative_known_state_without_spurious_deltas() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1378,7 +1241,7 @@ fn conflict_not_lost_when_truncated_by_budget() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         tiny_policy,
         "custom",
     )
@@ -1403,7 +1266,7 @@ fn conflict_not_lost_when_truncated_by_budget() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1430,7 +1293,7 @@ fn conflict_not_lost_when_truncated_by_budget() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1495,7 +1358,7 @@ fn extended_items_filtering_order_not_starved_by_core_items() {
         &db,
         "new",
         None,
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Compact,
     )
     .unwrap();
@@ -1518,7 +1381,7 @@ fn builder_requires_session_in_resume_mode_even_when_off() {
         &db,
         "resume",
         None,
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Off,
     );
     assert!(
@@ -1580,7 +1443,7 @@ fn resume_emits_gone_for_deleted_item() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1611,7 +1474,7 @@ fn resume_emits_gone_for_deleted_item() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1677,7 +1540,7 @@ fn gone_truncated_by_budget_preserves_revision_in_snapshot() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         tiny_policy,
         "custom",
     )
@@ -1699,7 +1562,7 @@ fn gone_truncated_by_budget_preserves_revision_in_snapshot() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1766,7 +1629,7 @@ fn resume_emits_conflict_resolved_when_conflict_closed() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1794,7 +1657,7 @@ fn resume_emits_conflict_resolved_when_conflict_closed() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1873,7 +1736,7 @@ fn conflict_resolved_truncated_by_budget_retains_conflict_id() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         tiny_policy,
         "custom",
     )
@@ -1898,7 +1761,7 @@ fn conflict_resolved_truncated_by_budget_retains_conflict_id() {
         &db,
         "resume",
         Some(&s),
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -1908,13 +1771,12 @@ fn conflict_resolved_truncated_by_budget_retains_conflict_id() {
         .any(|sec| sec.kind == "conflict_resolved"));
 }
 
-/// P2: apply_match must record deliveries for workstreams that only have conflicts
-/// (even if they have 0 revisions).
+/// P2: apply_match must record deliveries for a bundle that only has conflicts
+/// (even if it has 0 revisions).
 #[test]
-fn apply_match_handles_conflict_only_workstream() {
+fn apply_match_handles_conflict_only_bundle() {
     let db = open_db("match-conflict-only");
-    let ws_a = ws_row(&db, "WS A");
-    let ws_b = ws_row(&db, "WS B");
+    let ws = ws_row(&db, "WS");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
 
     let conflict_id = new_id();
@@ -1923,17 +1785,14 @@ fn apply_match_handles_conflict_only_workstream() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![ws_a.id.clone(), ws_b.id.clone()],
+        owner_workstream_id: Some(ws.id.clone()),
         cwd: None,
         context_bundle_markdown: Some("bundle".into()),
         context_bundle_revisions: Some(
             serde_json::json!({
                 "bundle_id": "b-test",
-                "by_workstream": {
-                    ws_a.id.clone(): ["rev-a-1"]
-                },
                 "conflicts_by_workstream": {
-                    ws_b.id.clone(): [conflict_id.clone()]
+                    ws.id.clone(): [conflict_id.clone()]
                 }
             })
             .to_string(),
@@ -1951,12 +1810,12 @@ fn apply_match_handles_conflict_only_workstream() {
     launcher::apply_match(&db, &intent, &s, &launcher::LaunchWorkspace::default()).unwrap();
 
     let deliveries = db.latest_deliveries(&s.id).unwrap();
-    let d_b = deliveries
+    let d = deliveries
         .iter()
-        .find(|d| d.workstream_id == ws_b.id)
-        .expect("workstream with only conflicts must still have ContextDelivery recorded");
-    assert_eq!(d_b.delivered_conflicts, vec![conflict_id]);
-    assert!(d_b.delivered_revisions.is_empty());
+        .find(|d| d.workstream_id == ws.id)
+        .expect("a bundle with only conflicts must still have ContextDelivery recorded");
+    assert_eq!(d.delivered_conflicts, vec![conflict_id]);
+    assert!(d.delivered_revisions.is_empty());
 }
 
 #[test]
@@ -1978,7 +1837,7 @@ fn prepare_new_does_not_create_intent_or_delivery_or_file() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -1986,9 +1845,15 @@ fn prepare_new_does_not_create_intent_or_delivery_or_file() {
 
     // 1. PreparedLaunch captures the exact bundle & fingerprint
     assert_eq!(prepared.mode, "new");
-    assert_eq!(prepared.workstream_ids, vec![ws.id.clone()]);
+    assert_eq!(
+        prepared.owner_workstream_id.as_deref(),
+        Some(ws.id.as_str())
+    );
     assert!(!prepared.state_fingerprint.is_empty());
-    assert_eq!(prepared.bundle.workstream_ids, vec![ws.id.clone()]);
+    assert_eq!(
+        prepared.bundle.workstream_id.as_deref(),
+        Some(ws.id.as_str())
+    );
     assert!(prepared.bundle.sections.iter().any(|s| s.title == "约束 A"));
 
     // 2. INVARIANT: No LaunchIntent created
@@ -2007,7 +1872,7 @@ fn prepare_new_does_not_create_intent_or_delivery_or_file() {
 }
 
 #[test]
-fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
+fn prepare_resume_uses_current_owner_without_committing_delivery() {
     let db = open_db("prep-resume-no-side-effects");
     // Needs a delivered bundle to assert on: opt into delivery explicitly.
     noending::settings::set_context_delivery_level(&db, context::ContextDeliveryLevel::Balanced)
@@ -2017,43 +1882,37 @@ fn prepare_resume_does_not_commit_extra_bindings_or_delivery() {
     seed_context(&db, &ws1.id, &["约束 1"]);
     seed_context(&db, &ws2.id, &["约束 2"]);
 
-    let s = session_row(&db, Agent::Codex, Some(now()), None);
-    // ws1 is already bound
-    launcher::record_binding(
-        &db,
-        &s.id,
-        &ws1.id,
-        "related",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
+    let session = session_row(&db, Agent::Codex, Some(now()), None);
+    // ws1 is the Session's current Owner
+    db.set_session_owner(&session.id, Some(&ws1.id)).unwrap();
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
         runtime_dir: tmp_dir.clone(),
     };
 
-    // User chooses to add ws2 during resume preparation
     let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &[ws2.id.clone()], &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
         .unwrap();
 
     assert_eq!(prepared.mode, "resume");
     assert_eq!(
-        prepared.workstream_ids,
-        vec![ws1.id.clone(), ws2.id.clone()]
+        prepared.owner_workstream_id.as_deref(),
+        Some(ws1.id.as_str())
     );
-    assert_eq!(prepared.extra_workstream_ids, vec![ws2.id.clone()]);
-    assert!(prepared.bundle.sections.iter().any(|s| s.title == "约束 2"));
+    assert_eq!(
+        prepared.bundle.workstream_id.as_deref(),
+        Some(ws1.id.as_str())
+    );
+    assert!(prepared.bundle.sections.iter().any(|s| s.title == "约束 1"));
+    // ws2 is not the Owner, so its context must not be assembled in
+    assert!(!prepared.bundle.sections.iter().any(|s| s.title == "约束 2"));
 
-    // INVARIANT: ws2 is NOT yet committed to DB
-    let bindings = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].workstream_id, ws1.id);
+    // INVARIANT: the Owner is unchanged (prepare only reads it)
+    assert_eq!(owner_of(&db, &session.id).as_deref(), Some(ws1.id.as_str()));
 
     // INVARIANT: No delivery snapshot recorded
-    let deliveries = db.latest_deliveries(&s.id).unwrap();
+    let deliveries = db.latest_deliveries(&session.id).unwrap();
     assert!(deliveries.is_empty());
 
     // INVARIANT: No context file written
@@ -2076,7 +1935,7 @@ fn state_fingerprint_stale_detection_on_context_change() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2112,7 +1971,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2124,7 +1983,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             db,
             "new",
             None,
-            &prepared.workstream_ids,
+            prepared.owner_workstream_id.as_deref(),
             prepared.delivery_level,
             Agent::Codex,
             &LaunchWorkspace::default(),
@@ -2166,7 +2025,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             &db,
             "new",
             None,
-            &prepared.workstream_ids,
+            prepared.owner_workstream_id.as_deref(),
             prepared.delivery_level,
             Agent::Codex,
             &LaunchWorkspace::default()
@@ -2201,7 +2060,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2248,15 +2107,7 @@ fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
     seed_context(&db, &ws.id, &["约束"]);
 
     let s = session_row(&db, Agent::Codex, Some(now()), None);
-    launcher::record_binding(
-        &db,
-        &s.id,
-        &ws.id,
-        "related",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
@@ -2264,7 +2115,7 @@ fn state_fingerprint_stale_detection_on_delivery_snapshot_change() {
     };
 
     let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
 
     // Background process advances delivery snapshot
@@ -2308,7 +2159,7 @@ fn state_fingerprint_stale_detection_on_delivery_level_change() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2347,7 +2198,7 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2358,7 +2209,7 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
         &db,
         "new",
         None,
-        &p1.workstream_ids,
+        p1.owner_workstream_id.as_deref(),
         p1.delivery_level,
         p1.agent,
         &LaunchWorkspace::default(),
@@ -2376,7 +2227,7 @@ fn prepared_bundle_identity_preserved_and_deterministic() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2398,7 +2249,7 @@ fn prepared_launch_single_use_atomic_consumption() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2439,7 +2290,7 @@ fn prepared_launch_concurrent_consumption_is_exclusive() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2484,7 +2335,7 @@ fn prepared_launch_lazy_ttl_cleanup() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -2497,7 +2348,7 @@ fn prepared_launch_lazy_ttl_cleanup() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )

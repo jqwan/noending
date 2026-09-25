@@ -11,7 +11,6 @@ import PermanentDeleteModal from "./PermanentDeleteModal";
 import {
   agentDisplayLabel,
   formatDateTime,
-  primaryFirst,
   projectCellFor,
   sessionDisplayTitle,
   NO_CWD,
@@ -43,7 +42,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [failed, setFailed] = useState(false);
-  const [bindingOpen, setBindingOpen] = useState(false);
+  const [ownerOpen, setOwnerOpen] = useState(false);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   // 回收站动作（Session Lifecycle & Deletion §36）：确认弹窗、执行中的 busy、
@@ -99,7 +98,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       </div>
     );
   }
-  const { session, events, bindings } = detail;
+  const { session, events, owner_workstream } = detail;
 
   /**
    * 刷新 = 只摄入。Context 提取只在智能开启时才会发生（方案 v0.1 §11.6），
@@ -131,7 +130,6 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const title = sessionDisplayTitle(session.title);
   const untitled = title === UNTITLED_SESSION;
   const cwd = (session.cwd ?? "").trim();
-  const ordered = primaryFirst(bindings, ([b]) => b.role);
   /** 单一生命周期权威：null = 正常，时间戳 = 在回收站（§3）。 */
   const trashed = session.trashed_at !== null;
 
@@ -180,16 +178,14 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const sessionProjectId = workspacePath?.project_id ?? session.project_id ?? null;
 
   /**
-   * 添加关联（方案 §1.8）：一次提交完整的关联集合，已有关联原样带上（后端在单事务里
-   * diff，未改动的 row 连 created_at / provenance 都不动），新选的按 related 追加。
+   * 设置所属任务（方案 §29）：一次提交一个 id 或 null（未归属）。只改
+   * `sessions.owner_workstream_id`，不碰工作路径与 Project —— 那两件事由后端保证，
+   * 这里也不做任何补偿动作。
    */
-  const addBindings = async (workstreamIds: string[]) => {
-    await api.replaceSessionBindings(sessionId, [
-      ...bindings.map(([b]) => ({ workstream_id: b.workstream_id, role: b.role })),
-      ...workstreamIds.map((id) => ({ workstream_id: id, role: "related" })),
-    ]);
+  const setOwner = async (workstreamId: string | null) => {
+    await api.setSessionOwnerWorkstream(sessionId, workstreamId);
     refresh();
-    setBindingOpen(false);
+    setOwnerOpen(false);
   };
 
   const messages: SessionMessageData[] = events.map((e) => ({
@@ -243,29 +239,36 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         </div>
       )}
 
-      {/* §36.19：右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（关联任务、消息）。 */}
+      {/* §36.19：右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（所属任务、消息）。 */}
       <div className="task-detail-layout">
       <div className="task-detail-main">
       <div className="row between" style={{ marginBottom: 8 }}>
-        <div className="section-label" style={{ margin: 0 }}>关联任务</div>
-        <button className="btn small ghost icon-button" aria-label="添加关联任务" title="添加关联任务" onClick={() => setBindingOpen(true)}><Icon name="plus" /></button>
+        <div className="section-label" style={{ margin: 0 }}>所属任务</div>
       </div>
-      {bindings.length === 0 && (
-        <div className="l1-none">
-          暂无关联任务
+      {/* 一次最多一个 Owner（方案 §3.3）：要么一条任务，要么「未归属任务」。
+          没有「再添加一条」的入口——更换与清空都在这一个入口里。 */}
+      {owner_workstream ? (
+        <div className="rail-row">
+          <div className="rail-main">
+            <button
+              className="link"
+              style={{ textAlign: "left", overflowWrap: "anywhere" }}
+              title={`打开任务：${owner_workstream.title}`}
+              onClick={() => navigate({ view: "workstream", workstreamId: owner_workstream.id })}
+            >
+              {owner_workstream.title.trim() || "未命名任务"}
+            </button>
+          </div>
+          <button className="btn small" onClick={() => setOwnerOpen(true)}>更改</button>
+        </div>
+      ) : (
+        <div className="rail-row">
+          <div className="rail-main">
+            <div className="rail-title muted">未归属任务</div>
+          </div>
+          <button className="btn small" onClick={() => setOwnerOpen(true)}>选择</button>
         </div>
       )}
-      {/* 不标主/相关：两种角色只影响排序，不影响这条会话与任务的归属（同 §36.18 项目侧）。 */}
-      {ordered.map(([b, t]) => (
-        <div className="rail-row" key={b.workstream_id}
-          onClick={() => navigate({ view: "workstream", workstreamId: b.workstream_id })}
-          title={t ?? "这个任务记录已不存在"}>
-          <div className="rail-main">
-            <div className="rail-title">{t ?? "任务已不可用"}</div>
-            {t === null && <div className="rail-sub mono">{b.workstream_id}</div>}
-          </div>
-        </div>
-      ))}
 
       <div className="section-label" style={{ marginTop: 34 }}>消息</div>
       <p className="muted small" style={{ margin: "0 0 6px" }}>
@@ -442,12 +445,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             <b>{title}</b> 会从 Sessions 列表、搜索与继续入口中消失，出现在 Sessions 页的「回收站」里。
           </p>
-          {/* §36 要求把两个概念摆在同一处明确区分：「从 Workstream 移除」只改
-              Workstream 成员关系，这里是全局回收站。前者目前只有后端能力
-              （replace_session_bindings 传一个更小的集合），界面上还没有入口。 */}
+          {/* §36 要求把两个概念摆在同一处明确区分：「从任务移除」只改这条会话的
+              所属任务（详情页的「更改 / 选择」），这里是全局回收站。 */}
           <div className="card hairline" style={{ marginBottom: 12 }}>
             <p style={{ margin: "0 0 6px" }}>
-              <b>从任务移除</b> = 只修改这个任务的成员关系。
+              <b>从任务移除</b> = 只修改这条会话的所属任务，会话本身留在列表里。
             </p>
             <p style={{ margin: 0 }}>
               <b>移入回收站</b> = 在 NoEnding 中全局隐藏该 Session。Agent 原始会话不会被删除。
@@ -470,12 +472,12 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         />
       )}
 
-      {bindingOpen && (
-        <ExistingTaskPicker
-          exclude={bindings.map(([b]) => b.workstream_id)}
+      {ownerOpen && (
+        <OwnerPickerModal
+          currentOwnerId={owner_workstream?.id ?? null}
           projectId={sessionProjectId}
-          onClose={() => setBindingOpen(false)}
-          onAdd={addBindings}
+          onClose={() => setOwnerOpen(false)}
+          onSubmit={setOwner}
         />
       )}
       {resumeOpen && (
@@ -550,20 +552,24 @@ function CopyValue({ value, mono, title }: { value: string; mono?: boolean; titl
 }
 
 /**
- * 添加关联任务：列出**这条会话所属项目**下的任务（§22：Session 只归类到 Workstream，
- * Project 是工作目录派生的，不在这里选）。形状照抄新建任务里的「选择已有目录」：
- * 候选列表 + 已关联的置灰标出，选好一次确认就提交。
+ * 选择所属任务（方案 §29）：单选，一次只能选一个，也可以选「未归属」清空。
+ *
+ * 候选按「当前 Project → 其他任务」分组（§29.1）：与这条会话的工作目录有路径
+ * 关联的任务优先出现。后端不建立这个限制，所以其他任务仍然可选中。
+ * 归档的任务不接收新的归属（和列表里的候选同一套口径）。
  */
-function ExistingTaskPicker({ exclude, projectId, onClose, onAdd }: {
-  exclude: string[];
-  /** null = 这条会话没有可解析的项目，此时不筛，退回全部任务。 */
+function OwnerPickerModal({ currentOwnerId, projectId, onClose, onSubmit }: {
+  /** 当前所属任务；null = 未归属。 */
+  currentOwnerId: string | null;
+  /** null = 这条会话没有可解析的项目，此时不分组，只列全部任务。 */
   projectId: string | null;
   onClose: () => void;
-  onAdd: (workstreamIds: string[]) => Promise<void>;
+  onSubmit: (workstreamId: string | null) => Promise<void>;
 }) {
   const [tasks, setTasks] = useState<Workstream[] | null>(null);
+  const [projectTaskIds, setProjectTaskIds] = useState<string[]>([]);
   const [error, setError] = useState(false);
-  const [selected, setSelected] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string | null>(currentOwnerId);
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [failText, setFailText] = useState("");
@@ -571,9 +577,15 @@ function ExistingTaskPicker({ exclude, projectId, onClose, onAdd }: {
   useEffect(() => {
     let active = true;
     setError(false);
-    api.listWorkstreams(projectId ?? undefined)
-      // 归档的任务不再接收新关联，和旧弹窗的下拉是同一套候选。
-      .then((rows) => { if (active) setTasks(rows.filter((w) => w.visibility === "normal")); })
+    Promise.all([
+      api.listWorkstreams(),
+      projectId ? api.listWorkstreams(projectId) : Promise.resolve([]),
+    ])
+      .then(([all, inProject]) => {
+        if (!active) return;
+        setTasks(all.filter((w) => w.visibility === "normal"));
+        setProjectTaskIds(inProject.map((w) => w.id));
+      })
       .catch(() => { if (active) setError(true); });
     return () => { active = false; };
   }, [projectId, attempt]);
@@ -583,7 +595,7 @@ function ExistingTaskPicker({ exclude, projectId, onClose, onAdd }: {
     setBusy(true);
     setFailText("");
     try {
-      await onAdd(selected);
+      await onSubmit(selected);
     } catch (e) {
       setFailText(String(e));
     } finally {
@@ -591,29 +603,51 @@ function ExistingTaskPicker({ exclude, projectId, onClose, onAdd }: {
     }
   };
 
+  const option = (id: string | null, title: string) => (
+    <label className="existing-path-option" key={id ?? "none"}>
+      <input
+        type="radio"
+        name="owner-workstream"
+        checked={selected === id}
+        onChange={() => setSelected(id)}
+      />
+      <span className="existing-path-info" title={title}>{title}</span>
+    </label>
+  );
+
+  const otherTasks = (tasks ?? []).filter((w) => !projectTaskIds.includes(w.id));
+  const projectTasks = (tasks ?? []).filter((w) => projectTaskIds.includes(w.id));
+
   return (
-    <Modal title="添加关联任务" onClose={onClose}>
-      <div className="existing-path-list" role="group" aria-label="项目任务">
-        {error ? <div role="alert">读取任务失败 <button className="btn small" onClick={() => setAttempt((n) => n + 1)}>重试</button></div>
-          : !tasks ? <div role="status">加载中…</div>
-          : tasks.length === 0 ? <div className="muted">{projectId ? "这个项目下还没有任务" : "还没有任务"}</div>
-          : tasks.map((w) => {
-            const added = exclude.includes(w.id);
-            return (
-              <label className={`existing-path-option${added ? " is-added" : ""}`} key={w.id}>
-                <input type="checkbox" disabled={added}
-                  checked={added || selected.includes(w.id)}
-                  onChange={(e) => setSelected((old) => e.target.checked ? [...old, w.id] : old.filter((id) => id !== w.id))} />
-                <span className="existing-path-info" title={w.title}>{w.title}</span>
-              </label>
-            );
-          })}
+    <Modal title="选择所属任务" onClose={onClose}>
+      <div className="existing-path-list" role="radiogroup" aria-label="所属任务">
+        {error ? (
+          <div role="alert">
+            读取任务失败 <button className="btn small" onClick={() => setAttempt((n) => n + 1)}>重试</button>
+          </div>
+        ) : !tasks ? (
+          <div role="status">加载中…</div>
+        ) : (
+          <>
+            {option(null, "未归属")}
+            {projectTasks.length > 0 ? (
+              <>
+                <div className="muted small" style={{ marginTop: 8 }}>当前项目</div>
+                {projectTasks.map((w) => option(w.id, w.title.trim() || "未命名任务"))}
+              </>
+            ) : null}
+            {projectTasks.length > 0 && otherTasks.length > 0 ? (
+              <div className="muted small" style={{ marginTop: 8 }}>其他任务</div>
+            ) : null}
+            {otherTasks.map((w) => option(w.id, w.title.trim() || "未命名任务"))}
+          </>
+        )}
       </div>
       {failText && <div className="badge warn" style={{ marginTop: 8 }}>{failText}</div>}
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn primary" disabled={busy || !selected.length} onClick={submit}>
-          {busy ? "添加中…" : `添加${selected.length ? ` (${selected.length})` : ""}`}
+        <button className="btn primary" disabled={busy || !tasks || selected === currentOwnerId} onClick={submit}>
+          {busy ? "保存中…" : "保存"}
         </button>
       </div>
     </Modal>

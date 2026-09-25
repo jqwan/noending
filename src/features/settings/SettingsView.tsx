@@ -294,8 +294,8 @@ function AutomationSettings() {
       </div>
       <div className="row-line">
         <div>
-          <div className="settings-row-label">Context 提取与自动归类</div>
-          <div className="settings-row-hint">自动归类只影响未显式绑定的会话；你的手动指定优先。</div>
+          <div className="settings-row-label">Context 提取</div>
+          <div className="settings-row-hint">只对已设置所属任务的会话提取 Context；未归属的会话只摄入事件。</div>
         </div>
         <span className={`badge ${intelligenceEnabled ? "success" : ""}`}>
           {intelligenceEnabled ? "开" : "关"}

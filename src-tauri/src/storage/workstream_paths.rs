@@ -15,8 +15,8 @@
 //! `(workstream_id, workspace_path_id)` stops duplicates, `(workstream_id,
 //! position)` stops two paths claiming the same slot.
 //!
-//! Policy that calls these — add/remove/reorder endpoints, the recycle bin, the
-//! binding side-effects — is `workspace::workstream` (方案 §18). Two of them
+//! Policy that calls these — add/remove/reorder endpoints, the recycle bin —
+//! is `workspace::workstream` (方案 §18). Two of them
 //! live here rather than there because they are mechanical and total:
 //! [`purge_workstream_data_conn`] (the whole §42.3-M6 delete order, in the
 //! caller's transaction) and [`reindex_workstream_search_conn`] (one Workstream's
@@ -40,7 +40,6 @@ fn row_workstream_path(r: &Row) -> rusqlite::Result<WorkstreamPath> {
         workstream_id: r.get("workstream_id")?,
         workspace_path_id: r.get("workspace_path_id")?,
         position: r.get("position")?,
-        source: r.get("source")?,
         created_at: r.get("created_at")?,
     })
 }
@@ -108,7 +107,6 @@ pub fn append_workstream_path_conn(
     conn: &Connection,
     workstream_id: &str,
     workspace_path_id: &str,
-    source: &str,
 ) -> Result<WorkstreamPath> {
     if let Some(existing) = find_workstream_path_conn(conn, workstream_id, workspace_path_id)? {
         return Ok(existing);
@@ -123,19 +121,17 @@ pub fn append_workstream_path_conn(
         workstream_id: workstream_id.to_string(),
         workspace_path_id: workspace_path_id.to_string(),
         position: next,
-        source: source.to_string(),
         created_at: now(),
     };
     conn.execute(
         "INSERT INTO workstream_paths
-           (id, workstream_id, workspace_path_id, position, source, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+           (id, workstream_id, workspace_path_id, position, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             row.id,
             row.workstream_id,
             row.workspace_path_id,
             row.position,
-            row.source,
             row.created_at
         ],
     )?;
@@ -160,42 +156,23 @@ pub fn find_workstream_path_conn(
 /// transaction. Deleting position 0 therefore promotes position 1 automatically:
 /// the user never has to pick a new primary path.
 ///
-/// Also unbinds exactly the Sessions that came in through this path
-/// (`session_workstream_bindings.workstream_path_id`), and only those:
-///  * a binding with `workstream_path_id IS NULL` is a legacy or drifted Session
-///    we cannot prove came from this path, so removing it would be a guess that
-///    destroys user intent (§42.3-M1/M2);
-///  * Sessions reached through another path of the same Workstream are untouched
-///    (方案 §32, design §32 — this is the nested `/repo` vs `/repo/frontend` case,
-///    resolved by exact identity rather than prefix matching);
-///  * the Sessions themselves, their events, and their cursors are never
-///    touched here.
-///
-/// Returns the number of bindings removed.
+/// This touches the path list only. It never changes a Session — not its cwd,
+/// not its workspace path, and not its Owner Workstream (方案 §5.2, §12). A
+/// Session's cwd is historical execution fact; the Workstream's path list is
+/// current configuration; the owner is semantic assignment. They are
+/// independent.
 pub fn remove_workstream_path_conn(
     tx: &Transaction<'_>,
     workstream_id: &str,
     workstream_path_id: &str,
-) -> Result<usize> {
-    let removed: Option<String> = tx
-        .query_row(
-            "DELETE FROM workstream_paths
-              WHERE workstream_id = ?1 AND id = ?2
-              RETURNING id",
-            params![workstream_id, workstream_path_id],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?;
-    if removed.is_none() {
-        return Ok(0);
-    }
-    let unbound = tx.execute(
-        "DELETE FROM session_workstream_bindings
-          WHERE workstream_id = ?1 AND workstream_path_id = ?2",
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM workstream_paths
+          WHERE workstream_id = ?1 AND id = ?2",
         params![workstream_id, workstream_path_id],
     )?;
     recompact_workstream_positions_conn(tx, workstream_id)?;
-    Ok(unbound)
+    Ok(())
 }
 
 /// Renumber positions to `0..len` preserving the current order. Cheap and
@@ -283,23 +260,6 @@ pub fn workstream_path_by_id_conn(
         .optional()?)
 }
 
-/// §22 — how many Sessions came in through this WorkstreamPath, which is exactly
-/// how many bindings removing it will take with it. Read-only, so the UI can
-/// warn before asking, and the warning cannot be stale by the time it is
-/// rendered.
-pub fn count_bindings_for_workstream_path_conn(
-    conn: &Connection,
-    workstream_id: &str,
-    workstream_path_id: &str,
-) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM session_workstream_bindings
-          WHERE workstream_id = ?1 AND workstream_path_id = ?2",
-        params![workstream_id, workstream_path_id],
-        |r| r.get(0),
-    )?)
-}
-
 /// §12/§13 — the list as canonical path strings, **in position order**.
 ///
 /// Ordering is the contract: this is the byte sequence the PreparedLaunch
@@ -365,11 +325,13 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
 /// `workstream_review_state` cascades; it is deleted explicitly anyway so the
 /// order is written down rather than inferred from the schema.
 ///
-/// NOT touched, on purpose: `sessions`, `session_events`, `session_cursors`,
-/// `launch_intents`, `workspace_paths`, `projects`, `sync_runs` and the Agents'
-/// raw transcript files. A Session survives the Workstream that referenced it
-/// (§18-12); `launch_intents` keep their recorded `cwd` as historical evidence
-/// even when it names a Workstream that is gone (§42.3-M24).
+/// NOT touched, on purpose: `sessions` (their `owner_workstream_id` is cleared
+/// by the FK in step 9, the rows themselves survive), `session_events`,
+/// `session_cursors`, `launch_intents`, `workspace_paths`, `projects`,
+/// `sync_runs` and the Agents' raw transcript files. A Session survives the
+/// Workstream that referenced it (方案 §37); `launch_intents` keep their
+/// recorded `cwd` as historical evidence even when it names a Workstream that
+/// is gone (§42.3-M24).
 pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> Result<()> {
     // 1. conflict audit trail — references context_conflicts.
     tx.execute(
@@ -404,25 +366,16 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
         "DELETE FROM context_deliveries WHERE workstream_id = ?1",
         params![workstream_id],
     )?;
-    // 7. bindings. The Sessions they point at are left exactly as they were.
-    tx.execute(
-        "DELETE FROM session_workstream_bindings WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
-    // 8. the ordered path list. `workspace_paths` rows survive: they are
+    // 7. the ordered path list. `workspace_paths` rows survive: they are
     //    physical facts other Sessions and Workstreams may share, and Project /
-    //    WorkspacePath GC is `workspace::project`'s job (§10).
+    //    WorkspacePath GC is `workspace::project`'s job (§10). Sessions keep
+    //    their `owner_workstream_id` until the Workstream row itself is removed
+    //    in step 9, where the FK's ON DELETE SET NULL clears it (方案 §37).
     tx.execute(
         "DELETE FROM workstream_paths WHERE workstream_id = ?1",
         params![workstream_id],
     )?;
-    // 9. negative decisions about this pair. No FK points here, so nothing
-    //    else would ever remove them and they would outlive their subject.
-    tx.execute(
-        "DELETE FROM session_binding_removals WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
-    // 10. review state.
+    // 8. review state.
     tx.execute(
         "DELETE FROM workstream_review_state WHERE workstream_id = ?1",
         params![workstream_id],
@@ -432,7 +385,8 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
         "DELETE FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
         workstream_id,
     )?;
-    // 12. the Workstream itself.
+    // 9. the Workstream itself. Sessions survive; their `owner_workstream_id`
+    //    is cleared by the FK's ON DELETE SET NULL in the same statement.
     tx.execute(
         "DELETE FROM workstreams WHERE id = ?1",
         params![workstream_id],

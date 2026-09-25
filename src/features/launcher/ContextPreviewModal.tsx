@@ -97,10 +97,8 @@ export default function ContextPreviewModal({
           注入等级: {deliveryLevelLabel(prepared.delivery_level)}
         </span>
         <span className="badge">
-          任务：{" "}
-          {prepared.workstream_ids.length > 0
-            ? `${prepared.workstream_ids.length} 个`
-            : "无"}
+          所属任务：{" "}
+          {prepared.owner_workstream_id === null ? "未归属" : "1 个"}
         </span>
         <span className="badge">
           工作目录: {prepared.cwd || "未指定"}

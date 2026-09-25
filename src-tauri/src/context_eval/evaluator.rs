@@ -148,7 +148,11 @@ pub struct FixtureEnv {
     pub db: Db,
     pub session: Session,
     pub session_events: Vec<SessionEvent>,
-    pub candidate_ids: Vec<String>,
+    /// The single Owner Workstream this fixture routes to (方案 §19): the
+    /// first workstream of the fixture. A fixture with more than one
+    /// workstream no longer describes a legal Session — a Session has at most
+    /// one Owner — so only the first is ever the routing target.
+    pub owner_workstream_id: String,
     pub ref_map: Vec<PromptEventRef>,
 }
 
@@ -237,6 +241,9 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
         cwd: None,
         workspace_path_id: None,
         project_id: None,
+        // The harness drives extraction directly with the fixture's single
+        // workstream id; the row itself is not consulted for routing.
+        owner_workstream_id: None,
         raw_path: format!("/tmp/{name}.jsonl"),
         parent_agent_session_id: None,
         started_at: Some(now()),
@@ -275,18 +282,18 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
         });
     }
 
-    let candidate_ids: Vec<String> = fixture
+    let owner_workstream_id = fixture
         .input
         .workstreams
-        .iter()
+        .first()
         .map(|w| w.id.clone())
-        .collect();
+        .ok_or_else(|| other(format!("fixture {name}: 没有 Workstream")))?;
 
     Ok(FixtureEnv {
         db,
         session,
         session_events,
-        candidate_ids,
+        owner_workstream_id,
         ref_map,
     })
 }
@@ -300,7 +307,7 @@ pub fn run_domain_golden(fixture: &ContextQualityFixture) -> Result<Db> {
         db,
         session,
         ref_map,
-        candidate_ids,
+        owner_workstream_id,
         ..
     } = setup_fixture(fixture)?;
     let name = &fixture.name;
@@ -308,7 +315,7 @@ pub fn run_domain_golden(fixture: &ContextQualityFixture) -> Result<Db> {
     let parse_output = parse_mutations(
         &fixture.recorded_model_output,
         &ref_map,
-        &candidate_ids,
+        &owner_workstream_id,
         &session,
     )
     .map_err(|e| other(format!("fixture {name}: parse recorded output failed: {e}")))?;
@@ -470,14 +477,14 @@ pub fn evaluate_extractor(
 
     // Same snapshot boundary as a production SyncJob: prompt inputs are read
     // up front, extraction itself never touches the database.
-    let inputs = collect_prompt_inputs(&env.db, &env.candidate_ids).map_err(|e| {
+    let inputs = collect_prompt_inputs(&env.db, &env.owner_workstream_id).map_err(|e| {
         other(format!(
             "fixture {name}: snapshot prompt inputs failed: {e}"
         ))
     })?;
     let event_refs: Vec<&SessionEvent> = env.session_events.iter().collect();
     let out = extractor
-        .extract(&env.session, &event_refs, &env.candidate_ids, &inputs)
+        .extract(&env.session, &event_refs, &env.owner_workstream_id, &inputs)
         .map_err(|e| {
             other(format!(
                 "fixture {name}: extractor '{}' failed: {e}",

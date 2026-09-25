@@ -313,7 +313,9 @@ pub struct WorkstreamContext {
     pub project_name: Option<String>,
     pub core: Vec<crate::context::ContextSection>,
     pub items: Vec<(ContextItem, ContextItemRevision)>,
-    pub related_sessions: Vec<Session>,
+    /// Sessions that own this Workstream (方案 §25). At most one Workstream
+    /// per Session, so a Session never appears in two of these lists.
+    pub sessions: Vec<Session>,
     pub conflicts: Vec<ContextConflict>,
     pub conflict_cases: Vec<crate::domain::ConflictReviewCase>,
     pub relations: Vec<ContextItemRelation>,
@@ -331,14 +333,9 @@ pub fn get_workstream_context(
             .ok_or_else(|| other("Workstream 不存在"))?;
         let core = crate::context::resolve_core_context(db, &workstream_id)?;
         let items = db.items_for_workstream(&workstream_id, true)?;
-        let sessions = db
-            .bindings_for_workstream(&workstream_id)?
-            .into_iter()
-            .filter_map(|b| db.get_session(&b.session_id).ok().flatten())
-            // §11 — the Workstream context view is a default projection: a
-            // trashed session keeps its bindings but is not shown here.
-            .filter(|s| !s.is_trashed())
-            .collect();
+        // §11 — the Workstream context view is a default projection: trashed
+        // Sessions are not shown here (the query filters them out).
+        let sessions = db.sessions_for_workstream(&workstream_id)?;
         let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
         let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
         let relations = db.item_relations_for_workstream(&workstream_id)?;
@@ -352,7 +349,7 @@ pub fn get_workstream_context(
             project_name,
             core,
             items,
-            related_sessions: sessions,
+            sessions,
             conflicts,
             conflict_cases,
             relations,
@@ -606,7 +603,7 @@ pub fn resolve_launch_intent(
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        // §43 — binding/delivery writes are Session write paths: a trashed
+        // §43 — owner/delivery writes are Session write paths: a trashed
         // session must not claim an intent. (Reconcile-side matching only
         // ever fires for brand-new sessions, which are never trashed.)
         if session.is_trashed() {
@@ -623,14 +620,20 @@ pub fn launch_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
-    workstream_ids: Vec<String>,
+    owner_workstream_id: Option<String>,
     cwd: Option<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     with_db(&state, |db| {
-        launcher.new_session_in(db, agent, &workstream_ids, cwd.as_deref(), &workspace)
+        launcher.new_session_in(
+            db,
+            agent,
+            owner_workstream_id.as_deref(),
+            cwd.as_deref(),
+            &workspace,
+        )
     })
 }
 
@@ -639,12 +642,11 @@ pub fn launch_resume_session(
     app: AppHandle,
     state: State<AppState>,
     session_id: String,
-    extra_workstream_ids: Vec<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     with_db(&state, |db| {
-        launcher.resume_session_in(db, &session_id, &extra_workstream_ids, &workspace)
+        launcher.resume_session_in(db, &session_id, &workspace)
     })
 }
 
@@ -688,14 +690,20 @@ pub fn prepare_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
-    workstream_ids: Vec<String>,
+    owner_workstream_id: Option<String>,
     cwd: Option<String>,
 ) -> Result<crate::launcher::PreparedLaunch> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     let prepared = with_db(&state, |db| {
-        launcher.prepare_new_in(db, agent, &workstream_ids, cwd.as_deref(), &workspace)
+        launcher.prepare_new_in(
+            db,
+            agent,
+            owner_workstream_id.as_deref(),
+            cwd.as_deref(),
+            &workspace,
+        )
     })?;
     let mut map = state
         .prepared_launches
@@ -711,12 +719,11 @@ pub fn prepare_resume_session(
     app: AppHandle,
     state: State<AppState>,
     session_id: String,
-    extra_workstream_ids: Vec<String>,
 ) -> Result<crate::launcher::PreparedLaunch> {
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     let prepared = with_db(&state, |db| {
-        launcher.prepare_resume_in(db, &session_id, &extra_workstream_ids, &workspace)
+        launcher.prepare_resume_in(db, &session_id, &workspace)
     })?;
     let mut map = state
         .prepared_launches

@@ -23,13 +23,11 @@
 use rusqlite::Connection;
 
 use noending::adapters::AgentCommand;
-use noending::domain::{
-    binding_source, launch_status, workstream_path_source, Agent, LaunchIntent, Project, Session,
-};
+use noending::domain::{launch_status, Agent, LaunchIntent, Project, Session};
 use noending::error::Result;
 use noending::launcher::{
-    apply_match, record_binding, resolve_resume_cwd, try_match_launch_intents_in, CwdSource,
-    LaunchWorkspace, SessionLauncher,
+    apply_match, resolve_resume_cwd, try_match_launch_intents_in, CwdSource, LaunchWorkspace,
+    SessionLauncher,
 };
 use noending::platform::exec_resolver::AgentInstallation;
 use noending::platform::launcher::LaunchOutcome;
@@ -172,6 +170,7 @@ fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> S
         cwd: cwd.map(|s| s.to_string()),
         workspace_path_id: workspace_path_id.map(|s| s.to_string()),
         project_id: None,
+        owner_workstream_id: None,
         raw_path: raw.to_string_lossy().to_string(),
         parent_agent_session_id: None,
         started_at: Some(now()),
@@ -208,7 +207,7 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[w.clone()],
+            Some(w.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -230,7 +229,13 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
 
     // Re-previewing under the new order works and follows the new primary.
     let fresh = launcher
-        .prepare_new_in(&db, Agent::Codex, &[w], None, &LaunchWorkspace::default())
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            Some(w.as_str()),
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(fresh.cwd.as_deref(), Some(second.as_str()));
     let launched = launcher
@@ -258,7 +263,7 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[w.clone()],
+            Some(w.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -284,7 +289,7 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[w.clone()],
+            Some(w.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -299,10 +304,17 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
 
     // A Workstream with zero paths and no Home previewed here: nothing to launch.
     let empty = launcher
-        .prepare_new_in(&db, Agent::Codex, &[w], None, &LaunchWorkspace::default())
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            Some(w.as_str()),
+            None,
+            &LaunchWorkspace::default(),
+        )
         .unwrap();
     assert_eq!(empty.cwd, None);
-    add_workstream_path(&db, &LexicalPaths, &empty.workstream_ids[0], &primary).unwrap();
+    let owner = empty.owner_workstream_id.clone().expect("owner recorded");
+    add_workstream_path(&db, &LexicalPaths, &owner, &primary).unwrap();
     let err = launcher
         .launch_prepared_in(&db, &empty, &LaunchWorkspace::default())
         .expect_err("an added path must invalidate the preview too");
@@ -321,7 +333,7 @@ fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     let after = real_dir("default-ws", "home-b/workspace");
 
     let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, &[], None, &workspace(Some(&before)))
+        .prepare_new_in(&db, Agent::Codex, None, None, &workspace(Some(&before)))
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(before.as_str()));
 
@@ -353,19 +365,11 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
     let home_dir = real_dir("resume-cwd", "session-home");
     let s = session_row(&db, Some(&home_dir), None);
     let w = ws_with_paths(&db, "elsewhere", &[real_dir("resume-cwd", "ws-path")]);
-    record_binding(
-        &db,
-        &s.id,
-        &w,
-        "related",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&w)).unwrap();
 
     let launcher = launcher_in("resume-cwd");
     let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(home_dir.as_str()));
     assert_eq!(prepared.cwd_resolution.source, CwdSource::SessionCwd);
@@ -393,7 +397,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
 
     let launcher = launcher_in("resume-drift");
     let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
 
     // Discovery rewrites the cwd (§7.2: the transcript is the source of truth).
@@ -408,7 +412,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     assert!(is_stale(&err.to_string()), "got: {err}");
 
     let fresh = launcher
-        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
     assert_eq!(fresh.cwd.as_deref(), Some(moved.as_str()));
     let result = launcher
@@ -428,19 +432,11 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
     let primary = real_dir("resume-fallback", "ws-primary");
     let s = session_row(&db, Some(&lost), None);
     let w = ws_with_paths(&db, "carries on", &[primary.clone()]);
-    record_binding(
-        &db,
-        &s.id,
-        &w,
-        "related",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&w)).unwrap();
 
     let launcher = launcher_in("resume-fallback");
     let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
 
     assert_eq!(prepared.cwd.as_deref(), Some(primary.as_str()));
@@ -475,7 +471,7 @@ fn a_resume_falls_back_to_the_default_workspace_and_says_so() {
     let s = session_row(&db, Some(&lost), None);
     let default_ws = real_dir("resume-default", "workspace");
 
-    let resolution = resolve_resume_cwd(&db, &s.id, &[], &workspace(Some(&default_ws))).unwrap();
+    let resolution = resolve_resume_cwd(&db, &s.id, None, &workspace(Some(&default_ws))).unwrap();
     assert_eq!(resolution.cwd.as_deref(), Some(default_ws.as_str()));
     assert_eq!(resolution.source, CwdSource::DefaultWorkspace);
     assert!(resolution.fallback);
@@ -483,7 +479,7 @@ fn a_resume_falls_back_to_the_default_workspace_and_says_so() {
 
     let launcher = launcher_in("resume-default");
     let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &[], &workspace(Some(&default_ws)))
+        .prepare_resume_in(&db, &s.id, &workspace(Some(&default_ws)))
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(default_ws.as_str()));
     let result = launcher
@@ -507,7 +503,7 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
 
     let launcher = launcher_in("session-path");
     let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &[], &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(dir.as_str()));
 
@@ -546,7 +542,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[w.clone()],
+            Some(w.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -583,17 +579,16 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     let intents = db.list_launch_intents(&[], 10).unwrap();
     assert_eq!(intents[0].status, launch_status::PENDING);
     assert_eq!(intents[0].cwd.as_deref(), Some(primary.as_str()));
-    assert_eq!(intents[0].selected_workstream_ids, vec![w]);
+    assert_eq!(intents[0].owner_workstream_id.as_deref(), Some(w.as_str()));
 }
 
-/// §21-10 — when discovery finds the real Session and its transcript matches the
-/// intent, the user's launch-time selection becomes an explicit binding, the
-/// WorkstreamPath for the directory actually used is ensured, and the Project
-/// comes from the derived cache. All three come out of one door
-/// (`workspace::session::record_user_binding`), so there is no second engine
-/// writing bindings or path lists from launch code.
+/// §21-10 / §15.1 — when discovery finds the real Session and its transcript
+/// matches the intent, the Session's Owner becomes the intent's Owner and
+/// NOTHING else is written: matching never grows a WorkstreamPath and never
+/// invents a path row (§5.1). Project membership keeps coming from the derived
+/// cache on the Session's own WorkspacePath, independently of the Owner.
 #[test]
-fn a_matched_session_produces_binding_workstream_path_and_project() {
+fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
     let db = open_db("matched");
     let dir = real_dir("matched", "repo");
     let session_path = db
@@ -607,7 +602,7 @@ fn a_matched_session_produces_binding_workstream_path_and_project() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![w.clone()],
+        owner_workstream_id: Some(w.clone()),
         cwd: Some(dir.clone()),
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -625,45 +620,39 @@ fn a_matched_session_produces_binding_workstream_path_and_project() {
     // Project was derived inside `upsert_session`.
     let s = session_row(&db, Some(&dir), Some(&session_path));
     assert_eq!(s.project_id.as_deref(), Some(PROJECT));
+    assert!(s.owner_workstream_id.is_none());
     assert_eq!(count(&db, "SELECT COUNT(*) FROM workstream_paths"), 0);
 
     apply_match(&db, &intent, &s, &LaunchWorkspace::default()).unwrap();
 
-    let bindings = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].workstream_id, w);
-    assert_eq!(bindings[0].source, binding_source::EXPLICIT_LAUNCH);
-    assert_eq!(bindings[0].confidence, 1.0);
-    assert!(
-        bindings[0].workstream_path_id.is_some(),
-        "the binding must record which path brought the Session in (§5.6)"
-    );
+    // The Owner is the intent's, verbatim.
+    let matched = db.get_session(&s.id).unwrap().unwrap();
+    assert_eq!(matched.owner_workstream_id.as_deref(), Some(w.as_str()));
 
-    // §1.8: the Workstream had no paths, so the Session's path becomes position 0.
-    let rows = db.list_workstream_paths(&w).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].position, 0);
-    assert_eq!(rows[0].workspace_path_id, session_path);
+    // §5.1 — setting an Owner is the ONLY write: the Workstream's path list is
+    // not grown by the physical directory the Session happened to use.
     assert_eq!(
-        workstream_launch_paths(&db, &w).unwrap().ordered_paths,
-        vec![dir.clone()],
-        "the ensured path is the one the launch used"
+        count(&db, "SELECT COUNT(*) FROM workstream_paths"),
+        0,
+        "a match must not invent a WorkstreamPath"
     );
     assert!(
-        matches!(
-            rows[0].source.as_str(),
-            workstream_path_source::SESSION | workstream_path_source::LAUNCH
-        ),
-        "a path grown by a binding records how it got there, got {}",
-        rows[0].source
+        workstream_launch_paths(&db, &w)
+            .unwrap()
+            .ordered_paths
+            .is_empty(),
+        "the Workstream still has no launch paths"
     );
-
-    // Derived Project membership: the Session's cache and the path agree, and the
-    // Workstream's primary Project projection now resolves through the list.
     let (project_id, _) =
         noending::workspace::workstream::primary_project_for_workstream(&db, &w).unwrap();
-    assert_eq!(project_id.as_deref(), Some(PROJECT));
-    assert_eq!(s.project_id.as_deref(), Some(PROJECT));
+    assert_eq!(project_id, None, "no path means no primary Project");
+    // Physical membership is independent of semantic ownership: the Project
+    // still comes from the Session's own path.
+    assert_eq!(matched.project_id.as_deref(), Some(PROJECT));
+    assert_eq!(
+        matched.workspace_path_id.as_deref(),
+        Some(session_path.as_str())
+    );
 
     let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
     assert_eq!(stored.status, launch_status::MATCHED);
@@ -675,7 +664,7 @@ fn a_matched_session_produces_binding_workstream_path_and_project() {
 /// §13's third tier routes independent launches into ONE shared directory, so
 /// cwd stops being evidence: two standalone launches at the default workspace
 /// must not auto-match each other's Session. They stay unresolved for a human,
-/// and a human decision binds each intent to its own Session.
+/// and a human decision applies each intent's Owner to its own Session.
 #[test]
 fn concurrent_default_workspace_launches_stay_ambiguous() {
     let db = open_db("m15");
@@ -686,7 +675,7 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![ws.to_string()],
+        owner_workstream_id: Some(ws.to_string()),
         cwd: Some(default_ws.clone()),
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -719,17 +708,25 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
          and neither may be auto-consumed by a directory they merely share"
     );
     assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM session_workstream_bindings"),
+        count(
+            &db,
+            "SELECT COUNT(*) FROM sessions WHERE owner_workstream_id IS NOT NULL"
+        ),
         0,
-        "an ambiguous match must not bind anything"
+        "an ambiguous match must not assign an Owner"
     );
 
-    // The human decision is what binds, and it cannot cross the two intents.
+    // The human decision is what assigns the Owner, and it cannot cross the two
+    // intents.
     apply_match(&db, &intent_a, &discovered, &LaunchWorkspace::default()).unwrap();
-    let bindings = db.bindings_for_session(&discovered.id).unwrap();
-    assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].workstream_id, a);
-    assert_eq!(bindings[0].source, binding_source::EXPLICIT_LAUNCH);
+    assert_eq!(
+        db.get_session(&discovered.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+            .as_deref(),
+        Some(a.as_str())
+    );
     let after = db.get_launch_intent(&intent_a.id).unwrap().unwrap();
     assert_eq!(after.status, launch_status::MATCHED);
     let other = db.get_launch_intent(&intent_b.id).unwrap().unwrap();
@@ -740,17 +737,17 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
     );
 }
 
-/// §1.7 — a fallback directory is not a statement about the Workstream.
+/// §1.7 / §5.1 — matching a Session back never teaches the Workstream the
+/// directory it happened to run in.
 ///
 /// A New Session in a Workstream whose own paths are unusable lands in NoEnding
 /// Home's shared `workspace/` (§13 tier 3). When that Session is matched back,
-/// the *binding* is the user's decision and stays strong, but the directory
-/// NoEnding invented must not be appended to the Workstream's ordered list: it
-/// would outlive the fallback, and removing it again drags the Sessions under it
-/// away (§1.6). A directory the user typed is a different matter and still grows
-/// the list, which is the control at the end.
+/// the Owner is the user's launch-time decision and is recorded verbatim, but
+/// the directory NoEnding invented must not be appended to the Workstream's
+/// ordered list: it would outlive the fallback and misrepresent where the work
+/// happens.
 #[test]
-fn a_default_workspace_fallback_binds_without_teaching_the_workstream_that_path() {
+fn a_match_never_teaches_the_workstream_a_foreign_path() {
     let db = open_db("no-laundering");
     let default_ws = real_dir("no-laundering", "workspace");
     let own = real_dir("no-laundering", "repo");
@@ -759,7 +756,7 @@ fn a_default_workspace_fallback_binds_without_teaching_the_workstream_that_path(
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![w.clone()],
+        owner_workstream_id: Some(w.clone()),
         cwd: Some(default_ws.clone()),
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -781,13 +778,14 @@ fn a_default_workspace_fallback_binds_without_teaching_the_workstream_that_path(
 
     apply_match(&db, &intent, &s, &workspace(Some(&default_ws))).unwrap();
 
-    let bindings = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(bindings.len(), 1, "the user's binding is still recorded");
-    assert_eq!(bindings[0].source, binding_source::EXPLICIT_LAUNCH);
     assert_eq!(
-        bindings[0].workstream_path_id, None,
-        "a binding that brings no path must hold no claim, so removing a real \
-         path cannot take this Session with it"
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+            .as_deref(),
+        Some(w.as_str()),
+        "the launch-time Owner is recorded"
     );
     assert_eq!(
         path_count(&db, &w),
@@ -798,19 +796,6 @@ fn a_default_workspace_fallback_binds_without_teaching_the_workstream_that_path(
         primary_titles(&db, &w),
         vec![own],
         "the one path it has is still the one the user added"
-    );
-
-    // Control: the gate keys on *who chose the directory*, not on being a launch.
-    let typed = real_dir("no-laundering", "typed");
-    let typed_path = db
-        .tx(|tx| insert_workspace_path_conn(tx, &typed, PROJECT))
-        .unwrap();
-    let s2 = session_row(&db, Some(&typed), Some(&typed_path));
-    apply_match(&db, &intent, &s2, &workspace(Some(&default_ws))).unwrap();
-    assert_eq!(
-        path_count(&db, &w),
-        2,
-        "a directory the caller named still grows the list (§1.8)"
     );
 }
 
@@ -851,7 +836,7 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![selected.clone()],
+        owner_workstream_id: Some(selected.clone()),
         cwd: Some(default_ws.clone()),
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -867,7 +852,7 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![],
+        owner_workstream_id: None,
         cwd: Some(default_ws.clone()),
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -885,11 +870,16 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
 
     assert!(
         try_match_launch_intents_in(&db, &discovered, &workspace(Some(&default_ws))).unwrap(),
-        "exactly one candidate selected a Workstream: that is the user's intent"
+        "exactly one candidate named an Owner Workstream: that is the user's intent"
     );
-    let bindings = db.bindings_for_session(&discovered.id).unwrap();
-    assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].workstream_id, selected);
+    assert_eq!(
+        db.get_session(&discovered.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+            .as_deref(),
+        Some(selected.as_str())
+    );
     assert_eq!(
         db.get_launch_intent(&standalone.id)
             .unwrap()
@@ -919,40 +909,46 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
     let home = workspace(Some(&default_ws));
     let no_home = LaunchWorkspace::default();
 
-    let cases: Vec<(&LaunchWorkspace, Vec<String>, Option<&str>, CwdSource, bool)> = vec![
+    let cases: Vec<(
+        &LaunchWorkspace,
+        Option<String>,
+        Option<&str>,
+        CwdSource,
+        bool,
+    )> = vec![
         (
             &home,
-            vec![w.clone()],
+            Some(w.clone()),
             Some("/typed/dir"),
             CwdSource::Explicit,
             false,
         ),
         (
             &home,
-            vec![w.clone()],
+            Some(w.clone()),
             None,
             CwdSource::WorkstreamPath,
             false,
         ),
-        (&home, vec![], None, CwdSource::DefaultWorkspace, false),
+        (&home, None, None, CwdSource::DefaultWorkspace, false),
         (
             &home,
-            vec![unmounted.clone()],
+            Some(unmounted.clone()),
             None,
             CwdSource::DefaultWorkspace,
             true,
         ),
-        (&no_home, vec![], None, CwdSource::Unresolved, false),
+        (&no_home, None, None, CwdSource::Unresolved, false),
     ];
 
-    for (at_launch, workstreams, explicit, source, fallback) in cases {
+    for (at_launch, owner, explicit, source, fallback) in cases {
         let prepared = launcher
-            .prepare_new_in(&db, Agent::Codex, &workstreams, explicit, at_launch)
+            .prepare_new_in(&db, Agent::Codex, owner.as_deref(), explicit, at_launch)
             .unwrap();
         assert_eq!(prepared.cwd_resolution.source, source);
         assert_eq!(prepared.cwd_resolution.fallback, fallback);
         assert_eq!(prepared.cwd, prepared.cwd_resolution.cwd);
-        assert_eq!(prepared.workstream_ids, workstreams);
+        assert_eq!(prepared.owner_workstream_id, owner);
         let result = launcher
             .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn)
             .unwrap_or_else(|e| panic!("{source:?} preview must launch: {e}"));

@@ -9,6 +9,7 @@ const HIT_KIND_LABELS: Record<string, string> = {
   item: "Context",
   workstream: "任务",
   project: "项目",
+  session: "会话",
   event: "消息",
 };
 
@@ -48,6 +49,7 @@ export default function SearchView({ query, navigate }: { query: string; navigat
         <button type="button" className="search-result" key={h.kind + h.ref_id}
           onClick={() => {
             if (h.kind === "workstream") navigate({ view: "workstream", workstreamId: h.ref_id });
+            else if (h.kind === "session") navigate({ view: "session", sessionId: h.ref_id });
             else if (h.kind === "item") navigate({ view: "workstream", workstreamId: h.parent_id });
             else if (h.kind === "event") navigate({ view: "session", sessionId: h.parent_id });
             else if (h.kind === "project") navigate({ view: "project", projectId: h.ref_id });

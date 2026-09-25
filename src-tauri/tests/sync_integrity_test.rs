@@ -8,7 +8,7 @@
 //!   user_explicit / user_edit items — they create ContextConflicts;
 //! - every status change leaves an audit revision.
 
-use noending::domain::{binding_source, Agent, Session, SessionWorkstreamBinding};
+use noending::domain::{Agent, Session};
 use noending::storage::{insert_sync_run_conn, new_id, now, set_processed_sequence_conn, Db};
 use noending::sync::merge::MergeEngine;
 use noending::sync::{create_item, ContextMutation, MergeContext};
@@ -27,6 +27,7 @@ fn session_row(db: &Db) -> Session {
         cwd: None,
         workspace_path_id: None,
         project_id: None,
+        owner_workstream_id: None,
         raw_path: "/tmp/x.jsonl".into(),
         parent_agent_session_id: None,
         started_at: Some(now()),
@@ -233,19 +234,8 @@ fn read_cursor_and_processed_cursor_are_separate() {
     let db = open_db("cursors");
     let s = session_row(&db);
     let ws = ws_row(&db, "cursor ws");
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+    // Routing is the Session's single Owner Workstream (方案 §19).
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     let parsed = |i: i64, text: &str| noending::domain::ParsedEvent {
         source_event_id: None,
@@ -337,19 +327,7 @@ fn nonblocking_sync_path_processes_pending_events() {
         s
     };
     let ws = ws_row(&db, "nb ws");
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     // one pending event (a real user message so extraction yields mutations)
     let source = noending::domain::SourceCursorUpdate {
@@ -598,90 +576,6 @@ fn user_status_changes_also_leave_audit() {
     assert_eq!(audits[1].metadata["audit"]["new_status"], "deleted");
 }
 
-/// Automatic classification may add candidate bindings, but never touches
-/// explicit ones — and explicit sources always win the upsert race.
-#[test]
-fn explicit_bindings_cannot_be_downgraded() {
-    let db = open_db("binding-source");
-    let ws = ws_row(&db, "binding ws");
-    let s = session_row(&db);
-
-    let b = SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "primary".into(),
-        source: binding_source::EXPLICIT_LAUNCH.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    };
-    db.bind(&b).unwrap();
-
-    // automatic classification tries to take over — ignored
-    let auto = SessionWorkstreamBinding {
-        source: binding_source::AUTO.into(),
-        confidence: 0.42,
-        ..b.clone()
-    };
-    db.bind(&auto).unwrap();
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(bound[0].source, binding_source::EXPLICIT_LAUNCH);
-    assert_eq!(bound[0].confidence, 1.0);
-
-    // an explicit source can upgrade an automatic one
-    let s2 = session_row(&db);
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s2.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "related".into(),
-        source: binding_source::AUTO.into(),
-        confidence: 0.5,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s2.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
-    let bound = db.bindings_for_session(&s2.id).unwrap();
-    assert_eq!(bound[0].source, binding_source::USER_ASSIGNED);
-
-    // derived classification state
-    use noending::domain::SessionClassificationState;
-    assert_eq!(
-        SessionClassificationState::derive(&[]),
-        SessionClassificationState::Unassigned
-    );
-    assert_eq!(
-        SessionClassificationState::derive(&bound),
-        SessionClassificationState::Assigned
-    );
-    let partial = vec![SessionWorkstreamBinding {
-        source: binding_source::AUTO.into(),
-        ..bound[0].clone()
-    }];
-    assert_eq!(
-        SessionClassificationState::derive(&partial),
-        SessionClassificationState::PartiallyAssigned
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Head integrity: an applied Update must persist its revision BEFORE the
 // item head points at it. A dangling current_revision_id breaks the
@@ -819,19 +713,7 @@ fn stale_commit_is_discarded_when_processed_cursor_moved() {
     let db = open_db("stale-commit");
     let s = session_row(&db);
     let ws = ws_row(&db, "stale ws");
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     let mk = |seq: i64, text: &str| noending::domain::SessionEvent {
         id: new_id(),
@@ -887,249 +769,19 @@ fn stale_commit_is_discarded_when_processed_cursor_moved() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Auto-classification becomes a real binding inside the commit transaction.
-// ---------------------------------------------------------------------------
-
+/// The Owner Workstream is the Context routing decision, so it is also the
+/// commit-phase CAS (方案 §20). If the user re-routes the Session while
+/// extraction runs (minutes, no lock held), the prepared mutations target a
+/// routing that no longer exists — commit must discard the run WITHOUT
+/// advancing the processed cursor, so the next sync prepares against the
+/// user's new decision.
 #[test]
-fn auto_classification_persists_as_binding_on_commit() {
-    let db = open_db("auto-bind");
-    let s = session_row(&db);
-    // no bindings at all: sync must classify by keyword
-    let ws = ws_row(&db, "量化系统架构");
-
-    let event = noending::domain::SessionEvent {
-        id: new_id(),
-        session_id: s.id.clone(),
-        sequence: 1,
-        source_event_id: None,
-        source_generation: 0,
-        source_position: "line:1".into(),
-        ts: Some(now()),
-        kind: "user_message".into(),
-        text: Some(
-            "我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度".into(),
-        ),
-        raw_ref: "/tmp/x.jsonl#line:1".into(),
-        metadata: serde_json::json!({}),
-    };
-    db.append_events(std::slice::from_ref(&event)).unwrap();
-
-    let engine = noending::sync::SyncEngine::default();
-    let out = engine
-        .run_session_sync(&db, &s, std::slice::from_ref(&event), 0, 1)
-        .unwrap();
-    assert_eq!(out.status, "ok");
-
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert!(
-        bound
-            .iter()
-            .any(|b| b.workstream_id == ws.id && b.source == binding_source::AUTO),
-        "auto classification must persist as a binding, got {:?}",
-        bound
-    );
-    use noending::domain::SessionClassificationState;
-    assert_eq!(
-        SessionClassificationState::derive(&bound),
-        SessionClassificationState::PartiallyAssigned,
-        "auto-only bindings read back as partially assigned"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Binding source precedence: equal-confidence later flows must not rewrite
-// stronger provenance, and role changes only when the binding is replaced.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn binding_source_precedence_beats_equal_confidence() {
-    let db = open_db("bind-precedence");
-    let s = session_row(&db);
-    let ws = ws_row(&db, "precedence ws");
-    let mk = |source: &str, role: &str| SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        role: role.into(),
-        source: source.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    };
-
-    db.bind(&mk(binding_source::EXPLICIT_LAUNCH, "primary"))
-        .unwrap();
-    // a later user_assigned resume at the SAME confidence must not rewrite
-    // the explicit provenance (nor steal the primary role)
-    db.bind(&mk(binding_source::USER_ASSIGNED, "related"))
-        .unwrap();
-    let b = &db.bindings_for_session(&s.id).unwrap()[0];
-    assert_eq!(b.source, binding_source::EXPLICIT_LAUNCH);
-    assert_eq!(b.role, "primary");
-
-    // automatic classification never downgrades anything explicit/user
-    db.bind(&mk(binding_source::AUTO, "related")).unwrap();
-    let b = &db.bindings_for_session(&s.id).unwrap()[0];
-    assert_eq!(b.source, binding_source::EXPLICIT_LAUNCH);
-
-    // equal-rank replacement still works (user_assigned over user_assigned)
-    db.bind(&mk(binding_source::USER_ASSIGNED, "related"))
-        .unwrap();
-    let fresh_ws = ws_row(&db, "precedence ws 2");
-    db.bind(&SessionWorkstreamBinding {
-        workstream_id: fresh_ws.id.clone(),
-        ..mk(binding_source::USER_ASSIGNED, "related")
-    })
-    .unwrap();
-    let b2 = db
-        .bindings_for_session(&s.id)
-        .unwrap()
-        .into_iter()
-        .find(|b| b.workstream_id == fresh_ws.id)
-        .unwrap();
-    assert_eq!(b2.source, binding_source::USER_ASSIGNED);
-}
-
-/// Automatic classification is a revisable guess: once it persists as a
-/// binding it must NOT freeze the session — new evidence pointing at a
-/// different workstream re-classifies and REPLACES the previous automatic
-/// binding (strong provenance — explicit launch / user assignment — is what
-/// actually freezes candidates).
-#[test]
-fn automatic_binding_is_replaced_when_classification_changes() {
-    let db = open_db("auto-reclassify");
+fn stale_commit_when_owner_changes_during_extraction() {
+    let db = open_db("stale-owner");
     let s = session_row(&db);
     let ws_a = ws_row(&db, "量化回测引擎");
     let ws_b = ws_row(&db, "前端界面重构");
-
-    let ev = |seq: i64, text: &str| noending::domain::SessionEvent {
-        id: new_id(),
-        session_id: s.id.clone(),
-        sequence: seq,
-        source_event_id: None,
-        source_generation: 0,
-        source_position: format!("line:{}", seq),
-        ts: Some(now()),
-        kind: "user_message".into(),
-        text: Some(text.into()),
-        raw_ref: format!("/tmp/x.jsonl#line:{}", seq),
-        metadata: serde_json::json!({}),
-    };
-    let engine = noending::sync::SyncEngine::default();
-
-    // batch 1: evidence points at A → auto binding to A
-    let e1 = ev(
-        1,
-        "我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度",
-    );
-    db.append_events(std::slice::from_ref(&e1)).unwrap();
-    let out = engine
-        .run_session_sync(&db, &s, std::slice::from_ref(&e1), 0, 1)
-        .unwrap();
-    assert_eq!(out.status, "ok");
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert!(
-        bound
-            .iter()
-            .any(|b| b.workstream_id == ws_a.id && b.source == binding_source::AUTO),
-        "classified to A, got {:?}",
-        bound
-    );
-
-    // batch 2: evidence now points at B — the weak auto guess is replaced,
-    // not frozen and not accumulated beside the fresh one
-    let e2 = ev(
-        2,
-        "接下来做前端界面的重构，把面板布局和交互流程全部重新设计一遍",
-    );
-    db.append_events(std::slice::from_ref(&e2)).unwrap();
-    let out = engine
-        .run_session_sync(&db, &s, std::slice::from_ref(&e2), 1, 2)
-        .unwrap();
-    assert_eq!(out.status, "ok");
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert!(
-        bound
-            .iter()
-            .any(|b| b.workstream_id == ws_b.id && b.source == binding_source::AUTO),
-        "re-classified to B, got {:?}",
-        bound
-    );
-    assert!(
-        !bound.iter().any(|b| b.workstream_id == ws_a.id),
-        "stale automatic binding to A must not survive the re-classification"
-    );
-}
-
-/// A user-assigned (strong) binding freezes the candidates: later events
-/// never re-classify away from what the user chose, even when the keywords
-/// of another workstream dominate the new batch.
-#[test]
-fn strong_binding_freezes_candidates_against_reclassification() {
-    let db = open_db("strong-freeze");
-    let s = session_row(&db);
-    let ws_a = ws_row(&db, "量化回测引擎");
-    let ws_b = ws_row(&db, "前端界面重构");
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws_a.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
-
-    let e1 = noending::domain::SessionEvent {
-        id: new_id(),
-        session_id: s.id.clone(),
-        sequence: 1,
-        source_event_id: None,
-        source_generation: 0,
-        source_position: "line:1".into(),
-        ts: Some(now()),
-        kind: "user_message".into(),
-        text: Some("接下来做前端界面的重构，把面板布局和交互流程全部重新设计一遍".into()),
-        raw_ref: "/tmp/x.jsonl#line:1".into(),
-        metadata: serde_json::json!({}),
-    };
-    db.append_events(std::slice::from_ref(&e1)).unwrap();
-    let engine = noending::sync::SyncEngine::default();
-    engine
-        .run_session_sync(&db, &s, std::slice::from_ref(&e1), 0, 1)
-        .unwrap();
-
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert!(
-        bound
-            .iter()
-            .any(|b| b.workstream_id == ws_a.id && b.source == binding_source::USER_ASSIGNED),
-        "strong binding survives"
-    );
-    assert!(
-        !bound.iter().any(|b| b.workstream_id == ws_b.id),
-        "keyword match against another workstream must not add candidates"
-    );
-}
-
-/// prepare classified automatically only because NO strong binding existed.
-/// If the user assigns an explicit binding while extraction runs (minutes,
-/// no lock held), the extraction targeted workstreams the user has since
-/// overridden — commit must discard the run WITHOUT advancing the processed
-/// cursor, so the next sync prepares against the user's decision.
-#[test]
-fn stale_commit_when_strong_binding_appears_during_extraction() {
-    let db = open_db("stale-binding");
-    let s = session_row(&db);
-    let ws_auto = ws_row(&db, "量化回测引擎");
-    let ws_user = ws_row(&db, "前端界面重构");
+    db.set_session_owner(&s.id, Some(&ws_a.id)).unwrap();
 
     let e1 = noending::domain::SessionEvent {
         id: new_id(),
@@ -1153,27 +805,14 @@ fn stale_commit_when_strong_binding_appears_during_extraction() {
         .prepare(&db, &s, std::slice::from_ref(&e1), 0, 1)
         .unwrap()
         .expect("prepared");
-    assert!(pre.candidates_are_automatic);
     assert_eq!(
-        pre.candidates,
-        vec![ws_auto.id.clone()],
-        "auto-classified to A while preparing"
+        pre.owner_workstream_id.as_deref(),
+        Some(ws_a.id.as_str()),
+        "routed to the Owner that existed at prepare time"
     );
 
-    // the user assigns an explicit binding while "extraction" is running
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws_user.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+    // the user re-routes the Session to B while "extraction" is running
+    db.set_session_owner(&s.id, Some(&ws_b.id)).unwrap();
 
     let out = engine
         .commit(&db, &s, &pre, vec![], "heuristic", vec![])
@@ -1189,136 +828,56 @@ fn stale_commit_when_strong_binding_appears_during_extraction() {
         "processed cursor must not advance for a stale run"
     );
     assert!(
-        !db.bindings_for_session(&s.id)
-            .unwrap()
-            .iter()
-            .any(|b| b.source == binding_source::AUTO),
-        "a stale run must not persist its automatic classification"
+        db.items_for_workstream(&ws_a.id, true).unwrap().is_empty(),
+        "a stale run must not write Context into the old Owner"
     );
-}
-
-/// A tombstoned workstream must not even become an extraction candidate.
-/// Filtering only at binding write-back would still run the extractor
-/// against it and COMMIT context mutations into a workstream the user
-/// explicitly removed — touching Context Integrity, not just UI state.
-#[test]
-fn prepare_filters_tombstoned_workstreams_before_extraction() {
-    let db = open_db("tombstone-prepare");
-    let s = session_row(&db);
-    let ws_a = ws_row(&db, "量化回测引擎");
-
-    let e1 = noending::domain::SessionEvent {
-        id: new_id(),
-        session_id: s.id.clone(),
-        sequence: 1,
-        source_event_id: None,
-        source_generation: 0,
-        source_position: "line:1".into(),
-        ts: Some(now()),
-        kind: "user_message".into(),
-        text: Some(
-            "我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度".into(),
-        ),
-        raw_ref: "/tmp/x.jsonl#line:1".into(),
-        metadata: serde_json::json!({}),
-    };
-    db.append_events(std::slice::from_ref(&e1)).unwrap();
-
-    let engine = noending::sync::SyncEngine::default();
-
-    // sanity: without the tombstone the keyword match proposes A
-    let pre1 = engine
-        .prepare(&db, &s, std::slice::from_ref(&e1), 0, 1)
-        .unwrap()
-        .expect("prepared");
-    assert_eq!(pre1.candidates, vec![ws_a.id.clone()]);
-
-    // the user rejects A — a durable negative override, even though no
-    // binding row exists right now
-    db.unbind(&s.id, &ws_a.id).unwrap();
-    assert!(db.binding_removal_exists(&s.id, &ws_a.id).unwrap());
-
-    // the next sync must not route A into candidates → extractor → mutations
-    let pre2 = engine
-        .prepare(&db, &s, std::slice::from_ref(&e1), 0, 1)
-        .unwrap()
-        .expect("prepared");
     assert!(
-        !pre2.candidates.contains(&ws_a.id),
-        "a user-rejected workstream must never become an extraction candidate"
+        db.items_for_workstream(&ws_b.id, true).unwrap().is_empty(),
+        "nor into the new one before it is re-prepared"
     );
-
-    // and the commit writes nothing into A
-    let out = engine
-        .commit(&db, &s, &pre2, vec![], "heuristic", vec![])
-        .unwrap();
-    assert_eq!(out.applied, 0);
-    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
+    assert_eq!(
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+            .as_deref(),
+        Some(ws_b.id.as_str())
+    );
 }
 
-/// The binding-decision CAS must catch strong→strong routing changes too:
-/// prepare saw strong binding A, the user re-routed the session to B while
-/// the extractor ran. The old check (auto→strong only) let this commit.
+/// Clearing the Owner during extraction is a routing change like any other:
+/// prepare saw Owner A, the user cleared it, so the run must be discarded
+/// rather than committing context into a Workstream the Session no longer
+/// belongs to (方案 §20/§21).
 #[test]
-fn stale_commit_when_strong_binding_replaced_during_extraction() {
-    let db = open_db("stale-strong-swap");
+fn stale_commit_when_owner_cleared_during_extraction() {
+    let db = open_db("stale-owner-cleared");
     let s = session_row(&db);
     let ws_a = ws_row(&db, "前端界面重构");
-    let ws_b = ws_row(&db, "数据导出管线");
-
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws_a.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&ws_a.id)).unwrap();
 
     let engine = noending::sync::SyncEngine::default();
     let pre = engine
         .prepare(&db, &s, &[], 0, 0)
         .unwrap()
         .expect("prepared");
-    assert!(!pre.candidates_are_automatic);
-    assert_eq!(pre.candidates, vec![ws_a.id.clone()]);
+    assert_eq!(pre.owner_workstream_id.as_deref(), Some(ws_a.id.as_str()));
 
-    // the user re-routes the session from A to B while extraction "runs":
-    // strong binding A removed (tombstoned), strong binding B added
-    db.unbind(&s.id, &ws_a.id).unwrap();
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: ws_b.id.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+    db.set_session_owner(&s.id, None).unwrap();
 
     let out = engine
         .commit(&db, &s, &pre, vec![], "heuristic", vec![])
         .unwrap();
-    assert_eq!(
-        out.status, "stale",
-        "mutations aimed at the old routing must not commit over the user's new one"
-    );
+    assert_eq!(out.status, "stale");
     assert_eq!(out.applied, 0);
-    assert_eq!(
-        db.get_processed_sequence(&s.id).unwrap(),
-        0,
-        "processed cursor must not advance for a stale run"
+    assert_eq!(db.get_processed_sequence(&s.id).unwrap(), 0);
+    assert!(db.items_for_workstream(&ws_a.id, true).unwrap().is_empty());
+    assert!(
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+            .is_none(),
+        "the user's clearing of the Owner is preserved"
     );
-    let bound = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(bound.len(), 1);
-    assert_eq!(bound[0].workstream_id, ws_b.id);
 }

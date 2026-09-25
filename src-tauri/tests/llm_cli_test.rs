@@ -35,6 +35,7 @@ fn fake_session() -> Session {
         started_at: None,
         last_activity_at: None,
         trashed_at: None,
+        owner_workstream_id: None,
     }
 }
 
@@ -102,13 +103,13 @@ fn real_codex_extracts_mutations() {
         timeout_secs: 180,
     };
     println!("runtime: {}", cli.name());
-    let inputs = noending::sync::extractor::collect_prompt_inputs(&db, &[ws.id.clone()])
-        .expect("prompt inputs");
+    let inputs =
+        noending::sync::extractor::collect_prompt_inputs(&db, &ws.id).expect("prompt inputs");
     let out = cli
         .extract(
             &session,
             &events.iter().collect::<Vec<_>>(),
-            &[ws.id.clone()],
+            &ws.id,
             &inputs,
         )
         .expect("codex CLI extraction should succeed");
@@ -222,7 +223,7 @@ fn parse_mutations_validates_candidate_ids() {
         kind: "user_message".into(),
     }];
     let text = r##" [{"op":"add","workstream_id":"nope","item_kind":"decision","title":"x","content":"y","refs":["#1"]}] "##;
-    let out = parse_mutations(text, &map, &["ws1".into()], &session).unwrap();
+    let out = parse_mutations(text, &map, "ws1", &session).unwrap();
     assert!(
         out.mutations.is_empty(),
         "mutations outside candidates must be dropped"
@@ -253,7 +254,7 @@ fn parse_mutations_maps_short_refs_through_prompt_map() {
         {"op":"resolve","item_id":"item-9","refs":["#1","#nope"]},
         {"op":"add","workstream_id":"ws1","item_kind":"note","title":"t3","content":"c","refs":["#777"]}
     ]"##;
-    let out = parse_mutations(text, &map, &["ws1".into()], &session).unwrap();
+    let out = parse_mutations(text, &map, "ws1", &session).unwrap();
     assert_eq!(out.mutations.len(), 3);
 
     match &out.mutations[0] {

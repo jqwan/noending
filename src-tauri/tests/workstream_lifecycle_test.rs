@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use noending::domain::{
-    workstream_lifecycle, workstream_path_source, workstream_visibility, Agent, ContextConflict,
-    ContextDelivery, Project, Session, SessionEvent, SessionWorkstreamBinding, Workstream,
+    workstream_lifecycle, workstream_visibility, Agent, ContextConflict, ContextDelivery, Project,
+    Session, SessionEvent, Workstream,
 };
 use noending::error::Result;
 use noending::storage::{new_id, now, Db};
@@ -66,20 +66,9 @@ fn session(db: &Db, tag: &str) -> Session {
     s
 }
 
-fn bind(db: &Db, session_id: &str, workstream_id: &str) {
-    db.bind(&SessionWorkstreamBinding {
-        session_id: session_id.into(),
-        workstream_id: workstream_id.into(),
-        role: "related".into(),
-        source: noending::domain::binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+fn set_owner(db: &Db, session_id: &str, workstream_id: &str) {
+    db.set_session_owner(session_id, Some(workstream_id))
+        .unwrap();
 }
 
 fn count(db: &Db, sql: &str, arg: &str) -> i64 {
@@ -96,7 +85,7 @@ fn active_to_completed_changes_nothing_else() {
     let (_d, db) = temp_db();
     let w = workstream(&db, "w-label");
     let s = session(&db, "s-label");
-    bind(&db, &s.id, &w.id);
+    set_owner(&db, &s.id, &w.id);
     let item = noending::sync::create_item(
         &db,
         &w.id,
@@ -160,12 +149,12 @@ fn lifecycle_rejects_the_retired_vocabulary() {
 
 /// §18-9 — archived IS the bin: everything the user built is still there.
 #[test]
-fn archive_preserves_lifecycle_paths_and_bindings() {
+fn archive_preserves_lifecycle_paths_and_ownership() {
     let (_d, db) = temp_db();
     let w = workstream(&db, "w-arch");
     set_workstream_lifecycle(&db, &w.id, workstream_lifecycle::COMPLETED).unwrap();
     let s = session(&db, "s-arch");
-    bind(&db, &s.id, &w.id);
+    set_owner(&db, &s.id, &w.id);
     add_workstream_path(&db, &FixedAttacher, &w.id, "/repo/docs").unwrap();
     let item = noending::sync::create_item(
         &db,
@@ -189,7 +178,7 @@ fn archive_preserves_lifecycle_paths_and_bindings() {
 
     let after = Snapshot::take(&db, &w.id);
     assert_eq!(after.paths, before.paths);
-    assert_eq!(after.bindings, before.bindings);
+    assert_eq!(after.owner_sessions, before.owner_sessions);
     assert_eq!(after.context_items, before.context_items);
     assert_eq!(after.revisions, before.revisions);
     assert_eq!(after.project_projection(), before.project_projection());
@@ -219,7 +208,7 @@ fn restore_returns_the_previous_lifecycle() {
         // A distinct agent_session_id per turn: upsert keys on it, so reusing one
         // would update the first row instead of making a second Session.
         let s = session(&db, &format!("s-restore-{i}"));
-        bind(&db, &s.id, &w.id);
+        set_owner(&db, &s.id, &w.id);
         let before = Snapshot::take(&db, &w.id);
 
         archive_workstream(&db, &w.id).unwrap();
@@ -296,7 +285,7 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     bound.cwd = Some(normalize_path("/repo/docs").unwrap());
     bound.workspace_path_id = Some(path_id.clone());
     db.upsert_session(&bound).unwrap();
-    bind(&db, &s.id, &w.id);
+    set_owner(&db, &s.id, &w.id);
     db.append_events(&[event(&s.id, 1, "first")]).unwrap();
     db.append_events(&[event(&s.id, 2, "second")]).unwrap();
     db.set_processed_sequence(&s.id, 2).unwrap();
@@ -306,7 +295,7 @@ fn permanent_delete_preserves_sessions_and_their_events() {
         id: new_id(),
         launch_type: "new".into(),
         agent: Agent::Codex,
-        selected_workstream_ids: vec![w.id.clone()],
+        owner_workstream_id: Some(w.id.clone()),
         cwd: Some("/repo/docs".into()),
         context_bundle_markdown: None,
         context_bundle_revisions: None,
@@ -347,7 +336,11 @@ fn permanent_delete_preserves_sessions_and_their_events() {
         "a Project is not a Workstream's property"
     );
     // what went is only what the Workstream owned
-    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
+    assert!(
+        kept.owner_workstream_id.is_none(),
+        "permanent delete clears the owner via ON DELETE SET NULL"
+    );
+    assert!(db.sessions_for_workstream(&w.id).unwrap().is_empty());
     assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
 }
 
@@ -425,7 +418,7 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     db.insert_conflict(&conflict).unwrap();
     db.update_conflict_status(&conflict.id, "resolved", Some("保留用户版"))
         .unwrap();
-    // delivery snapshot, binding, tombstone and review state
+    // delivery snapshot and review state
     db.record_delivery(&ContextDelivery {
         id: new_id(),
         session_id: s.id.clone(),
@@ -436,11 +429,9 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
         delivered_at: now(),
     })
     .unwrap();
-    bind(&db, &s.id, &w.id);
+    set_owner(&db, &s.id, &w.id);
     let rejected = session(&db, "s-rejected");
-    bind(&db, &rejected.id, &w.id);
-    db.unbind(&rejected.id, &w.id).unwrap();
-    assert!(db.binding_removal_exists(&rejected.id, &w.id).unwrap());
+    set_owner(&db, &rejected.id, &w.id);
     assert!(db.get_workstream_review_state(&w.id).unwrap().is_some());
 
     // Everything is there before the delete…
@@ -480,9 +471,7 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
         ("revisions", "SELECT COUNT(*) FROM context_item_revisions WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)"),
         ("items", "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1"),
         ("deliveries", "SELECT COUNT(*) FROM context_deliveries WHERE workstream_id = ?1"),
-        ("bindings", "SELECT COUNT(*) FROM session_workstream_bindings WHERE workstream_id = ?1"),
         ("workstream paths", "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1"),
-        ("binding removals", "SELECT COUNT(*) FROM session_binding_removals WHERE workstream_id = ?1"),
         ("review state", "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1"),
         ("the workstream", "SELECT COUNT(*) FROM workstreams WHERE id = ?1"),
     ] {
@@ -505,9 +494,22 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     // The Sessions, their events, their cursors and the physical paths all live.
     assert!(db.get_session(&s.id).unwrap().is_some());
     assert!(db.get_session(&rejected.id).unwrap().is_some());
+    // …and both lost their Owner (ON DELETE SET NULL), not their identity.
+    assert!(db
+        .get_session(&s.id)
+        .unwrap()
+        .unwrap()
+        .owner_workstream_id
+        .is_none());
+    assert!(db
+        .get_session(&rejected.id)
+        .unwrap()
+        .unwrap()
+        .owner_workstream_id
+        .is_none());
     assert_eq!(db.list_workspace_paths().unwrap().len(), 2);
     assert!(db.get_project("p1").unwrap().is_some());
-    // Sanity: the tombstone we deleted was really this Workstream's.
+    // Sanity: the two paths we purged really were this Workstream's.
     assert!(rows.len() == 2);
 }
 
@@ -519,8 +521,7 @@ fn permanent_delete_leaves_a_sibling_alone() {
     let a = workstream(&db, "w-a");
     let b = workstream(&db, "w-b");
     let shared = session(&db, "s-shared");
-    bind(&db, &shared.id, &a.id);
-    bind(&db, &shared.id, &b.id);
+    set_owner(&db, &shared.id, &b.id);
     let shared_path = db.list_workstream_paths(&a.id).unwrap()[0]
         .workspace_path_id
         .clone();
@@ -566,12 +567,13 @@ fn permanent_delete_leaves_a_sibling_alone() {
         ),
         1
     );
-    // b's binding to the shared Session survived, and the Session still points at b
-    assert_eq!(db.bindings_for_session(&shared.id).unwrap().len(), 1);
-    assert_eq!(
-        db.bindings_for_session(&shared.id).unwrap()[0].workstream_id,
-        b.id
-    );
+    // b's ownership of the shared Session survived, and the Session still points at b
+    let kept = db
+        .get_session(&shared.id)
+        .unwrap()
+        .expect("session survives");
+    assert_eq!(kept.owner_workstream_id.as_deref(), Some(b.id.as_str()));
+    assert_eq!(db.sessions_for_workstream(&b.id).unwrap().len(), 1);
     // the shared physical path is not a's to delete
     assert!(db.get_workspace_path(&shared_path).unwrap().is_some());
 }
@@ -585,10 +587,7 @@ fn created_archived_and_purged_leaves_no_trace_of_itself() {
     let w = create_workstream(&db, &FixedAttacher, "临时", "", &["/repo/tmp".into()])
         .unwrap()
         .workstream;
-    assert_eq!(
-        db.list_workstream_paths(&w.id).unwrap()[0].source,
-        workstream_path_source::USER
-    );
+    assert_eq!(db.list_workstream_paths(&w.id).unwrap().len(), 1);
     archive_workstream(&db, &w.id).unwrap();
     delete_workstream_permanently(&db, &w.id).unwrap();
     assert!(db.get_workstream(&w.id).unwrap().is_none());
@@ -657,8 +656,8 @@ struct Snapshot {
     title: String,
     description: String,
     created_at: String,
-    paths: Vec<(String, i64, String)>,
-    bindings: Vec<String>,
+    paths: Vec<(String, i64)>,
+    owner_sessions: Vec<String>,
     context_items: i64,
     revisions: i64,
     deliveries: i64,
@@ -668,11 +667,11 @@ struct Snapshot {
 impl Snapshot {
     fn take(db: &Db, workstream_id: &str) -> Self {
         let w = db.get_workstream(workstream_id).unwrap().unwrap();
-        let bindings: Vec<String> = db
-            .bindings_for_workstream(workstream_id)
+        let owner_sessions: Vec<String> = db
+            .sessions_for_workstream(workstream_id)
             .unwrap()
             .into_iter()
-            .map(|b| b.session_id)
+            .map(|s| s.id)
             .collect();
         Self {
             created_at: w.created_at,
@@ -684,9 +683,9 @@ impl Snapshot {
                 .list_workstream_paths(workstream_id)
                 .unwrap()
                 .into_iter()
-                .map(|p| (p.workspace_path_id, p.position, p.source))
+                .map(|p| (p.workspace_path_id, p.position))
                 .collect(),
-            bindings,
+            owner_sessions,
             context_items: count(db, "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1", workstream_id),
             revisions: count(db, "SELECT COUNT(*) FROM context_item_revisions WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)", workstream_id),
             deliveries: count(db, "SELECT COUNT(*) FROM context_deliveries WHERE workstream_id = ?1", workstream_id),
@@ -695,6 +694,6 @@ impl Snapshot {
     }
     /// The projection every card and detail page publishes (§42.3-M19).
     fn project_projection(&self) -> Option<String> {
-        self.paths.first().map(|(id, _, _)| id.clone())
+        self.paths.first().map(|(id, _)| id.clone())
     }
 }

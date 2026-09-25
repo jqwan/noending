@@ -52,6 +52,7 @@ function detail(id: string): SessionDetail {
       cwd: `/${id}`,
       project_id: null,
       workspace_path_id: null,
+      owner_workstream_id: null,
       raw_path: `/${id}.jsonl`,
       parent_agent_session_id: null,
       started_at: null,
@@ -59,10 +60,9 @@ function detail(id: string): SessionDetail {
       trashed_at: null,
     },
     events: [],
-    bindings: [],
+    owner_workstream: null,
     cursor: 0,
     processed_cursor: 0,
-    classification: "",
     raw_path_status: "present",
     workspace_path: null,
     parent: null,
@@ -70,14 +70,17 @@ function detail(id: string): SessionDetail {
   };
 }
 
-function prepared(id: string, cwd: string | null = null): PreparedLaunch {
+function prepared(
+  id: string,
+  cwd: string | null = null,
+  ownerWorkstreamId: string | null = null,
+): PreparedLaunch {
   return {
     id: `prepared-${id}`,
     mode: "resume",
     agent: "codex",
     session_id: id,
-    workstream_ids: [],
-    extra_workstream_ids: [],
+    owner_workstream_id: ownerWorkstreamId,
     cwd,
     cwd_resolution: {
       source: "session_cwd",
@@ -91,7 +94,7 @@ function prepared(id: string, cwd: string | null = null): PreparedLaunch {
     bundle: {
       mode: "resume",
       delivery_level: "off",
-      workstream_ids: [],
+      workstream_id: null,
       sections: [],
       markdown: "",
       approx_tokens: 0,
@@ -121,10 +124,10 @@ describe("ResumeSessionModal preparation races", () => {
     );
 
     const view = render(<ResumeSessionModal sessionId="a" onClose={vi.fn()} />);
-    await waitFor(() => expect(api.prepareResumeSession).toHaveBeenCalledWith("a", []));
+    await waitFor(() => expect(api.prepareResumeSession).toHaveBeenCalledWith("a"));
 
     view.rerender(<ResumeSessionModal sessionId="b" onClose={vi.fn()} />);
-    await waitFor(() => expect(api.prepareResumeSession).toHaveBeenCalledWith("b", []));
+    await waitFor(() => expect(api.prepareResumeSession).toHaveBeenCalledWith("b"));
     await screen.findByText("/b");
 
     if (bSucceeds) {
@@ -227,5 +230,40 @@ describe("ResumeSessionModal preparation races", () => {
       );
     });
     await waitFor(() => expect(api.launchPrepared).toHaveBeenCalledWith("prepared-initial"));
+  });
+});
+
+describe("ResumeSessionModal owner display", () => {
+  it("shows the single owner task instead of a count of tasks", async () => {
+    vi.mocked(api.getSessionDetail).mockResolvedValue({
+      ...detail("s1"),
+      session: { ...detail("s1").session, owner_workstream_id: "w1" },
+      owner_workstream: {
+        id: "w1",
+        title: "NoEnding 会话模型重构",
+        description: "",
+        lifecycle: "active",
+        visibility: "normal",
+        created_at: "2026-09-21T00:00:00+00:00",
+        updated_at: "2026-09-21T00:00:00+00:00",
+      },
+    });
+    vi.mocked(api.prepareResumeSession).mockResolvedValue(prepared("s1", null, "w1"));
+
+    render(<ResumeSessionModal sessionId="s1" onClose={vi.fn()} />);
+
+    await screen.findByText("NoEnding 会话模型重构");
+    // §33：不再出现「X 个任务」这种多任务计数，只显示这一个任务的名字。
+    screen.getByText("1 个");
+    expect(screen.queryByText(/个任务/)).toBeNull();
+  });
+
+  it("says 未归属任务 for a session with no owner", async () => {
+    vi.mocked(api.getSessionDetail).mockResolvedValue(detail("s1"));
+    vi.mocked(api.prepareResumeSession).mockResolvedValue(prepared("s1"));
+
+    render(<ResumeSessionModal sessionId="s1" onClose={vi.fn()} />);
+
+    await screen.findByText("未归属任务");
   });
 });

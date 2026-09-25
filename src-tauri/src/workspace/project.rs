@@ -371,7 +371,7 @@ pub fn ensure_workspace_path_conn(
                         None => {
                             if mine.git_id.is_none() {
                                 // §8.4, first branch: adopt in place. `Project.id`
-                                // does not move, so no Session, binding or audit
+                                // does not move, so no Session or audit
                                 // reference has to be repaired.
                                 if adopt_git_identity_conn(conn, &mine.id, &f.git_id)? {
                                     effect.touch(&mine.id);

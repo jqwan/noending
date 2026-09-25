@@ -34,7 +34,8 @@
 //!   path's Project, not the Project's `git_id` (§1.3).
 //! * Discovering a worktree adds a `WorkspacePath`, never a `WorkstreamPath` (§9).
 //! * Adding a `WorkstreamPath` never imports the Sessions under that path (§1.7).
-//! * Removing a Session's binding never removes a `WorkstreamPath` (§1.9).
+//! * Removing a `WorkstreamPath` never changes a Session's Owner, cwd or
+//!   `workspace_path_id` (§12).
 //! * A Home-level Git repository is not evidence (§1.4), and the reserved app
 //!   paths under NoEnding Home never become a WorkspacePath (§2).
 //! * Git detection runs *after* the database opens, in Workspace Reconcile —

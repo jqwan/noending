@@ -146,7 +146,7 @@ export default function WorkstreamDetailView({
       </div>
     );
   }
-  const { workstream, related_sessions } = ctx;
+  const { workstream, sessions } = ctx;
 
   /**
    * 一条命令返回新的 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
@@ -156,7 +156,7 @@ export default function WorkstreamDetailView({
 
   /**
    * §1.13：lifecycle 只是分类，没有任何行为差异，随时可切；它不碰路径、
-   * 绑定、visibility 或 Context。
+   * 会话归属、visibility 或 Context。
    */
   const setLifecycle = async (next: WorkstreamLifecycle) => {
     if (busyRef.current || workstream.lifecycle === next) return;
@@ -285,7 +285,7 @@ export default function WorkstreamDetailView({
             </button>
             {!archived && (
               <button className="btn ghost icon-button" aria-label="移入回收站"
-                title="移入回收站：只是不再出现在列表里，路径、绑定与 Context 都原样保留，随时可以恢复。"
+                title="移入回收站：只是不再出现在列表里，路径、会话归属与 Context 都原样保留，随时可以恢复。"
                 onClick={() => setConfirmTrash(true)}>
                 <Icon name="trash" />
               </button>
@@ -337,7 +337,7 @@ export default function WorkstreamDetailView({
         </section>
 
         <WorkstreamSessions
-          sessions={related_sessions}
+          sessions={sessions}
           navigate={navigate}
           onNewSession={archived ? undefined : () => setNewSessionOpen(true)}
           allowActions={!archived}
@@ -436,7 +436,7 @@ export default function WorkstreamDetailView({
             <b>{workstream.title}</b> 会离开正常列表，出现在任务页的「回收站」筛选里。
           </p>
           <p className="small muted" style={{ marginBottom: 8 }}>
-            路径、会话关联和上下文都会保留，可从回收站恢复。
+            路径、会话归属和上下文都会保留，可从回收站恢复。
           </p>
 
           <div className="row" style={{ justifyContent: "flex-end" }}>

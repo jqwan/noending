@@ -288,7 +288,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
         <>
           <div className="muted small" style={{ margin: "4px 0 14px", maxWidth: "72ch" }}>
             回收站里的任务不出现在任务列表、首页以及新建和继续入口中。工作路径、会话
-            绑定与 Context 都原样保留；打开任务详情后可以恢复或永久删除。
+            归属与 Context 都原样保留；打开任务详情后可以恢复或永久删除。
           </div>
           {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
           {list === null && !loadError && <div className="muted" role="status">加载中…</div>}

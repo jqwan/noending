@@ -91,6 +91,12 @@ pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
     tolerate_missing_fts(conn.execute(
         "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
         params![session_id],
+    ))?;
+    // §39 — the Session's own document goes with it (Trash and permanent
+    // deletion both route through here; a Restore rebuilds it).
+    tolerate_missing_fts(conn.execute(
+        "DELETE FROM search_index WHERE kind = 'session' AND ref_id = ?1",
+        params![session_id],
     ))
 }
 
@@ -102,6 +108,7 @@ pub fn reindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
         "DELETE FROM search_index WHERE kind = 'event' AND parent_id = ?1",
         params![session_id],
     ))?;
+    crate::storage::index_session_conn(conn, session_id)?;
     tolerate_missing_fts(conn.execute(
         "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
          SELECT 'event', session_id || ':' || sequence, session_id, '', text
@@ -119,7 +126,6 @@ pub fn reindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PermanentDeletionCounts {
     pub event_count: i64,
-    pub binding_count: i64,
     pub sync_run_count: i64,
     pub context_delivery_count: i64,
     pub launch_intent_count: i64,
@@ -135,9 +141,6 @@ impl PermanentDeletionCounts {
         };
         Ok(Self {
             event_count: count("SELECT COUNT(*) FROM session_events WHERE session_id = ?1")?,
-            binding_count: count(
-                "SELECT COUNT(*) FROM session_workstream_bindings WHERE session_id = ?1",
-            )?,
             sync_run_count: count("SELECT COUNT(*) FROM sync_runs WHERE session_id = ?1")?,
             context_delivery_count: count(
                 "SELECT COUNT(*) FROM context_deliveries WHERE session_id = ?1",
@@ -450,44 +453,33 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usi
         "DELETE FROM context_deliveries WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 4. Bindings.
-    tx.execute(
-        "DELETE FROM session_workstream_bindings WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    // 6. This session's binding-removal tombstones (they are session-scoped
-    //    negative decisions, not workstream data).
-    tx.execute(
-        "DELETE FROM session_binding_removals WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    // 7. Sync history — after redaction matched revisions by run id.
+    // 4. Sync history — after redaction matched revisions by run id.
     tx.execute(
         "DELETE FROM sync_runs WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 8. Launch history that matched this session.
+    // 5. Launch history that matched this session.
     tx.execute(
         "DELETE FROM launch_intents WHERE matched_session_id = ?1",
         params![session_id],
     )?;
-    // 9. Read cursors (FK → sessions).
+    // 6. Read cursors (FK → sessions).
     tx.execute(
         "DELETE FROM session_cursors WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 10. The append-only event store: THIS session's history ends here,
+    // 7. The append-only event store: THIS session's history ends here,
     //     after every surviving provenance pointer was redacted.
     tx.execute(
         "DELETE FROM session_events WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 11. The coordination row dies with the session — no tombstone (§8).
+    // 8. The coordination row dies with the session — no tombstone (§8).
     tx.execute(
         "DELETE FROM session_deletion_jobs WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 12. The session row itself, last, once nothing references it.
+    // 9. The session row itself, last, once nothing references it.
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
     // FTS rows of this session's events go with the data — a failure here
     // rolls the whole purge back, never a half-deleted session in search.

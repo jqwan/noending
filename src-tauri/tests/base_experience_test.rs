@@ -11,7 +11,7 @@
 //! not the SyncEngine directly, because the switch lives in the orchestration.
 
 use noending::context::ContextDeliveryLevel;
-use noending::domain::{binding_source, Agent, Session, Workstream};
+use noending::domain::{Agent, Session, Workstream};
 use noending::storage::{new_id, now, Db};
 use noending::{ingestion, launcher, search, settings, sync};
 use std::path::PathBuf;
@@ -74,6 +74,7 @@ fn session_row(db: &Db, path: &std::path::Path) -> Session {
         started_at: Some(now()),
         last_activity_at: Some(now()),
         trashed_at: None,
+        owner_workstream_id: None,
     };
     db.upsert_session(&s).unwrap();
     s
@@ -155,15 +156,7 @@ fn off_stops_after_ingestion_on_the_launch_and_refresh_path() {
     let file = write_transcript(&dir, 3);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "NoEnding");
-    launcher::record_binding(
-        &db,
-        &s.id,
-        &ws.id,
-        "primary",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     let (ingested, applied) =
         launcher::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
@@ -224,15 +217,7 @@ fn delivery_level_never_gates_extraction() {
     let file = write_transcript(&dir, 3);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "NoEnding");
-    launcher::record_binding(
-        &db,
-        &s.id,
-        &ws.id,
-        "primary",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
     settings::set_context_delivery_level(&db, ContextDeliveryLevel::Balanced).unwrap();
 
     let (_, applied) =
@@ -271,15 +256,7 @@ fn backlog_ingested_while_off_is_replayed_after_reenabling() {
     let file = write_transcript(&dir, 2);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "NoEnding");
-    launcher::record_binding(
-        &db,
-        &s.id,
-        &ws.id,
-        "primary",
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
+    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     // Two offline days: the source grows, we keep ingesting, nothing processes.
     for n in [2, 3] {

@@ -28,10 +28,10 @@ interface AssistantConfig {
 interface ActionProposal {
   action: string;
   agent?: string;
-  workstream_ids: string[];
+  /** 建议的所属任务；null / 缺省 = standalone（同一时刻最多一个）。 */
+  owner_workstream_id?: string | null;
   cwd?: string | null;
   session_id?: string;
-  extra_workstream_ids: string[];
 }
 
 const AGENT_CHOICES: string[] = [...(Object.keys(AGENT_LABELS) as Agent[]), "none"];
@@ -343,8 +343,8 @@ function ActionCard({ json, onExecute, navigate }: {
         <div className="row">
           <span className="badge dark">建议动作</span>
           <strong className="small">{label}</strong>
-          {action.workstream_ids.length > 0 && (
-            <span className="muted small">{action.workstream_ids.length} 个任务</span>
+          {action.owner_workstream_id && (
+            <span className="muted small">1 个所属任务</span>
           )}
         </div>
         <div className="row">

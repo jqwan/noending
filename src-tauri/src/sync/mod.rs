@@ -1,11 +1,14 @@
 //! Workspace Assistant Core — Background Sync.
 //!
 //! A SyncJob reads the event delta after the *processed* cursor, extracts
-//! candidate context mutations, classifies to workstreams, and merges —
-//! all database writes of one run commit in a single SQLite transaction
-//! together with the SyncRun row and the processed-cursor advance. Any
-//! failure rolls the whole run back; retries are idempotent via the delta
+//! context mutations routed to the Session's single Owner Workstream, and
+//! merges — all database writes of one run commit in a single SQLite
+//! transaction together with the SyncRun row and the processed-cursor advance.
+//! Any failure rolls the whole run back; retries are idempotent via the delta
 //! fingerprint.
+//!
+//! Routing has exactly one input: `session.owner_workstream_id` (方案 §19).
+//! There is no automatic classification and no candidate set.
 //!
 //! Locking model (non-blocking UI): a run is split into three phases.
 //! `prepare` and `commit` each take the DB lock briefly; `extract` — which
@@ -28,10 +31,7 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{
-    binding_source, ContextItem, ContextItemRevision, Session, SessionEvent,
-    SessionWorkstreamBinding, SyncRun,
-};
+use crate::domain::{ContextItem, ContextItemRevision, Session, SessionEvent, SyncRun};
 use crate::error::Result;
 use crate::storage::{new_id, now, Db};
 
@@ -114,11 +114,13 @@ pub struct SyncJobOutput {
 pub trait ContextExtractor: Send + Sync {
     fn name(&self) -> String;
 
+    /// `workstream_id` is the Session's Owner Workstream — the single routing
+    /// target of this extraction (方案 §19, §22).
     fn extract(
         &self,
         session: &Session,
         events: &[&SessionEvent],
-        candidate_workstream_ids: &[String],
+        workstream_id: &str,
         inputs: &extractor::PromptInputs,
     ) -> Result<ExtractOutput>;
 }
@@ -132,21 +134,11 @@ pub struct PreparedSync {
     pub source_generation: i64,
     pub from_sequence: i64,
     pub to_sequence: i64,
-    pub candidates: Vec<String>,
-    /// True when `candidates` came from keyword auto-classification rather
-    /// than existing bindings; commit then persists them as
-    /// `automatic_classification` bindings inside the run transaction, so
-    /// the UI's session state matches what sync actually used.
-    pub candidates_are_automatic: bool,
-    /// CAS snapshot of the session's binding decision (strong bindings +
-    /// removal tombstones) at prepare time. A binding decision IS a Context
-    /// routing decision; commit re-computes it and discards the run when it
-    /// changed during the lock-free extraction — one check that covers
-    /// auto→strong, strong→none, strong A→strong B and tombstone changes.
-    pub binding_decision_hash: String,
+    /// Snapshot of `sessions.owner_workstream_id` taken at prepare time. It is
+    /// both the routing target and the commit-phase CAS (方案 §19.2, §20).
+    pub owner_workstream_id: Option<String>,
     pub meaningful: Vec<SessionEvent>,
     pub meaningful_count: usize,
-    pub unclassified: usize,
     pub inputs: extractor::PromptInputs,
 }
 
@@ -191,9 +183,10 @@ impl SyncEngine {
         }
     }
 
-    /// Phase A (DB lock held): idempotency check, candidate classification,
-    /// pre-filter, prompt-input snapshot. Returns None when this delta was
-    /// already processed by a committed run.
+    /// Phase A (DB lock held): idempotency check, Owner snapshot, pre-filter,
+    /// prompt-input snapshot. Returns None when this delta was already
+    /// processed by a committed run, or when the Session has no Owner
+    /// Workstream (方案 §21).
     pub fn prepare(
         &self,
         db: &Db,
@@ -215,41 +208,16 @@ impl SyncEngine {
             return Ok(None);
         }
 
-        // 1. candidate workstreams: bound ones, plus keyword-matched ones.
-        //     Auto-classified candidates are remembered as such so commit
-        //     can persist the classification as a real binding.
-        //     STRONG provenance (explicit launch / user assignment) freezes
-        //     the candidates; automatic_classification is only a guess and
-        //     must stay revisable — it never blocks re-classification when
-        //     the evidence in new events points elsewhere.
-        let bound: Vec<SessionWorkstreamBinding> = db.bindings_for_session(&session.id)?;
-        let strong: Vec<String> = bound
-            .iter()
-            .filter(|b| {
-                matches!(
-                    b.source.as_str(),
-                    binding_source::EXPLICIT_LAUNCH | binding_source::USER_ASSIGNED
-                )
-            })
-            .map(|b| b.workstream_id.clone())
-            .collect();
-        let (candidates, candidates_are_automatic) = if strong.is_empty() {
-            // Durable negative overrides filter BEFORE extraction: a
-            // workstream the user explicitly removed must not even become an
-            // extraction candidate. Filtering only at binding write-back
-            // would still run the extractor against it and COMMIT context
-            // mutations into a workstream the user rejected.
-            let proposed = self.auto_classify(db, session, events);
-            let mut kept = Vec::with_capacity(proposed.len());
-            for ws in proposed {
-                if !db.binding_removal_exists(&session.id, &ws)? {
-                    kept.push(ws);
-                }
-            }
-            (kept, true)
-        } else {
-            (strong, false)
-        };
+        // 1. routing: the Session's single Owner Workstream, read fresh from
+        //    the DB. No Owner means no Context processing at all (方案 §21):
+        //    events keep ingesting, `processed_sequence` stays put, and a
+        //    later owner assignment re-processes from here.
+        let owner_workstream_id: Option<String> = db
+            .get_session(&session.id)?
+            .and_then(|s| s.owner_workstream_id);
+        if owner_workstream_id.is_none() {
+            return Ok(None);
+        }
 
         // 2. pre-filter: only meaningful message kinds
         let meaningful: Vec<SessionEvent> = events
@@ -259,17 +227,9 @@ impl SyncEngine {
             .cloned()
             .collect();
 
-        let unclassified = if candidates.is_empty() && !meaningful.is_empty() {
-            meaningful.len()
-        } else {
-            0
-        };
-
         // 3. snapshot everything extraction needs while the lock is held.
-        // The binding decision hash rides along as the commit-phase CAS.
-        let binding_decision = binding_decision_hash(&db.read(), &session.id)?;
         let inputs = if self.llm.is_some() {
-            extractor::collect_prompt_inputs(db, &candidates)?
+            extractor::collect_prompt_inputs(db, owner_workstream_id.as_deref().unwrap_or(""))?
         } else {
             extractor::PromptInputs::default()
         };
@@ -280,12 +240,9 @@ impl SyncEngine {
             source_generation,
             from_sequence,
             to_sequence,
-            candidates,
-            candidates_are_automatic,
-            binding_decision_hash: binding_decision,
+            owner_workstream_id,
             meaningful_count: meaningful.len(),
             meaningful,
-            unclassified,
             inputs,
         }))
     }
@@ -299,18 +256,19 @@ impl SyncEngine {
         session: &Session,
         pre: &PreparedSync,
     ) -> Result<(Vec<ContextMutation>, String, Vec<String>)> {
-        if pre.meaningful.is_empty() || pre.candidates.is_empty() {
+        let Some(ws_id) = pre.owner_workstream_id.as_deref() else {
+            return Ok((Vec::new(), "none".to_string(), Vec::new()));
+        };
+        if pre.meaningful.is_empty() {
             return Ok((Vec::new(), "none".to_string(), Vec::new()));
         }
         let refs: Vec<&SessionEvent> = pre.meaningful.iter().collect();
         if let Some(cli) = &self.llm {
-            match cli.extract(session, &refs, &pre.candidates, &pre.inputs) {
+            match cli.extract(session, &refs, ws_id, &pre.inputs) {
                 Ok(o) => Ok((o.mutations, cli.name(), o.diagnostics)),
                 Err(e) => {
                     eprintln!("[sync] cli extractor failed, falling back: {}", e);
-                    let o = self
-                        .heuristic
-                        .extract(session, &refs, &pre.candidates, &pre.inputs)?;
+                    let o = self.heuristic.extract(session, &refs, ws_id, &pre.inputs)?;
                     Ok((
                         o.mutations,
                         format!("{}->heuristic", cli.name()),
@@ -319,9 +277,7 @@ impl SyncEngine {
                 }
             }
         } else {
-            let o = self
-                .heuristic
-                .extract(session, &refs, &pre.candidates, &pre.inputs)?;
+            let o = self.heuristic.extract(session, &refs, ws_id, &pre.inputs)?;
             Ok((o.mutations, "heuristic".to_string(), o.diagnostics))
         }
     }
@@ -405,22 +361,22 @@ impl SyncEngine {
                 });
             }
 
-            // CAS on the binding decision (AGENTS.md: revalidate state before
-            // committing work prepared while the lock was released). A
-            // binding decision IS a Context routing decision: strong
-            // bindings and removal tombstones decide where this session's
-            // context may go. If either changed while the extractor ran
-            // (user edit, launch selection, removal), the prepared mutations
-            // target a routing that no longer exists — discard the run
-            // WITHOUT advancing the processed cursor, so the next sync
-            // re-prepares against the user's decision. One hash comparison
-            // covers every transition (auto→strong, strong→none,
-            // strong A→strong B, tombstone added/removed) instead of
-            // case-by-case counters.
-            let current_decision = binding_decision_hash(tx, &session.id)?;
-            if current_decision != pre.binding_decision_hash {
+            // CAS on the routing target (方案 §20): the Session's Owner
+            // Workstream IS the Context routing decision. If the user changed
+            // the Owner while the extractor ran without the lock, the prepared
+            // mutations target a routing that no longer exists — discard the
+            // run WITHOUT advancing the processed cursor, so the next sync
+            // re-prepares against the new Owner.
+            let current_owner: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT owner_workstream_id FROM sessions WHERE id = ?1",
+                    rusqlite::params![session.id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            if !matches!(&current_owner, Some(owner) if *owner == pre.owner_workstream_id) {
                 eprintln!(
-                    "[sync] run {} stale: binding decision changed during extraction, discarding",
+                    "[sync] run {} stale: session owner changed during extraction, discarding",
                     pre.run_id
                 );
                 return Ok(SyncJobOutput {
@@ -430,7 +386,7 @@ impl SyncEngine {
                     skipped: 0,
                     unclassified: 0,
                     summary:
-                        "提取期间该 Session 的 Workstream 绑定发生了变化，本次结果作废，待下次同步按新绑定重新准备。"
+                        "提取期间该 Session 的所属任务发生了变化，本次结果作废，待下次同步按新归属重新准备。"
                             .into(),
                 });
             }
@@ -445,34 +401,9 @@ impl SyncEngine {
                 }
             }
 
-            // Persist auto-classification so the session's UI state matches
-            // what sync actually used. Binding precedence keeps any explicit
-            // or user binding strictly stronger than this one.
-            //
-            // A fresh classification REPLACES the previous automatic guess
-            // instead of accumulating stale auto bindings beside it — auto
-            // bindings are revisable by design. When the new classification
-            // is empty there is no signal, so the old guess is kept rather
-            // than dropped. (Strong bindings are never touched here: prepare
-            // only reaches the automatic path when none exist, and
-            // bind_conn's precedence still guards a racing explicit bind.)
-            // Candidates the user explicitly removed are skipped via the
-            // durable removal tombstones — a rejected guess must not come
-            // back.
-            if pre.candidates_are_automatic && !pre.candidates.is_empty() {
-                persist_auto_classification(tx, &session.id, &pre.candidates)?;
-            }
-
             let mut summary = format!(
-                "同步 {} 条新增消息：新增/更新 {} 项，跳过 {} 项{}",
-                pre.meaningful_count,
-                applied,
-                skipped,
-                if pre.unclassified > 0 {
-                    format!("；{} 条消息暂未能归类到 Workstream", pre.unclassified)
-                } else {
-                    String::new()
-                }
+                "同步 {} 条新增消息：新增/更新 {} 项，跳过 {} 项",
+                pre.meaningful_count, applied, skipped
             );
             if !diagnostics.is_empty() {
                 summary.push_str(&format!("；诊断: {}", diagnostics.join("；")));
@@ -499,7 +430,7 @@ impl SyncEngine {
                 status: "ok".into(),
                 applied,
                 skipped,
-                unclassified: pre.unclassified,
+                unclassified: 0,
                 summary,
             })
         })
@@ -532,138 +463,10 @@ impl SyncEngine {
         let (mutations, runtime, diagnostics) = self.extract(session, &pre)?;
         self.commit(db, session, &pre, mutations, &runtime, diagnostics)
     }
-
-    /// Keyword-based workstream classification.
-    /// Title / description tokens are matched against event text.
-    fn auto_classify(&self, db: &Db, _session: &Session, events: &[SessionEvent]) -> Vec<String> {
-        let workstreams = match db.list_workstreams(None) {
-            Ok(v) => v,
-            Err(_) => return vec![],
-        };
-        let text = events
-            .iter()
-            .filter_map(|e| e.text.as_deref())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
-        if text.is_empty() {
-            return vec![];
-        }
-        let mut scored: Vec<(String, usize)> = Vec::new();
-        for w in workstreams {
-            let mut score = 0usize;
-            for token in tokenize(&format!("{} {}", w.title, w.description)) {
-                if token.len() >= 3 && text.contains(&token) {
-                    score += token.len();
-                }
-            }
-            if score > 0 {
-                scored.push((w.id, score));
-            }
-        }
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored.into_iter().take(2).map(|(id, _)| id).collect()
-    }
 }
 
 /// Stable fingerprint of a processed delta: ordered event ids. A completed
 /// SyncRun with the same fingerprint means "this batch is already merged".
-/// CAS snapshot of a session's binding decision: the sorted set of strong
-/// bindings (workstream_id + role) plus removal tombstones. AUTO rows are
-/// deliberately excluded — sync rewrites them on every classification run,
-/// so they are not part of the *decision*. Accepts `&Connection` or
-/// `&Transaction` (deref).
-pub fn binding_decision_hash(
-    conn: &rusqlite::Connection,
-    session_id: &str,
-) -> crate::error::Result<String> {
-    use sha2::Digest;
-
-    let mut st = conn.prepare(
-        "SELECT workstream_id, role FROM session_workstream_bindings
-         WHERE session_id = ?1 AND source IN (?2, ?3)
-         ORDER BY workstream_id",
-    )?;
-    let strong = st
-        .query_map(
-            rusqlite::params![
-                session_id,
-                binding_source::EXPLICIT_LAUNCH,
-                binding_source::USER_ASSIGNED
-            ],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    let mut st2 = conn.prepare(
-        "SELECT workstream_id FROM session_binding_removals
-         WHERE session_id = ?1 ORDER BY workstream_id",
-    )?;
-    let removed = st2
-        .query_map(rusqlite::params![session_id], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    let mut h = sha2::Sha256::new();
-    for (ws, role) in strong {
-        h.update(b"B\x1f");
-        h.update(ws.as_bytes());
-        h.update(b"\x1f");
-        h.update(role.as_bytes());
-        h.update(b"\x1e");
-    }
-    for ws in removed {
-        h.update(b"R\x1f");
-        h.update(ws.as_bytes());
-        h.update(b"\x1e");
-    }
-    Ok(format!("{:x}", h.finalize()))
-}
-
-/// Testable core of the auto-classification persist step: replace the
-/// previous AUTOMATIC guesses with the fresh candidates, skipping
-/// workstreams the user explicitly removed (durable removal tombstones —
-/// a rejected guess must not silently come back).
-pub fn persist_auto_classification(
-    tx: &rusqlite::Transaction,
-    session_id: &str,
-    candidates: &[String],
-) -> crate::error::Result<()> {
-    use crate::domain::{binding_source, SessionWorkstreamBinding};
-    use crate::storage::{bind_conn, now};
-
-    tx.execute(
-        "DELETE FROM session_workstream_bindings WHERE session_id = ?1 AND source = ?2",
-        rusqlite::params![session_id, binding_source::AUTO],
-    )?;
-    for ws_id in candidates {
-        let removed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_binding_removals
-             WHERE session_id = ?1 AND workstream_id = ?2)",
-            rusqlite::params![session_id, ws_id],
-            |r| r.get(0),
-        )?;
-        if removed {
-            continue;
-        }
-        bind_conn(
-            tx,
-            &SessionWorkstreamBinding {
-                session_id: session_id.to_string(),
-                workstream_id: ws_id.clone(),
-                role: "related".into(),
-                source: binding_source::AUTO.into(),
-                confidence: 0.6,
-                workstream_path_id: None,
-                last_seen_revision: None,
-                last_sync_cursor: 0,
-                created_at: now(),
-                last_used_at: now(),
-            },
-        )?;
-    }
-    Ok(())
-}
-
 pub fn delta_fingerprint(session_id: &str, events: &[SessionEvent]) -> String {
     let mut h = Sha256::new();
     h.update(session_id);
@@ -673,28 +476,6 @@ pub fn delta_fingerprint(session_id: &str, events: &[SessionEvent]) -> String {
     }
     let d = h.finalize();
     d.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-}
-
-fn tokenize(s: &str) -> Vec<String> {
-    // split on whitespace/punct; keep CJK bigrams for Chinese titles
-    let mut out = Vec::new();
-    for word in s.split(|c: char| c.is_whitespace() || ",.;:!?()[]{}\"'/|".contains(c)) {
-        let w = word.trim();
-        if w.is_empty() {
-            continue;
-        }
-        if w.chars().any(|c| c.is_ascii()) {
-            out.push(w.to_lowercase());
-        }
-        let chars: Vec<char> = w.chars().collect();
-        if chars.len() >= 2 && chars.iter().all(|c| !c.is_ascii()) {
-            for pair in chars.windows(2) {
-                out.push(pair.iter().collect());
-            }
-        }
-    }
-    out.dedup();
-    out
 }
 
 /// Create a new item with its first revision (shared by merge + manual UI).

@@ -1,16 +1,13 @@
-//! Session commands: listing, detail, and Workstream binding.
+//! Session commands: listing, detail, and Owner Workstream assignment.
 //!
-//! These are thin: they take the lock, map the
-//! wire shape and hand over to `workspace::session`, which owns the rules.
+//! These are thin: they take the lock, map the wire shape and hand over to
+//! `workspace::session`, which owns the rules.
 //!
-//! Binding a Session now also decides the Workstream's ordered path list — the
-//! Session's own WorkspacePath is reused if it is already there, appended if a
-//! user action says it should be, and recorded on the binding by exact equality
-//! (§1.8, §42.3-M1). Unbinding removes the binding only (§1.9). Which
-//! WorkstreamPath brought a Session in is a derived fact, so no command here
-//! accepts it from the UI.
+//! A Session has at most ONE Owner Workstream (方案 §3.3). Setting it writes
+//! `sessions.owner_workstream_id` and nothing else — it never touches the
+//! Workstream's ordered path list, the Session's cwd or its Project (§5.1).
 //!
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::State;
 
 use crate::domain::*;
@@ -24,10 +21,10 @@ use super::{with_db, AppState};
 pub struct SessionDetail {
     pub session: Session,
     pub events: Vec<SessionEvent>,
-    pub bindings: Vec<(SessionWorkstreamBinding, Option<WorkstreamTitle>)>,
+    /// The one Workstream this Session belongs to, or `None` (方案 §24).
+    pub owner_workstream: Option<Workstream>,
     pub cursor: i64,
     pub processed_cursor: i64,
-    pub classification: String,
     /// Read-only observation of the Agent source file at detail-load time.
     /// `missing` means NotFound; other filesystem errors stay `unavailable`.
     pub raw_path_status: &'static str,
@@ -53,8 +50,6 @@ pub struct SessionWorkspacePath {
     pub project_id: String,
     pub project_name: String,
 }
-
-pub type WorkstreamTitle = String;
 
 fn raw_path_status(path: &str) -> &'static str {
     match std::fs::metadata(path) {
@@ -96,17 +91,10 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         db.resolve_event_counterparts(&session, &mut events)?;
         let cursor = db.get_cursor(&session_id)?;
         let processed_cursor = db.get_processed_sequence(&session_id)?;
-        let bindings = db
-            .bindings_for_session(&session_id)?
-            .into_iter()
-            .map(|b| {
-                let title = db.get_workstream(&b.workstream_id)?.map(|w| w.title);
-                Ok((b, title))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let classification = SessionClassificationState::derive(&{
-            bindings.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>()
-        });
+        let owner_workstream = match session.owner_workstream_id.as_deref() {
+            Some(id) => db.get_workstream(id)?,
+            None => None,
+        };
         let raw_path_status = raw_path_status(&session.raw_path);
         let workspace_path = match session.workspace_path_id.as_deref() {
             Some(id) => db.get_workspace_path(id)?.map(|wp| {
@@ -134,10 +122,9 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         Ok(SessionDetail {
             session,
             events,
-            bindings,
+            owner_workstream,
             cursor,
             processed_cursor,
-            classification: classification.as_str().to_string(),
             raw_path_status,
             workspace_path: workspace_path.transpose()?,
             parent,
@@ -146,118 +133,17 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
     })
 }
 
-/// Bind a Session into a Workstream (user action).
+/// Set (or clear) a Session's Owner Workstream (方案 §23).
 ///
-/// v0.2: the same click also decides the Workstream's path list — if the
-/// Session's own WorkspacePath is not in it, it is appended (position 0 for a
-/// Workstream with no path yet) — and the binding records that WorkstreamPath by
-/// exact equality (§1.8, §42.3-M1). One transaction, so a binding never exists
-/// without its claim and a path never exists without the binding that asked for
-/// it.
+/// `workstream_id = None` clears ownership. This is the ONLY write path for
+/// semantic ownership; it changes one column and nothing else.
 #[tauri::command]
-pub fn bind_session_workstream(
+pub fn set_session_owner_workstream(
     state: State<AppState>,
     session_id: String,
-    workstream_id: String,
-    role: String,
-) -> Result<()> {
+    workstream_id: Option<String>,
+) -> Result<Session> {
     with_db(&state, |db| {
-        crate::workspace::session::record_user_binding(
-            db,
-            &session_id,
-            &workstream_id,
-            &role,
-            binding_source::USER_ASSIGNED,
-            1.0,
-        )
-    })
-}
-
-/// Remove a Session ↔ Workstream binding (user edit via Session Detail).
-///
-/// Only the binding goes away: the WorkstreamPath that brought the Session in
-/// stays in the user's list (§1.9), and the pair leaves a permanent removal
-/// tombstone so auto-classification cannot re-propose it.
-#[tauri::command]
-pub fn unbind_session_workstream(
-    state: State<AppState>,
-    session_id: String,
-    workstream_id: String,
-) -> Result<()> {
-    with_db(&state, |db| db.unbind(&session_id, &workstream_id))
-}
-
-#[derive(Deserialize)]
-pub struct DesiredBinding {
-    pub workstream_id: String,
-    pub role: String,
-}
-
-/// Atomic replace of a Session's Workstream bindings (Binding Modal save):
-/// the backend diffs desired vs. current inside one transaction — unchanged
-/// rows keep their provenance/created_at/cursors, role edits update only the
-/// role, removed rows are deleted, and only newly added rows become
-/// user_assigned. The frontend never orchestrates unbind+bind itself.
-///
-/// v0.2 adds the path half of the join: an added binding ensures its
-/// WorkstreamPath (§1.8), a kept binding gets a NULL claim repaired when the
-/// Session's own path is now in the list (§5.6), and no removal here ever
-/// removes a WorkstreamPath (§1.9). The wire shape stays `(workstream_id,
-/// role)` on purpose: which WorkstreamPath a binding came through is a derived
-/// fact, not something the UI may assert.
-#[tauri::command]
-pub fn replace_session_bindings(
-    state: State<AppState>,
-    session_id: String,
-    bindings: Vec<DesiredBinding>,
-) -> Result<()> {
-    let desired = bindings
-        .into_iter()
-        .map(|b| crate::workspace::session::DesiredBinding {
-            workstream_id: b.workstream_id,
-            role: b.role,
-            workstream_path_id: None,
-        })
-        .collect::<Vec<_>>();
-    with_db(&state, |db| {
-        crate::workspace::session::replace_session_bindings(db, &session_id, &desired)
-    })
-}
-
-/// Binding rows with workstream titles — lets the Sessions table show a
-/// Workstream column and Assigned filters without N queries.
-#[derive(Serialize)]
-pub struct SessionBindingRow {
-    pub session_id: String,
-    pub workstream_id: String,
-    pub role: String,
-    pub workstream_title: String,
-    /// Which `workstream_paths` entry brought this Session in, or `NULL` when
-    /// the binding no longer corresponds to a path in the list (方案 §42.3-M2).
-    pub workstream_path_id: Option<String>,
-}
-
-#[tauri::command]
-pub fn list_session_bindings(state: State<AppState>) -> Result<Vec<SessionBindingRow>> {
-    with_db(&state, |db| {
-        let conn = db.read();
-        let mut st = conn.prepare(
-            "SELECT b.session_id, b.workstream_id, b.role, COALESCE(w.title, b.workstream_id),
-                    b.workstream_path_id
-             FROM session_workstream_bindings b
-             LEFT JOIN workstreams w ON w.id = b.workstream_id",
-        )?;
-        let rows = st
-            .query_map([], |r| {
-                Ok(SessionBindingRow {
-                    session_id: r.get(0)?,
-                    workstream_id: r.get(1)?,
-                    role: r.get(2)?,
-                    workstream_title: r.get(3)?,
-                    workstream_path_id: r.get(4)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        crate::workspace::session::set_session_owner(db, &session_id, workstream_id.as_deref())
     })
 }

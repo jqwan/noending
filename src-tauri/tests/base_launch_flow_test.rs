@@ -6,7 +6,7 @@
 //! Workstreams. What must stay true while Context Delivery is Off (the shipped
 //! default):
 //!
-//! * a standalone prepared launch still succeeds (0 bindings is legal);
+//! * a standalone prepared launch still succeeds with no Owner Workstream;
 //! * it never writes a context file, never captures bundle markdown, and never
 //!   advances a `context_deliveries` snapshot (AGENTS.md: delivery snapshots
 //!   advance only when context was actually delivered);
@@ -151,10 +151,10 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     let _ = std::fs::remove_dir_all(&bundle_dir);
 
     let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, &[], None, &LaunchWorkspace::default())
+        .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
         .expect("standalone prepare");
     assert_eq!(prepared.mode, "new");
-    assert!(prepared.workstream_ids.is_empty());
+    assert!(prepared.owner_workstream_id.is_none());
     assert_eq!(prepared.delivery_level, ContextDeliveryLevel::Off);
     assert!(prepared.bundle.sections.is_empty());
     assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 0);
@@ -175,8 +175,8 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     assert_eq!(intents.len(), 1, "one launch = one LaunchIntent");
     assert_eq!(intents[0].launch_type, "new");
     assert!(
-        intents[0].selected_workstream_ids.is_empty(),
-        "standalone launch records a zero-binding selection, never a guessed one"
+        intents[0].owner_workstream_id.is_none(),
+        "standalone launch records no Owner, never a guessed one"
     );
     assert!(
         intents[0].context_bundle_markdown.is_none(),
@@ -195,7 +195,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
 /// Delivery Off with a real Workstream that HAS context: the launch still
 /// succeeds, and still injects nothing — the gate is the level, not the data.
 #[test]
-fn off_launch_with_bound_workstream_injects_nothing() {
+fn off_launch_with_owned_workstream_injects_nothing() {
     let db = open_db("off-with-workstream");
     seed_installation(&db, Agent::Codex);
     let ws = workstream(&db, "injected ws");
@@ -208,7 +208,7 @@ fn off_launch_with_bound_workstream_injects_nothing() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -226,7 +226,10 @@ fn off_launch_with_bound_workstream_injects_nothing() {
     assert!(!bundle_dir.exists());
     assert_eq!(count(&db, "SELECT COUNT(*) FROM context_deliveries"), 0);
     let intents = db.list_launch_intents(&[], 100).unwrap();
-    assert_eq!(intents[0].selected_workstream_ids, vec![ws.id.clone()]);
+    assert_eq!(
+        intents[0].owner_workstream_id.as_deref(),
+        Some(ws.id.as_str())
+    );
     assert!(intents[0].context_bundle_markdown.is_none());
 }
 
@@ -245,7 +248,7 @@ fn prepared_launch_goes_stale_when_delivery_level_leaves_off() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -274,7 +277,7 @@ fn prepared_launch_goes_stale_when_delivery_level_leaves_off() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -305,7 +308,7 @@ fn prepared_launch_goes_stale_when_delivery_level_is_turned_off() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -329,7 +332,7 @@ fn prepared_launch_capability_is_single_use() {
     let launcher = launcher_in("single-use");
 
     let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, &[], None, &LaunchWorkspace::default())
+        .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
         .unwrap();
     let id = prepared.id.clone();
     let map: std::sync::Mutex<std::collections::HashMap<String, PreparedLaunch>> =
@@ -372,7 +375,7 @@ fn prepared_launch_reports_the_resolved_working_directory() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[ws.id.clone()],
+            Some(ws.id.as_str()),
             None,
             &LaunchWorkspace::default(),
         )
@@ -387,7 +390,7 @@ fn prepared_launch_reports_the_resolved_working_directory() {
     assert!(!with_ws.cwd_resolution.fallback);
 
     let standalone = launcher
-        .prepare_new_in(&db, Agent::Codex, &[], None, &LaunchWorkspace::default())
+        .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
         .unwrap();
     assert_eq!(
         standalone.cwd, None,
@@ -412,7 +415,7 @@ fn standalone_prepared_launch_reports_the_default_workspace() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            &[],
+            None,
             None,
             &LaunchWorkspace {
                 default_workspace: Some(default_ws.clone()),
@@ -441,12 +444,12 @@ fn off_bundle_is_literally_empty_even_with_context_items() {
         &db,
         "new",
         None,
-        &[ws.id.clone()],
+        Some(ws.id.as_str()),
         ContextDeliveryLevel::Off,
     )
     .unwrap();
     assert!(bundle.sections.is_empty());
-    assert_eq!(bundle.workstream_ids, vec![ws.id.clone()]);
+    assert_eq!(bundle.workstream_id.as_deref(), Some(ws.id.as_str()));
     assert!(
         bundle.approx_tokens == 0 && bundle.markdown.is_empty(),
         "Off must deliver literally nothing"

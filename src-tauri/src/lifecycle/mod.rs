@@ -88,7 +88,7 @@ pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
         .ok_or_else(|| other("Session 不存在"))
 }
 
-/// Trash → Normal (§7): same Session id; bindings, events and cursors were
+/// Trash → Normal (§7): same Session id; Owner, events and cursors were
 /// never touched. Refused while a deletion job exists — the user cancels the
 /// deletion first (§42).
 ///

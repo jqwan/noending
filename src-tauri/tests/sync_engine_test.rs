@@ -1,9 +1,7 @@
 //! End-to-end domain test: ingest a fake session, run the sync engine,
 //! and verify context items, dedup and cursor advancement.
 
-use noending::domain::{
-    binding_source, Agent, Session, SessionEvent, SessionWorkstreamBinding, SourceCursor,
-};
+use noending::domain::{Agent, Session, SessionEvent, SourceCursor};
 use noending::storage::{new_id, now, Db};
 use noending::{context, sync};
 
@@ -54,25 +52,15 @@ fn make_session(db: &Db, agent: Agent, agent_session_id: &str) -> Session {
         started_at: Some(now()),
         last_activity_at: Some(now()),
         trashed_at: None,
+        owner_workstream_id: None,
     };
     db.upsert_session(&s).unwrap();
     s
 }
 
-fn bind(db: &Db, session_id: &str, workstream_id: &str) {
-    db.bind(&SessionWorkstreamBinding {
-        session_id: session_id.into(),
-        workstream_id: workstream_id.into(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+fn set_owner(db: &Db, session_id: &str, workstream_id: &str) {
+    db.set_session_owner(session_id, Some(workstream_id))
+        .unwrap();
 }
 
 fn event(session: &Session, sequence: i64, kind: &str, text: &str) -> SessionEvent {
@@ -99,7 +87,7 @@ fn sync_engine_extracts_and_merges() {
     let ws = create_workstream(&db, "Context Sync", "同步机制设计");
 
     let session = make_session(&db, Agent::Codex, "fake-session-1");
-    bind(&db, &session.id, &ws.id);
+    set_owner(&db, &session.id, &ws.id);
 
     let engine = sync::SyncEngine::default();
     let events = vec![
@@ -218,7 +206,7 @@ fn context_bundle_contains_core_sections() {
         &db,
         "new",
         None,
-        &[ws.id.clone()],
+        Some(&ws.id),
         context::ContextDeliveryLevel::Balanced,
     )
     .unwrap();
@@ -235,7 +223,7 @@ fn search_finds_ingested_events() {
     let ws = create_workstream(&db, "检索", "");
 
     let session = make_session(&db, Agent::ClaudeCode, "search-fixture");
-    bind(&db, &session.id, &ws.id);
+    set_owner(&db, &session.id, &ws.id);
 
     let events = vec![event(
         &session,

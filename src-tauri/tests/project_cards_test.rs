@@ -35,12 +35,7 @@ fn workstream_with_path(db: &Db, id: &str, title: &str, workspace_path_id: &str)
     };
     db.upsert_workstream(&w).unwrap();
     db.tx(|tx| {
-        noending::storage::workstream_paths::append_workstream_path_conn(
-            tx,
-            id,
-            workspace_path_id,
-            "user",
-        )
+        noending::storage::workstream_paths::append_workstream_path_conn(tx, id, workspace_path_id)
     })
     .unwrap();
 }
@@ -59,6 +54,7 @@ fn session_at(db: &Db, id: &str, path_id: &str, trashed: bool) {
         started_at: Some(now()),
         last_activity_at: Some(now()),
         trashed_at: None,
+        owner_workstream_id: None,
     };
     s.cwd = None;
     db.upsert_session(&s).unwrap();
@@ -108,12 +104,7 @@ fn board_card_projection_counts_and_paths() {
     workstream_with_path(&db, "ws-primary", "Primary", &a);
     workstream_with_path(&db, "ws-related", "Related", &other);
     db.tx(|tx| {
-        noending::storage::workstream_paths::append_workstream_path_conn(
-            tx,
-            "ws-related",
-            &b,
-            "user",
-        )
+        noending::storage::workstream_paths::append_workstream_path_conn(tx, "ws-related", &b)
     })
     .unwrap();
     session_at(&db, "s-live", &a, false);

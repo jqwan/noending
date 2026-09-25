@@ -133,15 +133,7 @@ pub struct WorkstreamPath {
     pub workstream_id: Id,
     pub workspace_path_id: Id,
     pub position: i64,
-    pub source: String, // user | session | launch | migration
     pub created_at: String,
-}
-
-pub mod workstream_path_source {
-    pub const USER: &str = "user";
-    pub const SESSION: &str = "session";
-    pub const LAUNCH: &str = "launch";
-    pub const MIGRATION: &str = "migration";
 }
 
 /// What the WorkspaceResolver reports about a filesystem path. Purely
@@ -219,7 +211,7 @@ pub mod workstream_lifecycle {
 pub mod workstream_visibility {
     pub const NORMAL: &str = "normal";
     /// The recycle bin. Restoring flips back to `normal` and nothing else —
-    /// which is why lifecycle / paths / bindings survive a round trip.
+    /// which is why lifecycle and paths survive a round trip.
     pub const ARCHIVED: &str = "archived";
 }
 
@@ -351,6 +343,13 @@ pub struct Session {
     #[serde(default)]
     pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
+    /// Semantic ownership: the one Workstream this execution belongs to, or
+    /// `None`. A Session has at most one Owner Workstream (方案 §3.3); there is
+    /// no primary/related pair and no M:N relation. Physical Project membership
+    /// (above) and this semantic owner are independent and never mutate each
+    /// other (方案 §4, §5).
+    #[serde(default)]
+    pub owner_workstream_id: Option<Id>,
     pub raw_path: String,
     pub parent_agent_session_id: Option<String>,
     pub started_at: Option<String>,
@@ -379,6 +378,7 @@ impl Session {
             cwd: None,
             workspace_path_id: None,
             project_id: None,
+            owner_workstream_id: None,
             raw_path: raw_path.into(),
             parent_agent_session_id: None,
             started_at: None,
@@ -541,73 +541,6 @@ pub struct SourceCursorUpdate {
     pub prefix_hash: String,
 }
 
-/// Multi-to-multi binding between sessions and workstreams.
-///
-/// `source` records who established the binding. Bindings created from an
-/// explicit launch selection (`explicit_launch_selection`, confidence 1.0)
-/// must never be replaced by automatic classification.
-///
-/// `workstream_path_id` (v0.2) records *which WorkstreamPath brought this
-/// Session in*: the Session's own `workspace_path_id`, which must be one of
-/// the Workstream's `workstream_paths` rows (exact match, never prefix
-/// matching). `None` means "unknown / legacy / drifted", and such a binding is
-/// deliberately NOT removed when a WorkstreamPath is deleted — deleting a path
-/// may not silently unbind Sessions we cannot prove came from it.
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionWorkstreamBinding {
-    pub session_id: Id,
-    pub workstream_id: Id,
-    pub role: String,   // primary | related
-    pub source: String, // explicit_launch_selection | user_assigned | automatic_classification
-    pub confidence: f64,
-    #[serde(default)]
-    pub workstream_path_id: Option<Id>,
-    pub last_seen_revision: Option<String>,
-    pub last_sync_cursor: i64,
-    pub created_at: String,
-    pub last_used_at: String,
-}
-
-pub mod binding_source {
-    pub const EXPLICIT_LAUNCH: &str = "explicit_launch_selection";
-    pub const USER_ASSIGNED: &str = "user_assigned";
-    pub const AUTO: &str = "automatic_classification";
-}
-
-/// Derived classification state of a session (Domain §Session).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionClassificationState {
-    Unassigned,
-    PartiallyAssigned,
-    Assigned,
-}
-
-impl SessionClassificationState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SessionClassificationState::Unassigned => "unassigned",
-            SessionClassificationState::PartiallyAssigned => "partially_assigned",
-            SessionClassificationState::Assigned => "assigned",
-        }
-    }
-
-    /// Derived projection: explicit bindings (user / launch selection) mean
-    /// assigned; only automatic candidate bindings mean partially assigned;
-    /// nothing at all means unassigned.
-    pub fn derive(bindings: &[SessionWorkstreamBinding]) -> SessionClassificationState {
-        if bindings.is_empty() {
-            return SessionClassificationState::Unassigned;
-        }
-        let has_explicit = bindings.iter().any(|b| b.source != binding_source::AUTO);
-        if has_explicit {
-            SessionClassificationState::Assigned
-        } else {
-            SessionClassificationState::PartiallyAssigned
-        }
-    }
-}
-
 /// A directory whose Agent sessions may be ingested. The standard agent
 /// data roots (~/.codex, ~/.claude, ~/.pi, honoring env overrides) are
 /// seeded as DISABLED defaults; whether any source is ingested is always
@@ -627,15 +560,15 @@ pub mod ingest_origin {
     pub const USER: &str = "user";
 }
 
-/// Stable, recoverable record of "user launched an agent and chose these
-/// Workstreams" — created before the agent session id is knowable, matched
-/// when discovery finds the new external session.
+/// Stable, recoverable record of "user launched an agent and chose this
+/// Workstream" — created before the agent session id is knowable, matched
+/// when discovery finds the new external session (方案 §15.1).
 #[derive(Debug, Clone, Serialize)]
 pub struct LaunchIntent {
     pub id: Id,
     pub launch_type: String, // new | resume
     pub agent: Agent,
-    pub selected_workstream_ids: Vec<Id>,
+    pub owner_workstream_id: Option<Id>,
     pub cwd: Option<String>,
     pub context_bundle_markdown: Option<String>,
     /// JSON snapshot of what the launched session actually received:

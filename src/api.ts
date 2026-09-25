@@ -6,7 +6,7 @@ import type {
   Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow,
   RecentWorkspacePath, SessionDeletionJob, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
-  ReviewFrontier, SearchHit, Session, SessionBindingRow, SessionDetail, SessionWorkstreamBinding,
+  ReviewFrontier, SearchHit, Session, SessionDetail,
   SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
   WorkstreamReviewSummary,
 } from "./types";
@@ -158,13 +158,12 @@ export const api = {
   getSessionDeletionJob: (sessionId: string) =>
     invoke<SessionDeletionJob | null>("get_session_deletion_job", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
-  bindSessionWorkstream: (sessionId: string, workstreamId: string, role: string) =>
-    invoke<void>("bind_session_workstream", { sessionId, workstreamId, role }),
-  unbindSessionWorkstream: (sessionId: string, workstreamId: string) =>
-    invoke<void>("unbind_session_workstream", { sessionId, workstreamId }),
-  replaceSessionBindings: (sessionId: string, bindings: { workstream_id: string; role: string }[]) =>
-    invoke<void>("replace_session_bindings", { sessionId, bindings }),
-  listSessionBindings: () => invoke<SessionBindingRow[]>("list_session_bindings"),
+  /**
+   * 设置 / 清空 Session 唯一的所属任务。`workstreamId === null` 即「未归属任务」。
+   * 只写 `sessions.owner_workstream_id`，不碰 WorkstreamPath、cwd 或 Project。
+   */
+  setSessionOwnerWorkstream: (sessionId: string, workstreamId: string | null) =>
+    invoke<Session>("set_session_owner_workstream", { sessionId, workstreamId }),
 
   syncAll: () => invoke<{ started: boolean }>("sync_all"),
   syncSource: (sourceId: string) => invoke<{ started: boolean }>("sync_source", { sourceId }),
@@ -177,10 +176,16 @@ export const api = {
     ),
   listSyncRuns: (limit?: number) => invoke<SyncRun[]>("list_sync_runs", { limit: limit ?? 50 }),
 
-  prepareNewSession: (agent: Agent, workstreamIds: string[], cwd?: string) =>
-    invoke<import("./types").PreparedLaunch>("prepare_new_session", { agent, workstreamIds, cwd: cwd ?? null }),
-  prepareResumeSession: (sessionId: string, extraWorkstreamIds: string[]) =>
-    invoke<import("./types").PreparedLaunch>("prepare_resume_session", { sessionId, extraWorkstreamIds }),
+  /** §15 — 新建 Session 最多带一个所属任务（`null` = standalone）。 */
+  prepareNewSession: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string) =>
+    invoke<import("./types").PreparedLaunch>("prepare_new_session", {
+      agent,
+      ownerWorkstreamId,
+      cwd: cwd ?? null,
+    }),
+  /** §16 — Resume 不再传任何 Workstream：用 Session 当前的 Owner。 */
+  prepareResumeSession: (sessionId: string) =>
+    invoke<import("./types").PreparedLaunch>("prepare_resume_session", { sessionId }),
   launchPrepared: (preparedId: string) =>
     invoke<LaunchResult>("launch_prepared", { preparedId }),
   cancelPrepared: (preparedId: string) =>
@@ -231,4 +236,4 @@ export const api = {
     invoke<{ ok: boolean; kind: string; launched_via: string; note: string }>("assistant_execute_action", { actionJson }),
 };
 
-export type { Agent, SessionWorkstreamBinding };
+export type { Agent };

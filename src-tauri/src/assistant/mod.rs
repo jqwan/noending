@@ -17,14 +17,13 @@ pub struct ActionProposal {
     pub action: String, // launch_new_session | resume_session
     #[serde(default)]
     pub agent: Option<String>,
+    /// The single Owner Workstream for a new Session, or none.
     #[serde(default)]
-    pub workstream_ids: Vec<String>,
+    pub owner_workstream_id: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
-    pub extra_workstream_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,10 +67,10 @@ const SYSTEM_INSTRUCTIONS: &str = r#"你是 NoEnding 的 Workspace Assistant。N
 1. 基于下方「领域快照」回答用户问题，语言跟随用户；找不到就说找不到，不要编造；
 2. 只做只读分析。如果用户的意图需要执行写操作（启动会话 / 恢复会话），不要描述执行过程，而是在回复末尾输出一个动作块：
 ```noending-action
-{"action":"launch_new_session","agent":"claude_code","workstream_ids":["<id>"],"cwd":"/可选"}
+{"action":"launch_new_session","agent":"claude_code","owner_workstream_id":"<id>","cwd":"/可选"}
 ```
 或
-{"action":"resume_session","session_id":"<id>","extra_workstream_ids":[]}
+{"action":"resume_session","session_id":"<id>"}
 3. action/agent 取值只能用快照里给出的 id 和 codex/claude_code/pi；
 4. 保持简洁克制，不使用夸张营销语言。"#;
 
@@ -235,7 +234,7 @@ impl AssistantService {
                 let r = launcher.new_session_in(
                     db,
                     agent,
-                    &action.workstream_ids,
+                    action.owner_workstream_id.as_deref(),
                     action.cwd.as_deref(),
                     workspace,
                 )?;
@@ -248,8 +247,7 @@ impl AssistantService {
                     .session_id
                     .as_deref()
                     .ok_or_else(|| other("动作缺少 session_id"))?;
-                let r =
-                    launcher.resume_session_in(db, sid, &action.extra_workstream_ids, workspace)?;
+                let r = launcher.resume_session_in(db, sid, workspace)?;
                 Ok(
                     serde_json::json!({ "ok": true, "kind": "resume", "launched_via": r.launched_via, "note": r.note }),
                 )

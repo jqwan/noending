@@ -10,10 +10,10 @@ import type { Route } from "../../app/routes";
 /**
  * Workstream 的 Sessions 段落（方案 §14）：这一页的主角。
  *
- * Workstream = 用户显式组织的一组持续相关 Sessions，所以这里只回答
- * 「有哪些 Session / 继续哪个 / 再来一个」。每行的「继续」挂载 Resume 的
- * 同一个 Modal（§8.1.1 冻结契约），由它走 prepare → 状态指纹 → launch_prepared；
- * 本页不再直接调用 launcher。
+ * 列表口径是**归属**（§34）：`owner_workstream_id == 当前 Workstream` 的
+ * Sessions，所以同一个 Session 不会同时出现在两个任务的列表里。每行的
+ * 「继续」挂载 Resume 的同一个 Modal（§8.1.1 冻结契约），由它走
+ * prepare → 状态指纹 → launch_prepared；本页不再直接调用 launcher。
  */
 export default function WorkstreamSessions({ sessions, navigate, onNewSession, allowActions = true }: {
   sessions: Session[];
@@ -42,7 +42,7 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
       </div>
 
       {sorted.length === 0 && (
-        <div className="l1-none">还没有会话关联到这里。</div>
+        <div className="l1-none">还没有会话归属到这项任务。</div>
       )}
 
       {sorted.map((s) => (

@@ -74,6 +74,7 @@ fn session_row(db: &Db, agent: Agent, path: &std::path::Path) -> Session {
         started_at: Some(now()),
         last_activity_at: Some(now()),
         trashed_at: None,
+        owner_workstream_id: None,
     };
     db.upsert_session(&s).unwrap();
     s

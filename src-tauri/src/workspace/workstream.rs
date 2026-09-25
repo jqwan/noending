@@ -5,7 +5,7 @@
 //! ## The ordered list is the whole model (§1.5)
 //!
 //! ```text
-//! workstream_paths(workstream_id, workspace_path_id, position, source)
+//! workstream_paths(workstream_id, workspace_path_id, position)
 //!   UNIQUE(workstream_id, workspace_path_id)
 //!   UNIQUE(workstream_id, position)
 //! ```
@@ -30,37 +30,33 @@
 //! ```
 //!
 //! `archive` flips visibility and nothing else; `restore` flips back, so
-//! lifecycle / paths / bindings / configuration are all still there and the
-//! previous state returns naturally. Permanent deletion is only reachable from
-//! `archived`.
+//! lifecycle / paths / configuration are all still there and the previous state
+//! returns naturally. Permanent deletion is only reachable from `archived`.
 //!
 //! ## Permanent deletion table order (§42.3-M6)
 //!
 //! `context_conflict_events` → `context_conflicts` → `context_item_revisions` →
-//! `context_items` → `context_deliveries` → `session_workstream_bindings` →
-//! `workstream_paths` → `session_binding_removals` (no FK, so it never cascades
-//! and would leak) → `workstream_review_state` (cascades) → `workstreams`.
+//! `context_items` → `context_deliveries` → `workstream_paths` →
+//! `workstream_review_state` (cascades) → `workstreams`.
 //!
 //! Never touched: `sessions`, `session_events`, `session_cursors`,
 //! `launch_intents`, `workspace_paths`, and the Agents' raw transcript files.
-//! A Session survives the Workstream that referenced it.
+//! A Session survives the Workstream that referenced it; its
+//! `owner_workstream_id` is cleared by the `ON DELETE SET NULL` FK when the
+//! `workstreams` row goes (方案 §13, §37).
 //!
 //! ## Reindex
 //!
 //! Any path-list mutation changes the primary-path Project projection, so it
 //! must re-index the Workstream's search row (§42.3-M18).
 //!
-//! ## Binding side-effects: no tombstone
+//! ## Path mutation vs. Session ownership
 //!
-//! Removing a WorkstreamPath deletes the bindings it brought in (§1.6). Those
-//! deletions deliberately do NOT write `session_binding_removals`. A tombstone
-//! means "the user refuses THIS session in THIS workstream, forever"; a path
-//! removal is a decision about a directory, and keeping the tombstone would
-//! mean that re-adding the same path next week silently loses Sessions the user
-//! has since bound — an unrecoverable inference from an unrelated action.
-//! Bindings deleted here were mostly automatic, and AGENTS.md is explicit that
-//! automatic classification may re-propose what it retracts; only a user's own
-//! `unbind_session_workstream` is a permanent negative decision.
+//! Removing a WorkstreamPath touches the path list only. It never changes a
+//! Session's Owner Workstream, cwd, `workspace_path_id` or `project_id`
+//! (方案 §5.2). A Session's cwd is historical execution fact, the path list is
+//! current configuration, ownership is semantic assignment — the three are
+//! independent.
 //!
 //! ## Add vs. create: why unresolvable paths differ
 //!
@@ -76,10 +72,9 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::workspace::{get_project_conn, get_workspace_path_conn};
 use crate::storage::workstream_paths::{
-    append_workstream_path_conn, count_bindings_for_workstream_path_conn,
-    ordered_canonical_paths_for_workstream, primary_workspace_path, purge_workstream_data_conn,
-    reindex_workstream_search_conn, remove_workstream_path_conn, reorder_workstream_paths_conn,
-    workstream_path_by_id_conn,
+    append_workstream_path_conn, ordered_canonical_paths_for_workstream, primary_workspace_path,
+    purge_workstream_data_conn, reindex_workstream_search_conn, remove_workstream_path_conn,
+    reorder_workstream_paths_conn, workstream_path_by_id_conn,
 };
 use crate::storage::{new_id, now, Db};
 
@@ -235,8 +230,7 @@ pub fn create_workstream(
             let wp = get_workspace_path_conn(tx, &path_id)?
                 .ok_or_else(|| other("WorkspacePath 写入后消失"))?;
             let project_name = get_project_conn(tx, &wp.project_id)?.map(|p| p.name);
-            let row =
-                append_workstream_path_conn(tx, &w.id, &path_id, workstream_path_source::USER)?;
+            let row = append_workstream_path_conn(tx, &w.id, &path_id)?;
             attached_ids.push(path_id);
             paths.push(CreatedPath {
                 raw: raw.to_string(),
@@ -259,8 +253,7 @@ pub fn create_workstream(
 // ---------------------------------------------------------- the path list (§1.5)
 
 /// One entry of the list as the UI shows it: the row plus the physical facts
-/// behind it, and how many Sessions removing it would take with it (§22's
-/// warning must be computable before the user commits).
+/// behind it.
 #[derive(Serialize)]
 pub struct WorkstreamPathView {
     #[serde(flatten)]
@@ -270,12 +263,11 @@ pub struct WorkstreamPathView {
     pub project_name: Option<String>,
     /// Observation, not identity: a path can exist and still be a valid entry.
     pub exists: bool,
-    pub bound_session_count: i64,
 }
 
 /// §1.7 — a user action that ONLY adds a path. Nothing under the path is
 /// scanned or imported, and an already-present path keeps its original
-/// position and `source` (a later session can never launder `user` provenance).
+/// position.
 pub fn add_workstream_path(
     db: &Db,
     attaching: &dyn WorkspaceAttaching,
@@ -291,33 +283,30 @@ pub fn add_workstream_path(
             // rather than guessing at one.
             other("该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录")
         })?;
-        let row =
-            append_workstream_path_conn(tx, workstream_id, &path_id, workstream_path_source::USER)?;
+        let row = append_workstream_path_conn(tx, workstream_id, &path_id)?;
         reindex_workstream_search_conn(tx, workstream_id)?;
         Ok(row)
     })?;
     Ok(row)
 }
 
-/// §1.6 — remove one entry and let the next move up to primary.
-///
-/// Returns how many bindings went with it, so the caller can tell the user what
-/// happened without a second read.
+/// §1.6 — remove one entry and let the next move up to primary. Sessions are
+/// not affected: this changes the Workstream's path list, never a Session's
+/// ownership (方案 §5.2, §13).
 pub fn remove_workstream_path(
     db: &Db,
     workstream_id: &str,
     workstream_path_id: &str,
-) -> Result<usize> {
+) -> Result<()> {
     require_workstream(db, workstream_id)?;
-    let unbound = db.tx(|tx| {
+    db.tx(|tx| {
         if workstream_path_by_id_conn(tx, workstream_id, workstream_path_id)?.is_none() {
             return Err(other("该工作路径不属于此 Workstream"));
         }
-        let unbound = remove_workstream_path_conn(tx, workstream_id, workstream_path_id)?;
+        remove_workstream_path_conn(tx, workstream_id, workstream_path_id)?;
         reindex_workstream_search_conn(tx, workstream_id)?;
-        Ok(unbound)
-    })?;
-    Ok(unbound)
+        Ok(())
+    })
 }
 
 /// §1.5 — rewrite the order. Takes the COMPLETE list; "make this the primary
@@ -348,11 +337,6 @@ pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<Wo
         let Some(wp) = wp else { continue };
         let project_name = db.get_project(&wp.project_id)?.map(|p| p.name);
         views.push(WorkstreamPathView {
-            bound_session_count: count_bindings_for_workstream_path_conn(
-                &db.read(),
-                workstream_id,
-                &path.id,
-            )?,
             project_id: wp.project_id,
             project_name,
             canonical_path: wp.canonical_path,
@@ -370,7 +354,7 @@ pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<Wo
 /// caller still writing it is a bug worth surfacing.
 ///
 /// Both values are a label only — no behavior differs, and switching must not
-/// touch paths, bindings, visibility or Context.
+/// touch paths, visibility or Context.
 pub fn set_workstream_lifecycle(
     db: &Db,
     workstream_id: &str,
@@ -386,8 +370,8 @@ pub fn set_workstream_lifecycle(
     Ok(w)
 }
 
-/// Move to the recycle bin. `archived` IS the trash (§1.13): paths, bindings,
-/// lifecycle, Context and configuration all survive, and `updated_at` is the
+/// Move to the recycle bin. `archived` IS the trash (§1.13): paths, lifecycle,
+/// Context and configuration all survive, and `updated_at` is the
 /// only other thing that moves.
 ///
 /// Absolute, not a toggle: the previous `archive_workstream` flipped

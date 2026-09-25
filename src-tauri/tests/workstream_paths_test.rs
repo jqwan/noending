@@ -18,8 +18,7 @@ use rusqlite::{params, Connection};
 
 use noending::commands::workstream_cards;
 use noending::domain::{
-    workstream_lifecycle, workstream_path_source, workstream_visibility, Agent, Project, Session,
-    SessionWorkstreamBinding, Workstream,
+    workstream_lifecycle, workstream_visibility, Agent, Project, Session, Workstream,
 };
 use noending::error::{other, Result};
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -141,19 +140,19 @@ fn fixture() -> Fixture {
     }
 }
 
-/// `(workspace_path_id, position, source)` in list order.
-fn list(db: &Db, workstream_id: &str) -> Vec<(String, i64, String)> {
+/// `(workspace_path_id, position)` in list order.
+fn list(db: &Db, workstream_id: &str) -> Vec<(String, i64)> {
     db.list_workstream_paths(workstream_id)
         .unwrap()
         .into_iter()
-        .map(|p| (p.workspace_path_id, p.position, p.source))
+        .map(|p| (p.workspace_path_id, p.position))
         .collect()
 }
 
 fn positions(db: &Db, workstream_id: &str) -> Vec<i64> {
     list(db, workstream_id)
         .into_iter()
-        .map(|(_, position, _)| position)
+        .map(|(_, position)| position)
         .collect()
 }
 
@@ -174,22 +173,6 @@ fn session(db: &Db, tag: &str) -> Session {
     );
     db.upsert_session(&s).unwrap();
     s
-}
-
-fn bind(db: &Db, session_id: &str, workstream_id: &str, via: Option<&str>) {
-    db.bind(&SessionWorkstreamBinding {
-        session_id: session_id.into(),
-        workstream_id: workstream_id.into(),
-        role: "related".into(),
-        source: noending::domain::binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: via.map(Into::into),
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
 }
 
 fn search_parent(db: &Db, workstream_id: &str) -> Option<String> {
@@ -241,14 +224,7 @@ fn first_path_becomes_primary_automatically() {
 
     // The string is forwarded untouched — this layer owns no second normalizer.
     assert_eq!(attacher.paths_tried(), vec!["/repo/main".to_string()]);
-    assert_eq!(
-        list(&db, &w.id),
-        vec![(
-            path_id_of("/repo/main"),
-            0,
-            workstream_path_source::USER.into()
-        )]
-    );
+    assert_eq!(list(&db, &w.id), vec![(path_id_of("/repo/main"), 0)]);
     assert_eq!(
         db.primary_workspace_path_id(&w.id).unwrap().as_deref(),
         Some(path_id_of("/repo/main").as_str())
@@ -334,7 +310,6 @@ fn append_is_secondary() {
 
     let second = add_workstream_path(&db, &attacher, &w.id, "/repo/docs").unwrap();
     assert_eq!(second.position, 1);
-    assert_eq!(second.source, workstream_path_source::USER);
     assert_eq!(positions(&db, &w.id), vec![0, 1]);
     assert_eq!(
         ordered_path_ids(&db, &w.id),
@@ -374,8 +349,7 @@ fn removing_the_first_path_promotes_the_second() {
     let before = f.db.list_workstream_paths(&w.id).unwrap();
     assert_eq!(positions(&f.db, &w.id), vec![0, 1, 2]);
 
-    let unbound = remove_workstream_path(&f.db, &w.id, &before[0].id).unwrap();
-    assert_eq!(unbound, 0, "no binding came in through it here");
+    remove_workstream_path(&f.db, &w.id, &before[0].id).unwrap();
 
     let after = f.db.list_workstream_paths(&w.id).unwrap();
     assert_eq!(after.len(), 2);
@@ -455,10 +429,6 @@ fn reorder_is_deterministic() {
         f.db.primary_workspace_path_id(&w.id).unwrap(),
         Some(before[1].clone())
     );
-    // the source of each entry rode along with it
-    assert!(result
-        .iter()
-        .all(|p| p.source == workstream_path_source::USER));
 
     // An incomplete list is refused rather than silently keeping the old tail
     // (a UI race must not be able to drop a path the user chose).
@@ -499,25 +469,22 @@ fn duplicate_path_is_idempotent() {
     }
     let rows = list(&db, &w.id);
     assert_eq!(rows.len(), 1, "no second row: {rows:?}");
-    // The original provenance survives: re-adding through another door can never
-    // launder `user` into something else, or the reverse.
-    assert_eq!(rows[0].2, workstream_path_source::USER);
+    assert_eq!(rows[0].0, first.workspace_path_id);
 
-    // The same door from a *session* binding keeps the user row too (§5.6): the
-    // path was already chosen by the user, so nothing rewrites its source.
+    // The same door from a second append still keeps the single user row: the
+    // path was already chosen, so nothing duplicates it.
     db.tx(|tx| {
         let idem = noending::storage::workstream_paths::append_workstream_path_conn(
             tx,
             &w.id,
             &first.workspace_path_id,
-            workstream_path_source::SESSION,
         )
         .unwrap();
         assert_eq!(idem.id, first.id);
         Ok(())
     })
     .unwrap();
-    assert_eq!(list(&db, &w.id)[0].2, workstream_path_source::USER);
+    assert_eq!(list(&db, &w.id).len(), 1);
 }
 
 /// The two UNIQUE keys are what make "secondary without primary" unrepresentable
@@ -533,8 +500,8 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
     // Two entries cannot both claim position 0 — that is the whole of §1.5's
     // "no primary + has secondary" impossibility.
     let clash = f.db.write().execute(
-        "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, source, created_at)
-         VALUES ('dup-zero', ?1, ?2, 0, 'user', ?3)",
+        "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, created_at)
+         VALUES ('dup-zero', ?1, ?2, 0, ?3)",
         params![w.id, spare, now()],
     );
     assert!(
@@ -544,8 +511,8 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
 
     // …and one path cannot be listed twice, even at a free position.
     let dupe = f.db.write().execute(
-        "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, source, created_at)
-         VALUES ('dupe', ?1, ?2, 9, 'user', ?3)",
+        "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, created_at)
+         VALUES ('dupe', ?1, ?2, 9, ?3)",
         params![w.id, rows[0].workspace_path_id, now()],
     );
     assert!(
@@ -565,7 +532,7 @@ fn adding_a_path_imports_no_sessions() {
         .unwrap()
         .workstream;
 
-    // A Session already working in that directory, bound to nothing.
+    // A Session already working in that directory, owned by no Workstream.
     let mut s = session(&db, "in-dir");
     s.workspace_path_id = Some(path_id_of("/repo/main"));
     s.cwd = Some(canonical("/repo/main"));
@@ -574,7 +541,12 @@ fn adding_a_path_imports_no_sessions() {
     add_workstream_path(&db, &attacher, &w.id, "/repo/main").unwrap();
 
     assert_eq!(db.workstream_session_stats(&w.id).unwrap().0, 0);
-    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
+    assert!(db
+        .get_session(&s.id)
+        .unwrap()
+        .unwrap()
+        .owner_workstream_id
+        .is_none());
     assert_eq!(db.list_workstream_paths(&w.id).unwrap().len(), 1);
 }
 
@@ -597,78 +569,33 @@ fn adding_an_unresolvable_path_is_an_error_not_a_noop() {
     assert!(add_workstream_path(&db, &attacher, "gone", "/repo/main").is_err());
 }
 
-// ------------------------------------------------------------- removal reach
+// ---------------------------------------------- removal reach (§5.2 / §12)
 
-/// §1.6 — removal takes exactly the bindings that came in through that path.
+/// §5.2 / §12 — a path removal changes only the path list. Sessions that were
+/// launched through the removed directory keep their Owner Workstream, and the
+/// Session rows themselves are untouched.
 #[test]
-fn removing_a_path_unbinds_only_the_sessions_it_brought_in() {
+fn removing_a_path_leaves_sessions_and_their_owner_alone() {
     let f = fixture();
     let w = &f.workstream;
     let rows = f.db.list_workstream_paths(&w.id).unwrap();
-    let (primary, secondary) = (&rows[0], &rows[1]);
+    let primary = &rows[0];
 
-    let through_primary = session(&f.db, "s-primary");
-    bind(&f.db, &through_primary.id, &w.id, Some(&primary.id));
-    let through_secondary = session(&f.db, "s-secondary");
-    bind(&f.db, &through_secondary.id, &w.id, Some(&secondary.id));
-    // A legacy or drifted binding: we cannot prove which path brought it, so no
-    // path removal gets to decide its fate (§42.3-M1/M2).
-    let without_a_path = session(&f.db, "s-null");
-    bind(&f.db, &without_a_path.id, &w.id, None);
-
-    assert_eq!(
-        remove_workstream_path(&f.db, &w.id, &primary.id).unwrap(),
-        1
-    );
-    assert!(f
-        .db
-        .bindings_for_session(&through_primary.id)
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        f.db.bindings_for_session(&through_secondary.id)
-            .unwrap()
-            .len(),
-        1,
-        "reached through a path that still exists"
-    );
-    assert_eq!(
-        f.db.bindings_for_session(&without_a_path.id).unwrap().len(),
-        1,
-        "a NULL pointer was not brought in by this path"
-    );
-    // §18-12 / §1.6: the Sessions themselves, and their history, are untouched.
-    for s in [&through_primary, &through_secondary, &without_a_path] {
-        assert!(f.db.get_session(&s.id).unwrap().is_some(), "{}", s.id);
-    }
-    assert_eq!(
-        f.db.list_workspace_paths().unwrap().len(),
-        3,
-        "paths are physical facts"
-    );
-}
-
-/// §1.6 — a path removal is about the directory, not a rejection of the Sessions
-/// it carried: no tombstone, so re-adding the path next week still works.
-#[test]
-fn removing_a_path_writes_no_binding_tombstone() {
-    let f = fixture();
-    let w = &f.workstream;
-    let rows = f.db.list_workstream_paths(&w.id).unwrap();
     let s = session(&f.db, "s-carried");
-    bind(&f.db, &s.id, &w.id, Some(&rows[0].id));
+    f.db.set_session_owner(&s.id, Some(&w.id)).unwrap();
 
-    remove_workstream_path(&f.db, &w.id, &rows[0].id).unwrap();
-    assert!(
-        !f.db.binding_removal_exists(&s.id, &w.id).unwrap(),
-        "only a user's own unbind is a permanent negative decision"
+    remove_workstream_path(&f.db, &w.id, &primary.id).unwrap();
+
+    let after = f.db.get_session(&s.id).unwrap().expect("session survives");
+    assert_eq!(
+        after.owner_workstream_id.as_deref(),
+        Some(w.id.as_str()),
+        "path removal never touches ownership"
     );
-    // A user unbind by contrast DOES leave one, which is what this is measured
-    // against (§1.9).
-    let other = session(&f.db, "s-rejected");
-    bind(&f.db, &other.id, &w.id, Some(&rows[1].id));
-    f.db.unbind(&other.id, &w.id).unwrap();
-    assert!(f.db.binding_removal_exists(&other.id, &w.id).unwrap());
+    assert_eq!(f.db.list_workspace_paths().unwrap().len(), 3);
+    // Re-adding the path next week still works: removal leaves no tombstone.
+    add_workstream_path(&f.db, &f.attacher, &w.id, "/repo/main").unwrap();
+    assert_eq!(positions(&f.db, &w.id), vec![0, 1, 2]);
 }
 
 /// A `workstream_paths.id` is scoped to its Workstream: another Workstream's
@@ -828,9 +755,6 @@ fn launch_path_fingerprint_is_order_sensitive() {
 fn path_views_carry_the_facts_the_detail_page_needs() {
     let f = fixture();
     let w = &f.workstream;
-    let rows = f.db.list_workstream_paths(&w.id).unwrap();
-    let s = session(&f.db, "s-view");
-    bind(&f.db, &s.id, &w.id, Some(&rows[1].id));
 
     let views = list_workstream_path_views(&f.db, &w.id).unwrap();
     assert_eq!(views.len(), 3);
@@ -838,11 +762,7 @@ fn path_views_carry_the_facts_the_detail_page_needs() {
     assert_eq!(views[0].canonical_path, canonical("/repo/main"));
     assert_eq!(views[0].project_id, "p1");
     assert_eq!(views[0].project_name.as_deref(), Some("P1"));
-    // §22: the "N sessions leave too" warning is computable before the user commits.
-    assert_eq!(views[1].bound_session_count, 1);
-    assert_eq!(views[0].bound_session_count, 0);
     assert_eq!(views[2].canonical_path, canonical("/repo/backend"));
-    assert_eq!(views[0].path.source, workstream_path_source::USER);
 }
 
 // ------------------------------------------------- multi-path creation (report)

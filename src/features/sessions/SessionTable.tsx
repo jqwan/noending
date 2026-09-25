@@ -3,7 +3,7 @@ import Icon from "../../components/Icon";
 import { useMemo } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type Session, type SessionBindingRow } from "../../types";
+import { AGENT_LABELS, type Agent, type Session } from "../../types";
 
 /* ------------------------------------------------------------------ *
  * 展示层 helper —— SessionCards 与 SessionDetailView 共用。
@@ -16,13 +16,13 @@ import { AGENT_LABELS, type Agent, type Session, type SessionBindingRow } from "
 /** 无标题 / title 未知的 Session：不拿 agent_session_id 当标题糊用户。 */
 export const UNTITLED_SESSION = "未命名会话";
 
-/** 无 cwd 的 Session 仍然合法（Workstream 不是路径，Session 也不绑定路径）。 */
+/** 无 cwd 的 Session 仍然合法（Workstream 不是路径，Session 也不持有路径）。 */
 export const NO_CWD = "未设置";
 
 /** 后端新增未知 Agent 时的兜底，不留空白单元格。 */
 export const UNKNOWN_AGENT = "未知 Agent";
 
-/** Workstream 标题为空串时的兜底（Session 可以零关联，但不能显示成空白格）。 */
+/** Workstream 标题为空串时的兜底（Session 可以未归属，但不能显示成空白格）。 */
 export const UNNAMED_WORKSTREAM = "未命名任务";
 
 /** 有 cwd、但还没被 NoEnding 登记成 WorkspacePath 的 Project 单元格状态。 */
@@ -233,20 +233,16 @@ export function activityLabel(iso: string | null | undefined): string {
 const W_WORKSTREAM = 16;
 
 /**
- * 主关联优先（§2.2 词表）：多绑定 Session 不能显示成随机的那一个。
- * `roleOf` 让 SessionBindingRow 与 [binding, title] 元组两种形状共用同一个判断。
- */
-export function primaryFirst<T>(rows: T[], roleOf: (row: T) => string): T[] {
-  return [...rows].sort((a, b) => (roleOf(a) === "primary" ? 0 : 1) - (roleOf(b) === "primary" ? 0 : 1));
-}
-
-/**
  * Sessions 卡片（整体设计方案 §38/§40）：信息按卡片分组，随窗口宽度自适应。
  * 点击卡片进入详情，操作区提供继续（Resume）和移入回收站。
+ *
+ * 一行最多一个任务（方案 §31）：`session.owner_workstream_id` 指向的那一个，
+ * 标题由调用方给出的 id → title 投影解析；未归属时显示「未归属任务」。
  */
-export default function SessionCards({ sessions, bindings, projectNameById, onOpen, onResume, onTrash }: {
+export default function SessionCards({ sessions, workstreamTitleById, projectNameById, onOpen, onResume, onTrash }: {
   sessions: Session[];
-  bindings: Map<string, SessionBindingRow[]>;
+  /** Workstream id → 标题；用于给 `owner_workstream_id` 一个可读名字。 */
+  workstreamTitleById: Map<string, string>;
   projectNameById: Map<string, string>;
   onOpen: (sessionId: string) => void;
   onResume: (sessionId: string) => void;
@@ -255,28 +251,28 @@ export default function SessionCards({ sessions, bindings, projectNameById, onOp
   const [visibleCount, setVisibleCount] = useViewState("sessions.visibleCount", 100);
   const rows = useMemo(
     () => sessions.map((s) => {
-      const bound = primaryFirst(bindings.get(s.id) ?? [], (r) => r.role);
-      const wsTitle = bound[0] ? (bound[0].workstream_title.trim() || UNNAMED_WORKSTREAM) : null;
+      const wsTitle = s.owner_workstream_id
+        ? (workstreamTitleById.get(s.owner_workstream_id)?.trim() || UNNAMED_WORKSTREAM)
+        : null;
       return {
         session: s,
         workstream: wsTitle ? ellipsisTail(wsTitle, W_WORKSTREAM) : null,
-        extraWorkstreams: Math.max(0, bound.length - 1),
         workstreamFull: wsTitle,
         project: projectCellFor(s, projectNameById),
       };
     }),
-    [sessions, bindings, projectNameById],
+    [sessions, workstreamTitleById, projectNameById],
   );
 
   return (
     <div className="session-list">
-      {rows.slice(0, visibleCount).map(({ session: s, workstream, extraWorkstreams, workstreamFull, project }) => (
+      {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
         <article className="session-list-row" key={s.id}>
           <button className="session-open" onClick={() => onOpen(s.id)}>
             <span className="session-list-title" title={sessionDisplayTitle(s.title)}>{sessionDisplayTitle(s.title)}</span>
             <span className="session-list-meta">
               <span><AgentIcon agent={s.agent} />{agentDisplayLabel(s.agent)}</span>
-              {workstream && <span title={workstreamFull ?? undefined}>{workstream}{extraWorkstreams > 0 ? ` +${extraWorkstreams}` : ""}</span>}
+              <span title={workstreamFull ?? undefined}>所属任务: {workstream ?? "未归属任务"}</span>
               {!project.dim && <span title={project.hint}>{project.text}</span>}
               <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
             </span>

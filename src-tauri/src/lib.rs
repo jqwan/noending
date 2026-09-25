@@ -229,10 +229,7 @@ pub fn run() {
             commands::resolve_conflict_with_edit,
             commands::session_workspace::list_sessions,
             commands::session_workspace::get_session_detail,
-            commands::session_workspace::bind_session_workstream,
-            commands::session_workspace::unbind_session_workstream,
-            commands::session_workspace::replace_session_bindings,
-            commands::session_workspace::list_session_bindings,
+            commands::session_workspace::set_session_owner_workstream,
             // Session Lifecycle & Deletion v0.1: Trash / Restore and the
             // prepared permanent deletion flow. The UI submits ids only.
             commands::session_lifecycle::trash_session,

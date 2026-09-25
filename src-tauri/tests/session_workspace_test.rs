@@ -1,4 +1,4 @@
-//! Session workspace + binding semantics (方案 §19).
+//! Session workspace semantics (方案 §19).
 //!
 //! Every test here pins one edge of the fact chain
 //!
@@ -6,8 +6,7 @@
 //! Session.cwd → workspace_path_id → workspace_paths.project_id → Project
 //! ```
 //!
-//! plus what a Workstream binding means now that a Workstream owns an ordered
-//! path list. Two things are deliberately scripted rather than real:
+//! Two things are deliberately scripted rather than real:
 //!
 //! * the WorkspacePath creator is a [`Scripted`] stand-in for
 //!   `workspace::project`'s implementation of [`WorkspaceAttaching`], so Session
@@ -22,28 +21,20 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use noending::adapters::{adapter_for, DiscoveredSession};
-use noending::domain::{
-    binding_source, workstream_path_source, Agent, Project, Session, SessionWorkstreamBinding,
-    Workstream,
-};
+use noending::domain::{Agent, Project, Session};
 use noending::error::Result;
 use noending::ingestion::{ensure_session_row_with, ingest_session, reconcile_with_engine};
 use noending::launcher::LaunchWorkspace;
 use noending::storage::session_paths::{
-    attach_session_workspace_path_conn, reconcile_binding_paths_conn,
-    refresh_sessions_project_for_path_conn,
+    attach_session_workspace_path_conn, refresh_sessions_project_for_path_conn,
 };
 use noending::storage::workspace::{
     insert_workspace_path_conn, reassign_workspace_path_project_conn,
 };
-use noending::storage::workstream_paths::append_workstream_path_conn;
-use noending::storage::workstream_paths::remove_workstream_path_conn;
 use noending::storage::Db;
 use noending::sync::SyncEngine;
 use noending::workspace::session::{
-    attach_session_conn, attach_sessions_to_registered_paths, record_user_binding,
-    register_workspace_attacher, replace_session_bindings, resolve_binding_path_conn,
-    DesiredBinding, UnattachedWorkspacePaths,
+    attach_sessions_to_registered_paths, register_workspace_attacher, UnattachedWorkspacePaths,
 };
 use noending::workspace::{normalize_path, path_identity_of, WorkspaceAttaching};
 
@@ -104,12 +95,6 @@ fn project(db: &Db, id: &str, name: &str) {
     db.upsert_project(&Project::new(id.into(), name)).unwrap();
 }
 
-fn workstream(db: &Db, id: &str) -> String {
-    db.upsert_workstream(&Workstream::new(id.into(), id))
-        .unwrap();
-    id.to_string()
-}
-
 fn discovered(agent_session_id: &str, cwd: Option<&str>, raw_path: &Path) -> DiscoveredSession {
     DiscoveredSession {
         agent: Agent::Codex,
@@ -144,56 +129,8 @@ fn discover(
     .unwrap()
 }
 
-fn bind(db: &Db, session_id: &str, workstream_id: &str, role: &str) {
-    record_user_binding(
-        db,
-        session_id,
-        workstream_id,
-        role,
-        binding_source::USER_ASSIGNED,
-        1.0,
-    )
-    .unwrap();
-}
-
 fn stored(db: &Db, id: &str) -> Session {
     db.get_session(id).unwrap().expect("session row")
-}
-
-fn claim(db: &Db, session_id: &str, workstream_id: &str) -> Option<String> {
-    db.bindings_for_session(session_id)
-        .unwrap()
-        .into_iter()
-        .find(|b| b.workstream_id == workstream_id)
-        .and_then(|b| b.workstream_path_id)
-}
-
-fn binding(db: &Db, session_id: &str, workstream_id: &str) -> SessionWorkstreamBinding {
-    db.bindings_for_session(session_id)
-        .unwrap()
-        .into_iter()
-        .find(|b| b.workstream_id == workstream_id)
-        .expect("binding row")
-}
-
-fn path_list(db: &Db, workstream_id: &str) -> Vec<(String, i64, String)> {
-    db.list_workstream_paths(workstream_id)
-        .unwrap()
-        .into_iter()
-        .map(|p| (p.workspace_path_id, p.position, p.source))
-        .collect()
-}
-
-/// The WorkstreamPath **row** id at a position — what a binding claims. It is
-/// deliberately not the WorkspacePath id: a claim points at the list entry, not
-/// at the path itself (§42.3-M1).
-fn row_id_at(db: &Db, workstream_id: &str, position: i64) -> String {
-    db.list_workstream_paths(workstream_id)
-        .unwrap()
-        .into_iter()
-        .find(|p| p.position == position)
-        .unwrap_or_else(|| panic!("no WorkstreamPath at position {position}"))
-        .id
 }
 
 /// Codex rollout envelope: discovery fingerprints on `{ordinal, payload, type}`
@@ -300,7 +237,10 @@ fn a_standalone_session_still_gets_a_project() {
     let attacher = Scripted::new("p1");
 
     let (s, _) = discover(&db, &attacher, "s1", Some("/repo/app"));
-    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
+    assert!(
+        stored(&db, &s.id).owner_workstream_id.is_none(),
+        "§3.3 — a standalone Session has no Owner Workstream"
+    );
     assert_eq!(stored(&db, &s.id).project_id.as_deref(), Some("p1"));
 }
 
@@ -500,596 +440,6 @@ fn event_ingestion_alone_does_not_change_a_project() {
         .unwrap();
     assert_eq!(path_after.last_seen_at, path_before.last_seen_at);
     assert_eq!(path_after.project_id, path_before.project_id);
-}
-
-// ------------------------------------------------ 6/7/8. binding → path list
-
-#[test]
-fn binding_a_session_adds_its_missing_workstream_path() {
-    let (_d, db) = temp_db("bind-add");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let w = workstream(&db, "w1");
-    // The user chose this path themselves; it holds position 0.
-    let main = db
-        .tx(|tx| insert_workspace_path_conn(tx, &normalize_path("/repo/main").unwrap(), "p1"))
-        .unwrap();
-    db.tx(|tx| {
-        append_workstream_path_conn(tx, "w1", &main, workstream_path_source::USER)?;
-        Ok(())
-    })
-    .unwrap();
-
-    bind(&db, &s.id, &w, "related");
-
-    let list = path_list(&db, &w);
-    assert_eq!(
-        list.iter().map(|p| p.1).collect::<Vec<_>>(),
-        vec![0, 1],
-        "an existing path keeps its slot; the Session's path appends last"
-    );
-    assert_eq!(list[0].0, main);
-    assert_eq!(list[0].2, workstream_path_source::USER);
-    assert_eq!(
-        list[1],
-        (
-            path_identity_of("/repo/app").unwrap(),
-            1,
-            workstream_path_source::SESSION.to_string()
-        )
-    );
-    assert_eq!(
-        claim(&db, &s.id, &w),
-        Some(row_id_at(&db, &w, 1)),
-        "the binding records the WorkstreamPath that brought it in"
-    );
-}
-
-#[test]
-fn the_first_bound_session_path_becomes_primary() {
-    let (_d, db) = temp_db("bind-primary");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let w = workstream(&db, "w1");
-    assert!(
-        path_list(&db, &w).is_empty(),
-        "a fresh Workstream has no paths"
-    );
-
-    bind(&db, &s.id, &w, "primary");
-
-    // §19-7: an empty list yields position 0 — "became primary" needs no special
-    // case, which is why there is no is_primary column to fall out of agreement.
-    assert_eq!(
-        path_list(&db, &w),
-        vec![(
-            path_identity_of("/repo/app").unwrap(),
-            0,
-            workstream_path_source::SESSION.to_string()
-        )]
-    );
-    assert_eq!(
-        db.primary_workspace_path_id(&w).unwrap(),
-        path_identity_of("/repo/app")
-    );
-    assert_eq!(claim(&db, &s.id, &w), Some(row_id_at(&db, &w, 0)));
-}
-
-#[test]
-fn a_later_bound_session_path_appends_as_secondary() {
-    let (_d, db) = temp_db("bind-secondary");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let w = workstream(&db, "w1");
-    let first = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let second = discover(&db, &attacher, "s2", Some("/repo/service")).0;
-
-    bind(&db, &first.id, &w, "primary");
-    bind(&db, &second.id, &w, "related");
-
-    assert_eq!(
-        path_list(&db, &w)
-            .into_iter()
-            .map(|p| (p.0, p.1))
-            .collect::<Vec<_>>(),
-        vec![
-            (path_identity_of("/repo/app").unwrap(), 0),
-            (path_identity_of("/repo/service").unwrap(), 1),
-        ]
-    );
-    assert_eq!(
-        db.primary_workspace_path_id(&w).unwrap(),
-        path_identity_of("/repo/app"),
-        "a later joiner never takes the primary slot"
-    );
-    assert_eq!(
-        claim(&db, &second.id, &w),
-        Some(row_id_at(&db, &w, 1)),
-        "the secondary joiner claims the secondary entry, not the primary one"
-    );
-}
-
-#[test]
-fn binding_reuses_a_path_that_is_already_in_the_list() {
-    let (_d, db) = temp_db("bind-reuse");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let path = path_identity_of("/repo/app").unwrap();
-    let w = workstream(&db, "w1");
-    let row = db
-        .tx(|tx| append_workstream_path_conn(tx, "w1", &path, workstream_path_source::USER))
-        .unwrap();
-
-    bind(&db, &s.id, &w, "related");
-
-    let list = path_list(&db, &w);
-    assert_eq!(list.len(), 1, "no duplicate row for the same path");
-    assert_eq!(
-        list[0].2,
-        workstream_path_source::USER.to_string(),
-        "a Session cannot launder the provenance of a path the user chose"
-    );
-    assert_eq!(claim(&db, &s.id, &w), Some(row.id));
-}
-
-#[test]
-fn an_automatic_binding_never_grows_the_path_list() {
-    // §42.3-M2 — path lists grow from a user action or an explicit bind only.
-    let (_d, db) = temp_db("bind-auto");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let w = workstream(&db, "w1");
-    let main = db
-        .tx(|tx| insert_workspace_path_conn(tx, &normalize_path("/repo/main").unwrap(), "p1"))
-        .unwrap();
-    db.tx(|tx| {
-        append_workstream_path_conn(tx, "w1", &main, workstream_path_source::USER)?;
-        Ok(())
-    })
-    .unwrap();
-
-    record_user_binding(&db, &s.id, &w, "related", binding_source::AUTO, 0.6).unwrap();
-
-    assert_eq!(
-        path_list(&db, &w),
-        vec![(main, 0, workstream_path_source::USER.to_string())],
-        "the classifier's guess did not add a path the user never chose"
-    );
-    assert_eq!(
-        claim(&db, &s.id, &w),
-        None,
-        "and the binding honestly reports that no path brought it in"
-    );
-}
-
-// --------------------------------------- 9. unbinding preserves the path list
-
-#[test]
-fn unbinding_a_session_preserves_the_workstream_path() {
-    let (_d, db) = temp_db("unbind");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let w = workstream(&db, "w1");
-    bind(&db, &s.id, &w, "primary");
-    let path = path_identity_of("/repo/app").unwrap();
-    assert_eq!(path_list(&db, &w).len(), 1);
-
-    db.unbind(&s.id, &w).unwrap();
-
-    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
-    assert_eq!(
-        path_list(&db, &w),
-        vec![(path, 0, workstream_path_source::SESSION.to_string())],
-        "§1.9: removing a binding never removes a path"
-    );
-    assert!(
-        db.binding_removal_exists(&s.id, &w).unwrap(),
-        "the removal stays a permanent negative decision"
-    );
-    // The Session and its workspace facts are untouched by a bind/unbind.
-    let after = stored(&db, &s.id);
-    assert_eq!(after.workspace_path_id, path_identity_of("/repo/app"));
-    assert_eq!(after.project_id.as_deref(), Some("p1"));
-}
-
-#[test]
-fn replace_bindings_removing_a_row_keeps_its_path() {
-    let (_d, db) = temp_db("unbind-replace");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let w = workstream(&db, "w1");
-    bind(&db, &s.id, &w, "related");
-
-    replace_session_bindings(&db, &s.id, &[]).unwrap();
-
-    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
-    assert_eq!(path_list(&db, &w).len(), 1);
-    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
-    assert!(db.binding_removal_exists(&s.id, &w).unwrap());
-}
-
-// --------------------------------- 10. the claim is exact equality (§42.3-M1)
-
-#[test]
-fn the_binding_records_the_exact_workstream_path_id() {
-    // /repo and /repo/frontend are two WorkspacePaths and both can be in one
-    // list. A Session at /repo/frontend claims the /repo/frontend row — never
-    // the prefix, never a "longest match": equality.
-    let (_d, db) = temp_db("exact");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let w = workstream(&db, "w1");
-    let outer = discover(&db, &attacher, "outer", Some("/repo")).0;
-    let inner = discover(&db, &attacher, "inner", Some("/repo/frontend")).0;
-    let outer_path = path_identity_of("/repo").unwrap();
-    let inner_path = path_identity_of("/repo/frontend").unwrap();
-    assert_ne!(outer_path, inner_path);
-    let outer_row = db
-        .tx(|tx| append_workstream_path_conn(tx, "w1", &outer_path, workstream_path_source::USER))
-        .unwrap();
-
-    bind(&db, &inner.id, &w, "related");
-    bind(&db, &outer.id, &w, "related");
-
-    let list = path_list(&db, &w);
-    assert_eq!(list.len(), 2, "both spellings coexist in the list");
-    assert_eq!(list[0].0, outer_path);
-    assert_eq!(list[1].0, inner_path);
-    let inner_claim = claim(&db, &inner.id, &w).expect("inner claim");
-    assert_eq!(inner_claim, db.list_workstream_paths(&w).unwrap()[1].id);
-    assert_ne!(inner_claim, outer_row.id, "no prefix matching");
-    assert_eq!(claim(&db, &outer.id, &w), Some(outer_row.id));
-}
-
-#[test]
-fn a_claim_must_be_a_path_of_that_workstream_and_of_that_session() {
-    let (_d, db) = temp_db("claim-guard");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let other = discover(&db, &attacher, "s2", Some("/repo/other")).0;
-    let w = workstream(&db, "w1");
-    let own = db
-        .tx(|tx| {
-            append_workstream_path_conn(
-                tx,
-                "w1",
-                &path_identity_of("/repo/app").unwrap(),
-                workstream_path_source::USER,
-            )
-        })
-        .unwrap();
-    let others_row = db
-        .tx(|tx| {
-            append_workstream_path_conn(
-                tx,
-                "w1",
-                &path_identity_of("/repo/other").unwrap(),
-                workstream_path_source::USER,
-            )
-        })
-        .unwrap();
-
-    // Naming a WorkstreamPath that is not in this Workstream's list is refused…
-    let err =
-        resolve_binding_path_conn(&db.read(), &s.id, "w-empty", Some(&own.id), false).unwrap_err();
-    assert!(!err.to_string().is_empty());
-    // …and so is a row that is in the list but belongs to another Session.
-    let err =
-        resolve_binding_path_conn(&db.read(), &s.id, &w, Some(&others_row.id), false).unwrap_err();
-    assert!(!err.to_string().is_empty());
-    // The honest answer for the Session's own path:
-    assert_eq!(
-        resolve_binding_path_conn(&db.read(), &s.id, &w, Some(&own.id), false).unwrap(),
-        Some(own.id.clone())
-    );
-    // And a path already in the list needs no append to be claimed, even when
-    // appending is disallowed.
-    assert_eq!(
-        resolve_binding_path_conn(&db.read(), &other.id, &w, None, false).unwrap(),
-        Some(others_row.id)
-    );
-}
-
-#[test]
-fn a_legacy_null_claim_keeps_working_and_is_repaired_by_a_real_rebind() {
-    let (_d, db) = temp_db("legacy-null");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let w = workstream(&db, "w1");
-    let path = path_identity_of("/repo/app").unwrap();
-    let row = db
-        .tx(|tx| append_workstream_path_conn(tx, "w1", &path, workstream_path_source::MIGRATION))
-        .unwrap();
-
-    // A v11-era binding: no claim at all.
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: w.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: Some("rev-3".into()),
-        last_sync_cursor: 11,
-        created_at: "2026-09-01T00:00:00Z".into(),
-        last_used_at: "2026-09-02T00:00:00Z".into(),
-    })
-    .unwrap();
-    assert_eq!(binding(&db, &s.id, &w).workstream_path_id, None);
-
-    // (1) It is out of reach of a path deletion: removing a path may not destroy
-    // a binding we cannot prove came from it (§42.3-M1/M2).
-    let unbound = db
-        .tx(|tx| remove_workstream_path_conn(tx, "w1", &row.id))
-        .unwrap();
-    assert_eq!(unbound, 0);
-    assert!(path_list(&db, &w).is_empty());
-    let kept = binding(&db, &s.id, &w);
-    assert_eq!(kept.role, "primary");
-    assert_eq!(kept.last_sync_cursor, 11);
-
-    // (2) Re-saving it grows nothing: a kept binding is not a join (§1.8), so the
-    // path the user removed is not silently put back.
-    replace_session_bindings(
-        &db,
-        &s.id,
-        &[DesiredBinding {
-            workstream_id: w.clone(),
-            role: "primary".into(),
-            workstream_path_id: None,
-        }],
-    )
-    .unwrap();
-    assert!(path_list(&db, &w).is_empty());
-    assert_eq!(binding(&db, &s.id, &w).workstream_path_id, None);
-
-    // (3) §5.6 — once the path is in the list again, a save records the claim
-    // that was always true. Nothing else about the row moves.
-    let back = db
-        .tx(|tx| append_workstream_path_conn(tx, "w1", &path, workstream_path_source::USER))
-        .unwrap();
-    replace_session_bindings(
-        &db,
-        &s.id,
-        &[DesiredBinding {
-            workstream_id: w.clone(),
-            role: "primary".into(),
-            workstream_path_id: None,
-        }],
-    )
-    .unwrap();
-    let repaired = binding(&db, &s.id, &w);
-    assert_eq!(repaired.workstream_path_id, Some(back.id));
-    assert_eq!(repaired.last_sync_cursor, 11, "provenance and cursors kept");
-    assert_eq!(repaired.created_at, "2026-09-01T00:00:00Z");
-    assert_eq!(
-        path_list(&db, &w),
-        vec![(path, 0, workstream_path_source::USER.to_string())]
-    );
-
-    // (4) Now that the claim is provable, deleting that path does take the
-    // binding — which is exactly what §1.6 promises, and what NULL was hiding.
-    let after = db
-        .tx(|tx| remove_workstream_path_conn(tx, "w1", &row_id_at(&db, "w1", 0)))
-        .unwrap();
-    assert_eq!(after, 1);
-    assert!(db.bindings_for_session(&s.id).unwrap().is_empty());
-}
-
-// ------------------------------------------- 12. cwd drift never grows a list
-
-#[test]
-fn cwd_drift_nulls_the_claim_and_never_grows_the_users_path_list() {
-    let (_d, db) = temp_db("drift");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/a")).0;
-    let w = workstream(&db, "w1");
-    bind(&db, &s.id, &w, "primary");
-    assert_eq!(path_list(&db, &w).len(), 1);
-    assert!(claim(&db, &s.id, &w).is_some());
-
-    // Re-discovery reads the transcript again: the Session really did move.
-    let (again, is_new) = discover(&db, &attacher, "s1", Some("/repo/b"));
-    assert!(!is_new);
-    assert_eq!(again.id, s.id);
-    let after = stored(&db, &s.id);
-    assert_eq!(after.cwd.as_deref(), Some("/repo/b"));
-    assert_eq!(after.workspace_path_id, path_identity_of("/repo/b"));
-    assert_eq!(after.project_id.as_deref(), Some("p1"), "same Project");
-    assert_eq!(
-        claim(&db, &s.id, &w),
-        None,
-        "§42.3-M2: the claim went back to NULL"
-    );
-    assert_eq!(
-        path_list(&db, &w).len(),
-        1,
-        "…and the user's Workstream did NOT gain /repo/b"
-    );
-    assert_eq!(
-        binding(&db, &s.id, &w).role,
-        "primary",
-        "the binding itself is user intent and stays"
-    );
-
-    // Drifting onto a path that IS in the list re-points the claim — exact match
-    // again, and still no growth.
-    discover(&db, &attacher, "s1", Some("/repo/a"));
-    assert_eq!(path_list(&db, &w).len(), 1);
-    assert!(claim(&db, &s.id, &w).is_some());
-}
-
-#[test]
-fn an_interrupted_drift_converges_without_double_applying() {
-    // The attach and the claim repair are one transaction; if a caller moved the
-    // path alone, replaying the reconciliation must settle on the same state.
-    let (_d, db) = temp_db("drift2");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/a")).0;
-    let w = workstream(&db, "w1");
-    bind(&db, &s.id, &w, "related");
-
-    db.tx(|tx| {
-        attach_session_workspace_path_conn(tx, &s.id, path_identity_of("/repo/b").as_deref())
-    })
-    .unwrap();
-    assert!(
-        claim(&db, &s.id, &w).is_some(),
-        "stale by construction: the path moved, the claim did not"
-    );
-
-    for _ in 0..3 {
-        db.tx(|tx| reconcile_binding_paths_conn(tx, &s.id)).unwrap();
-    }
-    assert_eq!(claim(&db, &s.id, &w), None);
-    assert_eq!(path_list(&db, &w).len(), 1);
-
-    // Discovery then agrees, and the seam changes nothing further.
-    let moved = db
-        .tx(|tx| attach_session_conn(tx, &attacher, &s.id, Some("/repo/b")))
-        .unwrap();
-    assert!(!moved, "already attached: no write, no churn");
-    assert_eq!(path_list(&db, &w).len(), 1);
-}
-
-// ------------------------------------------------ 13/14. replace semantics
-
-#[test]
-fn replace_bindings_keeps_provenance_and_adds_paths_only_for_new_rows() {
-    let (_d, db) = temp_db("replace");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let kept = workstream(&db, "w-kept");
-    let added = workstream(&db, "w-added");
-    let kept_path = db
-        .tx(|tx| {
-            append_workstream_path_conn(
-                tx,
-                "w-kept",
-                &path_identity_of("/repo/app").unwrap(),
-                workstream_path_source::USER,
-            )
-        })
-        .unwrap();
-    db.bind(&SessionWorkstreamBinding {
-        session_id: s.id.clone(),
-        workstream_id: kept.clone(),
-        role: "primary".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: Some(kept_path.id.clone()),
-        last_seen_revision: Some("rev-9".into()),
-        last_sync_cursor: 21,
-        created_at: "2026-09-01T00:00:00Z".into(),
-        last_used_at: "2026-09-02T00:00:00Z".into(),
-    })
-    .unwrap();
-
-    replace_session_bindings(
-        &db,
-        &s.id,
-        &[
-            DesiredBinding {
-                workstream_id: kept.clone(),
-                role: "primary".into(),
-                workstream_path_id: None,
-            },
-            DesiredBinding {
-                workstream_id: added.clone(),
-                role: "related".into(),
-                workstream_path_id: None,
-            },
-        ],
-    )
-    .unwrap();
-
-    let kept_row = binding(&db, &s.id, &kept);
-    assert_eq!(kept_row.created_at, "2026-09-01T00:00:00Z");
-    assert_eq!(kept_row.last_seen_revision.as_deref(), Some("rev-9"));
-    assert_eq!(kept_row.last_sync_cursor, 21);
-    assert_eq!(kept_row.workstream_path_id, Some(kept_path.id));
-    let added_row = binding(&db, &s.id, &added);
-    assert_eq!(added_row.source, binding_source::USER_ASSIGNED);
-    assert_eq!(added_row.confidence, 1.0);
-    assert_eq!(
-        path_list(&db, &added),
-        vec![(
-            path_identity_of("/repo/app").unwrap(),
-            0,
-            workstream_path_source::SESSION.to_string()
-        )],
-        "the added join created its WorkstreamPath at position 0"
-    );
-    assert_eq!(
-        path_list(&db, &kept).len(),
-        1,
-        "a kept binding never grew its Workstream's list"
-    );
-}
-
-#[test]
-fn replace_bindings_rejects_an_unknown_role_without_leaving_half_state() {
-    let (_d, db) = temp_db("replace-atomic");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let kept = workstream(&db, "w-kept");
-    let other = workstream(&db, "w-other");
-    bind(&db, &s.id, &kept, "primary");
-
-    let err = replace_session_bindings(
-        &db,
-        &s.id,
-        &[
-            DesiredBinding {
-                workstream_id: other.clone(),
-                role: "related".into(),
-                workstream_path_id: None,
-            },
-            DesiredBinding {
-                workstream_id: kept.clone(),
-                role: "boss".into(),
-                workstream_path_id: None,
-            },
-        ],
-    )
-    .unwrap_err();
-    assert!(!err.to_string().is_empty());
-    let rows = db.bindings_for_session(&s.id).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].workstream_id, kept);
-    assert_eq!(rows[0].role, "primary");
-    assert!(
-        path_list(&db, &other).is_empty(),
-        "the rolled-back WorkstreamPath did not survive either"
-    );
-}
-
-#[test]
-fn repeated_binds_are_idempotent_for_the_path_list() {
-    // Retry safety: the same user action applied twice must not double-apply.
-    let (_d, db) = temp_db("idempotent");
-    project(&db, "p1", "repo");
-    let attacher = Scripted::new("p1");
-    let s = discover(&db, &attacher, "s1", Some("/repo/app")).0;
-    let w = workstream(&db, "w1");
-    for _ in 0..3 {
-        bind(&db, &s.id, &w, "related");
-    }
-    assert_eq!(path_list(&db, &w).len(), 1);
-    assert_eq!(db.bindings_for_session(&s.id).unwrap().len(), 1);
-    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
 }
 
 // ------------------------------------------------ product-level discovery
@@ -1619,6 +969,7 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
         cwd: Some(cwd.into()),
         workspace_path_id: None,
         project_id: None,
+        owner_workstream_id: None,
         raw_path: format!("/raw/{id}.jsonl"),
         parent_agent_session_id: None,
         started_at: None,

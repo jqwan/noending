@@ -15,7 +15,6 @@
 //! whose stored cursor still matches the file on disk, so a reconcile pass
 //! costs O(changed files), not O(all history).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::adapters::AgentAdapter;
@@ -190,10 +189,9 @@ pub fn ensure_session_row_with(
             }
             updated.last_activity_at = d.last_activity_at.clone().or(updated.last_activity_at);
             // The path itself is deliberately NOT handed to upsert here: the
-            // attachment and the binding claims that read through it move
-            // together in the one transaction below, so an interrupted pass can
-            // never leave a claim pointing at a path the Session no longer has —
-            // and `moved` stays true until both are done, which makes the retry
+            // attachment moves in the one transaction below, so an interrupted
+            // pass can never leave the row claiming a path it no longer has —
+            // and `moved` stays true until it is done, which makes the retry
             // converge instead of double-applying.
             db.upsert_session(&updated)?;
             if let Some(new_path) = moved {
@@ -226,6 +224,9 @@ pub fn ensure_session_row_with(
         // Never taken from the caller: `upsert_session` derives it from that
         // WorkspacePath in the same statement (§42.3-M3).
         project_id: None,
+        // Discovery never assigns semantic ownership (方案 §49): only an
+        // explicit user action or a matched LaunchIntent sets this.
+        owner_workstream_id: None,
         raw_path,
         parent_agent_session_id: d.parent_agent_session_id.clone(),
         started_at: d.started_at.clone(),
@@ -391,7 +392,7 @@ where
 /// The EVENT STORE IS NEVER DELETED — event ids and every SourceReference
 /// in context revisions stay valid, because unchanged content dedups by
 /// identity and only genuinely new/changed source content appends.
-/// Bindings, context items and audit history are untouched.
+/// Context items and audit history are untouched.
 ///
 /// Deliberately passes the all-false "unchanged" predicate: a re-ingest
 /// WANTS to re-read every file, cursor match or not.
@@ -429,27 +430,27 @@ where
 }
 
 /// Sessions with pending (un-ingested) activity, used by "sync stale" flows.
+///
+/// Scoped to the Sessions that OWN this Workstream (方案 §40) — a Session
+/// belongs to at most one, so it can never be synced twice under this rule.
+/// "Stale" = the Agent source file was modified after the Session's last
+/// recorded activity, so there may be a delta the processed cursor has not
+/// seen. Read-only observation; nothing is written here.
 pub fn stale_sessions(db: &Db, workstream_id: &str) -> Result<Vec<Session>> {
-    let bindings = db.bindings_for_workstream(workstream_id)?;
     let mut out = Vec::new();
-    let mut seen: HashMap<String, ()> = HashMap::new();
-    for b in bindings {
-        if seen.contains_key(&b.session_id) {
-            continue;
-        }
-        seen.insert(b.session_id.clone(), ());
-        if let Some(s) = db.get_session(&b.session_id)? {
-            // compare stored cursor vs file size via quick re-discover is
-            // expensive; consider stale when file mtime newer than last used
-            if let Ok(meta) = std::fs::metadata(&s.raw_path) {
-                if let Ok(modified) = meta.modified() {
-                    let m: chrono::DateTime<chrono::Utc> = modified.into();
-                    let last_used = chrono::DateTime::parse_from_rfc3339(&b.last_used_at)
-                        .map(|t| t.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now());
-                    if m > last_used {
-                        out.push(s);
-                    }
+    for s in db.sessions_for_workstream(workstream_id)? {
+        if let Ok(meta) = std::fs::metadata(&s.raw_path) {
+            if let Ok(modified) = meta.modified() {
+                let m: chrono::DateTime<chrono::Utc> = modified.into();
+                let last_used = s
+                    .last_activity_at
+                    .as_deref()
+                    .or(s.started_at.as_deref())
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now);
+                if m > last_used {
+                    out.push(s);
                 }
             }
         }

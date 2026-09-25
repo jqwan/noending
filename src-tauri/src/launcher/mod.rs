@@ -3,9 +3,8 @@
 //! New Session: a durable LaunchIntent is created BEFORE the agent starts
 //! (the external session id is unknowable at that point). When reconcile
 //! later discovers the new external session, the intent is matched and the
-//! user's explicitly selected Workstreams become bindings with
-//! source=explicit_launch_selection / confidence=1.0 — never guessable away
-//! by automatic classification.
+//! user's chosen Workstream becomes the Session's single Owner (方案 §15.1).
+//! Nothing else is written: no WorkstreamPath and no confidence.
 //!
 //! Resume: builds a delta against the last delivered revision snapshot and
 //! records a fresh ContextDelivery only after a successful launch.
@@ -25,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::adapters::AgentCommand;
 use crate::agent_runtime::AgentRuntimeOverrides;
 use crate::context::ContextDeliveryLevel;
-use crate::domain::{binding_source, launch_status, Agent, ContextDelivery, LaunchIntent, Session};
+use crate::domain::{launch_status, Agent, ContextDelivery, LaunchIntent, Session};
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 
@@ -173,8 +172,9 @@ pub struct PreparedLaunch {
     pub mode: String, // "new" | "resume"
     pub agent: Agent,
     pub session_id: Option<String>,
-    pub workstream_ids: Vec<String>,
-    pub extra_workstream_ids: Vec<String>,
+    /// The single Owner Workstream of this launch, or `None` (方案 §14.1).
+    /// A Session has at most one, so there is no "extra" list.
+    pub owner_workstream_id: Option<String>,
     /// The directory the Agent WILL start in — authoritative. Since §42.3-M16
     /// the spawn step uses this value and nothing else: `launch_prepared` no
     /// longer re-reads `sessions.cwd`, because re-reading let background
@@ -229,16 +229,19 @@ impl SessionLauncher {
         Ok(path)
     }
 
-    /// Sync Point: before New Session, sync stale sessions of the workstreams.
-    pub fn sync_stale_for_workstreams(&self, db: &Db, workstream_ids: &[String]) -> Result<usize> {
+    /// Sync Point: before New Session, sync the Owner Workstream's stale sessions.
+    pub fn sync_stale_for_workstreams(
+        &self,
+        db: &Db,
+        owner_workstream_id: Option<&str>,
+    ) -> Result<usize> {
+        let Some(ws_id) = owner_workstream_id else {
+            return Ok(0);
+        };
         let engine = crate::sync::SyncEngine::from_settings(db);
         let mut synced = 0;
-        for ws_id in workstream_ids {
-            let stale = crate::ingestion::stale_sessions(db, ws_id)?;
-            for s in stale {
-                let n = sync_one_session_with_engine(db, &engine, &s)?;
-                synced += n;
-            }
+        for s in crate::ingestion::stale_sessions(db, ws_id)? {
+            synced += sync_one_session_with_engine(db, &engine, &s)?;
         }
         Ok(synced)
     }
@@ -254,28 +257,30 @@ impl SessionLauncher {
     ///
     /// `cwd` is the caller's explicit directory: when present it IS the launch
     /// directory (§13 tier 1) and nothing below it is consulted. Otherwise the
-    /// selected Workstreams' ordered paths decide, then the default workspace.
+    /// Owner Workstream's ordered paths decide, then the default workspace
+    /// (方案 §15).
     pub fn prepare_new_in(
         &self,
         db: &Db,
         agent: Agent,
-        workstream_ids: &[String],
+        owner_workstream_id: Option<&str>,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
-        self.sync_stale_for_workstreams(db, workstream_ids)?;
+        self.sync_stale_for_workstreams(db, owner_workstream_id)?;
 
-        let resolution = resolve_new_cwd(db, workstream_ids, cwd, workspace)?;
+        let resolution = resolve_new_cwd(db, owner_workstream_id, cwd, workspace)?;
 
         let delivery_level = crate::settings::context_delivery_level_of(db)?;
         let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
-        let bundle = crate::context::build_bundle(db, "new", None, workstream_ids, delivery_level)?;
+        let bundle =
+            crate::context::build_bundle(db, "new", None, owner_workstream_id, delivery_level)?;
 
         let state_fingerprint = compute_state_fingerprint_in(
             db,
             "new",
             None,
-            workstream_ids,
+            owner_workstream_id,
             delivery_level,
             agent,
             workspace,
@@ -287,8 +292,7 @@ impl SessionLauncher {
             mode: "new".into(),
             agent,
             session_id: None,
-            workstream_ids: workstream_ids.to_vec(),
-            extra_workstream_ids: vec![],
+            owner_workstream_id: owner_workstream_id.map(str::to_string),
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             delivery_level,
@@ -300,22 +304,22 @@ impl SessionLauncher {
     }
 
     /// Prepare Resume Session:
-    /// Syncs session's own messages, computes effective workstream list (existing + extra),
-    /// builds the delta context bundle against last delivered revisions, and captures fingerprint.
+    /// Syncs the session's own messages, uses its current Owner Workstream,
+    /// builds the delta context bundle against last delivered revisions, and
+    /// captures the fingerprint.
     ///
-    /// INVARIANT: Zero premature side effects. Does NOT commit extra workstream bindings,
+    /// INVARIANT: Zero premature side effects. Does NOT change ownership,
     /// does NOT write context files, and does NOT advance delivery snapshots.
     /// §21-3 — Prepare Resume against an explicit [`LaunchWorkspace`].
     ///
     /// The Session's own cwd wins while it is a real directory; when it is gone
-    /// the launch falls back to a bound Workstream's primary path and then to
+    /// the launch falls back to the Owner Workstream's primary path and then to
     /// the default workspace, and the fallback is recorded in
     /// `cwd_resolution` instead of being absorbed (§13, §42.3-M16).
     pub fn prepare_resume_in(
         &self,
         db: &Db,
         session_id: &str,
-        extra_workstream_ids: &[String],
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
         let session = db
@@ -331,29 +335,25 @@ impl SessionLauncher {
         let engine = crate::sync::SyncEngine::from_settings(db);
         sync_one_session_with_engine(db, &engine, &session)?;
 
-        let mut ws_ids: Vec<String> = db
-            .bindings_for_session(session_id)?
-            .into_iter()
-            .map(|b| b.workstream_id)
-            .collect();
-        for extra in extra_workstream_ids {
-            if !ws_ids.contains(extra) {
-                ws_ids.push(extra.clone());
-            }
-        }
+        let owner = session.owner_workstream_id.clone();
 
-        let resolution = resolve_resume_cwd(db, session_id, &ws_ids, workspace)?;
+        let resolution = resolve_resume_cwd(db, session_id, owner.as_deref(), workspace)?;
 
         let delivery_level = crate::settings::context_delivery_level_of(db)?;
         let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, session.agent)?;
-        let bundle =
-            crate::context::build_bundle(db, "resume", Some(&session), &ws_ids, delivery_level)?;
+        let bundle = crate::context::build_bundle(
+            db,
+            "resume",
+            Some(&session),
+            owner.as_deref(),
+            delivery_level,
+        )?;
 
         let state_fingerprint = compute_state_fingerprint_in(
             db,
             "resume",
             Some(session_id),
-            &ws_ids,
+            owner.as_deref(),
             delivery_level,
             session.agent,
             workspace,
@@ -365,8 +365,7 @@ impl SessionLauncher {
             mode: "resume".into(),
             agent: session.agent,
             session_id: Some(session_id.to_string()),
-            workstream_ids: ws_ids,
-            extra_workstream_ids: extra_workstream_ids.to_vec(),
+            owner_workstream_id: owner,
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             delivery_level,
@@ -387,7 +386,7 @@ impl SessionLauncher {
     ///    (NO re-building), passes the EXACT prepared runtime overrides (NO
     ///    re-reading Settings) and starts the Agent in `prepared.cwd` (NO
     ///    re-resolving — §42.3-M16).
-    /// 3. Commits LaunchIntent (new) or extra bindings & cumulative delivery snapshots (resume)
+    /// 3. Commits the LaunchIntent (new) or a cumulative delivery snapshot (resume)
     ///    only upon actual launch.
     /// `launch_prepared` with the current [`LaunchWorkspace`].
     ///
@@ -440,7 +439,7 @@ impl SessionLauncher {
             db,
             &prepared.mode,
             prepared.session_id.as_deref(),
-            &prepared.workstream_ids,
+            prepared.owner_workstream_id.as_deref(),
             current_delivery_level,
             prepared.agent,
             workspace,
@@ -456,14 +455,14 @@ impl SessionLauncher {
         // whatever Settings holds right now.
         let runtime_opts = prepared.runtime.exec_options();
 
-        let ctx_file = if prepared.workstream_ids.is_empty()
+        let ctx_file = if prepared.owner_workstream_id.is_none()
             || prepared.delivery_level == crate::context::ContextDeliveryLevel::Off
         {
             None
         } else {
             let title_hint = prepared
-                .workstream_ids
-                .first()
+                .owner_workstream_id
+                .as_deref()
                 .and_then(|id| db.get_workstream(id).ok().flatten())
                 .map(|w| w.title)
                 .unwrap_or_else(|| "bundle".into());
@@ -474,11 +473,7 @@ impl SessionLauncher {
             let (delivered_by_ws, delivered_confs_by_ws) = if ctx_file.is_some() {
                 delivered_revisions_and_conflicts_by_workstream(
                     &prepared.bundle,
-                    prepared
-                        .workstream_ids
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or(""),
+                    prepared.owner_workstream_id.as_deref().unwrap_or(""),
                 )
             } else {
                 Default::default()
@@ -487,7 +482,7 @@ impl SessionLauncher {
                 id: new_id(),
                 launch_type: "new".into(),
                 agent: prepared.agent,
-                selected_workstream_ids: prepared.workstream_ids.clone(),
+                owner_workstream_id: prepared.owner_workstream_id.clone(),
                 cwd: prepared.cwd.clone(),
                 context_bundle_markdown: if ctx_file.is_some() {
                     Some(prepared.bundle.markdown.clone())
@@ -549,13 +544,11 @@ impl SessionLauncher {
                     .unwrap_or_default(),
                 bundle: prepared.bundle.clone(),
                 note: if ctx_file.is_some() {
-                    "新 Session 启动后会在发现时通过 LaunchIntent 自动建立显式 Workstream 绑定。"
-                        .into()
-                } else if prepared.workstream_ids.is_empty() {
-                    "已直接启动（未携带 Workstream Context）；此启动未选择 Workstream，允许 0 绑定。"
-                        .into()
+                    "新 Session 启动后会在发现时通过 LaunchIntent 自动归属所选任务。".into()
+                } else if prepared.owner_workstream_id.is_none() {
+                    "已直接启动（未携带任务 Context）；此启动未选择所属任务。".into()
                 } else {
-                    "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
+                    "已选择所属任务；Context Delivery 已关闭，本次未注入 Context。".into()
                 },
                 launch_intent_id: Some(intent.id),
             })
@@ -592,47 +585,20 @@ impl SessionLauncher {
             )?;
             let outcome = spawn(&cmd)?;
 
-            // §1.7: a launch that fell back to NoEnding's own default
-            // workspace binds the Workstream but does not teach it that
-            // directory — the user never chose it.
-            let grow_path_list = prepared.cwd_resolution.source != CwdSource::DefaultWorkspace;
-
-            for extra in &prepared.extra_workstream_ids {
-                crate::workspace::session::record_user_binding_growing(
-                    db,
-                    session_id,
-                    extra,
-                    "related",
-                    binding_source::USER_ASSIGNED,
-                    1.0,
-                    grow_path_list,
-                )?;
-            }
-
-            let prev_deliveries = db.latest_deliveries(session_id)?;
-            for ws_id in &prepared.workstream_ids {
-                crate::workspace::session::record_user_binding_growing(
-                    db,
-                    session_id,
-                    ws_id,
-                    "related",
-                    binding_source::USER_ASSIGNED,
-                    1.0,
-                    grow_path_list,
-                )?;
+            // Resume never changes ownership: it uses the Session's current
+            // Owner Workstream (方案 §16), so the only write here is the
+            // delivery ledger entry for what the Agent was just handed.
+            if let Some(ws_id) = prepared.owner_workstream_id.as_deref() {
                 if ctx_file.is_some() {
-                    let prev = prev_deliveries.iter().find(|d| &d.workstream_id == ws_id);
+                    let prev_deliveries = db.latest_deliveries(session_id)?;
+                    let prev = prev_deliveries.iter().find(|d| d.workstream_id == ws_id);
                     let delivery = compute_cumulative_delivery(
                         db,
                         session_id,
                         ws_id,
                         &prepared.bundle,
                         prev,
-                        prepared
-                            .workstream_ids
-                            .first()
-                            .map(|s| s.as_str())
-                            .unwrap_or(""),
+                        ws_id,
                     )?;
                     db.record_delivery(&delivery)?;
                 }
@@ -648,8 +614,8 @@ impl SessionLauncher {
                 bundle: prepared.bundle.clone(),
                 note: if ctx_file.is_some() {
                     "已同步最新消息并生成增量上下文（基于上次实际交付的修订快照）。".into()
-                } else if prepared.workstream_ids.is_empty() {
-                    "该 Session 未关联 Workstream：已同步自身消息后直接恢复，未注入上下文。".into()
+                } else if prepared.owner_workstream_id.is_none() {
+                    "该 Session 未归属任务：已同步自身消息后直接恢复，未注入上下文。".into()
                 } else {
                     "已关联 Workstream；Context Delivery 已关闭，本次未注入 Context。".into()
                 },
@@ -662,11 +628,11 @@ impl SessionLauncher {
         &self,
         db: &Db,
         agent: Agent,
-        workstream_ids: &[String],
+        owner_workstream_id: Option<&str>,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<LaunchResult> {
-        let prepared = self.prepare_new_in(db, agent, workstream_ids, cwd, workspace)?;
+        let prepared = self.prepare_new_in(db, agent, owner_workstream_id, cwd, workspace)?;
         self.launch_prepared_in(db, &prepared, workspace)
     }
 
@@ -674,10 +640,9 @@ impl SessionLauncher {
         &self,
         db: &Db,
         session_id: &str,
-        extra_workstream_ids: &[String],
         workspace: &LaunchWorkspace,
     ) -> Result<LaunchResult> {
-        let prepared = self.prepare_resume_in(db, session_id, extra_workstream_ids, workspace)?;
+        let prepared = self.prepare_resume_in(db, session_id, workspace)?;
         self.launch_prepared_in(db, &prepared, workspace)
     }
 }
@@ -698,24 +663,24 @@ pub fn compute_state_fingerprint(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    effective_workstream_ids: &[String],
+    owner_workstream_id: Option<&str>,
     delivery_level: ContextDeliveryLevel,
     agent: Agent,
     workspace: &LaunchWorkspace,
 ) -> Result<String> {
     let resolution = if mode == "resume" {
         match session_id {
-            Some(sid) => resolve_resume_cwd(db, sid, effective_workstream_ids, workspace)?,
+            Some(sid) => resolve_resume_cwd(db, sid, owner_workstream_id, workspace)?,
             None => CwdResolution::default(),
         }
     } else {
-        resolve_new_cwd(db, effective_workstream_ids, None, workspace)?
+        resolve_new_cwd(db, owner_workstream_id, None, workspace)?
     };
     compute_state_fingerprint_in(
         db,
         mode,
         session_id,
-        effective_workstream_ids,
+        owner_workstream_id,
         delivery_level,
         agent,
         workspace,
@@ -726,15 +691,15 @@ pub fn compute_state_fingerprint(
 /// §12 — the full fingerprint. Everything that decides what the Agent receives:
 ///
 /// * the delivery level and the Agent runtime override intent;
-/// * per selected Workstream: title / description / `updated_at`, its active
-///   Context items with their current revisions, its open conflicts — and its
-///   **ordered path list** (§12, §21-5..7);
+/// * the Owner Workstream (or none): title / description / `updated_at`, its
+///   active Context items with their current revisions, its open conflicts —
+///   and its **ordered path list** (§12, §21-5..7);
 /// * the resolved launch directory and the tier that produced it (§42.3-M16);
 /// * NoEnding Home's default workspace, which is not in the DB at all
 ///   (§42.3-M17 note 4);
 /// * in resume mode: whether the Session still exists, its `last_activity_at`,
-///   its source cursor, its **`workspace_path_id`**, its bindings and its
-///   delivery snapshots.
+///   its source cursor, its **`workspace_path_id`**, its Owner Workstream and
+///   its delivery snapshots.
 ///
 /// Every added input is labelled and terminated by `|` (§42.3-M17), so a value
 /// cannot be re-read as a different field by shifting a boundary, and the path
@@ -746,7 +711,7 @@ pub fn compute_state_fingerprint_in(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    effective_workstream_ids: &[String],
+    owner_workstream_id: Option<&str>,
     delivery_level: ContextDeliveryLevel,
     agent: Agent,
     workspace: &LaunchWorkspace,
@@ -783,7 +748,8 @@ pub fn compute_state_fingerprint_in(
     // The directory the Agent will actually start in, and why (§42.3-M16).
     hasher.update(resolution.fingerprint_input());
 
-    for ws_id in effective_workstream_ids {
+    if let Some(ws_id) = owner_workstream_id {
+        hasher.update(b"owner:");
         hasher.update(ws_id.as_bytes());
         hasher.update(b":");
         if let Some(ws) = db.get_workstream(ws_id)? {
@@ -876,23 +842,14 @@ pub fn compute_state_fingerprint_in(
                 hasher.update(b"session_exists:0:");
                 hasher.update(b"|");
             }
-            let mut bindings = db.bindings_for_session(sid)?;
-            bindings.sort_by(|a, b| a.workstream_id.cmp(&b.workstream_id));
-            for b in bindings {
-                hasher.update(b.workstream_id.as_bytes());
-                hasher.update(b"|");
-                hasher.update(b.role.as_bytes());
-                hasher.update(b"|");
-                hasher.update(b.source.as_bytes());
-                hasher.update(b"|");
-                // Which path brought the binding in is part of the claim
-                // §1.6 removes paths by, so a re-claim is a state change too.
-                hasher.update(b"claim:");
-                if let Some(claim) = &b.workstream_path_id {
-                    hasher.update(claim.as_bytes());
-                }
-                hasher.update(b"|");
+            // The Session's Owner Workstream is part of the launch state: an
+            // owner edit between Preview and Launch must abort, not resume
+            // against a different Context route (方案 §20).
+            hasher.update(b"session_owner:");
+            if let Some(owner) = db.get_session(sid)?.and_then(|s| s.owner_workstream_id) {
+                hasher.update(owner.as_bytes());
             }
+            hasher.update(b"|");
             let mut deliveries = db.latest_deliveries(sid)?;
             deliveries.sort_by(|a, b| a.workstream_id.cmp(&b.workstream_id));
             for d in deliveries {
@@ -1065,32 +1022,6 @@ fn resolve_install(
     }
 }
 
-/// Record (or refresh) a binding. `source`/`confidence` describe how this
-/// binding was established; storage never lets a weaker source overwrite a
-/// stronger one.
-///
-/// It defers to the workspace layer because in v0.2 a binding is more than a
-/// row: an explicit launch must also ensure the WorkstreamPath its Session
-/// started in (§1.8). Whether a provenance may grow a Workstream's list is
-/// decided there — an automatic binding never does (§42.3-M2).
-pub fn record_binding(
-    db: &Db,
-    session_id: &str,
-    workstream_id: &str,
-    role: &str,
-    source: &str,
-    confidence: f64,
-) -> Result<()> {
-    crate::workspace::session::record_user_binding(
-        db,
-        session_id,
-        workstream_id,
-        role,
-        source,
-        confidence,
-    )
-}
-
 /// Expand a leading `~` / `~/` / `~\` to the user's home directory.
 ///
 /// Users type `~/projects/x` into a working-directory field, and the rendered
@@ -1121,54 +1052,54 @@ fn is_usable_directory(path: &str) -> bool {
 /// §42.3-M21 — the default workspace is a directory NoEnding owns, so the
 /// launcher may create it if Home bootstrap did not. This is the only
 /// filesystem effect a launch resolution has, it is idempotent, and it creates
-/// no domain fact: no row, no Revision, no binding, no delivery (§Launch
+/// no domain fact: no row, no Revision, no delivery (§Launch
 /// Preparation Integrity is about *storage*).
 fn ensure_default_workspace(dir: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     Ok(())
 }
 
-/// The `(cwd, source)` of §13's WorkstreamPath tier: walk the selected
-/// Workstreams in the user's selection order, and inside each one its ordered
-/// path list in position order, and return the first usable directory.
+/// The `(cwd, source)` of §13's WorkstreamPath tier: walk the Owner
+/// Workstream's ordered path list in position order and return the first
+/// usable directory (方案 §15).
 ///
 /// Position 0 wins whenever it can (that is what "primary" means); a later
 /// position is only reached because the earlier ones are unusable, and it is
-/// reported with its position so the UI can say so. Returns `None` plus a
-/// count-worthy note when the Workstreams have paths but none of them are
-/// usable.
+/// reported with its position so the UI can say so. Returns `None` plus a note
+/// when the Workstream has paths but none of them are usable.
 fn first_workstream_path(
     db: &Db,
-    workstream_ids: &[String],
+    owner_workstream_id: Option<&str>,
 ) -> Result<(Option<CwdResolution>, Option<String>)> {
+    let Some(ws_id) = owner_workstream_id else {
+        return Ok((None, None));
+    };
+    let paths = crate::workspace::workstream::workstream_launch_paths(db, ws_id)?;
     let mut blocked: Option<String> = None;
-    for ws_id in workstream_ids {
-        let paths = crate::workspace::workstream::workstream_launch_paths(db, ws_id)?;
-        for (position, raw) in paths.ordered_paths.iter().enumerate() {
-            if !is_usable_directory(raw) {
-                if blocked.is_none() {
-                    blocked = Some(raw.clone());
-                }
-                continue;
+    for (position, raw) in paths.ordered_paths.iter().enumerate() {
+        if !is_usable_directory(raw) {
+            if blocked.is_none() {
+                blocked = Some(raw.clone());
             }
-            return Ok((
-                Some(CwdResolution {
-                    source: CwdSource::WorkstreamPath,
-                    cwd: Some(raw.clone()),
-                    // Any entry after position 0 is a downgrade of the primary.
-                    fallback: position > 0,
-                    workstream_id: Some(ws_id.clone()),
-                    path_position: Some(position as i64),
-                    note: (position > 0).then(|| {
-                        format!(
-                            "主工作路径不可用，改用该 Workstream 的第 {} 条工作路径",
-                            position + 1
-                        )
-                    }),
-                }),
-                blocked,
-            ));
+            continue;
         }
+        return Ok((
+            Some(CwdResolution {
+                source: CwdSource::WorkstreamPath,
+                cwd: Some(raw.clone()),
+                // Any entry after position 0 is a downgrade of the primary.
+                fallback: position > 0,
+                workstream_id: Some(ws_id.to_string()),
+                path_position: Some(position as i64),
+                note: (position > 0).then(|| {
+                    format!(
+                        "主工作路径不可用，改用该 Workstream 的第 {} 条工作路径",
+                        position + 1
+                    )
+                }),
+            }),
+            blocked,
+        ));
     }
     Ok((None, blocked))
 }
@@ -1191,12 +1122,13 @@ fn default_workspace_resolution(workspace: &LaunchWorkspace) -> Result<Option<Cw
     }))
 }
 
-/// §13 — New Session launch directory, in priority order:
+/// §13 — New Session launch directory, in priority order (方案 §15):
 ///
 /// ```text
-/// explicit cwd  →  the selected Workstreams' ordered WorkstreamPaths
-///                  (first usable, selection order then list order)
+/// explicit cwd  →  the Owner Workstream's ordered WorkstreamPaths
+///                  (first usable, in list order)
 ///              →  NoEnding Home's default workspace
+///              →  Unresolved
 /// ```
 ///
 /// A Workstream's ordered path list is the recorded answer to "where does this
@@ -1206,18 +1138,18 @@ fn default_workspace_resolution(workspace: &LaunchWorkspace) -> Result<Option<Cw
 /// Workstream is still not a path, and Sessions keep their own cwd.
 pub fn resolve_new_cwd(
     db: &Db,
-    workstream_ids: &[String],
+    owner_workstream_id: Option<&str>,
     explicit: Option<&str>,
     workspace: &LaunchWorkspace,
 ) -> Result<CwdResolution> {
     if let Some(c) = explicit {
         return Ok(CwdResolution::explicit(expand_tilde(c)));
     }
-    let (from_paths, blocked) = first_workstream_path(db, workstream_ids)?;
+    let (from_paths, blocked) = first_workstream_path(db, owner_workstream_id)?;
     if let Some(resolution) = from_paths {
         return Ok(resolution);
     }
-    let standalone = workstream_ids.is_empty();
+    let standalone = owner_workstream_id.is_none();
     if let Some(mut resolution) = default_workspace_resolution(workspace)? {
         // For a New Session *about a Workstream* the default workspace is a
         // downgrade: the user expected to work in the Workstream's directory.
@@ -1241,7 +1173,7 @@ pub fn resolve_new_cwd(
 /// §13 — Resume launch directory:
 ///
 /// ```text
-/// the Session's own cwd  →  a bound Workstream's primary path
+/// the Session's own cwd  →  the Owner Workstream's available path
 ///                        →  NoEnding Home's default workspace
 /// ```
 ///
@@ -1257,7 +1189,7 @@ pub fn resolve_new_cwd(
 pub fn resolve_resume_cwd(
     db: &Db,
     session_id: &str,
-    workstream_ids: &[String],
+    owner_workstream_id: Option<&str>,
     workspace: &LaunchWorkspace,
 ) -> Result<CwdResolution> {
     let session = db.get_session(session_id)?;
@@ -1282,11 +1214,11 @@ pub fn resolve_resume_cwd(
         .clone()
         .filter(|c| !c.trim().is_empty())
         .unwrap_or_else(|| "(未记录)".into());
-    let (from_paths, blocked) = first_workstream_path(db, workstream_ids)?;
+    let (from_paths, blocked) = first_workstream_path(db, owner_workstream_id)?;
     if let Some(mut resolution) = from_paths {
         resolution.fallback = true;
         resolution.note = Some(format!(
-            "原 Session 的工作目录 {} 当前不可用，改用其 Workstream 的工作路径",
+            "原 Session 的工作目录 {} 当前不可用，改用其所归属任务的工作路径",
             lost
         ));
         return Ok(resolution);
@@ -1329,46 +1261,14 @@ fn recompute_launch_cwd(
         let Some(sid) = prepared.session_id.as_deref() else {
             return Ok(CwdResolution::default());
         };
-        return resolve_resume_cwd(db, sid, &prepared.workstream_ids, workspace);
+        return resolve_resume_cwd(db, sid, prepared.owner_workstream_id.as_deref(), workspace);
     }
     if prepared.cwd_resolution.source == CwdSource::Explicit {
         // A directory the user named in the form is a literal, not a derivation:
         // there is nothing in the database for it to drift against.
         return Ok(prepared.cwd_resolution.clone());
     }
-    resolve_new_cwd(db, &prepared.workstream_ids, None, workspace)
-}
-
-/// Unchanged rows are kept verbatim (provenance, created_at, cursors and
-/// last_used_at survive — a metadata edit is not a "use"). A role edit on an
-/// AUTOMATIC binding upgrades it to user_assigned, because sync replaces AUTO
-/// rows wholesale and the user's role choice would otherwise be silently undone
-/// by the next classification. Every removed row — any provenance — leaves a
-/// durable removal tombstone.
-///
-/// The diff itself lives in the workspace layer since v0.2: a row the user just
-/// added also ensures the WorkstreamPath its Session started in and records
-/// which one (§1.8). Two engines — one growing path lists, one not — is the
-/// split authority 方案 §29 forbids, so this is a typed entry point into
-/// `crate::workspace::session::replace_session_bindings`.
-pub fn replace_session_bindings(
-    db: &Db,
-    session_id: &str,
-    desired: &[(String, String)], // (workstream_id, role)
-) -> Result<()> {
-    let desired: Vec<crate::workspace::session::DesiredBinding> = desired
-        .iter()
-        .map(
-            |(workstream_id, role)| crate::workspace::session::DesiredBinding {
-                workstream_id: workstream_id.clone(),
-                role: role.clone(),
-                // Which path brought it in is derived from the Session's own
-                // WorkspacePath, never accepted from a caller (§42.3-M1).
-                workstream_path_id: None,
-            },
-        )
-        .collect();
-    crate::workspace::session::replace_session_bindings(db, session_id, &desired)
+    resolve_new_cwd(db, prepared.owner_workstream_id.as_deref(), None, workspace)
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,10 +1289,9 @@ pub fn replace_session_bindings(
 /// *same* cwd, and cwd was worth `+3.0` — enough on its own to look decisive.
 /// A directory that many intents share carries no distinguishing evidence, so
 /// against the default workspace it is worth `+1.0`, and a real cwd match still
-/// outranks it. When scores are otherwise tied, the intent whose user *selected
-/// Workstreams* wins: an explicit selection is a stronger statement than a
-/// coincidental directory, and AGENTS.md puts user bindings above automatic
-/// classification. Anything still tied stays AMBIGUOUS for a human — no
+/// outranks it. When scores are otherwise tied, the intent whose user *chose an
+/// Owner Workstream* wins: an explicit choice is a stronger statement than a
+/// coincidental directory. Anything still tied stays AMBIGUOUS for a human — no
 /// guessing.
 pub fn try_match_launch_intents_in(
     db: &Db,
@@ -1476,7 +1375,7 @@ pub fn try_match_launch_intents_in(
                 .iter()
                 .filter(|(_, s)| tied(*s))
                 .map(|(i, _)| i)
-                .filter(|i| !i.selected_workstream_ids.is_empty())
+                .filter(|i| i.owner_workstream_id.is_some())
                 .collect();
             if clear {
                 let (intent, _) = scored.remove(0);
@@ -1498,7 +1397,15 @@ pub fn try_match_launch_intents_in(
                         &intent.id,
                         launch_status::AMBIGUOUS,
                         None,
-                        &format!("{}（候选 {}）", note, intent.selected_workstream_ids.len()),
+                        &format!(
+                            "{}（{}）",
+                            note,
+                            if intent.owner_workstream_id.is_some() {
+                                "已选所属任务"
+                            } else {
+                                "未归属"
+                            }
+                        ),
                     )?;
                 }
                 Ok(false)
@@ -1507,31 +1414,20 @@ pub fn try_match_launch_intents_in(
     }
 }
 
+/// `_workspace` stays in the signature because every caller and test drives
+/// this through the same launcher seam; matching itself no longer consults the
+/// default workspace, since a match writes ownership only.
 pub fn apply_match(
     db: &Db,
     intent: &LaunchIntent,
     session: &Session,
-    workspace: &LaunchWorkspace,
+    _workspace: &LaunchWorkspace,
 ) -> Result<()> {
-    // §1.7: this Session may exist because a launch fell back to NoEnding's own
-    // default workspace. The Workstream *binding* is the user's choice; the
-    // directory was not, so it must not enter the Workstream's path list.
-    let grow_path_list = match (&session.workspace_path_id, &workspace.default_workspace) {
-        (Some(path), Some(default)) => {
-            crate::workspace::path_identity_of(default).as_deref() != Some(path.as_str())
-        }
-        _ => true,
-    };
-    for ws_id in &intent.selected_workstream_ids {
-        crate::workspace::session::record_user_binding_growing(
-            db,
-            &session.id,
-            ws_id,
-            "primary",
-            binding_source::EXPLICIT_LAUNCH,
-            1.0,
-            grow_path_list,
-        )?;
+    // The matched Session inherits the intent's Owner Workstream verbatim
+    // (方案 §15.1). Nothing else is written: no WorkstreamPath is added, and
+    // the Session's cwd / workspace_path_id / project_id stay untouched.
+    if let Some(ws_id) = intent.owner_workstream_id.as_deref() {
+        db.set_session_owner(&session.id, Some(ws_id))?;
     }
     // The matched session already RECEIVED the context bundle at launch:
     // record the delivery snapshot now, so its first resume computes a true
@@ -1667,6 +1563,18 @@ pub fn ingest_and_sync_session(
         }
     }
     if !crate::settings::context_intelligence_enabled(db)? {
+        return Ok((stored.len() as i64, 0));
+    }
+
+    // 方案 §21 — Ingestion and Context processing are separate. A Session with
+    // no Owner Workstream keeps ingesting events, but Context extraction does
+    // not run and `processed_sequence` is NOT advanced: once an Owner is set,
+    // processing resumes from the first unconsumed message.
+    if db
+        .get_session(&session.id)?
+        .and_then(|s| s.owner_workstream_id)
+        .is_none()
+    {
         return Ok((stored.len() as i64, 0));
     }
 

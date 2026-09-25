@@ -14,6 +14,26 @@ Workstream 语义层：Session 会结束，Agent 会切换，Context 持续存�
 - `Local Agent Workspace 技术实现方案 v0.3 增补 - Platform Abstraction.md` — Windows/macOS 平台抽象层
 - `NoEnding 品牌设计规范 v1.0.md` — 品牌与视觉
 
+## 领域模型
+
+三类实体的职责固定：
+
+- **Project** — 一组属于同一物理工作空间或 Git family 的 WorkspacePath。不是分类容器。
+- **Workstream** — 一项持续工作，可以拥有多个 WorkspacePath，因此可以跨越多个 Project。
+- **Session** — 一次具体 Agent 执行。所属 Project 由工作目录派生，语义归属由 Owner Workstream 表达，两者互相独立。
+
+核心 invariant：
+
+```text
+A Session has at most one Owner Workstream.
+
+Session ownership never mutates Workstream workspace paths.
+
+Workstream path mutations never change Session ownership.
+
+Session physical Project membership and semantic Workstream ownership are independent.
+```
+
 ## 技术栈
 
 ```text
@@ -27,9 +47,9 @@ Tauri 2 + React + TypeScript + Rust + SQLite (FTS5)
 | Agent Adapter | Codex / Claude Code / Pi 的 session discovery、JSONL 增量解析、raw_ref 溯源 |
 | Platform Abstraction | PlatformPaths（`CODEX_HOME`/`CLAUDE_CONFIG_DIR`/`PI_HOME` 覆盖）、ExecutableResolver、PlatformLauncher（macOS Terminal / Windows Terminal / PowerShell） |
 | Session Ingestion | 增量游标（append-only），原始 Agent 文件永不修改，已摄入历史不随源文件删除 |
-| Workstream | CRUD / merge / archive；Session ↔ Workstream 多对多 Binding |
+| Workstream | CRUD / archive；一个 Session 最多只有一个 Owner Workstream（所属任务） |
 | Context (L1/L2/L3) | CoreContextResolver 投影 Goal/Current State/Constraints/Decisions/Open Questions；ContextItem + Revision 历史；Supersede 演进链 |
-| Sync Engine | SyncJob（delta → pre-filter → extract → classify → merge → cursor），确定性 Merge Engine（Dedup / Supersede / Resolve / Conflict 保留不自动覆盖），Authority 分级（user_edit 不可被 Agent 静默覆盖） |
+| Sync Engine | SyncJob（delta → pre-filter → extract → merge → cursor），Context 路由只认 Session 的 Owner Workstream；确定性 Merge Engine（Dedup / Supersede / Resolve / Conflict 保留不自动覆盖），Authority 分级（user_edit 不可被 Agent 静默覆盖） |
 | Context Builder | New / Resume 两种模式的最小充分上下文 bundle + token budget |
 | Launcher | New Session / Resume Session（先同步 stale session，再注入 bundle 启动 CLI） |
 | Search | SQLite FTS5（FTS 不可用时 LIKE 兜底），优先 Current Context |

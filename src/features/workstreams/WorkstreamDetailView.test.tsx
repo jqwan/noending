@@ -30,13 +30,11 @@ const PATHS: WorkstreamPathRow[] = [
     workstream_id: "w1",
     workspace_path_id: "p-main",
     position: 0,
-    source: "user",
     created_at: "",
     canonical_path: "/repo/main",
     project_id: "pr",
     project_name: "Main",
     exists: true,
-    bound_session_count: 0,
   },
 ];
 
@@ -54,7 +52,7 @@ function context(): WorkstreamContext {
     project_name: null,
     core: [],
     items: [],
-    related_sessions: [],
+    sessions: [],
     conflicts: [],
     relations: [],
     recent_changes: [],
@@ -102,6 +100,34 @@ it("leaves no edit affordance on the page itself", async () => {
   screen.getByText("主目录");
   // 状态切换不是编辑，保留
   screen.getByRole("button", { name: "已完成" });
+});
+
+it("lists the sessions owned by this task and nothing else", async () => {
+  const ctx = context();
+  ctx.sessions = [{
+    id: "s1",
+    agent: "codex",
+    agent_session_id: "s1-agent",
+    title: "归属于本任务的会话",
+    cwd: "/repo/main",
+    project_id: "pr",
+    workspace_path_id: "p-main",
+    owner_workstream_id: "w1",
+    raw_path: "/s1.jsonl",
+    parent_agent_session_id: null,
+    started_at: "2026-09-21T00:00:00+00:00",
+    last_activity_at: "2026-09-21T00:00:00+00:00",
+    trashed_at: null,
+  }];
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
+  vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+
+  await screen.findByText("任务概览");
+  // 只有 owner Sessions 会出现在这里（后端按 owner_workstream_id 过滤）。
+  screen.getByText("会话");
+  screen.getByText("归属于本任务的会话");
+  expect(screen.queryByText("还没有会话归属到这项任务。")).toBeNull();
 });
 
 it("opens the 新建任务 form, prefilled with the current task", async () => {

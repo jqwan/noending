@@ -407,6 +407,7 @@ mod tests {
             cwd: None,
             workspace_path_id: None,
             project_id: None,
+            owner_workstream_id: None,
             raw_path: file.to_string_lossy().to_string(),
             parent_agent_session_id: None,
             started_at: None,

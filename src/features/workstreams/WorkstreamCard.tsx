@@ -86,7 +86,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
             {/* visibility=archived 就是回收站（方案 §1.13）：它和 lifecycle 正交，
                 所以这里单独一个徽标，而不是把 lifecycle 改成第三种值。 */}
             {card.visibility === "archived" && (
-              <span className="badge warn" title="在回收站里：工作路径、会话绑定与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
+              <span className="badge warn" title="在回收站里：工作路径、会话归属与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
             )}
           </div>
         </header>

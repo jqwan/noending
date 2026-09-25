@@ -17,7 +17,7 @@ import SessionCards, {
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import NewSessionModal from "./NewSessionModal";
 import ResumeSessionModal from "./ResumeSessionModal";
-import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session, type SessionBindingRow } from "../../types";
+import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session } from "../../types";
 import type { Route, SessionScope, ViewAction } from "../../app/routes";
 
 type AssignedFilter = "all" | "assigned" | "unassigned";
@@ -39,7 +39,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [trashMode, setTrashMode] = useState(scope === "trash");
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [bindings, setBindings] = useState<Map<string, SessionBindingRow[]>>(new Map());
+  /** Workstream id → 标题：`session.owner_workstream_id` 只有一个 id，名字在这里解析。 */
+  const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(new Map());
   /**
    * Session 来源只用来把"空"拆成两种真实情况：一个来源都没启用 vs
    * 启用了但还没发现 Session（§23）。读失败时保持 null，文案退回中性说法——
@@ -72,23 +73,17 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
         .catch((e) => { console.error(e); if (!cancelled) setSources(null); });
     }
     // 两个数据面各自的后端 scope（§11）：普通 = active，
-    // 回收站 = trash。projects / bindings 只服务普通模式的筛选列，回收站行不显示它们。
+    // 回收站 = trash。projects / workstreams 只服务普通模式的筛选列，回收站行不显示它们。
     const trashList = () => api.listSessions(undefined, undefined, "trash");
     Promise.all([
       trashMode ? trashList() : api.listSessions(),
       trashMode ? Promise.resolve(null) : api.listProjects(),
-      trashMode ? Promise.resolve(null) : api.listSessionBindings(),
+      trashMode ? Promise.resolve(null) : api.listWorkstreams(),
     ])
-      .then(([ss, ps, rows]) => {
+      .then(([ss, ps, ws]) => {
         if (cancelled) return;
         if (!trashMode) {
-          const m = new Map<string, SessionBindingRow[]>();
-          for (const r of rows ?? []) {
-            const list = m.get(r.session_id) ?? [];
-            list.push(r);
-            m.set(r.session_id, list);
-          }
-          setBindings(m);
+          setWorkstreamTitleById(new Map((ws ?? []).map((w) => [w.id, w.title])));
           setProjects(ps ?? []);
         }
         setSessions(ss);
@@ -115,13 +110,16 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     [projects],
   );
 
+  /** 筛选下拉里的任务选项：只列真的在列表里出现过的 Owner。 */
   const wsOptions = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const rows of bindings.values()) {
-      for (const r of rows) seen.set(r.workstream_id, r.workstream_title);
+    const seen = new Set<string>();
+    for (const s of sessions ?? []) {
+      if (s.owner_workstream_id) seen.add(s.owner_workstream_id);
     }
-    return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1], "zh-Hans"));
-  }, [bindings]);
+    return [...seen]
+      .map((id) => [id, workstreamTitleById.get(id)?.trim() || "未命名任务"] as const)
+      .sort((a, b) => a[1].localeCompare(b[1], "zh-Hans"));
+  }, [sessions, workstreamTitleById]);
 
   const filtersActive =
     query.trim() !== "" || agent !== "all" || projectId !== "all"
@@ -142,14 +140,14 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       )
       .filter((s) => {
         if (wsFilter === "all") return true;
-        const rows = bindings.get(s.id) ?? [];
+        // 归属是单值（方案 §30）：命中就是这一个，未归属就是 null。
         return wsFilter === "unassigned"
-          ? rows.length === 0
-          : rows.some((r) => r.workstream_id === wsFilter);
+          ? s.owner_workstream_id === null
+          : s.owner_workstream_id === wsFilter;
       })
       .filter((s) => {
         if (assigned === "all") return true;
-        const has = (bindings.get(s.id) ?? []).length > 0;
+        const has = s.owner_workstream_id !== null;
         return assigned === "assigned" ? has : !has;
       })
       .filter((s) => {
@@ -164,7 +162,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
           s.id,
           agentDisplayLabel(s.agent),
           s.project_id ? projectNameById.get(s.project_id) : null,
-          (bindings.get(s.id) ?? []).map((b) => b.workstream_title).join(" "),
+          s.owner_workstream_id ? workstreamTitleById.get(s.owner_workstream_id) : null,
         ]
           .filter(Boolean)
           .some((t) => (t as string).toLowerCase().includes(q));
@@ -174,7 +172,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
           a.last_activity_at ?? a.started_at ?? "",
         ),
       );
-  }, [sessions, bindings, query, agent, projectId, wsFilter, assigned, projectNameById]);
+  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, assigned, projectNameById]);
 
   const resume = (sessionId: string) => {
     setResumeModalSessionId(sessionId);
@@ -328,7 +326,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
               <select value={wsFilter} onChange={(e) => setWsFilter(e.target.value)}>
                 <option value="all">全部任务</option>
                 {wsOptions.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
-                <option value="unassigned">未关联任务</option>
+                <option value="unassigned">未归属任务</option>
               </select>
             </label>
             <label className="ws-control">
@@ -344,11 +342,11 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
               </select>
             </label>
             <label className="ws-control">
-              <span className="muted small">关联状态</span>
+              <span className="muted small">归属状态</span>
               <select value={assigned} onChange={(e) => setAssigned(e.target.value as AssignedFilter)}>
                 <option value="all">全部</option>
-                <option value="assigned">已关联</option>
-                <option value="unassigned">未关联</option>
+                <option value="assigned">已归属</option>
+                <option value="unassigned">未归属</option>
               </select>
             </label>
             {filtersActive && (
@@ -391,7 +389,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
           {shown !== null && shown.length > 0 && (
             <SessionCards
               sessions={shown}
-              bindings={bindings}
+              workstreamTitleById={workstreamTitleById}
               projectNameById={projectNameById}
               onOpen={(id) => navigate({ view: "session", sessionId: id })}
               onResume={resume}

@@ -11,13 +11,11 @@ function row(id: string, position: number): WorkstreamPathRow {
     workstream_id: "w",
     workspace_path_id: id,
     position,
-    source: "user",
     created_at: "",
     canonical_path: "/repo/" + id,
     project_id: "p",
     project_name: "Project",
     exists: true,
-    bound_session_count: 0,
   };
 }
 

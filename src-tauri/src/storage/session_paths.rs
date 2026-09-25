@@ -28,9 +28,9 @@
 //! 方案 §42.5-T2 (and executably by
 //! `tests/session_workspace_test::project_id_writers_are_confined_to_the_derived_doors`).
 //!
-//! [`reconcile_binding_paths_conn`] is not a fourth writer: it moves no Session and
-//! touches no `project_id`, it only keeps the *binding* side of §5.6 honest after
-//! one of the three doors above has run.
+//! Nothing here reads or writes `owner_workstream_id`: physical Project
+//! membership and semantic Workstream ownership are independent (方案 §3.1,
+//! §4, §5.2).
 
 use rusqlite::{params, Connection};
 
@@ -85,65 +85,6 @@ pub fn refresh_sessions_project_for_path_conn(conn: &Connection, path_id: &str) 
           WHERE workspace_path_id = ?1",
         params![path_id],
     )?)
-}
-
-/// §5.6 — record which WorkstreamPath brought a binding in.
-///
-/// `None` is a real state, not a reset: it means "legacy, or the Session's cwd
-/// has since drifted elsewhere", and such a binding is deliberately out of reach
-/// of a WorkstreamPath deletion (§42.3-M2). Callers must therefore only pass
-/// `None` when they have actually looked and found no match.
-pub fn set_binding_workstream_path_conn(
-    conn: &Connection,
-    session_id: &str,
-    workstream_id: &str,
-    workstream_path_id: Option<&str>,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE session_workstream_bindings
-            SET workstream_path_id = ?3
-          WHERE session_id = ?1 AND workstream_id = ?2",
-        params![session_id, workstream_id, workstream_path_id],
-    )?;
-    Ok(())
-}
-
-/// §42.3-M2 — after a Session's cwd moves, re-point each of its bindings at the
-/// WorkstreamPath that now matches, or drop the path claim when none does.
-/// Two statements rather than one clever predicate: "point at it" and "no longer
-/// provably from it" are different decisions and read differently.
-///
-/// Never appends a path to a Workstream — the path list only grows from a user
-/// action or an explicit bind.
-pub fn reconcile_binding_paths_conn(conn: &Connection, session_id: &str) -> Result<usize> {
-    let matched = conn.execute(
-        "UPDATE session_workstream_bindings
-            SET workstream_path_id = (
-              SELECT wsp.id FROM workstream_paths wsp
-                JOIN sessions s ON s.id = session_workstream_bindings.session_id
-               WHERE wsp.workstream_id = session_workstream_bindings.workstream_id
-                 AND wsp.workspace_path_id = s.workspace_path_id)
-          WHERE session_id = ?1
-            AND EXISTS (
-              SELECT 1 FROM workstream_paths wsp
-                JOIN sessions s ON s.id = session_workstream_bindings.session_id
-               WHERE wsp.workstream_id = session_workstream_bindings.workstream_id
-                 AND wsp.workspace_path_id = s.workspace_path_id)",
-        params![session_id],
-    )?;
-    let cleared = conn.execute(
-        "UPDATE session_workstream_bindings
-            SET workstream_path_id = NULL
-          WHERE session_id = ?1
-            AND workstream_path_id IS NOT NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM workstream_paths wsp
-                JOIN sessions s ON s.id = session_workstream_bindings.session_id
-               WHERE wsp.workstream_id = session_workstream_bindings.workstream_id
-                 AND wsp.workspace_path_id = s.workspace_path_id)",
-        params![session_id],
-    )?;
-    Ok(matched + cleared)
 }
 
 /// A Project is going away: every Session that was only *projecting* onto it

@@ -1,12 +1,12 @@
 //! Workstream card stats must follow the real sources: session count /
-//! latest session come from live bindings, card text from the active
-//! current_state revision, and a zero-session Workstream stays a legal
-//! card with no Resume target.
+//! latest session come from the single Owner Workstream link, card text from
+//! the active current_state revision, and a zero-session Workstream stays a
+//! legal card with no Resume target.
 
 use std::path::PathBuf;
 
 use noending::adapters::DiscoveredSession;
-use noending::domain::{binding_source, Agent, SessionWorkstreamBinding, Workstream};
+use noending::domain::{Agent, Workstream};
 use noending::ingestion::ensure_session_row;
 use noending::storage::{new_id, now, Db};
 
@@ -30,20 +30,9 @@ fn discovered(agent: Agent, agent_session_id: &str, activity: &str) -> Discovere
     }
 }
 
-fn bind(db: &Db, session_id: &str, workstream_id: &str) {
-    db.bind(&SessionWorkstreamBinding {
-        session_id: session_id.into(),
-        workstream_id: workstream_id.into(),
-        role: "related".into(),
-        source: binding_source::USER_ASSIGNED.into(),
-        confidence: 1.0,
-        workstream_path_id: None,
-        last_seen_revision: None,
-        last_sync_cursor: 0,
-        created_at: now(),
-        last_used_at: now(),
-    })
-    .unwrap();
+fn set_owner(db: &Db, session_id: &str, workstream_id: &str) {
+    db.set_session_owner(session_id, Some(workstream_id))
+        .unwrap();
 }
 
 fn workstream(db: &Db, title: &str) -> Workstream {
@@ -65,7 +54,7 @@ fn card_stats_follow_sessions_and_active_state() {
     let database = db("stats");
     let w = workstream(&database, "Context Integrity");
 
-    // Two bound sessions; the OLDER row was written later, activity decides.
+    // Two owned sessions; the OLDER row was written later, activity decides.
     let older = ensure_session_row(
         &database,
         &discovered(Agent::ClaudeCode, "s-old", "2026-09-10T09:00:00Z"),
@@ -78,8 +67,8 @@ fn card_stats_follow_sessions_and_active_state() {
     )
     .unwrap()
     .0;
-    bind(&database, &older.id, &w.id);
-    bind(&database, &newer.id, &w.id);
+    set_owner(&database, &older.id, &w.id);
+    set_owner(&database, &newer.id, &w.id);
 
     let item = noending::sync::create_item(
         &database,

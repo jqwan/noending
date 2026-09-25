@@ -221,7 +221,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
               <div className="small" style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
                 如果原始文件删除失败，NoEnding 仍会清理该会话数据。删除完成后：
                 <ul className="purge-list">
-                  <li>NoEnding 中该会话的事件、绑定和摄入历史都会消失。</li>
+                  <li>NoEnding 中该会话的事件和摄入历史都会消失。</li>
                   <li>任务 Context 内容不会因此删除。</li>
                   <li>
                     如果你以后从备份恢复原始 Agent 会话，NoEnding
@@ -252,7 +252,6 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             )}
             <li>1 个会话</li>
             <li>{fmtCount(preview.event_count)} 个 Events</li>
-            <li>{fmtCount(preview.binding_count)} 个任务绑定</li>
             <li>{fmtCount(preview.sync_run_count)} 个 Sync 运行</li>
             <li>{fmtCount(preview.context_delivery_count)} 个 Context 交付记录</li>
             <li>{fmtCount(preview.context_revision_redaction_count)} 条 Context 来源将被脱敏</li>

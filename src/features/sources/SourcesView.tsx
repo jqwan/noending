@@ -8,7 +8,7 @@ import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
  * Session 来源管理 + 摄入入口（方案 §2.1：Sources → Session 来源）。
  * - 默认 agent 根目录（~/.codex 等）以"未启用"状态预置，是否摄入由用户决定；
  * - 每个来源可以单独「同步」（增量）或「重新摄入」（从头重扫源文件，
- *   重新抓取，绑定与上下文条目保留）；
+ *   重新抓取，会话归属与上下文条目保留）；
  * - 摄入在后台执行（不阻塞界面），进度通过 sync-* 事件推送。
  */
 export default function SourcesView() {
@@ -96,7 +96,7 @@ export default function SourcesView() {
 
   const reingest = async (src: IngestSource) => {
     if (!window.confirm(
-      `重新摄入「${src.path}」？\n\n将从头重扫该来源的全部会话文件：已摄入的事件及其引用保持不变，仅真正新增或变化的内容会被追加（绑定、Context 条目与审计历史保留）。`
+      `重新摄入「${src.path}」？\n\n将从头重扫该来源的全部会话文件：已摄入的事件及其引用保持不变，仅真正新增或变化的内容会被追加（会话归属、Context 条目与审计历史保留）。`
     )) {
       return;
     }
