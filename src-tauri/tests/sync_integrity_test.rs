@@ -1,19 +1,16 @@
-//! Sync integrity tests (Issues #3 + #4) — Logical Session model.
+//! Context integrity tests — the explicit-update half of the pipeline.
 //!
-//! - one SyncRun = one transaction: any failure rolls back mutations, the
-//!   SyncRun row and the Context frontier together;
-//! - member cursors (ingested) and the Context frontier (synced) are separate
-//!   lifecycles;
-//! - completed runs are idempotent under retry (delta fingerprint);
-//! - the unified AuthorityPolicy: agents never silently overwrite
-//!   user_explicit / user_edit items — they create ContextConflicts;
-//! - every status change leaves an audit revision;
-//! - commit re-verifies trash / frontier / Owner inside its transaction.
+//! Every Workstream mutation goes through `MergeEngine::apply` inside ONE
+//! caller-owned transaction: any failure rolls the whole update back (mutations,
+//! conflict rows and head revisions together); retrying a batch applies it
+//! exactly once, and re-applying an identical mutation is a deterministic skip.
+//! Facts and Context are separate lifecycles, so an update never moves the fact
+//! frontier. Agents never silently overwrite user items (they persist
+//! ContextConflicts), every status change leaves an audit revision, and a
+//! mutation naming a Workstream outside the run's Owner is skipped, never written.
 
 use noending::domain::{Agent, ParsedSessionMessage, Session, SessionMessage, SessionMessageRole};
-use noending::storage::{
-    insert_sync_run_conn, new_id, now, set_processed_message_sequence_conn, Db,
-};
+use noending::storage::{new_id, Db};
 use noending::sync::merge::MergeEngine;
 use noending::sync::{create_item, ContextMutation, MergeContext};
 
@@ -24,9 +21,17 @@ fn open_db(tag: &str) -> Db {
     Db::open(&dir.join("test.db")).unwrap()
 }
 
+/// The run context for an explicit update of `ws`. `runtime` is recorded as
+/// `created_by = sync:<runtime>` on everything the merge engine writes.
+fn ctx(ws: &str) -> MergeContext {
+    MergeContext {
+        runtime: "heuristic".into(),
+        workstream_id: ws.to_string(),
+    }
+}
+
 /// A Logical Session + ROOT member seeded through the production commit path,
-/// with one stored user message per text. The member cursor starts as an
-/// append past genesis, so later batches chain from the committed tail.
+/// with one stored user message per text.
 fn session_with_messages(
     db: &Db,
     root_agent_session_id: &str,
@@ -73,67 +78,55 @@ fn user_item(
         authority,
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap()
 }
 
-// ---------------------------------------------------------------------------
-// Issue #3: transactions
-// ---------------------------------------------------------------------------
+fn agent_item(db: &Db, ws_id: &str, title: &str, content: &str) -> noending::domain::ContextItem {
+    create_item(
+        db,
+        ws_id,
+        "note",
+        title,
+        content,
+        "agent_inferred",
+        "session_message",
+        &[],
+        "sync:heuristic",
+    )
+    .unwrap()
+}
 
-/// A DB failure anywhere in the run's transaction must roll back the whole
-/// run: earlier mutations, the SyncRun row and the Context frontier all
-/// disappear.
-///
-/// The failure is injected at the frontier write (a Session that does not
-/// exist), not by an out-of-owner mutation: since the single-owner boundary
-/// landed, a mutation aimed at another Workstream is refused deterministically
-/// and SKIPPED — it never reaches the FK, so it is no longer a way to fail a
-/// run (that behaviour is pinned by
-/// `mutations_outside_the_owner_are_skipped_not_written`).
+fn add_note(ws_id: &str, title: &str, content: &str) -> ContextMutation {
+    ContextMutation::Add {
+        workstream_id: ws_id.to_string(),
+        item_kind: "note".into(),
+        title: title.into(),
+        content: content.into(),
+        source_refs: vec![],
+        authority: "agent_inferred".into(),
+    }
+}
+
+// Transactions
+
+/// A DB failure anywhere in the update's transaction must roll back the whole
+/// batch: earlier mutations and their conflict rows disappear together.
 #[test]
 fn mutation_failure_rolls_back_entire_run() {
     let db = open_db("rollback");
-    let (s, _member, _msgs) = session_with_messages(&db, "rollback-root", &["seed"]);
     let ws = ws_row(&db, "ws-rollback", "real workstream");
-
-    let mutations = vec![ContextMutation::Add {
-        workstream_id: ws.id.clone(),
-        item_kind: "note".into(),
-        title: "first mutation".into(),
-        content: "ok".into(),
-        source_refs: vec![],
-        authority: "agent_inferred".into(),
-    }];
-
-    let ctx = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
-    let run = noending::domain::SyncRun {
-        id: ctx.run_id.clone(),
-        session_id: s.id.clone(),
-        from_sequence: 0,
-        to_sequence: 5,
-        status: "ok".into(),
-        mutations: serde_json::json!([]),
-        summary: "should never persist".into(),
-        error: None,
-        created_at: now(),
-        runtime: "heuristic".into(),
-        delta_fingerprint: Some("fp".into()),
-    };
+    let c = ctx(&ws.id);
+    let m = add_note(&ws.id, "first mutation", "ok");
 
     let result = db.tx(|tx| {
-        for m in &mutations {
-            MergeEngine.apply(tx, m, &ctx)?;
-        }
-        insert_sync_run_conn(tx, &run)?;
-        // FK violation: there is no such Session to advance.
-        set_processed_message_sequence_conn(tx, "missing-session", 5)?;
+        MergeEngine.apply(tx, &m, &c)?;
+        // FK violation: there is no such Session to write Context for.
+        tx.execute(
+            "INSERT INTO session_contexts (session_id, updated_at) VALUES ('missing-session', 't')",
+            [],
+        )?;
         Ok(())
     });
     assert!(
@@ -141,51 +134,34 @@ fn mutation_failure_rolls_back_entire_run() {
         "the FK violation must fail the transaction"
     );
 
-    // everything rolled back
     assert!(
         db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
         "the applied mutation must NOT survive the rollback"
     );
-    assert_eq!(db.list_sync_runs(50).unwrap().len(), 0, "no SyncRun row");
     assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
+        db.conflicts_for_workstream(&ws.id, false).unwrap().len(),
         0,
-        "Context frontier unchanged"
+        "no conflict row survives either"
     );
 }
 
-/// Retrying after a rollback applies the batch exactly once; retrying an
-/// already-committed delta is recognized via the fingerprint.
+/// Retrying after a rollback applies the batch exactly once; re-applying an
+/// identical mutation is a deterministic skip (dedup).
 #[test]
-fn retry_after_rollback_applies_once_and_commit_is_idempotent() {
+fn retry_after_rollback_applies_once_and_reapply_is_deduped() {
     let db = open_db("retry");
-    let (_s, _member, _msgs) = session_with_messages(&db, "retry-root", &["seed"]);
     let ws = ws_row(&db, "ws-retry", "retry ws");
-
-    let mk_mutations = || {
-        vec![ContextMutation::Add {
-            workstream_id: ws.id.clone(),
-            item_kind: "note".into(),
-            title: "only good mutation".into(),
-            content: "fine".into(),
-            source_refs: vec![],
-            authority: "agent_inferred".into(),
-        }]
-    };
+    let m = add_note(&ws.id, "only good mutation", "fine");
 
     // 1st attempt fails after the mutation was applied
-    let ctx = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
+    let c = ctx(&ws.id);
     let failed = db.tx(|tx| {
-        for m in &mk_mutations() {
-            MergeEngine.apply(tx, m, &ctx)?;
-        }
-        set_processed_message_sequence_conn(tx, "missing-session", 1)
+        MergeEngine.apply(tx, &m, &c)?;
+        tx.execute(
+            "INSERT INTO session_contexts (session_id, updated_at) VALUES ('missing-session', 't')",
+            [],
+        )?;
+        Ok(())
     });
     assert!(failed.is_err());
     assert!(
@@ -193,46 +169,31 @@ fn retry_after_rollback_applies_once_and_commit_is_idempotent() {
         "the failed attempt left nothing behind"
     );
 
-    // retry with only the good mutation succeeds exactly once
-    let ctx2 = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
+    // retry succeeds exactly once
+    let c2 = ctx(&ws.id);
     db.tx(|tx| {
-        for m in mk_mutations() {
-            MergeEngine.apply(tx, &m, &ctx2)?;
-        }
+        MergeEngine.apply(tx, &m, &c2)?;
         Ok(())
     })
     .unwrap();
     assert_eq!(db.items_for_workstream(&ws.id, true).unwrap().len(), 1);
 
     // applying the same mutation again is a deterministic skip (dedup)
-    let ctx3 = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
+    let c3 = ctx(&ws.id);
     let applied_again = db
         .tx(|tx| {
-            let mut applied = 0;
-            for m in mk_mutations() {
-                if MergeEngine.apply(tx, &m, &ctx3)? {
-                    applied += 1;
-                }
-            }
-            Ok(applied)
+            let applied = MergeEngine.apply(tx, &m, &c3)?;
+            Ok(applied as i32)
         })
         .unwrap();
     assert_eq!(applied_again, 0, "identical re-apply is a no-op");
     assert_eq!(db.items_for_workstream(&ws.id, true).unwrap().len(), 1);
 }
 
-/// Member cursors and the Context frontier are independent: ingested-but-
-/// unsynced messages exist, survive, and are picked up by the next sync pass.
+/// Facts and Context are independent lifecycles: ingestion advances the fact
+/// frontier, an explicit update writes Context — neither touches the other.
 #[test]
-fn member_cursor_and_context_frontier_are_separate() {
+fn facts_and_context_are_separate_lifecycles() {
     let db = open_db("cursors");
     let (s, member_id, _stored) = session_with_messages(
         &db,
@@ -243,163 +204,45 @@ fn member_cursor_and_context_frontier_are_separate() {
     // Routing is the Session's single Owner Workstream.
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
-    let parsed = |id: String, text: &str| ParsedSessionMessage {
-        provider: None,
-        model: None,
-        source_message_id: Some(id),
-        source_position: String::new(),
-        ts: Some(now()),
-        role: SessionMessageRole::User,
-        content: text.into(),
-    };
-    let source = |offset: u64| noending::domain::SourceCursorUpdate {
-        file_identity: "dev:1:ino:9".into(),
-        generation: 0,
-        byte_offset: offset,
-        last_seen_size: offset,
-        mtime: None,
-        start_byte_offset: offset,
-        prefix_hash: String::new(),
-    };
-
-    // ingest batch 2 (real user message so the extractor produces mutations)
-    let batch2 = vec![parsed(
-        format!("cursors-root-b2"),
-        "补充约束：不能把密钥提交到代码仓库，必须使用环境变量",
-    )];
-    let stored2 = db
-        .commit_member_ingest(&s.id, &member_id, &batch2, None, &source(120))
-        .unwrap();
-    assert_eq!(stored2.len(), 1);
+    // facts advanced through the production commit path
     assert_eq!(
-        db.get_member_cursor(&member_id).unwrap().byte_offset,
-        120,
+        db.get_session_ingest_state(&s.id)
+            .unwrap()
+            .latest_message_seq,
+        1
+    );
+    assert_eq!(db.message_projection_ids(&s.id).unwrap().len(), 1);
+    assert!(
+        db.get_member_cursor(&member_id).unwrap().byte_offset > 0,
         "member (read) cursor advanced"
     );
+
+    // no Context exists yet — only an explicit update would write it
+    assert!(db.get_session_context(&s.id).unwrap().is_none());
+    assert!(db.workstream_frontiers(&ws.id).unwrap().is_empty());
+
+    // a Context write never moves the fact frontier
+    let c = ctx(&ws.id);
+    db.tx(|tx| {
+        MergeEngine.apply(tx, &add_note(&ws.id, "from the run", "body"), &c)?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(db.items_for_workstream(&ws.id, true).unwrap().len(), 1);
     assert_eq!(
-        db.get_context_state(&s.id)
+        db.get_session_ingest_state(&s.id)
             .unwrap()
-            .processed_message_sequence,
-        0,
-        "Context frontier behind"
-    );
-
-    // ingest batch 3 — still not synced (simulates a crash after ingest)
-    let batch3 = vec![parsed(
-        format!("cursors-root-b3"),
-        "下一步要实现增量读取的边界测试",
-    )];
-    let stored3 = db
-        .commit_member_ingest(&s.id, &member_id, &batch3, None, &source(200))
-        .unwrap();
-    assert_eq!(stored3.len(), 1);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0
-    );
-
-    // now sync everything after the frontier in one run
-    let processed = db
-        .get_context_state(&s.id)
-        .unwrap()
-        .processed_message_sequence;
-    let pending = db.get_messages_after(&s.id, processed, 10_000).unwrap();
-    assert_eq!(pending.len(), 3, "all stored messages are pending");
-    let engine = noending::sync::SyncEngine::default();
-    let to = pending.last().unwrap().sequence;
-    let out = engine
-        .run_session_sync(&db, &s, &pending, processed, to)
-        .unwrap();
-    assert!(out.applied > 0);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        to,
-        "Context frontier caught up"
-    );
-    assert_eq!(
-        db.items_for_workstream(&ws.id, true).unwrap().len(),
-        out.applied as usize,
-        "exactly the applied mutations persisted"
-    );
-}
-
-/// The single ingest+sync entry processes pending messages and advances the
-/// Context frontier exactly like the interactive path.
-/// (`ingest_and_sync_session` IS the one reconcile path.)
-#[test]
-fn ingest_and_sync_path_processes_pending_messages() {
-    let db = open_db("nb-path");
-    // The unified path reads the member's file delta first, so the ROOT
-    // member needs a real (empty) source file behind its cursor.
-    let dir = std::env::temp_dir().join(format!("noending-nb-{}", new_id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("source.jsonl");
-    std::fs::write(&file, "").unwrap();
-
-    let s = support::ensure_session(&db, new_id(), Agent::Codex, "nb-path-root");
-    let member_id = support::ensure_root_member(
-        &db,
-        &s.id,
-        Agent::Codex,
-        "nb-path-root",
-        &file.to_string_lossy(),
-    );
-    let ws = ws_row(&db, "ws-nb", "nb ws");
-    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
-
-    // one pending message (a real user message so extraction yields mutations)
-    let stored = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[support::parsed_message(
-                "nb-msg-1",
-                SessionMessageRole::User,
-                "我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据",
-            )],
-            None,
-            &support::seed_source(0),
-        )
-        .unwrap();
-    assert_eq!(stored.len(), 1);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0
-    );
-
-    // The reconcile path IS ingest_and_sync_session. Intelligence gates the
-    // sync half, so the switch is part of the setup.
-    noending::settings::set_context_intelligence_enabled(&db, true).unwrap();
-    let engine = noending::sync::SyncEngine::default();
-    let (_ingested, applied) =
-        noending::ingestion::ingest_and_sync_session(&db, &engine, &s).unwrap();
-    assert!(
-        applied > 0,
-        "pending messages processed through the sync path"
-    );
-
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
+            .latest_message_seq,
         1,
-        "Context frontier advanced"
+        "the fact frontier is unchanged by a Context write"
     );
     assert!(
-        !db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
-        "mutations were committed"
+        db.get_session_context(&s.id).unwrap().is_none(),
+        "a Workstream mutation does not author a Session summary"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Issue #4: authority policy integration
-// ---------------------------------------------------------------------------
+// Authority policy integration
 
 #[test]
 fn agent_update_of_user_item_creates_conflict_not_overwrite() {
@@ -422,12 +265,8 @@ fn agent_update_of_user_item_creates_conflict_not_overwrite() {
         source_refs: vec!["session-message:e1".into()],
         authority: "agent_inferred".into(),
     };
-    let ctx = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
-    let applied = db.tx(|tx| MergeEngine.apply(tx, &m, &ctx)).unwrap();
+    let c = ctx(&ws.id);
+    let applied = db.tx(|tx| MergeEngine.apply(tx, &m, &c)).unwrap();
     assert!(applied, "the disagreement is recorded (as a conflict)");
 
     let after = db.get_item(&item.id).unwrap().unwrap();
@@ -462,11 +301,7 @@ fn agent_supersede_and_resolve_of_user_items_never_apply() {
     let item = db.get_item(&created.id).unwrap().unwrap();
     let original_head = item.current_revision_id.clone();
 
-    let ctx = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
+    let c = ctx(&ws.id);
 
     let sup = ContextMutation::Supersede {
         item_id: item.id.clone(),
@@ -475,7 +310,7 @@ fn agent_supersede_and_resolve_of_user_items_never_apply() {
         source_refs: vec![],
         authority: "agent_inferred".into(),
     };
-    assert!(db.tx(|tx| MergeEngine.apply(tx, &sup, &ctx)).unwrap());
+    assert!(db.tx(|tx| MergeEngine.apply(tx, &sup, &c)).unwrap());
     let after = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(after.status, "active", "user_explicit not superseded");
     assert_eq!(after.current_revision_id, original_head);
@@ -484,7 +319,7 @@ fn agent_supersede_and_resolve_of_user_items_never_apply() {
         item_id: item.id.clone(),
         source_refs: vec![],
     };
-    assert!(db.tx(|tx| MergeEngine.apply(tx, &res, &ctx)).unwrap());
+    assert!(db.tx(|tx| MergeEngine.apply(tx, &res, &c)).unwrap());
     let after = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(
         after.status, "active",
@@ -503,26 +338,9 @@ fn agent_supersede_and_resolve_of_user_items_never_apply() {
 fn agent_may_evolve_agent_owned_items_with_full_trail() {
     let db = open_db("auth-agent-owned");
     let ws = ws_row(&db, "ws-agent-owned", "agent owned ws");
-    // agent-owned item
-    let item = create_item(
-        &db,
-        &ws.id,
-        "note",
-        "初步猜测",
-        "guess v1",
-        "agent_inferred",
-        "session_message",
-        &["session-message:e-old".into()],
-        None,
-        "sync:heuristic",
-    )
-    .unwrap();
+    let item = agent_item(&db, &ws.id, "初步猜测", "guess v1");
 
-    let ctx = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
+    let c = ctx(&ws.id);
     let update = ContextMutation::Update {
         item_id: item.id.clone(),
         title: "初步猜测（修订）".into(),
@@ -530,7 +348,7 @@ fn agent_may_evolve_agent_owned_items_with_full_trail() {
         source_refs: vec!["session-message:e-new".into()],
         authority: "agent_inferred".into(),
     };
-    assert!(db.tx(|tx| MergeEngine.apply(tx, &update, &ctx)).unwrap());
+    assert!(db.tx(|tx| MergeEngine.apply(tx, &update, &c)).unwrap());
     let after = db.get_item(&item.id).unwrap().unwrap();
     assert_ne!(
         after.current_revision_id, item.current_revision_id,
@@ -545,7 +363,7 @@ fn agent_may_evolve_agent_owned_items_with_full_trail() {
         source_refs: vec![],
         authority: "agent_inferred".into(),
     };
-    assert!(db.tx(|tx| MergeEngine.apply(tx, &sup, &ctx)).unwrap());
+    assert!(db.tx(|tx| MergeEngine.apply(tx, &sup, &c)).unwrap());
     let old = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(old.status, "superseded");
 
@@ -572,12 +390,12 @@ fn user_status_changes_also_leave_audit() {
     let ws = ws_row(&db, "ws-audit", "audit ws");
     let item = user_item(&db, &ws.id, "user_edit", "t", "c");
 
-    db.apply_status_change(&item.id, "resolved", "user", "用户标记完成", None, &[])
+    db.apply_status_change(&item.id, "resolved", "user", "用户标记完成", &[])
         .unwrap();
     let after = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(after.status, "resolved");
 
-    db.apply_status_change(&item.id, "deleted", "user", "用户删除", None, &[])
+    db.apply_status_change(&item.id, "deleted", "user", "用户删除", &[])
         .unwrap();
     let after = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(after.status, "deleted");
@@ -594,11 +412,9 @@ fn user_status_changes_also_leave_audit() {
     assert_eq!(audits[1].metadata["audit"]["new_status"], "deleted");
 }
 
-// ---------------------------------------------------------------------------
 // Head integrity: an applied Update must persist its revision BEFORE the
 // item head points at it. A dangling current_revision_id breaks the
 // workstream page (revision JOIN yields NULL).
-// ---------------------------------------------------------------------------
 
 fn head_is_resolvable(db: &Db, ws_id: &str, item_id: &str) {
     let items = db.items_for_workstream(ws_id, true).unwrap();
@@ -621,13 +437,8 @@ fn head_is_resolvable(db: &Db, ws_id: &str, item_id: &str) {
 #[test]
 fn update_mutation_persists_revision_before_head_points_at_it() {
     let db = open_db("head-update");
-    let (_s, _member, _msgs) = session_with_messages(&db, "head-update-root", &["seed"]);
     let ws = ws_row(&db, "ws-head", "head integrity");
-    let ctx = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
+    let c = ctx(&ws.id);
 
     let add = ContextMutation::Add {
         workstream_id: ws.id.clone(),
@@ -637,7 +448,7 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
         source_refs: vec!["session-message:a".into()],
         authority: "agent_inferred".into(),
     };
-    MergeEngine.apply(&db.write(), &add, &ctx).unwrap();
+    MergeEngine.apply(&db.write(), &add, &c).unwrap();
 
     let items = db.items_for_workstream(&ws.id, true).unwrap();
     let item_id = items[0].0.id.clone();
@@ -650,7 +461,7 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
         source_refs: vec!["session-message:b".into()],
         authority: "agent_inferred".into(),
     };
-    assert!(MergeEngine.apply(&db.write(), &update, &ctx).unwrap());
+    assert!(MergeEngine.apply(&db.write(), &update, &c).unwrap());
 
     // The new revision must exist AND be the stored head.
     let history = db.item_history(&item_id).unwrap();
@@ -671,13 +482,8 @@ fn update_mutation_persists_revision_before_head_points_at_it() {
 #[test]
 fn dedup_update_path_also_persists_revision() {
     let db = open_db("head-dedup");
-    let (_s, _member, _msgs) = session_with_messages(&db, "head-dedup-root", &["seed"]);
     let ws = ws_row(&db, "ws-head-dedup", "head integrity dedup");
-    let ctx = MergeContext {
-        run_id: new_id(),
-        runtime: "heuristic".into(),
-        workstream_id: ws.id.clone(),
-    };
+    let c = ctx(&ws.id);
 
     let add = ContextMutation::Add {
         workstream_id: ws.id.clone(),
@@ -687,7 +493,7 @@ fn dedup_update_path_also_persists_revision() {
         source_refs: vec![],
         authority: "agent_inferred".into(),
     };
-    MergeEngine.apply(&db.write(), &add, &ctx).unwrap();
+    MergeEngine.apply(&db.write(), &add, &c).unwrap();
     let item_id = db.items_for_workstream(&ws.id, true).unwrap()[0]
         .0
         .id
@@ -703,7 +509,7 @@ fn dedup_update_path_also_persists_revision() {
         source_refs: vec!["session-message:c".into()],
         authority: "agent_inferred".into(),
     };
-    assert!(MergeEngine.apply(&db.write(), &add_again, &ctx).unwrap());
+    assert!(MergeEngine.apply(&db.write(), &add_again, &c).unwrap());
 
     assert_eq!(
         db.items_for_workstream(&ws.id, true).unwrap().len(),
@@ -723,170 +529,79 @@ fn dedup_update_path_also_persists_revision() {
     head_is_resolvable(&db, &ws.id, &item_id);
 }
 
-// ---------------------------------------------------------------------------
-// Concurrency: commit must re-verify trash, the Context frontier and the
-// Owner inside its transaction (extraction runs without the lock and may
-// take minutes).
-// ---------------------------------------------------------------------------
+// Owner boundary: `update` / `supersede` / `resolve` name their target by
+// `item_id`, and that id may come from model output echoing an id found anywhere
+// in the transcript — so a mutation naming a Workstream outside the run's Owner
+// must be SKIPPED, never written. The routing decision the user just made wins.
 
 #[test]
-fn stale_commit_is_discarded_when_context_frontier_moved() {
-    let db = open_db("stale-commit");
-    let (s, _member, stored) = session_with_messages(
-        &db,
-        "stale-root",
-        &[
-            "决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据",
-            "补充约束：不能把密钥提交到代码仓库，必须使用环境变量管理",
-        ],
-    );
-    let ws = ws_row(&db, "ws-stale", "stale ws");
-    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
+fn mutation_outside_the_owner_is_skipped_not_written() {
+    let db = open_db("owner-boundary");
+    let ws_owner = ws_row(&db, "ws-owner", "the run's owner");
+    let ws_other = ws_row(&db, "ws-other", "someone else's workstream");
+    let item = agent_item(&db, &ws_other.id, "别的 Workstream 的条目", "body");
+    let original_head = item.current_revision_id.clone();
 
-    let engine = noending::sync::SyncEngine::default();
-    let pre = engine
-        .prepare(&db, &s, &stored, 0, 2)
+    // The run may only write `ws_owner`.
+    let c = ctx(&ws_owner.id);
+
+    let add = add_note(&ws_other.id, "越界新增", "should never land");
+    assert!(
+        !db.tx(|tx| MergeEngine.apply(tx, &add, &c)).unwrap(),
+        "an Add for another Workstream is skipped"
+    );
+
+    let update = ContextMutation::Update {
+        item_id: item.id.clone(),
+        title: "越界改写".into(),
+        content: "should never land".into(),
+        source_refs: vec![],
+        authority: "agent_inferred".into(),
+    };
+    assert!(
+        !db.tx(|tx| MergeEngine.apply(tx, &update, &c)).unwrap(),
+        "an Update naming another Workstream's item is skipped"
+    );
+
+    let sup = ContextMutation::Supersede {
+        item_id: item.id.clone(),
+        title: "越界取代".into(),
+        content: "should never land".into(),
+        source_refs: vec![],
+        authority: "agent_inferred".into(),
+    };
+    assert!(!db.tx(|tx| MergeEngine.apply(tx, &sup, &c)).unwrap());
+
+    let res = ContextMutation::Resolve {
+        item_id: item.id.clone(),
+        source_refs: vec![],
+    };
+    assert!(!db.tx(|tx| MergeEngine.apply(tx, &res, &c)).unwrap());
+
+    let after = db.get_item(&item.id).unwrap().unwrap();
+    assert_eq!(after.status, "active", "the other item is untouched");
+    assert_eq!(after.current_revision_id, original_head);
+    assert_eq!(
+        db.items_for_workstream(&ws_other.id, true).unwrap().len(),
+        1
+    );
+    assert!(db
+        .items_for_workstream(&ws_owner.id, true)
         .unwrap()
-        .expect("prepared");
-
-    // a concurrent run commits the same delta while "our" extraction runs
-    db.set_processed_message_sequence(&s.id, 2).unwrap();
-
-    let out = engine
-        .commit(&db, &s, &pre, vec![], "heuristic", vec![])
-        .unwrap();
+        .is_empty());
     assert_eq!(
-        out.status, "stale",
-        "stale run must be discarded, not applied"
-    );
-    assert_eq!(out.applied, 0);
-    assert_eq!(
-        db.get_context_state(&s.id)
+        db.conflicts_for_workstream(&ws_other.id, false)
             .unwrap()
-            .processed_message_sequence,
-        2,
-        "the Context frontier must never move backwards"
-    );
-    assert_eq!(
-        db.items_for_workstream(&ws.id, true).unwrap().len(),
+            .len(),
         0,
-        "no stale mutation may touch the workstream"
+        "a skipped mutation writes neither item nor conflict"
     );
 }
 
-/// The Owner Workstream is the Context routing decision, so it is also the
-/// commit-phase CAS. If the user re-routes the Session while
-/// extraction runs (minutes, no lock held), the prepared mutations target a
-/// routing that no longer exists — commit must discard the run WITHOUT
-/// advancing the frontier, so the next sync prepares against the user's new
-/// decision.
+/// A trashed Session refuses an explicit summary update outright (the guard
+/// runs before any model call), and its facts stay frozen.
 #[test]
-fn stale_commit_when_owner_changes_during_extraction() {
-    let db = open_db("stale-owner");
-    let (s, _member, stored) = session_with_messages(
-        &db,
-        "stale-owner-root",
-        &["我们决定量化系统的回测引擎采用向量化计算，行情数据全部走内存缓存以提升速度"],
-    );
-    let ws_a = ws_row(&db, "ws-a", "量化回测引擎");
-    let ws_b = ws_row(&db, "ws-b", "前端界面重构");
-    db.set_session_owner(&s.id, Some(&ws_a.id)).unwrap();
-
-    let engine = noending::sync::SyncEngine::default();
-    let pre = engine
-        .prepare(&db, &s, &stored, 0, stored.last().unwrap().sequence)
-        .unwrap()
-        .expect("prepared");
-    assert_eq!(
-        pre.owner_workstream_id.as_deref(),
-        Some(ws_a.id.as_str()),
-        "routed to the Owner that existed at prepare time"
-    );
-
-    // the user re-routes the Session to B while "extraction" is running
-    db.set_session_owner(&s.id, Some(&ws_b.id)).unwrap();
-
-    let out = engine
-        .commit(&db, &s, &pre, vec![], "heuristic", vec![])
-        .unwrap();
-    assert_eq!(
-        out.status, "stale",
-        "the user's mid-extract decision must win"
-    );
-    assert_eq!(out.applied, 0);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0,
-        "the frontier must not advance for a stale run"
-    );
-    assert!(
-        db.items_for_workstream(&ws_a.id, true).unwrap().is_empty(),
-        "a stale run must not write Context into the old Owner"
-    );
-    assert!(
-        db.items_for_workstream(&ws_b.id, true).unwrap().is_empty(),
-        "nor into the new one before it is re-prepared"
-    );
-    assert_eq!(
-        db.get_session(&s.id)
-            .unwrap()
-            .unwrap()
-            .owner_workstream_id
-            .as_deref(),
-        Some(ws_b.id.as_str())
-    );
-}
-
-/// Clearing the Owner during extraction is a routing change like any other:
-/// prepare saw Owner A, the user cleared it, so the run must be discarded
-/// rather than committing context into a Workstream the Session no longer
-/// belongs to.
-#[test]
-fn stale_commit_when_owner_cleared_during_extraction() {
-    let db = open_db("stale-owner-cleared");
-    let (s, _member, _stored) = session_with_messages(&db, "stale-cleared-root", &["seed"]);
-    let ws_a = ws_row(&db, "ws-cleared", "前端界面重构");
-    db.set_session_owner(&s.id, Some(&ws_a.id)).unwrap();
-
-    let engine = noending::sync::SyncEngine::default();
-    let pre = engine
-        .prepare(&db, &s, &[], 0, 0)
-        .unwrap()
-        .expect("prepared");
-    assert_eq!(pre.owner_workstream_id.as_deref(), Some(ws_a.id.as_str()));
-
-    db.set_session_owner(&s.id, None).unwrap();
-
-    let out = engine
-        .commit(&db, &s, &pre, vec![], "heuristic", vec![])
-        .unwrap();
-    assert_eq!(out.status, "stale");
-    assert_eq!(out.applied, 0);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0
-    );
-    assert!(db.items_for_workstream(&ws_a.id, true).unwrap().is_empty());
-    assert!(
-        db.get_session(&s.id)
-            .unwrap()
-            .unwrap()
-            .owner_workstream_id
-            .is_none(),
-        "the user's clearing of the Owner is preserved"
-    );
-}
-
-/// / a run prepared against a Session that was trashed while its
-/// extraction ran must not write message-derived context, a SyncRun, or a
-/// frontier advance. The data stays frozen at the moment of trashing; a
-/// Restore re-syncs from the unchanged frontier.
-#[test]
-fn trashed_session_rejects_commit_and_keeps_frontier_frozen() {
+fn trashed_session_refuses_explicit_update() {
     let db = open_db("trash-reject");
     let (s, _member, stored) = session_with_messages(
         &db,
@@ -896,32 +611,18 @@ fn trashed_session_rejects_commit_and_keeps_frontier_frozen() {
     let ws = ws_row(&db, "ws-trash", "trashed routing");
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
-    let engine = noending::sync::SyncEngine::default();
-    let pre = engine
-        .prepare(&db, &s, &stored, 0, stored.last().unwrap().sequence)
-        .unwrap()
-        .expect("prepared");
-
-    // the user trashes the Session while "extraction" is running
     noending::lifecycle::trash_session(&db, &s.id).unwrap();
 
-    let out = engine
-        .commit(&db, &s, &pre, vec![], "heuristic", vec![])
-        .unwrap();
-    assert_eq!(out.status, "trashed", "the run must be discarded");
-    assert_eq!(out.applied, 0);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0,
-        "the frontier stays frozen at the moment of trashing"
-    );
-    assert!(db.list_sync_runs(50).unwrap().is_empty(), "no SyncRun row");
+    let outcome = noending::context::update_session(&db, &s.id);
     assert!(
-        db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
-        "no context was written for a trashed session"
+        outcome.is_err(),
+        "a trashed session refuses an explicit summary update"
     );
-    // the messages themselves were never deleted: Restore re-syncs from here
-    assert_eq!(db.message_count(&s.id).unwrap(), stored.len() as i64);
+    assert_eq!(
+        db.message_count(&s.id).unwrap(),
+        stored.len() as i64,
+        "the messages themselves were never deleted"
+    );
+    assert!(db.get_session_context(&s.id).unwrap().is_none());
+    assert!(db.items_for_workstream(&ws.id, true).unwrap().is_empty());
 }

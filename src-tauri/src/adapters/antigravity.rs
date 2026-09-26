@@ -485,6 +485,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             ),
             messages,
             source: Some(source),
+            complete_snapshot: true,
             next_active_provider: None,
             next_active_model: None,
         })
@@ -500,7 +501,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         &self,
         _install: &crate::platform::exec_resolver::AgentInstallation,
         _opts: &ExecOptions,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other(
@@ -513,7 +513,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         _install: &crate::platform::exec_resolver::AgentInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("Antigravity 没有可恢复的 CLI，无法恢复会话"))
@@ -1002,6 +1001,7 @@ mod tests {
                 &delta.messages,
                 delta.stats,
                 delta.source.as_ref().unwrap(),
+                true,
                 None,
                 None,
             )
@@ -1052,6 +1052,7 @@ mod tests {
             &delta.messages,
             delta.stats,
             &source,
+            true,
             None,
             None,
         )

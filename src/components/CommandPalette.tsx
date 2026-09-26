@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { Route } from "../app/routes";
-import { useBaseExperience } from "../app/experience";
 import type { SearchHit, Session, Workstream } from "../types";
 
 interface PaletteItem {
@@ -13,8 +12,7 @@ interface PaletteItem {
 }
 
 /** 固定命令：导航 + New 动作，不与实体搜索混淆。
- *  New 动作以 route.action 携带意图，目标页已挂载时同样会打开 Modal。
- *  cmd-assistant 只在 Context Intelligence 开启时出现。 */
+ *  New 动作以 route.action 携带意图，目标页已挂载时同样会打开 Modal。 */
 const FIXED_COMMANDS: PaletteItem[] = [
   { key: "cmd-home", kind: "命令", label: "前往首页", hint: "继续最近的工作", route: { view: "home" } },
   { key: "cmd-workstreams", kind: "命令", label: "前往任务", route: { view: "workstreams" } },
@@ -36,7 +34,6 @@ export default function CommandPalette({ onClose, navigate }: {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { intelligenceEnabled } = useBaseExperience();
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -57,7 +54,6 @@ export default function CommandPalette({ onClose, navigate }: {
     const ql = q.trim().toLowerCase();
     // 固定命令：输入为空时全部可见；输入后按子串过滤
     for (const c of FIXED_COMMANDS) {
-      if (c.key === "cmd-assistant" && !intelligenceEnabled) continue;
       if (!ql || c.label.toLowerCase().includes(ql)) out.push(c);
     }
     if (!ql || "workstreams".includes(ql)) {
@@ -77,8 +73,7 @@ export default function CommandPalette({ onClose, navigate }: {
       const route: Route =
         h.kind === "workstream" ? { view: "workstream", workstreamId: h.ref_id }
         : h.kind === "item" ? { view: "workstream", workstreamId: h.parent_id }
-        // 消息命中（逻辑会话重构后 kind=message）：打开它所在的会话，
-        // ref_id 是消息 id，parent_id 才是会话 id。
+        // 消息命中：打开它所在的会话，ref_id 是消息 id，parent_id 才是会话 id。
         : h.kind === "message" ? { view: "session", sessionId: h.parent_id }
         : h.kind === "project" ? { view: "project", projectId: h.ref_id }
         : { view: "sessions" };
@@ -93,14 +88,13 @@ export default function CommandPalette({ onClose, navigate }: {
     // dedupe by key, cap
     const seen = new Set<string>();
     return out.filter((i) => !seen.has(i.key) && seen.add(i.key)).slice(0, 12);
-  }, [q, workstreams, sessions, hits, intelligenceEnabled]);
+  }, [q, workstreams, sessions, hits]);
 
   useEffect(() => { setSelected(0); }, [q]);
 
   const go = (item: PaletteItem | undefined) => {
     if (!item) return;
-    // New 命令：意图随 route.action 到达页面，由页面打开 Modal
-    // （保持可取消、可选项；已在目标页时同样生效）
+    // New 命令：意图随 route.action 到达页面，由页面打开 Modal（已在目标页时同样生效）。
     navigate(item.route);
     onClose();
   };

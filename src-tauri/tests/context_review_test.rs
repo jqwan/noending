@@ -1,6 +1,4 @@
-use noending::domain::{
-    Agent, ContextConflict, ContextDelivery, ContextItemRevision, ReviewFrontier, Workstream,
-};
+use noending::domain::{Agent, ContextConflict, ContextItemRevision, ReviewFrontier, Workstream};
 use noending::storage::{new_id, now, Db};
 use rusqlite::params;
 use std::ops::Deref;
@@ -90,7 +88,6 @@ fn set_conflict_time(db: &Db, conflict_id: &str, timestamp: &str) {
         .unwrap();
 }
 
-/// 2. new_agent_change_is_unseen
 /// An Agent revision created after baseline appears in unseen_changes.
 #[test]
 fn new_agent_change_is_unseen() {
@@ -109,7 +106,6 @@ fn new_agent_change_is_unseen() {
         "agent_inferred",
         "session_message",
         &[],
-        Some("sync-run-1"),
         "sync:agent",
     )
     .unwrap();
@@ -132,7 +128,6 @@ fn new_agent_change_is_unseen() {
     );
 }
 
-/// 3. user_edit_is_not_review_relevant
 /// Explicit user edits and additions are known to the user and do NOT become unseen.
 #[test]
 fn user_edit_is_not_review_relevant() {
@@ -148,7 +143,6 @@ fn user_edit_is_not_review_relevant() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -178,7 +172,6 @@ fn user_edit_is_not_review_relevant() {
         }),
         source_type: Some("user_edit".into()),
         source_ref: None,
-        sync_run_id: None,
         created_at: now(),
     };
     db.insert_revision(&edit_rev).unwrap();
@@ -196,7 +189,6 @@ fn user_edit_is_not_review_relevant() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -210,7 +202,6 @@ fn user_edit_is_not_review_relevant() {
     );
 }
 
-/// 4. conflict_creation_is_unseen
 /// New conflicts are contested state and always enter unseen.
 #[test]
 fn conflict_creation_is_unseen() {
@@ -226,7 +217,6 @@ fn conflict_creation_is_unseen() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -240,7 +230,6 @@ fn conflict_creation_is_unseen() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -273,7 +262,6 @@ fn conflict_creation_is_unseen() {
     assert_eq!(win.unseen_changes[0].actor, "Agent");
 }
 
-/// 5. mark_reviewed_advances_only_observed_frontier
 /// Reading A/B gives mark_through F1. If C is inserted concurrently,
 /// marking F1 advances through A and B, leaving C unseen.
 #[test]
@@ -290,7 +278,6 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -305,7 +292,6 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -315,7 +301,7 @@ fn mark_reviewed_advances_only_observed_frontier() {
     assert_eq!(window_ab.unseen_changes.len(), 2);
     let token_ab = window_ab.mark_through.clone();
 
-    // Meanwhile, background sync adds change C
+    // Meanwhile another write adds change C
     let item_c = noending::sync::create_item(
         &db,
         &ws.id,
@@ -325,7 +311,6 @@ fn mark_reviewed_advances_only_observed_frontier() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -343,7 +328,6 @@ fn mark_reviewed_advances_only_observed_frontier() {
     assert_ne!(window_after.unseen_changes[0].item_id, Some(item_b.id));
 }
 
-/// 6. same_timestamp_boundary_is_lossless
 /// When changes A and B share identical created_at timestamps, reviewing only A
 /// leaves B unseen without loss.
 #[test]
@@ -427,9 +411,8 @@ fn same_timestamp_boundary_is_lossless() {
     assert!(win_final.unseen_changes.is_empty());
 }
 
-/// 7. review_state_isolated_from_domain_state
 /// Marking reviewed is purely observational and MUST NOT mutate Context items,
-/// revisions, conflicts, ContextDelivery snapshots, or member cursors.
+/// revisions, conflicts, or member cursors.
 #[test]
 fn review_state_isolated_from_domain_state() {
     let db = open_db("domain-isolation");
@@ -470,7 +453,6 @@ fn review_state_isolated_from_domain_state() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -484,7 +466,6 @@ fn review_state_isolated_from_domain_state() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -504,24 +485,12 @@ fn review_state_isolated_from_domain_state() {
     };
     db.insert_conflict(&conflict).unwrap();
 
-    let delivery = ContextDelivery {
-        id: new_id(),
-        session_id: s.id.clone(),
-        workstream_id: ws.id.clone(),
-        bundle_id: "bundle-1".into(),
-        delivered_revisions: vec![item.current_revision_id.clone().unwrap()],
-        delivered_conflicts: vec![conflict.id.clone()],
-        delivered_at: now(),
-    };
-    db.record_delivery(&delivery).unwrap();
-
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     // Snapshot all domain states before mark reviewed
     let item_before = db.get_item(&item.id).unwrap().unwrap();
     let history_before = db.item_history(&item.id).unwrap();
     let conflict_before = db.get_conflict(&conflict.id).unwrap().unwrap();
-    let deliveries_before = db.latest_deliveries(&s.id).unwrap();
     let cursor_before = db.get_member_cursor(&member_id).unwrap();
     let owner_before = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
@@ -536,7 +505,6 @@ fn review_state_isolated_from_domain_state() {
     let item_after = db.get_item(&item.id).unwrap().unwrap();
     let history_after = db.item_history(&item.id).unwrap();
     let conflict_after = db.get_conflict(&conflict.id).unwrap().unwrap();
-    let deliveries_after = db.latest_deliveries(&s.id).unwrap();
     let cursor_after = db.get_member_cursor(&member_id).unwrap();
     let owner_after = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
@@ -563,17 +531,6 @@ fn review_state_isolated_from_domain_state() {
     assert_eq!(conflict_before.resolution, conflict_after.resolution);
     assert_eq!(conflict_before.updated_at, conflict_after.updated_at);
 
-    assert_eq!(deliveries_before.len(), deliveries_after.len());
-    assert_eq!(deliveries_before[0].id, deliveries_after[0].id);
-    assert_eq!(
-        deliveries_before[0].delivered_revisions,
-        deliveries_after[0].delivered_revisions
-    );
-    assert_eq!(
-        deliveries_before[0].delivered_conflicts,
-        deliveries_after[0].delivered_conflicts
-    );
-
     assert_eq!(cursor_before.byte_offset, cursor_after.byte_offset);
     assert_eq!(cursor_before.generation, cursor_after.generation);
     assert_eq!(
@@ -584,7 +541,6 @@ fn review_state_isolated_from_domain_state() {
     assert_eq!(owner_before, owner_after, "review must not touch the owner");
 }
 
-/// 8. sync_status_change_is_review_relevant
 /// Sync automated status changes (e.g. actor = "sync:heuristic") must be normalized
 /// to Agent and appear in unseen_changes.
 #[test]
@@ -601,7 +557,6 @@ fn sync_status_change_is_review_relevant() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -618,7 +573,6 @@ fn sync_status_change_is_review_relevant() {
         "resolved",
         "sync:heuristic",
         "自动推断已完成",
-        Some("sync-run-1"),
         &[],
     )
     .unwrap();
@@ -636,7 +590,6 @@ fn sync_status_change_is_review_relevant() {
     assert_eq!(win.unseen_changes[0].actor, "Agent");
 }
 
-/// 9. conflict_evidence_is_not_double_counted
 /// When a conflict occurs in production, the finding item created as evidence
 /// (source_type = "conflict") must be suppressed in the review loop, so that only
 /// the conflict_created event appears as unseen.
@@ -654,7 +607,6 @@ fn conflict_evidence_is_not_double_counted() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -674,7 +626,6 @@ fn conflict_evidence_is_not_double_counted() {
         "agent_inferred",
         "conflict",
         &[],
-        Some("sync-run-1"),
         "sync:claude-3-7-sonnet",
     )
     .unwrap();
@@ -709,7 +660,6 @@ fn conflict_evidence_is_not_double_counted() {
     assert_eq!(win.unseen_changes[0].conflict_id, Some(conflict.id));
 }
 
-/// 10. review_summary_category_breakdown
 /// Verifies that WorkstreamReviewSummary correctly counts each category:
 /// new_facts, updated_facts, resolved_items, superseded_items, unseen_change_count, open_conflict_count.
 #[test]
@@ -732,7 +682,6 @@ fn review_summary_category_breakdown() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -748,7 +697,6 @@ fn review_summary_category_breakdown() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -768,7 +716,6 @@ fn review_summary_category_breakdown() {
         }),
         source_type: Some("session_message".into()),
         source_ref: None,
-        sync_run_id: Some("sync-run-2".into()),
         created_at: now(),
     };
     db.insert_revision(&edit_rev).unwrap();
@@ -785,7 +732,6 @@ fn review_summary_category_breakdown() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -797,7 +743,6 @@ fn review_summary_category_breakdown() {
         "resolved",
         "sync:heuristic",
         "Auto completed",
-        Some("sync-run-3"),
         &[],
     )
     .unwrap();
@@ -819,7 +764,6 @@ fn review_summary_category_breakdown() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -831,7 +775,6 @@ fn review_summary_category_breakdown() {
         "superseded",
         "sync:heuristic",
         "Superseded by sync",
-        Some("sync-run-4"),
         &[],
     )
     .unwrap();
@@ -876,7 +819,6 @@ fn review_summary_category_breakdown() {
     assert!(summary.last_unseen_change_at.is_some());
 }
 
-/// 11. review_summary_updates_vs_attention_independence
 /// Tests the core invariant: has_updates and needs_attention are completely independent.
 /// Even after a user marks a window reviewed (has_updates -> false), an unresolved
 /// conflict keeps needs_attention -> true until resolved.
@@ -894,7 +836,6 @@ fn review_summary_updates_vs_attention_independence() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -966,7 +907,6 @@ fn review_summary_updates_vs_attention_independence() {
     assert!(!s2.needs_attention);
 }
 
-/// 12. review_summary_batch_list
 /// Verifies that list_workstream_review_summaries returns isomorphic summaries
 /// for all workstreams without N+1 mismatches.
 #[test]
@@ -993,7 +933,6 @@ fn review_summary_batch_list() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -1009,7 +948,6 @@ fn review_summary_batch_list() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();

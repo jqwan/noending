@@ -62,8 +62,8 @@ export function RecentSessions({ navigate, onNewSession }: {
     [],
   );
   useEffect(refresh, [refresh]);
-  // Home 常驻：后台 sync / reconcile 完成后 Recent Sessions 要跟上，
-  // 否则会和已刷新的 Workstream 卡片显示不一致的「最新」状态。
+  // Home 常驻：后台摄入完成后 Recent Sessions 要跟上，否则会和已刷新的
+  // Workstream 卡片显示不一致的「最新」状态。
   useRefreshSignal(refresh);
 
   // 还没读到数据时不出声，免得把「加载中」当成「没有 Session」。
@@ -73,8 +73,7 @@ export function RecentSessions({ navigate, onNewSession }: {
     <div className="recent-sessions" style={{ marginTop: 36 }}>
       <div className="section-label">最近会话</div>
 
-      {/* Workstream 存在但一次都还没跑过：这里必须留下一个明确的下一步，
-          否则首页看起来像空的。 */}
+      {/* Workstream 存在但一次都还没跑过：这里必须留下明确的下一步，否则首页看起来像空的。 */}
       {sessions.length === 0 ? (
         <div className="muted small">
           还没有会话。{" "}

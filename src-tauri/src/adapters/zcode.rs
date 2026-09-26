@@ -1,55 +1,44 @@
 //! ZCode Adapter: the session store is a **live SQLite database**,
-//! `~/.zcode/cli/db/db.sqlite` (144 MB locally, WAL, mutated in place).
+//! `~/.zcode/cli/db/db.sqlite` (WAL, mutated in place).
 //!
 //! This is the one agent with no transcript file at all, so none of the file
 //! machinery applies: no byte offsets, no prefix fingerprints, no append
-//! detection. Three tables carry the conversation (read-only open; NoEnding
-//! never writes, never migrates, never VACUUMs):
-//! - `session(id, parent_id, directory, title, time_created, time_updated,
-//!   time_archived, task_type, …)` — `directory` is the cwd;
-//! - `message(id, session_id, data, sequence)` — `data` is JSON with `role`
-//!   (`user` / `assistant` — the only two roles in the store) and
-//!   `time.created` / `time.completed`;
-//! - `part(id, message_id, session_id, data, sequence)` — `data.type` is
-//!   `text` / `reasoning` / `tool` / `step-start` / `step-finish` / `timeline`
-//!   / `compaction` / `file`.
+//! detection. Three tables carry the conversation, opened read-only (NoEnding
+//! never writes, migrates or VACUUMs): `session(id, parent_id, directory, title,
+//! time_created, time_updated, time_archived, task_type, …)` where `directory` is
+//! the cwd; `message(id, session_id, data, sequence)` with `data.role` and
+//! `data.time.created` / `time.completed`; and `part(id, message_id, session_id,
+//! data, sequence)` whose `data.type` is `text` / `reasoning` / `tool` /
+//! `step-start` / `step-finish` / `timeline` / `compaction` / `file`.
 //!
-//! Member mapping: every live session row is a member; a row with a
-//! `parent_id` is a CHILD member of that parent. ZCode's source cannot express
-//! a genuine user fork, so the conservative rule applies and no member
-//! is ever a ForkRoot — only seeing an explicit fork marker would change that,
-//! and an adapter test pins the rule.
+//! Member mapping: every live session row is a member; a row with a `parent_id`
+//! is a CHILD member of that parent. The source cannot express a genuine user
+//! fork, so no member is ever a ForkRoot — only an explicit fork marker would
+//! change that, and an adapter test pins the rule.
 //!
-//! What is ingested is therefore exactly the prose: the `text` parts of a
-//! message, joined in `sequence` order, under the message's own id as the
-//! native message id — and only for the ROOT member. Reasoning, tool traffic,
-//! step markers, timeline, and file references are machine chatter (counted,
-//! not stored); a `compaction` part becomes a compaction observation. The
+//! Ingested is exactly the prose: the `text` parts of a message joined in
+//! `sequence` order, under the message's own id, and only for the ROOT member.
+//! Reasoning, tool traffic, step markers, timeline and file references are
+//! counted, never stored; a `compaction` part is a compaction observation. The
 //! user's prompt needs no unwrapping — the environment snapshot lives in
 //! `message.data.contextSnapshot` and leaves `text` clean.
 //!
 //! Three decisions worth recording:
-//! - **`role` is not who wrote it.** ZCode tags every message with
-//!   `data.semantics.{origin,kind}`, and under `role:"user"` the runtime's own
-//!   talking-to-the-model hides in plain sight: over 6 620 real messages, 308
-//!   are `real_user`/`user_prompt` against 489 `todo_reminder`, 50
-//!   `system_reminder`, 14 `background_notification`, 10 `compact_summary` and
-//!   2 `system` reminders. Reading `role` would have ingested three times as
-//!   much machine chatter as human prose — and titled every session after a
-//!   reminder. Only `real_user`/`user_prompt` is a human turn.
+//! - **`role` is not who wrote it.** `data.semantics.{origin,kind}` is what
+//!   separates a human turn from the runtime talking to the model: under
+//!   `role:"user"` sit reminders and compaction summaries, which reading `role`
+//!   would ingest as prose and then use to title the session. Only
+//!   `real_user`/`user_prompt` is a human turn.
 //! - **Only settled assistant messages.** A row is inserted when generation
-//!   starts (`time.created`) and updated as it streams, and storage dedups by
-//!   id — so ingesting a half-written message would freeze a truncated reply
-//!   forever. A reply is read only once `time.completed` exists; user messages
-//!   never carry it (measured), which is why the guard is on the reply alone.
+//!   starts and rewritten as it streams, and storage dedups by id — so reading a
+//!   half-written reply would freeze a truncated answer forever. A reply is read
+//!   only once `time.completed` exists; user messages never carry it.
 //! - **Archived sessions are left alone.** `time_archived` is ZCode's own
-//!   "retired from the list" verdict, and dropping a source is the failure the
-//!   design tolerates; inventing sessions the app itself hides is the one it
-//!   does not.
+//!   "retired from the list" verdict, and inventing sessions the app itself
+//!   hides is the failure the design does not tolerate.
 //!
-//! There is no launchable CLI: ZCode is a desktop app (`~/.zcode/cli` is its
-//! own data dir, not a user-facing command), so `detect()` never succeeds and
-//! no command is built.
+//! There is no launchable CLI (`~/.zcode/cli` is its own data dir, not a
+//! user-facing command), so `detect()` never succeeds and no command is built.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -214,13 +203,11 @@ fn message_of(
     if text.trim().is_empty() {
         return (None, observation);
     }
-    // Message provenance: a settled assistant
-    // response's own `data` carries the actual generation identity at the top
-    // level — `modelID` / `providerID`, older rows spell them `modelId` /
-    // `providerId` (the two spellings never disagree when both are present;
-    // verified across the whole real store). Read together with the settled
-    // guard above: provenance is only trusted once `time.completed` exists.
-    // Rows without the fields stay NULL — unknown stays unknown.
+    // Every settled assistant response's own `data` carries the actual
+    // generation identity at the top level: `modelID` / `providerID`, older
+    // rows spelling them `modelId` / `providerId`. Read together with the
+    // settled guard above: provenance is only trusted once `time.completed`
+    // exists, and rows without the fields stay NULL.
     let (provider, model) = if kind == "assistant_response" {
         (
             data.get("providerID")
@@ -265,17 +252,15 @@ impl ZCodeAdapter {
         let title_source: Option<String> = row.get(6)?;
         let task_type: Option<String> = row.get(7)?;
         // ZCode says where each title came from. `generated` is a real title;
-        // `first_input` is ZCode truncating the first input, the same naive
-        // derivation
-        // as ours and is often worse (`You are running a verification smoke
-        // tes`, `研究 /Users/jqk/projects/deepseek-harness `), so it is skipped
-        // and our own derivation stands.
+        // `first_input` is ZCode truncating the first input — the same naive
+        // derivation as ours and often worse, so it is skipped and our own
+        // derivation stands.
         let native_title = title
             .filter(|t| !t.trim().is_empty() && title_source.as_deref() != Some("first_input"));
-        // the conservative rule: a parent_id makes this a CHILD member
-        // of that parent. The source cannot distinguish an internal child from
-        // a genuine user fork, so nothing here is ever a ForkRoot; `task_type`
-        // rides along as metadata for a future explicit fork marker.
+        // A `parent_id` makes this a CHILD member of that parent. The source
+        // cannot distinguish an internal child from a genuine user fork, so
+        // nothing here is ever a ForkRoot; `task_type` rides along as metadata
+        // for a future explicit fork marker.
         let (kind, parent) = match parent_id.filter(|p| !p.is_empty()) {
             Some(p) => (DiscoveredMemberKind::Child, Some(p)),
             None => (DiscoveredMemberKind::Root, None),
@@ -363,16 +348,13 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
                 continue;
             }
             seen.push(db.clone());
-            // `unchanged` is deliberately NOT consulted. It is keyed by source
+            // `unchanged` is deliberately NOT consulted: it is keyed by source
             // path, and every ZCode member shares this one path, so its verdict
-            // is "SOME member on this path is ingested" — not "all of them
-            // are". Worse, the store commits in WAL mode: rows can appear in
+            // would be "SOME member on this path is ingested", not "all of
+            // them". The store also commits in WAL mode, so rows can appear in
             // `db.sqlite-wal` while the main file's size and mtime stay
-            // identical, so the stat-based check would call the store unchanged
-            // and strand every new session until the next checkpoint. Reading
-            // all live sessions every pass costs one indexed query per session
-            // and is absorbed by message-identity dedup, which is the right
-            // trade for never losing a session.
+            // identical. Reading all live sessions every pass costs one indexed
+            // query each and is absorbed by message-identity dedup.
             let conn = open_read_only(&db)?;
             let mut stmt = conn
                 .prepare(
@@ -416,13 +398,11 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         }
 
         // There is no file to seek into and no stable prefix to fingerprint:
-        // the source is a database that changes under us. Identity is the
-        // framework's own message ids, so a re-read of the whole session
-        // stores nothing; a replaced database is the only shape change worth a
-        // generation bump. Every replay is a full scan → stats SNAPSHOT. The
-        // cursor is WAL-aware (main db + `-wal`): a checkpoint folds WAL bytes
-        // into the main file, so main-file-only stats would miss WAL-only
-        // writes and freeze `last_activity_at`.
+        // identity is the framework's own message ids, so a re-read of the whole
+        // session stores nothing, and a replaced database is the only shape
+        // change worth a generation bump. Every replay is a full scan → stats
+        // SNAPSHOT. The cursor is WAL-aware (main db + `-wal`), so a checkpoint
+        // cannot hide WAL-only writes and freeze `last_activity_at`.
         let source = crate::adapters::sqlite_replay_cursor_update(&path, cursor)?;
         Ok(MemberReadDelta {
             stats: crate::adapters::stats_update_from(
@@ -432,14 +412,14 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             ),
             messages,
             source: Some(source),
+            complete_snapshot: true,
             next_active_provider: None,
             next_active_model: None,
         })
     }
 
-    /// The store decides: the member's record is present → Present;
-    /// the record is gone → Missing; a store that cannot
-    /// be opened or has an unexpected shape is NEVER missing, only
+    /// The store decides: the member's record is present → Present, gone →
+    /// Missing, and a store that cannot be opened is NEVER missing, only
     /// Unavailable.
     fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
         let path = PathBuf::from(&member.source_path);
@@ -448,9 +428,9 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         };
         // Three verdicts, strictly: the record is there → Present; the store
         // opened fine and does NOT hold the record → Missing (the shared-store
-        // form of confirmed absence); anything the query could
-        // not answer (broken store, locked, wrong shape) → Unavailable — an
-        // unreadable store must never read as an absent source.
+        // form of confirmed absence); anything the query could not answer
+        // (broken store, locked, wrong shape) → Unavailable — an unreadable
+        // store must never read as an absent source.
         let record = match conn.query_row(
             "SELECT 1 FROM session WHERE id = ?1",
             [&member.source_member_id],
@@ -471,7 +451,6 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         &self,
         _install: &AgentInstallation,
         _opts: &ExecOptions,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("ZCode 是桌面应用，没有可启动的 CLI"))
@@ -482,7 +461,6 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         _install: &AgentInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("ZCode 是桌面应用，没有可启动的 CLI"))
@@ -673,9 +651,8 @@ mod tests {
         assert_eq!(db_path(&root.join("cli")), None, "not every dir is a store");
     }
 
-    /// a `parent_id` makes a live row a CHILD member of that parent,
-    /// never a fork: the source cannot express one, so the conservative rule
-    /// holds and the child carries no title source.
+    /// A `parent_id` makes a live row a CHILD member of that parent, never a
+    /// fork: the source cannot express one, so the child carries no title.
     #[test]
     fn discovery_lists_live_sessions_and_maps_parents_to_children() {
         let root = unique_dir("discover");
@@ -711,9 +688,8 @@ mod tests {
         );
     }
 
-    /// A `first_input` title is ZCode's own naive truncation of the first
-    /// input — the same thing we would derive, and measurably worse
-    /// (`You are running a verification smoke tes`). It is not a title the
+    /// A `first_input` title is ZCode's own naive truncation of the first input
+    /// — the same thing we would derive, and often worse. It is not a title the
     /// Agent thought about, so the derived one stands.
     #[test]
     fn a_first_input_title_is_not_treated_as_native() {
@@ -888,8 +864,7 @@ mod tests {
         let conn = open(&db);
         session_row(&conn, "s", None, "/repo", 100);
         // The summary is generated text, so the message itself is not prose;
-        // the `compaction` PART is the structural marker (measured: 20 parts
-        // across the local store, one per compaction event).
+        // the `compaction` PART is the structural marker.
         message_row(&conn, "m1", "s", 0, reminder("compact_summary"));
         part_row(
             &conn,
@@ -924,8 +899,8 @@ mod tests {
         }
     }
 
-    /// no ZCode member is ever a ForkRoot: the source cannot express a
-    /// genuine user fork, and only an explicit fork marker would change that.
+    /// No ZCode member is ever a ForkRoot: the source cannot express a genuine
+    /// user fork, and only an explicit fork marker would change that.
     #[test]
     fn no_member_is_ever_a_fork_root() {
         let root = unique_dir("no-fork");
@@ -942,8 +917,8 @@ mod tests {
             .all(|m| m.kind != DiscoveredMemberKind::ForkRoot));
     }
 
-    /// for a shared store: the record's absence is a confirmed Missing;
-    /// an unopenable store is only ever Unavailable.
+    /// For a shared store: the record's absence is a confirmed Missing; an
+    /// unopenable store is only ever Unavailable.
     #[test]
     fn inspect_reads_the_record_not_the_file() {
         let root = unique_dir("inspect");
@@ -976,9 +951,8 @@ mod tests {
         );
     }
 
-    ///  — a settled assistant response's own data carries
-    /// its generation identity in either field spelling; a row without the
-    /// fields stays NULL.
+    /// A settled assistant response's own data carries its generation identity
+    /// in either field spelling; a row without the fields stays NULL.
     #[test]
     fn settled_assistant_responses_carry_their_model_and_provider() {
         let root = unique_dir("prov");

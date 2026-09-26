@@ -1,36 +1,20 @@
 //! NoEnding Home — the on-disk data root, its bootstrap pointer, and the
 //! default workspace.
 //!
-//! This module owns the Home layout and relocation contract.
-//!
-//! ## Layout
-//!
 //! ```text
 //! ~/.noending/            (Windows: %USERPROFILE%\.noending\)
 //! ├─ data/                noending.db            ┐
-//! ├─ runtime/             context-bundles/       ├ reserved: never a WorkspacePath
+//! ├─ runtime/                                    ├ reserved: never a WorkspacePath
 //! ├─ logs/                                        ┘
 //! └─ workspace/          ← the default working directory, a NORMAL path
 //! ```
 //!
-//! ## Resolution order
+//! Resolution order: `$NOENDING_HOME` → bootstrap.current_home → `~/.noending`.
+//! The bootstrap pointer lives outside the Home
+//! (`<config_dir>/app.noending.desktop/home.json`) because the database inside
+//! the Home is what it locates.
 //!
-//! ```text
-//! $NOENDING_HOME  →  bootstrap.current_home  →  ~/.noending
-//! ```
-//!
-//! The pointer must live outside NoEnding Home, because the database inside the
-//! Home is what we are trying to locate:
-//!
-//! ```text
-//! <dirs::config_dir()>/app.noending.desktop/home.json
-//! ```
-//!
-//! (`~/Library/Application Support/…` on macOS, `%APPDATA%\…` on Windows.)
-//! Content: `{"current_home": "/Users/me/.noending", "pending_home": "…"}`,
-//! written with the already-present `serde_json`; no new dependency.
-//!
-//! ## Changing the Home is a restart-then-migrate operation
+//! Changing the Home is a restart-then-migrate operation:
 //!
 //! ```text
 //! set_noending_home(new)  →  write pending_home only  →  UI: “重启后迁移并生效”
@@ -44,32 +28,13 @@
 //! default workspace becomes an ordinary WorkspacePath and the new one is
 //! `<new-home>/workspace`. A failed move must leave `current_home` untouched.
 //!
-//! ## Required shape
-//!
 //! Every entry point takes the resolution inputs explicitly — `explicit`
 //! (`$NOENDING_HOME`), `bootstrap` path, and `home` — because `std::env::set_var`
-//! in one test poisons every other test in the same binary. Exactly
-//! one function may read the environment.
-//!
-//! ```text
-//! NoEndingHome { root, data_dir, runtime_dir, logs_dir, default_workspace, db_path }
-//! NoEndingHome::resolve(req: &HomeRequest) -> Result<NoEndingHome>
-//! NoEndingHome::ensure_dirs              // create_dir_all, incl. workspace/
-//! is_reserved_app_path(path) -> bool       // Home, data/, runtime/, logs/ — segment-wise
-//! ```
+//! in one test poisons every other test in the same binary. Exactly one function
+//! may read the environment.
 //!
 //! `is_reserved_app_path` must use `identity::is_within`, not `starts_with`
 //! (`/Users/me/.noending/datax` is not reserved).
-//!
-//! Also owns:
-//! * `platform::exec_resolver::resolve_executable(name)` — the generic locator
-//!   `git` needs, extracted from the Agent-specific resolver; a Finder-launched
-//!   macOS app does not inherit the shell PATH where Homebrew's git lives.
-//! * `platform::exec_runner::run(program, args, cwd, timeout)` — extracted from
-//!   `run_headless`, which today falls back to a hardcoded `/tmp` when `cwd` is
-//!   `None` and would run `git` in the wrong directory.
-//! * `platform::paths::expand_tilde` becomes the single expander, delegating to
-//!   `identity::expand_tilde`; `launcher::expand_tilde` must not stay a third one.
 
 use std::path::{Path, PathBuf};
 
@@ -82,7 +47,7 @@ use crate::workspace::identity::{self, NormalizeOpts, PathStyle};
 pub const APP_DIR_NAME: &str = ".noending";
 /// Reserved: the database and everything app-owned that is not a runtime file.
 pub const DATA_DIR_NAME: &str = "data";
-/// Reserved: ephemeral per-run artifacts (`context-bundles/`,).
+/// Reserved: ephemeral per-run artifacts.
 pub const RUNTIME_DIR_NAME: &str = "runtime";
 /// Reserved: log output.
 pub const LOGS_DIR_NAME: &str = "logs";
@@ -96,9 +61,7 @@ pub const BOOTSTRAP_FILE_NAME: &str = "home.json";
 /// holds user files, and silently relocating them is data loss with extra steps.
 pub const MIGRATABLE_DIRS: [&str; 3] = [DATA_DIR_NAME, RUNTIME_DIR_NAME, LOGS_DIR_NAME];
 
-// ---------------------------------------------------------------------------
-// resolution
-// ---------------------------------------------------------------------------
+// Resolution
 
 /// Why the Home is where it is. Reported in logs and Settings so a surprising
 /// location is never a mystery (failures must not be silent).
@@ -151,10 +114,9 @@ pub struct NoEndingHome {
     pub runtime_dir: PathBuf,
     pub logs_dir: PathBuf,
     /// `<root>/workspace` — the default working directory for sessions with no
-    /// Workstream path. Must exist before it is ever used as a `cwd`
-    ///: on macOS a failed `cd` in the launch script falls back to
-    /// `$HOME`, which is exactly the dotfiles-repository directory forbids
-    /// ever becoming a Project.
+    /// Workstream path. Must exist before it is ever used as a `cwd`: on macOS a
+    /// failed `cd` in the launch script falls back to `$HOME`, which is exactly
+    /// the dotfiles-repository directory that must never become a Project.
     pub default_workspace: PathBuf,
     pub db_path: PathBuf,
 }
@@ -301,12 +263,12 @@ pub struct HomeResolution {
 
 /// Where the bootstrap pointer lives, by default.
 ///
-///  names the path (`~/Library/Application Support/…` on macOS,
+/// The design names the path (`~/Library/Application Support/…` on macOS,
 /// `%APPDATA%\…` on Windows) and the call (`dirs::config_dir()`) — and on macOS
 /// those two disagree, because `config_dir()` is `~/Library/Preferences`. The
-/// **path** wins: it is the sentence the migration depends on (the pre-Home
-/// database is already in that folder,), and
-/// `platform::paths::resolve_app_support_dir` encodes exactly that pair.
+/// **path** wins: the migration depends on it (the pre-Home database is already
+/// in that folder), and `platform::paths::resolve_app_support_dir` encodes
+/// exactly that pair.
 pub fn default_pointer_path() -> Option<PathBuf> {
     crate::platform::paths::resolve_app_support_dir().map(|d| d.join(BOOTSTRAP_FILE_NAME))
 }
@@ -324,9 +286,7 @@ pub fn resolve_explicit_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-// ---------------------------------------------------------------------------
-// reserved app paths
-// ---------------------------------------------------------------------------
+// Reserved app paths
 
 /// Paths that can never be a WorkspacePath: NoEnding Home itself and the three
 /// app-owned directories under it.
@@ -334,7 +294,7 @@ pub fn resolve_explicit_override() -> Option<PathBuf> {
 /// Two different relations, deliberately not collapsed into one list:
 /// * the Home **root** is reserved by *equality* only — its non-reserved
 ///   children (`workspace/`) are ordinary paths, so treating the root as a
-///   container would reserve the whole Home and contradict;
+///   container would reserve the whole Home and contradict that;
 /// * `data/`, `runtime/`, `logs/` are reserved by *containment*, segment-wise via
 ///   [`identity::is_within`], so `~/.noending/datax` is an ordinary directory
 ///   and `~/.noending/data/noending.db` is not.
@@ -373,7 +333,7 @@ impl ReservedPaths {
     ///
     /// The comparison is [`identity::identity_key`], not [`identity::path_key`]:
     /// on a Windows volume `C:\Users\me\.noending\DATA` IS the `data/` directory
-    /// this set exists to reserve. 's reservation is a gate rather than a
+    /// this set exists to reserve. Reservation is a gate rather than a
     /// membership, so a case-variant miss does not converge later the way two
     /// spellings of a repository do — it lets the app's own database directory
     /// become a WorkspacePath and then a Project.
@@ -403,7 +363,7 @@ impl ReservedPaths {
     }
 }
 
-/// gate for callers holding only a raw string (a Session `cwd`, a path
+/// A gate for callers holding only a raw string (a Session `cwd`, a path
 /// picked in a file dialog). Normalizes first, then checks segment-wise.
 pub fn is_reserved_app_path(raw: &str, home: &NoEndingHome) -> bool {
     let user_home = identity::home_dir().map(|h| h.to_string_lossy().to_string());
@@ -429,9 +389,7 @@ pub fn is_reserved_app_path_with(raw: &str, home: &NoEndingHome, opts: Normalize
     home.reserved().contains_with(&canonical, style)
 }
 
-// ---------------------------------------------------------------------------
-// bootstrap pointer
-// ---------------------------------------------------------------------------
+// Bootstrap pointer
 
 /// `<app support>/home.json`: the pointer that survives before the database —
 /// and therefore before the Home — is known.
@@ -551,9 +509,7 @@ pub fn apply_relocation(migration: &PendingMigration) -> Result<BootstrapPointer
     Ok(pointer)
 }
 
-// ---------------------------------------------------------------------------
-// data-root migration — runs BEFORE the database opens
-// ---------------------------------------------------------------------------
+// Data-root migration — runs BEFORE the database opens
 
 /// What happened to one directory during a Home relocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -656,7 +612,7 @@ pub fn migrate_data_root(migration: &PendingMigration) -> Result<MigrationReport
         }
     }
 
-    // the old default workspace keeps its user files and becomes an
+    // The old default workspace keeps its user files and becomes an
     // ordinary WorkspacePath. Say so in the report so nobody hunts for them.
     let old_workspace = from_home.default_workspace;
     if old_workspace.is_dir() {
@@ -756,12 +712,10 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// start-up orchestration
-// ---------------------------------------------------------------------------
+// Start-up orchestration
 
 /// Everything [`prepare_home`] needs. Built by [`StartupInputs::from_environment`]
-/// in `lib.rs` and by literal values in tests — the type is what keeps
+/// in `lib.rs` and by literal values in tests — the type is what keeps it
 /// honest: there is no ambient read inside the resolution path.
 #[derive(Debug, Clone, Default)]
 pub struct StartupInputs {
@@ -959,9 +913,7 @@ fn sibling_tmp(dir: &Path, suffix: &str) -> PathBuf {
     dir.with_file_name(format!(".{name}.{suffix}"))
 }
 
-// ---------------------------------------------------------------------------
-// unit tests
-// ---------------------------------------------------------------------------
+// Unit tests
 
 #[cfg(test)]
 mod tests {
@@ -974,7 +926,7 @@ mod tests {
             .expect("test home")
     }
 
-    /// 必须测试: `~` expansion, and the precedence chain.
+    /// `~` expansion, and the precedence chain.
     #[test]
     fn tilde_and_precedence() {
         let explicit = PathBuf::from("~/custom-home");
@@ -1045,7 +997,7 @@ mod tests {
         assert_eq!(r.notes.len(), 1, "the skipped candidate must be reported");
     }
 
-    /// 必须测试: reserved `~/.noending/data` exclusion, and
+    /// Reserved `~/.noending/data` exclusion, and
     /// `~/.noending/workspace` ALLOWED.
     #[test]
     fn reserved_paths_are_segment_wise() {
@@ -1089,7 +1041,7 @@ mod tests {
         assert!(!is_reserved_app_path_with("", &home, opts));
     }
 
-    /// 必须测试: Windows separator/case behavior — driven by an explicit
+    /// Windows separator/case behavior — driven by an explicit
     /// `PathStyle`, so it verifies Windows rules from a macOS runner.
     #[test]
     fn reserved_paths_windows_spelling() {
@@ -1112,7 +1064,7 @@ mod tests {
         // Case: on a Windows volume the spelling is not the location, so a
         // case-variant of `data/` IS `data/` and reserves it. Compared with
         // `path_key` this leaked — the app's own database directory could become
-        // a WorkspacePath, and 's reservation cannot self-heal afterwards the
+        // a WorkspacePath, and reservation cannot self-heal afterwards the
         // way two spellings of one repository do (Git convergence).
         assert!(reserved.contains_with("c:\\Users\\me\\.noending\\data", PathStyle::Windows));
         assert!(reserved.contains_with("C:\\Users\\ME\\.noending\\DATA", PathStyle::Windows));
@@ -1197,7 +1149,7 @@ mod tests {
 
     #[test]
     fn default_workspace_is_derived() {
-        // 必须测试: `<home>/workspace`, and `ensure_dirs` is what makes
+        // `<home>/workspace`, and `ensure_dirs` is what makes
         // it real; the fs part is covered in tests/workspace_resolver_test.rs.
         let home = home_at("/Users/me/.noending");
         assert_eq!(
@@ -1252,7 +1204,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// both platforms' spelling in one run. The expected strings are
+    /// Pins both platforms' spelling in one run. The expected strings are
     /// written by hand: deriving them through this module would assert that
     /// `request_relocation` agrees with itself, which is not the claim.
     #[test]

@@ -1,13 +1,11 @@
-//! The ordered WorkstreamPath list.
+//! The ordered WorkstreamPath list: the list is the whole model, and "position 0
+//! is primary" is a property of the list rather than a second fact that could
+//! disagree with it.
 //!
-//! Every test here is about ONE thing: that the list is the whole model, and
-//! that "position 0 is primary" is a property of the list rather than a second
-//! fact that can disagree with it.
-//!
-//! The attacher is a scripted stand-in, because the real implementation must
-//! stay separate and the Workstream side must stay testable without Git
-//! (`workspace::WorkspaceAttaching`'s contract: resolve through the caller's
-//! connection, `Ok(None)` for "this string is no path").
+//! The attacher is a scripted stand-in, because the real implementation must stay
+//! separate and the Workstream side must stay testable without Git
+//! (`WorkspaceAttaching`: resolve through the caller's connection, `Ok(None)` for
+//! "this string is no path").
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -28,7 +26,7 @@ use noending::workspace::workstream::{
 };
 use noending::workspace::{normalize_path, path_identity, WorkspaceAttaching};
 
-// ------------------------------------------------------------- fixtures
+// fixtures
 
 fn temp_db() -> (PathBuf, Db) {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -42,9 +40,9 @@ fn temp_db() -> (PathBuf, Db) {
     (dir, db)
 }
 
-/// note 7: never compare a stored canonical path against a literal, and
-/// never against a raw spelling either — run it through the same normalizer the
-/// production door uses, or the assertion is a Unix-only assertion.
+/// Never compare a stored canonical path against a literal or a raw spelling:
+/// run it through the same normalizer the production door uses, or the assertion
+/// is Unix-only.
 fn canonical(raw: &str) -> String {
     normalize_path(raw).expect("fixture path is normalizable")
 }
@@ -193,7 +191,7 @@ fn search_parent(db: &Db, workstream_id: &str) -> Option<String> {
         .flatten()
 }
 
-// ---------------------------------------------------------------- creation
+// creation
 
 /// must-test: an empty list is a legal Workstream, not a half-built one.
 #[test]
@@ -303,7 +301,7 @@ fn create_requires_a_title() {
     assert!(db.list_workstreams(None).unwrap().is_empty());
 }
 
-// ------------------------------------------------------------ append / order
+// append / order
 
 /// a second entry lands last and the primary does not move.
 #[test]
@@ -590,7 +588,7 @@ fn adding_an_unresolvable_path_is_an_error_not_a_noop() {
     assert!(add_workstream_path(&db, &attacher, "gone", "/repo/main").is_err());
 }
 
-// ---------------------------------------------- removal reach
+// removal reach
 
 /// / a path removal changes only the path list. Sessions that were
 /// launched through the removed directory keep their Owner Workstream, and the
@@ -780,7 +778,7 @@ fn path_views_carry_the_facts_the_detail_page_needs() {
     assert_eq!(views[2].canonical_path, canonical("/repo/backend"));
 }
 
-// ------------------------------------------------- multi-path creation (report)
+// multi-path creation (report)
 
 /// several initial paths land in submission order, and the report names
 /// each one's canonical spelling, position and derived Project.

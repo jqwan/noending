@@ -1,24 +1,18 @@
-//! Workspace Domain v0.2 launcher integration.
+//! Workspace Domain v0.2 launcher integration. Three pinned invariants:
 //!
-//! Three things are pinned here, and they are the three that used to be
-//! silently wrong:
+//! 1. The launch directory comes from the ordered `WorkstreamPath` list plus
+//!    Home's default workspace — never from a frozen `workstreams.default_cwd`
+//!    or another Session's cwd.
+//! 2. Those inputs are in the PreparedLaunch fingerprint: a WorkstreamPath
+//!    mutation does *not* bump `workstreams.updated_at`, so a reorder/add/remove
+//!    could leave a stale preview looking fresh. Every stale test changes exactly
+//!    ONE input and asserts the launch is refused.
+//! 3. A resume launches in the directory the preview showed; a missing Session
+//!    directory surfaces as fallback data in the payload, never a silent
+//!    substitution ("发生 fallback 必须在 UI 明确显示").
 //!
-//! 1. **The launch directory comes from the ordered `WorkstreamPath` list** and
-//!    NoEnding Home's default workspace — never from the frozen
-//!    `workstreams.default_cwd` and never from another Session's cwd.
-//! 2. **Those inputs are in the PreparedLaunch fingerprint.** A WorkstreamPath
-//!    mutation does *not* bump `workstreams.updated_at`, so before this existed
-//!    a reorder, an added path or a removed primary could leave a preview that
-//!    no longer described reality looking fresh. Every stale test below
-//!    changes exactly ONE input and asserts the launch is refused.
-//! 3. **A resume launches in the directory the preview showed**, and
-//!    when the Session's own directory is gone the fallback is data in the
-//!    payload, not a silent substitution ("发生 fallback 必须在 UI 明确显示").
-//!
-//! Everything is hermetic: temp databases, temp directories, and a
-//! `LaunchWorkspace` literal standing in for the user's real Home.
-//! The spawn step is injected, so no Terminal window opens and no Agent process
-//! starts; the fake echoes the directory it was handed.
+//! Everything is hermetic: temp DB/dirs, a `LaunchWorkspace` literal for Home,
+//! and an injected spawn step (the fake echoes the directory it was handed).
 
 use rusqlite::Connection;
 mod support;
@@ -43,7 +37,7 @@ use noending::workspace::{normalize_path, path_identity, WorkspaceAttaching};
 
 const PROJECT: &str = "p-launcher-ws";
 
-// ------------------------------------------------------------------ fixtures
+// fixtures
 
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-lws-{}-{}", tag, new_id()));
@@ -190,7 +184,7 @@ fn is_stale(err: &str) -> bool {
     err.contains("stale")
 }
 
-// ----------------------------------------------------- staleness of paths
+// staleness of paths
 
 /// "reorder primary makes plan stale". Position 0 is the whole meaning of
 /// the ordered list, and reordering it changes no `updated_at` anywhere — the
@@ -359,7 +353,7 @@ fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     assert!(same.command_line.ends_with(&before));
 }
 
-// ------------------------------------------------------------------- resume
+// resume
 
 /// "resume uses original cwd": the Session's own directory is tier 1 and it
 /// reaches the OS.
@@ -538,7 +532,7 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
     assert!(is_stale(&err.to_string()), "got: {err}");
 }
 
-// ------------------------------------------------ no phantom Session
+// no phantom Session
 
 /// a launch records a durable `LaunchIntent` and creates **no** Session,
 /// no WorkspacePath and no WorkstreamPath. Those appear only when the real
@@ -619,8 +613,6 @@ fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
         agent: Agent::Codex,
         owner_workstream_id: Some(w.clone()),
         cwd: Some(dir.clone()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -674,8 +666,6 @@ fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
     assert_eq!(stored.matched_session_id.as_deref(), Some(s.id.as_str()));
 }
 
-// ----------------------------------------------------------------
-
 /// 's third tier routes independent launches into ONE shared directory, so
 /// cwd stops being evidence: two standalone launches at the default workspace
 /// must not auto-match each other's Session. They stay unresolved for a human,
@@ -692,8 +682,6 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
         agent: Agent::Codex,
         owner_workstream_id: Some(ws.to_string()),
         cwd: Some(default_ws.clone()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -773,8 +761,6 @@ fn a_match_never_teaches_the_workstream_a_foreign_path() {
         agent: Agent::Codex,
         owner_workstream_id: Some(w.clone()),
         cwd: Some(default_ws.clone()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -853,8 +839,6 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
         agent: Agent::Codex,
         owner_workstream_id: Some(selected.clone()),
         cwd: Some(default_ws.clone()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -869,8 +853,6 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
         agent: Agent::Codex,
         owner_workstream_id: None,
         cwd: Some(default_ws.clone()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -905,7 +887,7 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
     );
 }
 
-// ------------------------------------------------------ payload coherence
+// payload coherence
 
 /// The payload's own coherence: `PreparedLaunch.cwd` and
 /// `PreparedLaunch.cwd_resolution` describe one answer, the tier is named for

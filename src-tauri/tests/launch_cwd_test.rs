@@ -1,18 +1,13 @@
-//! New Session launch directory resolution.
-//!
-//! ```text
-//! explicit cwd
-//!     → the single Owner Workstream's ordered WorkstreamPaths
-//!       (first usable one, in list order)
-//!     → NoEnding Home's default workspace
-//! ```
+//! New Session launch directory resolution:
+//! explicit cwd → the single Owner Workstream's ordered WorkstreamPaths (first
+//! usable one, in list order) → NoEnding Home's default workspace.
 //!
 //! The ordered path list is the only Workstream workspace authority; an owned
 //! Session's cwd is never a suggestion for a new launch.
 //!
-//! Every directory a test expects to be *chosen* is a real temp directory,
-//! because forbids handing the terminal a directory that is not there
-//! (macOS would print a hint and quietly cd to `$HOME`).
+//! Every directory a test expects to be *chosen* is a real temp directory: the
+//! terminal must be handed a directory that exists (macOS would otherwise print
+//! a hint and quietly cd to `$HOME`).
 
 use std::path::{Path, PathBuf};
 mod support;
@@ -56,11 +51,11 @@ fn temp_root(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("noending-launch-cwd-{}-{}", tag, new_id()))
 }
 
-/// A directory that really exists — "usable" in 's sense.
+/// A directory that really exists — "usable" in the `CwdSource` sense.
 ///
-/// note 7: never assert a stored canonical path against a literal. The
-/// temp dir is handed to the same normalizer production uses, so this file says
-/// the same thing on macOS, Linux and a Windows `C:\…` temp path.
+/// Never assert a stored canonical path against a literal: the temp dir is
+/// handed to the same normalizer production uses, so this file says the same
+/// thing on macOS, Linux and a Windows `C:\…` temp path.
 fn real_dir(tag: &str, name: &str) -> String {
     let dir = temp_root(tag).join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -118,7 +113,7 @@ fn new_cwd(
     .cwd
 }
 
-// ------------------------------------------------------------- the tiers
+// the tiers
 
 /// "explicit cwd wins": a directory the user named outranks everything,
 /// including a Workstream whose primary path is a perfectly good directory.
@@ -276,7 +271,7 @@ fn another_sessions_cwd_is_not_a_launch_authority() {
     );
 }
 
-// ----------------------------------------------------------------- tilde
+// tilde
 
 /// Users type `~/projects/x` — the terminal renderers quote the path, and a
 /// literal `~` inside quotes never expands (the launch would silently land

@@ -1,16 +1,11 @@
-//! Project projection and the WorkspacePath registry.
-//!
-//! Every "必须测试" case is exactly one named test here, plus the extra doors
-//! the registry owns: the `WorkspaceAttaching` implementation, the reconcile
-//! sweep, GC, automatic naming and the detail shape.
+//! Project projection and the WorkspacePath registry: the `WorkspaceAttaching`
+//! implementation, the reconcile sweep, GC, automatic naming and the detail shape.
 //!
 //! No test touches a real repository, a real NoEnding Home or `git`: observations
-//! are constructed by script, which is the whole point of the
-//! `WorkspaceObserving` / `WorkspacePolicy` seams. Paths are absolute strings that
-//! need not exist — path identity is lexical — and every assertion
-//! compares against `canon(..)` rather than a spelled-out prefix, because
-//! `canonical_path` is stored in platform-native form and CI runs both macOS and
-//! Windows.
+//! are constructed by script (the `WorkspaceObserving` / `WorkspacePolicy` seams).
+//! Paths are absolute strings that need not exist — path identity is lexical — and
+//! assertions compare against `canon(..)` rather than a spelled-out prefix,
+//! because `canonical_path` is stored platform-native and CI runs macOS + Windows.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,9 +30,7 @@ use noending::workspace::project::{
 use noending::workspace::resolver::WorkspaceObserving;
 use noending::workspace::{is_within, normalize_path, path_identity, WorkspaceAttaching};
 
-// --------------------------------------------------------------------------
 // fixtures
-// --------------------------------------------------------------------------
 
 fn unique_dir(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -258,9 +251,7 @@ impl WorkspacePolicy for Home {
     }
 }
 
-// --------------------------------------------------------------------------
 // the door
-// --------------------------------------------------------------------------
 
 #[test]
 fn new_non_git_path_creates_exactly_one_project() {
@@ -438,9 +429,7 @@ fn two_worktrees_of_one_repo_share_one_project() {
     );
 }
 
-// --------------------------------------------------------------------------
 // / / upgrades, moves, and evidence that disappears
-// --------------------------------------------------------------------------
 
 #[test]
 fn path_project_upgrades_to_git_project_without_changing_project_id() {
@@ -866,9 +855,7 @@ fn zero_path_project_cannot_survive() {
     assert!(taken.is_err(), "one Git family is exactly one Project");
 }
 
-// --------------------------------------------------------------------------
 // GC
-// --------------------------------------------------------------------------
 
 #[test]
 fn gc_only_removes_paths_nothing_references_and_that_we_observed_gone() {
@@ -916,9 +903,7 @@ fn gc_only_removes_paths_nothing_references_and_that_we_observed_gone() {
     registry_is_consistent(&db).expect("consistent");
 }
 
-// --------------------------------------------------------------------------
 // the WorkspaceAttaching seam
-// --------------------------------------------------------------------------
 
 #[test]
 fn workspace_attaching_returns_none_for_unresolvable_and_reserved_paths() {
@@ -1076,9 +1061,7 @@ fn the_string_door_reports_its_effect_to_the_transaction_owner() {
     );
 }
 
-// --------------------------------------------------------------------------
 // / reconcile
-// --------------------------------------------------------------------------
 
 #[test]
 fn reconcile_a_single_path_reapplies_the_whole_decision_table() {
@@ -1190,9 +1173,7 @@ fn reconcile_sweep_removes_unreferenced_paths_even_when_present() {
     registry_is_consistent(&db).expect("consistent");
 }
 
-// --------------------------------------------------------------------------
 // naming, rename, detail
-// --------------------------------------------------------------------------
 
 #[test]
 fn default_workspace_project_is_named_noending_workspace() {
@@ -1451,25 +1432,16 @@ fn an_unregistered_home_policy_leaves_the_registry_open() {
     assert_eq!(projection.policy().default_workspace(), None);
 }
 
-// ------------------------------------------------ Windows case aliases
-//
-//  settled this as option A: `ensure_workspace_path_conn` re-derives the id
-// through the host's rule (`project.rs:295`), so a macOS runner can prove the key
-// — `identity.rs` and `workspace_identity_test.rs` do — but not the registry.
-// Injecting a style into that door would mean bending production for the test, so
-// the claim is pinned where it is actually true: CI's `windows-latest` job.
-//  requires reading for these two names in that job's log, because on
-// macOS they compile away to nothing — which also means Main could not falsify
-// them by hand here. The falsifiable-on-any-host version is the one below.
+// The Windows case-alias claim can only be proven where the host's own rule
+// applies: `ensure_workspace_path_conn` re-derives the id through the host, so
+// these tests are `#[cfg(windows)]` and run on CI's windows-latest job only.
 
-/// `git_identities` is found by location, not by spelling. Two spellings
-/// of one `common_dir` must return the id that was created first; before the
-/// second call inserted a fresh row, and reads a second family as license to
-/// move a WorkspacePath into a second Project.
+/// `git_identities` is found by location, not by spelling: two spellings of one
+/// `common_dir` must return the id created first, or a fresh row is inserted and a
+/// second family can move a WorkspacePath into a second Project.
 ///
-/// Separator-only (rather than case) because the location relation it proves is
-/// the one the host applies: on a Unix runner case is not part of it, and the
-/// case half is what the `#[cfg(windows)]` tests below carry.
+/// Separator-only (not case) because on a Unix runner case is not part of the
+/// location relation; that half is what the `#[cfg(windows)]` tests below carry.
 #[test]
 fn one_git_family_is_found_before_it_is_created() {
     let (_d, db) = temp_db();
@@ -1576,14 +1548,11 @@ fn windows_case_aliases_cannot_create_two_projects() {
     registry_is_consistent(&db).expect("consistent after the case alias merged");
 }
 
-// ===========================================================================
 // Projects Experience v0.2 workspace refresh contract.
-//
 // The two refresh entries (global / per-project) ride ONE rule set: the
 // reconcile_workspace_path_ids primitive below is the same observe → ensure →
 // GC pipeline the global sweep runs. These tests lock that contract without
 // any real git or real Home.
-// ===========================================================================
 
 use noending::workspace::project::{
     reconcile_workspace_path_ids, reconcile_workspace_paths_with_progress,

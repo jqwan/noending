@@ -27,11 +27,8 @@ export default function ContextUpdatesSection({ cards, summaries, navigate }: Pr
 
   if (updates.length === 0) return null;
 
-  // Sorting order:
-  // 1. needs_attention=true
-  // 2. has_updates=true
-  // 3. last_unseen_change_at DESC
-  // 4. card.last_activity_at DESC
+  // Sort: needs_attention, then has_updates, then last_unseen_change_at DESC,
+  // then last_activity_at DESC.
   updates.sort((a, b) => {
     if (a.summary.needs_attention !== b.summary.needs_attention) {
       return a.summary.needs_attention ? -1 : 1;

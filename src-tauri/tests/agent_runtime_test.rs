@@ -11,7 +11,6 @@ use noending::agent_runtime::{
 use noending::domain::Agent;
 use noending::storage::{new_id, Db};
 use noending::sync::extractor::CliExtractor;
-use noending::sync::ContextExtractor;
 
 fn temp_db() -> Db {
     let dir = std::env::temp_dir().join(format!("noending-runtime-test-{}", new_id()));
@@ -229,8 +228,6 @@ fn serialized_vocabulary_is_the_ui_contract() {
     );
 }
 
-// ---------- every consumer names the same intent ----------
-
 #[test]
 fn extractor_names_what_was_actually_passed() {
     let db = temp_db();
@@ -254,8 +251,7 @@ fn extractor_names_what_was_actually_passed() {
         .unwrap()
         .name();
     assert_eq!(name, "cli:codex:override:model=gpt-5.6-luna,effort=low");
-    // The SyncRun record, the Preview badge and the launch audit all render
-    // this one string.
+    // The Preview badge and the launch audit both render this one string.
     assert_eq!(
         get_runtime_overrides(&db, Agent::Codex)
             .unwrap()
@@ -273,11 +269,8 @@ fn an_invalid_override_errors_for_the_assistant_instead_of_downgrading() {
     let db = temp_db();
     db.set_setting("agent.runtime.claude_code", r#"{"provider":"openai"}"#)
         .unwrap();
-    // Waiting interactive answer: report it.
+    // an invalid override must surface, not downgrade
     assert!(CliExtractor::try_for_agent(&db, "claude_code").is_err());
-    // Background sync keeps its lenient contract: heuristic fallback, and
-    // never a launch carrying a flag the Agent would ignore.
-    assert!(CliExtractor::for_agent(&db, "claude_code").is_none());
 }
 
 #[test]
@@ -297,6 +290,4 @@ fn a_corrupt_assistant_agent_is_not_mistaken_for_retrieval_only() {
         CliExtractor::try_from_settings(&db).is_err(),
         "Assistant reports an unresolvable Agent instead of quietly answering from retrieval"
     );
-    // Background sync keeps its lenient contract.
-    assert!(CliExtractor::from_settings(&db).is_none());
 }

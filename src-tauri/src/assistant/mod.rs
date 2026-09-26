@@ -104,14 +104,6 @@ fn build_domain_snapshot(db: &Db, query: &str) -> Result<String> {
         ));
     }
 
-    snap.push_str("\n== 最近同步 ==\n");
-    for r in db.list_sync_runs(5)? {
-        snap.push_str(&format!(
-            "- [{}] {} ({})\n",
-            r.created_at, r.summary, r.runtime
-        ));
-    }
-
     Ok(snap)
 }
 
@@ -167,7 +159,7 @@ impl AssistantService {
                         "empty".to_string(),
                     )
                 } else {
-                    (text, crate::sync::ContextExtractor::name(&cli))
+                    (text, cli.name())
                 }
             }
             _ => {

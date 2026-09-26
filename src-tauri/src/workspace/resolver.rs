@@ -21,8 +21,7 @@
 //!
 //! If `git root == user home` or `common dir == <home>/.git`, return
 //! `GitDetection::None`. Without this a dotfiles repository swallows the entire
-//! Home into one Project — and it is exactly the false-positive that the retired
-//! `Project.name`-substring affinity used to amplify.
+//! Home into one Project.
 //!
 //! ## Calling git
 //!
@@ -409,11 +408,12 @@ impl ResolverContext {
     /// Are these two `canonical_path`s the *same location*?
     ///
     /// Not `==`, and not `path_key`: on a Windows volume case is not part of
-    /// location, and 's two exclusions are gates rather than memberships. A
+    /// location, and the two exclusions are gates rather than memberships. A
     /// case-sensitive read there lets a dotfiles repository whose `toplevel`
     /// git spelled as `C:\Users\ME` slip past, which then makes the entire user
-    /// Home one Project — the exact outcome exists to forbid. There is no
-    /// later convergence to save it, because the Home is not in a Git family.
+    /// Home one Project — the exact outcome the exclusion exists to forbid.
+    /// There is no later convergence to save it, because the Home is not in a
+    /// Git family.
     pub fn same_location(&self, a: &str, b: &str) -> bool {
         let style = self.style();
         identity::identity_key(a, style) == identity::identity_key(b, style)
@@ -473,8 +473,8 @@ impl WorkspaceResolver {
     pub fn try_observe(&self, raw: &str) -> Option<WorkspaceObservation> {
         let canonical = self.ctx.canonicalize(raw)?;
         // The reservation question is asked in the context's own style, not the
-        // host's: an injected `PathStyle::Windows` must fold for exactly like
-        // a Windows host does, or the seam only half-applies.
+        // host's: an injected `PathStyle::Windows` must fold exactly like a
+        // Windows host does, or the seam only half-applies.
         if self
             .ctx
             .reserved
@@ -482,7 +482,7 @@ impl WorkspaceResolver {
         {
             return None;
         }
-        //, second face: never let the user's Home become a Project. The
+        // Second face: never let the user's Home become a Project. The
         // repositories *inside* it are unaffected — they are separate paths with
         // their own evidence.
         if self
@@ -549,7 +549,7 @@ pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> 
                     parent_of(&common_dir).and_then(|p| ctx.canonicalize_from(&p, observed))
                 });
 
-            // a repository rooted at the user's Home is not evidence.
+            // A repository rooted at the user's Home is not evidence.
             if let Some(home) = ctx.user_home_canonical() {
                 let same = |a: &str, b: &str| ctx.same_location(a, b);
                 if toplevel.as_deref().is_some_and(|t| same(&t, &home)) {
@@ -712,21 +712,22 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
     out
 }
 
-///, spelled out for the caller that owns persistence: losing `.git` is
-/// `detected → missing`, and nothing else. `workspace::project` is the only place
-/// with the prior state this needs, so the resolver reports `None` and stops.
+/// Fold an observation into a stored `git_state`, for the caller that owns
+/// persistence: losing `.git` is `detected → missing`, and nothing else.
+/// `workspace::project` is the only place with the prior state this needs, so the
+/// resolver reports `None` and stops.
 ///
 /// [`GitProbeState::Unavailable`] keeps the stored value on purpose: "we could
-/// not ask" must never be recorded as "this is not a repository", because
-/// forbids losing a Project's Git identity on a transient failure.
+/// not ask" must never be recorded as "this is not a repository", because losing
+/// a Project's Git identity on a transient failure is forbidden.
 pub fn git_state_after_observation(prior: &str, detection: &GitDetection) -> String {
     match detection {
         GitDetection::Detected { .. } => git_state::DETECTED.to_string(),
         GitDetection::Missing => git_state::MISSING.to_string(),
         // "No evidence right now" keeps a path that was once Git-backed in
-        // `missing`: forbids a lost `.git` from detaching the WorkspacePath
-        // or clearing anything, and forbids forgetting that it was ever a
-        // repository. Demoting `missing → none` would erase that fact.
+        // `missing`: a lost `.git` must not detach the WorkspacePath or clear
+        // anything, and must not forget that it was ever a repository. Demoting
+        // `missing → none` would erase that fact.
         GitDetection::None if prior == git_state::DETECTED || prior == git_state::MISSING => {
             git_state::MISSING.to_string()
         }
@@ -786,8 +787,8 @@ mod tests {
         }
     }
 
-    /// 必须测试: home `.git` exclusion — both spellings names, and the
-    /// near-miss that must NOT be excluded.
+    /// Home `.git` exclusion — both spellings, and the near-miss that must NOT
+    /// be excluded.
     #[test]
     fn home_level_repository_is_not_evidence() {
         let c = ctx();
@@ -850,7 +851,7 @@ mod tests {
         ));
     }
 
-    /// 必须测试: a normal git repo / a linked worktree, from real porcelain.
+    /// A normal git repo / a linked worktree, from real porcelain.
     #[test]
     fn worktree_porcelain_parsing_and_kinds() {
         let main_only = "\
@@ -1008,8 +1009,8 @@ bare
         );
     }
 
-    /// 必须测试: missing `.git` — the resolver's raw answer is `None`, and only
-    /// the caller's prior state turns it into `missing`.
+    /// Missing `.git` — the resolver's raw answer is `None`, and only the
+    /// caller's prior state turns it into `missing`.
     #[test]
     fn missing_git_is_the_callers_derivation_not_the_resolvers() {
         let c = ctx();
@@ -1099,12 +1100,12 @@ bare
         assert!(matches!(sentinel.git, GitDetection::None));
     }
 
-    /// 必须测试: relative → absolute (rejected without a base) and the /
+    /// Relative → absolute (rejected without a base) and the Home / reserved
     /// exclusions, seen through the resolver rather than the predicate.
     ///
-    /// The style is pinned, not inherited: this module's own
-    /// convention is that a lexical test says which platform's spelling it means,
-    /// so both are proven on every runner instead of one of them.
+    /// The style is pinned, not inherited: a lexical test says which platform's
+    /// spelling it means, so both are proven on every runner instead of one of
+    /// them.
     #[test]
     fn normalization_and_exclusions_end_to_end() {
         let home = crate::workspace::home::NoEndingHome::new_with_style(
@@ -1190,8 +1191,7 @@ bare
         // The stored key is the host's rule, deliberately: a database belongs to
         // one machine, so an injected *spelling* must not decide what its ids
         // mean. That is why the Windows identity convergence itself is asserted
-        // by 's key tests and 's `#[cfg(windows)]` registry tests, not
-        // here.
+        // by the key tests and the `#[cfg(windows)]` registry tests, not here.
         assert_eq!(repo.path_id, identity::path_identity(&repo.canonical_path));
     }
 

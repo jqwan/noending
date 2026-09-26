@@ -8,7 +8,6 @@ import { timeAgo, useRefreshSignal, Modal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import { sessionDisplayTitle, UNTITLED_SESSION, cwdDisplayLabel } from "../sessions/SessionTable";
-import { IntelligenceOnly, useBaseExperience } from "../../app/experience";
 import { cardSummaryLine } from "../workstreams/WorkstreamCard";
 import {
   AGENT_LABELS,
@@ -18,20 +17,15 @@ import {
 import type { Route } from "../../app/routes";
 
 /**
- * Project Detail。
- *
- * 一次 `get_project_detail` 读到全部真相：它拥有的 WorkspacePaths、经由这些路径
- * 到达的 Workstreams（含「主关联 / 关联」，）、以及 cwd 落在这些路径上的
+ * Project Detail：一次 `get_project_detail` 读到全部真相——它拥有的 WorkspacePaths、
+ * 经由这些路径到达的 Workstreams（含主关联 / 关联），以及 cwd 落在这些路径上的
  * Sessions（走权威链，不走缓存列，M29）。
- *
- * 用户在这页唯一能做的编辑是**改名**：Project 的其余事实都是派生的，
- * 手工新建 / 删除 / 加引用资料 / 移动 Workstream / 移动 Session 都已退出产品 API。
+ * 用户在这页唯一能做的编辑是改名：其余事实都是派生的，手工新建 / 删除 / 移动都已退出产品 API。
  */
 export default function ProjectDetail({ projectId, navigate }: {
   projectId: string;
   navigate: (r: Route) => void;
 }) {
-  const { intelligenceEnabled } = useBaseExperience();
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [data, setData] = useState<ProjectDetailData | null>(null);
   const [gone, setGone] = useState(false);
@@ -56,9 +50,8 @@ export default function ProjectDetail({ projectId, navigate }: {
         if (seq !== seqRef.current) return;
         const text = String(e);
         setFailure(text);
-        // 后端对不存在的 Project 返回 `Project <id> 不存在`（commands/project.rs）。
-        // 只按这句话判定「已经消失」，其余一律当作读取失败 —— 猜错的代价是
-        // 让用户以为自己的 Project 没了。
+        // 只按「Project <id> 不存在」判定已消失，其余一律当作读取失败——
+        // 猜错的代价是让用户以为自己的 Project 没了。
         setGone(text.includes(`Project ${projectId} 不存在`));
       });
   }, [projectId]);
@@ -66,10 +59,8 @@ export default function ProjectDetail({ projectId, navigate }: {
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  // 定点刷新在后台执行；完成/失败事件把按钮恢复。Review P2-2：
-  // detail 重读统一走 useRefreshSignal（AppShell 扇出），这里不再直接读。
-  // 刷新可能让 Project 自己消失（最后一条路径被 GC）：
-  // get_project_detail 的「Project <id> 不存在」会把页面切到 gone 视图。
+  // 定点刷新在后台执行，完成/失败事件把按钮恢复；detail 重读走 useRefreshSignal。
+  // 刷新可能让 Project 自己消失（最后一条路径被 GC），此时页面切到 gone 视图。
   const [refreshingWorkspace, setRefreshingWorkspace] = useState(false);
   useEffect(() => {
     const unCompleted = listen("workspace-reconcile-completed", () => {
@@ -163,12 +154,10 @@ export default function ProjectDetail({ projectId, navigate }: {
         title={<span style={{ overflowWrap: "anywhere" }}>{project.name}</span>}
         actions={
           <>
-            <IntelligenceOnly>
-              <button className="btn ghost icon-button" aria-label="询问 Assistant" title="询问 Assistant"
-                onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
-                <Icon name="chat" />
-              </button>
-            </IntelligenceOnly>
+            <button className="btn ghost icon-button" aria-label="询问 Assistant" title="询问 Assistant"
+              onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
+              <Icon name="chat" />
+            </button>
             <button className="btn ghost icon-button" aria-label="刷新目录状态"
               title="刷新目录状态"
               disabled={refreshingWorkspace}
@@ -189,8 +178,7 @@ export default function ProjectDetail({ projectId, navigate }: {
         </div>
       )}
 
-      {/* 概览三个数字 + 的类型 / 命名 / 创建时间，都收在右栏「属性」块里：
-          标题栏只放标题与图标动作，只读事实一律放右栏。 */}
+      {/* 概览数字与类型 / 命名 / 创建时间都收在右栏「属性」块里：标题栏只放标题与图标动作。 */}
       <div className="project-detail-layout">
       <div>
       <section className="rail-section">
@@ -199,12 +187,10 @@ export default function ProjectDetail({ projectId, navigate }: {
         {detail.workstreams.length === 0 && (
           <div className="l1-none">还没有任务经由这些目录关联进来。</div>
         )}
-        {/* 不再分「主关联 / 关联」两组：关联方式不改变一条任务对项目的归属，
-            列表只按后端给的顺序（主关联优先、其余按最近更新）平铺。 */}
+        {/* 不再分「主关联 / 关联」两组：关联方式不改变归属，列表只按后端给的顺序平铺。 */}
         {detail.workstreams.map(({ workstream: w }) => {
-          // 与 Workstream 卡片同一条规则：智能关闭时这里只出现用户自己写的描述，
-          // 不展示冻结期的 Agent 摘要。规则只写在 cardSummaryLine 一处。
-          const summary = cardSummaryLine(w as unknown as WorkstreamCardData, intelligenceEnabled);
+          // 与 Workstream 卡片同一条规则：摘要取 Agent 的 current_state，退回用户描述。
+          const summary = cardSummaryLine(w as unknown as WorkstreamCardData);
           return (
             <div key={w.id} className="list-row"
               onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>

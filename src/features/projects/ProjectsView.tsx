@@ -12,13 +12,10 @@ import type { Route } from "../../app/routes";
 import type { ProjectCardData } from "../../types";
 
 /**
- * Projects Board（Projects Experience v0.2 、）：Projects 是一等浏览
- * 页面——物理工作空间，由工作目录自动派生。数据来自**一次** `list_project_cards`
- * 调用，不再是 1 + N 的 detail 读取。
- *
- * 卡片强调「地方」：物理路径、可用性、Workstream / Session 数量、最近活动
- *。诊断信息（uuid、git_id、内部 identity）属于 Detail，不上卡片。
- * 这里没有创建入口：Project 是派生的，Refresh 也不是编辑。
+ * Projects Board：Projects 是一等浏览页面——物理工作空间，由工作目录自动派生。
+ * 数据来自**一次** `list_project_cards` 调用，不再是 1 + N 的 detail 读取。
+ * 卡片强调「地方」（路径、可用性、任务 / 会话数、最近活动）；诊断信息（uuid、
+ * git_id、内部 identity）属于 Detail。这里没有创建入口：Project 是派生的。
  */
 type FilterKey = "all" | "ok" | "missing";
 type ProjectKindFilter = "all" | "git" | "directory";
@@ -39,8 +36,8 @@ const SORTERS: Record<SortKey, (a: ProjectCardData, b: ProjectCardData) => numbe
   paths: (a, b) => b.path_count - a.path_count || a.name.localeCompare(b.name, "zh-Hans"),
 };
 
-/** 搜索面：Project name + WorkspacePath canonical path。
- *  Review P2-1：搜的是 search_paths（全部路径），不限于展示用的前两条。 */
+/** 搜索面：Project name + WorkspacePath canonical path（搜 search_paths 全部路径，
+ *  不限于展示用的前两条）。 */
 function cardMatches(c: ProjectCardData, q: string): boolean {
   const needle = q.trim().toLowerCase();
   if (needle === "") return true;
@@ -75,10 +72,9 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   // 单次卡片查询足够便宜，refresh 信号不再需要防抖。
   useRefreshSignal(refresh);
 
-  //  — 刷新在后台执行，事件回报。卡片在整个期间保持可见，
-  // 不清空页面、不进 Loading。Review P2-2：这里只负责恢复按钮与提示——
-  // 数据读取统一走 AppShell 的 EVT_SYNCED 失效信号，避免同一次刷新触发
-  // 两次 listProjectCards。
+  // 刷新在后台执行、事件回报：卡片整个期间保持可见，不清空、不进 Loading。
+  // 这里只负责恢复按钮与提示——数据读取走 AppShell 的 EVT_SYNCED 失效信号，
+  // 避免同一次刷新触发两次 listProjectCards。
   useEffect(() => {
     const unCompleted = listen("workspace-reconcile-completed", (e) => {
       setWorkspaceRefreshing(false);

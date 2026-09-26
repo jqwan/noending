@@ -8,7 +8,7 @@
 //! behind the single [`WorkspaceAttaching`] door that command,
 //! ingestion and launch code call.
 //!
-//! Keeping it here is what preserves : there is exactly one object that
+//! Keeping it here is what preserves this: there is exactly one object that
 //! turns a raw path string into a `WorkspacePath`, so there is exactly one place
 //! that decides which Project a directory belongs to.
 

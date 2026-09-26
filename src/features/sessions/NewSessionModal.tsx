@@ -1,32 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
-import { useBaseExperience } from "../../app/experience";
 import { announceLaunch } from "../launcher/LaunchResultModal";
-import ContextPreviewModal from "../launcher/ContextPreviewModal";
 import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import {
   AgentRow,
   CwdRow,
   RuntimeRow,
-  deliveryLevelLabel,
 } from "../launcher/LaunchPreviewRows";
 import type { Agent, PreparedLaunch, WorkstreamCardData } from "../../types";
 
 /**
- * 全局新建 Session。
+ * 全局新建 Session。启动路径唯一：`prepareNewSession → launchPrepared`。Modal 一打开
+ * 就 Prepare，所以预览显示的就是这次启动真正使用的解析结果（cwd 三级优先级在后端算）。
+ * 点击启动时后端重算状态指纹，任何变化都以 stale 中止——绝不用没预览过的参数启动。
  *
- * 启动路径唯一：`prepareNewSession → launchPrepared`。Modal 一打开就 Prepare，
- * 所以「工作目录 / Agent / Runtime」显示的就是这次启动真正使用的解析结果
- * （`resolve_new_session_cwd` 的三级优先级在后端完成，前端不重算）。点击启动时
- * 后端重算状态指纹，任何变化都以 stale 中止——绝不用没预览过的参数启动
- * 后端在启动时会再次校验状态指纹。
- *
- * `workstreamId` 是可选预置入参：省略或 `"none"` 即
- * standalone（0 个所属任务完全合法）。预置后用户仍然可以改。
- *
- * 下拉读的是 Workstream 卡片投影：标题相同的 Workstream 靠主路径才能分清，
- * 而 Session 的实际启动目录恰恰由主路径决定——选项里必须能看到它。
+ * `workstreamId` 是可选预置入参：省略或 `"none"` 即 standalone（0 个所属任务完全合法）。
+ * 预置后用户仍可改。下拉读 Workstream 卡片投影：标题相同的靠主路径才能分清，而启动
+ * 目录恰由主路径决定，所以选项里必须能看到它。
  */
 export type NewSessionModalProps = {
   onClose: () => void;
@@ -58,11 +49,7 @@ export default function NewSessionModal({
   );
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [agentResolved, setAgentResolved] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-
-  const { deliveryLevel } = useBaseExperience();
-  const deliveryOff = deliveryLevel === "off";
 
   useEffect(() => {
     api
@@ -123,116 +110,72 @@ export default function NewSessionModal({
   };
 
   return (
-    <>
-      <Modal title="新建会话" onClose={handleClose}>
-        <label className="field">
-          <span>所属任务（可选）</span>
-          <select value={ownerWorkstreamId} onChange={(e) => handleWsChange(e.target.value)}>
-            <option value={STANDALONE}>无（直接开始）</option>
-            {workstreams.map((w) => (
-              <option key={w.id} value={w.id}>
-                {workstreamLabel(w)}
-              </option>
-            ))}
-          </select>
-        </label>
+    <Modal title="新建会话" onClose={handleClose}>
+      <label className="field">
+        <span>所属任务（可选）</span>
+        <select value={ownerWorkstreamId} onChange={(e) => handleWsChange(e.target.value)}>
+          <option value={STANDALONE}>无（直接开始）</option>
+          {workstreams.map((w) => (
+            <option key={w.id} value={w.id}>
+              {workstreamLabel(w)}
+            </option>
+          ))}
+        </select>
+      </label>
 
-        {defaultAgent ? (
-          <AgentRow agent={defaultAgent} hint="默认 Agent" first />
-        ) : (
-          <div className="row-line" style={{ borderTop: 0 }}>
-            <div>
-              <div className="settings-row-label">Agent</div>
-              <div className="settings-row-hint">
-                {agentResolved
-                  ? "未检测到可用的 Agent CLI — 请先到「设置 → Agent」配置"
-                  : "加载中…"}
-              </div>
+      {defaultAgent ? (
+        <AgentRow agent={defaultAgent} hint="默认 Agent" first />
+      ) : (
+        <div className="row-line" style={{ borderTop: 0 }}>
+          <div>
+            <div className="settings-row-label">Agent</div>
+            <div className="settings-row-hint">
+              {agentResolved
+                ? "未检测到可用的 Agent CLI — 请先到「设置 → Agent」配置"
+                : "加载中…"}
             </div>
-            <span className="badge">{agentResolved ? "未检测" : "—"}</span>
           </div>
-        )}
-        <CwdRow cwd={prepared?.cwd} pending={preparing} resolution={prepared?.cwd_resolution} />
-        {prepared && (
-          <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
-        )}
+          <span className="badge">{agentResolved ? "未检测" : "—"}</span>
+        </div>
+      )}
+      <CwdRow cwd={prepared?.cwd} pending={preparing} resolution={prepared?.cwd_resolution} />
+      {prepared && (
+        <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
+      )}
 
-        {/* Context 关闭时不挂载预览，也不显示 token 计数。 */}
-        {!deliveryOff && (
-          <div className="row-line">
-            <div>
-              <div className="settings-row-label">Context 注入</div>
-              <div className="settings-row-hint">
-                等级：{deliveryLevelLabel(deliveryLevel)} ·
-                预览显示的就是本次真正注入的 Context
-              </div>
-            </div>
+      {error && (
+        <div
+          className="badge warn"
+          style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}
+        >
+          <span style={{ flex: 1, overflowWrap: "anywhere" }}>{error}</span>
+          {!preparing && !busy && (
             <button
               type="button"
               className="btn small"
-              disabled={preparing || busy || !prepared}
-              onClick={() => setPreviewOpen(true)}
+              onClick={() => {
+                releasePrepared();
+                void prepare();
+              }}
             >
-              预览 Context
+              重试
             </button>
-          </div>
-        )}
-
-        {error && (
-          <div
-            className="badge warn"
-            style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}
-          >
-            <span style={{ flex: 1, overflowWrap: "anywhere" }}>{error}</span>
-            {!preparing && !busy && (
-              <button
-                type="button"
-                className="btn small"
-                onClick={() => {
-                  releasePrepared();
-                  void prepare();
-                }}
-              >
-                重试
-              </button>
-            )}
-          </div>
-        )}
-
-        <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
-          <button className="btn" onClick={handleClose} disabled={busy}>
-            取消
-          </button>
-          <button
-            className="btn primary"
-            disabled={busy || preparing || !defaultAgent || !prepared}
-            onClick={start}
-          >
-            {busy ? "启动中…" : preparing ? "准备中…" : "启动"}
-          </button>
+          )}
         </div>
-      </Modal>
-
-      {previewOpen && prepared && (
-        <ContextPreviewModal
-          prepared={prepared}
-          onClose={() => {
-            setPreviewOpen(false);
-            // 预览内部已回收这个令牌，这里只重新备好一份，保持就绪。
-            releasePrepared(true);
-            void prepare();
-          }}
-          onRefresh={async () => {
-            // 刷新当前预览时保留旧令牌；预览拿到新令牌后再回收旧的那个。
-            return await prepare({ preserveCurrent: true });
-          }}
-          onLaunched={() => {
-            // 预览内已经启动成功：令牌是被消费掉的，不再 cancel
-            releasePrepared(true);
-            onClose();
-          }}
-        />
       )}
-    </>
+
+      <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
+        <button className="btn" onClick={handleClose} disabled={busy}>
+          取消
+        </button>
+        <button
+          className="btn primary"
+          disabled={busy || preparing || !defaultAgent || !prepared}
+          onClick={start}
+        >
+          {busy ? "启动中…" : preparing ? "准备中…" : "启动"}
+        </button>
+      </div>
+    </Modal>
   );
 }

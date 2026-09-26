@@ -160,16 +160,6 @@ export default function SourceDetailModal({
                   </div>
                 </div>
               )}
-
-              {detail.sync_run_id && (
-                <div className="row-line">
-                  <div>
-                    <div className="settings-row-label">Sync Run ID</div>
-                    <div className="settings-row-hint">原子合并提交批次</div>
-                  </div>
-                  <span className="mono small">{detail.sync_run_id}</span>
-                </div>
-              )}
             </>
           )}
 

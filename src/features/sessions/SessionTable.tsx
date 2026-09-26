@@ -5,13 +5,9 @@ import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Agent, type Session } from "../../types";
 
-/* ------------------------------------------------------------------ *
- * 展示层 helper —— SessionCards 与 SessionDetailView 共用。
- *
- * 这里只做「怎么显示得下、看得懂」：截断与中文占位。领域字段一个都不改，
- * 完整值永远可达（title 提示 → Detail 页 → 复制按钮），所以截断不会损失
- * provenance（AGENTS.md: Context Provenance Fidelity）。
- * ------------------------------------------------------------------ */
+/* 展示层 helper —— SessionCards 与 SessionDetailView 共用。只做「怎么显示得下、
+ * 看得懂」：截断与中文占位，不改领域字段；完整值永远可达，所以截断不损失
+ * provenance（AGENTS.md: Context Provenance Fidelity）。 */
 
 /** 无标题 / title 未知的 Session：不拿 root_agent_session_id 当标题糊用户。 */
 export const UNTITLED_SESSION = "未命名会话";
@@ -43,16 +39,9 @@ export function sessionDisplayTitle(title: string | null | undefined): string {
 }
 
 /**
- * Project 单元格。
- *
- * v0.2 里 Project 只有一条事实链：`workspace_path_id → WorkspacePath.project_id`。
- * `sessions.project_id` 仍是缓存列，所以表格读它，但**读到什么就要说什么**：
- *
- * - 有 WorkspacePath → 名字是派生结果；
- * - 只有缓存值、没有 WorkspacePath → 派生链无法验证这个缓存列，
- *   弱化显示并说明它已经不决定任何事（值不删，但也不再冒充事实）；
- * - 有 cwd、还没有 WorkspacePath → 等目录扫描补上，说「待解析」；
- * - 什么都没有 → 空缺的原因是「没有记录过工作目录」，不是「没被归属」。
+ * Project 单元格。v0.2 里 Project 只有一条事实链：`workspace_path_id →
+ * WorkspacePath.project_id`；`sessions.project_id` 只是缓存列——读到什么就说
+ * 什么，缓存值弱化显示且不再冒充事实，缺目录时分别说「待解析」/「无工作目录」。
  */
 export interface ProjectCell {
   text: string;
@@ -156,12 +145,10 @@ export function shrinkMiddle(text: string, max: number): string {
 }
 
 /**
- * 路径中段省略：末段目录名是用户识别工作目录的唯一凭据，必须保住，
- * 所以宁可省中间也不省尾巴。
+ * 路径中段省略：末段目录名是识别工作目录的唯一凭据，必须保住。
  *
- * Windows 反斜杠与盘符（含 UNC `\\server\share\…`）按 Windows 规则切，
- * 不会当成 Unix 路径；Unix 段名里合法的 `\` 也不当分隔符（macOS 上
- * `my\dir` 是一个目录名）。原文放得下时原样返回，只在真溢出时才省。
+ * Windows 反斜杠与盘符（含 UNC `\\server\share\…`）按 Windows 规则切；
+ * Unix 段名里合法的 `\` 不当分隔符（macOS 上 `my\dir` 是一个目录名）。
  */
 export function ellipsisPathMiddle(path: string, max: number): string {
   const trimmed = path.trim();
@@ -226,18 +213,14 @@ export function activityLabel(iso: string | null | undefined): string {
   return `${relative} · ${formatDateTime(iso)}`;
 }
 
-/* ------------------------------- 列宽预算 ------------------------------- *
- * td 由全局 CSS 限定 max-width 320px + nowrap（components.css .session-table）。
- * 1 个宽度单位 ≈ 7px，所以这些预算就是列的真实宽度来源：宁可 JS 先省，也不
- * 让浏览器做尾部省略（那会把末段吃掉），更不让 7 列撑出 .main 的 1200px。 */
+/* 列宽预算：td 由全局 CSS 限定 max-width 320px + nowrap（components.css
+ * .session-table），1 个宽度单位 ≈ 7px。宁可 JS 先省，也不让浏览器做尾部
+ * 省略（会吃掉末段），更不让 7 列撑出 .main 的 1200px。 */
 const W_WORKSTREAM = 16;
 
 /**
- * Sessions 卡片（整体设计）：信息按卡片分组，随窗口宽度自适应。
- * 点击卡片进入详情，操作区提供继续（Resume）和移入回收站。
- *
- * 一行最多一个任务：`session.owner_workstream_id` 指向的那一个，
- * 标题由调用方给出的 id → title 投影解析；未归属时显示「未归属任务」。
+ * Sessions 卡片：信息按卡片分组，随窗口宽度自适应，点击进入详情。
+ * 一行最多一个任务：`session.owner_workstream_id` 指向的那一个。
  */
 export default function SessionCards({ sessions, workstreamTitleById, projectNameById, onOpen, onResume, onTrash }: {
   sessions: Session[];

@@ -1,17 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { onEvent, EVT_SYNCED, type Route } from "../app/routes";
-import { IntelligenceOnly } from "../app/experience";
 import Icon from "../components/Icon";
 import SidebarLogo from "../components/SidebarLogo";
 import type { WorkstreamCardData } from "../types";
 
 /**
- * Sidebar（Projects Experience v0.2 、）：Brand→Home、Search、
- * 工作区一级导航（Workstreams / Projects / Sessions / Assistant）、
- * 最近（最近 6 个 open Workstream， 保留）、底部固定 Settings。
- * Project 不再逐个铺在导航上——它们整体进入 Projects Board；
- * 自己负责自己的数据；AppShell 只传 route/navigate。
+ * Sidebar：Brand→Home、Search、工作区一级导航（Workstreams / Projects / Sessions /
+ * Assistant）、最近（最近 6 个 open Workstream，可固定）、底部固定 Settings。
+ * Project 不逐个铺在导航上，整体进入 Projects Board；Sidebar 自己加载数据。
  */
 export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
   route: Route;
@@ -93,12 +90,10 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
           onClick={() => navigate({ view: "sessions" })}>
           <Icon name="chat" />会话
         </button>
-        <IntelligenceOnly>
-          <button className={`nav-item ${workspaceActive("assistant")}`}
-            onClick={() => navigate({ view: "assistant" })}>
-            <Icon name="spark" />Assistant
-          </button>
-        </IntelligenceOnly>
+        <button className={`nav-item ${workspaceActive("assistant")}`}
+          onClick={() => navigate({ view: "assistant" })}>
+          <Icon name="spark" />Assistant
+        </button>
 
         {[{ label: "固定", rows: recent.filter(w => pinned.includes(w.id)) },
           { label: "最近", rows: recent.filter(w => !pinned.includes(w.id)).slice(0, 6) }].map(group => (

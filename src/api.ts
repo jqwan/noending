@@ -1,22 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
-  ContextDeliveryLevel, ContextItem, ContextItemRevision, CreateWorkstreamReport,
-  IngestionDiagnostic, LaunchResult, LocalDeletePreview, PathProbe,
+  ContextItem, ContextItemRevision, CreateWorkstreamReport,
+  IngestionDiagnostic, IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
   Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow,
   RecentWorkspacePath, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
-  ReviewFrontier, SearchHit, Session, SessionDetail,
-  SyncRun, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamReviewState, WorkstreamReviewWindow,
-  WorkstreamReviewSummary,
+  ReviewFrontier, SearchHit, Session, SessionContextView, SessionDetail,
+  SessionUpdateOutcome, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
+  WorkstreamReviewState, WorkstreamReviewWindow, WorkstreamReviewSummary,
+  WorkstreamUpdateOutcome,
 } from "./types";
 
 export const api = {
-  // ---------------- Projects ----------------
-  //
-  // v0.2 derives Projects from WorkspacePaths; reads and rename are the full
-  // client surface.
+  // Projects — v0.2 derives them from WorkspacePaths; reads and rename are the
+  // full client surface.
   listProjects: () => invoke<Project[]>("list_projects"),
   /** 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
   listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
@@ -33,7 +32,6 @@ export const api = {
   renameProject: (projectId: string, name: string) =>
     invoke<Project>("rename_project", { projectId, name }),
 
-  // ---------------- NoEnding Home ----------------
   getWorkspaceSettings: () => invoke<WorkspaceSettings>("get_workspace_settings"),
   /** Requests a relocation for the NEXT launch; `restart_required` says so. */
   setNoendingHome: (newHome: string) =>
@@ -43,13 +41,9 @@ export const api = {
     invoke<Workstream[]>("list_workstreams", { projectId: projectId ?? null }),
   listWorkstreamCards: () => invoke<WorkstreamCardData[]>("list_workstream_cards"),
   /**
-   * `create_workstream(title, description, initialPaths?)`.
-   *
-   * There is no Project argument to carry: v0.2 has no manual
-   * Workstream→Project assignment. Each entry of `initialPaths` is a raw
-   * string that becomes an ordered WorkstreamPath — first ACCEPTED entry wins
-   * the primary seat — and the report says per entry what landed and what was
-   * refused, so the UI never has to re-read and silently drop.
+   * 没有 Project 参数：v0.2 不做手动的 Workstream→Project 指派。`initialPaths`
+   * 每项是原始字符串，按序落成 WorkstreamPath（首个 ACCEPTED 占主位）；
+   * report 逐项说明落地/拒绝的结果，UI 无需回读再静默丢弃。
    */
   createWorkstream: (title: string, description: string, initialPaths: string[] = []) =>
     invoke<CreateWorkstreamReport>("create_workstream", {
@@ -57,20 +51,17 @@ export const api = {
       description,
       initialPaths,
     }),
-  /**
-   * Read-only preview for the path picker: what would happen if this string
-   * were attached as a working path, and which Project it would project onto.
-   * Advisory only — the attacher decides at create time.
-   */
+  /** 路径选择器的只读预览：这个字符串若作为工作路径会怎样、会投到哪个 Project。
+   *  仅供建议——真正决定发生在 create 时。 */
   probeWorkspacePath: (path: string) =>
     invoke<PathProbe>("probe_workspace_path", { path }),
   /** Picker candidates: known WorkspacePaths + Session cwd history, ranked by
-   *  recent activity. Pure reads; nothing here creates a WorkspacePath. */
+   *  recent activity. Pure reads. */
   listRecentWorkspacePaths: (limit = 8) =>
     invoke<RecentWorkspacePath[]>("list_recent_workspace_paths", { limit }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
 
-  // ---------------- Workstream paths, lifecycle, recycle bin ----------------
+  // Workstream paths, lifecycle, recycle bin
   listWorkstreamPaths: (workstreamId: string) =>
     invoke<WorkstreamPathRow[]>("list_workstream_paths", { workstreamId }),
   addWorkstreamPath: (workstreamId: string, path: string) =>
@@ -146,9 +137,8 @@ export const api = {
       agent: agent ?? null,
       scope: scope ?? null,
     }),
-  // Session Lifecycle: the UI submits session ids only —
-  // there is no deletion job and no source deletion anywhere: NoEnding never
-  // deletes Agent-owned sources; permanent delete is a LOCAL purge.
+  // Session Lifecycle: UI 只提交 session id。没有删除 job，也不删来源：
+  // NoEnding 不删 Agent 自有的源；permanent delete 是本地清除。
   trashSession: (sessionId: string) => invoke<Session>("trash_session", { sessionId }),
   restoreSession: (sessionId: string) => invoke<Session>("restore_session", { sessionId }),
   /** 无状态预览：fresh root source verdict + counts，没有 job。 */
@@ -170,16 +160,32 @@ export const api = {
   setSessionOwnerWorkstream: (sessionId: string, workstreamId: string | null) =>
     invoke<Session>("set_session_owner_workstream", { sessionId, workstreamId }),
 
-  syncAll: () => invoke<{ started: boolean }>("sync_all"),
-  syncSource: (sourceId: string) => invoke<{ started: boolean }>("sync_source", { sourceId }),
-  reingestSource: (sourceId: string) => invoke<{ started: boolean }>("reingest_source", { sourceId }),
-  /** Ingest one Session now; Context extraction only runs while Intelligence is on. */
-  syncSession: (sessionId: string) =>
-    invoke<{ applied: number; ingested: number; context_processing_enabled: boolean }>(
-      "sync_session",
-      { sessionId },
-    ),
-  listSyncRuns: (limit?: number) => invoke<SyncRun[]>("list_sync_runs", { limit: limit ?? 50 }),
+  // Ingestion: 两个显式更新按钮 + 纯读取。后台摄入只由三个显式入口排队
+  // （高级维护页）与两个自动触发（启动 / 回到前台的 freshness 回落）；普通页面打开从不触发。
+  /** 高级维护：重新扫描全部已启用来源。 */
+  reconcileAll: () => invoke<{ queued: boolean }>("reconcile_all"),
+  /** 高级维护：重新扫描单个来源。 */
+  reconcileSource: (sourceId: string) => invoke<{ queued: boolean }>("reconcile_source", { sourceId }),
+  /** 高级维护：从头重扫单个来源。 */
+  reingestSource: (sourceId: string) => invoke<{ queued: boolean }>("reingest_source", { sourceId }),
+  /** 前台回落：只在距上次成功超过 freshness 阈值时才排队。 */
+  appForeground: () => invoke<{ queued: boolean }>("app_foreground"),
+  /** 最近一次后台摄入任务的结果（高级维护页展示）。 */
+  getIngestionStatus: () => invoke<IngestTaskStatus | null>("get_ingestion_status"),
+
+  // Explicit Context update (read + one-click update)
+  /** Session 摘要 + 待更新状态。纯读取，不摄入、不调用模型。 */
+  getSessionContext: (sessionId: string) =>
+    invoke<SessionContextView>("get_session_context", { sessionId }),
+  /** Workstream 当前 Context + revision + 待更新状态。纯读取。 */
+  getWorkstreamContextState: (workstreamId: string) =>
+    invoke<WorkstreamContextView>("get_workstream_context_state", { workstreamId }),
+  /** 一次点击 → 最多一次模型调用 → 一份新的 Session 摘要。 */
+  updateSessionContext: (sessionId: string) =>
+    invoke<SessionUpdateOutcome>("update_session_context", { sessionId }),
+  /** 一次点击 → 最多一次模型调用 → 相关 Session 摘要与 Workstream 状态一起更新。 */
+  updateWorkstreamContext: (workstreamId: string) =>
+    invoke<WorkstreamUpdateOutcome>("update_workstream_context", { workstreamId }),
 
   /** 新建 Session 最多带一个所属任务（`null` = standalone）。 */
   prepareNewSession: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string) =>
@@ -218,18 +224,6 @@ export const api = {
     invoke<AgentRuntimeSettings>("set_agent_runtime_overrides", { agent, overrides }),
   refreshAgentRuntimeOptions: (agent: Agent) =>
     invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
-
-  getContextDeliveryLevel: () => invoke<ContextDeliveryLevel>("get_context_delivery_level"),
-  setContextDeliveryLevel: (level: ContextDeliveryLevel) =>
-    invoke<void>("set_context_delivery_level", { level }),
-
-  /** Context Intelligence — orthogonal to delivery level. Off = Base
-   *  Experience: Sessions are still ingested and indexed, but no Context is
-   *  extracted, classified or injected. See src/app/experience.tsx. */
-  getContextIntelligenceEnabled: () =>
-    invoke<boolean>("get_context_intelligence_enabled"),
-  setContextIntelligenceEnabled: (enabled: boolean) =>
-    invoke<void>("set_context_intelligence_enabled", { enabled }),
 
   assistantSend: (sessionId: string | null, text: string) =>
     invoke<{ session_id: string; content: string; runtime: string }>("assistant_send", { sessionId, text }),

@@ -58,15 +58,14 @@ Tauri 2 + React + TypeScript + Rust + SQLite (FTS5)
 |---|---|
 | Agent Adapter | Codex / Claude Code / Qoder / DSH / ZCode / Pi / AutoClaw / WorkBuddy 的 member discovery、增量解析、raw_ref 溯源；Root 之外的执行（child/side）只进拓扑与统计 |
 | Platform Abstraction | PlatformPaths（`CODEX_HOME`/`CLAUDE_CONFIG_DIR`/`PI_HOME`/`DSH_HOME` 覆盖）、ExecutableResolver、PlatformLauncher（macOS Terminal / Windows Terminal / PowerShell） |
-| Session Ingestion | Member 图解析（Root/ForkRoot 建会话，child/side 沿父链归属，悬空源进摄入诊断）+ Member 级增量游标（append-only）；原始 Agent 数据永不修改，已摄入会话不随源文件压缩/截断消失；消息/统计/游标单事务原子提交 |
+| Session Ingestion | Member 图解析（Root/ForkRoot 建会话，child/side 沿父链归属，悬空源进摄入诊断）+ Member 级增量游标；原始 Agent 数据永不修改；原始消息行只追加保留作溯源，当前有效对话由消息投影（`session_message_projection` + 事实世代）维护，源文件压缩/截断/重排会切换世代并原子替换投影。消息/统计/游标单事务原子提交，摄入永不调用 AI |
 | Workstream | CRUD / archive；一个 Session 最多只有一个 Owner Workstream（所属任务）；LaunchIntent 匹配只认 Root，fork 不继承 Owner |
-| Context (L1/L2/L3) | CoreContextResolver 投影 Goal/Current State/Constraints/Decisions/Open Questions；ContextItem + Revision 历史；Supersede 演进链 |
-| Sync Engine | SyncJob（会话消息 → extract → merge → Context frontier），无 kind/长度二次过滤；Context 路由只认 Session 的 Owner Workstream（无 Owner 时 frontier 冻结，归属后重放）；确定性 Merge Engine（Dedup / Supersede / Resolve / Conflict 保留不自动覆盖），Authority 分级（user_edit 不可被 Agent 静默覆盖） |
-| Context Builder | New / Resume 两种模式的最小充分上下文 bundle + token budget |
-| Launcher | New Session / Resume Session（Resume 前 fresh 检查 Root 源可用性，再同步成员并注入 bundle 启动 CLI） |
+| Context (L1/L2) | CoreContextResolver 投影 Goal/Current State/Constraints/Decisions/Open Questions；ContextItem + Revision 历史；Supersede 演进链 |
+| Context 更新（显式） | 用户点「更新摘要」（Session）或「更新状态」（Workstream）→ 至多一次 AI 调用 → 校验后一个事务内提交 Session Context 与 Workstream mutations；确定性 Merge Engine（Dedup / Supersede / Resolve / Conflict 保留不自动覆盖），Authority 分级（user_edit 不可被 Agent 静默覆盖）；CLI 失败不回退 heuristic |
+| Launcher | New Session / Resume Session：只解析启动事实（Agent / cwd / runtime / Owner / LaunchIntent），不注入 Context、不等待摄入；启动成功后向 IngestionCoordinator 投递后台摄入 |
 | Lifecycle | Trash / Restore；永久删除 = 仅清除 NoEnding 本地数据，且只对「已入回收站 + Root 源确认不存在」的会话开放 |
 | Search | SQLite FTS5（token 内子串查询由 LIKE 兜底），只索引会话文档与 Root 会话消息 |
-| Workspace Assistant | Interactive Mode v0（基于 Domain API 检索）；Background Mode 即 Sync Engine，LLM Runtime 通过 trait 预留接入 |
+| Workspace Assistant | Interactive Mode v0（基于 Domain API 检索 + 经用户确认的动作块）；显式 Context 更新直接复用同一 Runtime/CLI 选择 |
 
 ## 运行
 
@@ -96,7 +95,7 @@ NoEnding 只支持当前数据库格式，不提供任何数据库 migration。�
 「不修补」不等于「不校验」：带着当前身份但结构残缺的数据库会被拒绝，而不是被悄悄补全。
 
 启动时的 `reconcile_runtime_defaults` 只做环境相关的默认值补齐（新增 Agent 的默认
-source root、缺失的默认设置），属于当前环境的幂等 reconciliation，不是 migration。
+source root），属于当前环境的幂等 reconciliation，不是 migration。
 
 SQLite 数据库是可重建的本地投影：Session 来自 Agent 源数据，删除数据库后重启会重新摄入。
 但 **Workstream / Context 等 NoEnding 自有状态无法从 Agent 源恢复**，重建会丢失这部分数据。
@@ -121,18 +120,18 @@ src/                      React UI
   features/projects       Project 列表 / 详情 / Resources
   features/workstreams    Workstream 上下文页（L1 分区 + Extended Items + 历史）
   features/sessions       Session 列表 / 会话消息视图（仅 user/assistant）
-  features/launcher       New / Resume Session 启动器（含 bundle 预览）
+  features/launcher       New / Resume Session 启动器
 src-tauri/
   domain/                 平台无关领域模型（Session / SessionMember / SessionMessage / …）
   adapters/               codex / claude / qoder / dsh / zcode / pi / autoclaw / workbuddy Adapter（member 契约 + 注册表）
   platform/               PlatformPaths / ExecutableResolver / PlatformLauncher
-  ingestion/              Member 发现 → 逻辑图解析 → 成员原子提交 → Context sync
-  sync/                   SyncJob + 启发式 Extractor + 确定性 MergeEngine
-  context/                CoreContextResolver + ContextBuilder
+  ingestion/              Member 发现 → 逻辑图解析 → 成员原子提交（纯事实，不调用 AI）
+  sync/                   显式 Context 更新：严格 Extractor + 确定性 MergeEngine + AuthorityPolicy
+  context/                显式 Context 服务（updateSession / updateWorkstream）与读取投影
   launcher/               Session Launcher（New / Resume 流程）
   lifecycle/              Trash / Restore / 永久本地删除
   search/                 FTS5 检索
-  storage/                SQLite schema + 仓储（sessions / members / messages / cursors / stats / diagnostics）
+  storage/                SQLite schema + 仓储（sessions / members / messages / 消息投影 / context / cursors / stats / diagnostics）
 ```
 
 ## 测试
@@ -141,5 +140,5 @@ src-tauri/
 cd src-tauri && cargo test
 ```
 
-覆盖：PlatformPaths 跨平台路径解码、Sync 引擎端到端（提取→分类→合并→去重→游标）、
-Context Bundle 核心分区、FTS 搜索。
+覆盖：PlatformPaths 跨平台路径解码、摄入与消息投影（追加/重扫/改写换世代）、显式 Context 更新
+（Session 单独 / Workstream 联合、原子提交与失败回滚）、FTS 搜索。

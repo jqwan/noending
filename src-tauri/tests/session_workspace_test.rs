@@ -1,27 +1,12 @@
-//! Session workspace semantics and the storage ingredients
-//! of the Session detail view.
+//! Session workspace semantics and the storage ingredients of the Session
+//! detail view. Every test pins one edge of the fact chain:
+//! `Session.cwd` (the ROOT's) → `workspace_path_id` →
+//! `workspace_paths.project_id` → `Project`.
 //!
-//! Every workspace test pins one edge of the fact chain
-//!
-//! ```text
-//! Session.cwd (the ROOT's) → workspace_path_id → workspace_paths.project_id → Project
-//! ```
-//!
-//! Two things are deliberately scripted rather than real:
-//!
-//! * the WorkspacePath creator is a [`Scripted`] stand-in for
-//!   `workspace::project`'s implementation of [`WorkspaceAttaching`], so Session
-//!   rules are testable without Git detection. Discovery reaches it through the
-//!   app-wide seam (`register_workspace_attacher`), so the shared instance is
-//!   created once per process and every test reads facts, not call counts;
-//! * every path is a plain `/repo/...` string — no temp-dir prefix is ever
-//!   asserted, because `std::env::temp_dir` is a symlink on macOS.
-//!
-//! The Tauri detail command is a thin map over storage/lifecycle calls, so the
-//! detail-shape tests exercise exactly those calls (`members_for_session`,
-//! `aggregate_session_stats`, the two frontiers, `root_source_status`, …).
-//!
-//! Only temp databases are opened; no user Home, no real transcripts.
+//! The WorkspacePath creator is a `ScriptedAttacher` stand-in for
+//! `workspace::project`'s `WorkspaceAttaching`, so Session rules are testable
+//! without Git detection. Paths are plain `/repo/...` strings — no temp-dir
+//! prefix is asserted, because `std::env::temp_dir` is a symlink on macOS.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +16,7 @@ mod support;
 use noending::adapters::{adapter_for, DiscoveredMember, DiscoveredMemberKind};
 use noending::domain::{Agent, Session, SessionMemberRelation, SessionMessageRole};
 use noending::error::Result;
-use noending::ingestion::{ingest_and_sync_session, reconcile_with_engine, session_title};
+use noending::ingestion::{ingest_session, reconcile_all, session_title};
 use noending::launcher::LaunchWorkspace;
 use noending::lifecycle;
 use noending::storage::session_paths::{
@@ -41,14 +26,13 @@ use noending::storage::workspace::{
     insert_workspace_path_conn, reassign_workspace_path_project_conn,
 };
 use noending::storage::Db;
-use noending::sync::SyncEngine;
 use noending::workspace::session::{
     attach_sessions_to_registered_paths, move_session_to_path_conn, register_workspace_attacher,
     UnattachedWorkspacePaths,
 };
 use noending::workspace::{normalize_path, path_identity_of, WorkspaceAttaching};
 
-// ------------------------------------------------------------- fixtures
+// fixtures
 
 fn unique_dir(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -131,7 +115,6 @@ fn codex_meta_line(session_id: &str, cwd: &str) -> String {
 /// pass over the enabled ingest sources. Returns the stored session.
 fn discover_via_reconcile(
     db: &Db,
-    engine: &SyncEngine,
     root: &Path,
     file_name: &str,
     agent_session_id: &str,
@@ -153,7 +136,7 @@ fn discover_via_reconcile(
         db.add_ingest_source(Agent::Codex, &root_str, true).unwrap();
     }
     let _ = shared_attacher();
-    reconcile_with_engine(db, engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(db, &LaunchWorkspace::default(), &|_| {}).unwrap();
     db.find_session_by_root_agent_id(Agent::Codex, agent_session_id)
         .unwrap()
         .expect("discovered through the real adapter")
@@ -163,17 +146,15 @@ fn stored(db: &Db, id: &str) -> Session {
     db.get_session(id).unwrap().expect("session row")
 }
 
-// ------------------------------------------- 1. discovery → WorkspacePath
+// 1. discovery → WorkspacePath
 
 #[test]
 fn discovered_session_gets_a_workspace_path() {
     let (_d, db) = temp_db("discover");
     project(&db, "p-repo", "repo");
-    let engine = SyncEngine::default();
 
     let s = discover_via_reconcile(
         &db,
-        &engine,
         &unique_dir("discover-raw"),
         "rollout-2026-09-13-s-1-2-3-4.jsonl",
         "discover-1",
@@ -194,7 +175,7 @@ fn discovered_session_gets_a_workspace_path() {
 
     // Re-discovery of the same transcript skips the unchanged source, so no
     // second attach happens and no second path row can appear.
-    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
     assert_eq!(
         db.list_workspace_paths().unwrap().len(),
         1,
@@ -277,17 +258,15 @@ fn an_unwired_workspace_layer_resolves_no_path() {
     assert_eq!(scripted, None);
 }
 
-// ------------------------------------------- 2/3. the derived Project
+// 2/3. the derived Project
 
 #[test]
 fn session_gets_a_derived_project() {
     let (_d, db) = temp_db("derived");
     project(&db, "p-repo", "repo");
-    let engine = SyncEngine::default();
 
     let s = discover_via_reconcile(
         &db,
-        &engine,
         &unique_dir("derived-raw"),
         "rollout-2026-09-13-d-1-2-3-4.jsonl",
         "derived-1",
@@ -455,7 +434,7 @@ fn rust_files(path: &Path) -> Vec<PathBuf> {
     }
 }
 
-// ------------------------------------------------ 4. batch Project refresh
+// 4. batch Project refresh
 
 #[test]
 fn changing_a_workspace_paths_project_refreshes_all_its_sessions() {
@@ -545,17 +524,15 @@ fn the_batch_refresh_is_alone_sufficient_and_idempotent() {
     assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
 }
 
-// ------------------------------- 5. ordinary member ingestion does no Project work
+// 5. ordinary member ingestion does no Project work
 
 #[test]
 fn member_ingestion_alone_does_not_change_a_project() {
     let (_d, db) = temp_db("ingest");
     project(&db, "p-repo", "repo");
-    let engine = SyncEngine::default();
 
     let s = discover_via_reconcile(
         &db,
-        &engine,
         &unique_dir("ingest-raw"),
         "rollout-2026-09-13-i-1-2-3-4.jsonl",
         "ingest-1",
@@ -571,7 +548,7 @@ fn member_ingestion_alone_does_not_change_a_project() {
     // Another ingest pass over the same (unchanged) source: the reconcile
     // re-resolution is skipped by the cursor, and a direct member ingest has
     // no workspace code path at all — the session's Project facts stay put.
-    let (stored_count, _) = ingest_and_sync_session(&db, &engine, &before).unwrap();
+    let stored_count = ingest_session(&db, &before).unwrap();
     assert_eq!(stored_count, 0, "an unchanged source stores nothing");
 
     let after = stored(&db, &s.id);
@@ -585,7 +562,7 @@ fn member_ingestion_alone_does_not_change_a_project() {
     assert_eq!(path_after.last_seen_at, path_before.last_seen_at);
 }
 
-// ------------------------------------------------ product-level discovery
+// product-level discovery
 
 #[test]
 fn reconcile_discovers_and_attaches_sessions_to_workspace_paths() {
@@ -593,11 +570,9 @@ fn reconcile_discovers_and_attaches_sessions_to_workspace_paths() {
     let root = dir.join("sessions");
     let db = Db::open(&dir.join("noending.db")).unwrap();
     project(&db, "p-repo", "repo");
-    let engine = SyncEngine::default();
 
     let s = discover_via_reconcile(
         &db,
-        &engine,
         &root,
         "rollout-2026-09-13-r-1-2-3-4.jsonl",
         "reconciled-1",
@@ -626,10 +601,8 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
     // The global attacher is process state another test in this binary may
     // have registered; "p-repo" existing keeps that seam working here too.
     project(&db, "p-repo", "repo");
-    let engine = SyncEngine::default();
     let s = discover_via_reconcile(
         &db,
-        &engine,
         &root,
         "rollout-2026-09-13-k-1-2-3-4.jsonl",
         "skip-1",
@@ -649,7 +622,7 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
             rusqlite::params![s.id],
         )
         .unwrap();
-    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
     let after = stored(&db, &s.id);
     assert_eq!(
         after.last_activity_at.as_deref(),
@@ -665,7 +638,7 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
             rusqlite::params![s.id],
         )
         .unwrap();
-    reconcile_with_engine(&db, &engine, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
     let healed = stored(&db, &s.id);
     assert!(
         healed.title.is_some(),
@@ -674,11 +647,9 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
 }
 
 // ─────────────────────────────────────────────────────────  T1–T4
-//
 // The mechanical anti-drift assertions. `project_id_writers_are_confined_to_the_
 // derived_doors` above is T2; these are the rest of the same family, and they
 // live beside it because a guard nobody can find is a guard nobody keeps.
-//
 // Every one of them reads *source text*, so each must be proven to fire: see the
 // per-test note on what mutation breaks it. A grep guard that matches prose is
 // worse than no guard — it reports confidence it has not earned.
@@ -958,11 +929,9 @@ fn noending_home_is_resolved_before_the_database_opens() {
 fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     let (_d, db) = temp_db("cache-is-not-membership");
     project(&db, "p-repo", "Real");
-    let engine = SyncEngine::default();
     let raw = unique_dir("cache-authority-raw");
     let member = discover_via_reconcile(
         &db,
-        &engine,
         &raw,
         "rollout-2026-09-13-c-1-2-3-4.jsonl",
         "s-member",
@@ -971,7 +940,6 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     );
     let ghost = discover_via_reconcile(
         &db,
-        &engine,
         &raw,
         "rollout-2026-09-13-c-5-6-7-8.jsonl",
         "s-ghost",
@@ -1132,7 +1100,7 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
     );
 }
 
-// ------------------------------- 6. the detail ingredients ----
+// 6. the detail ingredients
 
 /// `get_session_detail` is a thin Tauri command over storage/lifecycle queries.
 /// This pins exactly the rows those queries hand it, so the detail page's
@@ -1236,16 +1204,16 @@ fn the_detail_ingredients_come_from_storage_queries() {
     assert_eq!(stats.side_count, 0);
     assert_eq!(stats.max_depth, 1, "the child hangs off the root");
 
-    // The two frontiers the detail page shows.
+    // The two frontiers the detail page shows: messages ingested, and how far
+    // the explicit Session Context has consumed them (no Context row → 0).
     assert_eq!(db.ingested_message_sequence(&s).unwrap(), 2);
     assert_eq!(
-        db.get_context_state(&s).unwrap().processed_message_sequence,
-        0
-    );
-    db.set_processed_message_sequence(&s, 1).unwrap();
-    assert_eq!(
-        db.get_context_state(&s).unwrap().processed_message_sequence,
-        1
+        db.get_session_context(&s)
+            .unwrap()
+            .map(|c| c.processed_through_seq)
+            .unwrap_or(0),
+        0,
+        "no Session Context has been generated yet"
     );
 
     // The fresh source verdict and the lifecycle flags it feeds.

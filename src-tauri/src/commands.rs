@@ -7,13 +7,13 @@
 //! This file owns the shared state and helpers the submodules borrow.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 
+pub mod ingestion;
 pub mod project;
 pub mod session_lifecycle;
 pub mod session_workspace;
@@ -24,50 +24,16 @@ pub use workstream::workstream_cards;
 
 pub struct AppState {
     /// The store owns its own concurrency (one writer + a WAL reader), so the
-    /// UI's reads never queue behind a background sync's writes.
+    /// UI's reads never queue behind a background reconcile's writes.
     pub db: Db,
-    /// Guards against concurrent background sync jobs.
-    pub sync_in_progress: std::sync::atomic::AtomicBool,
+    /// The one place background ingestion is queued. Never calls AI.
+    pub ingestion: ingestion::IngestionCoordinator,
     /// Guards against concurrent workspace reconciles (global AND targeted —
     /// both mutate the same registry, so one flag serializes them).
     pub workspace_refresh_in_progress: std::sync::atomic::AtomicBool,
     /// In-memory store for prepared launches awaiting user confirmation.
     pub prepared_launches:
         std::sync::Mutex<std::collections::HashMap<String, crate::launcher::PreparedLaunch>>,
-}
-
-/// Spawn a background sync job: returns immediately, emits `sync-started`,
-/// `sync-progress` (per session), `sync-completed` / `sync-failed`. The store
-/// serializes writes internally, so the job and the UI interleave freely.
-fn spawn_sync_job<F>(app: &AppHandle, state: &State<AppState>, job: F) -> Result<()>
-where
-    F: FnOnce(&Db, &dyn Fn(serde_json::Value)) -> Result<(usize, i64)> + Send + 'static,
-{
-    if state.sync_in_progress.swap(true, Ordering::SeqCst) {
-        return Err(other("已有同步任务在进行中，请等待完成"));
-    }
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        let _ = handle.emit("sync-started", serde_json::json!({}));
-        let state = handle.state::<AppState>();
-        let notify = |payload: serde_json::Value| {
-            let _ = handle.emit("sync-progress", payload);
-        };
-        let result = job(&state.db, &notify);
-        state.sync_in_progress.store(false, Ordering::SeqCst);
-        match result {
-            Ok((discovered, events)) => {
-                let _ = handle.emit(
-                    "sync-completed",
-                    serde_json::json!({ "discovered": discovered, "events": events }),
-                );
-            }
-            Err(e) => {
-                let _ = handle.emit("sync-failed", serde_json::json!({ "error": e.to_string() }));
-            }
-        }
-    });
-    Ok(())
 }
 
 pub(crate) fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
@@ -159,44 +125,50 @@ pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
     })
 }
 
-// ---------------- Context Delivery Level (Settings → Context Delivery) ----------------
+// ---------------- Explicit Context update ----------------
 
-pub use crate::settings::{
-    context_delivery_level_of, set_context_delivery_level as set_delivery_level,
-    CONTEXT_DELIVERY_LEVEL_KEY,
-};
-
+/// Read the Session's summary + pending state. A pure read: no ingestion, no AI.
 #[tauri::command]
-pub fn get_context_delivery_level(state: State<AppState>) -> Result<String> {
+pub fn get_session_context(
+    state: State<AppState>,
+    session_id: String,
+) -> Result<crate::context::SessionContextView> {
     with_db(&state, |db| {
-        Ok(context_delivery_level_of(db)?.as_str().to_string())
+        crate::context::session_context_view(db, &session_id)
     })
 }
 
+/// Read the Workstream's Context + revision + pending state. Pure read.
 #[tauri::command]
-pub fn set_context_delivery_level(state: State<AppState>, level: String) -> Result<()> {
-    let lvl = crate::context::ContextDeliveryLevel::parse(&level)
-        .ok_or_else(|| other("Invalid context delivery level"))?;
+pub fn get_workstream_context_state(
+    state: State<AppState>,
+    workstream_id: String,
+) -> Result<crate::context::WorkstreamContextView> {
     with_db(&state, |db| {
-        crate::settings::set_context_delivery_level(db, lvl)
+        crate::context::workstream_context_view(db, &workstream_id)
     })
 }
 
-// ---------------- Context Intelligence (Base Experience switch) ----------------
-
-/// Context Intelligence is a separate switch from delivery: turning delivery
-/// Off stops outbound injection only, never extraction.
+/// ONE user action → AT MOST ONE model call → one new Session Context.
+/// Returns `updated` / `partial` / `no_change`; a stale snapshot is an `Err`
+/// carrying the `stale_snapshot` reason so the UI can ask for a re-click.
 #[tauri::command]
-pub fn get_context_intelligence_enabled(state: State<AppState>) -> Result<bool> {
-    with_db(&state, |db| {
-        crate::settings::context_intelligence_enabled(db)
-    })
+pub fn update_session_context(
+    state: State<AppState>,
+    session_id: String,
+) -> Result<crate::context::SessionUpdateOutcome> {
+    with_db(&state, |db| crate::context::update_session(db, &session_id))
 }
 
+/// ONE user action → AT MOST ONE model call → every affected Session Context AND
+/// the Workstream Context mutations, committed atomically.
 #[tauri::command]
-pub fn set_context_intelligence_enabled(state: State<AppState>, enabled: bool) -> Result<()> {
+pub fn update_workstream_context(
+    state: State<AppState>,
+    workstream_id: String,
+) -> Result<crate::context::WorkstreamUpdateOutcome> {
     with_db(&state, |db| {
-        crate::settings::set_context_intelligence_enabled(db, enabled)
+        crate::context::update_workstream(db, &workstream_id)
     })
 }
 
@@ -223,7 +195,6 @@ pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<Con
             "user_explicit",
             "user_edit",
             &[],
-            None,
             "user",
         )?;
         // the Project this activity belongs to is its position-0
@@ -268,7 +239,6 @@ pub fn edit_context_item(state: State<AppState>, args: EditItemArgs) -> Result<(
             }),
             source_type: Some("user_edit".into()),
             source_ref: None,
-            sync_run_id: None,
             created_at: now(),
         };
         db.insert_revision(&new_rev)?;
@@ -285,7 +255,7 @@ pub fn edit_context_item(state: State<AppState>, args: EditItemArgs) -> Result<(
 #[tauri::command]
 pub fn set_item_status(state: State<AppState>, item_id: String, status: String) -> Result<()> {
     with_db(&state, |db| {
-        db.apply_status_change(&item_id, &status, "user", "用户手动修改状态", None, &[])
+        db.apply_status_change(&item_id, &status, "user", "用户手动修改状态", &[])
     })
 }
 
@@ -300,7 +270,7 @@ pub fn get_item_history(
 #[tauri::command]
 pub fn delete_context_item(state: State<AppState>, item_id: String) -> Result<()> {
     with_db(&state, |db| {
-        db.apply_status_change(&item_id, "deleted", "user", "用户删除", None, &[])?;
+        db.apply_status_change(&item_id, "deleted", "user", "用户删除", &[])?;
         db.unindex("item", &item_id);
         Ok(())
     })
@@ -477,96 +447,12 @@ pub fn resolve_conflict(
     })
 }
 
-// ---------------- Sync ----------------
-
-/// 同步全部启用的数据源（后台执行，不阻塞前端）。
-#[tauri::command]
-pub fn sync_all(app: AppHandle, state: State<AppState>) -> Result<serde_json::Value> {
-    let workspace = launch_workspace(&app);
-    spawn_sync_job(&app, &state, move |db, notify| {
-        let engine = crate::sync::SyncEngine::from_settings(db);
-        crate::ingestion::reconcile_with_engine(db, &engine, &workspace, &|s| {
-            notify(serde_json::json!({
-                "agent": s.agent.as_str(),
-                "title": s.title,
-            }));
-        })
-    })?;
-    Ok(serde_json::json!({ "started": true }))
-}
-
-/// 只同步某一个数据源（后台执行）。
-#[tauri::command]
-pub fn sync_source(
-    app: AppHandle,
-    state: State<AppState>,
-    source_id: String,
-) -> Result<serde_json::Value> {
-    let workspace = launch_workspace(&app);
-    spawn_sync_job(&app, &state, move |db, notify| {
-        let source = db
-            .get_ingest_source(&source_id)?
-            .ok_or_else(|| other("数据源不存在"))?;
-        let engine = crate::sync::SyncEngine::from_settings(db);
-        crate::ingestion::reconcile_source(db, &engine, &source, &workspace, &|s| {
-            notify(serde_json::json!({
-                "agent": s.agent.as_str(),
-                "title": s.title,
-            }));
-        })
-    })?;
-    Ok(serde_json::json!({ "started": true }))
-}
-
-/// 重新摄入某一个数据源：重置游标后重新抓取，已入库事件去重追加，
-/// 所属任务（Owner）、上下文条目和审计历史保留（后台执行）。
-#[tauri::command]
-pub fn reingest_source(
-    app: AppHandle,
-    state: State<AppState>,
-    source_id: String,
-) -> Result<serde_json::Value> {
-    let workspace = launch_workspace(&app);
-    spawn_sync_job(&app, &state, move |db, notify| {
-        let source = db
-            .get_ingest_source(&source_id)?
-            .ok_or_else(|| other("数据源不存在"))?;
-        let engine = crate::sync::SyncEngine::from_settings(db);
-        crate::ingestion::reingest_source(db, &engine, &source, &workspace, &|s| {
-            notify(serde_json::json!({
-                "agent": s.agent.as_str(),
-                "title": s.title,
-            }));
-        })
-    })?;
-    Ok(serde_json::json!({ "started": true }))
-}
-
-#[tauri::command]
-pub fn sync_session(state: State<AppState>, session_id: String) -> Result<serde_json::Value> {
-    with_db(&state, |db| {
-        let session = db
-            .get_session(&session_id)?
-            .ok_or_else(|| other("Session 不存在"))?;
-        // A trashed session is inactive: sync is an explicit user action
-        // here, so reject with a reason instead of silently no-op'ing.
-        if session.is_trashed() {
-            return Err(other("会话已在回收站，无法同步；请先恢复会话"));
-        }
-        let engine = crate::sync::SyncEngine::from_settings(db);
-        let (ingested, applied) = crate::launcher::ingest_and_sync_session(db, &engine, &session)?;
-        Ok(serde_json::json!({
-            "applied": applied,
-            "ingested": ingested,
-            "context_processing_enabled": crate::settings::context_intelligence_enabled(db)?,
-        }))
-    })
-}
-
-#[tauri::command]
-pub fn list_sync_runs(state: State<AppState>, limit: Option<i64>) -> Result<Vec<SyncRun>> {
-    with_db(&state, |db| db.list_sync_runs(limit.unwrap_or(50)))
-}
+// ---------------- Ingestion ----------------
+//
+// Background ingestion is queued through `commands::ingestion` (reconcile_all /
+// reconcile_source / reingest_source / app_foreground / get_ingestion_status).
+// Ingestion is automatic and never calls AI; Context is updated only by the
+// explicit commands above.
 
 // ---------------- Launch intents ----------------
 
@@ -627,7 +513,7 @@ pub fn launch_new_session(
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
-    with_db(&state, |db| {
+    let result = with_db(&state, |db| {
         launcher.new_session_in(
             db,
             agent,
@@ -635,7 +521,9 @@ pub fn launch_new_session(
             cwd.as_deref(),
             &workspace,
         )
-    })
+    })?;
+    ingestion::enqueue(&app, ingestion::IngestScope::ReconcileAll);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -646,9 +534,11 @@ pub fn launch_resume_session(
 ) -> Result<crate::launcher::LaunchResult> {
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
-    with_db(&state, |db| {
+    let result = with_db(&state, |db| {
         launcher.resume_session_in(db, &session_id, &workspace)
-    })
+    })?;
+    ingestion::enqueue(&app, ingestion::IngestScope::RefreshSession(session_id));
+    Ok(result)
 }
 
 /// Maximum time a prepared launch remains valid in memory before lazy cleanup (30 minutes).
@@ -745,9 +635,19 @@ pub fn launch_prepared(
 
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
-    with_db(&state, |db| {
+    let result = with_db(&state, |db| {
         launcher.launch_prepared_in(db, &prepared, &workspace)
-    })
+    })?;
+    let scope = if prepared.mode == "resume" {
+        prepared
+            .session_id
+            .map(ingestion::IngestScope::RefreshSession)
+            .unwrap_or(ingestion::IngestScope::ReconcileAll)
+    } else {
+        ingestion::IngestScope::ReconcileAll
+    };
+    ingestion::enqueue(&app, scope);
+    Ok(result)
 }
 
 #[tauri::command]

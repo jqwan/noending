@@ -38,14 +38,14 @@ fn exec_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
 
 fn new_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
     adapter_for(agent)
-        .build_new_command(&install(agent), opts, None, None)
+        .build_new_command(&install(agent), opts, None)
         .expect("build")
         .args
 }
 
 fn resume_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
     adapter_for(agent)
-        .build_resume_command(&install(agent), opts, "agent-session-id", None, None)
+        .build_resume_command(&install(agent), opts, "agent-session-id", None)
         .expect("build")
         .args
 }
@@ -235,17 +235,11 @@ fn agents_without_a_cli_refuse_to_build_a_command() {
     for agent in cli_less {
         assert!(cli_names(agent).is_empty());
         for built in [
-            adapter_for(agent).build_new_command(
-                &install(agent),
-                &ExecOptions::default(),
-                None,
-                None,
-            ),
+            adapter_for(agent).build_new_command(&install(agent), &ExecOptions::default(), None),
             adapter_for(agent).build_resume_command(
                 &install(agent),
                 &ExecOptions::default(),
                 "as-1",
-                None,
                 None,
             ),
             adapter_for(agent).build_exec_command(&install(agent), &ExecOptions::default(), "p"),

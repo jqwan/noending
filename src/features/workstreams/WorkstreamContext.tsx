@@ -26,10 +26,10 @@ interface Props {
 }
 
 /**
- * Workstream Context Workbench（当前事实、追溯来源、演进关系、状态纠偏控制面）：
- * - Core Context 严格以后端 ctx.core (resolve_core_context 权威投影) 为准展示当前事实
- * - 提供 Provenance 追溯 (SourceDetailModal)、演进历史 (History) 与关系标签 (替代/被替代)
- * - 支持标题 + 详细内容双字段内联编辑，保存生成 user_edit 新 Revision
+ * Workstream Context Workbench（当前事实、追溯来源、演进关系、状态纠偏）：
+ * - Core Context 严格以后端 ctx.core（resolve_core_context 权威投影）为准
+ * - 提供 Provenance 追溯 / 演进历史 / 关系标签（替代 · 被替代）
+ * - 支持标题 + 内容双字段内联编辑，保存生成 user_edit 新 Revision
  */
 export default function WorkstreamContext({ ctx, focusedItemId, onChanged, onNavigateSession }: Props) {
   const [editing, setEditing] = useState<string | null>(null); // item id
@@ -44,7 +44,6 @@ export default function WorkstreamContext({ ctx, focusedItemId, onChanged, onNav
   const [newContent, setNewContent] = useState("");
   const [showAllExt, setShowAllExt] = useState(false);
 
-  // Maps for fast lookup
   const itemByRevId = new Map(ctx.items.map(([item, rev]) => [rev.id, [item, rev] as const]));
   const relationsMap = new Map((ctx.relations ?? []).map((r) => [r.item_id, r]));
 

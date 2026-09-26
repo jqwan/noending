@@ -2,22 +2,25 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import WorkspacePathField from "../../components/WorkspacePathField";
-import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
+import { timeAgo } from "../../components/common";
+import { AGENT_LABELS, type Agent, type IngestSource, type IngestTaskStatus } from "../../types";
 
 /**
- * Session 来源管理 + 摄入入口。
- * - 默认 agent 根目录（~/.codex 等）以"未启用"状态预置，是否摄入由用户决定；
- * - 每个来源可以单独「同步」（增量）或「重新摄入」（从头重扫源文件，
- *   重新抓取，会话归属与上下文条目保留）；
- * - 摄入在后台执行（不阻塞界面），进度通过 sync-* 事件推送。
+ * 高级维护：Session 来源管理 + 摄入入口。
+ *
+ * 普通主流程不出现这些按钮——摄入只在应用启动、前台回落与这里排队。每个来源可单独
+ * 「重新扫描」（增量）或「重新入库」（从头重扫）；顶部按钮覆盖全部已启用来源。
+ * 摄入在后台单线程执行，完成事件是 `ingestion-completed`，最近一次结果来自
+ * `get_ingestion_status`（纯读取）。
  */
 export default function SourcesView() {
   const [sources, setSources] = useState<IngestSource[]>([]);
   const [agent, setAgent] = useState<Agent>("codex");
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [progress, setProgress] = useState("");
+  /** 已排队但还没收到完成事件：这期间不允许再排队同样的动作。 */
+  const [queued, setQueued] = useState(false);
+  const [status, setStatus] = useState<IngestTaskStatus | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -25,42 +28,40 @@ export default function SourcesView() {
     api.listIngestSources().then(setSources).catch((e) => setError(String(e)));
   }, []);
 
-  useEffect(reload, [reload]);
+  const reloadStatus = useCallback(() => {
+    api.getIngestionStatus().then(setStatus).catch(console.error);
+  }, []);
 
-  // 后台摄入事件：started / per-session progress / completed / failed
   useEffect(() => {
-    const unlisten = Promise.all([
-      listen("sync-started", () => {
-        setSyncing(true);
-        setProgress("正在扫描会话来源…");
-      }),
-      listen("sync-progress", (e) => {
-        const p = e.payload as { agent?: string; title?: string };
-        setProgress(`正在处理：${p.title || "（未命名会话）"}`);
-      }),
-      listen("sync-completed", (e) => {
-        const p = e.payload as { discovered?: number; events?: number };
-        setSyncing(false);
-        setProgress("");
-        setNotice(`摄入完成：发现 ${p.discovered ?? 0} 个会话，摄入 ${p.events ?? 0} 条新事件。`);
-        reload();
-      }),
-      listen("sync-failed", (e) => {
-        const p = e.payload as { error?: string };
-        setSyncing(false);
-        setProgress("");
-        setError(p.error || "同步失败");
-      }),
-    ]);
-    return () => { unlisten.then((fns) => fns.forEach((f) => f())); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reload]);
+    reload();
+    reloadStatus();
+  }, [reload, reloadStatus]);
+
+  // 后台摄入完成：刷新来源列表与最近一次摄入结果。
+  useEffect(() => {
+    const unlisten = listen("ingestion-completed", (e) => {
+      const p = e.payload as {
+        discovered?: number;
+        messages?: number;
+        error?: string | null;
+      };
+      setQueued(false);
+      if (p.error) {
+        setError(p.error);
+      } else {
+        setNotice(`摄入完成：发现 ${p.discovered ?? 0} 个会话，写入 ${p.messages ?? 0} 条新消息。`);
+      }
+      reload();
+      reloadStatus();
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, [reload, reloadStatus]);
 
   const toggle = async (src: IngestSource, enabled: boolean) => {
     await api.setIngestSourceEnabled(src.id, enabled).catch((e) => setError(String(e)));
     reload();
     if (enabled) {
-      setNotice("已启用。点击该行的「同步」开始摄入。");
+      setNotice("已启用。点击该行的「重新扫描」开始摄入。");
     }
   };
 
@@ -71,7 +72,7 @@ export default function SourcesView() {
     try {
       await api.addIngestSource(agent, path.trim());
       setPath("");
-      setNotice("已添加并启用。点击该行的「同步」开始摄入。");
+      setNotice("已添加并启用。点击该行的「重新扫描」开始摄入。");
       reload();
     } catch (e) {
       setError(String(e));
@@ -85,10 +86,13 @@ export default function SourcesView() {
     reload();
   };
 
-  const syncOne = async (src: IngestSource) => {
+  const scanOne = async (src: IngestSource) => {
     setError("");
+    setNotice("");
     try {
-      await api.syncSource(src.id);
+      await api.reconcileSource(src.id);
+      setQueued(true);
+      setNotice("已排队：正在重新扫描这个来源。");
     } catch (e) {
       setError(String(e));
     }
@@ -96,22 +100,28 @@ export default function SourcesView() {
 
   const reingest = async (src: IngestSource) => {
     if (!window.confirm(
-      `重新摄入「${src.path}」？\n\n将从头重扫该来源的全部会话文件：已摄入的事件及其引用保持不变，仅真正新增或变化的内容会被追加（会话归属、Context 条目与审计历史保留）。`
+      `重新入库「${src.path}」？\n\n将从头重扫该来源的全部会话文件：已摄入的事件及其引用保持不变，仅真正新增或变化的内容会被追加（会话归属、Context 条目与审计历史保留）。`
     )) {
       return;
     }
     setError("");
+    setNotice("");
     try {
       await api.reingestSource(src.id);
+      setQueued(true);
+      setNotice("已排队：正在重新入库这个来源。");
     } catch (e) {
       setError(String(e));
     }
   };
 
-  const syncAll = async () => {
+  const scanAll = async () => {
     setError("");
+    setNotice("");
     try {
-      await api.syncAll();
+      await api.reconcileAll();
+      setQueued(true);
+      setNotice("已排队：正在重新扫描全部已启用来源。");
     } catch (e) {
       setError(String(e));
     }
@@ -122,18 +132,20 @@ export default function SourcesView() {
   return (
     <div>
       <p className="muted small" style={{ marginTop: 0 }}>
-        仅同步已启用的目录。
+        仅扫描已启用的目录。这些按钮是高级维护入口，普通使用不需要它们。
       </p>
 
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}>
-        <button className="btn primary" disabled={syncing} onClick={syncAll}>
-          {syncing ? "正在摄入…" : "同步全部来源"}
+        <button className="btn primary" disabled={queued} onClick={scanAll}>
+          {queued ? "正在摄入…" : "重新扫描全部来源"}
         </button>
-        {syncing && <span className="badge accent">{progress || "正在摄入…"}</span>}
+        {queued && <span className="badge accent">已排队，后台处理中…</span>}
         <span className="muted small">
           当前 {enabledCount} / {sources.length} 个来源启用
         </span>
       </div>
+
+      <IngestionStatusCard status={status} />
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="row" style={{ alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
@@ -173,7 +185,7 @@ export default function SourcesView() {
               type="checkbox"
               style={{ width: "auto" }}
               checked={src.enabled}
-              disabled={syncing}
+              disabled={queued}
               onChange={(e) => toggle(src, e.target.checked)}
             />
             <span className="badge">{AGENT_LABELS[src.agent]}</span>
@@ -186,21 +198,20 @@ export default function SourcesView() {
             </span>
             {src.origin === "default" && <span className="badge">默认</span>}
             {!src.exists && <span className="badge warn" title="该目录当前不存在">目录不存在</span>}
-            {/* 徽标说的是这一行的配置状态，不是"此刻正在摄入"——
-                真正的进行中状态由顶部的 progress 表达——状态必须是真的。 */}
+            {/* 徽标说的是这一行的配置状态，不是"此刻正在摄入"——进行中由顶部 queued 表达。 */}
             {src.enabled ? (
               <span className="badge accent">已启用</span>
             ) : (
               <span className="muted small">未启用</span>
             )}
-            <button className="btn small" disabled={syncing} onClick={() => syncOne(src)}>
-              同步
+            <button className="btn small" disabled={queued} onClick={() => scanOne(src)}>
+              重新扫描
             </button>
-            <button className="btn small ghost" disabled={syncing} onClick={() => reingest(src)}>
-              重新摄入
+            <button className="btn small ghost" disabled={queued} onClick={() => reingest(src)}>
+              重新入库
             </button>
             {src.origin === "user" && (
-              <button className="btn small ghost" disabled={syncing} onClick={() => remove(src)}>
+              <button className="btn small ghost" disabled={queued} onClick={() => remove(src)}>
                 移除
               </button>
             )}
@@ -208,7 +219,33 @@ export default function SourcesView() {
         ))}
       </div>
 
-      <details className="muted small" style={{ marginTop: 10 }}><summary>同步与重新摄入</summary><p>同步只读取新增内容；重新摄入会重扫全部文件，保留现有关联与上下文。</p></details>
+      <details className="muted small" style={{ marginTop: 10 }}><summary>重新扫描与重新入库</summary><p>重新扫描只读取新增内容；重新入库会重扫全部文件，保留现有关联与上下文。</p></details>
     </div>
+  );
+}
+
+/** `IngestTaskStatus.scope` 的中文说明。 */
+function scopeLabel(scope: string): string {
+  if (scope === "reconcile_all") return "重新扫描全部来源";
+  if (scope.startsWith("reconcile_source:")) return "重新扫描单个来源";
+  if (scope.startsWith("reingest_source:")) return "重新入库";
+  if (scope.startsWith("refresh_session:")) return "刷新单个会话";
+  return scope;
+}
+
+/** 最近一次后台摄入的结果。没有任何记录时不占位。 */
+function IngestionStatusCard({ status }: { status: IngestTaskStatus | null }) {
+  if (!status) return null;
+  return (
+    <section className="card" style={{ marginBottom: 16 }}>
+      <div className="section-label" style={{ marginTop: 0 }}>最近一次摄入</div>
+      <div className="small">
+        {scopeLabel(status.scope)} · 发现 {status.discovered} 个会话 · 写入 {status.messages} 条新消息
+        {status.finished_at ? <span className="muted"> · {timeAgo(status.finished_at)}</span> : null}
+      </div>
+      {status.error && (
+        <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere" }}>{status.error}</div>
+      )}
+    </section>
   );
 }

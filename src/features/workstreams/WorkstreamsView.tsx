@@ -9,16 +9,14 @@ import { showToast } from "../../components/Toast";
 import WorkstreamCard, { cardSearchFields, searchFieldHint } from "./WorkstreamCard";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import { useWorkstreamCards } from "./useWorkstreamCards";
-import { useBaseExperience } from "../../app/experience";
 import type { WorkstreamCardData } from "../../types";
 import type { Route, ViewAction, WorkstreamScope } from "../../app/routes";
 
 type SortKey = "recent" | "created" | "name";
 /**
- * 筛选按**两个正交维度**表达：lifecycle（进行中 / 已完成）与
- * visibility（normal / archived）。回收站就是 archived —— 它不是第三种状态，
- * 也不改变 lifecycle，所以「回收站」只能按 visibility 判，
- * 不能像旧代码那样把「非进行中」统统算成已归档。
+ * 筛选按两个正交维度表达：lifecycle（进行中 / 已完成）与 visibility（normal /
+ * archived）。回收站就是 archived，它不是第三种状态、也不改变 lifecycle，所以
+ * 「回收站」只能按 visibility 判，不能把「非进行中」统统算成已归档。
  */
 type LifecycleFilter = "all" | "active" | "completed";
 type PresenceFilter = "all" | "assigned" | "unassigned";
@@ -38,7 +36,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   actionSeq: number;
 }) {
   const { cards, defaultAgent, refresh, loadError } = useWorkstreamCards();
-  const { intelligenceEnabled } = useBaseExperience();
   const [query, setQuery] = useViewState("workstreams.query", "");
   const [sort, setSort] = useViewState<SortKey>("workstreams.sort", "recent");
   const [lifecycle, setLifecycle] = useViewState<LifecycleFilter>("workstreams.lifecycle", "active");
@@ -52,8 +49,8 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   const [taskActionId, setTaskActionId] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<WorkstreamCardData | null>(null);
 
-  // 页面动作随 Route 到达（palette → New Workstream）：
-  // actionSeq 让「已在 Workstreams 页」的重复命令同样触发。
+  // 页面动作随 Route 到达（palette → New Workstream）：actionSeq 让「已在 Workstreams 页」
+  // 的重复命令同样触发。
   useEffect(() => {
     if (action === "new") setCreatingWs(true);
   }, [action, actionSeq]);
@@ -82,12 +79,12 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
       .filter((c) =>
         q === ""
           ? true
-          : cardSearchFields(c, intelligenceEnabled)
+          : cardSearchFields(c)
               .filter(Boolean)
               .some((s) => s!.toLowerCase().includes(q)),
       )
       .sort(SORTERS[sort]);
-  }, [cards, query, sort, lifecycle, projectId, sessionFilter, pathFilter, trashMode, intelligenceEnabled]);
+  }, [cards, query, sort, lifecycle, projectId, sessionFilter, pathFilter, trashMode]);
 
   const bulkPurge = async () => {
     if (!trashMode || !list || list.length === 0 || bulkPurgeBusy) return;
@@ -194,7 +191,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             type="text"
             className="ws-search"
             aria-label="搜索任务"
-            placeholder={searchFieldHint(intelligenceEnabled)}
+            placeholder={searchFieldHint()}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

@@ -1,13 +1,9 @@
-//! Platform-agnostic domain model.
-//!
-//! Nothing here may depend on a specific Agent's data format.
+//! Platform-agnostic domain model — nothing here may depend on a specific
+//! Agent's data format.
 //!
 //! Workspace invariant: a physical working path IS domain state
-//! (`WorkspacePath`, plus the ordered `workstream_paths` list). An Agent's raw
-//! transcript layout is separate, and a Workstream is not a path — it *has* an
-//! ordered list of paths, while a Session keeps its own authoritative cwd.
-//!
-//! Environment data (cwd etc.) is optional metadata carried by Session: a
+//! (`WorkspacePath`, plus the ordered `workstream_paths` list), while an Agent's
+//! raw transcript layout never is. A Session carries cwd as optional metadata: a
 //! Session with no cwd is legal and gets no WorkspacePath — nothing fabricates
 //! one from a default.
 
@@ -199,14 +195,12 @@ pub mod workstream_visibility {
 /// Qoder ships no headless CLI, so its adapter ingests history only and
 /// `exec_resolver::resolve` fails by design.
 ///
-/// The rename on each variant is the IPC spelling and MUST equal `as_str()` —
-/// the sessions table, the frontend's `Agent` union and its `AGENT_LABELS` all
-/// use that same string. Declaring it per variant rather than deriving it with
-/// `rename_all = "snake_case"` is deliberate: the derive spelled two variants
-/// (`work_buddy`, `z_code`) differently from everything else, so those rows
-/// rendered as「未知 Agent」and every command taking an `agent` argument
-/// failed to deserialize. `serde_spelling_equals_as_str_for_every_agent`
-/// keeps the spellings in step.
+/// Each variant's serde rename is the IPC spelling and MUST equal `as_str()` —
+/// the sessions table, the frontend's `Agent` union and `AGENT_LABELS` all use
+/// that same string. It is declared per variant rather than derived: the derive
+/// spelled two variants (`work_buddy`, `z_code`) differently from everything
+/// else, so those rows rendered as「未知 Agent」and every command taking an
+/// `agent` argument failed to deserialize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Agent {
     #[serde(rename = "codex")]
@@ -285,23 +279,19 @@ impl Agent {
 }
 
 /// A Logical Session: the one user-visible conversation plus every internal
-/// execution member (child agents, sidechains) it spawned.
+/// execution member (child agents, sidechains) it spawned. Not an Agent thread
+/// — it is keyed by the ROOT member's real Resume identity
+/// (`root_agent_session_id`), while children/sides live on as [`SessionMember`]
+/// rows and can never own, rename or resume it.
 ///
-/// A Session is NOT an Agent thread — it is keyed by the ROOT member's real
-/// Resume identity (`root_agent_session_id`), while children/sides live on as
-/// [`SessionMember`] rows of the same Session and can never own, rename or
-/// resume it.
-///
-/// Workspace facts on a Session:
-/// - `workspace_path_id` is the authoritative link to the physical workspace;
-///   it is set only when the ROOT member really has a cwd. A Session without
-///   one stays `None` — the default workspace is a *launch* convenience and is
-///   never retrofitted onto historical Sessions. Child/side cwds are execution
-///   facts on their member rows and never flow up.
+/// - `workspace_path_id` is the authoritative link to the physical workspace,
+///   set only when the ROOT member really has a cwd (the default workspace is a
+///   *launch* convenience, never retrofitted onto historical Sessions).
+///   Child/side cwds stay on their member rows and never flow up.
 /// - `project_id` is a **derived cache** of
-///   `workspace_path_id → workspace_paths.project_id`. It is written by exactly
-///   two code paths (see `storage::session_paths`); a manual write into it is a
-///   domain violation, not a convenience.
+///   `workspace_path_id → workspace_paths.project_id`, written by exactly two
+///   code paths (see `storage::session_paths`); a manual write is a domain
+///   violation.
 #[derive(Debug, Clone, Serialize)]
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
@@ -372,15 +362,15 @@ impl SessionMemberRelation {
 }
 
 /// One internal execution unit of a Logical Session — the Agent-side thread,
-/// subagent transcript or sidechain file that together make up the session
-///. Only the `root` member produces [`SessionMessage`]s; every member is
-/// an observation surface for stats.
+/// subagent transcript or sidechain file that together make up the session.
+/// Only the `root` member produces [`SessionMessage`]s; every member is an
+/// observation surface for stats.
 ///
 /// `source_member_id` is the Adapter's stable execution identity and need not
-/// equal the Agent's native session id: Qoder subagent transcripts
-/// repeat the parent's id, so the adapter derives `root-id:subagent:<stem>`.
-/// A source with no stable identity produces NO member — never a fabricated
-/// row just to make the topology look complete.
+/// equal the Agent's native session id (Qoder subagent transcripts repeat the
+/// parent's, so the adapter derives `root-id:subagent:<stem>`). A source with no
+/// stable identity produces NO member — never a fabricated row just to make the
+/// topology look complete.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionMember {
     pub id: Id,
@@ -405,9 +395,9 @@ pub struct SessionMember {
     pub metadata: serde_json::Value,
 }
 
-/// The role of a [`SessionMessage`] — the only two shapes a conversation has
-///. The database CHECK constraint is the last line of defense; adapters
-/// must already have dropped everything else.
+/// The role of a [`SessionMessage`] — the only two shapes a conversation has.
+/// The database CHECK constraint is the last line of defense; adapters must
+/// already have dropped everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMessageRole {
@@ -449,7 +439,7 @@ pub struct SessionMessage {
     /// stays unknown (`NULL`).
     pub provider: Option<String>,
     pub model: Option<String>,
-    // ---- source provenance (Context Integrity) ----
+    // Source provenance.
     pub source_message_id: Option<String>,
     pub source_generation: i64,
     pub source_position: String,
@@ -474,9 +464,6 @@ pub struct SessionMemberStats {
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub cost: Option<f64>,
-    // model / provider / effort removed: message
-    // provenance lives on SessionMessage; a member-level "current model"
-    // was a second, semantically unclear authority.
     pub updated_at: String,
     pub extra: serde_json::Value,
 }
@@ -546,8 +533,7 @@ impl MemberObservation {
 
 /// Where a member's Agent source stands, as far as reading is concerned.
 /// Belongs to the MEMBER, never to the Session — each member reads its own
-/// source at its own pace. The Context frontier is the separate
-/// [`SessionContextState`].
+/// source at its own pace; the Context frontier is tracked separately.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SessionMemberCursor {
     pub member_id: Id,
@@ -563,12 +549,9 @@ pub struct SessionMemberCursor {
     /// base the next append batch continues from. Only messages advance it;
     /// stats-only batches keep the tail. Empty until a message exists.
     pub identity_tail_hash: String,
-    /// Provenance state frontier: the generation
-    /// provenance an Adapter confirmed from explicit state events and that,
-    /// by the source format, still governs the messages to come. ONLY a
-    /// stateful-evidence adapter (Codex `turn_context`) uses these — every
-    /// other adapter leaves them `None`/`None`, and they are never a UI
-    /// authority or a Session "current model".
+    /// Provenance state frontier: the provenance a stateful-evidence adapter
+    /// (Codex `turn_context`) confirmed and that still governs the messages to
+    /// come. Every other adapter leaves them `None`; never a UI authority.
     #[serde(default)]
     pub active_provider: Option<String>,
     #[serde(default)]
@@ -595,13 +578,115 @@ impl SessionMemberCursor {
     }
 }
 
-/// The Logical Session's Context frontier: how far Sync has consumed
-/// ROOT conversation messages. Lifecycle is completely independent of the
-/// member cursors — Trash/Restore never touches it.
+/// Per-session ingest state: the FACT generation of the current conversation
+/// and how many ordinals the current-message projection holds.
+///
+/// `generation` is raised only when a source rewrite / truncate / reorder
+/// changes the effective conversation; a normal append leaves it and just
+/// extends `latest_message_seq`. Both numbers are PROJECTION ordinals, never
+/// `session_messages.sequence`.
 #[derive(Debug, Clone, Serialize, Default)]
-pub struct SessionContextState {
+pub struct SessionIngestState {
     pub session_id: Id,
-    pub processed_message_sequence: i64,
+    pub generation: i64,
+    pub latest_message_seq: i64,
+}
+
+/// The fixed, system-derived Session Context structure. All four fields are
+/// always present (empty lists are legal); extra fields are rejected at the
+/// model boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SessionContextFields {
+    pub summary_current_state: String,
+    pub decisions: Vec<String>,
+    pub open_questions: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+/// The current Session Context plus its CAS/frontier state. No row means the
+/// Session has never had a summary generated.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionContextRecord {
+    pub session_id: Id,
+    pub fields: SessionContextFields,
+    /// CAS guard: a committed update writes `revision + 1`.
+    pub revision: i64,
+    /// The fact generation this summary was built against.
+    pub ingest_generation: i64,
+    /// How far into the current-message projection this summary consumed.
+    pub processed_through_seq: i64,
+    pub updated_at: String,
+}
+
+/// One entry of the append-only Session Context history, so a Workstream
+/// update can cite `session-context:<session_id>:<revision>`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionContextRevision {
+    pub session_id: Id,
+    pub revision: i64,
+    pub fields: SessionContextFields,
+    pub ingest_generation: i64,
+    pub processed_through_seq: i64,
+    pub created_at: String,
+}
+
+/// The Workstream side of the two-level revision scheme.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct WorkstreamContextState {
+    pub workstream_id: Id,
+    /// Guard for every ContextItem write (manual + AI).
+    pub context_revision: i64,
+    /// Marks manual Context edits / Owner-set / title / description /
+    /// Trash-Restore that require re-synthesis.
+    pub input_revision: i64,
+    /// The `input_revision` the last successful AI update consumed. A
+    /// Workstream is pending when `input_revision > consumed_input_revision`.
+    pub consumed_input_revision: i64,
+}
+
+/// What a Workstream has already consumed from one Owner Session.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct WorkstreamSessionFrontier {
+    pub workstream_id: Id,
+    pub session_id: Id,
+    pub session_context_revision: i64,
+    pub ingest_generation: i64,
+    pub consumed_through_seq: i64,
+}
+
+/// The outcome vocabulary of an explicit Context update command. Every value
+/// is a SUCCESS from the caller's point of view; failures are `Err`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextUpdateStatus {
+    /// Everything the snapshot covered was written.
+    Updated,
+    /// Only a prefix of the pending work fit the input budget; the rest stays
+    /// pending.
+    Partial,
+    /// Nothing to do — no new messages. The model was NOT called.
+    NoChange,
+    /// The world moved under the model call; the user must click again.
+    StaleSnapshot,
+}
+
+/// Why an explicit Context update failed, so the UI can offer the right retry.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "message")]
+pub enum ContextUpdateError {
+    /// The Assistant Agent is `none`, the CLI is missing, or its config is
+    /// invalid.
+    AiUnavailable(String),
+    /// The model call itself failed (timeout, non-zero exit, model error).
+    ModelCallFailed(String),
+    /// The model answered, but the output did not satisfy the contract.
+    InvalidOutput(String),
+    /// The snapshot changed under the model call.
+    ConcurrencyConflict(String),
+    /// The smallest possible request would already exceed the input budget.
+    InputTooLarge(String),
+    /// Storage / IO failure.
+    Storage(String),
 }
 
 /// An ingestion problem that is deliberately NOT a Session: a child or
@@ -784,14 +869,6 @@ pub struct LaunchIntent {
     pub agent: Agent,
     pub owner_workstream_id: Option<Id>,
     pub cwd: Option<String>,
-    pub context_bundle_markdown: Option<String>,
-    /// JSON snapshot of what the launched session actually received:
-    /// `{"bundle_id": "...", "workstream_id": "...", "revisions": [...],
-    /// "conflicts": [...]}`. One bundle belongs to one Workstream, so the ids
-    /// are plain lists. Recorded as a ContextDelivery row when the intent
-    /// matches a session, so the first resume computes a true delta instead of
-    /// re-sending the full context.
-    pub context_bundle_revisions: Option<String>,
     pub process_id: Option<u32>,
     pub launched_at: String,
     pub matched_session_id: Option<Id>,
@@ -855,7 +932,6 @@ pub struct ContextItemRevision {
     pub metadata: serde_json::Value,
     pub source_type: Option<String>, // user_edit | session_message | manual | system | status_change
     pub source_ref: Option<String>,  // e.g. "session-message:<message-id>" or "url:..."
-    pub sync_run_id: Option<Id>,
     pub created_at: String,
 }
 
@@ -960,47 +1036,12 @@ pub struct ContextSourceDetail {
     pub authority: String,
     pub source_type: Option<String>,
     pub source_ref: Option<String>,
-    pub sync_run_id: Option<Id>,
     pub session_id: Option<Id>,
     pub session_title: Option<String>,
     pub agent: Option<Agent>,
     pub message_sequence: Option<i64>,
     pub message_ts: Option<String>,
     pub evidence: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SyncRun {
-    pub id: Id,
-    pub session_id: Id,
-    /// SessionMessage sequence bounds of the processed delta.
-    pub from_sequence: i64,
-    pub to_sequence: i64,
-    pub status: String, // ok | partial | error
-    pub mutations: serde_json::Value,
-    pub summary: String,
-    pub error: Option<String>,
-    pub created_at: String,
-    /// Which extractor produced the mutations: heuristic | cli:<agent>:<model>
-    /// | cli:<...>->heuristic (fallback) | none.
-    pub runtime: String,
-    /// Fingerprint of the processed delta (message ids). A completed run with
-    /// the same fingerprint is never re-applied (idempotent retries).
-    pub delta_fingerprint: Option<String>,
-}
-
-/// Snapshot of what a session was actually delivered, recorded only after a
-/// successful launch. Resume deltas are computed against this, not against
-/// wall-clock timestamps.
-#[derive(Debug, Clone, Serialize)]
-pub struct ContextDelivery {
-    pub id: Id,
-    pub session_id: Id,
-    pub workstream_id: Id,
-    pub bundle_id: Id,
-    pub delivered_revisions: Vec<Id>,
-    pub delivered_conflicts: Vec<Id>,
-    pub delivered_at: String,
 }
 
 /// Item types that make up the L1 Core Context projection.
@@ -1074,13 +1115,8 @@ mod agent_wire_spelling_tests {
 
     /// The Agent enum has THREE spellings to keep in step: `as_str()` (the DB
     /// column and every SQL literal), `parse` (what we read back), and serde
-    /// (the Tauri IPC boundary the frontend sees). They are hand-written in two
-    /// places and derived in the third, so the only way they stay equal is a
-    /// test. `WorkBuddy` and `ZCode` are where this broke: `rename_all =
-    /// "snake_case"` spelled them `work_buddy` / `z_code` while everything else
-    /// — the sessions table, the frontend's `Agent` union, `AGENT_LABELS` —
-    /// spells them `workbuddy` / `zcode`, so those rows rendered as「未知 Agent」
-    /// and every command taking an `agent` argument failed to deserialize.
+    /// (the Tauri IPC boundary). They are hand-written in two places and derived
+    /// in the third, so only a test keeps them equal.
     #[test]
     fn serde_spelling_equals_as_str_for_every_agent() {
         for agent in Agent::all() {

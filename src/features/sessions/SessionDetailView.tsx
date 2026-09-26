@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { Modal, copyToClipboard, timeAgo, useRefreshSignal } from "../../components/common";
+import { Modal, contextUpdateErrorMessage, copyToClipboard, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { type SessionMessageData } from "./SessionMessage";
 import ResumeSessionModal from "./ResumeSessionModal";
@@ -19,6 +19,8 @@ import {
 } from "./SessionTable";
 import {
   type Project,
+  type SessionContextFields,
+  type SessionContextView,
   type SessionDetail,
   type SessionMemberRelation,
   type Workstream,
@@ -31,14 +33,9 @@ type DetailMember = SessionDetail["members"][number];
 const MEMBER_ID_WIDTH = 24;
 
 /**
- * Session Detail = 一个逻辑会话：一次用户可感知、可 Resume
- * 的主会话。 的四块内容——Conversation（只有 user/assistant prose）、
- * Execution Info（聚合统计 + 成员树）、Source / Lifecycle（源会话 + 回收站）、
- * Context / Owner（所属任务）。
- *
- * parent/children Session 链接已删除：执行图以 members 呈现，成员是执行信息，
- * 不是可进入的「另一个 Session 页面」。唯一的会话链接是 fork 来源
- *。右栏的 WorkspacePath / Project 事实照旧（v0.2 M29）。
+ * Session Detail：一个逻辑会话（用户可感知、可 Resume 的主会话）的四块内容——
+ * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / Owner。
+ * 没有 parent/children Session 链接：执行图以 members 呈现，唯一的会话→会话链接是 fork 来源。
  */
 export default function SessionDetailView({ sessionId, navigate, goBack }: {
   sessionId: string;
@@ -49,7 +46,10 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const [failed, setFailed] = useState(false);
   const [ownerOpen, setOwnerOpen] = useState(false);
   const [resumeOpen, setResumeOpen] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  /** Context：纯读取的四字段摘要 + 显式「生成 / 更新摘要」。 */
+  const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
+  const [ctxBusy, setCtxBusy] = useState(false);
+  const [ctxError, setCtxError] = useState("");
   // 回收站动作（Session Lifecycle & Deletion）：确认弹窗、执行中的 busy、
   // 以及从详情页直接发起的永久删除 Modal。
   const [confirmTrash, setConfirmTrash] = useState(false);
@@ -58,15 +58,19 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   // 执行成员树默认收起：统计常看，整棵图偶看。
   const [membersOpen, setMembersOpen] = useState(false);
   /**
-   * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字
-   *。派生链自带名字，所以正常情况下不多这一次读取。
+   * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字；
+   * 派生链自带名字，正常情况下不多这一次读取。
    */
   const [projects, setProjects] = useState<Project[] | null>(null);
 
+  /** 打开 / 刷新这一页：详情与 Session Context 都是纯读取。 */
   const refresh = useCallback(() => {
     api.getSessionDetail(sessionId)
       .then((d) => { setDetail(d); setFailed(false); })
       .catch((e) => { console.error(e); setFailed(true); });
+    api.getSessionContext(sessionId)
+      .then((c) => { setSessionCtx(c); setCtxError(""); })
+      .catch((e) => { console.error(e); setCtxError(contextUpdateErrorMessage(e)); });
   }, [sessionId]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
@@ -82,9 +86,8 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   );
 
   /**
-   * 没拿到数据时也要把 PageHeader 画出来（照 ProjectDetail 的做法）：标题行是吸在
-   * 应用标题栏那条 band 上的，加载态若不渲染它，整条标题栏会先消失再补回来——那一下
-   * 比"内容区里一行加载中"显眼得多。所以这里只换标题文案，不换页面骨架。
+   * 没拿到数据时也要把 PageHeader 画出来：标题行吸在应用标题栏那条 band 上，
+   * 加载态若不渲染它，整条标题栏会先消失再补回来，比"内容区里一行加载中"显眼得多。
    */
   if (!detail) {
     return (
@@ -106,31 +109,34 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   }
   const { session, owner_workstream } = detail;
 
-  /**
-   * 刷新 = 只摄入。Context 提取只在智能开启时才会发生，
-   * 所以提取结果只跟随后端的 context_processing_enabled 走：智能关闭时它恒为 false，
-   * 这一屏永远不会出现「Context 变更」。
-   */
-  const doSync = async () => {
-    if (syncing) return;
-    setSyncing(true);
+  /** 一次点击 → 最多一次模型调用 → 一份新的四字段摘要。失败按后端原因给可行动文案。 */
+  const updateSummary = async () => {
+    if (ctxBusy) return;
+    setCtxBusy(true);
+    setCtxError("");
     try {
-      const r = await api.syncSession(sessionId);
-      const extracted = r.context_processing_enabled && r.applied > 0;
+      const out = await api.updateSessionContext(sessionId);
       showToast(
-        extracted
-          ? `摄入了 ${r.ingested} 条新消息 · 提取了 ${r.applied} 个 Context 变更`
-          : r.ingested > 0
-            ? `摄入了 ${r.ingested} 条新消息`
-            : "没有新消息",
+        out.status === "no_change"
+          ? "没有新内容，摘要保持不变"
+          : out.status === "partial"
+            ? "已更新摘要（还有内容待下次更新）"
+            : "已更新摘要",
       );
       refresh();
     } catch (e) {
       console.error(e);
-      showToast("刷新失败，本地数据没有被修改");
+      setCtxError(contextUpdateErrorMessage(e));
     } finally {
-      setSyncing(false);
+      setCtxBusy(false);
     }
+  };
+
+  /** 复制当前摘要：四字段按可读文本整段给出去。 */
+  const copyContext = async () => {
+    if (!sessionCtx?.fields) return;
+    const ok = await copyToClipboard(sessionContextText(sessionCtx.fields));
+    showToast(ok ? "已复制 Context" : "复制失败，请手动选中文字复制");
   };
 
   const title = sessionDisplayTitle(session.title);
@@ -139,10 +145,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   /** 单一生命周期权威：null = 正常，时间戳 = 在回收站。 */
   const trashed = session.trashed_at !== null;
 
-  /**
-   * 移入回收站：全局隐藏，不删任何数据。成功后返回上一个界面——
-   * 这个页面展示的执行事实仍然有效，但入口动作（继续 / 刷新）已经不适用。
-   */
+  /** 移入回收站：全局隐藏，不删任何数据。成功后返回上一个界面。 */
   const doTrash = async () => {
     if (trashBusy) return;
     setTrashBusy(true);
@@ -182,11 +185,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   /** 这条会话「属于」哪个项目：派生链优先，退回会话行上缓存的 project_id。 */
   const sessionProjectId = workspacePath?.project_id ?? session.project_id ?? null;
 
-  /**
-   * 设置所属任务：一次提交一个 id 或 null（未归属）。只改
-   * `sessions.owner_workstream_id`，不碰工作路径与 Project —— 那两件事由后端保证，
-   * 这里也不做任何补偿动作。
-   */
+  /** 设置所属任务：只改 `sessions.owner_workstream_id`，不碰工作路径与 Project。 */
   const setOwner = async (workstreamId: string | null) => {
     await api.setSessionOwnerWorkstream(sessionId, workstreamId);
     refresh();
@@ -204,9 +203,15 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     model: m.role === "assistant" ? m.model : null,
   }));
 
+  /** 按钮只在真的有内容可更新时出现：需要已读到 Context、有消息，且无摘要或有增量。 */
+  const canUpdateSummary =
+    sessionCtx !== null
+    && messages.length > 0
+    && (sessionCtx.fields === null || sessionCtx.pending);
+
   /**
    * 源会话：Root 成员的源文件 + 详情加载时的新鲜结论。
-   * members 里没有 root 行本身就是一个异常，按 unavailable 对待。
+   * members 里没有 root 行本身即异常，按 unavailable 对待。
    */
   const rootMember = detail.members.find((m) => m.relation === "root") ?? null;
   const sourceMissing = rootMember !== null && detail.root_source_status === "missing";
@@ -235,7 +240,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             <button className="btn ghost icon-button" aria-label="移入回收站" title="移入回收站" onClick={() => setConfirmTrash(true)} disabled={trashBusy}>
               <Icon name="trash" />
             </button>
-            <button className="btn ghost icon-button" aria-label="刷新" title="刷新" onClick={doSync} disabled={syncing}><Icon name="refresh" /></button>
+            <button className="btn ghost icon-button" aria-label="重新读取" title="重新读取本地数据（不会触发摄入）" onClick={refresh}><Icon name="refresh" /></button>
             <button className="btn ghost icon-button" aria-label="继续" title={resumeTitle} onClick={() => setResumeOpen(true)} disabled={resumeDisabled}>
               <Icon name="play" />
             </button>
@@ -301,16 +306,66 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         </div>
       )}
 
+      {/* Context：四字段只读 + 复制 + 显式「生成 / 更新摘要」。
+          只有当有消息、且（还没有摘要 或 有新消息待并入）时才出现按钮——
+          没有内容可更新时不摆一个按不动的按钮。 */}
+      <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
+        <div className="section-label" style={{ margin: 0 }}>Context</div>
+        <div className="row" style={{ gap: 8 }}>
+          <button
+            className="btn small ghost"
+            disabled={!sessionCtx?.fields}
+            title={sessionCtx?.fields ? "复制当前摘要" : "还没有摘要"}
+            onClick={copyContext}
+          >
+            复制
+          </button>
+          {canUpdateSummary && (
+            <button className="btn small primary" disabled={ctxBusy} onClick={updateSummary}>
+              {ctxBusy ? "更新中…" : sessionCtx?.fields ? "更新摘要" : "生成摘要"}
+            </button>
+          )}
+        </div>
+      </div>
+      {sessionCtx?.pending && (
+        <div className="small muted" style={{ marginTop: 4 }}>
+          有新消息尚未并入摘要{sessionCtx.fields === null ? "，点击「生成摘要」" : "，点击「更新摘要」"}。
+        </div>
+      )}
+      {ctxError && (
+        <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere" }}>{ctxError}</div>
+      )}
+      {sessionCtx?.fields ? (
+        <div style={{ display: "grid", gap: 12, marginTop: 10, maxWidth: "72ch" }}>
+          <ContextField label="Summary / Current State">
+            {sessionCtx.fields.summary_current_state.trim() || "—"}
+          </ContextField>
+          <ContextField label="Decisions">
+            <ContextList items={sessionCtx.fields.decisions} />
+          </ContextField>
+          <ContextField label="Open Questions">
+            <ContextList items={sessionCtx.fields.open_questions} />
+          </ContextField>
+          <ContextField label="Next Steps">
+            <ContextList items={sessionCtx.fields.next_steps} />
+          </ContextField>
+        </div>
+      ) : (
+        <div className="l1-none" style={{ marginTop: 8 }}>
+          {messages.length === 0 ? "还没有摘要；先摄入消息后即可生成。" : "还没有摘要。"}
+        </div>
+      )}
+
       <div className="section-label" style={{ marginTop: 34 }}>消息</div>
       {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
       {messages.length === 0 && (
         <div className="empty">
           还没有摄入消息。
           <div className="small" style={{ marginTop: 4 }}>
-            刷新以读取原始会话。
+            重新读取以加载已摄入的原始会话。
           </div>
           <div className="invite">
-            <button className="btn small" onClick={doSync} disabled={syncing}>刷新</button>
+            <button className="btn small" onClick={refresh}>重新读取</button>
           </div>
         </div>
       )}
@@ -577,9 +632,8 @@ function ExecutionStats({ stats }: { stats: SessionDetail["stats"] }) {
   if (stats.cached_tokens !== null) tokenBits.push(`缓存 ${fmtCount(stats.cached_tokens)}`);
   if (stats.reasoning_tokens !== null) tokenBits.push(`推理 ${fmtCount(stats.reasoning_tokens)}`);
 
-  // 不再显示"Session 的 model/provider/effort"：一个
-  // Logical Session 完全可能中途切模型，不存在天然的 Session model。消息级
-  // 的模型标签在会话消息上；将来要按模型统计时从 assistant 消息派生。
+  // 不显示"Session 的 model/provider/effort"：一个 Logical Session 可能中途切模型，
+  // 不存在天然的 Session model；消息级模型标签在消息上。
 
   return (
     <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
@@ -684,12 +738,49 @@ function CopyValue({ value, mono, title }: { value: string; mono?: boolean; titl
   );
 }
 
+/** 一个只读 Context 字段：标签 + 值。 */
+function ContextField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="muted small">{label}</div>
+      <div className="small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{children}</div>
+    </div>
+  );
+}
+
+/** 字符串数组字段：空数组不冒称有内容。 */
+function ContextList({ items }: { items: string[] }) {
+  if (items.length === 0) return <span className="muted">—</span>;
+  return (
+    <ul style={{ margin: 0, paddingLeft: 18 }}>
+      {items.map((item, i) => <li key={i}>{item}</li>)}
+    </ul>
+  );
+}
+
+/** 复制用的纯文本渲染：四字段按可读顺序整段给出去。 */
+function sessionContextText(f: SessionContextFields): string {
+  const list = (xs: string[]) => (xs.length > 0 ? xs.map((x) => `- ${x}`).join("\n") : "—");
+  return [
+    "Summary / Current State:",
+    f.summary_current_state.trim() || "—",
+    "",
+    "Decisions:",
+    list(f.decisions),
+    "",
+    "Open Questions:",
+    list(f.open_questions),
+    "",
+    "Next Steps:",
+    list(f.next_steps),
+  ].join("\n");
+}
+
 /**
- * 选择所属任务：单选，一次只能选一个，也可以选「未归属」清空。
+ * 选择所属任务：单选，可清空为「未归属」。
  *
- * 候选按「当前 Project → 其他任务」分组：与这条会话的工作目录有路径
- * 关联的任务优先出现。后端不建立这个限制，所以其他任务仍然可选中。
- * 归档的任务不接收新的归属（和列表里的候选同一套口径）。
+ * 候选按「当前 Project → 其他任务」分组，与工作目录有路径关联的任务优先；
+ * 后端不强制这个限制，其他任务仍可选中。归档任务不接收新的归属。
  */
 function OwnerPickerModal({ currentOwnerId, projectId, onClose, onSubmit }: {
   /** 当前所属任务；null = 未归属。 */

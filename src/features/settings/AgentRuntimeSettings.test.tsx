@@ -1,10 +1,8 @@
-//  — Agent Settings 的 discovery 行为契约：
-//
+// Agent Settings 的 discovery 行为契约：
 //   1. mount 只读已保存设置，绝不 spawn Agent CLI（进入页面 ≠ 刷新模型）；
 //   2. 「刷新模型」按钮是唯一 discovery 入口；
 //   3. 已保存 override 在没有任何 model catalog 时照常显示；
 //   4. discovery 失败只降级 catalog，绝不覆盖已保存的 override。
-//
 // api 模块整体被 mock：测试不依赖 Tauri，只断言调用模式。
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";

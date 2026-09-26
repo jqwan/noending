@@ -1,22 +1,18 @@
 //! Unified Context Mutation Policy.
 //!
-//! Every context mutation — whether it comes from background Sync, the
-//! Assistant, or direct user actions — must pass through this policy before
-//! it touches a ContextItem. No code path may decide on its own whether
-//! overwriting is allowed.
+//! Every context mutation — from an explicit update, the Assistant, or a direct
+//! user action — passes through this policy before it touches a ContextItem; no
+//! code path decides on its own whether overwriting is allowed.
 //!
-//! Authority model:
-//! - `authority` = whose word the information is (user_explicit / user_edit /
-//!   system_observed / agent_statement / agent_inferred);
-//! - `created_by` = who performed the extraction/write (user, sync:<runtime>,
-//!   assistant, …) — deliberately separated from authority: a Decision
-//!   extracted from a user message keeps `user_explicit` authority even
-//!   though the extractor wrote the row.
+//! `authority` (whose word the information is: user_explicit / user_edit /
+//! system_observed / agent_statement / agent_inferred) and `created_by` (who
+//! performed the write) are deliberately separate: a Decision extracted from a
+//! user message keeps `user_explicit` authority even though the extractor wrote
+//! the row.
 //!
 //! Core rule: agent-derived mutations may never *silently* overwrite
-//! user-explicit or user-edited context. In background sync there is no one
-//! to ask, so the decision materializes as a persisted ContextConflict and
-//! the user's content stays untouched.
+//! user-explicit or user-edited context — the disagreement is persisted as a
+//! ContextConflict and the user's content stays untouched.
 
 /// Who is attempting the mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

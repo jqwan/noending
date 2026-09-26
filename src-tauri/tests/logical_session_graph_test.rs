@@ -1,11 +1,10 @@
-//! Logical Session graph resolution end-to-end tests (and
-//! the  test matrix): discovery batch → root/child/side
+//! Logical Session graph resolution end-to-end: discovery batch → root/child/side
 //! resolution → diagnostics → atomic member commit → LaunchIntent root-only.
 //!
-//! Fixtures are Codex rollouts (plain JSONL): the one adapter whose sources
+//! Fixtures are Codex rollouts (plain JSONL), the one adapter whose sources
 //! express child threads (`thread_source=subagent`), side threads
-//! (`guardian_review`) and forked pages (`history_base`) — so one fixture
-//! family covers the whole graph vocabulary.
+//! (`guardian_review`) and forked pages (`history_base`) — so one fixture family
+//! covers the whole graph vocabulary.
 
 use std::path::{Path, PathBuf};
 
@@ -91,8 +90,7 @@ fn enable_codex_source(db: &Db, root: &Path) {
 }
 
 fn reconcile(db: &Db) -> (usize, i64) {
-    let engine = noending::sync::SyncEngine::default();
-    ingestion::reconcile_with_engine(db, &engine, &LaunchWorkspace::default(), &|_| {}).unwrap()
+    ingestion::reconcile_all(db, &LaunchWorkspace::default(), &|_| {}).unwrap()
 }
 
 const ROOT_ID: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
@@ -133,9 +131,7 @@ fn logical_root_creation_rolls_back_if_root_member_cannot_be_written() {
         .is_none());
 }
 
-// ---------------------------------------------------------------------------
 // child/side resolution and diagnostics
-// ---------------------------------------------------------------------------
 
 /// A child discovered with no root anywhere: no Logical Session is created
 /// (no root, no session), the child is a diagnostic — not a fake root.
@@ -354,8 +350,7 @@ fn child_activity_moves_last_activity_but_not_last_conversation() {
     let cursor_before = db.get_member_cursor(&child.id).unwrap();
 
     // A no-change read is not source activity.
-    let engine = noending::sync::SyncEngine::default();
-    ingestion::ingest_and_sync_session(&db, &engine, &before).unwrap();
+    ingestion::ingest_session(&db, &before).unwrap();
     assert_eq!(
         db.get_session(&session_id)
             .unwrap()
@@ -455,9 +450,7 @@ fn trash_freezes_discovery_until_restore() {
     assert!(db.get_member_cursor(&root_member.id).unwrap().byte_offset > before_cursor.byte_offset);
 }
 
-// ---------------------------------------------------------------------------
 // Fork
-// ---------------------------------------------------------------------------
 
 /// A forked page becomes its OWN Logical Session with the fork source recorded
 /// — and the source session's Owner is NOT inherited.
@@ -562,8 +555,6 @@ fn launch_intents_match_roots_only() {
         agent: Agent::Codex,
         owner_workstream_id: Some(ws.id.clone()),
         cwd: Some("/repo-a".into()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         // Within the match window of the fixture timestamps (both are now).
         launched_at: chrono_now(),
@@ -638,8 +629,6 @@ fn unchanged_root_retries_a_pending_launch_intent() {
         agent: Agent::Codex,
         owner_workstream_id: Some(owner.id.clone()),
         cwd: Some("/repo-a".into()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: chrono_now(),
         matched_session_id: None,
@@ -666,53 +655,7 @@ fn unchanged_root_retries_a_pending_launch_intent() {
     );
 }
 
-#[test]
-fn owner_assignment_replays_pending_context_on_reconcile() {
-    let root_dir = temp_root("owner-replay");
-    write_rollout(
-        &root_dir,
-        &rollout_name(ROOT_ID),
-        &[
-            meta_line(ROOT_ID, serde_json::json!({})),
-            message_line(1, "m1", "user", "请记住这个重要约定"),
-            message_line(2, "m2", "assistant", "我会记住"),
-        ],
-    );
-    let db = open_db("owner-replay");
-    enable_codex_source(&db, &root_dir);
-    reconcile(&db);
-    let session = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        db.get_context_state(&session.id)
-            .unwrap()
-            .processed_message_sequence,
-        0
-    );
-
-    let owner = support_workstream("ws-owner-replay");
-    db.upsert_workstream(&owner).unwrap();
-    db.set_session_owner(&session.id, Some(&owner.id)).unwrap();
-    noending::settings::set_context_intelligence_enabled(&db, true).unwrap();
-    reconcile(&db);
-
-    assert_eq!(
-        db.get_context_state(&session.id)
-            .unwrap()
-            .processed_message_sequence,
-        db.get_messages(&session.id, None, 100)
-            .unwrap()
-            .last()
-            .unwrap()
-            .sequence
-    );
-}
-
-// ---------------------------------------------------------------------------
 // ingestion atomicity
-// ---------------------------------------------------------------------------
 
 /// A Trash racing a member commit: the whole delta is refused — no messages,
 /// no stats, no cursor move (trash racing ingestion commits either all
@@ -754,7 +697,7 @@ fn a_trash_racing_the_commit_takes_nothing() {
 #[test]
 fn a_stale_commit_after_topology_correction_is_rejected() {
     let db = open_db("topology-race");
-    let (session, member_id, _) = seed_root(&db);
+    let (session, _member_id, _) = seed_root(&db);
 
     // A CHILD member of this session gets re-pointed at another session by a
     // topology correction. (A root member cannot move: root-ness never flips —
@@ -1120,9 +1063,7 @@ fn a_child_member_cannot_write_conversation() {
     assert_eq!(db.message_count(&session.id).unwrap(), 1, "only the seed");
 }
 
-// ---------------------------------------------------------------------------
 // diagnostics stay out of everything
-// ---------------------------------------------------------------------------
 
 /// A repeat offender becomes visible at observation_count >= 2, and resolving
 /// the member removes it. Diagnostics never surface in search.
@@ -1197,9 +1138,7 @@ fn every_adapter_inspects_sources_without_panicking() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // helpers
-// ---------------------------------------------------------------------------
 
 /// Seed a logical session + root member + one message, the way production
 /// would after discovery (via the same storage APIs ingestion uses).

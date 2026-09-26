@@ -6,12 +6,9 @@ import { agentDisplayLabel, sessionDisplayTitle } from "./SessionTable";
 import type { LocalDeletePreview } from "../../types";
 
 /**
- * Session 永久删除：无状态的本地清除。
- *
- * 打开即读 的删除预览（新鲜结论 + 计数），确认后以 sessionId 执行
- * 的 `permanently_delete_session`。没有 job、没有取消、没有重试状态机：
- * 后端只在（trashed + fresh root missing）时允许执行，且只删除 NoEnding
- * 本地数据——Agent 保存的源会话永远不被触碰。
+ * Session 永久删除：无状态的本地清除。打开即读删除预览（新鲜结论 + 计数），确认后执行
+ * `permanently_delete_session`。没有 job、没有取消、没有重试状态机：后端只在
+ * （trashed + fresh root missing）时允许执行，且只删 NoEnding 本地数据——Agent 源会话不被触碰。
  */
 
 /** 大数加千位分隔。 */
@@ -111,7 +108,6 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             <li>{fmtCount(preview.message_count)} 条会话消息</li>
             <li>{fmtCount(preview.member_count)} 个执行成员</li>
             <li>{fmtCount(preview.sync_run_count)} 条同步记录</li>
-            <li>{fmtCount(preview.context_delivery_count)} 条投递记录</li>
             <li>{fmtCount(preview.launch_intent_count)} 条启动记录</li>
             <li>上下文来源改写 {fmtCount(preview.context_revision_redaction_count)} 条</li>
           </ul>

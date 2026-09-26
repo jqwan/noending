@@ -59,7 +59,6 @@ fn workstream_context_core_matches_resolve_core_context() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -73,7 +72,6 @@ fn workstream_context_core_matches_resolve_core_context() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -87,7 +85,6 @@ fn workstream_context_core_matches_resolve_core_context() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -97,9 +94,9 @@ fn workstream_context_core_matches_resolve_core_context() {
     assert_eq!(core_resolved[0].kind, "goal");
     assert_eq!(core_resolved[1].kind, "current_state");
     assert!(core_resolved[0].revision_id.is_some());
-    assert_eq!(
-        core_resolved[0].workstream_id.as_deref(),
-        Some(ws.id.as_str())
+    assert!(
+        !core_resolved[0].item_id.is_empty(),
+        "a resolved section is backed by a real item"
     );
 }
 
@@ -117,7 +114,6 @@ fn item_relations_supersede_chain() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -144,20 +140,12 @@ fn item_relations_supersede_chain() {
         metadata: serde_json::json!({}),
         source_type: Some("user_edit".into()),
         source_ref: None,
-        sync_run_id: None,
         created_at: now(),
     };
     db.insert_item(&item2, &rev2).unwrap();
 
-    db.apply_status_change(
-        &item1.id,
-        "superseded",
-        "user",
-        "Superseded by SQLite",
-        None,
-        &[],
-    )
-    .unwrap();
+    db.apply_status_change(&item1.id, "superseded", "user", "Superseded by SQLite", &[])
+        .unwrap();
 
     let relations = db.item_relations_for_workstream(&ws.id).unwrap();
     assert_eq!(relations.len(), 2);
@@ -222,7 +210,6 @@ fn get_context_revision_source_resolution() {
         "agent_statement",
         "session_message",
         &[sref.clone()],
-        Some("sync-run-123"),
         "sync:heuristic",
     )
     .unwrap();
@@ -237,7 +224,6 @@ fn get_context_revision_source_resolution() {
     assert_eq!(detail.authority, "agent_statement");
     assert_eq!(detail.source_type.as_deref(), Some("session_message"));
     assert_eq!(detail.source_ref.as_deref(), Some(sref.as_str()));
-    assert_eq!(detail.sync_run_id.as_deref(), Some("sync-run-123"));
     assert_eq!(detail.session_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(
         detail.session_title.as_deref(),
@@ -266,7 +252,6 @@ fn list_workstream_context_changes_timeline() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -279,13 +264,12 @@ fn list_workstream_context_changes_timeline() {
         metadata: serde_json::json!({}),
         source_type: Some("user_edit".into()),
         source_ref: None,
-        sync_run_id: None,
         created_at: now(),
     };
     db.insert_revision(&rev2).unwrap();
     db.set_item_head(&item.id, &rev2.id, None).unwrap();
 
-    db.apply_status_change(&item.id, "resolved", "user", "Work done", None, &[])
+    db.apply_status_change(&item.id, "resolved", "user", "Work done", &[])
         .unwrap();
 
     let conflict = ContextConflict {
@@ -332,7 +316,6 @@ fn conflict_audited_resolution_and_history() {
         "user_explicit",
         "user_edit",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -410,14 +393,12 @@ fn test_historical_provenance_freeze() {
         "agent_statement",
         "session_message",
         &["session-message:100".into()],
-        None,
         "agent",
     )
     .unwrap();
 
     let rev1_id = item.current_revision_id.clone().unwrap();
 
-    // Verify revision 1 source before any edits
     let src1_before = db.get_context_revision_source(&rev1_id).unwrap().unwrap();
     assert_eq!(src1_before.authority, "agent_statement");
     assert_eq!(src1_before.source_type.as_deref(), Some("session_message"));
@@ -438,14 +419,12 @@ fn test_historical_provenance_freeze() {
         }),
         source_type: Some("user_edit".into()),
         source_ref: None,
-        sync_run_id: None,
         created_at: now(),
     };
     db.insert_revision(&rev2).unwrap();
     db.set_item_head(&item.id, &rev2.id, None).unwrap();
     db.set_item_authority(&item.id, "user_edit").unwrap();
 
-    // Verify current item authority is user_edit
     let updated_item = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(updated_item.authority, "user_edit");
 
@@ -456,11 +435,9 @@ fn test_historical_provenance_freeze() {
         "Historical revision authority must be frozen and not overwritten by subsequent user edit"
     );
 
-    // Inspecting rev2 returns user_edit
     let src2 = db.get_context_revision_source(&rev2.id).unwrap().unwrap();
     assert_eq!(src2.authority, "user_edit");
 
-    // Activity timeline correctly reports actors
     let changes = db.list_workstream_context_changes(&ws.id, 10).unwrap();
     assert_eq!(changes.len(), 2);
     // Most recent first:
@@ -482,13 +459,11 @@ fn test_conflict_snapshots_freeze() {
         "agent_statement",
         "session_message",
         &[],
-        None,
         "agent",
     )
     .unwrap();
     let rev1_id = item.current_revision_id.clone().unwrap();
 
-    // Conflict created referencing rev1 and candidate snapshot
     let candidate_val = serde_json::json!({
         "title": "Keep on premise",
         "content": "Privacy requirement",
@@ -511,7 +486,6 @@ fn test_conflict_snapshots_freeze() {
     };
     db.insert_conflict(&conflict).unwrap();
 
-    // Item evolves to rev2
     let rev2 = ContextItemRevision {
         id: new_id(),
         item_id: item.id.clone(),
@@ -527,7 +501,6 @@ fn test_conflict_snapshots_freeze() {
         }),
         source_type: Some("session_message".into()),
         source_ref: None,
-        sync_run_id: None,
         created_at: now(),
     };
     db.insert_revision(&rev2).unwrap();
@@ -541,7 +514,6 @@ fn test_conflict_snapshots_freeze() {
         Some(candidate_val.to_string().as_str())
     );
 
-    // Resolve conflict audited
     db.resolve_conflict_audited(
         &conflict.id,
         "resolved",
@@ -550,7 +522,6 @@ fn test_conflict_snapshots_freeze() {
     )
     .unwrap();
 
-    // Check conflict history audit event snapshot
     let history = db.conflict_history(&conflict.id).unwrap();
     assert_eq!(history.len(), 1);
     assert!(history[0].snapshot_json.is_some());
@@ -576,7 +547,6 @@ fn test_resolve_conflict_with_edit_atomic_transaction() {
         "agent_statement",
         "session_message",
         &["session-message:1".into()],
-        None,
         "agent",
     )
     .unwrap();
@@ -619,7 +589,6 @@ fn test_resolve_conflict_with_edit_atomic_transaction() {
     )
     .unwrap();
 
-    // Verify conflict row
     let c1 = db.get_conflict(&conflict.id).unwrap().unwrap();
     assert_eq!(c1.status, "resolved");
     assert_eq!(
@@ -627,17 +596,14 @@ fn test_resolve_conflict_with_edit_atomic_transaction() {
         Some("Resolved by compromise at 3GB")
     );
 
-    // Verify item updated to new revision with user_edit authority
     let item_after = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(item_after.authority, "user_edit");
     let rev2_id = item_after.current_revision_id.unwrap();
     assert_ne!(rev2_id, rev1_id);
 
-    // Verify revision provenance is user_edit / user
     let src2 = db.get_context_revision_source(&rev2_id).unwrap().unwrap();
     assert_eq!(src2.authority, "user_edit");
 
-    // Verify audit history event captures resolved_revision_id
     let history = db.conflict_history(&conflict.id).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].previous_status, "open");
@@ -694,16 +660,13 @@ fn test_resolve_conflict_with_edit_atomic_transaction() {
         .unwrap_err();
     assert!(err.to_string().contains("标题不能为空"));
 
-    // Verify conflict2 remains open and untouched
     let c2_check = db.get_conflict(&conflict2.id).unwrap().unwrap();
     assert_eq!(c2_check.status, "open");
     assert_eq!(c2_check.resolution, None);
 
-    // Verify no conflict event was written
     let h2 = db.conflict_history(&conflict2.id).unwrap();
     assert_eq!(h2.len(), 0);
 
-    // Verify item head was NOT updated
     let item_check = db.get_item(&item.id).unwrap().unwrap();
     assert_eq!(
         item_check.current_revision_id.as_deref(),
@@ -732,7 +695,6 @@ fn test_conflict_review_case_frozen_vs_current() {
         "agent_statement",
         "session_message",
         &["session-message:a1".into()],
-        None,
         "agent",
     )
     .unwrap();
@@ -748,7 +710,6 @@ fn test_conflict_review_case_frozen_vs_current() {
         "agent_statement",
         "session_message",
         &["session-message:b1".into()],
-        None,
         "agent",
     )
     .unwrap();
@@ -787,7 +748,6 @@ fn test_conflict_review_case_frozen_vs_current() {
         }),
         source_type: Some("user_edit".into()),
         source_ref: None,
-        sync_run_id: None,
         created_at: now(),
     };
     db.insert_revision(&rev_a2).unwrap();
@@ -810,7 +770,6 @@ fn test_conflict_review_case_frozen_vs_current() {
         }),
         source_type: Some("session_message".into()),
         source_ref: None,
-        sync_run_id: None,
         created_at: now(),
     };
     db.insert_revision(&rev_b2).unwrap();
@@ -864,7 +823,6 @@ fn test_conflict_review_case_frozen_vs_current() {
         Some("B2 Title")
     );
 
-    // Evolution flags are accurately detected
     assert!(review_case.left_changed_since_conflict);
     assert!(review_case.right_changed_since_conflict);
 }
@@ -883,7 +841,6 @@ fn test_fts_failure_rolls_back_entire_conflict_transaction() {
         "agent_statement",
         "session_message",
         &["session-message:1".into()],
-        None,
         "agent",
     )
     .unwrap();
@@ -925,7 +882,6 @@ fn test_fts_failure_rolls_back_entire_conflict_transaction() {
         )
         .unwrap_err();
 
-    // Confirm that error occurred from FTS
     assert!(err.to_string().contains("search_index") || err.to_string().contains("no such table"));
 
     // Verify entire transaction rolled back:
@@ -963,10 +919,9 @@ fn revision_authority_is_never_polluted_by_item_authority() {
         params![item_id, ws.id, rev1_id, ts],
     ).unwrap();
 
-    // Revision metadata is completely empty (no provenance object)
     db.write().execute(
-        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
-         VALUES (?1, ?2, 'Historical Agent Goal', 'Extracted by agent', '{}', 'session_message', 'sync-run-1', ?3)",
+        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
+         VALUES (?1, ?2, 'Historical Agent Goal', 'Extracted by agent', '{}', 'session_message', ?3)",
         params![rev1_id, item_id, ts],
     ).unwrap();
 
@@ -990,8 +945,8 @@ fn revision_authority_is_never_polluted_by_item_authority() {
     // 5. A completely un-inferrable revision resolves to `unknown`, NOT item.authority
     let rev_unknown_id = new_id();
     db.write().execute(
-        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, sync_run_id, created_at)
-         VALUES (?1, ?2, 'Undetermined origin', 'No source', '{}', NULL, NULL, ?3)",
+        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, created_at)
+         VALUES (?1, ?2, 'Undetermined origin', 'No source', '{}', NULL, ?3)",
         params![rev_unknown_id, item_id, ts],
     ).unwrap();
 

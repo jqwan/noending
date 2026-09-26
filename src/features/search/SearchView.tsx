@@ -4,7 +4,7 @@ import { api } from "../../api";
 import type { Route } from "../../app/routes";
 import type { SearchHit } from "../../types";
 
-/** 结果类型徽标（search/mod.rs 的 kind 定义域）。领域词按 词表保留。 */
+/** 结果类型徽标（search/mod.rs 的 kind 定义域）。领域词按词表保留。 */
 const HIT_KIND_LABELS: Record<string, string> = {
   item: "Context",
   workstream: "任务",

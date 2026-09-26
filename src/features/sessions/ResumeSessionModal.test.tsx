@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ResumeSessionModal from "./ResumeSessionModal";
 import { api } from "../../api";
@@ -11,14 +11,6 @@ vi.mock("../../api", () => ({
     cancelPrepared: vi.fn().mockResolvedValue(undefined),
     launchPrepared: vi.fn(),
   },
-}));
-
-vi.mock("../../app/experience", () => ({
-  useBaseExperience: vi.fn(() => ({
-    intelligenceEnabled: false,
-    deliveryLevel: "balanced",
-  })),
-  useDeliveryOff: vi.fn(() => false),
 }));
 
 vi.mock("../launcher/LaunchResultModal", () => ({ announceLaunch: vi.fn() }));
@@ -107,25 +99,10 @@ function prepared(
       path_position: null,
       note: null,
     },
-    delivery_level: "off",
-    bundle: {
-      mode: "resume",
-      delivery_level: "off",
-      workstream_id: null,
-      sections: [],
-      markdown: "",
-      approx_tokens: 0,
-    },
     runtime: { model: null, provider: null, effort: null },
     state_fingerprint: `fingerprint-${id}`,
     prepared_at: "2026-09-20T00:00:00Z",
   };
-}
-
-function previewCwd(dialog: HTMLElement, cwd: string) {
-  return within(dialog).queryByText(
-    (_, element) => element?.tagName === "SPAN" && element.textContent?.includes(cwd) === true,
-  );
 }
 
 describe("ResumeSessionModal preparation races", () => {
@@ -190,63 +167,6 @@ describe("ResumeSessionModal preparation races", () => {
     });
     await screen.findByText("Error: B failed");
     expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  it("refreshes the preview by replacing the token after the new one succeeds", async () => {
-    const refresh = deferred<PreparedLaunch>();
-    vi.mocked(api.getSessionDetail).mockImplementation(async (id) => detail(id));
-    vi.mocked(api.prepareResumeSession)
-      .mockResolvedValueOnce(prepared("initial", "/prepared-initial"))
-      .mockImplementationOnce(() => refresh.promise);
-
-    render(<ResumeSessionModal sessionId="b" onClose={vi.fn()} />);
-    await screen.findByRole("button", { name: "预览 Context" });
-    fireEvent.click(screen.getByRole("button", { name: "预览 Context" }));
-    const previewDialog = await screen.findByRole("dialog", { name: "Context 注入预览" });
-    expect(previewCwd(previewDialog, "/prepared-initial")).not.toBeNull();
-
-    await act(async () => {
-      fireEvent.click(within(previewDialog).getByRole("button", { name: "刷新预览" }));
-    });
-    await waitFor(() => expect(api.prepareResumeSession).toHaveBeenCalledTimes(2));
-    expect(api.cancelPrepared).not.toHaveBeenCalledWith("prepared-initial");
-    expect(previewCwd(previewDialog, "/prepared-initial")).not.toBeNull();
-
-    await act(async () => {
-      refresh.resolve(prepared("refreshed", "/prepared-refreshed"));
-    });
-    await waitFor(() =>
-      expect(previewCwd(previewDialog, "/prepared-refreshed")).not.toBeNull(),
-    );
-    expect(previewCwd(previewDialog, "/prepared-initial")).toBeNull();
-    expect(api.cancelPrepared).toHaveBeenCalledWith("prepared-initial");
-  });
-
-  it("keeps the old preview token when refreshing fails", async () => {
-    vi.mocked(api.getSessionDetail).mockImplementation(async (id) => detail(id));
-    vi.mocked(api.prepareResumeSession)
-      .mockResolvedValueOnce(prepared("initial", "/prepared-initial"))
-      .mockRejectedValueOnce(new Error("refresh failed"));
-
-    render(<ResumeSessionModal sessionId="b" onClose={vi.fn()} />);
-    await screen.findByRole("button", { name: "预览 Context" });
-    fireEvent.click(screen.getByRole("button", { name: "预览 Context" }));
-    const previewDialog = await screen.findByRole("dialog", { name: "Context 注入预览" });
-
-    await act(async () => {
-      fireEvent.click(within(previewDialog).getByRole("button", { name: "刷新预览" }));
-    });
-    await screen.findByText("Error: refresh failed");
-    expect(previewCwd(previewDialog, "/prepared-initial")).not.toBeNull();
-    expect(api.cancelPrepared).not.toHaveBeenCalledWith("prepared-initial");
-
-    vi.mocked(api.launchPrepared).mockResolvedValue(undefined as never);
-    await act(async () => {
-      fireEvent.click(
-        within(previewDialog).getByRole("button", { name: "确认并立即启动" }),
-      );
-    });
-    await waitFor(() => expect(api.launchPrepared).toHaveBeenCalledWith("prepared-initial"));
   });
 });
 

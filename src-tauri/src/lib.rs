@@ -6,7 +6,6 @@ pub mod agent_runtime;
 pub mod assistant;
 pub mod commands;
 pub mod context;
-pub mod context_eval;
 pub mod domain;
 pub mod error;
 pub mod ingestion;
@@ -14,14 +13,13 @@ pub mod launcher;
 pub mod lifecycle;
 pub mod platform;
 pub mod search;
-pub mod settings;
 pub mod storage;
 pub mod sync;
 pub mod workspace;
 
 use std::sync::Mutex;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
@@ -33,12 +31,17 @@ pub fn run() {
             // workspace/. A *migration* failure
             // is not fatal here — it returns the old Home with the reason in
             // `notes` — because "no database found" would look like data loss.
-            let startup = workspace::home::prepare_home(&workspace::home::StartupInputs::from_environment())?;
+            let startup =
+                workspace::home::prepare_home(&workspace::home::StartupInputs::from_environment())?;
             for note in &startup.notes {
                 eprintln!("[noending] {note}");
             }
             let home = startup.home.clone();
-            eprintln!("[noending] home at {} ({})", home.root.display(), home.root_str());
+            eprintln!(
+                "[noending] home at {} ({})",
+                home.root.display(),
+                home.root_str()
+            );
             let db_path = home.db_path.clone();
             let db = storage::Db::open(&db_path)?;
             eprintln!("[noending] db at {}", db_path.display());
@@ -70,11 +73,11 @@ pub fn run() {
             }
 
             // AppState MUST be managed before any background worker starts:
-            // the reconcile thread resolves handle.state::<AppState>(), which
+            // the ingestion worker resolves handle.state::<AppState>(), which
             // panics when the state has not been managed yet.
             app.manage(commands::AppState {
                 db,
-                sync_in_progress: std::sync::atomic::AtomicBool::new(false),
+                ingestion: Default::default(),
                 workspace_refresh_in_progress: std::sync::atomic::AtomicBool::new(false),
                 prepared_launches: Mutex::new(std::collections::HashMap::new()),
             });
@@ -87,68 +90,39 @@ pub fn run() {
                 }
             }
 
-            // Application Reconcile: ingest what happened while we were away.
-            // Runs on a worker thread; the store serializes writes itself, so
-            // the UI stays responsive. UI is notified on completion.
+            // Application Reconcile: at every startup, queue a background
+            // ingestion pass (`ReconcileAll`). Ingestion never calls AI; the
+            // UI is notified on completion. Runs on the coordinator's worker
+            // thread, so the UI stays responsive.
+            commands::ingestion::enqueue(
+                &app.handle().clone(),
+                commands::ingestion::IngestScope::ReconcileAll,
+            );
+
+            // Workspace Reconcile: Git detection on paths that so far exist
+            // only as strings. It runs after ingestion is queued because a
+            // Session's cwd is what tells us a directory is real, and it
+            // re-observes per path instead of holding the DB lock across a
+            // `git` call.
             {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    use std::sync::atomic::Ordering;
                     let state: tauri::State<commands::AppState> = handle.state();
-                    if state.sync_in_progress.swap(true, Ordering::SeqCst) {
-                        return; // a user-triggered sync is already running
-                    }
-                    let result = (|| -> error::Result<(usize, i64)> {
-                        let engine = sync::SyncEngine::from_settings(&state.db);
-                        ingestion::reconcile_with_engine(
-                            &state.db,
-                            &engine,
-                            &crate::commands::launch_workspace(&handle),
-                            &|s| {
-                                eprintln!(
-                                    "[reconcile] processing: {}",
-                                    s.title.as_deref().unwrap_or("(untitled)")
-                                );
-                            },
-                        )
-                    })();
-                    state.sync_in_progress.store(false, Ordering::SeqCst);
-                    match result {
-                        Ok((discovered, events)) => {
-                            eprintln!(
-                                "[reconcile] {} sessions discovered, {} events ingested",
-                                discovered, events
-                            );
-                            let _ = handle.emit(
-                                "reconcile-completed",
-                                serde_json::json!({ "discovered": discovered, "events": events }),
-                            );
-                        }
-                        Err(e) => eprintln!("[reconcile] failed: {}", e),
-                    }
-
-                    // Workspace Reconcile: Git detection on
-                    // paths that so far exist only as strings. It runs after
-                    // ingestion because a Session's cwd is what tells us a
-                    // directory is real, and it re-observes per path instead of
-                    // holding the DB lock across a `git` call.
-                    {
-                        let layer: tauri::State<std::sync::Arc<workspace::wiring::WorkspaceLayer>> =
-                            handle.state();
-                        match workspace::project::reconcile_workspace_paths(
-                            &state.db,
-                            &layer.projection(),
-                            usize::MAX,
-                        ) {
-                            Ok(report) => eprintln!(
-                                "[workspace] reconciled {} paths, {} moved, {} discovered, {} failed",
-                                report.scanned,
-                                report.moved_paths,
-                                report.discovered_paths.len(),
-                                report.failed.len(),
-                            ),
-                            Err(e) => eprintln!("[workspace] reconcile skipped: {e}"),
-                        }
+                    let layer: tauri::State<std::sync::Arc<workspace::wiring::WorkspaceLayer>> =
+                        handle.state();
+                    match workspace::project::reconcile_workspace_paths(
+                        &state.db,
+                        &layer.projection(),
+                        usize::MAX,
+                    ) {
+                        Ok(report) => eprintln!(
+                            "[workspace] reconciled {} paths, {} moved, {} discovered, {} failed",
+                            report.scanned,
+                            report.moved_paths,
+                            report.discovered_paths.len(),
+                            report.failed.len(),
+                        ),
+                        Err(e) => eprintln!("[workspace] reconcile skipped: {e}"),
                     }
                 });
             }
@@ -184,10 +158,11 @@ pub fn run() {
             // Workstreams without leaving a Revision.
             commands::get_default_agent,
             commands::set_default_agent,
-            commands::get_context_delivery_level,
-            commands::set_context_delivery_level,
-            commands::get_context_intelligence_enabled,
-            commands::set_context_intelligence_enabled,
+            // Explicit Context: two read commands, two AI commands.
+            commands::get_session_context,
+            commands::get_workstream_context_state,
+            commands::update_session_context,
+            commands::update_workstream_context,
             commands::add_context_item,
             commands::edit_context_item,
             commands::set_item_status,
@@ -215,11 +190,11 @@ pub fn run() {
             commands::session_lifecycle::restore_session,
             commands::session_lifecycle::get_session_local_delete_preview,
             commands::session_lifecycle::permanently_delete_session,
-            commands::sync_all,
-            commands::sync_source,
-            commands::reingest_source,
-            commands::sync_session,
-            commands::list_sync_runs,
+            commands::ingestion::reconcile_all,
+            commands::ingestion::reconcile_source,
+            commands::ingestion::reingest_source,
+            commands::ingestion::app_foreground,
+            commands::ingestion::get_ingestion_status,
             commands::list_launch_intents,
             commands::list_ingest_sources,
             commands::add_ingest_source,

@@ -4,16 +4,14 @@ import { api } from "../api";
 import type { PathProbe, RecentWorkspacePath } from "../types";
 
 /**
- * 工作路径输入框（路径选择体验 v1）：一个文本输入 + 「浏览…」原生文件夹选择 +
- * 输入时的即时探测反馈 + 最近/已知路径快选。四个能力都围绕一件事——把「路径
- * 对不对、会落到哪个 Project」从提交后的裁决提前到输入时的知情。
+ * 工作路径输入框：文本框 + 「浏览…」原生选择 + 输入时即时探测 + 最近/已知路径快选，
+ * 把「路径对不对、会落到哪个 Project」从提交后的裁决提前到输入时的知情。
  *
- * 探测是**顾问**：`probe_workspace_path` 只读，真正的接受判定仍发生在创建/
- * 添加时的 Rust 侧（workspace::identity 是唯一权威）。这里显示的一切都可能是
- * 过时的——所以提交永远不会被探测结果硬拦，只做提示。
+ * 探测是顾问：`probe_workspace_path` 只读，真正的接受判定仍在创建/添加时的 Rust 侧
+ * （workspace::identity 是唯一权威），所以提交永不被探测结果硬拦，只做提示。
  *
- * `enableProbe` / `enableRecent` 可以关掉：Session 来源（摄入目录）不是
- * WorkspacePath，Git/Project 语义不适用，只借用输入框和浏览按钮。
+ * `enableProbe` / `enableRecent` 可关掉：Session 来源（摄入目录）不是 WorkspacePath，
+ * Git/Project 语义不适用，只借用输入框和浏览按钮。
  */
 
 /** 只挡明显写错的形式；「能不能当工作路径」的最终判定在 Rust 侧。 */
@@ -48,7 +46,7 @@ export type WorkspacePathFieldProps = {
   submitLabel?: string;
 };
 
-/** 输入内容的探测状态：一个可独立复用的防抖 hook（路径列表的每一行也用它）。 */
+/** 输入内容的探测状态：一个可复用的防抖 hook（路径列表的每一行也用它）。 */
 export function usePathProbe(raw: string, enabled: boolean): PathProbe | null {
   const [probe, setProbe] = useState<PathProbe | null>(null);
   useEffect(() => {

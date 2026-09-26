@@ -67,8 +67,7 @@ pub use identity::{
 ///
 /// Contract:
 /// * `Ok(None)` means "this string resolves to no path" (empty, or relative with
-///   no base). Callers must then leave `workspace_path_id` NULL — never guess
-///.
+///   no base). Callers must then leave `workspace_path_id` NULL — never guess.
 /// * A reserved app path under NoEnding Home and a Home-level repository are not
 ///   WorkspacePaths; they also yield `Ok(None)`.
 /// * Implementations write through the caller's connection so an atomic Sync run

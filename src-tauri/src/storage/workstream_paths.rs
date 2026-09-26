@@ -1,31 +1,18 @@
 //! WorkstreamPath persistence: the ordered working-path list.
 //!
 //! The ordering IS the role — position 0 is the primary path, so there is no
-//! `is_primary` column to drift out of agreement with the list. The
-//! invariant these helpers must keep at all times:
+//! `is_primary` column to drift. Invariant: `paths.is_empty() OR a row at
+//! position 0 exists`; it holds only if every removal recompacts, so
+//! [`remove_workstream_path_conn`] is the only legal delete.
 //!
-//! ```text
-//! paths.is_empty()  OR  a row at position 0 exists
-//! ```
+//! The UNIQUE keys enforce the rest: `(workstream_id, workspace_path_id)` stops
+//! duplicates, `(workstream_id, position)` stops two paths claiming one slot.
+//! Policy that calls these (add/remove/reorder endpoints, the recycle bin) is
+//! `workspace::workstream`; only the mechanical, total helpers live here:
+//! [`purge_workstream_data_conn`] and [`reindex_workstream_search_conn`].
 //!
-//! which is only true if every removal recompacts. `remove_workstream_path_conn`
-//! is therefore the only legal delete, and it recompacts in the same statement.
-//!
-//! The UNIQUE constraints do the rest of the enforcing at the storage level:
-//! `(workstream_id, workspace_path_id)` stops duplicates, `(workstream_id,
-//! position)` stops two paths claiming the same slot.
-//!
-//! Policy that calls these — add/remove/reorder endpoints, the recycle bin —
-//! is `workspace::workstream`. Two of them
-//! live here rather than there because they are mechanical and total:
-//! [`purge_workstream_data_conn`] (the full delete order, in the
-//! caller's transaction) and [`reindex_workstream_search_conn`] (one Workstream's
-//! search row, re-derived from position 0).
-//!
-//! [`reorder_workstream_paths_conn`] is the one helper here a caller must not run
-//! on a `&Connection` it cannot roll back: it stages through negative positions,
-//! so a mid-way failure would leave the list half-renumbered. Always pass a
-//! transaction.
+//! [`reorder_workstream_paths_conn`] stages through negative positions, so it
+//! must only ever run inside a transaction.
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
@@ -45,9 +32,8 @@ fn row_workstream_path(r: &Row) -> rusqlite::Result<WorkstreamPath> {
 }
 
 impl Db {
-    /// The ordered list, always. Every caller that shows or reasons about "the
-    /// Workstream's paths" reads it here, so ordering can not be forgotten at a
-    /// call site.
+    /// The ordered list. Every caller that shows or reasons about "the
+    /// Workstream's paths" reads it here, so ordering cannot be forgotten.
     pub fn list_workstream_paths(&self, workstream_id: &str) -> Result<Vec<WorkstreamPath>> {
         let conn = self.read();
         let mut st = conn
@@ -97,12 +83,10 @@ pub fn primary_workspace_path(
         .optional()?)
 }
 
-/// Append at the end (an empty list yields position 0, which is why
-/// "become the primary path" needs no special case).
-///
-/// Idempotent by `(workstream_id, workspace_path_id)`: re-adding a path that is
-/// already in the list returns the existing row rather than failing or shifting
-/// positions under the caller.
+/// Append at the end — an empty list yields position 0, which is why "become the
+/// primary path" needs no special case. Idempotent by
+/// `(workstream_id, workspace_path_id)`: re-adding a path returns the existing
+/// row rather than failing or shifting positions under the caller.
 pub fn append_workstream_path_conn(
     conn: &Connection,
     workstream_id: &str,
@@ -153,14 +137,12 @@ pub fn find_workstream_path_conn(
 }
 
 /// Delete the WorkstreamPath and renumber the survivors, in the caller's
-/// transaction. Deleting position 0 therefore promotes position 1 automatically:
-/// the user never has to pick a new primary path.
+/// transaction. Deleting position 0 therefore promotes position 1: the user never
+/// has to pick a new primary path.
 ///
-/// This touches the path list only. It never changes a Session — not its cwd,
-/// not its workspace path, and not its Owner Workstream. A
-/// Session's cwd is historical execution fact; the Workstream's path list is
-/// current configuration; the owner is semantic assignment. They are
-/// independent.
+/// Touches the path list only — never a Session's cwd, workspace path or Owner.
+/// Those are independent facts: cwd is historical execution, the path list is
+/// current configuration, the owner is semantic assignment.
 pub fn remove_workstream_path_conn(
     tx: &Transaction<'_>,
     workstream_id: &str,
@@ -194,12 +176,10 @@ pub fn recompact_workstream_positions_conn(conn: &Connection, workstream_id: &st
     Ok(())
 }
 
-/// "Make this the primary path" is a reorder, not a role change.
-///
-/// Takes the COMPLETE ordered list of workspace path ids and rewrites positions
-/// to match. Anything not listed is not silently appended: an incomplete list is
-/// a bug in the caller, and quietly keeping the old tail would let a UI race drop
-/// a user's path.
+/// "Make this the primary path" is a reorder, not a role change. Takes the
+/// COMPLETE ordered list of workspace path ids and rewrites positions to match;
+/// an incomplete list is a caller bug, and silently keeping the old tail would let
+/// a UI race drop a user's path.
 pub fn reorder_workstream_paths_conn(
     conn: &Connection,
     workstream_id: &str,
@@ -242,10 +222,9 @@ pub fn reorder_workstream_paths_conn(
 }
 
 /// One entry of the list by its own id, scoped to the Workstream that owns it.
-///
-/// The `workstream_id` predicate is not decoration: a `workstream_paths.id`
-/// copied from another Workstream (a stale UI row, a race between two lists)
-/// must resolve to `None` rather than mutate someone else's path list.
+/// The `workstream_id` predicate is not decoration: an id copied from another
+/// Workstream (a stale UI row, a race between two lists) must resolve to `None`
+/// rather than mutate someone else's path list.
 pub fn workstream_path_by_id_conn(
     conn: &Connection,
     workstream_id: &str,
@@ -260,12 +239,10 @@ pub fn workstream_path_by_id_conn(
         .optional()?)
 }
 
-/// The list as canonical path strings, **in position order**.
-///
-/// Ordering is the contract: this is the byte sequence the PreparedLaunch
-/// fingerprint hashes, so a reorder that moves position 0 changes the launch
-/// plan and a sorted copy of the list can never make two different orders look
-/// equal.
+/// The list as canonical path strings, **in position order**. Ordering is the
+/// contract: this is the byte sequence the PreparedLaunch fingerprint hashes, so a
+/// reorder that moves position 0 changes the launch plan, and a sorted copy can
+/// never make two different orders look equal.
 pub fn ordered_canonical_paths_for_workstream(
     conn: &Connection,
     workstream_id: &str,
@@ -279,14 +256,12 @@ pub fn ordered_canonical_paths_for_workstream(
     Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
-/// Rewrite one Workstream's search row so its `parent_id` follows
-/// the CURRENT position-0 path.
-///
-/// The generic [`super::workspace::refresh_workstream_search_parents_conn`]
-/// finds affected Workstreams *through* `workstream_paths`, which cannot work
-/// for a removal: by the time it runs, the row that connected the Workstream to
-/// the path is gone. This one takes the Workstream id directly and is therefore
-/// usable on both sides of a mutation.
+/// Rewrite one Workstream's search row so its `parent_id` follows the CURRENT
+/// position-0 path. The generic
+/// [`super::workspace::refresh_workstream_search_parents_conn`] finds affected
+/// Workstreams *through* `workstream_paths`, which cannot work for a removal — by
+/// then the connecting row is gone. This one takes the Workstream id directly and
+/// is therefore usable on both sides of a mutation.
 pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
@@ -305,24 +280,19 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
     Ok(())
 }
 
-/// Delete every row a Workstream owns, in FK order, inside the
-/// caller's transaction. A permanent delete is all-or-nothing: a half-purged
-/// Workstream would keep Context rows whose owner no longer exists.
+/// Delete every row a Workstream owns, in FK order, inside the caller's
+/// transaction. A permanent delete is all-or-nothing: a half-purged Workstream
+/// would keep Context rows whose owner no longer exists.
 ///
-/// The search index is an FTS5 table with no FK. Its `kind='item'` rows
-///   carry `parent_id = workstream_id`, so deleting the items without deleting
-///   their index rows leaves search returning facts that no longer exist.
+/// The search index is an FTS5 table with no FK, so its `kind='item'` rows
+/// (`parent_id = workstream_id`) must go with the items. `workstream_review_state`
+/// cascades; it is deleted explicitly anyway so the order is written down rather
+/// than inferred from the schema.
 ///
-/// `workstream_review_state` cascades; it is deleted explicitly anyway so the
-/// order is written down rather than inferred from the schema.
-///
-/// NOT touched, on purpose: `sessions` (their `owner_workstream_id` is cleared
-/// by the FK in step 9, the rows themselves survive), `session_members`,
-/// `session_messages`, `launch_intents`, `workspace_paths`, `projects`,
-/// `sync_runs` and the Agents' raw source data. A Session survives the
-/// Workstream that referenced it; `launch_intents` keep their
-/// recorded `cwd` as historical evidence even when it names a Workstream that
-/// is gone.
+/// NOT touched, on purpose: `sessions` (only their `owner_workstream_id` is
+/// cleared by the FK in step 9; the rows survive), `session_members`,
+/// `session_messages`, `launch_intents`, `workspace_paths`, `projects`, the Session
+/// Contexts themselves and the Agents' raw source data.
 pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> Result<()> {
     // 1. conflict audit trail — references context_conflicts.
     tx.execute(
@@ -351,9 +321,13 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
         "DELETE FROM context_items WHERE workstream_id = ?1",
         params![workstream_id],
     )?;
-    // 6. delivery snapshots — provenance of what an Agent was told.
+    // 6. the Workstream's own revision state and per-Session frontiers.
     tx.execute(
-        "DELETE FROM context_deliveries WHERE workstream_id = ?1",
+        "DELETE FROM workstream_session_frontiers WHERE workstream_id = ?1",
+        params![workstream_id],
+    )?;
+    tx.execute(
+        "DELETE FROM workstream_context_state WHERE workstream_id = ?1",
         params![workstream_id],
     )?;
     // 7. the ordered path list. `workspace_paths` rows survive: they are
@@ -421,7 +395,7 @@ pub fn project_roles_for_workstream(
 }
 
 /// The Workstreams visible in one Project, with the primary/related
-/// distinction. Any position counts as membership; position 0 makes it 主关联.
+/// distinction: any position counts as membership, position 0 is the primary.
 pub fn workstreams_for_project(
     conn: &Connection,
     project_id: &str,

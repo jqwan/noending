@@ -4,12 +4,8 @@ import { Modal } from "../../components/common";
 import PathListEditor, { type PathEntryDraft } from "./PathListEditor";
 import type { CreateWorkstreamReport, Workstream, WorkstreamPathRow } from "../../types";
 
-/**
- * 任务表单弹窗：新建与编辑共用。传 `workstream` 即为编辑模式。
- *
- * Project 是从工作目录派生的，用户既不能挑也不能造；被拒绝的路径在这里
- * 逐条说破，而不是静默丢掉。
- */
+/** 任务表单弹窗：新建与编辑共用，传 `workstream` 即编辑模式。
+ *  Project 由工作目录派生，用户既不能挑也不能造；被拒绝的路径逐条说破，不静默丢掉。 */
 
 type PathOutcome = CreateWorkstreamReport["paths"][number];
 
@@ -107,12 +103,9 @@ export default function WorkstreamFormModal({
     }
   };
 
-  /**
-   * 工作目录按「认领 → 解析 → 移除」落地：草稿里与已有行 canonical_path 逐字相同的
-   * 那条直接认领它的 id（草稿行就是从 canonical_path 预填的）；只有新加的路径才交给
-   * `addWorkstreamPath`，由后端决定 canonical 与 identity；移除只针对真的从列表里
-   * 拿掉的路径 —— 某一次解析失败不是删除的理由。
-   */
+  /** 工作目录按「认领 → 解析 → 移除」落地：草稿里与已有行 canonical_path 逐字相同的
+   *  直接认领它的 id，只有新加的路径才交给 `addWorkstreamPath`；移除只针对真的从列表里
+   *  拿掉的路径——某一次解析失败不是删除的理由。 */
   const save = async () => {
     if (!workstream || busyRef.current || !dirty) return;
     busyRef.current = true;

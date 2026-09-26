@@ -1,48 +1,39 @@
 //! dsh Adapter (DeepSeek Harness): `$DSH_HOME/sessions/<encoded-cwd>/<id>/session.v2.jsonl.zstd`,
 //! `$DSH_HOME` defaulting to `~/.dsh`.
 //!
-//! The only agent whose source bytes are not JSONL: every transcript is zstd,
-//! and the file grows by **appending complete zstd frames** (one checksummed
-//! frame per durable write batch, `packages/session/session-persistence-jsonl`).
-//! Committed bytes are never rewritten — the two truncations dsh performs are
-//! rollback of an in-flight append and repair of a torn tail, both of which
-//! only ever remove the *last, incomplete* frame. That is why this adapter's
-//! cursor still detects append / truncate / replacement exactly like the plain
-//! JSONL readers do; only the coordinates differ (see below).
+//! The only agent whose source bytes are not JSONL: transcripts are zstd, and the
+//! file grows by **appending complete zstd frames** (one checksummed frame per
+//! write batch). Committed bytes are never rewritten — the two truncations dsh
+//! performs roll back an in-flight append or repair a torn tail, removing only the
+//! *last, incomplete* frame — so the cursor still detects append / truncate /
+//! replacement like the plain JSONL readers; only the coordinates differ.
 //!
-//! Record shape (decoded):
-//! - line 0 is the session header `{type:"session", version, id, createdAt,
-//!   cwd, …}`; it is the only record without a `seq`;
-//! - every later record is `{type, seq, time, data}`. The header's
-//!   `parentSession` / `origin` / `delegationDepth` name the member graph
-//!   directly: a transcript with a `parentSession` is a CHILD member
-//!   of that parent; without one it is a ROOT.
-//! - Only the ROOT's conversation is ingested: `user/message` (real user
-//!   turns) and `assistant/message`. A `user/message` that carries
-//!   `data.source.senderSessionId` was sent by another session — execution
-//!   observation (side activity), never conversation. `assistant/chunk`
-//!   (v0/v1 token deltas), `tool/call`, `tool/result`, `todo/write`,
-//!   `request/*`, `session/title*` and the turn/step bookkeeping are machine
-//!   traffic and are dropped or counted.
-//! - `seq` is writer-assigned, contiguous and monotonic within a generation,
-//!   so it is the native message id — dedup is exact and position-independent.
+//! Record shape (decoded): line 0 is the header `{type:"session", version, id,
+//! createdAt, cwd, …}`, the only record without a `seq`; every later record is
+//! `{type, seq, time, data}`. A header `parentSession` makes the transcript a
+//! CHILD member of that parent (otherwise ROOT); `origin` / `delegationDepth` ride
+//! along as metadata.
+//!
+//! Only the ROOT's conversation is ingested: `user/message` (real user turns) and
+//! `assistant/message`. A `user/message` carrying `data.source.senderSessionId` was
+//! sent by another session — side activity, never conversation. `assistant/chunk`,
+//! `tool/*`, `todo/write`, `request/*`, `session/title*` and turn/step bookkeeping
+//! are dropped or counted. `seq` is writer-assigned and monotonic within a
+//! generation, so it is the native message id.
 //!
 //! Two shapes need real work:
 //! - **The user turn is not always the user's words.** dsh injects its own
-//!   `user/message` records for runtime context ("Current runtime context. …"
-//!   and `<system-reminder>` blocks). Ingesting those as user text would make
-//!   every session start with a machine preamble, so they are dropped, exactly
-//!   as codex's `<…>`/`#` injections are for the title.
-//! - **Cursor coordinates.** The shared reader's offsets live in the bytes it
-//!   parses, and those are decoded here, not on disk. This adapter reads the
-//!   whole decoded body every time and lets message identity absorb it, while
-//!   the stored cursor keeps raw-file identity/size/mtime so the reconcile
-//!   pre-filter ("already ingested and stat-identical") still works. Because
-//!   every replay is a full scan, its observations become a stats SNAPSHOT.
+//!   `user/message` records for runtime context ("Current runtime context. …" and
+//!   `<system-reminder>` blocks); ingesting those would open every session with a
+//!   machine preamble, so they are dropped.
+//! - **Cursor coordinates.** Offsets live in decoded bytes, not on disk, so this
+//!   adapter reads the whole decoded body every time and lets message identity
+//!   absorb it, while the stored cursor keeps raw-file identity/size/mtime so the
+//!   reconcile pre-filter still works. Every replay is a full scan → stats
+//!   SNAPSHOT.
 //!
-//! There is no launchable CLI: `dsh --profile <name>` needs a profile name
-//! that is the user's own setup, and NoEnding cannot know it — guessing one
-//! would boot the wrong tree.
+//! There is no launchable CLI: `dsh --profile <name>` needs a profile name that is
+//! the user's own setup, and guessing one would boot the wrong tree.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -60,11 +51,10 @@ use crate::platform::exec_resolver::AgentInstallation;
 
 pub struct DshAdapter;
 
-/// Generations dsh publishes beside each other, newest last (README of
-/// `session-persistence-jsonl`: v0 has no version infix; a migration publishes
-/// a NEW file and never touches the old one). A session directory can hold
-/// several at once after an upgrade, and they describe the same session id —
-/// so discovery must claim exactly one: the highest generation present.
+/// Generations dsh publishes beside each other, newest last (v0 has no version
+/// infix; a migration publishes a NEW file and never touches the old one). A
+/// session directory can hold several after an upgrade, all describing the same
+/// session id, so discovery claims exactly one: the highest generation present.
 fn generation_of(file_name: &str) -> Option<u8> {
     match file_name {
         "session.v2.jsonl.zstd" => Some(2),
@@ -106,10 +96,8 @@ fn is_machine_context(text: &str) -> bool {
 }
 
 /// dsh's own task envelope: the parent's task description, pasted in as the
-/// first "user" turn of a delegated session. It is not a human turn — the same
-/// call this codebase makes for Codex's review prompts — and its first
-/// line names the envelope, not the session: three sessions here would
-/// otherwise be titled `## Task context task title:`.
+/// first "user" turn of a delegated session. It is not a human turn, and its
+/// first line names the envelope, not the session.
 ///
 /// Deliberately NOT folded into [`is_machine_context`]: that one also decides
 /// what gets stored as a user turn, and this is a title-only call.
@@ -121,9 +109,9 @@ fn is_task_envelope(text: &str) -> bool {
 /// A torn final frame ends the walk instead of erroring — the complete prefix
 /// is exactly what a mid-write file has to offer, and the next read sees the
 /// finished frame.
-fn scan_lines(raw: &[u8], mut keep_going: impl FnMut(&str) -> bool) {
+fn scan_lines(raw: &[u8], mut keep_going: impl FnMut(&str) -> bool) -> bool {
     let Ok(mut decoder) = zstd::stream::read::Decoder::new(raw) else {
-        return;
+        return false;
     };
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
@@ -131,20 +119,25 @@ fn scan_lines(raw: &[u8], mut keep_going: impl FnMut(&str) -> bool) {
         let n = match decoder.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(_) => break,
+            // A corrupt / still-being-written frame: the body could NOT be
+            // fully decoded, so this read is not a complete snapshot.
+            Err(_) => return false,
         };
         pending.extend_from_slice(&chunk[..n]);
         while let Some(end) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=end).collect();
             let text = String::from_utf8_lossy(&line[..line.len() - 1]);
             if !keep_going(&text) {
-                return;
+                return false;
             }
         }
     }
     if !pending.is_empty() {
         keep_going(&String::from_utf8_lossy(&pending));
+        // A trailing partial line: the last frame is not finished.
+        return false;
     }
+    true
 }
 
 /// The subtree that actually holds transcripts. dsh's layout is fixed —
@@ -174,9 +167,8 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str())?;
     let source_message_id = v.get("seq").and_then(|s| s.as_i64()).map(|s| s.to_string());
     // A `user/message` is not necessarily the user: dsh labels the writer in
-    // `data.source`, and the kinds that bring a `senderSessionId` are the
-    // messages another session sent. That one field is the whole test
-    // — a fifth cross-agent kind would need no change here.
+    // `data.source`, and the kinds bringing a `senderSessionId` are the messages
+    // another session sent.
     let counterpart_id = v
         .pointer("/data/source/senderSessionId")
         .and_then(|s| s.as_str())
@@ -212,13 +204,10 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if !is_root {
                 return Some(ParsedLine::observation_only(MemberObservation::default()));
             }
-            // Message provenance: the assistant
-            // record itself carries `data.message.source` — a discriminated
-            // union gated on `kind == "model"`, holding the actual generation
-            // identity (`source.provider` / `source.model`; verified: 1907/
-            // 1907 assistant records in the real corpus, in-session switches
-            // observed). Profile/preset config is NOT message-level fact and
-            // is never consulted.
+            // The assistant record itself carries `data.message.source` — a
+            // discriminated union gated on `kind == "model"` holding the actual
+            // generation identity (`source.provider` / `source.model`).
+            // Profile/preset config is NOT message-level fact and is never read.
             let source_meta = v.pointer("/data/message/source").unwrap_or(&Value::Null);
             let prov = if source_meta.get("kind").and_then(|k| k.as_str()) == Some("model") {
                 (
@@ -297,16 +286,14 @@ impl DshAdapter {
                         first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
                 }
-                // dsh names its own sessions and REWRITES the name: measured
+                // dsh names its own sessions and REWRITES the name; measured
                 // order is always `fallback` → `provider` → `user`, so the last
                 // record is the current one and no ranking is needed.
                 //
-                // `source.kind` says who named it. `fallback` is dsh itself
-                // truncating the first line of the first message — on three of
-                // this machine's sessions that produced the literal machine
-                // preamble `## Task context task title:`, i.e. exactly the
-                // naive truncation this tier exists to beat, so it is skipped
-                // and the derived title stands.
+                // `source.kind` says who named it. `fallback` is dsh truncating
+                // the first line of the first message — often the literal machine
+                // preamble `## Task context task title:` — i.e. exactly the naive
+                // truncation this tier exists to beat, so it is skipped.
                 Some("session/title") => {
                     let named_by = v
                         .pointer("/data/source/kind")
@@ -324,11 +311,9 @@ impl DshAdapter {
                 }
                 _ => {}
             }
-            // The whole transcript is scanned, because the title is the LAST
-            // one written and a record can appear at any position. Measured
-            // cost of a full pass over this machine's 104 dsh sessions
-            // (198 MB decompressed, 123 k records) is ~1.5 s, and only
-            // CHANGED files are read at all.
+            // The whole transcript is scanned, because the title is the LAST one
+            // written and can appear at any position. Only CHANGED files are read
+            // at all.
             true
         });
 
@@ -471,12 +456,11 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 
         // Decoded text cannot be seeked into, so every read replays the whole
         // body and leans on message identity: each record carries the writer's
-        // own `seq`, so a replay stores nothing it already has. Every replay
-        // is a full scan, so the observations become a stats SNAPSHOT.
+        // own `seq`, so a replay stores nothing it already has.
         let is_root = member.relation.as_str() == "root";
         let mut messages = Vec::new();
         let mut observation = MemberObservation::default();
-        scan_lines(&raw, |line| {
+        let complete_snapshot = scan_lines(&raw, |line| {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 return true;
             };
@@ -511,6 +495,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             ),
             messages,
             source: Some(source),
+            complete_snapshot,
             next_active_provider: None,
             next_active_model: None,
         })
@@ -526,7 +511,6 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         &self,
         _install: &AgentInstallation,
         _opts: &ExecOptions,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("dsh 需要指定 profile，NoEnding 无法替用户选择"))
@@ -537,7 +521,6 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         _install: &AgentInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("dsh 需要指定 profile，NoEnding 无法替用户选择"))
@@ -739,8 +722,8 @@ mod tests {
         );
     }
 
-    /// the root read keeps the conversation and drops machine traffic;
-    /// the writer's own `seq` is the native message id.
+    /// The root read keeps the conversation and drops machine traffic; the
+    /// writer's own `seq` is the native message id.
     #[test]
     fn the_root_read_keeps_the_conversation_and_drops_machine_traffic() {
         let id = "session-ingest";
@@ -867,10 +850,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `fallback` is dsh truncating the first line of the first message, which
-    /// on three of this machine's sessions is the literal machine preamble
-    /// `## Task context task title:` — not a title anyone wrote.
-    /// The task envelope is the parent's words, not the user's.
+    /// `fallback` is dsh truncating the first line of the first message, which is
+    /// often the literal machine preamble `## Task context task title:` — not a
+    /// title anyone wrote, and not the parent's words as a user turn either.
     #[test]
     fn the_task_envelope_is_not_the_user_turn() {
         let root = unique_dir("dsh-envelope");
@@ -989,8 +971,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    ///  — `data.message.source` gated on `kind=="model"`
-    /// attributes the generation identity; any other source kind stays NULL.
+    /// `data.message.source` gated on `kind == "model"` attributes the
+    /// generation identity; any other source kind stays NULL.
     #[test]
     fn assistant_source_kind_model_attributes_the_generation_identity() {
         let id = "session-prov";

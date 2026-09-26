@@ -1,18 +1,15 @@
 //! Message Identity & Source mutation tests (Issue #1) — Logical Session model.
 //!
-//! Fixture-driven: real temp JSONL files per agent adapter, exercising
-//! append / no-change / truncate+rewrite / same-size rewrite / file
-//! replacement, and verifying that:
-//! - sequences are app-assigned, monotonic, never reused;
-//! - history is never overwritten by later source states (append-only);
-//! - re-scans of identical content never duplicate messages;
-//! - file replacement is recognized as a new generation.
+//! Fixture-driven real JSONL per adapter: append / no-change / truncate+rewrite
+//! / same-size rewrite / file replacement. The RAW `session_messages` store is
+//! append-only, while the conversation projection `get_messages` reads is
+//! replaced to match; sequences are app-assigned and never reused; a rewritten
+//! file is a new generation.
 //!
-//! Identity now lives on the ROOT MEMBER: reads commit through
-//! `Db::commit_member_ingest`, which chains `message_identity_hash` from
-//! IDENTITY_GENESIS on a full re-scan (`start_byte_offset == 0`) and from the
-//! member cursor's `identity_tail_hash` on an append. The cursor — not the
-//! session — owns the read position.
+//! Identity lives on the ROOT MEMBER: `commit_member_ingest` chains
+//! `message_identity_hash` from IDENTITY_GENESIS on a full re-scan, else from
+//! the cursor's `identity_tail_hash`. The cursor — not the session — owns the
+//! read position.
 
 use noending::adapters::AgentAdapter;
 use noending::domain::{
@@ -42,8 +39,26 @@ fn open_db(tag: &str) -> Db {
     Db::open(&dir.join("test.db")).unwrap()
 }
 
-// ---- per-source write strategies -----------------------------------------
-//
+/// The RAW append-only message store — provenance — independent of the
+/// current-message projection that `get_messages` reads. Rows survive a source
+/// rewrite; the projection does not.
+fn raw_rows(db: &Db, session_id: &str) -> Vec<(i64, String, i64)> {
+    let conn = db.read();
+    let mut stmt = conn
+        .prepare(
+            "SELECT sequence, content, source_generation FROM session_messages
+             WHERE session_id = ?1 ORDER BY sequence",
+        )
+        .unwrap();
+    stmt.query_map(rusqlite::params![session_id], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
+    .unwrap()
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .unwrap()
+}
+
+// per-source write strategies
 // Plain JSONL is written as text; dsh's transcript is zstd, appended one
 // complete frame per write batch. Both must pass the same suite.
 
@@ -137,7 +152,7 @@ fn append(gen: i64) -> SourceCursorUpdate {
     }
 }
 
-// ---- per-agent JSONL fixtures --------------------------------------------
+// per-agent JSONL fixtures
 
 fn codex_line(role: &str, text: &str) -> String {
     format!(
@@ -235,7 +250,7 @@ macro_rules! identity_suite {
             let write: fn(&std::path::Path, &str) = $write;
             let append: fn(&std::path::Path, &str) = $append;
 
-            // ---- initial ingest: 3 lines ----
+            // initial ingest: 3 lines
             write(
                 &file,
                 &format!(
@@ -281,7 +296,7 @@ macro_rules! identity_suite {
                 "the cursor tracks the source identity chain tail"
             );
 
-            // ---- append: only the delta is stored ----
+            // append: only the delta is stored
             std::thread::sleep(std::time::Duration::from_millis(20));
             append(
                 &file,
@@ -305,14 +320,14 @@ macro_rules! identity_suite {
                 "sequence continues monotonically, line numbers are never reused as identity"
             );
 
-            // ---- no change: re-read is a no-op ----
+            // no change: re-read is a no-op
             assert_eq!(
                 ingest(&db, adapter, &s, &member_id),
                 0,
                 "unchanged file adds nothing"
             );
 
-            // ---- truncate + rewrite with different content ----
+            // truncate + rewrite with different content
             std::thread::sleep(std::time::Duration::from_millis(20));
             write(
                 &file,
@@ -328,23 +343,32 @@ macro_rules! identity_suite {
                 2,
                 "compacted content is new messages"
             );
-            let all = db.get_messages(&s.id, None, 100).unwrap();
-            assert_eq!(all.len(), 7, "old history is preserved, never overwritten");
+            // The RAW store keeps the retired history for provenance: seven
+            // rows now, sequences still dense and never reused.
+            let raw = raw_rows(&db, &s.id);
+            assert_eq!(raw.len(), 7, "old history is preserved, never overwritten");
             assert_eq!(
-                all.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+                raw.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>(),
                 vec![1, 2, 3, 4, 5, 6, 7],
                 "sequences keep increasing after truncate; no reuse"
             );
-            assert_eq!(all.iter().filter(|e| e.source_generation == 1).count(), 2);
+            assert_eq!(raw.iter().filter(|(_, _, g)| *g == 1).count(), 2);
+            // The CURRENT conversation is the rewritten source only.
+            let conv = db.get_messages(&s.id, None, 100).unwrap();
+            assert_eq!(
+                conv.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+                vec![6, 7],
+                "the effective conversation is the rewritten source"
+            );
 
-            // ---- rescan of identical content dedups ----
+            // rescan of identical content dedups
             assert_eq!(
                 ingest(&db, adapter, &s, &member_id),
                 0,
                 "identical rescan never duplicates"
             );
 
-            // ---- file replacement (new identity) ----
+            // file replacement (new identity)
             std::thread::sleep(std::time::Duration::from_millis(20));
             std::fs::remove_file(&file).unwrap();
             write(
@@ -358,8 +382,16 @@ macro_rules! identity_suite {
             );
             let c = db.get_member_cursor(&member_id).unwrap();
             assert_eq!(c.generation, 2, "file replacement bumps the generation");
-            let all = db.get_messages(&s.id, None, 100).unwrap();
-            assert_eq!(all.len(), 8);
+            assert_eq!(
+                raw_rows(&db, &s.id).len(),
+                8,
+                "the raw store keeps every row it ever stored"
+            );
+            assert_eq!(
+                db.get_messages(&s.id, None, 100).unwrap().len(),
+                1,
+                "the current conversation is the replaced file"
+            );
         }
     };
 }
@@ -451,9 +483,18 @@ fn same_size_rewrite_is_detected() {
         1,
         "same-size rewrite adds the new text"
     );
-    let all = db.get_messages(&s.id, None, 100).unwrap();
-    assert_eq!(all.len(), 2, "history preserved");
-    assert_eq!(all[1].source_generation, 1);
+    let conv = db.get_messages(&s.id, None, 100).unwrap();
+    assert_eq!(
+        conv.len(),
+        1,
+        "the current conversation is the rewritten text"
+    );
+    assert_eq!(conv[0].source_generation, 1);
+    assert_eq!(
+        raw_rows(&db, &s.id).len(),
+        2,
+        "the raw store keeps the retired row too"
+    );
     let c = db.get_member_cursor(&member_id).unwrap();
     assert_eq!(c.generation, 1);
 }
@@ -716,13 +757,13 @@ fn child_member_messages_are_rejected_not_stored() {
     );
 }
 
-/// The conversation store is append-only across truncation, and the Context
-/// frontier is a separate lifecycle: a source truncation (compaction) never
-/// deletes old messages, never reuses sequences, and never moves the
-/// processed frontier that Sync consumed ("conversation ends, context
-/// doesn't",).
+/// A source rewrite (compaction / truncate) REPLACES the current-message
+/// projection while the raw `session_messages` rows survive for provenance:
+/// the effective conversation becomes the rewritten source, retired ids stay
+/// addressable, sequences keep increasing (never reused), and the fact
+/// generation is raised so any stale Context is rebuilt from scratch.
 #[test]
-fn truncate_preserves_history_and_leaves_the_context_frontier_alone() {
+fn truncate_replaces_the_projection_and_preserves_raw_history() {
     let db = open_db("truncate-frontier");
     let dir = unique_dir("truncate-frontier");
     let (s, member_id) = fixture_session(
@@ -746,12 +787,15 @@ fn truncate_preserves_history_and_leaves_the_context_frontier_alone() {
         )
         .unwrap();
     assert_eq!(first.len(), 3);
-
-    // Sync consumed the first message
-    db.set_processed_message_sequence(&s.id, 1).unwrap();
+    assert_eq!(
+        db.get_messages(&s.id, None, 100).unwrap().len(),
+        3,
+        "the effective conversation is the three ingested messages"
+    );
 
     // the source truncates to a compaction summary: a full re-scan at a new
-    // generation appends the summary, dedups nothing, deletes nothing
+    // generation atomically replaces the projection — dedups nothing, deletes
+    // no raw row.
     let compacted = db
         .commit_member_ingest(
             &s.id,
@@ -767,24 +811,64 @@ fn truncate_preserves_history_and_leaves_the_context_frontier_alone() {
         .unwrap();
     assert_eq!(compacted.len(), 1, "the summary is new evidence");
 
-    let all = db.get_messages(&s.id, None, 100).unwrap();
+    let conversation = db.get_messages(&s.id, None, 100).unwrap();
     assert_eq!(
-        all.iter().map(|m| m.sequence).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4],
+        conversation
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["compacted summary of it all"],
+        "the current conversation is the rewritten source, not the retired messages"
+    );
+    assert!(
+        noending::search::search(&db, "decision", 10)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.kind != "message" || hit.parent_id != s.id),
+        "messages retired from the current projection must not remain searchable"
+    );
+    assert!(
+        noending::search::search(&db, "compacted", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.kind == "message" && hit.parent_id == s.id),
+        "the replacement conversation must be indexed"
+    );
+
+    // raw rows are append-only across the truncation.
+    let (rows, max_seq): (i64, i64) = db
+        .read()
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM session_messages WHERE session_id = ?1",
+            rusqlite::params![s.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (rows, max_seq),
+        (4, 4),
         "sequences keep increasing across a truncate; none reused"
     );
-    let ids_before: Vec<String> = first.iter().map(|m| m.id.clone()).collect();
-    let ids_after: Vec<String> = all[..3].iter().map(|m| m.id.clone()).collect();
-    assert_eq!(
-        ids_after, ids_before,
-        "pre-truncation message ids survive untouched"
+
+    // the pre-truncation ids survive addressable — provenance is intact.
+    for m in &first {
+        assert!(
+            db.get_message_by_ref(&format!("session-message:{}", m.id))
+                .unwrap()
+                .is_some(),
+            "retired message {} must stay addressable",
+            m.id
+        );
+    }
+
+    let state = db.get_session_ingest_state(&s.id).unwrap();
+    assert!(
+        state.generation > 0,
+        "the rewrite raised the fact generation"
     );
     assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        1,
-        "member cursors and the Context frontier are separate lifecycles"
+        state.latest_message_seq, 1,
+        "the current projection now holds a single message"
     );
 }
 
@@ -884,7 +968,16 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
         0,
         "E survives a full re-scan without duplication"
     );
-    assert_eq!(db.get_messages(&s.id, None, 100).unwrap().len(), 5);
+    assert_eq!(
+        raw_rows(&db, &s.id).len(),
+        5,
+        "no duplicate row was ever stored"
+    );
+    assert_eq!(
+        db.get_messages(&s.id, None, 100).unwrap().len(),
+        3,
+        "the current conversation is the compacted A,B,E"
+    );
     assert_eq!(
         db.get_member_cursor(&member_id).unwrap().identity_tail_hash,
         e_hash

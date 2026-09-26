@@ -1,37 +1,18 @@
 //! The ONE database format this build understands.
 //!
-//! NoEnding supports exactly one SQLite shape at a time:
-//!
-//! ```text
-//! empty file                     → create the current format
-//! current format, intact         → use as it is, never repair it
-//! anything else, or incomplete   → refuse to open
-//! ```
-//!
 //! A database is recognised by *identity*, not by guessing: creation stamps the
-//! SQLite header with [`DATABASE_APPLICATION_ID`] plus
-//! [`DATABASE_FORMAT_VERSION`], and opening demands that pair. A foreign SQLite
-//! file, an older NoEnding generation and a file with no identity at all are
-//! therefore all refused, and so is a current-format database whose structure
-//! is missing a required table or index — "no repair" never means "no
-//! validation", because half a schema is exactly what no repair pass could be
-//! trusted to complete.
+//! SQLite header with [`DATABASE_APPLICATION_ID`] +
+//! [`DATABASE_FORMAT_VERSION`], and opening demands that pair and then validates
+//! that every object [`CURRENT_SCHEMA`] declares is present. An empty file is
+//! created; a current-format database is used as it is and never repaired; a
+//! foreign file, an older generation or a half-created schema is refused —
+//! "no repair" never means "no validation".
 //!
-//! There is no migration chain, no `ALTER TABLE` step and no old-row mapping: a
-//! breaking change edits [`CURRENT_SCHEMA`] and bumps
-//! [`DATABASE_FORMAT_VERSION`], and the local database is rebuilt from the
-//! Agent sources plus whatever the user re-creates. The database is a
-//! projection over that data, not the only copy of it — except for the
-//! Workstream/Context state NoEnding itself owns, which a rebuild does NOT
-//! restore.
-//!
-//! Responsibility split:
-//!
-//! * [`CURRENT_SCHEMA`] — the complete current structure (tables, indexes and
-//!   the FTS5 search index).
-//! * [`open_or_create`] — recognise, validate, or create. Nothing else.
-//! * [`reconcile_runtime_defaults`] — environment-dependent defaults, on every
-//!   start. Not schema, not a migration.
+//! No migration chain and no `ALTER TABLE`: a breaking change edits
+//! [`CURRENT_SCHEMA`] and bumps [`DATABASE_FORMAT_VERSION`], and the local
+//! database is rebuilt from the Agent sources. The database is a projection over
+//! that data — except the Workstream/Context state NoEnding itself owns, which a
+//! rebuild does NOT restore.
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -43,33 +24,24 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 
 /// Exact SQLite format generation required by this build.
 ///
-/// No database migrations or backwards compatibility are supported. A database
-/// whose format generation differs from this value must be discarded and
-/// rebuilt from Agent source data.
+/// No migrations and no backwards compatibility: a database whose generation
+/// differs must be discarded and rebuilt from Agent source data.
 ///
-/// v2 — the Logical Session refactor: `sessions` is keyed by the
-/// root member's Resume identity and owns lifecycle/Owner alone; execution
-/// lives in `session_members`, conversation in `session_messages`, reading in
-/// `session_member_cursors`, observation in `session_member_stats`, the Sync
-/// frontier in `session_context_state`, and unattachable sources in
-/// `ingestion_diagnostics`. `session_events`, `session_cursors` and
-/// `session_deletion_jobs` are gone: there is one conversation store, cursors
-/// belong to members, and NoEnding never deletes an Agent-owned source.
-///
-/// v3 — message-level model provenance:
-/// `session_messages` gains `provider` / `model` (source-confirmed, Assistant
-/// only — enforced by CHECK), and `session_member_stats` loses its
-/// `model` / `provider` / `effort` columns: member-level "current model" was
-/// a second, semantically unclear authority over the same question.
-pub const DATABASE_FORMAT_VERSION: i64 = 3;
+/// v1 — ingestion writes FACTS only (sessions, members, messages, stats,
+/// cursors, the current-message projection, ingest generation); Context is
+/// written only by an explicit user action. The Session frontier is
+/// `(ingest_generation, processed_through_seq)` over the current-message
+/// projection; the Workstream side keeps its own `context_revision` /
+/// `input_revision` plus per-Session consumption frontier.
+pub const DATABASE_FORMAT_VERSION: i64 = 1;
 
 /// Open an existing current-format database, or create one.
 ///
 /// The only accepted starting points are a completely empty file and an intact
 /// database carrying this build's identity; everything else is refused with a
-/// message that says so. A current-format database is returned untouched — the
-/// startup path deliberately performs no schema repair, because SQLite schema
-/// is not self-healing and a half-created database must never look usable.
+/// message that says so. A current-format database is returned untouched: the
+/// startup path performs no schema repair, because SQLite schema is not
+/// self-healing and a half-created database must never look usable.
 pub fn open_or_create(conn: &Connection) -> Result<()> {
     let application_id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -95,12 +67,11 @@ pub fn open_or_create(conn: &Connection) -> Result<()> {
 }
 
 /// Fill in the defaults that depend on the *current* environment. Runs on every
-/// start, so a newly supported Agent, or a relocated `CODEX_HOME`, needs no
-/// format change to be picked up.
+/// start, so a newly supported Agent or a relocated `CODEX_HOME` needs no format
+/// change to be picked up.
 ///
-/// This is reconciliation, not migration: it inserts missing rows only, creates
-/// no schema and never overwrites the user's own decision about a source (a
-/// default source always starts DISABLED).
+/// Reconciliation, not migration: it inserts missing rows only, creates no
+/// schema, and never overwrites a user's decision (defaults start DISABLED).
 pub fn reconcile_runtime_defaults(conn: &Connection) -> Result<()> {
     for agent in crate::domain::Agent::all() {
         if let Some(root) = crate::platform::paths::resolve_agent_data_dir(*agent) {
@@ -116,11 +87,6 @@ pub fn reconcile_runtime_defaults(conn: &Connection) -> Result<()> {
             )?;
         }
     }
-
-    conn.execute(
-        "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, 'off')",
-        params![crate::settings::CONTEXT_DELIVERY_LEVEL_KEY],
-    )?;
     Ok(())
 }
 
@@ -226,11 +192,9 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
 /// writes. Verbatim source of truth — nothing else in the codebase creates
 /// schema.
 ///
-/// The physical workspace: paths are first-class domain state, and a path-backed
-/// Project is what every Session's cwd chain derives from. `workspace_paths.id`
-/// is NOT a random uuid — it is derived from the canonical path by
-/// `workspace::path_identity`, which is what makes `ensure_workspace_path`
-/// idempotent: observing the same directory twice cannot create two rows.
+/// Fact tables and NoEnding-owned Context state are separated by intent:
+/// everything up to `ingest_sources` describes the Agent sources, everything
+/// from `session_contexts` on is state a database rebuild does NOT restore.
 const CURRENT_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
@@ -261,8 +225,8 @@ const CURRENT_SCHEMA: &str = r#"
       cwd TEXT,
       workspace_path_id TEXT,
       project_id TEXT REFERENCES projects(id),
-      -- Semantic ownership: at most one Owner Workstream per Session
-      --. Deleting the Workstream clears this, never the row.
+      -- Semantic ownership: at most one Owner Workstream per Session.
+      -- Deleting the Workstream clears this, never the row.
       owner_workstream_id TEXT
         REFERENCES workstreams(id) ON DELETE SET NULL,
       -- Fork provenance only: lifecycle / Owner / Conversation stay
@@ -302,7 +266,7 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_session_members_parent
       ON session_members(agent, parent_source_member_id);
     -- Where each member stopped reading ITS source. Member-owned, never
-    -- session-owned; the Context frontier lives in session_context_state.
+    -- session-owned; the Context frontier lives in session_contexts.
     CREATE TABLE IF NOT EXISTS session_member_cursors (
       member_id TEXT PRIMARY KEY
         REFERENCES session_members(id) ON DELETE CASCADE,
@@ -322,7 +286,9 @@ const CURRENT_SCHEMA: &str = r#"
     );
     -- The ONLY conversation store: user/assistant turns of the ROOT
     -- member. Identity dedup is (member_id, source_identity_hash); sequence is
-    -- NoEnding's own per-session counter.
+    -- NoEnding's own per-session append counter. Rows are AUDIT history and
+    -- are never deleted by a re-scan — the CURRENT conversation is the
+    -- projection below.
     CREATE TABLE IF NOT EXISTS session_messages (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
@@ -352,12 +318,30 @@ const CURRENT_SCHEMA: &str = r#"
     );
     CREATE INDEX IF NOT EXISTS idx_session_messages_session
       ON session_messages(session_id, sequence);
-    -- The Logical Session's Context frontier: how far Sync has consumed
-    -- root conversation messages. Completely separate lifecycle from cursors.
-    CREATE TABLE IF NOT EXISTS session_context_state (
+    -- The CURRENT effective conversation: an ordered view over
+    -- session_messages holding exactly one generation. A normal append adds
+    -- to the tail; a source rewrite / truncate / reorder that changes the
+    -- conversation raises the session ingest generation and atomically
+    -- replaces the whole projection, while the old session_messages rows stay
+    -- for provenance audit. Conversation, search and Context read HERE.
+    CREATE TABLE IF NOT EXISTS session_message_projection (
+      session_id TEXT NOT NULL
+        REFERENCES sessions(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      session_message_id TEXT NOT NULL
+        REFERENCES session_messages(id) ON DELETE CASCADE,
+      PRIMARY KEY (session_id, ordinal)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_projection_message
+      ON session_message_projection(session_id, session_message_id);
+    -- Per-session ingest state: the fact generation of the current
+    -- conversation and how many projection ordinals exist. Maintained inside
+    -- the member-ingest transaction.
+    CREATE TABLE IF NOT EXISTS session_ingest_state (
       session_id TEXT PRIMARY KEY
         REFERENCES sessions(id) ON DELETE CASCADE,
-      processed_message_sequence INTEGER NOT NULL DEFAULT 0
+      generation INTEGER NOT NULL DEFAULT 0,
+      latest_message_seq INTEGER NOT NULL DEFAULT 0
     );
     -- 1:1 execution snapshot per member: current observable source state,
     -- not an append-only log. NULL = source does not provide the metric.
@@ -373,9 +357,6 @@ const CURRENT_SCHEMA: &str = r#"
       cached_tokens INTEGER,
       reasoning_tokens INTEGER,
       cost REAL,
-      -- model / provider / effort were removed in v3:
-      -- message provenance lives in session_messages, and a member-level
-      -- "current model" was a second unclear authority, never an execution fact.
       updated_at TEXT NOT NULL,
       extra TEXT NOT NULL DEFAULT '{}'
     );
@@ -396,6 +377,7 @@ const CURRENT_SCHEMA: &str = r#"
       observation_count INTEGER NOT NULL DEFAULT 1,
       details TEXT NOT NULL DEFAULT '{}'
     );
+    -- Workstream Context content authority: items + revisions + conflicts.
     CREATE TABLE IF NOT EXISTS context_items (
       id TEXT PRIMARY KEY,
       workstream_id TEXT NOT NULL REFERENCES workstreams(id),
@@ -416,21 +398,64 @@ const CURRENT_SCHEMA: &str = r#"
       metadata TEXT NOT NULL DEFAULT '{}',
       source_type TEXT,
       source_ref TEXT,
-      sync_run_id TEXT,
       created_at TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS sync_runs (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      from_sequence INTEGER NOT NULL,
-      to_sequence INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      mutations TEXT NOT NULL DEFAULT '[]',
-      summary TEXT NOT NULL DEFAULT '',
-      error TEXT,
+    -- The Logical Session's Context: system-derived, read-only, one current
+    -- row per Session. No row means "never generated". The four JSON columns
+    -- are the fixed summary structure; revision is the CAS guard, and
+    -- (ingest_generation, processed_through_seq) is the Session frontier in
+    -- CURRENT-message-projection ordinals.
+    CREATE TABLE IF NOT EXISTS session_contexts (
+      session_id TEXT PRIMARY KEY
+        REFERENCES sessions(id) ON DELETE CASCADE,
+      summary_current_state TEXT NOT NULL DEFAULT '',
+      decisions TEXT NOT NULL DEFAULT '[]',
+      open_questions TEXT NOT NULL DEFAULT '[]',
+      next_steps TEXT NOT NULL DEFAULT '[]',
+      revision INTEGER NOT NULL DEFAULT 0,
+      ingest_generation INTEGER NOT NULL DEFAULT 0,
+      processed_through_seq INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+    -- Append-only history of every committed Session Context, so a
+    -- Workstream update can cite `session-context:<id>:<revision>` and prove
+    -- which summary it consumed.
+    CREATE TABLE IF NOT EXISTS session_context_revisions (
+      session_id TEXT NOT NULL
+        REFERENCES sessions(id) ON DELETE CASCADE,
+      revision INTEGER NOT NULL,
+      summary_current_state TEXT NOT NULL DEFAULT '',
+      decisions TEXT NOT NULL DEFAULT '[]',
+      open_questions TEXT NOT NULL DEFAULT '[]',
+      next_steps TEXT NOT NULL DEFAULT '[]',
+      ingest_generation INTEGER NOT NULL DEFAULT 0,
+      processed_through_seq INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
-      runtime TEXT NOT NULL DEFAULT 'heuristic',
-      delta_fingerprint TEXT
+      PRIMARY KEY (session_id, revision)
+    );
+    -- The Workstream side of the two-level revision scheme.
+    -- context_revision guards all ContextItem writes (manual + AI);
+    -- input_revision marks manual Context edits / Owner-set / title /
+    -- description / Trash-Restore that need re-synthesis; AI records the
+    -- input_revision it consumed so its own success does not leave the
+    -- Workstream "pending" again. Created as (0, 1, 0) so the first explicit
+    -- generation is allowed.
+    CREATE TABLE IF NOT EXISTS workstream_context_state (
+      workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id),
+      context_revision INTEGER NOT NULL DEFAULT 0,
+      input_revision INTEGER NOT NULL DEFAULT 0,
+      consumed_input_revision INTEGER NOT NULL DEFAULT 0
+    );
+    -- What the Workstream has already consumed from each Owner Session.
+    -- Written in the same transaction as a combined update; a Session that
+    -- leaves the Owner set is cleaned up on the next successful synthesis.
+    CREATE TABLE IF NOT EXISTS workstream_session_frontiers (
+      workstream_id TEXT NOT NULL REFERENCES workstreams(id),
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      session_context_revision INTEGER NOT NULL DEFAULT 0,
+      ingest_generation INTEGER NOT NULL DEFAULT 0,
+      consumed_through_seq INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (workstream_id, session_id)
     );
     CREATE TABLE IF NOT EXISTS agent_installations (
       agent TEXT PRIMARY KEY,
@@ -449,8 +474,6 @@ const CURRENT_SCHEMA: &str = r#"
       agent TEXT NOT NULL,
       owner_workstream_id TEXT REFERENCES workstreams(id) ON DELETE SET NULL,
       cwd TEXT,
-      context_bundle_markdown TEXT,
-      context_bundle_revisions TEXT,
       process_id INTEGER,
       launched_at TEXT NOT NULL,
       matched_session_id TEXT,
@@ -473,15 +496,6 @@ const CURRENT_SCHEMA: &str = r#"
       right_revision_id TEXT,
       candidate_snapshot_json TEXT
     );
-    CREATE TABLE IF NOT EXISTS context_deliveries (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL REFERENCES sessions(id),
-      workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-      bundle_id TEXT NOT NULL,
-      delivered_revisions TEXT NOT NULL DEFAULT '[]',
-      delivered_conflicts TEXT NOT NULL DEFAULT '[]',
-      delivered_at TEXT NOT NULL
-    );
     CREATE TABLE IF NOT EXISTS ingest_sources (
       id TEXT PRIMARY KEY,
       agent TEXT NOT NULL,
@@ -495,9 +509,8 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
     CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_fingerprint
-      ON sync_runs(session_id, delta_fingerprint)
-      WHERE status = 'ok' AND delta_fingerprint IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_workstream_frontiers_session
+      ON workstream_session_frontiers(session_id);
 
     CREATE TABLE IF NOT EXISTS assistant_sessions (
       id TEXT PRIMARY KEY,
@@ -607,17 +620,20 @@ mod tests {
             ("table", "session_members"),
             ("table", "session_member_cursors"),
             ("table", "session_messages"),
-            ("table", "session_context_state"),
+            ("table", "session_message_projection"),
+            ("table", "session_ingest_state"),
             ("table", "session_member_stats"),
             ("table", "ingestion_diagnostics"),
             ("table", "context_items"),
             ("table", "context_item_revisions"),
-            ("table", "sync_runs"),
+            ("table", "session_contexts"),
+            ("table", "session_context_revisions"),
+            ("table", "workstream_context_state"),
+            ("table", "workstream_session_frontiers"),
             ("table", "agent_installations"),
             ("table", "settings"),
             ("table", "launch_intents"),
             ("table", "context_conflicts"),
-            ("table", "context_deliveries"),
             ("table", "ingest_sources"),
             ("table", "assistant_sessions"),
             ("table", "assistant_messages"),
@@ -634,8 +650,9 @@ mod tests {
             ("index", "idx_session_members_session"),
             ("index", "idx_session_members_parent"),
             ("index", "idx_session_messages_session"),
+            ("index", "idx_projection_message"),
             ("index", "idx_intents_status"),
-            ("index", "idx_sync_runs_fingerprint"),
+            ("index", "idx_workstream_frontiers_session"),
             ("index", "idx_conflict_events_conflict"),
             ("index", "idx_workspace_paths_project"),
             ("index", "idx_workspace_paths_canonical"),
@@ -648,6 +665,6 @@ mod tests {
                 "required_objects() missed {kind} {name}"
             );
         }
-        assert_eq!(found.len(), 41, "required_objects() found an object twice");
+        assert_eq!(found.len(), 45, "required_objects() found an object twice");
     }
 }

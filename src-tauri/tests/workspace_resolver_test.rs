@@ -1,23 +1,17 @@
 //! WorkspaceResolver regression tests.
 //!
-//! The pure, lexical half of the resolver is unit-tested inside
-//! `workspace/resolver.rs` with injected fixtures. This file covers what a
-//! fixture cannot prove: that a real `git` binary, run through
-//! `platform::exec_resolver` + `platform::exec_runner`, produces the
-//! observation the domain claims.
+//! The pure, lexical half is unit-tested inside `workspace/resolver.rs` with
+//! injected fixtures. This file covers what a fixture cannot prove: that a real
+//! `git` binary, run through `platform::exec_resolver` + `platform::exec_runner`,
+//! produces the observation the domain claims.
 //!
-//! Environment rules:
-//! * Nothing here reads or writes the process environment: the Home, the user
-//!   home and the reserved set are all passed in explicitly.
-//! * Nothing here resolves the real `~/.noending`.
-//! * Every repository is created under a real temp directory whose path has been
-//!   `fs::canonicalize`d first — because on macOS `std::env::temp_dir()` is
-//!   `/tmp`, a symlink, and an assertion against an unresolved prefix would
-//!   compare two different spellings of the same directory (rule 7).
-//! * `git init` / `git worktree add` appear ONLY in these fixtures. The product
-//!   path runs two read-only commands and nothing else.
-//! * Every test returns early when the `git` binary cannot be located, so a
-//!   machine without git reports green rather than lying.
+//! Environment rules: nothing here reads or writes the process environment (Home,
+//! user home and the reserved set are passed in explicitly) and nothing resolves
+//! the real `~/.noending`. Every repository lives under a `fs::canonicalize`d temp
+//! directory, because macOS `std::env::temp_dir()` is `/tmp`, a symlink. `git init`
+//! / `git worktree add` appear ONLY in these fixtures. Every test returns early
+//! when the `git` binary cannot be located, so a machine without git reports green
+//! rather than lying.
 
 use noending::domain::{GitDetection, GitWorktreeKind};
 use noending::platform::exec_resolver::resolve_executable;
@@ -42,13 +36,11 @@ fn scratch(tag: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&raw).unwrap();
     let real = std::fs::canonicalize(&raw).unwrap_or(raw);
-    // rule 7: never assert on a temp prefix without normalizing it.
-    // The call below used to compute the normalized string and discard it, so
-    // every fixture handed the resolver — and compared against — the raw
-    // `fs::canonicalize` answer. On macOS that is harmless (`/private/var/…` is
-    // already lexical); on Windows it is `\\?\C:\Users\…`, a verbatim API
-    // spelling no NoEnding row ever carries, which is why five of these tests
-    // were red on the Windows runner and none on the macOS one.
+    // Rule 7: never assert on a temp prefix without normalizing it. The normalized
+    // string used to be computed and discarded, so fixtures handed the resolver the
+    // raw `fs::canonicalize` answer — harmless on macOS, but on Windows a
+    // `\\?\C:\…` verbatim spelling no NoEnding row carries, which reddened five
+    // tests there and none on macOS.
     let normalized =
         identity::normalize_path(&real.to_string_lossy()).expect("temp path normalizes");
     PathBuf::from(normalized)

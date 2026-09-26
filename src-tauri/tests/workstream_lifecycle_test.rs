@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod support;
 
 use noending::domain::{
-    workstream_lifecycle, workstream_visibility, Agent, ContextConflict, ContextDelivery, Session,
+    workstream_lifecycle, workstream_visibility, Agent, ContextConflict, Session,
     SessionMessageRole, Workstream,
 };
 use noending::error::Result;
@@ -22,7 +22,7 @@ use noending::workspace::workstream::{
 use noending::workspace::{normalize_path, WorkspaceAttaching};
 use rusqlite::{params, Connection};
 
-// ------------------------------------------------------------- fixtures
+// fixtures
 
 fn temp_db() -> (PathBuf, Db) {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -95,7 +95,7 @@ fn count(db: &Db, sql: &str, arg: &str) -> i64 {
         .unwrap()
 }
 
-// ------------------------------------------------------------- lifecycle
+// lifecycle
 
 /// must-test — the label is a label: switching it changes the label.
 #[test]
@@ -113,7 +113,6 @@ fn active_to_completed_changes_nothing_else() {
         "user_explicit",
         "manual",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -184,7 +183,6 @@ fn archive_preserves_lifecycle_paths_and_ownership() {
         "user_edit",
         "manual",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -262,7 +260,7 @@ fn archiving_is_idempotent_and_never_a_toggle() {
     assert!(restore_workstream(&db, "no-such-workstream").is_err());
 }
 
-// -------------------------------------------------------- permanent deletion
+// permanent deletion
 
 /// / the destructive door only opens from the bin.
 #[test]
@@ -315,7 +313,6 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     ];
     db.commit_member_ingest(&s.id, &member_id, &messages, None, &support::seed_source(0))
         .unwrap();
-    db.set_processed_message_sequence(&s.id, 2).unwrap();
     // A LaunchIntent naming this Workstream is historical evidence:
     // forbids a fourth path column on it, and M6 forbids touching it at all.
     let intent = noending::domain::LaunchIntent {
@@ -324,8 +321,6 @@ fn permanent_delete_preserves_sessions_and_their_events() {
         agent: Agent::Codex,
         owner_workstream_id: Some(w.id.clone()),
         cwd: Some("/repo/docs".into()),
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: Some(s.id.clone()),
@@ -353,11 +348,11 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     );
     assert_eq!(db.message_count(&s.id).unwrap(), 2, "append-only history");
     assert_eq!(
-        db.get_context_state(&s.id)
+        db.get_session_ingest_state(&s.id)
             .unwrap()
-            .processed_message_sequence,
+            .latest_message_seq,
         2,
-        "context frontier"
+        "the fact frontier survives the purge"
     );
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
@@ -398,11 +393,10 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
         "user_explicit",
         "manual",
         &[],
-        None,
         "user",
     )
     .unwrap();
-    db.apply_status_change(&item.id, "resolved", "user", "改主意了", None, &[])
+    db.apply_status_change(&item.id, "resolved", "user", "改主意了", &[])
         .unwrap();
     // conflict + its audited resolution event
     let second = noending::sync::create_item(
@@ -414,7 +408,6 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
         "system_observed",
         "agent_statement",
         &[],
-        None,
         "agent",
     )
     .unwrap();
@@ -435,17 +428,7 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     db.insert_conflict(&conflict).unwrap();
     db.update_conflict_status(&conflict.id, "resolved", Some("保留用户版"))
         .unwrap();
-    // delivery snapshot and review state
-    db.record_delivery(&ContextDelivery {
-        id: new_id(),
-        session_id: s.id.clone(),
-        workstream_id: w.id.clone(),
-        bundle_id: "b-1".into(),
-        delivered_revisions: vec![item.current_revision_id.clone().unwrap()],
-        delivered_conflicts: vec![conflict.id.clone()],
-        delivered_at: now(),
-    })
-    .unwrap();
+    // review state is Workstream-owned and must be purged with it
     set_owner(&db, &s.id, &w.id);
     let rejected = session(&db, "s-rejected");
     set_owner(&db, &rejected.id, &w.id);
@@ -487,7 +470,6 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
         ("conflicts", "SELECT COUNT(*) FROM context_conflicts WHERE workstream_id = ?1"),
         ("revisions", "SELECT COUNT(*) FROM context_item_revisions WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)"),
         ("items", "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1"),
-        ("deliveries", "SELECT COUNT(*) FROM context_deliveries WHERE workstream_id = ?1"),
         ("workstream paths", "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1"),
         ("review state", "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1"),
         ("the workstream", "SELECT COUNT(*) FROM workstreams WHERE id = ?1"),
@@ -553,7 +535,6 @@ fn permanent_delete_leaves_a_sibling_alone() {
         "user_explicit",
         "manual",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -673,7 +654,6 @@ struct Snapshot {
     owner_sessions: Vec<String>,
     context_items: i64,
     revisions: i64,
-    deliveries: i64,
     review_state: i64,
 }
 
@@ -701,7 +681,6 @@ impl Snapshot {
             owner_sessions,
             context_items: count(db, "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1", workstream_id),
             revisions: count(db, "SELECT COUNT(*) FROM context_item_revisions WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)", workstream_id),
-            deliveries: count(db, "SELECT COUNT(*) FROM context_deliveries WHERE workstream_id = ?1", workstream_id),
             review_state: count(db, "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1", workstream_id),
         }
     }

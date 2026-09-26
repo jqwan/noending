@@ -7,8 +7,7 @@ import { Modal, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SourcesSettings from "./SourcesSettings";
 import AgentRuntimeRow from "./AgentRuntimeSettings";
-import { refreshBaseExperience, useBaseExperience } from "../../app/experience";
-import { AGENT_LABELS, type Agent, type ContextDeliveryLevel, type IngestionDiagnostic, type WorkspaceSettings } from "../../types";
+import { AGENT_LABELS, type Agent, type IngestionDiagnostic, type WorkspaceSettings } from "../../types";
 import type { Route, SettingsSection } from "../../app/routes";
 
 const SECTIONS: { key: SettingsSection; label: string; icon: "settings" | "spark" | "folder" | "palette" | "database" }[] = [
@@ -19,13 +18,8 @@ const SECTIONS: { key: SettingsSection; label: string; icon: "settings" | "spark
   { key: "advanced", icon: "database", label: "数据与高级" },
 ];
 
-/**
- * Settings（整体设计）：Main 内部二级导航 + 内容区。
- * 只暴露真正有用户价值的设置；实现细节（threshold/authority/cursor）不进 UI。
- *
- * Base Experience：Context 相关设置不再是普通入口，
- * 统一收进「数据与高级 → 实验性功能」。
- */
+/** Settings：Main 内部二级导航 + 内容区。只暴露有用户价值的设置。
+ *  实现细节（threshold/authority/cursor）不进 UI。 */
 export default function SettingsView({ section, navigate }: {
   section: SettingsSection;
   navigate: (r: Route) => void;
@@ -63,11 +57,8 @@ export default function SettingsView({ section, navigate }: {
   );
 }
 
-/**
- * 摄入诊断：无法归属到任何会话的内部执行源（child / side 等）。
- * 只展示、没有任何动作——它们不是会话，不参与搜索、上下文与归属。
- * 默认只看反复出现的（后端 minObservations 默认 2）。
- */
+/** 摄入诊断：无法归属到任何会话的内部执行源（child / side 等）。只展示、无动作——
+ *  它们不是会话，不参与搜索、上下文与归属。默认只看反复出现的（minObservations 2）。 */
 function IngestionDiagnosticsSection() {
   const [rows, setRows] = useState<IngestionDiagnostic[] | null>(null);
 
@@ -207,144 +198,8 @@ function AgentsSettings() {
   );
 }
 
-const DELIVERY_LEVELS: { key: ContextDeliveryLevel; label: string; hint: string }[] = [
-  { key: "off", label: "关闭", hint: "不把 NoEnding 的任务 Context 送进 Agent 会话。" },
-  { key: "compact", label: "精简", hint: "只送最重要的当前 Context 与最近变更。" },
-  { key: "balanced", label: "均衡", hint: "送核心 Context 加少量相关信息。" },
-  { key: "detailed", label: "详细", hint: "在需要更多背景时送更广的支撑信息。" },
-];
-
-/** 智能处理开关。它与注入梯度是两个正交开关。 */
-function IntelligenceSettings() {
-  const { intelligenceEnabled } = useBaseExperience();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const change = async (next: boolean) => {
-    if (busy || next === intelligenceEnabled) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.setContextIntelligenceEnabled(next);
-      await refreshBaseExperience();
-    } catch (err) {
-      console.error(err);
-      setError(String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section>
-      <h3>实验性功能</h3>
-      <p className="muted small" style={{ marginTop: 0 }}>
-        自动整理任务与上下文。
-      </p>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Context 智能处理</div>
-          <div className="settings-row-hint">
-            自动提取上下文并归类任务。关闭后仍记录会话，保留已有历史。
-          </div>
-        </div>
-        <div className="settings-seg">
-          <button disabled={busy} className={intelligenceEnabled ? "on" : ""} onClick={() => change(true)}>开启</button>
-          <button disabled={busy} className={intelligenceEnabled ? "" : "on"} onClick={() => change(false)}>关闭</button>
-        </div>
-      </div>
-      {error && (
-        <p className="small" style={{ color: "var(--danger)", marginBottom: 0 }}>{error}</p>
-      )}
-    </section>
-  );
-}
-
-/** Context Delivery：注入梯度（实验区，）。 */
-function ContextDeliverySettings() {
-  const [level, setLevel] = useState<ContextDeliveryLevel>("off");
-  const [loading, setLoading] = useState<boolean>(true);
-  const [saving, setSaving] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    api.getContextDeliveryLevel()
-      .then((lvl) => {
-        if (active) setLevel(lvl);
-      })
-      .catch((err) => {
-        if (active) {
-          console.error(err);
-          setError(String(err));
-        }
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const changeLevel = async (next: ContextDeliveryLevel) => {
-    if (saving || loading || next === level) return;
-    const prev = level;
-    setSaving(true);
-    setLevel(next);
-    setError(null);
-    try {
-      await api.setContextDeliveryLevel(next);
-      await refreshBaseExperience();
-    } catch (err) {
-      console.error(err);
-      setLevel(prev);
-      setError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const currentHint = DELIVERY_LEVELS.find((d) => d.key === level)?.hint;
-
-  return (
-    <section>
-      <h3 style={{ marginTop: 0 }}>Context 注入</h3>
-      <p className="muted small" style={{ marginTop: 0 }}>
-        控制新建 / 继续会话时，NoEnding 送进去多少任务 Context。
-        它只影响对外注入，不会停止摄入与同步。
-      </p>
-      <div className="settings-seg">
-        {DELIVERY_LEVELS.map((d) => (
-          <button
-            key={d.key}
-            disabled={loading || saving}
-            className={level === d.key ? "on" : ""}
-            onClick={() => changeLevel(d.key)}
-          >
-            {d.label}
-          </button>
-        ))}
-      </div>
-      {currentHint && (
-        <p className="muted small" style={{ marginBottom: 0, marginTop: 8 }}>
-          {currentHint}
-        </p>
-      )}
-      {error && (
-        <p className="small" style={{ color: "var(--danger)", marginBottom: 0, marginTop: 8 }}>
-          {error}
-        </p>
-      )}
-    </section>
-  );
-}
-
 /** 自动化：只读说明，状态必须是真的。 */
 function AutomationSettings() {
-  const { intelligenceEnabled, deliveryLevel } = useBaseExperience();
-  const deliveryLabel = DELIVERY_LEVELS.find((d) => d.key === deliveryLevel)?.label ?? deliveryLevel;
   return (
     <section>
       <h3 style={{ marginTop: 0 }}>自动化</h3>
@@ -357,19 +212,12 @@ function AutomationSettings() {
       </div>
       <div className="row-line">
         <div>
-          <div className="settings-row-label">Context 提取</div>
-          <div className="settings-row-hint">只对已设置所属任务的会话提取 Context；未归属的会话只摄入事件。</div>
+          <div className="settings-row-label">Context 更新</div>
+          <div className="settings-row-hint">
+            不再自动提取：在 Session 或任务页面点击「生成 / 更新摘要」与「更新状态」时才调用模型。
+          </div>
         </div>
-        <span className={`badge ${intelligenceEnabled ? "success" : ""}`}>
-          {intelligenceEnabled ? "开" : "关"}
-        </span>
-      </div>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Context 注入</div>
-          <div className="settings-row-hint">由「实验性功能 → Context 注入」决定送多少。</div>
-        </div>
-        <span className={`badge ${deliveryLevel === "off" ? "" : "success"}`}>{deliveryLabel}</span>
+        <span className="badge">手动</span>
       </div>
       <div className="row-line">
         <div>
@@ -382,7 +230,7 @@ function AutomationSettings() {
   );
 }
 
-/** Appearance：Theme（tokens 支持暗色，）；Density 暂缓。 */
+/** Appearance：主题设置（tokens 支持暗色）；Density 暂缓。 */
 type Theme = "system" | "light" | "dark";
 const THEME_LABELS: Record<Theme, string> = { system: "跟随系统", light: "浅色", dark: "深色" };
 function AppearanceSettings() {
@@ -420,28 +268,20 @@ function AppearanceSettings() {
   );
 }
 
-/** Data & Advanced：NoEnding Home + 实验性功能（含 Context 相关设置，）。 */
+/** Data & Advanced：NoEnding Home + 自动化说明。 */
 function AdvancedSettings() {
   return (
     <>
-      <IntelligenceSettings />
-      <ContextDeliverySettings />
       <AutomationSettings />
       <WorkspaceStorageSettings />
     </>
   );
 }
 
-/* ------------------------------------------------------------------ *
- * NoEnding Home
- *
- * 这一屏只有一个硬规矩：**说的必须是当前真正在写的那一份**。
- * `get_workspace_settings` 读的是启动时解析并 manage 进应用的 Home，
- * 不是重新解析一遍。
- * 改位置因此不切库，只写 bootstrap 指针的 `pending_home`，
- * 下一次启动、打开数据库之前才移动，所以 `restart_required`
- * 与 `pending_home` 必须原样显示出来，不能吞掉。
- * ------------------------------------------------------------------ */
+/* NoEnding Home：说的必须是当前真正在写的那一份。`get_workspace_settings` 读的是
+ * 启动时解析并 manage 进应用的 Home（不重新解析）；改位置不切库，只写 bootstrap
+ * 指针的 `pending_home`，下次启动打开数据库前才移动——所以 `restart_required` 与
+ * `pending_home` 必须原样显示，不能吞掉。 */
 
 /** `home_source` 的中文说明。 */
 function homeSourceLabel(source: string | null | undefined): string {
@@ -493,8 +333,7 @@ function WorkspaceStorageSettings() {
     );
   }
 
-  /* restart_required 与 pending_home 是两个信号，各自都要露出来：
-     今天后端让 `restart_required = pending_home.is_some()`，但任一字段单独出现
+  /* restart_required 与 pending_home 是两个信号，各自都要露出来：任一字段单独出现
      都意味着有件事还没落地，不能被另一个字段的空值吞掉。 */
   const pending = settings.pending_home;
   const relocationPending = settings.restart_required || pending !== null;
@@ -634,11 +473,8 @@ function WarnCallout({ title, children }: {
 }
 
 /**
- * 更改 NoEnding Home：只登记下一次启动要搬去的地方。
- *
- * 这里不说「已迁移」，也不给「立即生效」—— 在同一个进程里换数据库会留下两份
- * 分叉的写入。同样要在按钮之前说清的两句：只搬应用拥有的
- * data/ runtime/ logs/，旧 Home 的 workspace/ 里的用户文件不动。
+ * 更改 NoEnding Home：只登记下一次启动要搬去的地方（同进程换库会留下两份分叉写入）。
+ * 说清两句：只搬应用拥有的 data/ runtime/ logs/，旧 Home 的 workspace/ 用户文件不动。
  */
 function ChangeHomeModal({ current, onClose, onSaved }: {
   current: WorkspaceSettings;

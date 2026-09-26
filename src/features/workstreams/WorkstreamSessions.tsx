@@ -8,12 +8,10 @@ import { AGENT_LABELS, type Session } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
- * Workstream 的 Sessions 段落：这一页的主角。
+ * Workstream 的 Sessions 段落，这一页的主角。
  *
- * 列表口径是**归属**：`owner_workstream_id == 当前 Workstream` 的
- * Sessions，所以同一个 Session 不会同时出现在两个任务的列表里。每行的
- * 「继续」挂载 Resume 的同一个 Modal，由它走
- * prepare → 状态指纹 → launch_prepared；本页不再直接调用 launcher。
+ * 列表口径是归属：`owner_workstream_id == 当前 Workstream` 的 Sessions，所以同一个
+ * Session 不会同时出现在两个任务的列表里。每行的「继续」挂载 Resume 的同一个 Modal。
  */
 export default function WorkstreamSessions({ sessions, navigate, onNewSession, allowActions = true }: {
   sessions: Session[];

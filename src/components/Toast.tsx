@@ -1,9 +1,6 @@
 import { useEffect, useState } from "react";
 
-/**
- * 轻量全局 Toast：New / Resume 成功后不再强制弹 LaunchResultModal，
- * 只提示结果，「查看详情」作为可选入口打开完整启动信息。
- */
+/** 轻量全局 Toast：New / Resume 成功后只提示结果，「查看详情」作为可选入口。 */
 export interface ToastAction {
   label: string;
   onClick: () => void;

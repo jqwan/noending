@@ -1,589 +1,1069 @@
-//! Context Builder — produces the SessionContextBundle handed to agents.
+//! Context read models and the explicit Context update service.
 //!
-//! New session: minimal sufficient context (Goal, Current State,
-//! Constraints, Decisions, Open Questions, high-relevance items).
-//! Resume: a *delta* against the last successfully delivered revision set
-//! (recorded in `context_deliveries`), never a re-dump of full context.
+//! Two read commands (`getSessionContext`, `getWorkstreamContext`) plus
+//! pending-state reads are pure reads — they never scan a Source or call AI.
 //!
-//! Multi-workstream bundles are aggregated FIRST (dedup / rank / conflicts)
-//! and only then rendered — never stitched together while looping.
+//! Two write entry points each run AT MOST ONE model call, then validate and
+//! commit in a single transaction:
+//!
+//! * `update_session` — asks the model for one new four-field summary of the
+//!   Session and commits it with CAS on the revision / generation / message
+//!   prefix.
+//! * `update_workstream` — asks once for all affected Session Contexts AND the
+//!   Workstream mutations, and commits everything atomically.
+//!
+//! CLI failure / timeout / invalid output NEVER falls back to a heuristic.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::domain::{ContextConflict, Session, CORE_ITEM_TYPES};
-use crate::error::Result;
-use crate::storage::{new_id, Db};
+use crate::domain::WorkstreamSessionFrontier;
+use crate::domain::{
+    workstream_visibility, ContextItem, ContextItemRevision, ContextUpdateError,
+    ContextUpdateStatus, Session, SessionContextFields, SessionContextRecord, SessionMessage,
+};
+use crate::error::{other, AppError, Result};
+use crate::storage::context_repo::{
+    self, commit_session_context_conn, consume_input_revision_conn, get_ingest_state_conn,
+    get_session_context_conn, get_workstream_context_state_conn, projection_ids_conn,
+    set_workstream_frontier_conn,
+};
+use crate::storage::Db;
+use crate::sync::extractor::{
+    self, CliExtractor, PromptInput, PromptRefs, PromptSession, INPUT_LIMIT_BYTES,
+    SESSION_CONTEXT_RESERVE_BYTES, WORKSTREAM_RESERVE_BYTES,
+};
+use crate::sync::merge::MergeEngine;
+use crate::sync::{MergeContext, SessionContextDraft};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextDeliveryLevel {
-    Off,
-    Compact,
-    Balanced,
-    Detailed,
-}
+use crate::domain::CORE_ITEM_TYPES;
 
-impl Default for ContextDeliveryLevel {
-    fn default() -> Self {
-        Self::Balanced
-    }
-}
+// Read models
 
-impl ContextDeliveryLevel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Compact => "compact",
-            Self::Balanced => "balanced",
-            Self::Detailed => "detailed",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().as_str() {
-            "off" => Some(Self::Off),
-            "compact" => Some(Self::Compact),
-            "balanced" => Some(Self::Balanced),
-            "detailed" => Some(Self::Detailed),
-            _ => None,
-        }
-    }
-
-    pub fn policy(&self) -> ContextDeliveryPolicy {
-        match self {
-            Self::Off => ContextDeliveryPolicy {
-                enabled: false,
-                new_token_budget: 0,
-                resume_token_budget: 0,
-                new_extended_limit: 0,
-                resume_first_delivery_extended_limit: 0,
-                conflict_limit: 0,
-            },
-            Self::Compact => ContextDeliveryPolicy {
-                enabled: true,
-                new_token_budget: 2000,
-                resume_token_budget: 1500,
-                new_extended_limit: 3,
-                resume_first_delivery_extended_limit: 2,
-                conflict_limit: 2,
-            },
-            Self::Balanced => ContextDeliveryPolicy {
-                enabled: true,
-                new_token_budget: 4000,
-                resume_token_budget: 3000,
-                new_extended_limit: 10,
-                resume_first_delivery_extended_limit: 5,
-                conflict_limit: 5,
-            },
-            Self::Detailed => ContextDeliveryPolicy {
-                enabled: true,
-                new_token_budget: 8000,
-                resume_token_budget: 6000,
-                new_extended_limit: 20,
-                resume_first_delivery_extended_limit: 10,
-                conflict_limit: 10,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContextDeliveryPolicy {
-    pub enabled: bool,
-    pub new_token_budget: usize,
-    pub resume_token_budget: usize,
-    pub new_extended_limit: usize,
-    pub resume_first_delivery_extended_limit: usize,
-    pub conflict_limit: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// L1 projection: active items of core types, in canonical order.
+#[derive(Debug, Clone, Serialize)]
 pub struct ContextSection {
-    pub kind: String, // goal | current_state | constraint | decision | open_question | item | delta | gone | conflict | reminder
+    pub kind: String,
     pub title: String,
     pub content: String,
     pub authority: String,
     pub source_ref: Option<String>,
-    /// Which workstream produced this section (for delivery snapshots).
-    pub workstream_id: Option<String>,
-    /// The revision this section reflects (for delivery snapshots).
+    pub item_id: String,
     pub revision_id: Option<String>,
-    /// The conflict this section reflects (for delivery snapshots).
-    pub conflict_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionContextBundle {
-    pub bundle_id: String,
-    pub mode: String, // new | resume
-    pub delivery_level: String,
-    /// The single Workstream this bundle routes to, or `None` for an empty
-    /// bundle. A Session has at most one Owner Workstream, so a
-    /// bundle never aggregates several — no primary/related, no cross-workstream
-    /// dedup.
-    pub workstream_id: Option<String>,
-    pub sections: Vec<ContextSection>,
-    pub markdown: String,
-    pub approx_tokens: usize,
-}
-
-impl SessionContextBundle {
-    fn empty(mode: &str, delivery_level_label: &str, workstream_id: Option<String>) -> Self {
-        Self {
-            bundle_id: new_id(),
-            mode: mode.to_string(),
-            delivery_level: delivery_level_label.to_string(),
-            workstream_id,
-            sections: vec![],
-            markdown: String::new(),
-            approx_tokens: 0,
-        }
-    }
-}
-
-/// L1 projection: active items of core types, in canonical order.
 pub fn resolve_core_context(db: &Db, workstream_id: &str) -> Result<Vec<ContextSection>> {
     let items = db.items_for_workstream(workstream_id, false)?;
     let mut out = Vec::new();
     for want in CORE_ITEM_TYPES {
         for (item, rev) in &items {
             if &item.kind == want {
-                out.push(ContextSection {
-                    kind: want.to_string(),
-                    title: rev.title.clone(),
-                    content: rev.content.clone(),
-                    authority: item.authority.clone(),
-                    source_ref: rev.source_ref.clone(),
-                    workstream_id: Some(workstream_id.to_string()),
-                    revision_id: Some(rev.id.clone()),
-                    conflict_id: None,
-                });
+                out.push(section_of(item, rev));
             }
         }
     }
     Ok(out)
 }
 
-/// Build the markdown bundle for one Workstream.
-///
-/// `workstream_id == None` yields an EMPTY bundle: a Session with
-/// no Owner Workstream has no context route, and nothing is assembled from
-/// elsewhere. The token budget applies at SECTION SELECTION time, before
-/// rendering: `bundle.sections` contains exactly the sections the rendered
-/// markdown delivers — never more. Delivery snapshots are derived from
-/// `sections`, so filtering after rendering (the old behavior) would record
-/// context as "delivered" that the agent never received, and the next resume
-/// would skip it as a false delta.
-pub fn build_bundle(
-    db: &Db,
-    mode: &str,
-    session: Option<&Session>,
-    workstream_id: Option<&str>,
-    delivery_level: ContextDeliveryLevel,
-) -> Result<SessionContextBundle> {
-    build_bundle_with_policy(
-        db,
-        mode,
-        session,
-        workstream_id,
-        delivery_level.policy(),
-        delivery_level.as_str(),
-    )
+fn section_of(item: &ContextItem, rev: &ContextItemRevision) -> ContextSection {
+    ContextSection {
+        kind: item.kind.clone(),
+        title: rev.title.clone(),
+        content: rev.content.clone(),
+        authority: item.authority.clone(),
+        source_ref: rev.source_ref.clone(),
+        item_id: item.id.clone(),
+        revision_id: Some(rev.id.clone()),
+    }
 }
 
-pub fn build_bundle_with_policy(
-    db: &Db,
-    mode: &str,
-    session: Option<&Session>,
-    workstream_id: Option<&str>,
-    policy: ContextDeliveryPolicy,
-    delivery_level_label: &str,
-) -> Result<SessionContextBundle> {
-    if mode == "resume" && session.is_none() {
-        return Err(crate::error::other("Resume 模式必须提供 Session"));
-    }
+/// The read model behind `getSessionContext`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionContextView {
+    pub session_id: String,
+    /// `None` means the Session has never had a summary generated.
+    pub fields: Option<SessionContextFields>,
+    pub revision: i64,
+    pub ingest_generation: i64,
+    pub processed_through_seq: i64,
+    pub latest_message_seq: i64,
+    pub updated_at: Option<String>,
+    /// True when there is work an "更新摘要" would process.
+    pub pending: bool,
+}
 
-    let Some(ws_id) = workstream_id else {
-        return Ok(SessionContextBundle::empty(
-            mode,
-            delivery_level_label,
-            None,
-        ));
+/// The read model behind `getWorkstreamContext`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkstreamContextView {
+    pub workstream_id: String,
+    pub title: String,
+    pub description: String,
+    pub lifecycle: String,
+    pub sections: Vec<ContextSection>,
+    pub context_revision: i64,
+    pub input_revision: i64,
+    pub consumed_input_revision: i64,
+    /// True when a "更新状态" has something to synthesize.
+    pub pending: bool,
+    pub pending_sessions: usize,
+}
+
+pub fn session_context_view(db: &Db, session_id: &str) -> Result<SessionContextView> {
+    let ctx = db.get_session_context(session_id)?;
+    let ingest = db.get_session_ingest_state(session_id)?;
+    let from = match &ctx {
+        Some(c) if c.ingest_generation == ingest.generation => c.processed_through_seq,
+        _ => 0,
     };
+    let generation_changed = ctx
+        .as_ref()
+        .is_some_and(|context| context.ingest_generation != ingest.generation);
+    let pending = generation_changed || ingest.latest_message_seq > from;
+    Ok(SessionContextView {
+        session_id: session_id.to_string(),
+        fields: ctx.as_ref().map(|c| c.fields.clone()),
+        revision: ctx.as_ref().map(|c| c.revision).unwrap_or(0),
+        ingest_generation: ingest.generation,
+        processed_through_seq: from,
+        latest_message_seq: ingest.latest_message_seq,
+        updated_at: ctx.as_ref().map(|c| c.updated_at.clone()),
+        pending,
+    })
+}
 
-    if !policy.enabled {
-        return Ok(SessionContextBundle::empty(
-            mode,
-            delivery_level_label,
-            Some(ws_id.to_string()),
-        ));
+pub fn workstream_context_view(db: &Db, workstream_id: &str) -> Result<WorkstreamContextView> {
+    let ws = db
+        .get_workstream(workstream_id)?
+        .ok_or_else(|| other("Workstream 不存在"))?;
+    let state = db.get_workstream_context_state(workstream_id)?;
+    let sessions = db.sessions_for_workstream(workstream_id)?;
+    let mut pending_sessions = 0;
+    for s in &sessions {
+        if session_needs_workstream_update(db, workstream_id, s)? {
+            pending_sessions += 1;
+        }
+    }
+    let input_pending = state.input_revision > state.consumed_input_revision;
+    let items = db.items_for_workstream(workstream_id, false)?;
+    let sections = items.iter().map(|(i, r)| section_of(i, r)).collect();
+    Ok(WorkstreamContextView {
+        workstream_id: ws.id.clone(),
+        title: ws.title.clone(),
+        description: ws.description.clone(),
+        lifecycle: ws.lifecycle.clone(),
+        sections,
+        context_revision: state.context_revision,
+        input_revision: state.input_revision,
+        consumed_input_revision: state.consumed_input_revision,
+        pending: input_pending || pending_sessions > 0,
+        pending_sessions,
+    })
+}
+
+fn session_needs_workstream_update(db: &Db, workstream_id: &str, s: &Session) -> Result<bool> {
+    let ingest = db.get_session_ingest_state(&s.id)?;
+    let ctx = db.get_session_context(&s.id)?;
+    if ctx
+        .as_ref()
+        .is_some_and(|context| context.ingest_generation != ingest.generation)
+    {
+        return Ok(true);
+    }
+    let frontier = db
+        .workstream_frontiers(workstream_id)?
+        .into_iter()
+        .find(|f| f.session_id == s.id);
+    let Some(f) = frontier else {
+        return Ok(ingest.latest_message_seq > 0);
+    };
+    if f.ingest_generation != ingest.generation {
+        return Ok(true);
+    }
+    if ingest.latest_message_seq > f.consumed_through_seq {
+        return Ok(true);
+    }
+    let rev = ctx.as_ref().map(|c| c.revision).unwrap_or(0);
+    Ok(rev > f.session_context_revision)
+}
+
+// Outcomes
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionUpdateOutcome {
+    pub session_id: String,
+    pub status: ContextUpdateStatus,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkstreamUpdateOutcome {
+    pub workstream_id: String,
+    pub status: ContextUpdateStatus,
+    pub context_revision: i64,
+    pub updated_sessions: Vec<String>,
+    pub mutations_applied: usize,
+    /// Sessions still needing an update after this call (budget-limited).
+    pub remaining_pending: usize,
+}
+
+// Session update
+
+pub fn update_session(db: &Db, session_id: &str) -> Result<SessionUpdateOutcome> {
+    let session = db
+        .get_session(session_id)?
+        .ok_or_else(|| other("会话不存在"))?;
+    if session.trashed_at.is_some() {
+        return Err(other("会话已移入回收站，暂不可更新摘要"));
     }
 
-    let mut sections: Vec<ContextSection> = Vec::new();
-
-    // The one Workstream header this bundle belongs to.
-    if let Some(ws) = db.get_workstream(ws_id)? {
-        sections.push(ContextSection {
-            kind: "workstream_header".into(),
-            title: ws.title.clone(),
-            content: if ws.description.is_empty() {
-                String::new()
-            } else {
-                ws.description.clone()
-            },
-            authority: "system_observed".into(),
-            source_ref: None,
-            workstream_id: Some(ws.id.clone()),
-            revision_id: None,
-            conflict_id: None,
+    let existing = db.get_session_context(session_id)?;
+    let ingest = db.get_session_ingest_state(session_id)?;
+    let from = match &existing {
+        Some(c) if c.ingest_generation == ingest.generation => c.processed_through_seq,
+        _ => 0,
+    };
+    let all = db.get_messages_after(session_id, from, 1_000_000)?;
+    if all.is_empty() {
+        if existing
+            .as_ref()
+            .is_some_and(|context| context.ingest_generation != ingest.generation)
+        {
+            let expect_rev = existing
+                .as_ref()
+                .map(|context| context.revision)
+                .unwrap_or(0);
+            let revision = commit_session_update(
+                db,
+                session_id,
+                expect_rev,
+                ingest.generation,
+                0,
+                0,
+                &[],
+                &SessionContextFields::default(),
+            )?
+            .ok_or_else(|| {
+                AppError::context(ContextUpdateError::ConcurrencyConflict(
+                    "内容已变化，请重新更新".into(),
+                ))
+            })?;
+            return Ok(SessionUpdateOutcome {
+                session_id: session_id.to_string(),
+                status: ContextUpdateStatus::Updated,
+                revision,
+            });
+        }
+        return Ok(SessionUpdateOutcome {
+            session_id: session_id.to_string(),
+            status: ContextUpdateStatus::NoChange,
+            revision: existing.as_ref().map(|c| c.revision).unwrap_or(0),
         });
     }
 
-    let core = resolve_core_context(db, ws_id)?;
+    let cli = require_cli(db)?;
 
-    if mode == "resume" {
-        let session = session.ok_or_else(|| crate::error::other("Resume 模式必须提供 Session"))?;
-        sections.extend(build_resume_sections(db, session, ws_id, &core, &policy)?);
-    } else {
-        sections.extend(core.clone());
-
-        // extended items — most recent first, trimmed hard for budget.
-        let items = db.items_for_workstream(ws_id, false)?;
-        for (item, rev) in items
-            .iter()
-            .filter(|(item, _)| !CORE_ITEM_TYPES.contains(&item.kind.as_str()))
-            .take(policy.new_extended_limit)
-        {
-            sections.push(ContextSection {
-                kind: item.kind.clone(),
-                title: rev.title.clone(),
-                content: crate::adapters::truncate_text(&rev.content, 400),
-                authority: item.authority.clone(),
-                source_ref: rev.source_ref.clone(),
-                workstream_id: Some(ws_id.to_string()),
-                revision_id: Some(rev.id.clone()),
-                conflict_id: None,
-            });
-        }
-
-        for c in db
-            .conflicts_for_workstream(ws_id, false)?
-            .iter()
-            .take(policy.conflict_limit)
-        {
-            sections.push(conflict_section(db, c)?);
-        }
-    }
-
-    let budget = if mode == "resume" {
-        policy.resume_token_budget
-    } else {
-        policy.new_token_budget
+    let heading = session
+        .title
+        .clone()
+        .unwrap_or_else(|| "该会话".to_string());
+    let build = |msgs: &[SessionMessage]| -> (String, PromptRefs) {
+        let current_context = existing
+            .as_ref()
+            .filter(|context| context.ingest_generation == ingest.generation);
+        let input = PromptInput {
+            workstream_title: format!("仅更新该 Session 摘要（{heading}）"),
+            workstream_description: String::new(),
+            item_lines: Vec::new(),
+            sessions: vec![PromptSession {
+                session_id: session_id.to_string(),
+                is_target: true,
+                existing: current_context.map(|c| c.fields.clone()),
+                existing_revision: current_context.map(|c| c.revision),
+                messages: msgs.to_vec(),
+            }],
+            messages: msgs.to_vec(),
+        };
+        extractor::build_update_prompt(&input)
     };
 
-    // Sections fit the budget or they are not delivered — and what is not
-    // delivered must not appear in `sections` (see doc above).
-    let (markdown, delivered_sections) = render_markdown_within_budget(mode, &sections, budget * 3);
-    Ok(SessionContextBundle {
-        bundle_id: new_id(),
-        mode: mode.to_string(),
-        delivery_level: delivery_level_label.to_string(),
-        workstream_id: Some(ws_id.to_string()),
-        sections: delivered_sections,
-        approx_tokens: markdown.len() / 3, // rough CJK/EN mix heuristic
-        markdown,
+    let (msgs, prompt, refs) = select_message_prefix(build, &all, SESSION_CONTEXT_RESERVE_BYTES)?;
+    let upper = from + msgs.len() as i64;
+
+    let raw = cli
+        .run(&prompt)
+        .map_err(|e| AppError::context(ContextUpdateError::ModelCallFailed(e.to_string())))?;
+    let expected_targets = vec![session_id.to_string()];
+    let allowed_items: HashSet<String> = HashSet::new();
+    let parsed = extractor::parse_update_output(&raw, &refs, "", &expected_targets, &allowed_items)
+        .map_err(|e| AppError::context(ContextUpdateError::InvalidOutput(e.to_string())))?;
+    let draft = parsed.session_contexts.into_iter().next().ok_or_else(|| {
+        AppError::context(ContextUpdateError::InvalidOutput("缺少摘要输出".into()))
+    })?;
+
+    let expect_rev = existing.as_ref().map(|c| c.revision).unwrap_or(0);
+    let prefix: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
+    let committed = commit_session_update(
+        db,
+        session_id,
+        expect_rev,
+        ingest.generation,
+        from,
+        upper,
+        &prefix,
+        &draft.fields,
+    )?;
+    let revision = committed.ok_or_else(|| {
+        AppError::context(ContextUpdateError::ConcurrencyConflict(
+            "内容已变化，请重新更新".into(),
+        ))
+    })?;
+
+    let status = if upper >= ingest.latest_message_seq {
+        ContextUpdateStatus::Updated
+    } else {
+        ContextUpdateStatus::Partial
+    };
+    Ok(SessionUpdateOutcome {
+        session_id: session_id.to_string(),
+        status,
+        revision,
     })
 }
 
-/// Resume = Current − LastDelivered. Uses the recorded revision snapshot,
-/// not timestamps: same-second edits, replayed revisions and clock skew
-/// cannot fool it. "已经消失" itself counts as a change.
-fn build_resume_sections(
+/// Commit one Session Context update with CAS on revision / generation /
+/// message prefix. Returns `Ok(None)` when the snapshot moved (nothing was
+/// written) so the caller can surface `stale_snapshot`.
+#[allow(clippy::too_many_arguments)]
+fn commit_session_update(
     db: &Db,
-    session: &Session,
-    workstream_id: &str,
-    core: &[ContextSection],
-    policy: &ContextDeliveryPolicy,
-) -> Result<Vec<ContextSection>> {
-    let deliveries = db.latest_deliveries(&session.id)?;
-    let delivery = deliveries.iter().find(|d| d.workstream_id == workstream_id);
+    session_id: &str,
+    expect_rev: i64,
+    generation: i64,
+    from: i64,
+    upper: i64,
+    prefix: &[String],
+    fields: &SessionContextFields,
+) -> Result<Option<i64>> {
+    db.tx(|tx| {
+        let cur_rev = get_session_context_conn(tx, session_id)?
+            .map(|c| c.revision)
+            .unwrap_or(0);
+        if cur_rev != expect_rev {
+            return Ok(None);
+        }
+        if get_ingest_state_conn(tx, session_id)?.generation != generation {
+            return Ok(None);
+        }
+        let ids = projection_ids_conn(tx, session_id)?;
+        if ids.len() < upper as usize {
+            return Ok(None);
+        }
+        let start = from as usize;
+        for (i, exp) in prefix.iter().enumerate() {
+            if ids.get(start + i) != Some(exp) {
+                return Ok(None);
+            }
+        }
+        let rev =
+            commit_session_context_conn(tx, session_id, fields, expect_rev, generation, upper)?;
+        Ok(Some(rev))
+    })
+}
 
-    let mut sections = Vec::new();
+// Workstream combined update
 
-    // Minimal core reminder: this workstream's goal / current state.
-    for s in core {
-        if s.kind == "goal" || s.kind == "current_state" {
-            let mut s = s.clone();
-            s.kind = "reminder".into();
-            sections.push(s);
+struct TargetSession {
+    session: Session,
+    existing: Option<SessionContextRecord>,
+    frontier: Option<WorkstreamSessionFrontier>,
+    generation: i64,
+    from: i64,
+    messages: Vec<SessionMessage>,
+}
+
+impl Clone for TargetSession {
+    fn clone(&self) -> Self {
+        TargetSession {
+            session: self.session.clone(),
+            existing: self.existing.clone(),
+            frontier: self.frontier.clone(),
+            generation: self.generation,
+            from: self.from,
+            messages: self.messages.clone(),
         }
     }
+}
 
-    let mut any_change = false;
+pub fn update_workstream(db: &Db, workstream_id: &str) -> Result<WorkstreamUpdateOutcome> {
+    let ws = db
+        .get_workstream(workstream_id)?
+        .ok_or_else(|| other("Workstream 不存在"))?;
+    if ws.visibility == workstream_visibility::ARCHIVED {
+        return Err(other("已归档的 Workstream 只读，恢复后才能更新状态"));
+    }
 
-    let Some(delivery) = delivery else {
-        // Never delivered to this session: inject the full core + top extended
-        // items (first delivery).
-        any_change = true;
-        sections.extend(core.iter().cloned());
-        let items = db.items_for_workstream(workstream_id, false)?;
-        for (item, rev) in items
-            .iter()
-            .filter(|(item, _)| !CORE_ITEM_TYPES.contains(&item.kind.as_str()))
-            .take(policy.resume_first_delivery_extended_limit)
-        {
-            sections.push(ContextSection {
-                kind: item.kind.clone(),
-                title: rev.title.clone(),
-                content: crate::adapters::truncate_text(&rev.content, 400),
-                authority: item.authority.clone(),
-                source_ref: rev.source_ref.clone(),
-                workstream_id: Some(workstream_id.to_string()),
-                revision_id: Some(rev.id.clone()),
-                conflict_id: None,
-            });
-        }
-        for c in db
-            .conflicts_for_workstream(workstream_id, false)?
-            .iter()
-            .take(policy.conflict_limit)
-        {
-            sections.push(conflict_section(db, c)?);
-        }
-        if !any_change {
-            sections.retain(|s| s.kind == "reminder");
-        }
-        return Ok(sections);
-    };
-
-    let delivered: HashSet<&str> = delivery
-        .delivered_revisions
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-    let delivered_conflicts: HashSet<&str> = delivery
-        .delivered_conflicts
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-
-    // 1. new or updated: active items whose current revision was never
-    //    delivered.
+    let state = db.get_workstream_context_state(workstream_id)?;
     let items = db.items_for_workstream(workstream_id, false)?;
-    for (item, rev) in &items {
-        if !delivered.contains(rev.id.as_str()) {
-            any_change = true;
-            sections.push(ContextSection {
-                kind: "delta".into(),
-                title: rev.title.clone(),
-                content: rev.content.clone(),
-                authority: item.authority.clone(),
-                source_ref: rev.source_ref.clone(),
-                workstream_id: Some(workstream_id.to_string()),
-                revision_id: Some(rev.id.clone()),
-                conflict_id: None,
+    let allowed_items: HashSet<String> = items.iter().map(|(i, _)| i.id.clone()).collect();
+    let item_lines: Vec<String> = items
+        .iter()
+        .map(|(i, r)| format!("- item_id={} | {} | {}", i.id, i.kind, r.title))
+        .collect();
+
+    let frontiers: HashMap<String, WorkstreamSessionFrontier> = db
+        .workstream_frontiers(workstream_id)?
+        .into_iter()
+        .map(|f| (f.session_id.clone(), f))
+        .collect();
+
+    let sessions = db.sessions_for_workstream(workstream_id)?;
+
+    let mut targets: Vec<TargetSession> = Vec::new();
+    let mut read_only: Vec<ReadOnlySession> = Vec::new();
+
+    for session in sessions {
+        let existing = db.get_session_context(&session.id)?;
+        let ingest = db.get_session_ingest_state(&session.id)?;
+        let frontier = frontiers.get(&session.id).cloned();
+
+        let generation_changed = match &frontier {
+            Some(f) => f.ingest_generation != ingest.generation,
+            None => ingest.latest_message_seq > 0,
+        } || existing
+            .as_ref()
+            .is_some_and(|context| context.ingest_generation != ingest.generation);
+        let from = if generation_changed {
+            0
+        } else {
+            frontier
+                .as_ref()
+                .map(|f| f.consumed_through_seq)
+                .unwrap_or(0)
+        };
+        let messages = db.get_messages_after(&session.id, from, 1_000_000)?;
+
+        if !messages.is_empty() {
+            targets.push(TargetSession {
+                session,
+                existing: existing.clone(),
+                frontier,
+                generation: ingest.generation,
+                from,
+                messages,
             });
+        } else if generation_changed {
+            read_only.push(ReadOnlySession {
+                session_id: session.id,
+                context: existing,
+                generation: ingest.generation,
+                latest_message_seq: ingest.latest_message_seq,
+                invalidate_context: true,
+            });
+        } else if let Some(c) = existing {
+            let rev = c.revision;
+            let consumed = frontier
+                .as_ref()
+                .map(|f| f.session_context_revision)
+                .unwrap_or(0);
+            if rev > consumed {
+                read_only.push(ReadOnlySession {
+                    session_id: session.id,
+                    context: Some(c),
+                    generation: ingest.generation,
+                    latest_message_seq: ingest.latest_message_seq,
+                    invalidate_context: false,
+                });
+            }
         }
     }
 
-    // 2. disappeared: previously delivered revisions whose items are no
-    //    longer active (resolved / superseded / deleted).
-    for rev_id in &delivery.delivered_revisions {
-        if let Some(rev) = db.get_revision(rev_id)? {
-            if let Some(item) = db.get_item(&rev.item_id)? {
-                if item.status != "active" {
-                    any_change = true;
-                    sections.push(ContextSection {
-                        kind: "gone".into(),
-                        title: rev.title.clone(),
-                        content: format!(
-                            "该条目已{}，不再属于当前有效上下文。",
-                            match item.status.as_str() {
-                                "resolved" => "被标记完成",
-                                "superseded" => "被新版本取代",
-                                "deleted" => "被删除",
-                                other => other,
-                            }
+    let input_pending = state.input_revision > state.consumed_input_revision;
+    if targets.is_empty() && read_only.is_empty() && !input_pending {
+        return Ok(WorkstreamUpdateOutcome {
+            workstream_id: workstream_id.to_string(),
+            status: ContextUpdateStatus::NoChange,
+            context_revision: state.context_revision,
+            updated_sessions: Vec::new(),
+            mutations_applied: 0,
+            remaining_pending: 0,
+        });
+    }
+
+    let cli = require_cli(db)?;
+
+    // Budget: reserve output space only for target sessions actually included.
+    // Read-only sessions only carry their existing summary.
+    let (included, prompt, refs) =
+        select_workstream_inputs(&ws, &item_lines, &targets, &read_only)?;
+
+    let expected_targets: Vec<String> = included.iter().map(|t| t.session.id.clone()).collect();
+
+    let raw = cli
+        .run(&prompt)
+        .map_err(|e| AppError::context(ContextUpdateError::ModelCallFailed(e.to_string())))?;
+    let parsed = extractor::parse_update_output(
+        &raw,
+        &refs,
+        workstream_id,
+        &expected_targets,
+        &allowed_items,
+    )
+    .map_err(|e| AppError::context(ContextUpdateError::InvalidOutput(e.to_string())))?;
+
+    let outcome = commit_workstream_update(
+        db,
+        workstream_id,
+        &state,
+        &included,
+        &read_only,
+        parsed,
+        cli.name(),
+    )?;
+
+    let remaining_pending = targets.len().saturating_sub(included.len());
+    Ok(WorkstreamUpdateOutcome {
+        workstream_id: workstream_id.to_string(),
+        status: if remaining_pending > 0 {
+            ContextUpdateStatus::Partial
+        } else {
+            ContextUpdateStatus::Updated
+        },
+        context_revision: outcome.context_revision,
+        updated_sessions: outcome.updated_sessions,
+        mutations_applied: outcome.mutations_applied,
+        remaining_pending,
+    })
+}
+
+struct CommitOutcome {
+    context_revision: i64,
+    updated_sessions: Vec<String>,
+    mutations_applied: usize,
+}
+
+#[derive(Clone)]
+struct ReadOnlySession {
+    session_id: String,
+    context: Option<SessionContextRecord>,
+    generation: i64,
+    latest_message_seq: i64,
+    invalidate_context: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_workstream_update(
+    db: &Db,
+    workstream_id: &str,
+    snapshot: &crate::domain::WorkstreamContextState,
+    included: &[TargetSession],
+    read_only: &[ReadOnlySession],
+    parsed: crate::sync::ContextUpdateOutput,
+    runtime: String,
+) -> Result<CommitOutcome> {
+    let ctx = MergeContext {
+        runtime,
+        workstream_id: workstream_id.to_string(),
+    };
+    let merger = MergeEngine;
+    let session_contexts: HashMap<String, SessionContextFields> = parsed
+        .session_contexts
+        .into_iter()
+        .map(|SessionContextDraft { session_id, fields }| (session_id, fields))
+        .collect();
+    let mutations = parsed.workstream_mutations;
+
+    db.tx(|tx| {
+        // CAS on the two Workstream revisions.
+        let cur = get_workstream_context_state_conn(tx, workstream_id)?;
+        if cur.context_revision != snapshot.context_revision
+            || cur.input_revision != snapshot.input_revision
+        {
+            return Ok(Err(AppError::context(
+                ContextUpdateError::ConcurrencyConflict("Workstream 状态已变化，请重新更新".into()),
+            )));
+        }
+        // CAS on each included target's Session Context revision / generation /
+        // message prefix.
+        for t in included {
+            let cur_rev = get_session_context_conn(tx, &t.session.id)?
+                .map(|c| c.revision)
+                .unwrap_or(0);
+            let expect_rev = t.existing.as_ref().map(|c| c.revision).unwrap_or(0);
+            if cur_rev != expect_rev {
+                return Ok(Err(AppError::context(
+                    ContextUpdateError::ConcurrencyConflict(format!(
+                        "会话 {} 的摘要已变化，请重新更新",
+                        t.session.id
+                    )),
+                )));
+            }
+            if get_ingest_state_conn(tx, &t.session.id)?.generation != t.generation {
+                return Ok(Err(AppError::context(
+                    ContextUpdateError::ConcurrencyConflict(format!(
+                        "会话 {} 的对话已改写，请重新更新",
+                        t.session.id
+                    )),
+                )));
+            }
+            let ids = projection_ids_conn(tx, &t.session.id)?;
+            let upper = t.from + t.messages.len() as i64;
+            if ids.len() < upper as usize {
+                return Ok(Err(AppError::context(
+                    ContextUpdateError::ConcurrencyConflict("会话内容已变化，请重新更新".into()),
+                )));
+            }
+            for (i, m) in t.messages.iter().enumerate() {
+                if ids.get(t.from as usize + i) != Some(&m.id) {
+                    return Ok(Err(AppError::context(
+                        ContextUpdateError::ConcurrencyConflict(
+                            "会话内容已变化，请重新更新".into(),
                         ),
-                        authority: item.authority.clone(),
-                        source_ref: rev.source_ref.clone(),
-                        workstream_id: Some(workstream_id.to_string()),
-                        revision_id: Some(rev.id.clone()),
-                        conflict_id: None,
-                    });
+                    )));
                 }
             }
         }
-    }
-
-    // 3. new or undelivered conflicts.
-    let mut conf_count = 0;
-    for c in db.conflicts_for_workstream(workstream_id, false)? {
-        if !delivered_conflicts.contains(c.id.as_str()) {
-            if conf_count >= policy.conflict_limit {
-                break;
+        // Read-only Sessions can still have new Session Context revisions or
+        // an empty replacement generation to consume. Guard the snapshot and
+        // advance their frontier even though no new messages are sent as model
+        // targets.
+        for r in read_only {
+            let current = get_session_context_conn(tx, &r.session_id)?;
+            let current_revision = current.as_ref().map(|c| c.revision).unwrap_or(0);
+            let expected_revision = r.context.as_ref().map(|c| c.revision).unwrap_or(0);
+            let ingest = get_ingest_state_conn(tx, &r.session_id)?;
+            if current_revision != expected_revision
+                || ingest.generation != r.generation
+                || ingest.latest_message_seq != r.latest_message_seq
+            {
+                return Ok(Err(AppError::context(
+                    ContextUpdateError::ConcurrencyConflict(format!(
+                        "会话 {} 的摘要或对话已变化，请重新更新",
+                        r.session_id
+                    )),
+                )));
             }
-            conf_count += 1;
-            any_change = true;
-            sections.push(conflict_section(db, &c)?);
         }
-    }
 
-    // 4. resolved or closed conflicts that were previously delivered.
-    for cid in &delivery.delivered_conflicts {
-        match db.get_conflict(cid)? {
-            Some(c) if c.status != "open" => {
-                any_change = true;
-                let left = db.get_item(&c.left_item_id)?;
-                let left_desc = match &left {
-                    Some(i) => format!("{}（{}）", i.kind, i.authority),
-                    None => "(已删除)".into(),
-                };
-                let resolution_text = c.resolution.as_deref().unwrap_or(match c.status.as_str() {
-                    "resolved" => "已解决",
-                    "ignored" => "已忽略",
-                    "closed" => "已关闭",
-                    other => other,
-                });
-                sections.push(ContextSection {
-                    kind: "conflict_resolved".into(),
-                    title: format!("既有冲突已解决（{}）", left_desc),
-                    content: format!("解决状态：{}", resolution_text),
-                    authority: "user_explicit".into(),
-                    source_ref: None,
-                    workstream_id: Some(workstream_id.to_string()),
-                    revision_id: None,
-                    conflict_id: Some(c.id.clone()),
-                });
+        // Apply Workstream mutations.
+        let mut applied = 0usize;
+        for m in &mutations {
+            if merger.apply(tx, m, &ctx)? {
+                applied += 1;
             }
-            None => {
-                any_change = true;
-                sections.push(ContextSection {
-                    kind: "conflict_resolved".into(),
-                    title: "既有冲突已移除".into(),
-                    content: "该冲突已被删除，不再有效。".into(),
-                    authority: "user_explicit".into(),
-                    source_ref: None,
-                    workstream_id: Some(workstream_id.to_string()),
-                    revision_id: None,
-                    conflict_id: Some(cid.clone()),
-                });
-            }
-            _ => {}
         }
-    }
 
-    // Nothing changed: only the minimal reminder, never the full history.
-    if !any_change {
-        sections.retain(|s| s.kind == "reminder");
-    }
-    Ok(sections)
-}
+        // Write every included Session Context + revision + Workstream frontier.
+        let mut updated_sessions = Vec::new();
+        for t in included {
+            let Some(fields) = session_contexts.get(&t.session.id) else {
+                continue;
+            };
+            let expect_rev = t.existing.as_ref().map(|c| c.revision).unwrap_or(0);
+            let upper = t.from + t.messages.len() as i64;
+            let rev = commit_session_context_conn(
+                tx,
+                &t.session.id,
+                fields,
+                expect_rev,
+                t.generation,
+                upper,
+            )?;
+            set_workstream_frontier_conn(
+                tx,
+                &WorkstreamSessionFrontier {
+                    workstream_id: workstream_id.to_string(),
+                    session_id: t.session.id.clone(),
+                    session_context_revision: rev,
+                    ingest_generation: t.generation,
+                    consumed_through_seq: upper,
+                },
+            )?;
+            updated_sessions.push(t.session.id.clone());
+        }
 
-fn conflict_section(db: &Db, c: &ContextConflict) -> Result<ContextSection> {
-    let left = db.get_item(&c.left_item_id)?;
-    let right = match &c.right_item_id {
-        Some(id) => db.get_item(id)?,
-        None => None,
-    };
-    let left_desc = match &left {
-        Some(i) => format!("{}（{}）", i.kind, i.authority),
-        None => "(已删除)".into(),
-    };
-    let right_desc = match &right {
-        Some(i) => match i
-            .current_revision_id
-            .as_deref()
-            .and_then(|rid| db.get_revision(rid).ok().flatten())
-        {
-            Some(r) => format!(
-                "{}：{}",
-                r.title,
-                crate::adapters::truncate_text(&r.content, 200)
-            ),
-            None => "(无内容)".into(),
-        },
-        None => "(agent 新信息，未成条目)".into(),
-    };
-    Ok(ContextSection {
-        kind: "conflict".into(),
-        title: format!("与既有上下文冲突（{}）", left_desc),
-        content: right_desc,
-        authority: "agent_inferred".into(),
-        source_ref: None,
-        workstream_id: Some(c.workstream_id.clone()),
-        revision_id: None,
-        conflict_id: Some(c.id.clone()),
+        // Preserve frontiers for every Session that still belongs to this
+        // Workstream, including unchanged and budget-excluded Sessions.
+        context_repo::delete_unowned_workstream_frontiers_conn(tx, workstream_id)?;
+
+        for r in read_only {
+            let revision = if r.invalidate_context {
+                if let Some(context) = &r.context {
+                    commit_session_context_conn(
+                        tx,
+                        &r.session_id,
+                        &SessionContextFields::default(),
+                        context.revision,
+                        r.generation,
+                        0,
+                    )?
+                } else {
+                    0
+                }
+            } else {
+                r.context.as_ref().map(|c| c.revision).unwrap_or(0)
+            };
+            set_workstream_frontier_conn(
+                tx,
+                &WorkstreamSessionFrontier {
+                    workstream_id: workstream_id.to_string(),
+                    session_id: r.session_id.clone(),
+                    session_context_revision: revision,
+                    ingest_generation: r.generation,
+                    consumed_through_seq: r.latest_message_seq,
+                },
+            )?;
+        }
+
+        let context_revision = context_repo::bump_context_revision_conn(tx, workstream_id)?;
+        consume_input_revision_conn(tx, workstream_id)?;
+
+        Ok(Ok(CommitOutcome {
+            context_revision,
+            updated_sessions,
+            mutations_applied: applied,
+        }))
     })
+    .and_then(|r| r)
 }
 
-fn render_markdown_within_budget(
-    mode: &str,
-    sections: &[ContextSection],
-    max_chars: usize,
-) -> (String, Vec<ContextSection>) {
-    let mut md = String::new();
-    md.push_str("# NoEnding Context Bundle\n\n");
-    md.push_str(match mode {
-        "resume" => "> Resume：以下是自你上次会话以来的上下文变化，请先消化增量，再继续工作。\n\n",
-        _ => "> 这是当前 Workstream 的有效语义状态（不是聊天记录）。请基于以下上下文继续推进。\n\n",
-    });
+// Helpers
 
-    let mut delivered = Vec::new();
-    for s in sections {
-        let block = render_section(s);
-        if md.len() + block.len() > max_chars {
-            md.push_str("\n\n… (上下文因预算被截断)\n");
+fn require_cli(db: &Db) -> Result<CliExtractor> {
+    CliExtractor::try_from_settings(db)
+        .map_err(|e| AppError::context(ContextUpdateError::AiUnavailable(e.to_string())))?
+        .ok_or_else(|| {
+            AppError::context(ContextUpdateError::AiUnavailable(
+                "Assistant Agent 未配置（none）".into(),
+            ))
+        })
+}
+
+/// Choose the largest whole-message prefix whose prompt fits the input budget.
+fn select_message_prefix(
+    build: impl Fn(&[SessionMessage]) -> (String, PromptRefs),
+    all: &[SessionMessage],
+    reserve: usize,
+) -> Result<(Vec<SessionMessage>, String, PromptRefs)> {
+    let budget = INPUT_LIMIT_BYTES.saturating_sub(reserve);
+    let (full_prompt, full_refs) = build(all);
+    if full_prompt.len() <= budget {
+        return Ok((all.to_vec(), full_prompt, full_refs));
+    }
+    let (one_prompt, _) = build(&all[..1]);
+    if one_prompt.len() > budget {
+        return Err(AppError::context(ContextUpdateError::InputTooLarge(
+            "即使最小的请求也超出输入预算".into(),
+        )));
+    }
+    let (mut lo, mut hi) = (1usize, all.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let (p, _) = build(&all[..mid]);
+        if p.len() <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let (p, r) = build(&all[..lo]);
+    Ok((all[..lo].to_vec(), p, r))
+}
+
+/// Include whole target Sessions in stable order while the request fits.
+fn select_workstream_inputs(
+    ws: &crate::domain::Workstream,
+    item_lines: &[String],
+    targets: &[TargetSession],
+    read_only: &[ReadOnlySession],
+) -> Result<(Vec<TargetSession>, String, PromptRefs)> {
+    let build = |inc: &[usize]| -> (String, PromptRefs) {
+        let mut sessions: Vec<PromptSession> = Vec::new();
+        let mut messages: Vec<SessionMessage> = Vec::new();
+        for &i in inc {
+            let t = &targets[i];
+            let current_context = t
+                .existing
+                .as_ref()
+                .filter(|context| context.ingest_generation == t.generation);
+            sessions.push(PromptSession {
+                session_id: t.session.id.clone(),
+                is_target: true,
+                existing: current_context.map(|c| c.fields.clone()),
+                existing_revision: current_context.map(|c| c.revision),
+                messages: t.messages.clone(),
+            });
+            messages.extend(t.messages.iter().cloned());
+        }
+        for r in read_only {
+            sessions.push(PromptSession {
+                session_id: r.session_id.clone(),
+                is_target: false,
+                existing: if r.invalidate_context {
+                    Some(SessionContextFields::default())
+                } else {
+                    r.context.as_ref().map(|c| c.fields.clone())
+                },
+                existing_revision: r.context.as_ref().map(|c| c.revision),
+                messages: Vec::new(),
+            });
+        }
+        let input = PromptInput {
+            workstream_title: ws.title.clone(),
+            workstream_description: ws.description.clone(),
+            item_lines: item_lines.to_vec(),
+            sessions,
+            messages,
+        };
+        extractor::build_update_prompt(&input)
+    };
+
+    if targets.is_empty() {
+        let (p, r) = build(&[]);
+        let budget = INPUT_LIMIT_BYTES.saturating_sub(WORKSTREAM_RESERVE_BYTES);
+        if p.len() > budget {
+            return Err(AppError::context(ContextUpdateError::InputTooLarge(
+                "Workstream 与只读输入的组合已超出预算".into(),
+            )));
+        }
+        return Ok((Vec::new(), p, r));
+    }
+
+    // Greedy: add targets while they fit; a target is included WHOLE.
+    let mut included: Vec<usize> = Vec::new();
+    for i in 0..targets.len() {
+        let mut trial = included.clone();
+        trial.push(i);
+        let (p, _) = build(&trial);
+        let reserve = WORKSTREAM_RESERVE_BYTES + SESSION_CONTEXT_RESERVE_BYTES * trial.len();
+        let budget = INPUT_LIMIT_BYTES.saturating_sub(reserve);
+        if p.len() <= budget {
+            included = trial;
+        } else {
             break;
         }
-        md.push_str(&block);
-        delivered.push(s.clone());
     }
-    (md, delivered)
+    if included.is_empty() {
+        return Err(AppError::context(ContextUpdateError::InputTooLarge(
+            "第一个目标会话已超出输入预算".into(),
+        )));
+    }
+    let (p, r) = build(&included);
+    let chosen = included.into_iter().map(|i| targets[i].clone()).collect();
+    Ok((chosen, p, r))
 }
 
-fn render_section(s: &ContextSection) -> String {
-    let labels = [
-        ("workstream_header", "Workstream"),
-        ("reminder", "Current Task Reminder / 当前任务提醒"),
-        ("goal", "Goal / 目标"),
-        ("current_state", "Current State / 当前状态"),
-        ("constraint", "Constraints / 约束"),
-        ("decision", "Decisions / 决定"),
-        ("open_question", "Open Questions / 未决问题"),
-        ("delta", "Changed Since Your Last Activity"),
-        ("gone", "Resolved / Superseded / Deleted"),
-        ("conflict", "New Conflicts"),
-        ("conflict_resolved", "Resolved Conflicts / 已解决冲突"),
-    ];
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Agent, Workstream};
 
-    let label = labels
-        .iter()
-        .find(|(k, _)| *k == s.kind)
-        .map(|(_, l)| l.to_string())
-        .unwrap_or_else(|| format!("Item ({})", s.kind));
-    let mut md = String::new();
-    match s.kind.as_str() {
-        "workstream_header" => {
-            md.push_str(&format!("## {}\n\n", s.title));
-            if !s.content.is_empty() {
-                md.push_str(&s.content);
-                md.push_str("\n\n");
-            }
-        }
-        _ => {
-            md.push_str(&format!("### {}\n", label));
-            md.push_str(&format!("**{}**\n", s.title));
-            if !s.content.is_empty() && s.content != s.title {
-                md.push_str(&format!("{}\n", s.content));
-            }
-            if let Some(src) = &s.source_ref {
-                md.push_str(&format!("> 来源: {}\n", src));
-            }
-            md.push('\n');
+    fn test_workstream() -> Workstream {
+        Workstream {
+            id: "workstream-context-test".into(),
+            title: "Context test".into(),
+            description: String::new(),
+            lifecycle: "active".into(),
+            visibility: "normal".into(),
+            created_at: crate::storage::now(),
+            updated_at: crate::storage::now(),
         }
     }
-    md
+
+    fn test_session(id: &str) -> Session {
+        Session {
+            id: id.into(),
+            agent: Agent::Codex,
+            root_agent_session_id: format!("root-{id}"),
+            title: Some(id.into()),
+            owner_workstream_id: None,
+            cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            forked_from_session_id: None,
+            started_at: None,
+            last_activity_at: None,
+            last_conversation_at: None,
+            trashed_at: None,
+        }
+    }
+
+    #[test]
+    fn backlog_budget_reserves_output_for_only_the_included_prefix() {
+        let ws = test_workstream();
+        let targets: Vec<TargetSession> = (0..10)
+            .map(|i| TargetSession {
+                session: test_session(&format!("session-{i}")),
+                existing: None,
+                frontier: None,
+                generation: 0,
+                from: 0,
+                messages: Vec::new(),
+            })
+            .collect();
+
+        let (included, _, _) =
+            select_workstream_inputs(&ws, &[], &targets, &[]).expect("first short target fits");
+        assert!(!included.is_empty());
+        assert!(
+            included.len() < targets.len(),
+            "the backlog is returned as a prefix"
+        );
+    }
+
+    #[test]
+    fn workstream_update_advances_read_only_and_preserves_unchanged_frontiers() {
+        let dir =
+            std::env::temp_dir().join(format!("noending-context-{}", crate::storage::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("test.db")).unwrap();
+        let ws = test_workstream();
+        db.upsert_workstream(&ws).unwrap();
+        let session_id = db
+            .upsert_logical_session_unchecked(
+                Agent::Codex,
+                "context-revision-frontier-root",
+                Some("Context frontier"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .0;
+        db.set_session_owner(&session_id, Some(&ws.id)).unwrap();
+
+        let unchanged_session_id = db
+            .upsert_logical_session_unchecked(
+                Agent::Codex,
+                "unchanged-context-frontier-root",
+                Some("Unchanged frontier"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .0;
+        db.set_session_owner(&unchanged_session_id, Some(&ws.id))
+            .unwrap();
+        db.tx(|tx| {
+            set_workstream_frontier_conn(
+                tx,
+                &WorkstreamSessionFrontier {
+                    workstream_id: ws.id.clone(),
+                    session_id: unchanged_session_id.clone(),
+                    session_context_revision: 0,
+                    ingest_generation: 0,
+                    consumed_through_seq: 0,
+                },
+            )
+        })
+        .unwrap();
+
+        let former_session_id = db
+            .upsert_logical_session_unchecked(
+                Agent::Codex,
+                "former-context-frontier-root",
+                Some("Former owner"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .0;
+        db.tx(|tx| {
+            set_workstream_frontier_conn(
+                tx,
+                &WorkstreamSessionFrontier {
+                    workstream_id: ws.id.clone(),
+                    session_id: former_session_id.clone(),
+                    session_context_revision: 0,
+                    ingest_generation: 0,
+                    consumed_through_seq: 0,
+                },
+            )
+        })
+        .unwrap();
+
+        let first_revision = db
+            .tx(|tx| {
+                commit_session_context_conn(
+                    tx,
+                    &session_id,
+                    &SessionContextFields {
+                        summary_current_state: "first summary".into(),
+                        ..Default::default()
+                    },
+                    0,
+                    0,
+                    0,
+                )
+            })
+            .unwrap();
+        db.tx(|tx| {
+            set_workstream_frontier_conn(
+                tx,
+                &WorkstreamSessionFrontier {
+                    workstream_id: ws.id.clone(),
+                    session_id: session_id.clone(),
+                    session_context_revision: first_revision,
+                    ingest_generation: 0,
+                    consumed_through_seq: 0,
+                },
+            )
+        })
+        .unwrap();
+        let next_revision = db
+            .tx(|tx| {
+                commit_session_context_conn(
+                    tx,
+                    &session_id,
+                    &SessionContextFields {
+                        summary_current_state: "revised summary".into(),
+                        ..Default::default()
+                    },
+                    first_revision,
+                    0,
+                    0,
+                )
+            })
+            .unwrap();
+        let state = db.get_workstream_context_state(&ws.id).unwrap();
+        assert!(workstream_context_view(&db, &ws.id).unwrap().pending);
+
+        commit_workstream_update(
+            &db,
+            &ws.id,
+            &state,
+            &[],
+            &[ReadOnlySession {
+                session_id: session_id.clone(),
+                context: db.get_session_context(&session_id).unwrap(),
+                generation: 0,
+                latest_message_seq: 0,
+                invalidate_context: false,
+            }],
+            crate::sync::ContextUpdateOutput::default(),
+            "test".into(),
+        )
+        .unwrap();
+
+        let frontiers = db.workstream_frontiers(&ws.id).unwrap();
+        let frontier = frontiers
+            .iter()
+            .find(|f| f.session_id == session_id)
+            .expect("read-only Session frontier remains");
+        assert_eq!(frontier.session_context_revision, next_revision);
+        assert!(frontiers
+            .iter()
+            .any(|f| f.session_id == unchanged_session_id));
+        assert!(!frontiers.iter().any(|f| f.session_id == former_session_id));
+        assert!(!workstream_context_view(&db, &ws.id).unwrap().pending);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

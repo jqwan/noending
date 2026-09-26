@@ -2,14 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import Icon from "../../components/Icon";
-import { timeAgo } from "../../components/common";
+import { copyToClipboard, contextUpdateErrorMessage, timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal } from "../../components/common";
-import { IntelligenceOnly } from "../../app/experience";
+import { showToast } from "../../components/Toast";
 import NewSessionModal from "../sessions/NewSessionModal";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import {
+  KIND_LABELS,
   type Workstream,
   type WorkstreamContext as WorkstreamContextData,
+  type WorkstreamContextView,
   type WorkstreamLifecycle,
   type WorkstreamPathRow,
   type WorkstreamReviewSummary,
@@ -25,24 +27,13 @@ import RecentChangesTimeline from "./RecentChangesTimeline";
 import SinceLastReview from "./SinceLastReview";
 
 /**
- * Workstream Detail = 持续相关 Sessions 的组织容器。
+ * Workstream Detail：持续相关 Sessions 的组织容器。
  *
- * Base Experience 下这一页只有五块内容：概览（描述）、Sessions、工作目录、
- * Project、状态。Context 智能段落（Current Context / Since Last Review /
- * Needs Attention / Recent Changes / Conflict Review）全部保留代码但不挂载
- * ——见 ，off 就是 `<IntelligenceOnly>` 里不渲染。
- *
- * 启动路径唯一：本页不再自己调 launcher，而是挂载 New Session / Resume 的
- * 同一个 Modal，由它们走 prepare → 状态指纹 → launch_prepared
- * （Preview-Launch Identity / Launch Preparation Integrity）。
- *
- * 编辑入口唯一：标题 / 描述 / 工作目录都在 ••• → 编辑任务（WorkstreamFormModal）。
- *
- * v0.2 的边界：
- *   • 工作目录 = **有序 WorkstreamPath 列表**；
- *   • Project 是**只读投影**（主路径 → WorkspacePath → Project），所以链接取的是
- *     列表第 1 条路径所属 Project；
- *   • 归档 / 恢复 / 永久删除是三个**单向**命令，不是一枚翻转开关。
+ * Context 只读呈现（`get_workstream_context_state`），人工纠正永远可用；仅当有相关
+ * 变化（pending）时才出现「更新状态」按钮，一次点击同时更新相关 Session 摘要与状态。
+ * 启动 / 编辑入口唯一，分别挂 New Session Modal 与 WorkstreamFormModal。
+ * v0.2 边界：工作目录是有序 WorkstreamPath 列表；Project 是只读投影（取第 1 条路径）；
+ * 归档 / 恢复 / 永久删除是三个单向命令，不是一枚翻转开关。
  */
 export default function WorkstreamDetailView({
   workstreamId,
@@ -58,6 +49,10 @@ export default function WorkstreamDetailView({
   const [loadError, setLoadError] = useState("");
   const [retry, setRetry] = useState(0);
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(null);
+  /** Context 状态（只读）：当前投影 + revision + 待更新。 */
+  const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(null);
+  const [ctxUpdating, setCtxUpdating] = useState(false);
+  const [ctxUpdateError, setCtxUpdateError] = useState("");
   const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(null);
   const [pathsError, setPathsError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -71,8 +66,7 @@ export default function WorkstreamDetailView({
   const busyRef = useRef(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // ••• 菜单：点击外部与 Escape 都要收起。之前只有再点一次 ••• 才关得掉，
-  // 点别处它一直悬着。mousedown 阶段监听，先于 click，
+  // ••• 菜单：点击外部与 Escape 都要收起。mousedown 阶段监听先于 click，
   // 所以菜单项自己的 click 仍然正常触发。
   useEffect(() => {
     if (!menuOpen) return;
@@ -92,11 +86,12 @@ export default function WorkstreamDetailView({
 
   useEffect(() => {
     let cancelled = false;
-    // 换 Workstream 时先把手里的投影清空：本页所有写操作都以 workstreamId 为准，
-    // 留着上一条的路径列表会让用户在错的列表上按下按钮（例如把旧 path id 发给
-    // 新 Workstream 的 reorder）。宁可闪一下「加载中…」，也不拿旧数据当现状。
+    // 换 Workstream 时先清空手里的投影：本页写操作都以 workstreamId 为准，留着上一条的
+    // 路径列表会让用户在错的列表上按按钮。宁可闪一下「加载中…」，也不拿旧数据当现状。
     setCtx(null);
     setLoadError("");
+    setCtxState(null);
+    setCtxUpdateError("");
     setPaths(null);
     setPathsError("");
     setMenuOpen(false);
@@ -107,6 +102,9 @@ export default function WorkstreamDetailView({
     api.getWorkstreamContext(workstreamId).then((c) => {
       if (!cancelled) setCtx(c);
     }).catch(e => { if (!cancelled) setLoadError(String(e)); });
+    api.getWorkstreamContextState(workstreamId).then((s) => {
+      if (!cancelled) setCtxState(s);
+    }).catch(e => { if (!cancelled) setCtxUpdateError(contextUpdateErrorMessage(e)); });
     api.listWorkstreamPaths(workstreamId).then((rows) => {
       if (!cancelled) { setPaths(rows); setPathsError(""); }
     }).catch((e) => {
@@ -117,10 +115,11 @@ export default function WorkstreamDetailView({
     };
   }, [workstreamId, retry]);
 
-  // Background refresh only re-reads the projection; the intelligence panels
-  // own their own (frozen-window) refresh so this page never touches ReviewState.
+  // Background refresh only re-reads the projection; the intelligence panels own
+  // their own (frozen-window) refresh so this page never touches ReviewState.
   const refresh = useCallback(() => {
     api.getWorkstreamContext(workstreamId).then(setCtx).catch(console.error);
+    api.getWorkstreamContextState(workstreamId).then(setCtxState).catch(console.error);
     api.listWorkstreamPaths(workstreamId).then((rows) => {
       setPaths(rows); setPathsError("");
     }).catch((e) => {
@@ -129,6 +128,41 @@ export default function WorkstreamDetailView({
   }, [workstreamId]);
 
   useRefreshSignal(refresh);
+
+  /** 一次点击 → 相关 Session 摘要与 Workstream 状态一起更新（后端一次模型调用）。 */
+  const updateContext = async () => {
+    if (ctxUpdating) return;
+    setCtxUpdating(true);
+    setCtxUpdateError("");
+    try {
+      const out = await api.updateWorkstreamContext(workstreamId);
+      showToast(
+        out.status === "no_change"
+          ? "没有相关变化，状态保持不变"
+          : out.remaining_pending > 0
+            ? `已更新状态（还有 ${out.remaining_pending} 个 Session 待更新）`
+            : "已更新状态与相关 Session 摘要",
+      );
+      refresh();
+    } catch (e) {
+      console.error(e);
+      setCtxUpdateError(contextUpdateErrorMessage(e));
+    } finally {
+      setCtxUpdating(false);
+    }
+  };
+
+  /** 复制当前 Context：投影按可读文本整段给出去。 */
+  const copyContext = async () => {
+    const sections = ctxState?.sections ?? [];
+    const text = sections.length === 0
+      ? "（当前没有 Context 条目）"
+      : sections
+        .map((s) => `${KIND_LABELS[s.kind] ?? s.kind}：${s.title}\n${s.content}`.trim())
+        .join("\n\n");
+    const ok = await copyToClipboard(text);
+    showToast(ok ? "已复制当前 Context" : "复制失败，请手动选中文字复制");
+  };
 
   // 同 SessionDetailView：加载态也要渲染 PageHeader，否则整条标题栏会先消失再补回来。
   // 标题承担"是什么状态"，正文只放具体的错误详情，不再重复一遍状态名。
@@ -148,16 +182,11 @@ export default function WorkstreamDetailView({
   }
   const { workstream, sessions } = ctx;
 
-  /**
-   * 一条命令返回新的 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
-   * 手里留着旧的 lifecycle / visibility，下一次整对象保存就会被后端拒绝。
-   */
+  /** 一条命令返回新 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
+   *  留着旧的 lifecycle / visibility，下一次整对象保存会被后端拒绝。 */
   const adopt = (next: Workstream) => setCtx((c) => (c ? { ...c, workstream: next } : c));
 
-  /**
-   * lifecycle 只是分类，没有任何行为差异，随时可切；它不碰路径、
-   * 会话归属、visibility 或 Context。
-   */
+  /** lifecycle 只是分类，无行为差异，随时可切；它不碰路径、会话归属、visibility 或 Context。 */
   const setLifecycle = async (next: WorkstreamLifecycle) => {
     if (busyRef.current || workstream.lifecycle === next) return;
     busyRef.current = true;
@@ -177,11 +206,9 @@ export default function WorkstreamDetailView({
   };
 
   /**
-   * 归档与恢复是**两个单向命令**：`archive_workstream` 只进回收站，
-   * `restore_workstream` 只出来。旧代码把 archive 当翻转用，于是「再点一次取消
-   * 归档」和「重复点击」会互相抵消 —— 那正是 v0.2 要消掉的双权威。
-   * 之前这里 `await` 完不判成败就跳走：失败时菜单收起、页面不动、没有任何
-   * 回执。现在失败留在原地说明原因，成功才跳走。
+   * 归档与恢复是两个单向命令：`archive_workstream` 只进回收站，
+   * `restore_workstream` 只出来——不是一枚翻转开关（那会造出双权威）。
+   * 失败留在原地说明原因，成功才跳走。
    */
   const moveToTrash = async () => {
     setMenuOpen(false);
@@ -243,10 +270,8 @@ export default function WorkstreamDetailView({
     }
   };
 
-  /**
-   * 工作目录还没读回来时不能进编辑模式：草稿由当前列表预填，拿「空」当「没有目录」
-   * 会在保存时把已有路径全删掉。所以这里明说还在读，而不是静默什么都不做。
-   */
+  /** 工作目录还没读回来时不能进编辑模式：草稿由当前列表预填，拿「空」当
+   *  「没有目录」会在保存时把已有路径全删掉，所以明说还在读。 */
   const openEditor = () => {
     setMenuOpen(false);
     if (paths === null) {
@@ -320,7 +345,7 @@ export default function WorkstreamDetailView({
         )}
       </PageHeader>
 
-      {/* ---------- Base Experience：Workstream 自身 ---------- */}
+      {/* Workstream 自身（Base Experience） */}
       <div className="task-detail-layout">
         <div className="task-detail-main">
         <section className="rail-section">
@@ -398,18 +423,21 @@ export default function WorkstreamDetailView({
         </aside>
       </div>
 
-      {/* ---------- 智能段落：off 时整块不挂载 ---------- */}
-      <IntelligenceOnly>
-        <div className="ws-detail-grid">
-          <IntelligenceSections
-            ctx={ctx}
-            entry={entry}
-            workstreamId={workstreamId}
-            navigate={navigate}
-            onChanged={refresh}
-          />
-        </div>
-      </IntelligenceOnly>
+      {/* Context：只读当前状态 + 显式更新 + 人工纠正 */}
+      <div className="ws-detail-grid">
+        <IntelligenceSections
+          ctx={ctx}
+          entry={entry}
+          workstreamId={workstreamId}
+          navigate={navigate}
+          onChanged={refresh}
+          ctxState={ctxState}
+          ctxUpdating={ctxUpdating}
+          ctxUpdateError={ctxUpdateError}
+          onCopyContext={copyContext}
+          onUpdateContext={updateContext}
+        />
+      </div>
 
       {newSessionOpen && (
         <NewSessionModal
@@ -483,23 +511,30 @@ export default function WorkstreamDetailView({
   );
 }
 
-/**
- * Context 智能段落。单独成一个组件，是为了让这些开关只在「真的挂载」时才发生：
- * getWorkstreamReviewWindow / Summary / markWorkstreamReviewed / conflict 命令在
- * Base Experience 下不出请求，而不是发了请求再藏起来。
- */
+/** Context 段落：当前状态只读呈现 + 显式「更新状态」，以及审查 / 冲突 /
+ *  变更这些由本页命令驱动的面板（人工纠正始终可用）。 */
 function IntelligenceSections({
   ctx,
   entry,
   workstreamId,
   navigate,
   onChanged,
+  ctxState,
+  ctxUpdating,
+  ctxUpdateError,
+  onCopyContext,
+  onUpdateContext,
 }: {
   ctx: WorkstreamContextData;
   entry?: WorkstreamEntry;
   workstreamId: string;
   navigate: (r: Route) => void;
   onChanged: () => void;
+  ctxState: WorkstreamContextView | null;
+  ctxUpdating: boolean;
+  ctxUpdateError: string;
+  onCopyContext: () => void;
+  onUpdateContext: () => void;
 }) {
   const [reviewWindow, setReviewWindow] = useState<WorkstreamReviewWindow | null>(null);
   const [reviewSummary, setReviewSummary] = useState<WorkstreamReviewSummary | null>(null);
@@ -596,6 +631,36 @@ function IntelligenceSections({
   return (
     <>
       <div>
+        {ctxState && (
+          <div style={{ marginBottom: 18 }}>
+            <div className="row between" style={{ alignItems: "center" }}>
+              <div className="section-label" style={{ margin: 0 }}>当前 Context</div>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn small ghost" onClick={onCopyContext}>复制</button>
+                {ctxState.pending && (
+                  <button className="btn small primary" disabled={ctxUpdating} onClick={onUpdateContext}>
+                    {ctxUpdating ? "更新中…" : "更新状态"}
+                  </button>
+                )}
+              </div>
+            </div>
+            {ctxState.pending ? (
+              <div className="small muted" style={{ marginTop: 4 }}>
+                {ctxState.pending_sessions > 0
+                  ? `有 ${ctxState.pending_sessions} 个相关 Session 有新内容。`
+                  : "有相关变化尚未并入。"}
+                点击「更新状态」会同时更新它们的摘要与本任务状态。
+              </div>
+            ) : (
+              <div className="small muted" style={{ marginTop: 4 }}>
+                已是最新（revision {ctxState.context_revision}）。
+              </div>
+            )}
+            {ctxUpdateError && (
+              <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere" }}>{ctxUpdateError}</div>
+            )}
+          </div>
+        )}
         {reviewWindow && reviewSummary && (
           <SinceLastReview
             window={reviewWindow}
@@ -648,10 +713,8 @@ function IntelligenceSections({
 }
 
 /**
- * RFC3339 (UTC) → 本地 YYYY/MM/DD.
- *
- * 不用 `toLocaleDateString()`：webview 语言不一定是中文，格式会随环境漂移；
- * 也不用 `slice(0, 10)`：那是 UTC 日期，本地可能已经跨了一天。
+ * RFC3339 (UTC) → 本地 YYYY/MM/DD。不用 `toLocaleDateString()`（webview 语言不固定，
+ * 格式会漂移），也不用 `slice(0, 10)`（那是 UTC 日期，本地可能已跨天）。
  */
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";

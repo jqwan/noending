@@ -2,11 +2,9 @@
 //! `PI_HOME` overrides the root. Pi sessions are plain JSONL trees, read-only
 //! always — NoEnding never deletes an Agent-owned source.
 //!
-//! Member mapping: today's sources are single-root — one transcript,
-//! one ROOT member. The existing conversation filters stay: thinking blocks,
-//! tool traffic and runtime injections never become conversation; a
-//! compaction marker is an observation. If a future source exposes child/side
-//! identities, Member discovery extends — the Conversation schema does not.
+//! Member mapping: today's sources are single-root — one transcript, one ROOT
+//! member. Thinking blocks, tool traffic and runtime injections never become
+//! conversation; a compaction marker is an observation.
 
 use std::path::{Path, PathBuf};
 
@@ -23,8 +21,7 @@ use crate::platform::exec_resolver::{self, AgentInstallation};
 pub struct PiAdapter;
 
 /// Text parts only: `thinking` blocks are model reasoning, and tool calls /
-/// results are deliberately dropped — they used to be appended
-/// to the owning message's text as `[tool:…] …`.
+/// results are deliberately dropped.
 fn content_text(content: &Value) -> String {
     let mut text_parts = Vec::new();
     if let Some(arr) = content.as_array() {
@@ -223,11 +220,9 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         &self,
         install: &AgentInstallation,
         opts: &crate::adapters::ExecOptions,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let mut args = runtime_args(opts);
-        args.extend(crate::adapters::context_prompt(context_file)?);
+        let args = runtime_args(opts);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -240,14 +235,12 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         install: &AgentInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         // pi [options] [--] [@files...] [messages...] — options first, then
-        // the session selector and the prompt.
+        // the session selector.
         let mut args = runtime_args(opts);
         args.extend(["--session".into(), agent_session_id.into()]);
-        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -297,13 +290,10 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                     )))
                 }
                 ("assistant", true) => {
-                    // Message provenance: the
-                    // assistant entry itself carries `message.provider` and
-                    // `message.model` — the actual generation identity
-                    // (verified: 1203/1203 assistant entries in the real
-                    // corpus carry both). Direct evidence wins over the
-                    // `model_change` events, which exist in the file but are
-                    // redundant here.
+                    // The assistant entry itself carries `message.provider` /
+                    // `message.model`, the actual generation identity (present
+                    // on every assistant entry in the real corpus). Direct
+                    // evidence wins over the redundant `model_change` events.
                     Some(ParsedLine::message_only(
                         crate::adapters::parsed_message(
                             source_message_id,
@@ -440,9 +430,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Direct evidence: the assistant entry's own
-    /// `message.provider` / `message.model` land on the message; an entry
-    /// without them stays NULL.
+    /// Direct evidence: the assistant entry's own `message.provider` /
+    /// `message.model` land on the message; an entry without them stays NULL.
     #[test]
     fn assistant_entries_carry_source_provider_and_model() {
         let dir = unique_dir("prov");

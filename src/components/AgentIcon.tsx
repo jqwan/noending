@@ -1,10 +1,7 @@
 import type { Agent } from "../types";
 
-/**
- * Small per-agent mark (14–16px) for New / Resume / Start buttons.
- * Visually one family (14px geometric marks, currentColor) while staying
- * distinguishable: Claude ◈ · Codex ◇ · Pi ◎. Text stays dominant next to it.
- */
+/** Small per-agent mark (14–16px). One family (geometric marks, currentColor) while
+ *  staying distinguishable: Claude ◈ · Codex ◇ · Pi ◎. Text stays dominant next to it. */
 export default function AgentIcon({ agent, size = 14 }: { agent: Agent; size?: number }) {
   return (
     <svg

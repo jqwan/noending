@@ -1,13 +1,22 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import WorkstreamDetailView from "./WorkstreamDetailView";
 import { api } from "../../api";
-import type { WorkstreamContext, WorkstreamPathRow } from "../../types";
+import type { WorkstreamContext, WorkstreamContextView, WorkstreamPathRow } from "../../types";
 
 // 只覆盖「页面把编辑入口收敛到弹窗」；命令怎么走由 WorkstreamFormModal.test.tsx 覆盖。
 vi.mock("../../api", () => ({
   api: {
     getWorkstreamContext: vi.fn(),
+    getWorkstreamContextState: vi.fn().mockResolvedValue(null),
+    updateWorkstreamContext: vi.fn().mockResolvedValue({
+      workstream_id: "",
+      status: "updated",
+      context_revision: 1,
+      updated_sessions: [],
+      mutations_applied: 0,
+      remaining_pending: 0,
+    }),
     listWorkstreamPaths: vi.fn(),
     getDefaultAgent: vi.fn().mockResolvedValue(null),
     updateWorkstream: vi.fn(),
@@ -79,9 +88,27 @@ function context(): WorkstreamContext {
   };
 }
 
+function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamContextView {
+  return {
+    workstream_id: "w1",
+    title: "接口设计",
+    description: "整理 API 设计",
+    lifecycle: "active",
+    sections: [],
+    context_revision: 1,
+    input_revision: 1,
+    consumed_input_revision: 1,
+    pending: false,
+    pending_sessions: 0,
+    ...over,
+  };
+}
+
 async function renderDetail() {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
   vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
+  // 逐个测试独立：默认「已是最新」，pending 用例自己覆盖。
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState());
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
 }
@@ -160,4 +187,36 @@ it("opens the 新建任务 form, prefilled with the current task", async () => {
   within(dialog).getByText("/repo/main");
   screen.getByRole("button", { name: "保存" });
   screen.getByRole("button", { name: "新增目录" });
+});
+
+it("shows 更新状态 with the pending-session count and calls the explicit update", async () => {
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
+  vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
+  const state: WorkstreamContextView = contextState({
+    context_revision: 2,
+    input_revision: 5,
+    consumed_input_revision: 3,
+    pending: true,
+    pending_sessions: 2,
+  });
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(state);
+  vi.mocked(api.updateWorkstreamContext).mockResolvedValue({
+    workstream_id: "w1",
+    status: "updated",
+    context_revision: 3,
+    updated_sessions: ["s1", "s2"],
+    mutations_applied: 2,
+    remaining_pending: 0,
+  });
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByText("任务概览");
+
+  screen.getByText(/有 2 个相关 Session 有新内容/);
+  fireEvent.click(screen.getByRole("button", { name: "更新状态" }));
+  await waitFor(() => expect(api.updateWorkstreamContext).toHaveBeenCalledWith("w1"));
+});
+
+it("hides 更新状态 when the Context is already up to date", async () => {
+  await renderDetail();
+  expect(screen.queryByRole("button", { name: "更新状态" })).toBeNull();
 });

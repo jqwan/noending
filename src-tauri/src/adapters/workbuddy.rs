@@ -1,45 +1,22 @@
 //! WorkBuddy Adapter: `~/.workbuddy/projects/<slug>/<sessionId>.jsonl`.
 //!
 //! An Electron app (Tencent's WorkBuddy) whose conversation store is
-//! append-only JSONL without a session header: the first line is already a
-//! message, and the session's facts (`sessionId`, `cwd`) repeat on every line.
-//! Line types measured on the three real files (712 lines total): `message`
-//! (95; role `user` / `assistant`, content blocks typed `input_text` /
-//! `output_text`), `function_call` / `function_call_result` (237 each),
-//! `reasoning` (101), `file-history-snapshot` (35) and `ai-title` (7) — machine
-//! traffic that is counted, not ingested.
+//! append-only JSONL with no session header: the first line is already a
+//! message, and `sessionId` / `cwd` repeat on every line.
 //!
-//! Message provenance: **None — stays NULL.** Assistant
-//! entries do carry a non-empty `providerData`, but in the real corpus every
-//! single one (78/78 across all three sessions) records
-//! `model = requestModelId = "auto"` / `requestModelName = "Auto"`: the USER'S
-//! model *preference* at send time, not the identity of the model that
-//! actually generated the response. A request preference is not
-//! message-level provenance, and inferring a provider from the WorkBuddy
-//! brand is forbidden — so nothing is attributed here.
+//! A user turn is wrapped in a `<system-reminder data-role="user-context">`
+//! envelope with the prompt in `<user_query>…</user_query>` at the end, so only
+//! that body is the human text. Compaction replays
+//! (`<conversation_history_summary>`, `<cb_summary>`) are also `user`-role but
+//! count as compaction; any other `<`-prefixed body is system noise and drops.
 //!
-//! The one shape that needs real work is the user turn. WorkBuddy wraps every
-//! human turn in a `<system-reminder data-role="user-context">` envelope and
-//! puts the prompt in `<user_query>…</user_query>` at the very end — measured
-//! on all three sessions, where the bare opening message is a 9 KB identity
-//! preamble (`SOUL.md` and friends) that no human typed. Three consequences:
-//! - the human text is the `<user_query>` body, not the envelope;
-//! - the compaction replays (`<conversation_history_summary>`, `<cb_summary>`)
-//!   are also `user`-role messages but no human wrote them → compaction
-//!   observation, and only a count is kept, never the tens of KB of machine
-//!   summary;
-//! - anything else that starts with `<` is system noise → dropped.
+//! Provenance stays NULL: `providerData` records only the user's model
+//! *preference* ("auto"), not the identity of the model that answered.
 //!
-//! Member mapping: one transcript, one ROOT member.
-//!
-//! Two things this adapter deliberately does not use:
-//! - `ai-title` carries the app's own AI-generated title (`aiTitle`) — it IS
-//!   reported as the native title, the last one written wins.
-//! - `function_call` / `function_call_result` have `name` / `arguments` /
-//!   `output`; they are observations, not text.
-//!
-//! There is no CLI (the bundle's only executable is Electron), so this adapter
-//! ingests history only: `detect()` never succeeds and no command is built.
+//! One transcript, one ROOT member. `ai-title` supplies the native title (last
+//! written wins); `function_call` / `function_call_result` are observations,
+//! not text. There is no CLI — the bundle's only executable is Electron — so
+//! this adapter ingests history only: `detect()` never succeeds.
 
 use std::path::{Path, PathBuf};
 
@@ -161,11 +138,8 @@ impl WorkBuddyAdapter {
                 }
                 last_ts = Some(ts);
             }
-            // WorkBuddy writes its own `ai-title` and REWRITES it as the
-            // conversation moves on (one session here carries four, drifting
-            // from 「通达信连接功能介绍」 to 「分析国轩高科股票」). The last one
-            // written is the Agent's final word on what the session is about,
-            // so it is the one worth showing.
+            // WorkBuddy rewrites its `ai-title` as the conversation moves on,
+            // so the last one written is the Agent's final word on the session.
             if v.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
                 if let Some(t) = v
                     .get("aiTitle")
@@ -289,7 +263,6 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         &self,
         _install: &crate::platform::exec_resolver::AgentInstallation,
         _opts: &ExecOptions,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
@@ -300,7 +273,6 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         _install: &crate::platform::exec_resolver::AgentInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
@@ -424,9 +396,8 @@ mod tests {
         );
     }
 
-    /// WorkBuddy rewrites its `ai-title` as the conversation moves on — one real
-    /// session here carries four, drifting from 「通达信连接功能介绍」 to
-    /// 「分析国轩高科股票」. The last one written is the current one.
+    /// WorkBuddy rewrites its `ai-title` as the conversation moves on; the
+    /// last one written is the current one.
     #[test]
     fn the_last_ai_title_wins() {
         let dir = unique_dir("ai-title");
@@ -544,8 +515,8 @@ mod tests {
         assert!(found.is_empty(), "{found:#?}");
     }
 
-    /// providerData.model = "auto" is the user's
-    /// request preference, not the generating model: nothing is attributed.
+    /// `providerData.model = "auto"` is the user's request preference, not the
+    /// generating model: nothing is attributed.
     #[test]
     fn the_auto_preference_is_not_provenance() {
         let dir = unique_dir("prov");

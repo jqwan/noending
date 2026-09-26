@@ -1,205 +1,37 @@
-//! ContextExtractor implementations.
+//! Explicit Context update model call.
 //!
-//! - HeuristicExtractor: deterministic rules, zero cost, always available.
-//! - CliExtractor: runs the user's already-authenticated agent CLI headlessly
-//!   (codex exec / claude -p / pi -p) and parses a strict JSON mutation list.
-//!   Any failure (missing CLI, timeout, invalid JSON) returns Err so the
-//!   SyncEngine can fall back to the heuristic — sync never breaks because
-//!   the model had a bad day.
+//! ONE call produces both the affected Session Contexts and the Workstream
+//! mutations; the backend derives authority, revisions, generations and
+//! frontiers from the cited sources, never from the model's word.
 //!
-//! SourceReference integrity (Issue #2): the prompt numbers messages #1..#N
-//! but those numbers are *prompt-local*. A `PromptMessageRef` map is built
-//! while composing the prompt and is the ONLY way a short ref resolves to a
-//! real message; unknown refs are dropped with a diagnostic instead of being
-//! misinterpreted as message sequences.
-//!
-//! Input is `session_messages` only: every message the store holds is
-//! already root user/assistant prose, so the extractor's one judgment call is
-//! "does this text carry Context value" — never "is this conversation".
+//! Strictness is the point: the response must be a single JSON object whose keys
+//! and fields are exactly what was asked for. Anything else — prose, markdown
+//! fences, an unknown field, an unknown id, an out-of-snapshot reference — fails
+//! the whole update. No heuristic fallback, no "ignore the bad entry and keep
+//! the rest".
+
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
 use crate::adapters::ExecOptions;
-use crate::domain::{Agent, Session, SessionMessage, SessionMessageRole};
+use crate::domain::{Agent, SessionContextFields, SessionMessage, SessionMessageRole};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-use super::{ContextExtractor, ContextMutation, ExtractOutput};
+use super::{ContextMutation, ContextUpdateOutput, SessionContextDraft};
 
-/// Prompt-building reads (workstream lines, existing item lines),
-/// snapshotted while the DB lock is held so extraction can run lock-free.
-#[derive(Debug, Clone, Default)]
-pub struct PromptInputs {
-    pub ws_lines: Vec<String>,
-    pub item_lines: Vec<String>,
-}
-
-/// Snapshot the workstream / item context an extraction prompt needs.
-/// Snapshot the prompt material for the ONE Workstream this extraction routes
-/// to. A Session has a single Owner, so there is no candidate set and
-/// no cross-workstream item stitching.
-pub fn collect_prompt_inputs(db: &Db, workstream_id: &str) -> Result<PromptInputs> {
-    let mut ws_lines = Vec::new();
-    if let Some(w) = db.get_workstream(workstream_id)? {
-        ws_lines.push(format!(
-            "- id={} | {} | goal: {}",
-            w.id,
-            w.title,
-            if w.description.is_empty() {
-                "(none)"
-            } else {
-                &w.description
-            }
-        ));
-    }
-    let mut item_lines = Vec::new();
-    for (item, rev) in db.items_for_workstream(workstream_id, false)? {
-        item_lines.push(format!(
-            "- item_id={} | {} | {}",
-            item.id, item.kind, rev.title
-        ));
-    }
-    Ok(PromptInputs {
-        ws_lines,
-        item_lines,
-    })
-}
-
-const DECISION_HINTS: [&str; 8] = [
-    "决定",
-    "确定采用",
-    "就用",
-    "decided",
-    "decision:",
-    "we'll use",
-    "选择",
-    "定为",
-];
-const CONSTRAINT_HINTS: [&str; 8] = [
-    "不能",
-    "禁止",
-    "不允许",
-    "must not",
-    "don't change",
-    "不要动",
-    "保持兼容",
-    "constraint",
-];
-const TODO_HINTS: [&str; 7] = [
-    "todo",
-    "待办",
-    "接下来要",
-    "下一步",
-    "next step",
-    "待完成",
-    "需要先",
-];
-const QUESTION_HINTS: [&str; 5] = ["？", "?", "为什么", "是否", "how to"];
-
-pub struct HeuristicExtractor;
-
-impl ContextExtractor for HeuristicExtractor {
-    fn name(&self) -> String {
-        "heuristic".into()
-    }
-
-    fn extract(
-        &self,
-        _session: &Session,
-        messages: &[&SessionMessage],
-        workstream_id: &str,
-        _inputs: &PromptInputs,
-    ) -> Result<ExtractOutput> {
-        let mut out = Vec::new();
-        if workstream_id.is_empty() {
-            return Ok(ExtractOutput::default());
-        }
-        let primary = workstream_id.to_string();
-
-        for m in messages {
-            let text = &m.content;
-            // Stable source reference: the message's app-owned identity, not a
-            // positional number.
-            let source_refs = vec![format!("session-message:{}", m.id)];
-            // Authority = whose word the content is. Text from a user turn is
-            // the USER's statement, whoever wrote the row.
-            let is_user = m.role == SessionMessageRole::User;
-            let authority = if is_user {
-                "user_explicit"
-            } else {
-                "agent_statement"
-            };
-
-            if is_user && text.len() > 20 && !looks_like_command(text) {
-                if contains_any(
-                    text,
-                    &[
-                        "目标",
-                        "要做",
-                        "实现",
-                        "完成",
-                        "build",
-                        "implement",
-                        "规划",
-                        "设计",
-                    ],
-                ) {
-                    out.push(ContextMutation::Add {
-                        workstream_id: primary.clone(),
-                        item_kind: "current_state".into(),
-                        title: crate::adapters::truncate_text(text.trim(), 80),
-                        content: text.trim().to_string(),
-                        source_refs: source_refs.clone(),
-                        authority: authority.into(),
-                    });
-                }
-            }
-
-            for (kind, hints) in [
-                ("decision", &DECISION_HINTS[..]),
-                ("constraint", &CONSTRAINT_HINTS[..]),
-                ("todo", &TODO_HINTS[..]),
-                ("open_question", &QUESTION_HINTS[..]),
-            ] {
-                if let Some(line) = find_hint_line(text, hints) {
-                    let title = crate::adapters::truncate_text(line.trim(), 80);
-                    if title.len() < 8 {
-                        continue;
-                    }
-                    out.push(ContextMutation::Add {
-                        workstream_id: primary.clone(),
-                        item_kind: kind.into(),
-                        title,
-                        content: line.trim().to_string(),
-                        source_refs: source_refs.clone(),
-                        authority: authority.into(),
-                    });
-                }
-            }
-        }
-
-        out.truncate(8);
-        Ok(ExtractOutput::mutations(out))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CLI extractor
-// ---------------------------------------------------------------------------
-
-/// Runs intelligence through the user's agent CLI (headless mode).
-pub struct CliExtractor {
-    pub agent: Agent,
-    pub opts: ExecOptions,
-    pub timeout_secs: u64,
-}
+/// Fixed single-request limits. Defined once here; the frontend never
+/// recomputes them.
+pub const INPUT_LIMIT_BYTES: usize = 48 * 1024;
+pub const OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+pub const WORKSTREAM_RESERVE_BYTES: usize = 8 * 1024;
+pub const SESSION_CONTEXT_RESERVE_BYTES: usize = 4 * 1024;
 
 /// Assistant configuration, persisted in settings.
 ///
-/// This is ONLY the agent choice: which CLI the built-in Assistant runs on is
-/// a product decision, while model / provider / effort are owned by
-/// Settings → Agents like every other consumer's runtime. There is no
-/// second model configuration and no cross-Agent default left to leak.
+/// ONLY the agent choice: which CLI the explicit Context update runs on. Model /
+/// provider / effort are owned by Settings → Agents like every other runtime.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AssistantConfig {
     pub agent: String, // codex | claude_code | pi | none
@@ -229,35 +61,21 @@ impl AssistantConfig {
     }
 }
 
-impl CliExtractor {
-    pub fn from_settings(db: &Db) -> Option<CliExtractor> {
-        Self::for_agent(db, &AssistantConfig::from_settings(db).agent)
-    }
+/// Runs the explicit Context update through the user's agent CLI (headless).
+pub struct CliExtractor {
+    pub agent: Agent,
+    pub opts: ExecOptions,
+    pub timeout_secs: u64,
+}
 
-    /// Interactive variant: an invalid stored override is reported instead of
-    /// quietly downgrading to retrieval-only, because the user *did* configure
-    /// an Agent. `Ok(None)` means Assistant runs with no model on purpose.
+impl CliExtractor {
+    /// Strict lookup for the interactive path: `Ok(None)` means the user set
+    /// Assistant to `none`; anything else that cannot be honoured is an `Err`.
+    /// A missing or invalid CLI is surfaced, never degraded to a heuristic.
     pub fn try_from_settings(db: &Db) -> Result<Option<CliExtractor>> {
         Self::try_for_agent(db, &AssistantConfig::from_settings(db).agent)
     }
 
-    pub fn for_agent(db: &Db, agent: &str) -> Option<CliExtractor> {
-        match Self::try_for_agent(db, agent) {
-            Ok(cli) => cli,
-            Err(e) => {
-                // An invalid stored row degrades to heuristic extraction;
-                // it never becomes a launch with parameters NoEnding was not
-                // allowed to pass.
-                eprintln!("[extractor] {e}");
-                None
-            }
-        }
-    }
-
-    /// `Ok(None)` has exactly one meaning: Assistant is set to `none`, i.e. no
-    /// model on purpose. Anything else that cannot be honoured is an `Err` —
-    /// a stored Agent name NoEnding cannot resolve is corruption, not a
-    /// request for retrieval-only.
     pub fn try_for_agent(db: &Db, agent: &str) -> Result<Option<CliExtractor>> {
         if agent == "none" {
             return Ok(None);
@@ -270,8 +88,6 @@ impl CliExtractor {
         )))
     }
 
-    /// Explicit runtime intent — nothing is read from Settings. `None` fields
-    /// mean the Agent's own defaults are used verbatim.
     pub fn new(agent: Agent, opts: ExecOptions) -> CliExtractor {
         CliExtractor {
             agent,
@@ -279,13 +95,9 @@ impl CliExtractor {
             timeout_secs: 120,
         }
     }
-}
 
-impl ContextExtractor for CliExtractor {
-    /// Names what was actually passed: `agent-default` records that NoEnding
-    /// sent no runtime flag at all, so a SyncRun can never be misread as
-    /// "NoEnding chose this model".
-    fn name(&self) -> String {
+    /// Runtime label recorded on written revisions.
+    pub fn name(&self) -> String {
         let agent = self.agent.as_str();
         if self.opts.is_default() {
             format!("cli:{agent}:agent-default")
@@ -294,42 +106,206 @@ impl ContextExtractor for CliExtractor {
         }
     }
 
-    fn extract(
-        &self,
-        session: &Session,
-        messages: &[&SessionMessage],
-        workstream_id: &str,
-        inputs: &PromptInputs,
-    ) -> Result<ExtractOutput> {
+    /// Run ONE headless model call and return cleaned stdout. Any failure
+    /// (CLI missing, timeout, non-zero exit) is returned as Err — the caller
+    /// must NOT fall back to a heuristic.
+    pub fn run(&self, prompt: &str) -> Result<String> {
         let install = crate::platform::exec_resolver::resolve(self.agent)?;
         let adapter = crate::adapters::adapter_for(self.agent);
-        let (prompt, ref_map) = build_extraction_prompt(session, messages, inputs)?;
-        let cmd = adapter.build_exec_command(&install, &self.opts, &prompt)?;
+        let cmd = adapter.build_exec_command(&install, &self.opts, prompt)?;
         let out = crate::platform::exec_runner::run_headless(&cmd, self.timeout_secs)?;
-        let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
-        parse_mutations(&text, &ref_map, workstream_id, session)
+        Ok(crate::platform::exec_runner::clean_exec_stdout(&out.stdout))
     }
 }
 
-/// One entry of the prompt-local reference map: "#N" as shown to the model
-/// → the real, stable message identity behind it.
+// Prompt material
+
+/// One entry of the prompt-local message reference map: "#N" as shown to the
+/// model → the real, stable message identity behind it.
 #[derive(Debug, Clone)]
 pub struct PromptMessageRef {
     pub short_ref: String,
     pub message_id: String,
-    pub sequence: i64,
-    /// The message's role: the raw material for deterministic authority
-    /// derivation after parsing.
     pub role: SessionMessageRole,
 }
 
-/// Raw mutation shape we ask the model for. Short refs ("#1") map back to
-/// real session source refs after parsing, so the model cannot invent them.
+/// Everything the model may cite, and the ids it is allowed to target. Built
+/// while the snapshot was taken; parsing resolves through this, never through
+/// prompt positions.
+#[derive(Debug, Clone, Default)]
+pub struct PromptRefs {
+    pub messages: Vec<PromptMessageRef>,
+    /// session_id → the revision number a `@<session_id>` citation resolves
+    /// to (the revision this update will persist for a target, or the current
+    /// revision for a read-only input).
+    pub session_cite_revision: HashMap<String, i64>,
+}
+
+/// A Session fed into the prompt: its (optional) existing Context and the raw
+/// messages that need processing. `is_target` sessions must be echoed in the
+/// response; read-only sessions may only be cited.
+#[derive(Debug, Clone)]
+pub struct PromptSession {
+    pub session_id: String,
+    pub is_target: bool,
+    /// Existing four-field Context, when one exists.
+    pub existing: Option<SessionContextFields>,
+    /// Current Session Context revision (0 when none exists).
+    pub existing_revision: Option<i64>,
+    /// For a target: the raw messages to (re)summarize; empty for a read-only
+    /// input.
+    pub messages: Vec<SessionMessage>,
+}
+
+/// Everything one explicit update needs from the model call.
+#[derive(Debug, Clone)]
+pub struct PromptInput {
+    pub workstream_title: String,
+    pub workstream_description: String,
+    /// Lines describing the Workstream's current ContextItems (id | kind | title).
+    pub item_lines: Vec<String>,
+    pub sessions: Vec<PromptSession>,
+    /// Messages for the Workstream call, in stable order.
+    pub messages: Vec<SessionMessage>,
+}
+
+/// Assemble the prompt and the reference map. `refs` is filled so parsing can
+/// resolve every short ref back to a real, stable identity.
+pub fn build_update_prompt(input: &PromptInput) -> (String, PromptRefs) {
+    let mut msg_lines = Vec::new();
+    let mut refs = PromptRefs::default();
+    for (i, m) in input.messages.iter().enumerate() {
+        let short_ref = format!("#{}", i + 1);
+        msg_lines.push(format!(
+            "{} [{}] {}",
+            short_ref,
+            if m.role == SessionMessageRole::User {
+                "user"
+            } else {
+                "agent"
+            },
+            crate::adapters::truncate_text(&m.content, 1200)
+        ));
+        refs.messages.push(PromptMessageRef {
+            short_ref,
+            message_id: m.id.clone(),
+            role: m.role,
+        });
+    }
+
+    let mut session_lines = Vec::new();
+    for s in &input.sessions {
+        let role = if s.is_target {
+            "必须输出"
+        } else {
+            "只读引用"
+        };
+        let existing = match &s.existing {
+            Some(f) => format!(
+                "summary_current_state: {}\ndecisions: {}\nopen_questions: {}\nnext_steps: {}",
+                f.summary_current_state,
+                f.decisions.join(" | "),
+                f.open_questions.join(" | "),
+                f.next_steps.join(" | "),
+            ),
+            None => "(无，需首次生成)".to_string(),
+        };
+        session_lines.push(format!(
+            "- session_id={} [{role}]\n  现有 Context: {}\n  本次消息数: {}",
+            s.session_id,
+            existing,
+            s.messages.len()
+        ));
+        // citation target: current revision for read-only, next for target
+        let rev = s
+            .existing_revision
+            .map(|r| if s.is_target { r + 1 } else { r })
+            .unwrap_or(if s.is_target { 1 } else { 0 });
+        if s.existing.is_some() || s.is_target {
+            refs.session_cite_revision.insert(s.session_id.clone(), rev);
+        }
+    }
+
+    let prompt = format!(
+        r##"你是 NoEnding 的上下文更新器。只输出一个 JSON 对象，不要任何解释文字或 markdown 代码块。
+
+Workstream：
+- 标题：{ws_title}
+- 描述：{ws_desc}
+
+该 Workstream 现有的 active 条目（避免重复；若要实质更新某条，输出 op=update 并给出其 item_id）：
+{items}
+
+相关 Session（session_id 必须原样使用；标记「必须输出」的 Session 必须在 session_contexts 中给出完整四字段）：
+{sessions}
+
+需要处理的原始消息（行首 #编号 是引用编号）：
+{messages}
+
+输出 JSON 对象，且只能包含两个键：
+{{
+  "session_contexts": [
+    {{"session_id":"<必须输出的 session_id>","summary_current_state":"...","decisions":["..."],"open_questions":["..."],"next_steps":["..."]}}
+  ],
+  "workstream_mutations": [
+    {{"op":"add","item_kind":"decision|constraint|todo|open_question|goal|current_state|note|finding|risk|issue|reference","title":"不超过60字","content":"原文或简述","refs":["#1"]}},
+    {{"op":"update","item_id":"<已有条目 id>","title":"...","content":"...","refs":["#2"]}},
+    {{"op":"supersede","item_id":"<已有条目 id>","title":"...","content":"...","refs":["#2"]}},
+    {{"op":"resolve","item_id":"<已有条目 id>","refs":["#3"]}}
+  ]
+}}
+
+规则：
+1. session_contexts 必须覆盖所有「必须输出」的 Session，且不得包含其他 Session；不得重复。
+2. 四个字段必须齐全，空列表写 []。decisions/open_questions/next_steps 是字符串数组。
+3. workstream_mutations 只允许 add/update/supersede/resolve；add 必须给 item_kind 与 title；update/supersede/resolve 必须给 item_id。
+4. refs 只能引用上面的 #编号，或 @session_id（引用某个 Session 的现有摘要）；不得出现其他取值。
+5. 没有可提出的变更时，workstream_mutations 写 []。
+6. 不要输出 authority、revision、generation 或任何处理位置。除这一个 JSON 对象外不要输出任何内容。"##,
+        ws_title = input.workstream_title,
+        ws_desc = if input.workstream_description.is_empty() {
+            "(无)"
+        } else {
+            &input.workstream_description
+        },
+        items = if input.item_lines.is_empty() {
+            "(none)".to_string()
+        } else {
+            input.item_lines.join("\n")
+        },
+        sessions = session_lines.join("\n"),
+        messages = if msg_lines.is_empty() {
+            "(none)".to_string()
+        } else {
+            msg_lines.join("\n")
+        },
+    );
+    (prompt, refs)
+}
+
+// Strict parsing
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOutput {
+    session_contexts: Vec<RawSessionContext>,
+    workstream_mutations: Vec<RawMutation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSessionContext {
+    session_id: String,
+    summary_current_state: String,
+    decisions: Vec<String>,
+    open_questions: Vec<String>,
+    next_steps: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawMutation {
     op: String,
-    #[serde(default)]
-    workstream_id: String,
     #[serde(default)]
     item_kind: String,
     #[serde(default)]
@@ -342,7 +318,7 @@ struct RawMutation {
     refs: Vec<String>,
 }
 
-const ALLOWED_KINDS: [&str; 15] = [
+pub const ALLOWED_KINDS: [&str; 15] = [
     "goal",
     "current_state",
     "constraint",
@@ -360,76 +336,11 @@ const ALLOWED_KINDS: [&str; 15] = [
     "research_note",
 ];
 
-fn build_extraction_prompt(
-    session: &Session,
-    messages: &[&SessionMessage],
-    inputs: &PromptInputs,
-) -> Result<(String, Vec<PromptMessageRef>)> {
-    let ws_lines = &inputs.ws_lines;
-    let item_lines = &inputs.item_lines;
-
-    let mut msg_lines = Vec::new();
-    let mut ref_map = Vec::new();
-    for (i, m) in messages.iter().enumerate() {
-        let short_ref = format!("#{}", i + 1);
-        msg_lines.push(format!(
-            "{} [{}] {}",
-            short_ref,
-            if m.role == SessionMessageRole::User {
-                "user"
-            } else {
-                "agent"
-            },
-            crate::adapters::truncate_text(&m.content, 600)
-        ));
-        ref_map.push(PromptMessageRef {
-            short_ref,
-            message_id: m.id.clone(),
-            sequence: m.sequence,
-            role: m.role,
-        });
-    }
-
-    let prompt = format!(
-        r##"你是 NoEnding 的上下文提取器。任务：从 Agent 会话的新增消息中提取少量高价值的长期上下文变更。这不是对话，禁止自由发挥，只输出 JSON。
-
-所属 Workstream（只允许使用这个 id）：
-{ws}
-
-该 Workstream 已有的 active 条目（避免重复；若新信息实质更新了某条，输出 op=update）：
-{items}
-
-新增消息（ref 编号见行首）：
-{messages}
-
-只输出一个 JSON 数组，每个元素形如：
-{{"op":"add","workstream_id":"<所属id>","item_kind":"decision|constraint|todo|open_question|goal|current_state|note|finding|risk|issue|reference","title":"不超过60字","content":"原文或简述","refs":["#1"]}}
-可选 op："update"（需 item_id，取自已有条目列表）、"resolve"（需 item_id，表示已完成）、"conflict"（与用户约束冲突时保留双方，需 item_id）。
-
-规则：
-1. 最多 8 条；没有有价值信息就输出 []；
-2. workstream_id 必须是上面给出的所属 id；item_kind 必须来自上面的枚举；
-3. refs 只能引用消息行首的 #编号；寒暄、工具输出、纯过程性内容一律忽略；
-4. 不要输出 JSON 以外的任何文字（不要 markdown 代码块标记）。
-
-Session: {agent} / {sid}"##,
-        ws = ws_lines.join("\n"),
-        items = if item_lines.is_empty() {
-            "(none)".to_string()
-        } else {
-            item_lines.join("\n")
-        },
-        messages = msg_lines.join("\n"),
-        agent = session.agent.display_name(),
-        sid = session.root_agent_session_id,
-    );
-    Ok((prompt, ref_map))
-}
-
-/// Extract the first JSON array from model output (models sometimes wrap
-/// output in prose or code fences despite instructions).
-pub fn extract_json_array(text: &str) -> Option<String> {
-    let start = text.find('[')?;
+/// Extract the first complete JSON object from model output. Models sometimes
+/// wrap output in prose or code fences despite instructions; we still insist
+/// the payload itself be a single object.
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
     let bytes = text.as_bytes();
     let mut depth = 0usize;
     let mut in_str = false;
@@ -442,11 +353,11 @@ pub fn extract_json_array(text: &str) -> Option<String> {
         match b {
             b'\\' if in_str => escape = true,
             b'"' => in_str = !in_str,
-            b'[' if !in_str => depth += 1,
-            b']' if !in_str => {
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(text[start..=i].to_string());
+                    return Some(&text[start..=i]);
                 }
             }
             _ => {}
@@ -455,397 +366,313 @@ pub fn extract_json_array(text: &str) -> Option<String> {
     None
 }
 
-/// Resolve short refs through the prompt's reference map. The map is the
-/// only bridge between "#N" and a real message: an unknown ref is dropped
-/// with a diagnostic, never misread as a message sequence.
-fn resolve_refs(
-    refs: &[String],
-    ref_map: &[PromptMessageRef],
-    diagnostics: &mut Vec<String>,
-) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for r in refs {
-        let key = r.trim().trim_start_matches('#');
-        let short = format!("#{}", key);
-        if let Some(m) = ref_map.iter().find(|m| m.short_ref == short) {
-            let reference = format!("session-message:{}", m.message_id);
-            if !out.contains(&reference) {
-                out.push(reference);
-            }
-        } else {
-            diagnostics.push(format!("模型引用了 prompt 中不存在的 {}，已忽略", r.trim()));
-        }
+/// Resolve one source ref through the reference map. Only a known "#N" or
+/// "@session_id" is legal; anything else fails.
+fn resolve_ref(r: &str, refs: &PromptRefs) -> Result<String> {
+    let r = r.trim();
+    if let Some(key) = r.strip_prefix('#') {
+        let short = format!("#{key}");
+        let Some(m) = refs.messages.iter().find(|m| m.short_ref == short) else {
+            return Err(other(format!("模型引用了不存在的消息引用 {r}")));
+        };
+        return Ok(format!("session-message:{}", m.message_id));
     }
-    out
+    if let Some(sid) = r.strip_prefix('@') {
+        let Some(rev) = refs.session_cite_revision.get(sid) else {
+            return Err(other(format!("模型引用了不存在的 Session 引用 {r}")));
+        };
+        return Ok(format!("session-context:{sid}:{rev}"));
+    }
+    Err(other(format!("模型引用了非法来源 {r}")))
 }
 
-/// Deterministic authority derivation (Issue: authority is NEVER the
-/// model's call). The LLM decides WHAT to extract; NoEnding decides whose
-/// word it is, from the messages the mutation actually cites:
-/// - all cited messages are user turns         → `user_explicit`
-/// - all cited messages are assistant turns    → `agent_statement`
-/// - mixed citations (user participated)       → `user_explicit` (conservative:
-///   the item is protected from silent agent modification)
+/// Deterministic authority derivation — authority is NEVER the model's call.
+/// The model decides WHAT to extract; NoEnding decides whose word it is, from
+/// the sources the mutation actually cites:
+/// - any cited user message                    → `user_explicit`
+/// - all-agent citations (messages / contexts) → `agent_statement`
 /// - no resolvable citation                    → `agent_inferred`
-pub fn derive_authority(source_refs: &[String], ref_map: &[PromptMessageRef]) -> String {
+pub fn derive_authority(source_refs: &[String], refs: &PromptRefs) -> String {
     if source_refs.is_empty() {
         return "agent_inferred".into();
     }
-    let roles: Vec<SessionMessageRole> = source_refs
-        .iter()
-        .filter_map(|r| {
-            let id = r.strip_prefix("session-message:")?;
-            ref_map.iter().find(|m| m.message_id == id).map(|m| m.role)
-        })
-        .collect();
-    if roles.is_empty() {
-        return "agent_inferred".into();
+    let mut saw_user = false;
+    let mut saw_agent = false;
+    for r in source_refs {
+        if let Some(id) = r.strip_prefix("session-message:") {
+            match refs
+                .messages
+                .iter()
+                .find(|m| m.message_id == id)
+                .map(|m| m.role)
+            {
+                Some(SessionMessageRole::User) => saw_user = true,
+                Some(SessionMessageRole::Assistant) => saw_agent = true,
+                None => {}
+            }
+        } else if r.starts_with("session-context:") {
+            saw_agent = true;
+        }
     }
-    if roles.iter().all(|r| *r == SessionMessageRole::Assistant) {
+    if saw_user {
+        "user_explicit".into()
+    } else if saw_agent {
         "agent_statement".into()
     } else {
-        // all user, or mixed → user participates in the claim
-        "user_explicit".into()
+        "agent_inferred".into()
     }
 }
 
-/// Parse + validate model output into real mutations. Invalid entries are
-/// dropped individually (with diagnostics); the rest still merges.
-pub fn parse_mutations(
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Parse + STRICTLY validate model output. Any violation fails the whole
+/// update; nothing partial is ever returned.
+///
+/// `expected_targets` is the exact set of session ids that must appear in
+/// `session_contexts`. `allowed_item_ids` is the set of Workstream item ids
+/// the model may name in update/supersede/resolve.
+pub fn parse_update_output(
     text: &str,
-    ref_map: &[PromptMessageRef],
-    workstream_id: &str,
-    _session: &Session,
-) -> Result<ExtractOutput> {
-    let arr = extract_json_array(text).ok_or_else(|| other("模型输出中未找到 JSON 数组"))?;
-    let raw: Vec<RawMutation> =
-        serde_json::from_str(&arr).map_err(|e| other(format!("JSON 解析失败: {}", e)))?;
+    refs: &PromptRefs,
+    owner_workstream_id: &str,
+    expected_targets: &[String],
+    allowed_item_ids: &HashSet<String>,
+) -> Result<ContextUpdateOutput> {
+    if text.len() > OUTPUT_LIMIT_BYTES {
+        return Err(other("模型输出超出大小上限"));
+    }
+    let obj = extract_json_object(text).ok_or_else(|| other("模型输出中未找到 JSON 对象"))?;
+    let raw: RawOutput =
+        serde_json::from_str(obj).map_err(|e| other(format!("模型输出 JSON 解析失败: {e}")))?;
 
-    let mut out = Vec::new();
-    let mut diagnostics: Vec<String> = Vec::new();
-    for r in raw.into_iter().take(12) {
-        let source_refs = resolve_refs(&r.refs, ref_map, &mut diagnostics);
+    // session_contexts: exactly the target set, no duplicates.
+    let expected: HashSet<&str> = expected_targets.iter().map(|s| s.as_str()).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut session_contexts = Vec::new();
+    for sc in raw.session_contexts {
+        if !expected.contains(sc.session_id.as_str()) {
+            return Err(other(format!(
+                "模型输出了非目标 Session: {}",
+                sc.session_id
+            )));
+        }
+        if !seen.insert(sc.session_id.clone()) {
+            return Err(other(format!("模型重复输出 Session: {}", sc.session_id)));
+        }
+        session_contexts.push(SessionContextDraft {
+            session_id: sc.session_id,
+            fields: SessionContextFields {
+                summary_current_state: normalize_ws(&sc.summary_current_state),
+                decisions: normalize_list(sc.decisions),
+                open_questions: normalize_list(sc.open_questions),
+                next_steps: normalize_list(sc.next_steps),
+            },
+        });
+    }
+    for t in expected_targets {
+        if !seen.contains(t) {
+            return Err(other(format!("模型缺少目标 Session: {t}")));
+        }
+    }
 
-        match r.op.as_str() {
+    // workstream_mutations: allowed ops only, valid ids/refs.
+    let mut workstream_mutations = Vec::new();
+    for m in raw.workstream_mutations {
+        let source_refs = m
+            .refs
+            .iter()
+            .map(|r| resolve_ref(r, refs))
+            .collect::<Result<Vec<String>>>()?;
+        // dedup while preserving order
+        let mut deduped: Vec<String> = Vec::new();
+        for r in source_refs {
+            if !deduped.contains(&r) {
+                deduped.push(r);
+            }
+        }
+        let title = normalize_ws(&m.title);
+        let content = m.content.trim().to_string();
+        match m.op.as_str() {
             "add" => {
-                if r.workstream_id != workstream_id
-                    || !ALLOWED_KINDS.contains(&r.item_kind.as_str())
-                    || r.title.trim().is_empty()
-                {
-                    diagnostics
-                        .push("模型输出 add 条目缺少合法 workstream/kind/title，已忽略".into());
-                    continue;
+                if !ALLOWED_KINDS.contains(&m.item_kind.as_str()) || title.is_empty() {
+                    return Err(other("add mutation 缺少合法 item_kind 或 title"));
                 }
-                out.push(ContextMutation::Add {
-                    workstream_id: r.workstream_id,
-                    item_kind: r.item_kind,
-                    title: crate::adapters::truncate_text(r.title.trim(), 80),
-                    content: r.content.trim().to_string(),
-                    authority: derive_authority(&source_refs, ref_map),
-                    source_refs,
+                workstream_mutations.push(ContextMutation::Add {
+                    workstream_id: owner_workstream_id.to_string(),
+                    item_kind: m.item_kind,
+                    title,
+                    content,
+                    authority: derive_authority(&deduped, refs),
+                    source_refs: deduped,
                 });
             }
             "update" | "supersede" => {
-                if r.item_id.is_empty() || r.title.trim().is_empty() {
-                    diagnostics.push("模型输出 update/supersede 缺少 item_id/title，已忽略".into());
-                    continue;
+                if m.item_id.is_empty() || title.is_empty() {
+                    return Err(other("update/supersede mutation 缺少 item_id 或 title"));
                 }
-                let content = r.content.trim().to_string();
-                let authority = derive_authority(&source_refs, ref_map);
-                out.push(if r.op == "update" {
+                if !allowed_item_ids.contains(&m.item_id) {
+                    return Err(other(format!("mutation 指向未知条目 {}", m.item_id)));
+                }
+                let authority = derive_authority(&deduped, refs);
+                workstream_mutations.push(if m.op == "update" {
                     ContextMutation::Update {
-                        item_id: r.item_id,
-                        title: r.title.trim().to_string(),
+                        item_id: m.item_id,
+                        title,
                         content,
-                        source_refs,
+                        source_refs: deduped,
                         authority,
                     }
                 } else {
                     ContextMutation::Supersede {
-                        item_id: r.item_id,
-                        title: r.title.trim().to_string(),
+                        item_id: m.item_id,
+                        title,
                         content,
-                        source_refs,
+                        source_refs: deduped,
                         authority,
                     }
                 });
             }
             "resolve" => {
-                if r.item_id.is_empty() {
-                    diagnostics.push("模型输出 resolve 缺少 item_id，已忽略".into());
-                    continue;
+                if m.item_id.is_empty() {
+                    return Err(other("resolve mutation 缺少 item_id"));
                 }
-                out.push(ContextMutation::Resolve {
-                    item_id: r.item_id,
-                    source_refs,
+                if !allowed_item_ids.contains(&m.item_id) {
+                    return Err(other(format!("mutation 指向未知条目 {}", m.item_id)));
+                }
+                workstream_mutations.push(ContextMutation::Resolve {
+                    item_id: m.item_id,
+                    source_refs: deduped,
                 });
             }
-            "create_workstream" => {
-                if r.title.trim().is_empty() {
-                    continue;
-                }
-                out.push(ContextMutation::CreateWorkstream {
-                    title: r.title.trim().to_string(),
-                    reason: r.content.trim().to_string(),
-                });
-            }
-            "conflict" => {
-                if r.workstream_id != workstream_id {
-                    continue;
-                }
-                out.push(ContextMutation::Conflict {
-                    workstream_id: r.workstream_id,
-                    item_id: r.item_id,
-                    title: r.title.trim().to_string(),
-                    content: r.content.trim().to_string(),
-                    source_refs,
-                    reason: "模型判定与用户约束可能冲突".into(),
-                });
-            }
-            _ => continue,
+            other_op => return Err(other(format!("未知 mutation op: {other_op}"))),
         }
     }
-    out.truncate(8);
-    Ok(ExtractOutput {
-        mutations: out,
-        diagnostics,
+
+    Ok(ContextUpdateOutput {
+        session_contexts,
+        workstream_mutations,
     })
 }
 
-fn contains_any(text: &str, hints: &[&str]) -> bool {
-    let lower = text.to_lowercase();
-    hints.iter().any(|h| lower.contains(h))
-}
-
-fn looks_like_command(text: &str) -> bool {
-    text.trim_start().starts_with('/') || text.trim_start().starts_with("!")
-}
-
-/// Extract the first line that carries a hint, so titles are anchored to
-/// real transcript evidence.
-fn find_hint_line<'a>(text: &'a str, hints: &[&str]) -> Option<String> {
-    let lower = text.to_lowercase();
-    for h in hints {
-        if let Some(pos) = lower.find(h) {
-            let bytes = text.as_bytes();
-            let mut start = pos.min(text.len());
-            while start > 0 && bytes[start] != b'\n' {
-                start -= 1;
-            }
-            if bytes.get(start) == Some(&b'\n') {
-                start += 1;
-            }
-            let mut end = pos + h.len();
-            while end < text.len() && bytes[end] != b'\n' {
-                end += 1;
-            }
-            let line = &text[start..end];
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
+fn normalize_list(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for it in items {
+        let n = normalize_ws(&it);
+        if !n.is_empty() && !out.contains(&n) {
+            out.push(n);
         }
     }
-    None
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::SessionMessage;
 
-    fn session() -> Session {
-        Session {
-            id: "s1".into(),
-            agent: Agent::Codex,
-            root_agent_session_id: "a1".into(),
-            title: None,
-            cwd: None,
-            workspace_path_id: None,
-            project_id: None,
-            owner_workstream_id: None,
-            forked_from_session_id: None,
-            started_at: None,
-            last_activity_at: None,
-            last_conversation_at: None,
-            trashed_at: None,
+    fn refs() -> PromptRefs {
+        PromptRefs {
+            messages: vec![
+                PromptMessageRef {
+                    short_ref: "#1".into(),
+                    message_id: "m-aaa".into(),
+                    role: SessionMessageRole::User,
+                },
+                PromptMessageRef {
+                    short_ref: "#2".into(),
+                    message_id: "m-bbb".into(),
+                    role: SessionMessageRole::Assistant,
+                },
+            ],
+            session_cite_revision: HashMap::from([("s1".to_string(), 3)]),
         }
     }
 
-    /// Messages with non-1-starting, non-contiguous sequences — the map must
-    /// translate "#1" to the FIRST prompt message (sequence 101), never to
-    /// "sequence 1".
-    fn ref_map() -> Vec<PromptMessageRef> {
-        vec![
-            PromptMessageRef {
-                short_ref: "#1".into(),
-                message_id: "m-aaa".into(),
-                sequence: 101,
-                role: SessionMessageRole::User,
-            },
-            PromptMessageRef {
-                short_ref: "#2".into(),
-                message_id: "m-bbb".into(),
-                sequence: 105,
-                role: SessionMessageRole::Assistant,
-            },
-        ]
-    }
-
-    fn parse(text: &str) -> ExtractOutput {
-        parse_mutations(text, &ref_map(), "ws1", &session()).unwrap()
+    fn allowed() -> HashSet<String> {
+        HashSet::from(["item-1".to_string()])
     }
 
     #[test]
-    fn parses_model_output_with_fences_and_prose() {
-        let text = "好的，以下是提取结果：\n```json\n[{\"op\":\"add\",\"workstream_id\":\"ws1\",\"item_kind\":\"decision\",\"title\":\"采用 FTS5\",\"content\":\"决定使用 FTS5\",\"refs\":[\"#2\"]},\n{\"op\":\"add\",\"workstream_id\":\"bad\",\"item_kind\":\"decision\",\"title\":\"x\",\"content\":\"y\",\"refs\":[]}]\n```";
-        let out = parse(text);
-        assert_eq!(out.mutations.len(), 1, "invalid workstream filtered out");
-        match &out.mutations[0] {
+    fn parses_a_well_formed_object() {
+        let text = r##"{"session_contexts":[{"session_id":"s1","summary_current_state":"推进重构","decisions":["采用 SQLite"],"open_questions":[],"next_steps":["补测试"]}],"workstream_mutations":[{"op":"add","item_kind":"decision","title":"采用 SQLite","content":"决定用 SQLite","refs":["#1"]},{"op":"update","item_id":"item-1","title":"x","content":"y","refs":["#2"]}]}"##;
+        let out =
+            parse_update_output(text, &refs(), "ws1", &["s1".to_string()], &allowed()).unwrap();
+        assert_eq!(out.session_contexts.len(), 1);
+        assert_eq!(
+            out.session_contexts[0].fields.decisions,
+            vec!["采用 SQLite"]
+        );
+        assert_eq!(out.workstream_mutations.len(), 2);
+        match &out.workstream_mutations[0] {
             ContextMutation::Add {
                 workstream_id,
-                source_refs,
                 authority,
+                source_refs,
                 ..
             } => {
                 assert_eq!(workstream_id, "ws1");
-                assert_eq!(source_refs, &vec!["session-message:m-bbb".to_string()]);
-                // #2 is an assistant turn: agent's own statement.
-                assert_eq!(authority, "agent_statement");
-            }
-            other => panic!("unexpected mutation: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn user_cited_extraction_keeps_user_authority() {
-        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"constraint","title":"双平台一等公民","content":"Windows 和 macOS 都必须作为一等平台。","refs":["#1"]}]"##;
-        let out = parse(text);
-        match &out.mutations[0] {
-            ContextMutation::Add { authority, .. } => {
-                assert_eq!(authority, "user_explicit", "user words keep user authority");
-            }
-            other => panic!("unexpected: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn mixed_citation_is_conservatively_user_owned() {
-        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":["#1","#2"]}]"##;
-        let out = parse(text);
-        match &out.mutations[0] {
-            ContextMutation::Add { authority, .. } => {
-                assert_eq!(
-                    authority, "user_explicit",
-                    "mixed refs protect the user's voice"
-                );
-            }
-            other => panic!("unexpected: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn uncited_extraction_is_agent_inferred() {
-        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":[]}]"##;
-        let out = parse(text);
-        match &out.mutations[0] {
-            ContextMutation::Add { authority, .. } => assert_eq!(authority, "agent_inferred"),
-            other => panic!("unexpected: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn short_ref_maps_to_real_message_not_prompt_position() {
-        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"第一条","content":"c","refs":["#1"]}]"##;
-        let out = parse(text);
-        match &out.mutations[0] {
-            ContextMutation::Add { source_refs, .. } => {
-                // "#1" is the first PROMPT message: id m-aaa / sequence 101.
+                assert_eq!(authority, "user_explicit");
                 assert_eq!(source_refs, &vec!["session-message:m-aaa".to_string()]);
             }
-            other => panic!("unexpected mutation: {:?}", other),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
-    fn unknown_ref_is_dropped_with_diagnostic() {
-        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":["#999"]},
-                       {"op":"add","workstream_id":"ws1","item_kind":"note","title":"u","content":"c","refs":["#2","#999"]}]"##;
-        let out = parse(text);
-        assert_eq!(out.mutations.len(), 2);
-        match &out.mutations[0] {
-            ContextMutation::Add { source_refs, .. } => assert!(source_refs.is_empty()),
-            other => panic!("unexpected: {:?}", other),
-        }
-        match &out.mutations[1] {
-            ContextMutation::Add { source_refs, .. } => {
-                assert_eq!(source_refs.len(), 1);
-                assert_eq!(source_refs[0], "session-message:m-bbb");
-            }
-            other => panic!("unexpected: {:?}", other),
-        }
+    fn unknown_field_is_rejected() {
+        let text = r#"{"session_contexts":[],"workstream_mutations":[],"extra":1}"#;
+        assert!(parse_update_output(text, &refs(), "ws1", &[], &allowed()).is_err());
+    }
+
+    #[test]
+    fn missing_target_session_is_rejected() {
+        let text = r#"{"session_contexts":[],"workstream_mutations":[]}"#;
         assert!(
-            out.diagnostics.iter().any(|d| d.contains("#999")),
-            "diagnostics mention the bad ref"
+            parse_update_output(text, &refs(), "ws1", &["s1".to_string()], &allowed()).is_err()
         );
     }
 
     #[test]
-    fn multi_and_duplicate_refs_are_deduped() {
-        let text = r##"[{"op":"add","workstream_id":"ws1","item_kind":"note","title":"t","content":"c","refs":["#1","#2","#1"]}]"##;
-        let out = parse(text);
-        match &out.mutations[0] {
-            ContextMutation::Add { source_refs, .. } => {
-                assert_eq!(
-                    source_refs.len(),
-                    2,
-                    "duplicates removed, both messages kept"
-                );
+    fn non_target_session_is_rejected() {
+        let text = r#"{"session_contexts":[{"session_id":"other","summary_current_state":"","decisions":[],"open_questions":[],"next_steps":[]}],"workstream_mutations":[]}"#;
+        assert!(
+            parse_update_output(text, &refs(), "ws1", &["s1".to_string()], &allowed()).is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_item_id_is_rejected() {
+        let text = r##"{"session_contexts":[],"workstream_mutations":[{"op":"resolve","item_id":"nope","refs":["#1"]}]}"##;
+        assert!(parse_update_output(text, &refs(), "ws1", &[], &allowed()).is_err());
+    }
+
+    #[test]
+    fn unknown_ref_is_rejected() {
+        let text = r##"{"session_contexts":[],"workstream_mutations":[{"op":"add","item_kind":"note","title":"t","content":"c","refs":["#99"]}]}"##;
+        assert!(parse_update_output(text, &refs(), "ws1", &[], &allowed()).is_err());
+    }
+
+    #[test]
+    fn session_context_citation_resolves_to_revision() {
+        let text = r#"{"session_contexts":[],"workstream_mutations":[{"op":"add","item_kind":"note","title":"t","content":"c","refs":["@s1"]}]}"#;
+        let out = parse_update_output(text, &refs(), "ws1", &[], &allowed()).unwrap();
+        match &out.workstream_mutations[0] {
+            ContextMutation::Add {
+                source_refs,
+                authority,
+                ..
+            } => {
+                assert_eq!(source_refs, &vec!["session-context:s1:3".to_string()]);
+                assert_eq!(authority, "agent_statement");
             }
-            other => panic!("unexpected: {:?}", other),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 
-    /// a short user message reaches the extractor untouched: there is
-    /// no length pre-filter between the store and extraction.
     #[test]
-    fn heuristic_uses_user_authority_for_user_messages() {
-        let db_dir = std::env::temp_dir().join(format!("noending-ext-{}", uuid::Uuid::new_v4()));
-        let db = Db::open(&db_dir.join("t.db")).unwrap();
-        let s = session();
-        let msg = SessionMessage {
-            id: "m-1".into(),
-            session_id: s.id.clone(),
-            member_id: "mem-1".into(),
-            sequence: 42,
-            source_message_id: None,
-            source_generation: 0,
-            source_position: "line:42".into(),
-            source_identity_hash: "h".into(),
-            ts: None,
-            role: SessionMessageRole::User,
-            content: "我们决定采用 SQLite，不再引入向量数据库，这个方案就这么定了。".into(),
-            provider: None,
-            model: None,
-            raw_ref: "x#line:42".into(),
-        };
-        let inputs = collect_prompt_inputs(&db, "ws1").unwrap();
-        let out = HeuristicExtractor
-            .extract(&s, &[&msg], "ws1", &inputs)
-            .unwrap();
-        assert!(!out.mutations.is_empty());
-        for m in &out.mutations {
-            match m {
-                ContextMutation::Add {
-                    authority,
-                    source_refs,
-                    ..
-                } => {
-                    assert_eq!(authority, "user_explicit", "user words keep user authority");
-                    assert_eq!(source_refs[0], "session-message:m-1");
-                }
-                other => panic!("unexpected: {:?}", other),
-            }
-        }
+    fn prose_wrapped_object_still_parses() {
+        let text = "好的：\n```json\n{\"session_contexts\":[],\"workstream_mutations\":[]}\n```";
+        assert!(parse_update_output(text, &refs(), "ws1", &[], &allowed()).is_ok());
     }
 }

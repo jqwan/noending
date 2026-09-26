@@ -1,59 +1,23 @@
 //! Session → WorkspacePath, and the derived Project cache.
 //!
-//! This module owns Session-to-WorkspacePath policy and Owner assignment.
-//!
-//! ## The fact chain
-//!
 //! ```text
 //! Session.cwd  →  workspace_path_id  →  workspace_paths.project_id  →  Project
 //! ```
 //!
-//! `sessions.project_id` stays in the schema as a **derived cache** and is
-//! written in exactly two places:
+//! `sessions.project_id` is a **derived cache** written in exactly two places:
+//! inside `upsert_session` (same statement as `workspace_path_id`, so cache and
+//! source cannot drift), and the batch refresh when a WorkspacePath changes
+//! Project. Any other `UPDATE sessions SET project_id` is a domain violation.
 //!
-//! 1. inside `upsert_session`, as `project_id = (SELECT project_id FROM
-//!    workspace_paths WHERE id = <workspace_path_id>)` — same statement, so the
-//!    cache and its source cannot be set apart;
-//! 2. the batch refresh when a WorkspacePath changes Project, from
-//!    `workspace::project`.
+//! Invariants: a Session with no cwd keeps `workspace_path_id = NULL` — never
+//! backfill with the default workspace, which would fabricate a fact the
+//! transcript does not contain. Event ingestion must not re-resolve a Project;
+//! discovery is authoritative for cwd. Setting an Owner writes only
+//! `owner_workstream_id`, leaving cwd / `workspace_path_id` / `project_id` untouched.
 //!
-//! Any other `UPDATE sessions SET project_id` is a domain violation.
-//!
-//! ## Rules
-//!
-//! * A Session with no cwd keeps `workspace_path_id = NULL`. Never backfill it
-//!   with the default workspace — that would fabricate a physical fact the
-//!   transcript does not contain.
-//! * Ordinary event ingestion must not re-resolve a Project. Project work
-//!   happens when `workspace_path_id` changes or a WorkspacePath is reassigned
-//!; the per-event hot path stays as it is.
-//! * Discovery is authoritative for cwd, so `workspace_path_id` follows it: add
-//!   it to the `ON CONFLICT` update set alongside `cwd`.
-//! * Setting a Session's Owner writes `owner_workstream_id` and nothing else —
-//!   no WorkstreamPath is added, and cwd / `workspace_path_id` / `project_id`
-//!   stay put.
-//! * `launch_intents` keep their existing `cwd` and gain no workspace_path_id:
-//!   a fourth place to store a path is a fourth chance to be wrong.
-//!
-//! ## Wiring
-//!
-//! The WorkspacePath creator is [`WorkspaceAttaching`], and it is *injected*:
-//! every policy entry point here takes `&dyn WorkspaceAttaching` (or is reached
-//! from one), so these rules are testable with a scripted stand-in while
-//! `workspace::project` remains the only real implementation. Because Session
-//! discovery runs on a background thread that has nowhere to carry one,
-//! [`register_workspace_attacher`] holds the app-wide seam that ingestion's
-//! logical-session resolution uses; [`UnattachedWorkspacePaths`] is what it
-//! falls back to, and it answers "no path" to everything — never a guess.
-//!
-//! The doors, in the order the fact chain is walked:
-//!
-//! * [`resolve_session_path`] — cwd → WorkspacePath id (discovery's only
-//!   workspace call);
-//! * [`attach_session_conn`] — an existing row moves;
-//! * [`attach_sessions_to_registered_paths`] — the same move for every Session
-//!   discovery skipped, so a late-registered path still reaches them;
-//! * [`set_session_owner`] — the one write door for semantic ownership.
+//! The WorkspacePath creator is [`WorkspaceAttaching`], injected so these rules
+//! stay testable with a scripted stand-in; [`register_workspace_attacher`] holds
+//! the app-wide seam the background discovery thread has nowhere else to carry.
 
 use std::sync::{Arc, OnceLock};
 
@@ -63,8 +27,6 @@ use crate::error::{other, Result};
 use crate::storage::session_paths;
 use crate::storage::Db;
 use crate::workspace::WorkspaceAttaching;
-
-// ------------------------------------------------------------ the seam
 
 /// The seam when no workspace layer is wired: every path answers `Ok(None)`.
 ///
@@ -107,9 +69,9 @@ pub fn workspace_attacher() -> SharedAttacher {
         .clone()
 }
 
-// -------------------------------------------------------- path attaching
+// Path attaching
 
-/// the WorkspacePath a Session's cwd names, resolved through the seam.
+/// The WorkspacePath a Session's cwd names, resolved through the seam.
 ///
 /// A missing or blank cwd is answered here instead of being handed to the seam:
 /// "no path was observed" and "the observed path resolves to nothing" are
@@ -136,12 +98,12 @@ pub fn move_session_to_path_conn(
     session_paths::attach_session_workspace_path_conn(conn, session_id, Some(workspace_path_id))
 }
 
-/// move an existing Session row onto its cwd's WorkspacePath and
+/// Move an existing Session row onto its cwd's WorkspacePath and
 /// recompute its cached Project in the same statement.
 ///
 /// Returns whether the row actually moved. `Ok(false)` when the seam resolves to
 /// nothing: an attachment is only ever replaced by a better fact, never deleted
-/// because a resolver is unavailable (, change-discipline 1).
+/// because a resolver is unavailable.
 pub fn attach_session_conn(
     conn: &Connection,
     attacher: &dyn WorkspaceAttaching,
@@ -169,7 +131,7 @@ pub fn attach_session_conn(
     move_session_to_path_conn(conn, session_id, &path_id)
 }
 
-/// attach the Sessions that owe a WorkspacePath but were never given
+/// Attach the Sessions that owe a WorkspacePath but were never given
 /// one, because discovery skipped their file.
 ///
 /// `ingestion::ensure_logical_session` resolves the cwd while a row is created
@@ -208,7 +170,7 @@ pub fn attach_sessions_to_registered_paths(db: &Db) -> Result<usize> {
     })
 }
 
-// ------------------------------------------------------- owner assignment
+// Owner assignment
 
 /// Set (or clear) a Session's single Owner Workstream.
 ///

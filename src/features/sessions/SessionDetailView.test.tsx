@@ -5,6 +5,7 @@ import { api } from "../../api";
 import type {
   Session,
   SessionAggregateStats,
+  SessionContextView,
   SessionDetail,
   SessionMember,
   SessionMessage,
@@ -12,14 +13,28 @@ import type {
   Workstream,
 } from "../../types";
 
-// 只覆盖重构后的详情页：执行信息（聚合统计 + 成员树）、源会话状态、
-// fork 链接、回收站横幅的永久删除门槛，以及「所属任务」这个单 Owner 入口。
+// 只覆盖重构后的详情页：执行信息（聚合统计 + 成员树）、源会话状态、fork 链接、
+// 回收站横幅的永久删除门槛、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
     getSessionDetail: vi.fn(),
+    getSessionContext: vi.fn().mockResolvedValue({
+      session_id: "",
+      fields: null,
+      revision: 0,
+      ingest_generation: 0,
+      processed_through_seq: 0,
+      latest_message_seq: 0,
+      updated_at: null,
+      pending: false,
+    }),
+    updateSessionContext: vi.fn().mockResolvedValue({
+      session_id: "",
+      status: "updated",
+      revision: 1,
+    }),
     listProjects: vi.fn().mockResolvedValue([]),
     listWorkstreams: vi.fn().mockResolvedValue([]),
-    syncSession: vi.fn(),
     trashSession: vi.fn(),
     restoreSession: vi.fn(),
     setSessionOwnerWorkstream: vi.fn(),
@@ -157,7 +172,7 @@ async function renderDetail(d: SessionDetail) {
   return { navigate, container: document.body };
 }
 
-// ---------------- 执行信息 ----------------
+// 执行信息
 
 it("shows aggregate execution stats and an expandable member tree", async () => {
   const me = session("me");
@@ -228,7 +243,7 @@ it("shows tool / token / cost rows only when the data is present", async () => {
   expect(body).toContain("成本 0.5");
 });
 
-// ---------------- 源会话 ----------------
+// 源会话
 
 it("shows the root member's source as 源会话 without status noise when present", async () => {
   await renderDetail(detail(session("me")));
@@ -263,7 +278,7 @@ it("treats a missing root member as unavailable even when the verdict says prese
   screen.getByText("无法确认源会话状态");
 });
 
-// ---------------- 消息 ----------------
+// 消息
 
 it("renders only the user/assistant conversation", async () => {
   await renderDetail(detail(session("me"), {
@@ -277,7 +292,7 @@ it("renders only the user/assistant conversation", async () => {
   screen.getByText("好的，我在看");
 });
 
-// ---------------- Fork ----------------
+// Fork
 
 it("links to the session it forked from", async () => {
   const me = session("me", { forked_from_session_id: "orig" });
@@ -303,7 +318,7 @@ it("shows no fork field for a session that is not a fork", async () => {
   expect(screen.queryByText(/分叉自/)).toBeNull();
 });
 
-// ---------------- 回收站横幅 ----------------
+// 回收站横幅
 
 it("offers permanent delete in the trash banner only when allowed", async () => {
   await renderDetail(detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
@@ -326,7 +341,7 @@ it("explains why permanent delete is unavailable while trashed", async () => {
   screen.getByText(/永久删除不可用（Root 源仍存在或无法确认）/);
 });
 
-// ---------------- 所属任务（单 Owner，） ----------------
+// 所属任务（单 Owner）
 
 it("shows the one owner workstream and links to it", async () => {
   const owner = workstream("w1", "会话与 Workstream 重构");
@@ -380,4 +395,87 @@ it("clears the owner by choosing 未归属", async () => {
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
   await waitFor(() => expect(api.setSessionOwnerWorkstream).toHaveBeenCalledWith("me", null));
+});
+
+// Context 面板
+
+function contextView(over: Partial<SessionContextView> = {}): SessionContextView {
+  return {
+    session_id: "me",
+    fields: null,
+    revision: 0,
+    ingest_generation: 0,
+    processed_through_seq: 0,
+    latest_message_seq: 0,
+    updated_at: null,
+    pending: false,
+    ...over,
+  };
+}
+
+it("offers 生成摘要 only when there are messages and no summary yet", async () => {
+  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
+  await renderDetail(detail(session("me"), {
+    messages: [message("me", 1, "user", "开始吧")],
+  }));
+
+  screen.getByText("Context");
+  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
+  // 更新成功后重新拉取 Context 与详情。
+  await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
+});
+
+it("keeps the summary read-only and shows 更新摘要 while there is a pending increment", async () => {
+  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
+    fields: {
+      summary_current_state: "正在重构前端入口",
+      decisions: ["删掉 Context Intelligence 开关"],
+      open_questions: [],
+      next_steps: ["补测试"],
+    },
+    pending: true,
+    revision: 3,
+  }));
+  await renderDetail(detail(session("me"), {
+    messages: [message("me", 1, "user", "继续")],
+  }));
+
+  screen.getByText(/正在重构前端入口/);
+  screen.getByText(/删掉 Context Intelligence 开关/);
+  screen.getByText(/补测试/);
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
+  await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
+});
+
+it("hides the update button when there is nothing pending", async () => {
+  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
+    fields: {
+      summary_current_state: "已完成",
+      decisions: [],
+      open_questions: [],
+      next_steps: [],
+    },
+    pending: false,
+    revision: 1,
+  }));
+  await renderDetail(detail(session("me"), {
+    messages: [message("me", 1, "user", "好了")],
+  }));
+
+  expect(screen.queryByRole("button", { name: "更新摘要" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "生成摘要" })).toBeNull();
+});
+
+it("turns a concurrency conflict into an actionable retry message", async () => {
+  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
+  vi.mocked(api.updateSessionContext).mockRejectedValue(
+    'context: ConcurrencyConflict("snapshot moved")',
+  );
+  await renderDetail(detail(session("me"), {
+    messages: [message("me", 1, "user", "开始吧")],
+  }));
+
+  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  await screen.findByText("内容已变化，请重新更新");
 });

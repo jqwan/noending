@@ -2,7 +2,6 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import WorkstreamCard from "./WorkstreamCard";
 import type { WorkstreamCardData } from "../../types";
-vi.mock("../../app/experience", () => ({ useBaseExperience: () => ({ intelligenceEnabled: false }) }));
 vi.mock("../sessions/NewSessionModal", () => ({ default: () => <div role="dialog">新建面板</div> }));
 vi.mock("../sessions/ResumeSessionModal", () => ({ default: () => <div role="dialog">继续面板</div> }));
 afterEach(cleanup);

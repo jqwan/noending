@@ -3,7 +3,6 @@ import { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import type { Route } from "../../app/routes";
-import { useBaseExperience } from "../../app/experience";
 import NewSessionModal from "../sessions/NewSessionModal";
 import ResumeSessionModal from "../sessions/ResumeSessionModal";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
@@ -14,48 +13,26 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   completed: "已完成",
 };
 
-/**
- * Base Experience 下，Workstream 由用户显式组织的信息驱动，
- * 不显示冻结期留下的 Agent 摘要（`current_state` / `goal`）。智能重新开启时
- * 摘要能力原样回来，所以这里是门控而不是删除。
- */
-export function cardSummaryLine(card: WorkstreamCardData, intelligenceEnabled: boolean): string {
-  return intelligenceEnabled
-    ? card.current_state || card.description || card.goal || ""
-    : card.description || "";
+/** 卡片摘要：优先 Agent 的 current_state，退回用户写的描述与目标。 */
+export function cardSummaryLine(card: WorkstreamCardData): string {
+  return card.current_state || card.description || card.goal || "";
+}
+
+/** 检索字段必须与 placeholder 声明的一致：命中一个页面上看不见的字段，
+ *  等于给用户一个无法解释的结果。 */
+export function cardSearchFields(card: WorkstreamCardData): (string | null | undefined)[] {
+  return [card.title, card.description, card.project_name, card.current_state, card.goal];
+}
+
+export function searchFieldHint(): string {
+  return "搜索任务…（标题、描述、项目、Context 摘要）";
 }
 
 /**
- * 检索字段必须与 placeholder 声明的一致：命中一个页面上根本看不见的字段，
- * 等于给用户一个无法解释的结果（搜到了、却看不到命中的是什么）。
- */
-export function cardSearchFields(
-  card: WorkstreamCardData,
-  intelligenceEnabled: boolean,
-): (string | null | undefined)[] {
-  const userFields = [card.title, card.description, card.project_name];
-  return intelligenceEnabled
-    ? [...userFields, card.current_state, card.goal]
-    : userFields;
-}
-
-export function searchFieldHint(intelligenceEnabled: boolean): string {
-  return intelligenceEnabled
-    ? "搜索任务…（标题、描述、项目、Context 摘要）"
-    : "搜索任务…（标题、描述、项目）";
-}
-
-/**
- * The one Workstream card shared by Home (compact) and Workstreams (full).
- * Behavior is identical in both modes:
- *   Body   → Workstream Detail
- *   新建 Session → 挂载全局 NewSessionModal（预置本 Workstream，可再改）
- *   继续        → 挂载全局 ResumeSessionModal
- *
- * 卡片自己不再调用 launcher：启动路径唯一
- * NewSessionModal → prepareNewSession → launchPrepared（、Preview-Launch
- * Identity）。两个 Modal 渲染在 `<article>` 之外，否则卡片整体的
- * 「点击进详情」会吃掉弹窗里的点击。
+ * Home（compact）与 Workstreams（full）共用的 Workstream 卡片，两种模式行为一致：
+ * 卡片体 → Detail；新建 / 继续 → 挂载全局 NewSessionModal / ResumeSessionModal。
+ * 启动路径唯一：Modal → prepareNewSession → launchPrepared。
+ * 两个 Modal 渲染在 `<article>` 之外，否则卡片整体的「点击进详情」会吃掉弹窗里的点击。
  */
 export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
   card: WorkstreamCardData;
@@ -68,8 +45,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
 
   const openDetail = () => navigate({ view: "workstream", workstreamId: card.id });
 
-  const { intelligenceEnabled } = useBaseExperience();
-  const body = cardSummaryLine(card, intelligenceEnabled);
+  const body = cardSummaryLine(card);
   const archived = card.visibility === "archived";
 
   return (
@@ -101,11 +77,9 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
               : `${card.session_count} 个会话 · ${timeAgo(card.last_activity_at)}`}
           </span>
           {!archived && <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-            {/* 与 Home 同一个判断：卡片不自己宣称「没有 Agent」。`defaultAgent`
-                由 useWorkstreamCards 异步解析（返回形状已冻结，没有
-                "解析完成"这一位），所以在解析期间 disabled + 「未检测到」的
-                tooltip 会说假话。是否真的没有 Agent 一律交给 NewSessionModal
-                自己判定——它同时是唯一的启动路径。 */}
+            {/* 卡片不自己宣称「没有 Agent」：`defaultAgent` 由 useWorkstreamCards
+                异步解析（没有"解析完成"这一位），解析期间 disabled + 「未检测到」会说假话。
+                是否真的没有 Agent 交给 NewSessionModal 判定——它是唯一的启动路径。 */}
             <button
               className={`btn small ws-btn ${card.latest_session ? "ghost icon-button" : ""}`}
               aria-label="新建会话"

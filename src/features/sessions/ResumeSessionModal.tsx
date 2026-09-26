@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
-import { useBaseExperience } from "../../app/experience";
 import { announceLaunch } from "../launcher/LaunchResultModal";
-import ContextPreviewModal from "../launcher/ContextPreviewModal";
 import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import {
   AgentRow,
   CwdRow,
   PreviewRow,
   RuntimeRow,
-  deliveryLevelLabel,
 } from "../launcher/LaunchPreviewRows";
 import type { PreparedLaunch, SessionDetail } from "../../types";
 
@@ -21,10 +18,8 @@ export type ResumeSessionModalProps = {
 };
 
 /**
- * 打开即准备（后端会先摄入这个 Session 自己的最新消息），预览显示
- * Agent / 工作目录 / 所属任务 / Runtime；「继续」消费这份 PreparedLaunch。
- * 不要求用户重新选择任何已经确定的参数，也不再有额外的 Workstream 入参。
- *
+ * 打开即准备（后端会先摄入这个 Session 的最新消息），预览显示 Agent / 工作目录 /
+ * 所属任务 / Runtime；「继续」消费这份 PreparedLaunch，不要求用户重选已确定的参数。
  * PreparedLaunch 是 single-use 能力令牌；关闭预览后会重新准备，卸载时会回收。
  */
 export default function ResumeSessionModal({
@@ -32,12 +27,8 @@ export default function ResumeSessionModal({
   onClose,
 }: ResumeSessionModalProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [previewOpen, setPreviewOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const detailRequest = useRef(0);
-
-  const { deliveryLevel } = useBaseExperience();
-  const deliveryOff = deliveryLevel === "off";
 
   const refreshDetail = useCallback(async (isCurrent: () => boolean = () => true) => {
     const request = ++detailRequest.current;
@@ -116,110 +107,64 @@ export default function ResumeSessionModal({
     : ownerTitle ?? "未命名任务";
 
   return (
-    <>
-      <Modal title="继续会话" onClose={handleClose}>
-        <AgentRow
-          agent={session.agent}
-          hint="原会话 Agent"
-          first
-        />
-        <CwdRow
-          cwd={prepared?.cwd ?? session.cwd}
-          pending={preparing && !prepared}
-          resolution={prepared?.cwd_resolution}
-        />
+    <Modal title="继续会话" onClose={handleClose}>
+      <AgentRow
+        agent={session.agent}
+        hint="原会话 Agent"
+        first
+      />
+      <CwdRow
+        cwd={prepared?.cwd ?? session.cwd}
+        pending={preparing && !prepared}
+        resolution={prepared?.cwd_resolution}
+      />
 
-        <PreviewRow
-          label="所属任务"
-          hint={ownerDisplay}
+      <PreviewRow
+        label="所属任务"
+        hint={ownerDisplay}
+      >
+        <span className="badge">
+          {ownerWorkstreamId === null ? "无" : "1 个"}
+        </span>
+      </PreviewRow>
+
+      {prepared && (
+        <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
+      )}
+
+      {error && (
+        <div
+          className="badge warn"
+          style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}
         >
-          <span className="badge">
-            {ownerWorkstreamId === null ? "无" : "1 个"}
-          </span>
-        </PreviewRow>
-
-        {prepared && (
-          <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
-        )}
-
-        {/* Context 关闭时不挂载预览，也不显示 token 计数。 */}
-        {!deliveryOff && (
-          <div className="row-line">
-            <div>
-              <div className="settings-row-label">Context 注入</div>
-              <div className="settings-row-hint">
-                等级：{deliveryLevelLabel(deliveryLevel)} ·
-                预览显示的就是本次真正注入的 Context
-              </div>
-            </div>
+          <span style={{ flex: 1, overflowWrap: "anywhere" }}>{error}</span>
+          {!preparing && !busy && (
             <button
               type="button"
               className="btn small"
-              disabled={preparing || busy || !prepared}
               onClick={() => {
-                if (prepared) setPreviewOpen(true);
+                releasePrepared();
+                void prepare();
               }}
             >
-              预览 Context
+              重试
             </button>
-          </div>
-        )}
-
-        {error && (
-          <div
-            className="badge warn"
-            style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}
-          >
-            <span style={{ flex: 1, overflowWrap: "anywhere" }}>{error}</span>
-            {!preparing && !busy && (
-              <button
-                type="button"
-                className="btn small"
-                onClick={() => {
-                  releasePrepared();
-                  void prepare();
-                }}
-              >
-                重试
-              </button>
-            )}
-          </div>
-        )}
-
-        <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
-          <button className="btn" onClick={handleClose} disabled={busy}>
-            取消
-          </button>
-          <button
-            className="btn primary"
-            disabled={busy || preparing || !prepared}
-            onClick={handleResume}
-          >
-            {busy ? "继续中…" : preparing ? "准备中…" : "继续"}
-          </button>
+          )}
         </div>
-      </Modal>
-
-      {previewOpen && prepared && (
-        <ContextPreviewModal
-          prepared={prepared}
-          onClose={() => {
-            setPreviewOpen(false);
-            // 预览内部已回收这个令牌：重新准备一份，保持「继续」随时可用
-            releasePrepared(true);
-            void prepare();
-          }}
-          onRefresh={async () => {
-            // 刷新当前预览时保留旧令牌；预览拿到新令牌后再回收旧的那个。
-            return await prepare({ preserveCurrent: true });
-          }}
-          onLaunched={() => {
-            // 预览内已经启动成功：令牌是被消费掉的，不再 cancel
-            releasePrepared(true);
-            onClose();
-          }}
-        />
       )}
-    </>
+
+      <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
+        <button className="btn" onClick={handleClose} disabled={busy}>
+          取消
+        </button>
+        <button
+          className="btn primary"
+          disabled={busy || preparing || !prepared}
+          onClick={handleResume}
+        >
+          {busy ? "继续中…" : preparing ? "准备中…" : "继续"}
+        </button>
+      </div>
+    </Modal>
   );
 }

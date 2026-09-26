@@ -35,6 +35,16 @@ const ACTIVE_MESSAGE_GUARD: &str = "(
                       END
            AND s.trashed_at IS NULL))";
 
+/// Only the current conversation projection is searchable. Message rows stay
+/// append-only for provenance, so this predicate excludes facts retired by a
+/// source rewrite even if an old FTS row survives an interrupted transaction.
+const CURRENT_MESSAGE_GUARD: &str = "(
+    search_index.kind != 'message'
+    OR EXISTS (
+        SELECT 1 FROM session_message_projection p
+         WHERE p.session_id = search_index.parent_id
+           AND p.session_message_id = search_index.ref_id))";
+
 pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -60,6 +70,7 @@ fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
                bm25(search_index)
                FROM search_index WHERE search_index MATCH ?1
                AND {ACTIVE_MESSAGE_GUARD}
+               AND {CURRENT_MESSAGE_GUARD}
                ORDER BY bm25(search_index) LIMIT ?2"
     );
     let conn = db.read();
@@ -92,6 +103,7 @@ fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
         "SELECT kind, ref_id, parent_id, title, body FROM search_index
                WHERE (title LIKE ?1 ESCAPE '!' OR body LIKE ?1 ESCAPE '!')
                AND {ACTIVE_MESSAGE_GUARD}
+               AND {CURRENT_MESSAGE_GUARD}
                LIMIT ?2"
     );
     let conn = db.read();

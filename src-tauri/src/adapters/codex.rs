@@ -1,41 +1,27 @@
 //! Codex Adapter: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
-//! `CODEX_HOME` overrides the root. Raw data is read-only, always
-//! — NoEnding never deletes an Agent-owned source.
+//! `CODEX_HOME` overrides the root. Raw data is read-only, always — NoEnding
+//! never deletes an Agent-owned source.
 //!
-//! Member mapping:
-//! - normal root rollout       → `Root`;
-//! - `thread_source=subagent`  → `Child` (a task thread Codex spawned);
-//! - `thread_source=guardian_review` → `Side` (a review lane beside the main
-//!   conversation, not a task the user's session delegated);
-//! - forked page               → `ForkRoot` (its own Logical Session, with
-//!   the fork base only as provenance).
+//! Member mapping: normal root rollout → `Root`; `thread_source=subagent` →
+//! `Child` (a task thread Codex spawned); `thread_source=guardian_review` →
+//! `Side` (a review lane beside the main conversation); forked page →
+//! `ForkRoot` (its own Logical Session, the fork base being provenance only).
 //!
 //! Conversation is ONLY the root member's `response_item.message` turns with
-//! role user / assistant. `agent_message` envelopes, tool traffic, reasoning,
-//! compaction markers and session meta are execution observations: counted
-//! into member stats, never stored as conversation.
+//! role user / assistant. Everything else — `agent_message` envelopes, tool
+//! traffic, reasoning, compaction markers, session meta — is execution
+//! observation: counted into member stats, never stored as conversation.
 //!
-//! Message provenance — **Stateful**, the one
-//! adapter that needs the cursor provenance frontier. Verified against this
-//! machine's corpus (June → Sept 2026 schemas, 748/748 `turn_context` lines):
-//! no assistant `response_item` row ever carries a model; the model lives on
-//! the `turn_context` line that opens each turn (`payload.model`), and the
-//! provider only on `thread_settings_applied` event_msg payloads
-//! (`payload.thread_settings.model_provider_id`), which precede each turn's
-//! `turn_context`. The assistant rows carry the join key
-//! `payload.internal_chat_message_metadata_passthrough.turn_id`, so state
-//! threading in file order attributes each message exactly — turns never
-//! interleave: every assistant row's `turn_id` equals the last `turn_context`
-//! seen before it in file order (verified across all 1759 assistant rows of
-//! this machine's 68 rollouts, 0 violations), so the single active-model
-//! frontier is exact and a per-turn_id join would change nothing. Because a
-//! `turn_context` is always consumed in an EARLIER delta pass than the
-//! assistant messages of its turn, the frontier must survive across reconcile
-//! passes — it lives on the member cursor and commits in the same transaction
-//! as the messages it covers. A full re-scan resets the state and re-derives
-//! it from the file. Where a source line carries no such state (old schemas
-//! without `thread_settings_applied`), provider stays NULL; no branding
-//! inference (Codex ≠ "openai" unless the source says so).
+//! Provenance is **stateful**, the one adapter that needs the cursor frontier.
+//! No assistant `response_item` row carries a model: the model lives on the
+//! `turn_context` line opening each turn, the provider on the
+//! `thread_settings_applied` payload before it. Turns never interleave, so one
+//! active-model frontier is exact. Since a `turn_context` is consumed in an
+//! EARLIER delta pass than its assistant messages, the frontier must survive
+//! across reconcile passes: it lives on the member cursor and commits in the
+//! same transaction as the messages it covers, and a full re-scan resets and
+//! re-derives it from the file. Old schemas without those events leave provider
+//! NULL — never inferred from branding.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,9 +53,8 @@ fn extract_text(content: &Value) -> String {
     parts.join("\n")
 }
 
-/// The uuid Codex wrote into a rollout's name: the file's OWN thread id.
-/// 77 of this machine's 78 rollouts have it equal to `payload.id`, and the one
-/// that does not is exactly the forked page below.
+/// The uuid Codex wrote into a rollout's name: the file's OWN thread id,
+/// which differs from `payload.id` only on a forked page.
 fn thread_id_from_filename(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_string_lossy().to_string();
     let rest = stem.strip_prefix("rollout-")?;
@@ -188,12 +173,11 @@ impl CodexAdapter {
                     }
                 }
             }
-            // session_meta opens a rollout file, so stopping at the meta
-            // line itself would leave first_user_text — and every title —
-            // unset. Stop once the meta is parsed and there is a user text to
-            // name the session after; a thread Codex wrote itself has no user
-            // text, so it scans on until its own first reply (or EOF, for a
-            // meta-only session).
+            // session_meta opens a rollout file, so stopping at the meta line
+            // itself would leave every title unset. Stop once the meta is parsed
+            // and there is a user text to name the session after; a thread Codex
+            // wrote itself has no user text, so it scans on to its own first
+            // reply (or EOF, for a meta-only session).
             let internal = matches!(
                 thread_source.as_deref(),
                 Some("subagent") | Some("guardian_review")
@@ -206,9 +190,8 @@ impl CodexAdapter {
 
         // Identity is the file's OWN thread id. A forked page's meta still
         // names the thread it forked FROM, so there the name has to decide;
-        // everywhere else the meta is Codex's own statement of the thread id
-        // and leads. Keying on `session_id` instead is what collapsed this
-        // machine's 78 rollouts into 37 sessions.
+        // everywhere else the meta leads. Keying on `session_id` instead would
+        // collapse several rollouts into one session.
         let by_name = || thread_id_from_filename(path);
         let forked = is_forked_page_name(path);
         let session_id = if forked {
@@ -345,10 +328,8 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     ) -> Result<MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
         // The shared reader classifies the scan (append vs full re-scan) and
-        // derives the matching stats update; the closure decides, per line,
-        // what is conversation and what is an observation. The provenance
-        // frontier is seeded from the cursor for appends and reset by the
-        // reader on a full re-scan.
+        // derives the matching stats update. The provenance frontier is seeded
+        // from the cursor for appends and reset by the reader on a re-scan.
         let mut state = ProvenanceState {
             provider: cursor.active_provider.clone(),
             model: cursor.active_model.clone(),
@@ -372,11 +353,9 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         &self,
         install: &AgentInstallation,
         opts: &ExecOptions,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let mut args = runtime_args(opts);
-        args.extend(crate::adapters::context_prompt(context_file)?);
+        let args = runtime_args(opts);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -389,14 +368,12 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         install: &AgentInstallation,
         opts: &ExecOptions,
         agent_session_id: &str,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        // codex resume [OPTIONS] [SESSION_ID] [PROMPT]
+        // codex resume [OPTIONS] [SESSION_ID]
         let mut args = vec!["resume".into()];
         args.extend(runtime_args(opts));
         args.push(agent_session_id.into());
-        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -441,10 +418,9 @@ fn parse_line(
         .map(|s| s.to_string());
 
     match vtype {
-        // Provenance state events: a turn opens with
-        // its actual model; `thread_settings_applied` precedes it and carries
-        // the provider. Both are confirmed generation scope, verified against
-        // the real corpus (see the module doc) — not configuration echoes.
+        // Provenance state events: a turn opens with its actual model, and
+        // `thread_settings_applied` precedes it with the provider. Both are
+        // confirmed generation scope, not configuration echoes.
         "turn_context" => {
             if let Some(m) = payload
                 .get("model")
@@ -564,10 +540,8 @@ fn text_of_envelope(payload: &Value) -> String {
 /// Codex's own name for each thread: `<root>/session_index.jsonl`, one
 /// `{"id": <thread id>, "thread_name": <name>}` per line.
 ///
-/// This file is a row-for-row mirror of `threads.name` in
-/// `~/.codex/state_5.sqlite` (31 rows, same ids, same names, 0 differences), so
-/// reading it needs neither the WAL nor the version number baked into that
-/// file's name (`state_5` → the next release's `state_6`).
+/// This file mirrors `threads.name` in `~/.codex/state_5.sqlite`, so reading it
+/// needs neither the WAL nor the version number baked into that file's name.
 struct ThreadNames(HashMap<String, String>);
 
 impl ThreadNames {
@@ -599,10 +573,9 @@ impl ThreadNames {
     /// The name, unless it is merely the first user message again.
     ///
     /// The index holds the runtime's placeholder until the model names the
-    /// thread: 4 of this machine's 31 names are their own transcript's first
-    /// user text (3 verbatim, 1 cut at 60 chars with `…`). Comparing against
-    /// `first_user_text` — which the parser already found — is exact where a
-    /// length or ellipsis rule would be a guess.
+    /// thread (the first user text, verbatim or cut at 60 chars with `…`).
+    /// Comparing against `first_user_text` — which the parser already found — is
+    /// exact where a length or ellipsis rule would be a guess.
     fn title_for(&self, thread_id: &str, first_user_text: Option<&str>) -> Option<String> {
         let name = self.0.get(thread_id)?;
         let placeholder =
@@ -716,8 +689,7 @@ mod rollout_tests {
         }
     }
 
-    /// Regression: session_meta opens every rollout file, so the scan must
-    /// continue past it to reach the first user message — stopping at the
+    /// Regression: session_meta opens every rollout file, and stopping at the
     /// meta line left every Codex session without a title source.
     #[test]
     fn first_user_text_survives_meta_on_line_zero() {
@@ -821,11 +793,11 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- Root conversation vs execution observations ----------------
+    // Root conversation vs execution observations
 
-    /// Only root user/assistant prose becomes messages; thinking,
-    /// tool traffic and compaction markers become stats observations; and two
-    /// visible assistant prose segments around a tool call are BOTH kept.
+    /// Only root user/assistant prose becomes messages; thinking, tool traffic
+    /// and compaction markers become stats observations; and two visible
+    /// assistant prose segments around a tool call are BOTH kept.
     #[test]
     fn the_root_read_keeps_prose_and_counts_the_machine_traffic() {
         let dir = temp_dir("root-read");
@@ -966,7 +938,7 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- The session index as a title source ----------------
+    // The session index as a title source
 
     fn index_line(id: &str, name: &str) -> String {
         serde_json::json!({ "id": id, "thread_name": name, "updated_at": "2026-09-20T13:00:00Z" })
@@ -1048,8 +1020,8 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Strict availability: NotFound is Missing, everything else is
-    /// not.
+    /// Strict availability: only NotFound is Missing; everything else is
+    /// Unavailable.
     #[test]
     fn inspect_reports_missing_only_for_a_confirmed_absent_file() {
         let dir = temp_dir("inspect");
@@ -1088,9 +1060,9 @@ mod rollout_tests {
         .to_string()
     }
 
-    /// Per-turn attribution: two turns with different
-    /// models give each assistant message its own model; no session-wide
-    /// broadcast, and the provider comes from the source, never branding.
+    /// Per-turn attribution: two turns with different models give each
+    /// assistant message its own model; the provider comes from the source,
+    /// never from branding.
     #[test]
     fn turn_context_attributes_each_assistant_message_and_tracks_switches() {
         let dir = temp_dir("prov-switch");
@@ -1126,10 +1098,9 @@ mod rollout_tests {
         );
     }
 
-    /// The stateful boundary: the state events are
-    /// consumed in pass 1 while the assistant message only arrives in pass 2;
-    /// the frontier must survive on the cursor and attribute identically to
-    /// the single-pass read of the same conversation.
+    /// The stateful boundary: state events are consumed in pass 1 while the
+    /// assistant message only arrives in pass 2; the frontier must survive on
+    /// the cursor and attribute identically to the single-pass read.
     #[test]
     fn provenance_frontier_survives_the_cursor_boundary() {
         let dir = temp_dir("prov-boundary");
@@ -1197,9 +1168,8 @@ mod rollout_tests {
         assert_eq!(one_pass.messages[0].provider, pass2.messages[0].provider);
     }
 
-    /// An old-schema rollout without the state events
-    /// attributes nothing, even though the Agent is Codex: unknown stays
-    /// unknown.
+    /// An old-schema rollout without the state events attributes nothing, even
+    /// though the Agent is Codex: unknown stays unknown.
     #[test]
     fn no_state_event_means_no_attribution() {
         let dir = temp_dir("prov-null");

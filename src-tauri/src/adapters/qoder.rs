@@ -4,25 +4,23 @@
 //! (`workspace-directories`, `runtime-config`, `worktree-state`, `active-leaf`,
 //! `last-prompt`). That shared shape is why `fingerprint_line` must claim Qoder
 //! *before* the Claude branch: read as Claude, every line would still parse and
-//! nothing would look wrong — which is exactly how provenance gets lost
-//! (AGENTS.md: Provenance Fidelity).
+//! nothing would look wrong.
 //!
 //! Member mapping:
 //! - `<encoded-cwd>/<main>.jsonl` → the ROOT member;
-//! - `<encoded-cwd>/<main>/subagents/agent-*.jsonl` → CHILD members. Their
-//!   every line repeats the ROOT's `sessionId`, so the member identity is
-//!   Adapter-derived and stable: `<root-session-id>:subagent:<file-stem>`.
-//!   Their text never becomes conversation — they contribute
-//!   execution observations only.
+//! - `<encoded-cwd>/<main>/subagents/agent-*.jsonl` → CHILD members. Every line
+//!   repeats the ROOT's `sessionId`, so identity is Adapter-derived and stable:
+//!   `<root-session-id>:subagent:<file-stem>`. Their text never becomes
+//!   conversation — they contribute execution observations only.
 //!
 //! Qoder is an IDE with no headless CLI, so this adapter **ingests history
-//! only**: `detect()` never succeeds, and there is no new/resume/exec command
-//! to build. The raw transcripts are opened read-only, always.
+//! only**: `detect()` never succeeds, and there is no new/resume/exec command to
+//! build. The raw transcripts are opened read-only, always.
 //!
 //! **One fact comes from a second store.** The transcript carries no title, so
 //! discovery reads the app's own `chat_sessions` for it — read-only, looked up
-//! by the very session id the transcript reports, and silent when that store is
-//! absent. Nothing else about the session is taken from there.
+//! by the session id the transcript reports, and silent when that store is
+//! absent. Nothing else is taken from there.
 
 use std::path::{Path, PathBuf};
 
@@ -46,10 +44,9 @@ const QODER_DB: &str = "main.sqlite";
 /// The titles Qoder itself shows, read from the app's own database.
 ///
 /// The transcript has none, which is why discovery reads a second source for
-/// this one fact. `chat_sessions.session_id` is the id the transcript
-/// carries (7/7 on this machine), so the join is exact; `title` is the model's
-/// short name for the session — except when Qoder says otherwise, which it does
-/// out loud: `extra_json.titleSource`.
+/// this one fact. `chat_sessions.session_id` is the id the transcript carries,
+/// so the join is exact; `title` is the model's short name for the session —
+/// except when `extra_json.titleSource` says otherwise.
 struct SessionTitles(Option<Connection>);
 
 impl SessionTitles {
@@ -99,12 +96,10 @@ impl SessionTitles {
 
 /// Whether Qoder's `title` is a name it settled on.
 ///
-/// The two values it writes: `ai` (6 of 7 sessions locally — 「修改任务
-/// 编辑功能」, 「了解工程概况」) and `provisional` (the first user message, shown
-/// until the model answers). The rule is therefore a deny-list, not an
-/// allow-list: a future `custom` (the user renaming the session) is a title too.
-/// An absent field means a store from before the field existed, when `title`
-/// was the raw prompt — treated as provisional.
+/// It writes `ai` or `provisional` (the first user message, shown until the
+/// model answers). The rule is a deny-list, not an allow-list, so a future
+/// `custom` (the user renaming the session) is a title too. An absent field
+/// predates the field and is treated as provisional.
 fn is_resolved_title(source: Option<&str>) -> bool {
     matches!(source, Some(s) if s != "provisional")
 }
@@ -393,7 +388,6 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         &self,
         _install: &crate::platform::exec_resolver::AgentInstallation,
         _opts: &ExecOptions,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法新建会话"))
@@ -404,7 +398,6 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         _install: &crate::platform::exec_resolver::AgentInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
-        _context_file: Option<&Path>,
         _cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法恢复会话"))
@@ -459,14 +452,11 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
                 return Some(ParsedLine::observation_only(observation));
             }
-            // Message provenance: the assistant
-            // row itself carries `message.model` — same envelope position as
-            // Claude Code's actual response model, source-native opaque ids
-            // ("dfmodel", "qfmodel", …; 4728/4728 rows in the real corpus).
-            // This is NOT the `runtime-config.model` broadcast: the field sits
-            // on the message row. Locally synthesized
-            // rows ("<synthetic>" error notices) are not real generations and
-            // stay NULL. No provider field exists → NULL.
+            // The assistant row itself carries `message.model` — the actual
+            // response model, source-native opaque ids ("dfmodel", "qfmodel", …).
+            // This is NOT the `runtime-config.model` broadcast.
+            // Locally synthesized rows ("<synthetic>" error notices) are not
+            // real generations and stay NULL; no provider field exists → NULL.
             let model = if role == SessionMessageRole::Assistant {
                 msg.get("model")
                     .and_then(|m| m.as_str())
@@ -658,9 +648,8 @@ mod tests {
         assert_eq!(m.first_user_text.as_deref(), Some("把详情页的消息改一下"));
     }
 
-    /// A `chat_sessions` as Qoder lays it out — only the columns the reader
-    /// touches, but with the real constraints, so the fixture could have been
-    /// written by the app itself.
+    /// An absent title source is provisional too, and a missing store costs
+    /// nothing but the title.
     #[test]
     fn only_a_settled_title_is_a_native_title() {
         assert!(is_resolved_title(Some("ai")));
@@ -670,10 +659,9 @@ mod tests {
         let _ = SessionTitles::open_at(None);
     }
 
-    /// The assistant row's own `message.model`
-    /// attributes (this is NOT the runtime-config broadcast);
-    /// locally synthesized error rows ("<synthetic>") are not generations and
-    /// stay NULL. The runtime-config line itself contributes nothing.
+    /// The assistant row's own `message.model` attributes (this is NOT the
+    /// runtime-config broadcast); synthesized error rows stay NULL, and the
+    /// runtime-config line itself contributes nothing.
     #[test]
     fn assistant_rows_carry_their_model_but_synthetic_stays_null() {
         let dir = unique_dir("prov");

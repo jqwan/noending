@@ -1,10 +1,10 @@
 //! WorkspacePath / GitIdentity / Project-row persistence.
 //!
-//! These are the *mechanical* operations every workspace layer shares: read a
-//! row, insert a row, move a row's Project, and keep the derived Session cache
-//! consistent when it moves. The policy that decides WHEN to call them lives in
-//! `workspace::project`, so nothing here re-reads the filesystem or
-//! runs Git — and nothing here decides ownership, it only applies it.
+//! The *mechanical* operations every workspace layer shares: read a row, insert
+//! a row, move a row's Project, and keep the derived Session cache consistent
+//! when it moves. Policy — when to call them — lives in `workspace::project`, so
+//! nothing here re-reads the filesystem, runs Git, or decides ownership; it only
+//! applies it.
 //!
 //! Column note: the schema calls it `exists_on_disk` because `EXISTS` is a
 //! SQLite keyword; the domain field is `exists`.
@@ -143,11 +143,10 @@ impl Db {
 /// Insert a WorkspacePath for an already-normalized path.
 ///
 /// `id` is derived from `canonical_path` by `workspace::path_identity`, so this
-/// is idempotent on both unique keys and safe to call again after a partial
-/// failure. An existing row is NEVER re-projected here: ownership changes go
-/// through [`reassign_workspace_path_project_conn`], which also repairs the
-/// derived Session cache. A silent re-projection here is what would let two
-/// code paths disagree about which Project owns a path.
+/// is idempotent on both unique keys and safe to retry. An existing row is NEVER
+/// re-projected here: ownership changes go through
+/// [`reassign_workspace_path_project_conn`], which also repairs the derived
+/// Session cache — a silent re-projection would let two code paths disagree.
 pub fn insert_workspace_path_conn(
     conn: &Connection,
     canonical_path: &str,
@@ -182,11 +181,9 @@ pub fn update_workspace_path_observation_conn(
     Ok(())
 }
 
-/// Move a path to another Project and refresh every derived
-/// cache that reads through it, in one transaction.
-///
-/// `git_id` on the *Project* side and the merge choice are policy
-/// (`workspace::project`); this is the single mechanical door.
+/// Move a path to another Project and refresh every derived cache that reads
+/// through it, in one transaction. `git_id` on the *Project* side and the merge
+/// choice are policy (`workspace::project`); this is the single mechanical door.
 pub fn reassign_workspace_path_project_conn(
     conn: &Connection,
     path_id: &str,
@@ -230,7 +227,7 @@ pub fn delete_workspace_path_conn(conn: &Connection, path_id: &str) -> Result<Op
     Ok(project)
 }
 
-// ---- Git identity -------------------------------------------------------
+// Git identity
 
 fn row_git_identity(r: &Row) -> rusqlite::Result<GitIdentity> {
     Ok(GitIdentity {
@@ -260,10 +257,9 @@ impl Db {
     }
 }
 
-/// Connection-level twin of [`Db::find_git_identity_by_common_dir`], for
-/// read-only callers that already hold the reader lock. Same two-step lookup as
-/// [`ensure_git_identity_conn`] minus the write: the exact spelling first, then
-/// the domain's location relation, so a Windows case variant of one
+/// Connection-level twin of [`Db::find_git_identity_by_common_dir`] for
+/// read-only callers that already hold the reader lock: the exact spelling
+/// first, then the domain's location relation, so a Windows case variant of one
 /// repository is still recognized as the family it is.
 pub fn find_git_identity_by_common_dir_conn(
     conn: &Connection,
@@ -290,11 +286,9 @@ pub fn find_git_identity_by_common_dir_conn(
 }
 
 /// `git_identities.id` is app-assigned, NOT derived from `common_dir`: a
-/// repository can move and a path hash would silently rename its identity
-/// A replayed call returns the same id because the row is found
-/// before it is created — by exact `common_dir` first, then, if that misses, by
-/// the domain's location relation, which is what stops a Windows
-/// case spelling of one repository from becoming two families.
+/// repository can move, and a path hash would silently rename its identity. A
+/// replayed call returns the same id because the row is found before it is
+/// created — by exact `common_dir` first, then by the domain's location relation.
 pub fn ensure_git_identity_conn(conn: &Connection, common_dir: &str) -> Result<String> {
     // The exact string first: it is the common case on both platforms and costs
     // one indexed lookup.
@@ -305,16 +299,14 @@ pub fn ensure_git_identity_conn(conn: &Connection, common_dir: &str) -> Result<S
     ) {
         return Ok(id);
     }
-    // A miss is not proof of a second repository. On a Windows volume
-    // `C:\Code\Repo\.git` and `c:\code\repo\.git` are one directory seen through two
-    // spellings, because git echoes back whatever cwd it was called with. Keyed
-    // literally they become two `git_identities`, and the family relation would
-    // read that as a family change and move the WorkspacePath into a second
-    // Project. So ask the domain's location question before creating anything. On Unix this reduces to the separator-insensitive string
-    // comparison the lookup above already covered, so no macOS identity moves.
+    // A miss is not proof of a second repository: on a Windows volume
+    // `C:\Code\Repo\.git` and `c:\code\repo\.git` are one directory seen through
+    // two spellings, so keyed literally they would become two `git_identities`,
+    // and the family relation would read that as a change of family. Ask the
+    // domain's location question before creating anything.
     //
-    // A scan, deliberately: the table holds one row per repository family (tens),
-    // and an index cannot answer a case-folded comparison anyway.
+    // A scan, deliberately: one row per repository family (tens of rows), and an
+    // index cannot answer a case-folded comparison anyway.
     let existing: Vec<(String, String)> = {
         let mut stmt = conn.prepare("SELECT id, common_dir FROM git_identities ORDER BY id")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
@@ -360,22 +352,17 @@ pub fn project_is_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
     Ok(owned == 0)
 }
 
-// ---- Project writes (narrow, one column-set each) -------------------------
-//
-// `upsert_project_conn` is the *whole-object* write Project creation uses, and
-// it is not a product surface: a Project row is app-owned, so every other write
-// here changes one documented fact and nothing else. In particular
-// no function here can clear `git_id` or `name_customized` — both are one-way.
+// Project writes, narrow, one column-set each. Creating a Project lives in
+// `workspace::project` (it needs the naming policy) and calls
+// `upsert_project_conn`, the one whole-object write that is safe on a row that
+// does not exist yet. Every other write here changes one documented fact and
+// nothing else; none of them can clear `git_id` or `name_customized` — both are
+// one-way.
 
-// Creating a Project lives in `workspace::project` (it needs the naming policy);
-// it calls `upsert_project_conn`, the one whole-object write that is safe on a
-// row that does not exist yet. Everything below is a narrow, single-fact update.
-
-/// A Project that had no Git family adopts one. `Project.id` does not
-/// change, so every Session, WorkstreamPath and audit reference keeps pointing
-/// at the same row: this is the whole reason an upgrade is not a merge.
-/// Returns false when the Project already carries a family, which is a different
-/// decision and must never be taken here.
+/// A Project that had no Git family adopts one. `Project.id` does not change, so
+/// every Session, WorkstreamPath and audit reference keeps pointing at the same
+/// row: this is why an upgrade is not a merge. Returns false when the Project
+/// already carries a family — a different decision, never taken here.
 pub fn adopt_git_identity_conn(conn: &Connection, project_id: &str, git_id: &str) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE projects SET git_id = ?2, updated_at = ?3
@@ -384,9 +371,9 @@ pub fn adopt_git_identity_conn(conn: &Connection, project_id: &str, git_id: &str
     )? > 0)
 }
 
-/// A merge may hand the survivor a name that came from a user.
-/// `customized` is written with the name because the pair is one fact: a name a
-/// person chose is a name automatic naming may not touch again.
+/// A merge may hand the survivor a user-provided name. `customized` is written
+/// with the name because the pair is one fact: a name a person chose is a name
+/// automatic naming may not touch again.
 pub fn set_project_name_conn(
     conn: &Connection,
     project_id: &str,
@@ -400,9 +387,8 @@ pub fn set_project_name_conn(
     Ok(())
 }
 
-/// The only user-facing Project name write. It sets
-/// `name_customized`, which is what stops every later automatic rename
-/// (`upsert_project_conn`'s `CASE`, the merge adoption below).
+/// The only user-facing Project name write. Sets `name_customized`, which stops
+/// every later automatic rename (`upsert_project_conn`'s `CASE`, merge adoption).
 pub fn rename_project_conn(conn: &Connection, project_id: &str, name: &str) -> Result<Project> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -423,16 +409,14 @@ pub fn rename_project_conn(conn: &Connection, project_id: &str, name: &str) -> R
 
 /// Delete a Project that no longer owns any WorkspacePath.
 ///
-/// Sessions keep a nullable derived cache, so it is cleared before deleting the
-/// now-unowned Project.
-/// The FTS row is NOT dropped here: `unindex` belongs after the commit
+/// Sessions keep a nullable derived cache, so it is cleared before the Project
+/// goes. The FTS row is NOT dropped here: `unindex` belongs after the commit
 /// (`ProjectionEffect::projects_deleted` carries the ids), and an un-committed
 /// delete must not leave search with a hole if this transaction rolls back.
 ///
-/// A Project that still owns a path is refused rather than silently emptied —
-/// says a Project exists exactly while it owns one, so reaching this point
-/// with paths is a caller bug, and deleting a live Project would orphan the very
-/// fact chain everything else reads through.
+/// A Project that still owns a path is refused rather than silently emptied: a
+/// Project exists exactly while it owns one, so reaching this point with paths is
+/// a caller bug.
 pub fn delete_zero_path_project_conn(conn: &Connection, project_id: &str) -> Result<bool> {
     if get_project_conn(conn, project_id)?.is_none() {
         return Ok(false);
@@ -442,12 +426,9 @@ pub fn delete_zero_path_project_conn(conn: &Connection, project_id: &str) -> Res
             "Project {project_id} 仍然拥有 WorkspacePath，不能删除"
         )));
     }
-    // Referential hygiene, not a write to the derived cache: no Session can
-    // still be projecting onto a Project that owns no path.
-    //
-    // The ids are collected first: clearing the cache below is exactly
-    // what would make the Project's name wrong in these Sessions' search
-    // documents, and afterwards `project_id` no longer names them.
+    // The ids are collected first: clearing the cache below is exactly what would
+    // make the Project's name wrong in these Sessions' search documents, and
+    // afterwards `project_id` no longer names them.
     let mut projections: Vec<String> = Vec::new();
     {
         let mut st = conn.prepare("SELECT id FROM sessions WHERE project_id = ?1")?;
@@ -472,9 +453,9 @@ pub fn retire_project_if_unowned(conn: &Connection, project_id: &str) -> Result<
     delete_zero_path_project_conn(conn, project_id)
 }
 
-/// A Workstream's search row is parented by its PRIMARY-path
-/// Project, so any change behind `path_ids` can move it. Done as one SQL
-/// statement pair so there is no Rust-side round trip to get wrong.
+/// A Workstream's search row is parented by its PRIMARY-path Project, so any
+/// change behind `path_ids` can move it. Done as one SQL statement pair, so there
+/// is no Rust-side round trip to get wrong.
 pub fn refresh_workstream_search_parents_conn(
     conn: &Connection,
     path_ids: &[String],
@@ -482,10 +463,9 @@ pub fn refresh_workstream_search_parents_conn(
     if path_ids.is_empty() {
         return Ok(());
     }
-    // Distinct `?1..?n` indexes, one per path id: repeating `?1` would make the
+    // Distinct `?1..?n` indexes, one per path id: repeating `?1` makes the
     // statement take ONE parameter while the caller supplies N, which rusqlite
-    // rejects (`InvalidParameterCount`) — so a batch over two or more paths has to
-    // number them.
+    // rejects (`InvalidParameterCount`).
     let markers = (1..=path_ids.len())
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()

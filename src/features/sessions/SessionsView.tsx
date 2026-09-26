@@ -23,12 +23,9 @@ import type { Route, SessionScope, ViewAction } from "../../app/routes";
 type AssignedFilter = "all" | "assigned" | "unassigned";
 
 /**
- * Sessions = 执行记录页（整体设计）：用户第二天回来还能一眼找到并继续
- * 任意一次 Agent 会话。不承担 Workstream 浏览。搜索与筛选在前端做，规模大了再转后端。
- *
- * Session Lifecycle & Deletion v0.1加入「回收站」：不是第三种筛选，而是
- * 换一个数据面——普通模式读 scope=active（与旧行为完全一致），回收站读 scope=trash，
- * 行渲染与操作都是回收站专属（恢复 / 永久删除），正常列表不出现这些动作。
+ * Sessions = 执行记录页：第二天回来还能一眼找到并继续任意一次 Agent 会话，不承担
+ * Workstream 浏览。搜索与筛选在前端做，规模大了再转后端。
+ * 回收站不是第三种筛选，而是换一个数据面（scope=trash），行渲染与动作都专属。
  */
 export default function SessionsView({ navigate, scope, action, actionSeq }: {
   navigate: (r: Route) => void;
@@ -41,11 +38,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [projects, setProjects] = useState<Project[]>([]);
   /** Workstream id → 标题：`session.owner_workstream_id` 只有一个 id，名字在这里解析。 */
   const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(new Map());
-  /**
-   * Session 来源只用来把"空"拆成两种真实情况：一个来源都没启用 vs
-   * 启用了但还没发现 Session。读失败时保持 null，文案退回中性说法——
-   * 不能把"读不到"说成"没启用"。
-   */
+  /** Session 来源只用来把"空"拆成两种真实情况：没启用来源 vs 启用了但还没发现。
+   *  读失败时保持 null，文案退回中性说法，不把"读不到"说成"没启用"。 */
   const [sources, setSources] = useState<IngestSource[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [query, setQuery] = useViewState("sessions.query", "");
@@ -99,8 +93,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
   useEffect(() => setTrashMode(scope === "trash"), [scope]);
-  // 页面动作随 Route 到达（palette → New Session）：
-  // actionSeq 让「已在 Sessions 页」的重复命令同样触发。
+  // 页面动作随 Route 到达（palette → New Session）：actionSeq 让「已在 Sessions 页」
+  // 的重复命令同样触发。
   useEffect(() => {
     if (action === "new") setCreating(true);
   }, [action, actionSeq]);
@@ -131,8 +125,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     return sessions
       .filter((s) => (agent === "all" ? true : s.agent === agent))
       // 和 Project 徽章同一个判据：只有存在物理锚点的行才算这个 Project 的成员。
-      // 缓存列单方面说"是"、而徽章说"历史标签，已不决定任何事"的行，不能一边
-      // 显示成无归属、一边又被筛进列表（M34 / M29：一个视图不能两个真相）。
+      // 徽章说"历史标签，已不决定任何事"的行不能一边显示成无归属、一边又被筛进来
+      // （M34 / M29：一个视图不能两个真相）。
       .filter((s) =>
         projectId === "all" ? true : projectId === "none"
           ? !s.workspace_path_id || !s.project_id
@@ -195,11 +189,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     }
   };
 
-  /**
-   * 全部永久删除：无状态的本地清除。逐个读预览，只有
-   * can_permanently_delete（trashed + fresh root missing）的会话才执行；
-   * Root 源仍存在或无法确认的会话原地保留——NoEnding 不删除 Agent 数据。
-   */
+  /** 全部永久删除：无状态的本地清除。逐个读预览，只有 `can_permanently_delete`
+   *  （trashed + fresh root missing）的会话才执行；Root 源仍存在或无法确认的原地保留。 */
   const bulkPurge = async () => {
     if (!trashMode || !sessions || sessions.length === 0 || bulkPurgeBusy) return;
     const targets = [...sessions];
@@ -251,11 +242,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     setAssigned("all");
   };
 
-  /**
-   * 空库的三种情况分开说话：
-   * 一个来源都没启用 / 启用的来源目录不在了 / 来源正常但确实还没跑过。
-   * 来源读不到时退回中性说法，不宣称任何一件没被证实的事。
-   */
+  /** 空库的三种情况分开说话：没启用来源 / 启用的来源目录不在了 / 还没跑过。
+   *  来源读不到时退回中性说法，不宣称没被证实的事。 */
   const noSourcesEnabled = sources !== null && sources.every((s) => !s.enabled);
   const missingSourcePath = sources?.find((s) => s.enabled && !s.exists)?.path ?? "";
   const emptyTitle = noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
@@ -277,8 +265,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
         title="会话"
         actions={
           <>
-            {/* 回收站开关：同一页面的两个数据面，用分段控件而不是筛选器，
-                因为两边的行为（列、动作）不同，不是同一张表的条件过滤。 */}
+            {/* 回收站开关：同一页面的两个数据面，用分段控件而非筛选器——
+                两边行为（列、动作）不同，不是同一张表的条件过滤。 */}
             <div className="settings-seg" role="group" aria-label="会话列表范围">
               <button
                 className={trashMode ? "" : "on"}
@@ -500,12 +488,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   );
 }
 
-/**
- * 回收站表格（Session Lifecycle & Deletion）：行就是规格里的五段信息——
- * Agent、标题、工作目录、移入时间、恢复 / 永久删除。这里不做筛选与搜索
- * （回收站规模小，规格也不要求）；正常列表的筛选工具在回收站里一律隐藏。
- * 点行仍然可以进详情页：那里对回收站 Session 有专属的横幅与动作。
- */
+/** 回收站表格：行是 Agent、标题、工作目录、移入时间、恢复 / 永久删除五段。
+ *  不做筛选与搜索（回收站规模小），点行仍可进详情页。 */
 function TrashSessionTable({ sessions, onOpen, onRestore, onPurge }: {
   sessions: Session[];
   onOpen: (sessionId: string) => void;

@@ -120,8 +120,9 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         // far Context processing has consumed them.
         let ingested_message_sequence = db.ingested_message_sequence(&session_id)?;
         let processed_message_sequence = db
-            .get_context_state(&session_id)?
-            .processed_message_sequence;
+            .get_session_context(&session_id)?
+            .map(|c| c.processed_through_seq)
+            .unwrap_or(0);
         let owner_workstream = match session.owner_workstream_id.as_deref() {
             Some(id) => db.get_workstream(id)?,
             None => None,

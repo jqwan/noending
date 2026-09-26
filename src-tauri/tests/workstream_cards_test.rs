@@ -74,7 +74,6 @@ fn card_stats_follow_sessions_and_active_state() {
         "agent_statement",
         "manual",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -181,7 +180,6 @@ fn resolved_state_items_no_longer_feed_the_card() {
         "agent_statement",
         "manual",
         &[],
-        None,
         "user",
     )
     .unwrap();
@@ -194,7 +192,6 @@ fn resolved_state_items_no_longer_feed_the_card() {
         "agent_statement",
         "manual",
         &[],
-        None,
         "user",
     )
     .unwrap();

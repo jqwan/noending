@@ -1,34 +1,17 @@
 //! Session ↔ WorkspacePath, and the derived Project cache.
 //!
-//! The fact chain is
+//! Fact chain: `Session.cwd → sessions.workspace_path_id →
+//! workspace_paths.project_id → Project`. `sessions.project_id` is only a
+//! **derived cache** of that chain, never an independent fact — so the write
+//! space is small and closed: three call sites that each compute the value from
+//! the path in the same statement (discovery's session upsert,
+//! [`attach_session_workspace_path_conn`],
+//! [`refresh_sessions_project_for_path_conn`]), plus
+//! [`clear_sessions_project_for_project_conn`] for a Project that is going away.
+//! Anything else is a domain violation.
 //!
-//! ```text
-//! Session.cwd → sessions.workspace_path_id → workspace_paths.project_id → Project
-//! ```
-//!
-//! `sessions.project_id` survives as a **derived cache** so the Project pages do
-//! not have to re-join on every read, and it must never be an independent
-//! fact. That prohibition is enforced by making the write space
-//! small and closed — exactly three call sites, and each one computes the value
-//! from the path in the same statement instead of taking a Project from the
-//! caller:
-//!
-//! 1. `Db::upsert_logical_session` (in `storage/mod.rs`) — discovery resolves
-//!    the Root's cwd through it (`ingestion::ensure_logical_session`);
-//! 2. [`attach_session_workspace_path_conn`] — an explicit re-attach, called when
-//!    discovery sees the cwd move (`workspace::session`);
-//! 3. [`refresh_sessions_project_for_path_conn`] — a WorkspacePath changed Project,
-//!    so every Session behind it must follow in the same transaction
-//!    (`storage::workspace::reassign_workspace_path_project_conn`).
-//!
-//! Plus one referential-cleanup case: [`clear_sessions_project_for_project_conn`]
-//! invalidates the cache for a Project that is going away. The workspace layer's
-//! zero-path auto-delete funnels through it, so the cleanup stays one statement
-//! in one file. Anything else is a domain violation, enforced by
-//! `tests/session_workspace_test::project_id_writers_are_confined_to_the_derived_doors`.
-//!
-//! Nothing here reads or writes `owner_workstream_id`: physical Project
-//! membership and semantic Workstream ownership are independent.
+//! Nothing here touches `owner_workstream_id`: physical Project membership and
+//! semantic Workstream ownership are independent.
 
 use rusqlite::{params, Connection};
 
@@ -37,9 +20,9 @@ use crate::error::Result;
 use super::Db;
 
 impl Db {
-    /// Standalone Sessions belong to a Project too, straight from their
-    /// own path, with no Workstream involved. Active sessions only: the
-    /// Project detail is a default projection and hides the recycle bin.
+    /// Standalone Sessions belong to a Project too, straight from their own path,
+    /// with no Workstream involved. Active only: the Project detail is a default
+    /// projection and hides the recycle bin.
     pub fn list_sessions_for_workspace_path(
         &self,
         path_id: &str,
@@ -54,8 +37,8 @@ impl Db {
     }
 }
 
-/// Point a Session at a WorkspacePath and recompute its cached Project
-/// in the same statement. Passing a Project is not an option here by design.
+/// Point a Session at a WorkspacePath and recompute its cached Project in the
+/// same statement — passing a Project is deliberately not an option.
 pub fn attach_session_workspace_path_conn(
     conn: &Connection,
     session_id: &str,
@@ -70,10 +53,9 @@ pub fn attach_session_workspace_path_conn(
     )? == 1)
 }
 
-/// The ONLY reason a Session's cached Project changes without the Session
-/// moving: the path it hangs off changed owner (Git upgrade, Project merge, new
-/// Git family). Batch, so the cache cannot be left half-updated if one row
-/// fails.
+/// The ONLY reason a Session's cached Project changes without the Session moving:
+/// the path it hangs off changed owner (Git upgrade, Project merge, new Git
+/// family). Batch, so the cache cannot be left half-updated.
 pub fn refresh_sessions_project_for_path_conn(conn: &Connection, path_id: &str) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE sessions
@@ -86,12 +68,8 @@ pub fn refresh_sessions_project_for_path_conn(conn: &Connection, path_id: &str) 
 /// A Project is going away: every Session that was only *projecting* onto it
 /// through the derived cache must stop doing so.
 ///
-/// This is invalidation, not assignment — it writes `NULL` and nothing else, so
-/// it cannot mint a membership the path chain does not imply. It lives here so
-/// the question "who may write `sessions.project_id`?" has one answer per file:
-/// `grep 'UPDATE sessions SET project_id'` finds this module and the
-/// authoritative project-cache derivation statements in `storage/mod.rs`,
-/// nowhere else.
+/// Invalidation, not assignment — it writes `NULL` and nothing else, so it cannot
+/// mint a membership the path chain does not imply.
 pub fn clear_sessions_project_for_project_conn(
     conn: &Connection,
     project_id: &str,

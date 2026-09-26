@@ -1,27 +1,19 @@
-//! Session single-Owner invariant suite.
+//! Session single-Owner invariant suite: every test pins one rule of
+//! `Session ── 0..1 ──> Owner Workstream`.
 //!
-//! Every test here pins one rule of the converged model:
+//! The point is not the happy path alone but that the two directions stay
+//! INDEPENDENT: setting an Owner never mutates the Workstream's path list, and
+//! mutating the path list never changes an Owner.
 //!
-//! ```text
-//! Session ── 0..1 ──> Owner Workstream
-//! ```
-//!
-//! The point of the file is not the happy path alone — it is that the two
-//! directions stay INDEPENDENT: setting an Owner never mutates the Workstream's
-//! path list, and mutating the path list never changes an Owner.
-//!
-//! Logical-Session shape: a Session is keyed by its ROOT member's
-//! Resume identity (`root_agent_session_id`); conversation is seeded through
-//! the production commit path (`commit_member_ingest`) and read back through
-//! `get_messages` — there are no session events any more.
+//! A Session is keyed by its ROOT member's Resume identity
+//! (`root_agent_session_id`); conversation is seeded through the production
+//! commit path (`commit_member_ingest`) and read back through `get_messages`.
 
-use noending::domain::{
-    Agent, ParsedSessionMessage, Session, SessionMessage, SessionMessageRole, Workstream,
-};
+use noending::domain::{Agent, Session, Workstream};
 use noending::launcher::{LaunchWorkspace, SessionLauncher};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
-use noending::sync::{ContextExtractor, ContextMutation, ExtractOutput, SyncEngine};
+use noending::sync::ContextMutation;
 use noending::workspace::workstream::{
     add_workstream_path, archive_workstream, create_workstream, delete_workstream_permanently,
     remove_workstream_path,
@@ -31,7 +23,7 @@ use rusqlite::Connection;
 use std::ops::Deref;
 mod support;
 
-// ---------------------------------------------------------------- harness
+// harness
 
 struct TestDb {
     db: Option<Db>,
@@ -154,7 +146,7 @@ fn owner_of(db: &Db, session_id: &str) -> Option<String> {
         .owner_workstream_id
 }
 
-// ------------------------------------------------- Session Owner basics
+// Session Owner basics
 
 #[test]
 fn newly_ingested_session_has_no_owner() {
@@ -211,7 +203,7 @@ fn unknown_workstream_and_unknown_session_are_refused() {
     assert!(db.set_session_owner("no-such-session", None).is_err());
 }
 
-// --------------------------------------------------------- lifecycle
+// lifecycle
 
 #[test]
 fn deleting_a_workstream_clears_the_owner_but_keeps_the_session() {
@@ -264,7 +256,7 @@ fn trash_and_restore_preserve_the_owner() {
     assert_eq!(db.sessions_for_workstream(&a.id).unwrap().len(), 1);
 }
 
-// ------------------------------------------- workspace independence
+// workspace independence
 
 #[test]
 fn removing_a_workstream_path_does_not_change_the_owner() {
@@ -328,7 +320,7 @@ fn changing_the_session_cwd_or_project_does_not_change_the_owner() {
     assert_eq!(after.owner_workstream_id.as_deref(), Some(w.id.as_str()));
 }
 
-// ---------------------------------------------- launcher → matched intent
+// launcher → matched intent
 
 /// a New Session launched for Workstream A records A on its
 /// LaunchIntent, and when discovery matches that intent the discovered Session
@@ -345,8 +337,6 @@ fn matched_launch_intent_gives_the_discovered_session_that_owner() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -384,8 +374,6 @@ fn matched_ownerless_intent_leaves_the_session_unowned() {
         agent: Agent::Codex,
         owner_workstream_id: None,
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -405,7 +393,7 @@ fn matched_ownerless_intent_leaves_the_session_unowned() {
     assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
 }
 
-// ------------------------------------------------------------ launcher
+// launcher
 
 #[test]
 fn new_session_launch_intent_carries_the_chosen_owner() {
@@ -514,229 +502,7 @@ fn ownerless_session_with_no_usable_cwd_resolves_to_unresolved() {
     assert_eq!(resolution.source, noending::launcher::CwdSource::Unresolved);
 }
 
-// ---------------------------------------------------------------- sync
-
-/// A stub extractor: it never looks at the transcript, it just records the
-/// workstream it was routed to and proposes one `add` there. Enough to pin the
-/// routing contract without depending on heuristic quality.
-struct RoutingProbe {
-    seen: std::sync::Mutex<Vec<String>>,
-}
-
-impl ContextExtractor for RoutingProbe {
-    fn name(&self) -> String {
-        "routing-probe".into()
-    }
-
-    fn extract(
-        &self,
-        _session: &Session,
-        _messages: &[&SessionMessage],
-        workstream_id: &str,
-        _inputs: &noending::sync::extractor::PromptInputs,
-    ) -> noending::error::Result<ExtractOutput> {
-        self.seen.lock().unwrap().push(workstream_id.to_string());
-        Ok(ExtractOutput::mutations(vec![ContextMutation::Add {
-            workstream_id: workstream_id.to_string(),
-            item_kind: "decision".into(),
-            title: "routed".into(),
-            content: "routed".into(),
-            source_refs: vec![],
-            authority: "agent_statement".into(),
-        }]))
-    }
-}
-
-/// Write `texts` through the production ingestion door (`commit_member_ingest`
-/// on the Session's ROOT member), so the stored messages carry app-assigned
-/// identity and sequence exactly like a real ingest.
-fn seed_messages(db: &Db, s: &Session, texts: &[&str]) -> Vec<SessionMessage> {
-    let root = db
-        .root_member_for_session(&s.id)
-        .unwrap()
-        .expect("fixture session has a ROOT member");
-    let parsed: Vec<ParsedSessionMessage> = texts
-        .iter()
-        .enumerate()
-        .map(|(i, text)| {
-            support::parsed_message(format!("src-{}", i + 1), SessionMessageRole::User, *text)
-        })
-        .collect();
-    db.commit_member_ingest(&s.id, &root.id, &parsed, None, &support::seed_source(0))
-        .unwrap()
-}
-
-/// The whole stored conversation, in sequence order.
-fn conversation(db: &Db, s: &Session) -> Vec<SessionMessage> {
-    db.get_messages(&s.id, None, 10_000).unwrap()
-}
-
-/// Drive one full prepare → extract → commit cycle with an injected extractor,
-/// so the routing assertions do not depend on the heuristic's content rules.
-fn run_with_probe(
-    db: &Db,
-    engine: &SyncEngine,
-    probe: &RoutingProbe,
-    s: &Session,
-) -> noending::error::Result<Option<noending::sync::SyncJobOutput>> {
-    let messages = conversation(db, s);
-    let to = messages.last().map(|m| m.sequence).unwrap_or(0);
-    let Some(pre) = engine.prepare(db, s, &messages, 0, to)? else {
-        return Ok(None);
-    };
-    let refs: Vec<&SessionMessage> = pre.messages.iter().collect();
-    let ws = pre.owner_workstream_id.clone().unwrap_or_default();
-    let out = probe.extract(s, &refs, &ws, &pre.inputs)?;
-    let job = engine.commit(db, s, &pre, out.mutations, "probe", out.diagnostics)?;
-    Ok(Some(job))
-}
-
-#[test]
-fn sync_routes_to_the_owner_only_and_never_defaults_it() {
-    let db = open_db("sync-owner-route");
-    let a = workstream(&db, "A");
-    let b = workstream(&db, "B");
-    let s = session(&db, None);
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    seed_messages(
-        &db,
-        &s,
-        &["我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。"],
-    );
-
-    let engine = SyncEngine::default();
-    let probe = RoutingProbe {
-        seen: std::sync::Mutex::new(Vec::new()),
-    };
-    let job = run_with_probe(&db, &engine, &probe, &s)
-        .unwrap()
-        .expect("run happens");
-    assert_eq!(job.status, "ok");
-
-    assert_eq!(probe.seen.lock().unwrap().as_slice(), &[a.id.clone()]);
-    assert_eq!(db.items_for_workstream(&a.id, false).unwrap().len(), 1);
-    assert!(db.items_for_workstream(&b.id, false).unwrap().is_empty());
-}
-
-#[test]
-fn ownerless_session_does_not_run_context_processing_or_advance_the_frontier() {
-    let db = open_db("sync-ownerless");
-    let s = session(&db, None);
-    let messages = seed_messages(
-        &db,
-        &s,
-        &["我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。"],
-    );
-    let engine = SyncEngine::default();
-
-    // The messages ARE stored: an ownerless session keeps ingesting.
-    assert_eq!(messages.len(), 1);
-    assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 1);
-
-    // prepare() itself refuses to produce a plan without an Owner.
-    let prepared = engine.prepare(&db, &s, &messages, 0, 1).unwrap();
-    assert!(prepared.is_none(), "no owner ⇒ no extraction plan");
-
-    let out = engine.run_session_sync(&db, &s, &messages, 0, 1).unwrap();
-    assert_eq!(out.applied, 0);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0,
-        "the Context frontier stays frozen while the Session is ownerless"
-    );
-
-    // Assigning an Owner replays the backlog from the frozen frontier.
-    let a = workstream(&db, "A");
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    let replay = engine.run_session_sync(&db, &s, &messages, 0, 1).unwrap();
-    assert_eq!(replay.status, "ok");
-    assert!(
-        replay.applied >= 1,
-        "the frozen backlog is processed once an Owner exists"
-    );
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        1
-    );
-}
-
-#[test]
-fn owner_change_during_extraction_makes_the_run_stale() {
-    let db = open_db("sync-owner-cas");
-    let a = workstream(&db, "A");
-    let b = workstream(&db, "B");
-    let s = session(&db, None);
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    let messages = seed_messages(
-        &db,
-        &s,
-        &["我们决定采用单 Owner 模型，这个方案就这么定了，请照着实现。"],
-    );
-    let engine = SyncEngine::default();
-
-    let pre = engine
-        .prepare(&db, &s, &messages, 0, 1)
-        .unwrap()
-        .expect("plan");
-    assert_eq!(pre.owner_workstream_id.as_deref(), Some(a.id.as_str()));
-
-    // The user re-homes the Session while extraction runs without the lock.
-    db.set_session_owner(&s.id, Some(&b.id)).unwrap();
-
-    let job = engine
-        .commit(
-            &db,
-            &s,
-            &pre,
-            vec![ContextMutation::Add {
-                workstream_id: a.id.clone(),
-                item_kind: "decision".into(),
-                title: "t".into(),
-                content: "c".into(),
-                source_refs: vec![],
-                authority: "agent_statement".into(),
-            }],
-            "probe",
-            vec![],
-        )
-        .unwrap();
-    assert_eq!(job.status, "stale");
-    assert_eq!(job.applied, 0);
-    // a stale run must not write Context and must not move the frontier.
-    assert!(db.items_for_workstream(&a.id, false).unwrap().is_empty());
-    assert!(db.items_for_workstream(&b.id, false).unwrap().is_empty());
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0
-    );
-}
-
-#[test]
-fn sync_never_invents_an_owner() {
-    let db = open_db("sync-no-auto");
-    let a = workstream(&db, "单 Owner 模型重构");
-    let s = session(&db, None);
-    let messages = seed_messages(
-        &db,
-        &s,
-        &["单 Owner 模型重构：我们决定采用单 Owner 模型，这个方案就这么定了。"],
-    );
-    let engine = SyncEngine::default();
-
-    // Even though the transcript mentions the Workstream title verbatim, the
-    // old keyword auto-classification is gone: a run cannot mint an Owner.
-    assert!(engine.prepare(&db, &s, &messages, 0, 1).unwrap().is_none());
-    assert!(owner_of(&db, &s.id).is_none());
-    assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
-}
-
-// ----------------------------------------------------------- workstream
+// workstream
 
 #[test]
 fn a_session_never_appears_in_two_workstream_lists() {
@@ -755,7 +521,7 @@ fn a_session_never_appears_in_two_workstream_lists() {
     assert_eq!(in_b[0].id, s.id);
 }
 
-// ------------------------------------------- the owner side-effect rule
+// the owner side-effect rule
 
 /// `set_session_owner` writes `sessions.owner_workstream_id` and
 /// NOTHING else. The Workstream's path list is untouched (no path is appended
@@ -813,7 +579,7 @@ fn clearing_the_owner_moves_nothing() {
     assert_eq!(after.workspace_path_id, before.workspace_path_id);
 }
 
-// ------------------------------------------ Workstream statistics
+// Workstream statistics
 
 /// a Workstream's stats count exactly the Sessions that OWN it. An
 /// unowned Session is counted by no Workstream, and re-homing a Session moves
@@ -847,7 +613,7 @@ fn workstream_session_stats_count_only_owned_sessions() {
     assert_eq!(db.workstream_session_stats(&b.id).unwrap().0, 1);
 }
 
-// --------------------------------- the Owner is the only write target
+// the Owner is the only write target
 
 ///  — a run writes its Owner Workstream and nothing else.
 ///
@@ -875,14 +641,12 @@ fn mutations_outside_the_owner_are_skipped_not_written() {
         "agent_inferred",
         "session_message",
         &[],
-        None,
         "sync:other",
     )
     .unwrap();
     let before = db.get_item(&foreign.id).unwrap().unwrap();
 
     let ctx = MergeContext {
-        run_id: new_id(),
         runtime: "probe".into(),
         workstream_id: a.id.clone(),
     };
@@ -912,16 +676,6 @@ fn mutations_outside_the_owner_are_skipped_not_written() {
         ContextMutation::Resolve {
             item_id: foreign.id.clone(),
             source_refs: vec![],
-        },
-        // A conflict that links B's item into A's workstream: refused whole,
-        // because the linked item is not this run's to drag across.
-        ContextMutation::Conflict {
-            workstream_id: a.id.clone(),
-            item_id: foreign.id.clone(),
-            title: "跨库冲突".into(),
-            content: "c".into(),
-            source_refs: vec![],
-            reason: "模型判定与用户约束可能冲突".into(),
         },
         // The control: the same run CAN write its own Owner.
         ContextMutation::Add {
@@ -960,12 +714,12 @@ fn mutations_outside_the_owner_are_skipped_not_written() {
     assert!(db.conflicts_for_workstream(&b.id, true).unwrap().is_empty());
     assert!(
         db.conflicts_for_workstream(&a.id, true).unwrap().is_empty(),
-        "the refused conflict must not land on A either"
+        "a skipped foreign mutation must not create a conflict on A either"
     );
     assert_eq!(db.items_for_workstream(&a.id, true).unwrap().len(), 1);
 }
 
-// ------------------------- resume reads the Owner after the sync seam
+// resume reads the Owner after the sync seam
 
 /// Resume preparation reads ownership AFTER its sync, never from the
 /// snapshot taken before it.
@@ -1007,7 +761,6 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
         .unwrap();
     assert_eq!(first.owner_workstream_id.as_deref(), Some(a.id.as_str()));
     assert_eq!(first.cwd.as_deref(), Some(dir_a.as_str()));
-    assert_eq!(first.bundle.workstream_id.as_deref(), Some(a.id.as_str()));
 
     // Ownership moves during the window in which sync would have been running.
     db.set_session_owner(&s.id, Some(&b.id)).unwrap();
@@ -1021,7 +774,6 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
         Some(dir_b.as_str()),
         "the cwd tier follows the CURRENT Owner"
     );
-    assert_eq!(second.bundle.workstream_id.as_deref(), Some(b.id.as_str()));
 
     // And the end-to-end entry point (which syncs first) agrees.
     let full = launcher.prepare_resume_in(&db, &s.id, &workspace).unwrap();
@@ -1029,7 +781,7 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
     assert_eq!(full.cwd.as_deref(), Some(dir_b.as_str()));
 }
 
-// ------------------- first discovery, whichever door found the session
+// first discovery, whichever door found the session
 
 /// A Codex rollout the real adapter discovers, so the source-scoped
 /// reconcile below runs the production discovery → row → ingest path.
@@ -1055,7 +807,6 @@ fn codex_rollout(dir: &std::path::Path, session_id: &str, cwd: &str) -> std::pat
 fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
     use noending::domain::{ingest_origin, launch_status, IngestSource, LaunchIntent};
     use noending::ingestion::reconcile_source;
-    use noending::sync::SyncEngine;
 
     let db = open_db("owner-intent-source-first");
     let a = workstream(&db, "A");
@@ -1073,9 +824,8 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
         created_at: now(),
     };
 
-    let engine = SyncEngine::default();
     let (discovered, _) =
-        reconcile_source(&db, &engine, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        reconcile_source(&db, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
     assert_eq!(discovered, 1, "the rollout fixture is discoverable");
 
     let stored = db
@@ -1091,8 +841,6 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: "2026-09-22T21:17:07Z".into(),
         matched_session_id: None,
@@ -1103,7 +851,7 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
     };
     db.insert_launch_intent(&intent).unwrap();
     let (discovered, _) =
-        reconcile_source(&db, &engine, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        reconcile_source(&db, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
     assert_eq!(discovered, 0, "the unchanged root is skipped");
 
     let stored = db.get_session(&stored.id).unwrap().unwrap();
@@ -1126,84 +874,7 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
     assert_eq!(root.source_member_id, "rollout-thread-1");
 }
 
-#[test]
-fn source_scoped_reconcile_retries_only_that_sources_pending_context() {
-    use noending::domain::{ingest_origin, IngestSource};
-    use noending::ingestion::reconcile_source;
-    use noending::settings::set_context_intelligence_enabled;
-    use noending::sync::SyncEngine;
-    use std::cell::RefCell;
-
-    let db = open_db("source-retry-scope");
-    let owner = workstream(&db, "Retry owner");
-    set_context_intelligence_enabled(&db, false).unwrap();
-    let source = |root: &std::path::Path| IngestSource {
-        id: new_id(),
-        agent: Agent::Codex,
-        path: root.to_string_lossy().to_string(),
-        enabled: true,
-        origin: ingest_origin::USER.into(),
-        created_at: now(),
-    };
-    let root_a = db.dir.join("retry-source-a");
-    let root_b = db.dir.join("retry-source-b");
-    std::fs::create_dir_all(&root_a).unwrap();
-    std::fs::create_dir_all(&root_b).unwrap();
-    codex_rollout(&root_a, "retry-a", "/repo/app");
-    codex_rollout(&root_b, "retry-b", "/repo/app");
-    let source_a = source(&root_a);
-    let source_b = source(&root_b);
-    let engine = SyncEngine::default();
-
-    for source in [&source_a, &source_b] {
-        assert_eq!(
-            reconcile_source(&db, &engine, source, &LaunchWorkspace::default(), &|_| {})
-                .unwrap()
-                .0,
-            1
-        );
-    }
-    let session_a = db
-        .find_session_by_root_agent_id(Agent::Codex, "retry-a")
-        .unwrap()
-        .unwrap();
-    let session_b = db
-        .find_session_by_root_agent_id(Agent::Codex, "retry-b")
-        .unwrap()
-        .unwrap();
-    db.set_session_owner(&session_a.id, Some(&owner.id))
-        .unwrap();
-    db.set_session_owner(&session_b.id, Some(&owner.id))
-        .unwrap();
-    set_context_intelligence_enabled(&db, true).unwrap();
-
-    let seen = RefCell::new(Vec::new());
-    let (discovered, _) = reconcile_source(
-        &db,
-        &engine,
-        &source_a,
-        &LaunchWorkspace::default(),
-        &|session| seen.borrow_mut().push(session.id.clone()),
-    )
-    .unwrap();
-    assert_eq!(discovered, 0, "the source file is unchanged");
-    assert_eq!(*seen.borrow(), vec![session_a.id.clone()]);
-    assert_eq!(
-        db.get_context_state(&session_a.id)
-            .unwrap()
-            .processed_message_sequence,
-        db.ingested_message_sequence(&session_a.id).unwrap()
-    );
-    assert_eq!(
-        db.get_context_state(&session_b.id)
-            .unwrap()
-            .processed_message_sequence,
-        0,
-        "syncing source A must not retry source B"
-    );
-}
-
-// ---------------------- a match is one atomic ownership handover
+// a match is one atomic ownership handover
 
 /// A match writes the Owner, the delivery snapshot and the intent status as
 /// ONE unit: an intent that says MATCHED always has a Session that exists.
@@ -1220,8 +891,6 @@ fn a_failed_match_leaves_the_intent_pending() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -1277,16 +946,6 @@ fn a_deleted_workstream_cannot_leave_a_dangling_intent_owner() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: Some(
-            serde_json::json!({
-                "bundle_id": "bundle-gone",
-                "workstream_id": a.id.clone(),
-                "revisions": [],
-                "conflicts": [],
-            })
-            .to_string(),
-        ),
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -1312,17 +971,13 @@ fn a_deleted_workstream_cannot_leave_a_dangling_intent_owner() {
         owner_of(&db, &s.id).is_none(),
         "there is nothing to inherit"
     );
-    assert!(
-        db.latest_deliveries(&s.id).unwrap().is_empty(),
-        "no delivery for a bundle whose Workstream is gone"
-    );
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
         launch_status::MATCHED
     );
 }
 
-// --------------------  prepare-time consistency (Preview = Launch)
+// prepare-time consistency (Preview = Launch)
 
 /// The consistency predicate a Resume preparation ends with: it may only hand
 /// back a plan while the Session still names the Owner it was built for.
@@ -1385,7 +1040,7 @@ fn new_preparation_refuses_a_workstream_that_no_longer_exists() {
     );
 }
 
-// --------------------- a LaunchIntent is spent exactly once
+// a LaunchIntent is spent exactly once
 
 /// An intent is a one-shot capability: the second consumer must not be able to
 /// re-point it at its own Session, and the first Session keeps what it got.
@@ -1402,8 +1057,6 @@ fn a_launch_intent_is_consumed_exactly_once() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -1449,8 +1102,6 @@ fn the_match_claim_is_a_cas_that_only_fires_once() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -1494,8 +1145,6 @@ fn matching_refuses_a_foreign_agent_or_a_trashed_session() {
             agent: Agent::Codex,
             owner_workstream_id: Some(a.id.clone()),
             cwd: None,
-            context_bundle_markdown: None,
-            context_bundle_revisions: None,
             process_id: None,
             launched_at: now(),
             matched_session_id: None,
@@ -1531,7 +1180,7 @@ fn matching_refuses_a_foreign_agent_or_a_trashed_session() {
     assert!(owner_of(&db, &s.id).is_none());
 }
 
-// ---------------- the discovery retry window for an unclaimed intent
+// the discovery retry window for an unclaimed intent
 
 /// An ownerless Session gets more than one chance to claim a pending intent.
 ///
@@ -1552,8 +1201,6 @@ fn an_ownerless_session_can_still_claim_its_intent_later() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -1592,8 +1239,6 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: None,
         launched_at: now(),
         matched_session_id: None,
@@ -1640,7 +1285,7 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     assert!(owner_of(&db, &stray.id).is_none());
 }
 
-// ------------------ search projections follow the facts they copy
+// search projections follow the facts they copy
 
 /// A Session's search document embeds its Owner's title and its Project's name
 ///. Every write that changes either fact must rebuild those documents

@@ -1,25 +1,13 @@
 //! Agent Adapter layer.
 //!
-//! Each adapter owns: the member layout of its Agent's data directory, the
-//! file/record formats, member identity, optional environment info, resume
-//! parameters, new-session invocation. Upper layers must never reference
-//! `~/.codex` / `~/.claude` / `~/.pi` directly — that is PlatformPaths' job.
+//! Each adapter owns its Agent's data-dir layout, formats, member identity,
+//! resume parameters and new-session invocation. Upper layers must never
+//! reference `~/.codex` / `~/.claude` / `~/.pi` directly — that is
+//! PlatformPaths' job.
 //!
-//! The source unit is the **member** (`DiscoveredMember` / `SessionMember`),
-//! not the session: one Logical Session is the root member plus every child /
-//! side member that resolves to it.
-//!
-//! Context Integrity rules enforced here:
-//! - adapters never generate shell fragments (no `$(cat …)`): context is
-//!   passed as a real argv string produced by [`context_prompt`];
-//! - [`read_jsonl_delta`] classifies every read as append / truncate /
-//!   rewrite / file-replacement and only ever returns the *new* portion;
-//! - adapters emit CONVERSATION (`role` user/assistant, user-visible prose
-//!   only) plus execution OBSERVATIONS (tool/compaction/side counts). Child
-//!   and side members never emit messages at all — the core's commit would
-//!   reject them, and adapter tests keep that from ever being relied on;
-//! - re-ingesting already-seen content is prevented by the storage layer's
-//!   content-identity dedup, so compaction can never overwrite history.
+//! The source unit is the **member**, not the session: one Logical Session is
+//! the root member plus every child/side member resolving to it. Only root
+//! members emit conversation; child/side members emit observations only.
 
 pub mod antigravity;
 pub mod claude;
@@ -183,20 +171,6 @@ impl ExecOptions {
     }
 }
 
-/// Read the context bundle file and return its literal content.
-///
-/// This replaces the old `$(cat 'file')` shell-substitution helper: the
-/// content travels as a single argv element (quoted by the Platform layer),
-/// so the agent receives exactly this text on every OS.
-pub fn context_prompt(context_file: Option<&Path>) -> Result<Option<String>> {
-    match context_file {
-        None => Ok(None),
-        Some(p) => Ok(Some(std::fs::read_to_string(p).map_err(|e| {
-            other(format!("读取上下文文件失败 {}: {}", p.display(), e))
-        })?)),
-    }
-}
-
 /// One parsed source line's contribution: at most one conversation message
 /// plus the execution observations the line carries. Lines that are neither
 /// (reasoning bodies, bookkeeping, session meta) return `None` from the
@@ -232,22 +206,40 @@ impl ParsedLine {
 /// only), how the read updates stats, and the source state AFTER reading.
 /// Messages carry no sequence — the storage layer assigns stable identities.
 ///
-/// `next_active_provider` / `next_active_model` are the stateful provenance
-/// frontier after this read — `None`/`None` for every
-/// adapter whose evidence is direct per-message or absent.
+/// `complete_snapshot` is true only when EVERY parsed frame of the read was
+/// whole (an unfinished last line or a failed decode is NOT complete); an
+/// incomplete full re-scan must leave projection, generation and cursor
+/// untouched and record a retryable error instead.
+///
+/// `next_active_provider` / `next_active_model` are the provenance frontier
+/// after this read — `None`/`None` for adapters whose evidence is direct
+/// per-message or absent.
 #[derive(Debug, Clone, Default)]
 pub struct MemberReadDelta {
     pub messages: Vec<ParsedSessionMessage>,
     pub stats: Option<StatsUpdate>,
     pub source: Option<crate::domain::SourceCursorUpdate>,
+    pub complete_snapshot: bool,
     pub next_active_provider: Option<String>,
     pub next_active_model: Option<String>,
 }
 
-/// The stateful provenance frontier a stateful-evidence adapter threads
-/// through one read: the generation provenance the
-/// source has explicitly confirmed and that still governs messages to come.
-/// Seeded from the member cursor on appends, reset on any full re-scan.
+impl MemberReadDelta {
+    /// A read that could not establish a whole-snapshot verdict (an error
+    /// mid-read, a source that never re-scans): the storage layer treats it as
+    /// incomplete.
+    pub fn incomplete() -> Self {
+        Self {
+            complete_snapshot: false,
+            ..Default::default()
+        }
+    }
+}
+
+/// The provenance frontier a stateful-evidence adapter threads through one
+/// read: provenance the source has explicitly confirmed and that still governs
+/// messages to come. Seeded from the member cursor on appends, reset on any
+/// full re-scan.
 #[derive(Debug, Clone, Default)]
 pub struct ProvenanceState {
     pub provider: Option<String>,
@@ -316,22 +308,13 @@ pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
 /// Content fingerprint: which agent wrote this session file?
 ///
 /// Filename conventions (rollout-*.jsonl, *.jsonl under some directory) are
-/// pre-filters, not guarantees — and no format except Codex names its
-/// writer. The on-disk formats are mutually exclusive *except* for Qoder,
-/// whose transcript is Claude's plus Qoder-only lines, so order matters:
-/// - Codex: every line is the `{ordinal, payload, type}` envelope;
-/// - Qoder: one of its own line types (`workspace-directories`,
-///   `runtime-config`, `worktree-state`, `active-leaf`, `last-prompt`) —
-///   checked before Claude, or every Qoder file would read as Claude;
-/// - Claude Code: event lines carry `{sessionId, parentUuid/uuid, message}`;
-/// - Pi: `{type:"session", id}` header or `{parentId, provider|modelId|
-///   thinkingLevel}` event lines;
-/// - WorkBuddy: `{type:"message", role, content:[…]}` with the payload at the
-///   top level, plus its own `ai-title` / `file-history-snapshot` lines.
+/// pre-filters, not guarantees. The on-disk formats are mutually exclusive
+/// *except* for Qoder, whose transcript is Claude's plus Qoder-only lines, so
+/// the order of the checks in [`fingerprint_line`] matters.
 ///
-/// Returns None when the file is not a recognizable session file of any
-/// known agent — including files whose content is genuinely ambiguous, which
-/// must be left unclaimed rather than guessed at.
+/// Returns None when the file is not a recognizable session file of any known
+/// agent — including genuinely ambiguous content, which must be left unclaimed
+/// rather than guessed at.
 pub fn detect_format(path: &Path) -> Option<Agent> {
     const MAX_PARSE_LINES: usize = 10;
     let file = std::fs::File::open(path).ok()?;
@@ -588,6 +571,7 @@ pub fn read_jsonl_delta_stateful(
     };
 
     let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
+
     let (generation, start_offset): (i64, u64) = if first_ever {
         (0, 0)
     } else if obs.identity != cursor.source_file_identity {
@@ -614,6 +598,7 @@ pub fn read_jsonl_delta_stateful(
                     start_byte_offset: cursor.byte_offset,
                     prefix_hash: cursor.prefix_hash.clone(),
                 }),
+                complete_snapshot: true,
                 next_active_provider: state.provider.clone(),
                 next_active_model: state.model.clone(),
             });
@@ -639,29 +624,35 @@ pub fn read_jsonl_delta_stateful(
         *state = ProvenanceState::default();
     }
 
-    // Byte offset of the end of the last complete (newline-terminated) line.
-    let complete_end: usize = if text.ends_with('\n') {
-        text.len()
-    } else {
-        text.rfind('\n').map(|i| i + 1).unwrap_or(0)
-    };
-
     let mut messages: Vec<ParsedSessionMessage> = Vec::new();
     let mut observation = MemberObservation::default();
     let start_offset = start_offset as usize;
     let mut offset = 0usize;
-    for (idx, line) in text.lines().enumerate() {
+    let mut complete_snapshot = true;
+    let mut complete_end = text.len();
+    for (idx, frame) in text.split_inclusive('\n').enumerate() {
         let line_start = offset;
-        offset += line.len() + 1; // +1 for '\n' (off-by-one at EOF is harmless)
-        if line_start < start_offset || line_start >= complete_end {
+        offset += frame.len();
+        if line_start < start_offset {
             continue;
         }
+        let line = frame
+            .strip_suffix('\n')
+            .unwrap_or(frame)
+            .strip_suffix('\r')
+            .unwrap_or_else(|| frame.strip_suffix('\n').unwrap_or(frame));
         if line.trim().is_empty() {
             continue;
         }
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => {
+                // Stop at the first damaged frame. The cursor remains before
+                // it so an append or repair will retry this line and the tail.
+                complete_snapshot = false;
+                complete_end = line_start;
+                break;
+            }
         };
         // Timestamps are RFC3339 strings in every format but WorkBuddy's,
         // which writes epoch millis as a number. Both are normalized here so
@@ -692,7 +683,7 @@ pub fn read_jsonl_delta_stateful(
         file_identity: obs.identity,
         generation,
         byte_offset: complete_end as u64,
-        last_seen_size: obs.size,
+        last_seen_size: if complete_snapshot { obs.size } else { 0 },
         mtime: obs.mtime,
         start_byte_offset: start_offset as u64,
         prefix_hash: prefix_hash_of(complete_end),
@@ -701,6 +692,7 @@ pub fn read_jsonl_delta_stateful(
         stats: stats_update_from(&observation, &source, capabilities),
         messages,
         source: Some(source),
+        complete_snapshot,
         next_active_provider: state.provider.clone(),
         next_active_model: state.model.clone(),
     })
@@ -709,13 +701,12 @@ pub fn read_jsonl_delta_stateful(
 /// Cursor update for readers that replay the whole source on every read (dsh's
 /// zstd frames; ZCode's live store).
 ///
-/// Their offsets must stay in the source's OWN coordinates: that is what the
-/// reconcile pre-filter stats, and it is the only thing known without decoding
-/// or replaying. A replay therefore always starts at genesis, and message
-/// identity — the writer's own ids — absorbs it: re-reading a source stores
-/// nothing. A new generation is a change of shape (the file was replaced, or
-/// truncation removed bytes), never a mere append. Because every replay is a
-/// full scan, its observations become a stats SNAPSHOT.
+/// Offsets stay in the source's OWN coordinates — that is what the reconcile
+/// pre-filter stats, and it is all that is known without decoding. A replay
+/// always starts at genesis and message identity (the writer's own ids) absorbs
+/// it, so re-reading stores nothing. A new generation is a change of shape
+/// (file replaced or truncated), never a mere append; every replay is a full
+/// scan, so its observations become a stats SNAPSHOT.
 pub fn replay_cursor_update(
     path: &Path,
     cursor: &SessionMemberCursor,
@@ -747,14 +738,13 @@ pub fn replay_cursor_update(
 
 /// Source observation for a live SQLite store whose newest writes may sit ONLY
 /// in the `-wal` file: logical size = main + `-wal`, mtime = the LATER of the
-/// two. A WAL-only append therefore always moves this cursor, so member and
-/// session `last_activity_at` keep tracking the execution graph even when the
-/// main database file is untouched. A checkpoint folds WAL bytes back into the
-/// main file and the total may shrink slightly — that reads as a new
-/// generation and the full replay dedup absorbs it.
+/// two. A WAL-only append therefore always moves this cursor, so
+/// `last_activity_at` keeps tracking the execution graph even when the main
+/// database file is untouched. A checkpoint may shrink the total — that reads
+/// as a new generation and the full replay dedup absorbs it.
 ///
-/// `prefix_hash` is a logical fingerprint (identity + sizes), not a byte
-/// hash: replay readers never walk an append path.
+/// `prefix_hash` is a logical fingerprint (identity + sizes), not a byte hash:
+/// replay readers never walk an append path.
 pub fn sqlite_replay_cursor_update(
     path: &Path,
     cursor: &SessionMemberCursor,
@@ -836,18 +826,16 @@ pub trait AgentAdapter: Send + Sync {
     /// fresh `Missing` may ever enable a local purge.
     fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability>;
 
-    /// Build the command line for a New Session. `context_file` is None when
-    /// the user chose to start without any Workstream Context — adapters then
-    /// launch the plain CLI with no injected prompt.
+    /// Build the command line for a New Session.
     ///
-    /// `opts` carries NoEnding's override intent only. A `None` field must
-    /// produce no CLI argument at all: the Agent's own configuration stays
-    /// untouched and unguessed.
+    /// NoEnding never injects Context at launch: the command carries only the
+    /// launch facts (Agent, cwd, runtime overrides). `opts` carries NoEnding's
+    /// override intent only — a `None` field must produce no CLI argument at
+    /// all, so the Agent's own configuration stays untouched and unguessed.
     fn build_new_command(
         &self,
         install: &AgentInstallation,
         opts: &ExecOptions,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand>;
 
@@ -856,7 +844,6 @@ pub trait AgentAdapter: Send + Sync {
         install: &AgentInstallation,
         opts: &ExecOptions,
         agent_session_id: &str,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand>;
 
@@ -896,7 +883,7 @@ pub fn adapter_for(agent: Agent) -> &'static dyn AgentAdapter {
     unreachable!("adapter for {:?} missing", agent)
 }
 
-// Shared JSONL helpers -------------------------------------------------
+// Shared JSONL helpers
 
 /// First non-empty line of a JSONL file, parsed. Session headers open these
 /// files in every format NoEnding reads, so one line is enough to learn how the
@@ -936,12 +923,12 @@ pub fn truncate_text(s: &str, max: usize) -> String {
 
 /// An injected preamble rather than the user's own words: `<…>` environment
 /// blocks and `#`-prefixed injections (AGENTS.md, attached-file headers).
-///
-/// The test is on the trimmed text because the runtime does not always put the
-/// marker first: Codex writes the pasted-file block as `"\n# Files pasted by
-/// the user: …"`, and testing the raw text let exactly that become a title.
 /// Adapters call this when picking their first human turn AND when deciding
 /// what is Conversation (injected context never becomes a SessionMessage).
+///
+/// The test is on trimmed text because the runtime does not always put the
+/// marker first: Codex writes the pasted-file block as
+/// `"\n# Files pasted by the user: …"`.
 pub fn is_injected_preamble(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with('<') || t.starts_with('#')
@@ -951,11 +938,8 @@ pub fn is_injected_preamble(text: &str) -> bool {
 /// nothing title-worthy in it.
 ///
 /// A machine blob is not a title: Codex's review threads open with
-/// `{"risk_level":"medium","user_authorization":"high","outcome":"allow"}` (27
-/// of the 50 internal threads on this machine do), and putting that in the
-/// session list is noise, not a title. Same call the user-text tier already
-/// makes for `<…>` / `#` injections — this is simply the agent-role spelling
-/// of it.
+/// `{"risk_level":"medium",…}`, which is noise in the session list. Same call
+/// the user-text tier makes for `<…>` / `#` injections.
 pub fn title_from_text(text: &str) -> Option<String> {
     let t = text
         .lines()
@@ -991,6 +975,59 @@ pub fn parsed_message(
 }
 
 pub(crate) use str_field as json_str_field;
+
+#[cfg(test)]
+mod jsonl_integrity_tests {
+    use super::*;
+
+    fn temp_file(body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("noending-jsonl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_valid_final_json_frame_does_not_need_a_newline() {
+        let frame = r#"{"type":"event","value":1}"#;
+        let path = temp_file(frame);
+        let delta = read_jsonl_delta(
+            &path,
+            &SessionMemberCursor::default(),
+            StatsCapabilities::COMPACTION,
+            &|_, _| None,
+        )
+        .unwrap();
+
+        assert!(delta.complete_snapshot);
+        assert_eq!(delta.source.unwrap().byte_offset, frame.len() as u64);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn malformed_frames_make_the_snapshot_incomplete_and_hold_the_cursor() {
+        let valid = r#"{"type":"event","value":1}"#;
+        let body = format!("{valid}\n{{broken}}\n{valid}\n");
+        let path = temp_file(&body);
+        let delta = read_jsonl_delta(
+            &path,
+            &SessionMemberCursor::default(),
+            StatsCapabilities::COMPACTION,
+            &|_, _| None,
+        )
+        .unwrap();
+
+        assert!(!delta.complete_snapshot);
+        let source = delta.source.unwrap();
+        assert_eq!(source.byte_offset, (valid.len() + 1) as u64);
+        assert_eq!(
+            source.last_seen_size, 0,
+            "discovery must retry the damaged tail"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
 
 #[cfg(test)]
 mod fingerprint_tests {

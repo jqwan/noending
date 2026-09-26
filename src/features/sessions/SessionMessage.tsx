@@ -6,11 +6,8 @@ import { Modal, copyToClipboard } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import { formatDateTime } from "./SessionTable";
 
-/**
- * 一条会话消息：Conversation 只剩 user | assistant 两种
- * role 的 prose——compact / system / agent_message / sidechain 这些概念不再
- * 进入 UI，`who` 由调用方给出（用户 / Codex / …）。
- */
+/** 一条会话消息：Conversation 只剩 user | assistant 两种 role 的 prose，
+ *  `who` 由调用方给出（用户 / Codex / …）。 */
 export interface SessionMessageData {
   sequence: number;
   role: "user" | "assistant";
@@ -22,11 +19,8 @@ export interface SessionMessageData {
   model?: string | null;
 }
 
-/**
- * Assistant 消息头上的低干扰模型标签：
- * provider+model → "model · provider"；只有其一 → 那一个；两者皆空 → null（不占位）。
- * User 消息永远没有生成模型，调用方应根本不传。
- */
+/** Assistant 消息头上的低干扰模型标签：provider+model → "model · provider"；
+ *  只有其一 → 那一个；两者皆空 → null。User 消息不传。 */
 export function provenanceLabel(
   provider: string | null | undefined,
   model: string | null | undefined,
@@ -40,12 +34,11 @@ export function provenanceLabel(
 }
 
 /**
- * 纯文本消息在列表里最多显示这么多字，全文点开弹窗看。
- * Markdown 消息不走这里——渲染结果不能按字数切，改用高度收口。
+ * 纯文本消息在列表里最多显示这么多字，全文点开弹窗看。Markdown 不走这里
+ * （渲染结果不能按字数切，改用高度收口）。
  *
- * 不在这里「展开全文」：这个流是密排的一列，就地展开会把后面的消息越推越远，
- * 而且长内容（代码、JSON、diff）在 724px 宽的消息列里折行折得很难读；
- * 弹窗给的是整块宽度 + 可滚动的一屏。
+ * 不做就地「展开全文」：密排的一列里就地展开会把后面的消息越推越远，长内容
+ * （代码、JSON、diff）在窄列里折行也很难读；弹窗给的是整块宽度 + 可滚动的一屏。
  */
 const TRUNCATE_AT = 240;
 
@@ -74,9 +67,8 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   // User 消息没有生成模型——即使调用方误传也不显示。
   const prov = msg.role === "assistant" ? provenanceLabel(msg.provider, msg.model) : null;
 
-  // 整行可点会让「悬停到哪儿」变成一条与内容无关的宽条，而点开这件事属于这条消息本身，
-  // 所以热区和悬浮效果都只落在气泡上。键盘可达靠 role + tabIndex，
-  // 焦点环由全局的 :focus-visible 给。
+  // 整行可点会变成一条与内容无关的宽条，所以热区和悬浮效果都只落在气泡上；
+  // 键盘可达靠 role + tabIndex，焦点环由全局的 :focus-visible 给。
   return (
     <>
       <div className={`event ${cls}`}>
@@ -157,10 +149,8 @@ function MessageModal({ who, stamp, text, previewable, onClose }: {
 }
 
 /**
- * 看起来像 Markdown 才给预览入口。
- *
- * 纯文本没什么可预览的，硬渲染只会让人觉得东西坏了；而 Agent 的转录里本来就有大量
- * 不是 Markdown 的内容（raw 日志、ANSI、diff、半句话），所以默认永远是「原文」。
+ * 看起来像 Markdown 才给预览入口：纯文本硬渲染只会像坏了，而转录里本就有大量
+ * 非 Markdown 内容（raw 日志、ANSI、diff、半句话），所以默认永远是「原文」。
  */
 export function looksLikeMarkdown(text: string): boolean {
   return /^```/m.test(text)                  // 围栏代码块
@@ -172,11 +162,9 @@ export function looksLikeMarkdown(text: string): boolean {
     || /`[^`\n]+`/.test(text);               // 行内代码
 }
 
-/**
- * 两个元素被刻意退化掉（转录是我们不控制的内容）：
- *   a   —— webview 里点链接会把整个应用导航走（也没装打开外部浏览器的插件），所以只留文字；
- *   img —— 不因为一条转录就去请求远程地址（本地优先的应用不该有这种外连），显示 alt 与 URL。
- */
+/** 刻意退化两个元素（转录是我们不控制的内容）：
+ *  a   —— 点链接会把整个应用导航走（也没装外链插件），只留文字；
+ *  img —— 不因一条转录去请求远程地址（本地优先不该外连），显示 alt 与 URL。 */
 const MD_COMPONENTS: Components = {
   a: ({ href, children }) => <span className="md-link" title={href}>{children}</span>,
   img: ({ src, alt }) => <span className="md-img">[{alt || "图片"}] {src}</span>,

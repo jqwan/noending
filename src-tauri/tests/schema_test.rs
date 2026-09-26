@@ -1,25 +1,25 @@
-//! Database format contract (Logical Session refactor,).
+//! Database format contract (Logical Session refactor).
 //!
-//! NoEnding supports exactly one SQLite format generation at a time, identified
-//! by the header pair (`application_id`, `user_version`) that creation stamps.
-//! An empty file is created in that format; a database carrying the pair must
-//! also still have the full structure; anything else — a foreign SQLite file, an
-//! older generation, or an incomplete current-format database — is refused
-//! instead of migrated or repaired.
+//! Exactly one SQLite format generation is supported at a time, identified by the
+//! header pair (`application_id`, `user_version`) that creation stamps. An empty
+//! file is created in that format; a database carrying the pair must also have
+//! the full structure; anything else — a foreign SQLite file, an older
+//! generation, or an incomplete current-format database — is refused instead of
+//! migrated or repaired.
 //!
-//! Format v2 is the Logical Session shape: `sessions` is keyed by the root
-//! member's Resume identity, execution lives in `session_members`, conversation
-//! in `session_messages` (root only), reading in `session_member_cursors`,
-//! observation in `session_member_stats`, the Sync frontier in
-//! `session_context_state`, and unattachable sources in
-//! `ingestion_diagnostics`. `session_events`, `session_cursors` and
-//! `session_deletion_jobs` are gone.
+//! Format v1 keys `sessions` by the root member's Resume identity, with execution
+//! in `session_members`, the RAW conversation in `session_messages` (root only,
+//! append-only for provenance), the CURRENT conversation in
+//! `session_message_projection`, reading in `session_member_cursors`,
+//! observation in `session_member_stats`, the fact generation in
+//! `session_ingest_state`, the Session summary frontier in `session_contexts` /
+//! `session_context_revisions`, and the Workstream revision pair in
+//! `workstream_context_state` / `workstream_session_frontiers`, and unattachable
+//! sources in `ingestion_diagnostics`.
 //!
-//! Format v3 adds message-level model provenance:
 //! `session_messages` carries `provider` / `model` (Assistant only, enforced by
-//! CHECK), and `session_member_stats` loses `model` / `provider` / `effort` —
-//! a member-level "current model" was a second, semantically unclear
-//! authority.
+//! CHECK); `session_member_stats` has neither — a member-level "current model"
+//! was a second, semantically unclear authority.
 
 use noending::domain::{Agent, SessionMemberRelation, SessionMessageRole};
 use noending::domain::{ParsedSessionMessage, SourceCursorUpdate};
@@ -136,12 +136,13 @@ fn fresh_database_uses_current_format_generation() {
         ("sessions", "agent_session_id"),
         ("sessions", "raw_path"),
         ("sessions", "parent_agent_session_id"),
-        ("sync_runs", "source_generation"),
         ("projects", "archived"),
         ("workstreams", "project_id"),
         ("workstreams", "default_cwd"),
         ("workstream_paths", "source"),
         ("launch_intents", "selected_workstream_ids"),
+        ("launch_intents", "context_bundle_markdown"),
+        ("launch_intents", "context_bundle_revisions"),
     ] {
         assert!(
             !has_column(&db.read(), table, column),
@@ -155,11 +156,17 @@ fn fresh_database_uses_current_format_generation() {
         "session_members",
         "session_member_cursors",
         "session_messages",
-        "session_context_state",
+        "session_message_projection",
+        "session_ingest_state",
         "session_member_stats",
+        "session_contexts",
+        "session_context_revisions",
+        "workstream_context_state",
+        "workstream_session_frontiers",
         "ingestion_diagnostics",
         "idx_session_members_one_root",
         "idx_session_messages_session",
+        "idx_projection_message",
     ] {
         assert!(
             object_exists(&db.read(), object),
@@ -344,8 +351,7 @@ fn logical_session_schema_enforces_its_invariants() {
         .unwrap();
     db.write()
         .execute(
-            "INSERT INTO session_context_state (session_id, processed_message_sequence)
-             VALUES ('s1', 1)",
+            "INSERT INTO session_contexts (session_id, updated_at) VALUES ('s1', 't')",
             [],
         )
         .unwrap();
@@ -357,7 +363,7 @@ fn logical_session_schema_enforces_its_invariants() {
     for (table, key_column, what) in [
         ("session_members", "session_id", "members"),
         ("session_messages", "session_id", "messages"),
-        ("session_context_state", "session_id", "context frontier"),
+        ("session_contexts", "session_id", "context frontier"),
         ("session_member_cursors", "member_id", "cursors"),
         ("session_member_stats", "member_id", "stats"),
     ] {
@@ -569,8 +575,8 @@ fn incomplete_current_format_database_is_refused_without_repair() {
     for (tag, damage, missing) in [
         (
             "missing-table",
-            vec!["DROP TABLE context_deliveries"],
-            "context_deliveries",
+            vec!["DROP TABLE session_contexts"],
+            "session_contexts",
         ),
         (
             "missing-index",
@@ -587,10 +593,10 @@ fn incomplete_current_format_database_is_refused_without_repair() {
         (
             "view-impersonator",
             vec![
-                "DROP TABLE context_deliveries",
-                "CREATE VIEW context_deliveries AS SELECT 1 AS id",
+                "DROP TABLE session_contexts",
+                "CREATE VIEW session_contexts AS SELECT 1 AS id",
             ],
-            "context_deliveries",
+            "session_contexts",
         ),
     ] {
         let path = db_path(tag);
@@ -735,8 +741,6 @@ fn runtime_defaults_are_reconciled_on_every_start() {
     db.write()
         .execute("DELETE FROM ingest_sources WHERE origin = 'default'", [])
         .unwrap();
-    db.delete_setting(noending::settings::CONTEXT_DELIVERY_LEVEL_KEY)
-        .unwrap();
     drop(db);
 
     let reopened = Db::open(path.path()).unwrap();
@@ -761,13 +765,6 @@ fn runtime_defaults_are_reconciled_on_every_start() {
         )
         .unwrap();
     assert_eq!((enabled, origin.as_str()), (1, "user"));
-    assert_eq!(
-        reopened
-            .get_setting(noending::settings::CONTEXT_DELIVERY_LEVEL_KEY)
-            .unwrap()
-            .as_deref(),
-        Some("off")
-    );
 }
 
 /// Identity and structure are written by ONE transaction, so a database that
@@ -851,19 +848,32 @@ fn message_provenance_round_trip_guard_and_enrichment() {
     assert_eq!(stored[0].model.as_deref(), Some("claude-opus-x"));
 
     // Round-trip through the row mapper, plus the NULL/NULL Assistant case.
+    // A full re-scan carries the WHOLE current conversation, so the projection
+    // extends by prefix; the retired-row guard is exercised below.
     let _ = db
         .commit_member_ingest(
             &s_id,
             &member,
-            &[ParsedSessionMessage {
-                provider: None,
-                model: None,
-                source_message_id: Some("a2".into()),
-                source_position: "1".into(),
-                ts: None,
-                role: SessionMessageRole::Assistant,
-                content: "unknown provenance".into(),
-            }],
+            &[
+                ParsedSessionMessage {
+                    provider: Some("anthropic".into()),
+                    model: Some("claude-opus-x".into()),
+                    source_message_id: Some("a1".into()),
+                    source_position: "0".into(),
+                    ts: None,
+                    role: SessionMessageRole::Assistant,
+                    content: "这里存在一个并发问题。".into(),
+                },
+                ParsedSessionMessage {
+                    provider: None,
+                    model: None,
+                    source_message_id: Some("a2".into()),
+                    source_position: "1".into(),
+                    ts: None,
+                    role: SessionMessageRole::Assistant,
+                    content: "unknown provenance".into(),
+                },
+            ],
             None,
             &source(20),
         )
@@ -914,15 +924,26 @@ fn message_provenance_round_trip_guard_and_enrichment() {
         .commit_member_ingest(
             &s_id,
             &member,
-            &[ParsedSessionMessage {
-                provider: None,
-                model: Some("claude-opus-x".into()),
-                source_message_id: Some("a2".into()),
-                source_position: "1".into(),
-                ts: None,
-                role: SessionMessageRole::Assistant,
-                content: "unknown provenance".into(),
-            }],
+            &[
+                ParsedSessionMessage {
+                    provider: Some("anthropic".into()),
+                    model: Some("claude-opus-x".into()),
+                    source_message_id: Some("a1".into()),
+                    source_position: "0".into(),
+                    ts: None,
+                    role: SessionMessageRole::Assistant,
+                    content: "这里存在一个并发问题。".into(),
+                },
+                ParsedSessionMessage {
+                    provider: None,
+                    model: Some("claude-opus-x".into()),
+                    source_message_id: Some("a2".into()),
+                    source_position: "1".into(),
+                    ts: None,
+                    role: SessionMessageRole::Assistant,
+                    content: "unknown provenance".into(),
+                },
+            ],
             None,
             &source(20),
         )
@@ -941,17 +962,28 @@ fn message_provenance_round_trip_guard_and_enrichment() {
         .commit_member_ingest(
             &s_id,
             &member,
-            &[ParsedSessionMessage {
-                provider: None,
-                model: Some("some-other-model".into()),
-                source_message_id: Some("a1".into()),
-                source_position: "0".into(),
-                ts: None,
-                role: SessionMessageRole::Assistant,
-                content: "这里存在一个并发问题。".into(),
-            }],
+            &[
+                ParsedSessionMessage {
+                    provider: None,
+                    model: Some("some-other-model".into()),
+                    source_message_id: Some("a1".into()),
+                    source_position: "0".into(),
+                    ts: None,
+                    role: SessionMessageRole::Assistant,
+                    content: "这里存在一个并发问题。".into(),
+                },
+                ParsedSessionMessage {
+                    provider: None,
+                    model: Some("claude-opus-x".into()),
+                    source_message_id: Some("a2".into()),
+                    source_position: "1".into(),
+                    ts: None,
+                    role: SessionMessageRole::Assistant,
+                    content: "unknown provenance".into(),
+                },
+            ],
             None,
-            &source(10),
+            &source(20),
         )
         .unwrap();
     assert!(

@@ -1,17 +1,12 @@
-//! Read-only path intelligence for the "pick a working directory" UI.
+//! Read-only path probing for the "pick a working directory" UI.
 //!
-//! Two questions the user asks *before* committing a path, answered without
-//! writing anything:
-//!
-//! * [`probe_workspace_path`] — what would `ensure_path` decide about this
-//!   string, and which Project would it land in? The acceptance answer here is
-//!   advisory only: the attacher's `Ok(None)` inside the caller's transaction
-//!   stays the only authority. Everything the probe reports is derived
-//!   from the same observation the attacher would run, so the two cannot
-//!   disagree about facts — only about timing.
-//! * [`list_recent_workspace_paths`] — the recent/known directories a picker
-//!   offers, unioned from the WorkspacePath registry and the Session cwd
-//!   history. Ranking is pure reads; nothing here creates a WorkspacePath.
+//! [`probe_workspace_path`] reports what the attacher would decide about a
+//! string and which Project it would land in; it is advisory only — the
+//! attacher's `Ok(None)` inside the caller's transaction stays the authority.
+//! The probe derives its answer from the same observation the attacher runs, so
+//! the two can disagree only about timing, never about facts.
+//! [`list_recent_workspace_paths`] unions the WorkspacePath registry with Session
+//! cwd history for the picker; nothing here creates a WorkspacePath.
 //!
 //! Both run on the `Db` read half and never observe inside a write guard
 //! (a `git` call never holds the DB lock).
@@ -188,7 +183,7 @@ pub struct RecentWorkspacePath {
 /// each directory. Trashed Sessions still count as usage — they were real work
 /// in a real directory, and the trash says so about the Session, not the path.
 ///
-/// Unknown cwds are normalized and checked against, but never probed
+/// Unknown cwds are normalized and existence-checked, but never probed
 /// with git: a picker listing must stay cheap, and the per-entry probe run
 /// answers that properly once the user focuses a candidate.
 pub fn list_recent_workspace_paths(

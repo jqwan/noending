@@ -1,31 +1,21 @@
-//! Session lifecycle — Trash / Restore / permanent LOCAL delete
-//!.
+//! Session lifecycle — Trash / Restore / permanent LOCAL delete.
 //!
-//! The invariants locked here:
-//! - Trash freezes a session: no member ingestion commits against it (the
-//!   commit-time guard stores nothing and moves no cursor), it leaves search,
-//!   cannot resume, and never touches the Agent source file — NoEnding never
-//!   deletes an Agent-owned source.
-//! - Restore keeps the same session id, Owner, messages, cursors and Context
-//!   frontier, and reindexes the conversation; the next commit resumes.
-//! - Permanent delete is a NoEnding-LOCAL purge with no job, no filesystem
-//!   step and no crash recovery. It is allowed only for a TRASHED session
-//!   whose ROOT source the adapter freshly confirmed Missing; Present and
-//!   Unavailable both refuse, and execute re-checks the source freshly.
-//! - The purge removes exactly the session-owned rows, redacts Context
-//!   provenance in place (content survives, authority/actor survive), leaves
-//!   the Workstream and every other session untouched, and leaves no
-//!   tombstone: a reappearing source may be re-ingested as a NEW session.
+//! Trash freezes a session: no member ingestion commits against it, it leaves
+//! search, cannot resume, and never touches the Agent source file (NoEnding never
+//! deletes an Agent-owned source). Restore keeps the same id, Owner, messages,
+//! cursors and Context frontier, then reindexes. Permanent delete is a
+//! NoEnding-LOCAL purge (no job, no filesystem step, no crash recovery), allowed
+//! only for a TRASHED session whose ROOT source the adapter freshly confirmed
+//! Missing; it removes exactly the session-owned rows, redacts Context provenance
+//! in place, and leaves no tombstone.
 //!
-//! Adapter verdicts are driven with REAL files: `inspect_file_source` answers
-//! Present for an existing file, Missing for a NotFound path, and Unavailable
-//! for a non-regular file (a directory). Only temp dirs are used; the real
-//! ~/.codex / ~/.claude / ~/.pi are never touched.
+//! Adapter verdicts are driven with REAL files via `inspect_file_source`; only
+//! temp dirs are used, never the real ~/.codex, ~/.claude or ~/.pi.
 
 use noending::domain::diagnostic_kind;
 use noending::domain::{
-    Agent, ContextDelivery, LaunchIntent, MemberStatsDelta, SessionMemberRelation,
-    SessionMessageRole, SourceAvailability, StatsUpdate, SyncRun,
+    Agent, LaunchIntent, MemberStatsDelta, SessionMemberRelation, SessionMessageRole,
+    SourceAvailability, StatsUpdate,
 };
 use noending::lifecycle;
 use noending::search;
@@ -35,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod support;
 
-// ---- fixtures -------------------------------------------------------------
+// fixtures
 
 fn unique_dir(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -163,35 +153,30 @@ fn set_owner(db: &Db, session_id: &str, ws_id: &str) {
     noending::workspace::session::set_session_owner(db, session_id, Some(ws_id)).unwrap();
 }
 
-fn sync_run(db: &Db, session_id: &str) -> SyncRun {
-    let run = SyncRun {
-        id: new_id(),
-        session_id: session_id.to_string(),
-        from_sequence: 0,
-        to_sequence: 1,
-        status: "ok".into(),
-        mutations: serde_json::json!([]),
-        summary: "test".into(),
-        error: None,
-        created_at: now(),
-        runtime: "heuristic".into(),
-        delta_fingerprint: Some(new_id()),
-    };
-    db.insert_sync_run(&run).unwrap();
-    run
-}
-
-fn delivery(db: &Db, session_id: &str, ws_id: &str) {
-    db.record_delivery(&ContextDelivery {
-        id: new_id(),
-        session_id: session_id.to_string(),
-        workstream_id: ws_id.to_string(),
-        bundle_id: new_id(),
-        delivered_revisions: vec![],
-        delivered_conflicts: vec![],
-        delivered_at: now(),
+/// Commit the Session Context frontier through the v1 commit path — what an
+/// explicit "更新摘要" writes. Only the frontier is asserted here, so the
+/// summary fields stay at their defaults.
+fn set_context_frontier(db: &Db, session_id: &str, seq: i64) {
+    db.tx(|tx| {
+        noending::storage::commit_session_context_conn(
+            tx,
+            session_id,
+            &noending::domain::SessionContextFields::default(),
+            0,
+            0,
+            seq,
+        )
     })
     .unwrap();
+}
+
+/// The Session Context's processed-through frontier, or 0 when the Session has
+/// never had a summary generated.
+fn context_frontier(db: &Db, session_id: &str) -> i64 {
+    db.get_session_context(session_id)
+        .unwrap()
+        .map(|c| c.processed_through_seq)
+        .unwrap_or(0)
 }
 
 fn launch_intent(db: &Db, session_id: &str, agent: Agent) {
@@ -201,8 +186,6 @@ fn launch_intent(db: &Db, session_id: &str, agent: Agent) {
         agent,
         owner_workstream_id: None,
         cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
         process_id: Some(1),
         launched_at: now(),
         matched_session_id: Some(session_id.to_string()),
@@ -215,7 +198,7 @@ fn launch_intent(db: &Db, session_id: &str, agent: Agent) {
 }
 
 /// A context item whose head revision points at one of the session's messages
-/// (current provenance spelling) and at one of its sync runs.
+/// (current provenance spelling).
 fn context_item_pointing_at(
     db: &Db,
     ws_id: &str,
@@ -224,7 +207,6 @@ fn context_item_pointing_at(
     let messages = db.get_messages(session_id, None, 10).unwrap();
     let message = messages.first().expect("a committed message").clone();
     let message_ref = format!("session-message:{}", message.id);
-    let run = sync_run(db, session_id);
     let item = noending::sync::create_item(
         db,
         ws_id,
@@ -234,14 +216,13 @@ fn context_item_pointing_at(
         "agent_statement",
         "session_message",
         &[message_ref],
-        Some(&run.id),
         "agent",
     )
     .unwrap();
     (item.id, message)
 }
 
-// ---- lifecycle trash / restore -------------------------------------
+// lifecycle trash / restore
 
 #[test]
 fn trash_freezes_the_session_and_keeps_every_fact() {
@@ -255,7 +236,7 @@ fn trash_freezes_the_session_and_keeps_every_fact() {
     commit_message(&db, &s.id, &member, "决定使用 SQLite 存储", 100);
     let ws = workstream(&db, "WS");
     set_owner(&db, &s.id, &ws.id);
-    db.set_processed_message_sequence(&s.id, 1).unwrap();
+    set_context_frontier(&db, &s.id, 1);
 
     let cursor_before = db.get_member_cursor(&member).unwrap();
     let trashed = lifecycle::trash_session(&db, &s.id).unwrap();
@@ -288,9 +269,7 @@ fn trash_freezes_the_session_and_keeps_every_fact() {
         cursor_after.identity_tail_hash
     );
     assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
+        context_frontier(&db, &s.id),
         1,
         "the Context frontier is member-lifecycle-independent"
     );
@@ -385,7 +364,7 @@ fn restore_keeps_identity_data_and_reindexes() {
     let stored = commit_message(&db, &s.id, &member, "the sqlite decision message", 100);
     let ws = workstream(&db, "WS");
     set_owner(&db, &s.id, &ws.id);
-    db.set_processed_message_sequence(&s.id, 1).unwrap();
+    set_context_frontier(&db, &s.id, 1);
     let cursor_before = db.get_member_cursor(&member).unwrap();
 
     lifecycle::trash_session(&db, &s.id).unwrap();
@@ -404,9 +383,7 @@ fn restore_keeps_identity_data_and_reindexes() {
     let cursor_after = db.get_member_cursor(&member).unwrap();
     assert_eq!(cursor_before.byte_offset, cursor_after.byte_offset);
     assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
+        context_frontier(&db, &s.id),
         1,
         "the frontier was never touched"
     );
@@ -541,9 +518,7 @@ fn permanent_delete_purges_local_rows_only() {
     let ws = workstream(&db, "Surviving WS");
     set_owner(&db, &s.id, &ws.id);
     let (item_id, _) = context_item_pointing_at(&db, &ws.id, &s.id);
-    delivery(&db, &s.id, &ws.id);
     launch_intent(&db, &s.id, Agent::Codex);
-    sync_run(&db, &s.id);
     // A diagnostic describing exactly this session's root member.
     let root_source_id = {
         let root = db.root_member_for_session(&s.id).unwrap().unwrap();
@@ -583,7 +558,7 @@ fn permanent_delete_purges_local_rows_only() {
         db.get_member_stats(&member).unwrap().is_some(),
         "fixture sanity"
     );
-    db.set_processed_message_sequence(&s.id, 1).unwrap();
+    set_context_frontier(&db, &s.id, 1);
 
     // …another session's context must NOT be redacted.
     let other_dir = TempDir::new("purge-other-src");
@@ -600,8 +575,7 @@ fn permanent_delete_purges_local_rows_only() {
     assert!(preview.can_permanently_delete);
     assert_eq!(preview.counts.message_count, 1);
     assert_eq!(preview.counts.member_count, 1);
-    assert!(preview.counts.sync_run_count >= 1);
-    assert_eq!(preview.counts.context_delivery_count, 1);
+    assert!(preview.counts.session_context_count >= 1);
     assert_eq!(preview.counts.launch_intent_count, 1);
     assert!(
         preview.counts.context_revision_redaction_count >= 1,
@@ -655,29 +629,20 @@ fn permanent_delete_purges_local_rows_only() {
     assert_eq!(
         count(
             &db,
-            "SELECT COUNT(*) FROM session_context_state WHERE session_id = ?",
+            "SELECT COUNT(*) FROM session_contexts WHERE session_id = ?",
             &s.id
         ),
         0,
-        "context frontier gone"
+        "session summary gone"
     );
     assert_eq!(
         count(
             &db,
-            "SELECT COUNT(*) FROM sync_runs WHERE session_id = ?",
+            "SELECT COUNT(*) FROM session_context_revisions WHERE session_id = ?",
             &s.id
         ),
         0,
-        "sync history gone"
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM context_deliveries WHERE session_id = ?",
-            &s.id
-        ),
-        0,
-        "delivery bookkeeping gone"
+        "summary revision history gone"
     );
     assert_eq!(
         count(
@@ -723,7 +688,6 @@ fn permanent_delete_purges_local_rows_only() {
     let source = db.get_context_revision_source(&rev_id).unwrap().unwrap();
     assert_eq!(source.source_type.as_deref(), Some("deleted_session"));
     assert!(source.source_ref.is_none(), "the message ref dies");
-    assert!(source.sync_run_id.is_none(), "the sync run ref dies");
     assert!(source.session_id.is_none(), "no session may resolve");
     let rev = db.get_revision(&rev_id).unwrap().unwrap();
     assert_eq!(rev.title, "Use SQLite", "the title survives");
@@ -897,7 +861,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     );
 }
 
-// ---- Review P1-1: search stays lifecycle-authoritative across restarts ----
+// Review P1-1: search stays lifecycle-authoritative across restarts
 
 /// The startup backfill must not re-index what a Trash unindexed: only ACTIVE
 /// sessions are ever filled in, so the recycle bin cannot leak back into
@@ -969,44 +933,5 @@ fn search_filters_stale_rows_of_dead_sessions() {
         !hits.iter().any(|h| h.ref_id == "stale:1"),
         "stale rows must never surface: {:?}",
         hits.iter().map(|h| h.ref_id.clone()).collect::<Vec<_>>()
-    );
-}
-
-/// an in-flight Sync run that tries to commit after a Trash is
-/// discarded: no message-derived context, no SyncRun, no frontier advance.
-#[test]
-fn inflight_sync_cannot_commit_after_trash() {
-    let db = open_db("sync-guard");
-    let dir = TempDir::new("sync-guard-src");
-    let (s, member) = seeded_session(&db, &dir, SourceKind::File);
-    let messages = commit_message(&db, &s.id, &member, "决定使用 SQLite，方案已确认。", 100);
-    let ws = workstream(&db, "WS");
-    set_owner(&db, &s.id, &ws.id);
-
-    let engine = noending::sync::SyncEngine::default();
-    lifecycle::trash_session(&db, &s.id).unwrap();
-
-    let out = engine.run_session_sync(&db, &s, &messages, 0, 1).unwrap();
-    assert_eq!(
-        out.status, "trashed",
-        "commit must reject a trashed session"
-    );
-    assert_eq!(out.applied, 0);
-
-    // Nothing landed: no SyncRun, no context mutations, no processed advance.
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM sync_runs WHERE session_id = ?",
-            &s.id
-        ),
-        0
-    );
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0,
-        "the frontier must not move"
     );
 }

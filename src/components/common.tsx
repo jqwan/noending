@@ -22,15 +22,22 @@ export function timeAgo(iso: string | null | undefined): string {
   return new Date(iso).toLocaleDateString();
 }
 
+/** 显式 Context 更新失败时的用户文案。后端把失败序列化成 `context: <ContextUpdateError>`
+ *  的 Debug 字符串；两种可行动原因要能认出来（快照变化 → 重按；没配 Agent → 去设置），
+ *  其余给通用失败提示，绝不假装成功。 */
+export function contextUpdateErrorMessage(err: unknown): string {
+  const text = String(err);
+  if (text.includes("ConcurrencyConflict")) return "内容已变化，请重新更新";
+  if (text.includes("AiUnavailable")) return "未配置 Assistant Agent（Settings → Agents）";
+  return `更新失败：${text}`;
+}
+
 /**
- * 共用的确认 / 编辑 / 关系弹窗外壳（整体设计）。
+ * 共用的确认 / 编辑 / 关系弹窗外壳。Escape 与点击背板走同一个 `onClose`，所以
+ * 调用方挂在 `onClose` 上的收尾（例如 New / Resume 释放令牌）不会因键盘退出而漏掉。
  *
- * Escape 与点击背板走的是同一个 `onClose`，所以调用方挂在 `onClose` 上的收尾
- * （例如 New / Resume 释放 PreparedLaunch 令牌）不会因为键盘退出而漏掉。
- *
- * 弹窗可以叠（启动 Modal 上面再开 Context 预览）。两个 Modal 的 keydown 监听
- * 都在 document 上，一次按键会同时命中，所以只让**最上面那一个**响应：
- * 自己不是最后一个 `.modal-backdrop` 时直接忽略。
+ * 弹窗可以叠：两个 Modal 的 keydown 监听都在 document 上，一次按键会同时命中，
+ * 所以只让最上面那一个响应（自己不是最后一个 `.modal-backdrop` 时忽略）。
  */
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   const backdropRef = useRef<HTMLDivElement>(null);
@@ -82,11 +89,8 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
   );
 }
 
-/**
- * 剪贴板：Tauri webview 里 navigator.clipboard 通常可用（localhost / tauri:// 都是
- * secure context），但没有授权时会抛；退到隐藏 textarea + execCommand，最后返回
- * false 让调用方给出「手动选中」的提示，绝不静默失败。
- */
+/** 剪贴板：Tauri webview 里 navigator.clipboard 通常可用（secure context），但
+ *  无授权时会抛；退到隐藏 textarea + execCommand，最后返回 false 让调用方给出手动提示。 */
 export async function copyToClipboard(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {

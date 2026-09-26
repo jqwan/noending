@@ -2,11 +2,10 @@
 //! `CLAUDE_CONFIG_DIR` overrides the root. Raw transcripts stay untouched,
 //! always — NoEnding never deletes an Agent-owned source.
 //!
-//! Member mapping: the main transcript is the ROOT member. Claude
-//! interleaves `isSidechain=true` lines into the same file but gives them no
-//! stable execution identity of their own — so no side member is
-//! fabricated: they are counted as `side_activity` on the root member and
-//! their text never becomes conversation.
+//! Member mapping: the main transcript is the ROOT member. Claude interleaves
+//! `isSidechain=true` lines into the same file but gives them no stable
+//! execution identity of their own, so no side member is fabricated: they are
+//! counted as `side_activity` and their text never becomes conversation.
 
 use std::path::{Path, PathBuf};
 
@@ -240,11 +239,9 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         &self,
         install: &AgentInstallation,
         opts: &crate::adapters::ExecOptions,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let mut args = runtime_args(opts);
-        args.extend(crate::adapters::context_prompt(context_file)?);
+        let args = runtime_args(opts);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -257,12 +254,10 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         install: &AgentInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
-        context_file: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
         let mut args = vec!["--resume".into(), agent_session_id.into()];
         args.extend(runtime_args(opts));
-        args.extend(crate::adapters::context_prompt(context_file)?);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -288,8 +283,8 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
 }
 
 /// One transcript line's contribution. `is_root` is false only for a
-/// hypothetical non-root Claude member — none exists today, and the flag keeps
-/// the "child text is never conversation" rule explicit rather than implied.
+/// hypothetical non-root Claude member (none exists today); the flag keeps the
+/// "child text is never conversation" rule explicit rather than implied.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let sidechain = v
@@ -331,13 +326,11 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
                 return Some(ParsedLine::observation_only(observation));
             }
-            // Message provenance: every assistant
-            // row carries `message.model` — the actual response model in the
-            // API-style envelope (verified against the real corpus: 0 rows
-            // without it; the value tracks the model that answered, e.g. a
-            // gateway spelling like "qwen/qwen3.8-27b", NOT "anthropic" from
-            // branding). No provider field exists in the source → NULL.
-            // Direct per-row evidence is safe across delta boundaries.
+            // Every assistant row carries `message.model` — the actual
+            // response model in the API-style envelope (verified: 0 rows
+            // without it), which may be a gateway spelling like
+            // "qwen/qwen3.8-27b" rather than a branding name. No provider
+            // field exists in the source.
             let model = if role == SessionMessageRole::Assistant {
                 msg.get("model")
                     .and_then(|m| m.as_str())
@@ -537,9 +530,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Direct evidence: the assistant row's
-    /// `message.model` lands on the message; a missing field stays NULL and
-    /// provider stays NULL (the source has no such field).
+    /// Direct evidence: the assistant row's `message.model` lands on the
+    /// message; a missing field stays NULL and provider stays NULL.
     #[test]
     fn assistant_messages_carry_their_source_model() {
         let dir = unique_dir("prov");

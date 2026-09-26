@@ -1,7 +1,5 @@
 import { viewState } from "../../hooks/useViewState";
-// Projects Experience v0.2 Projects Board 契约：
-// 一次卡片查询、名称/路径搜索、缺失筛选、
-// 以及刷新期间卡片保持可见。
+// Projects Board 契约：一次卡片查询、名称/路径搜索、缺失筛选，以及刷新期间卡片保持可见。
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -104,8 +102,7 @@ describe("Projects Board", () => {
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("My App");
 
-    // Review P2-1 — 第三个 worktree 不在展示用的 representative_paths 里，
-    // 但路径搜索覆盖全部 search_paths。
+    // 第三个 worktree 不在展示用的 representative_paths 里，但路径搜索覆盖全部 search_paths。
     fireEvent.change(screen.getByPlaceholderText(/搜索项目/), {
       target: { value: "worktrees/noending-ui" },
     });

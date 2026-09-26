@@ -1,9 +1,9 @@
 //! Workspace path identity — the ONE place a filesystem string becomes a
 //! stable domain identity, and the ONE place a Project name is derived.
 //!
-//! Owned by Main. Wave 1+ agents must reuse these functions rather than write
-//! a second normalizer: two normalizers means two `path_id`s for one directory,
-//! and `workspace_paths.id` is the join key for Sessions, WorkstreamPaths and
+//! Every caller must reuse these functions rather than write a second
+//! normalizer: two normalizers means two `path_id`s for one directory, and
+//! `workspace_paths.id` is the join key for Sessions, WorkstreamPaths and
 //! therefore every Project fact.
 //!
 //! ## Why identity is lexical and never `fs::canonicalize`
@@ -12,20 +12,19 @@
 //! produce the same value forever. `std::fs::canonicalize` cannot promise that:
 //! it fails while the directory does not exist yet (so a path that is created
 //! later would flip identity), and a symlink may be introduced at any time by
-//! something outside NoEnding. Both are disqualified for an identity key
-//!.
+//! something outside NoEnding. Both are disqualified for an identity key.
 //!
 //! The accepted cost is aliasing: `/tmp/x` and `/private/tmp/x`, or two spellings
 //! that differ only by case on Unix, become two WorkspacePath rows. That
 //! self-heals where it matters — Git detection resolves both to the same
-//! `common_dir`, so converges them into one Project — and it is bounded: no
-//! path is ever silently rewritten underneath a user.
+//! `common_dir`, so they converge into one Project — and it is bounded: no path
+//! is ever silently rewritten underneath a user.
 //!
 //! Windows pays the opposite cost instead, on purpose: the volume is
 //! case-insensitive, so a case difference there is not two directories, and an
 //! identity that kept it would give one directory two rows that every gate
 //! already agrees are the same location. Folding case into the Windows identity
-//! merges rather than splits — which is why  accepts it only while no
+//! merges rather than splits — which is why the design accepts it only while no
 //! Windows installation has a populated database.
 
 use sha2::{Digest, Sha256};
@@ -125,21 +124,14 @@ pub fn path_key(canonical: &str) -> String {
 /// mis-render a user's directory. This adds the one rule display cannot
 /// provide: on a Windows-style path, case is not part of location, so
 /// `C:\Users\me\.noending\data` and `C:\USERS\me\.noending\DATA` are the same
-/// directory.
-///
-/// Until  this key served comparison only while `path_identity` hashed
-/// [`path_key`], which left the app with two answers to "same directory?": a
-/// gate could call two Windows spellings one location and the registry would
-/// keep them as two WorkspacePaths under two Projects. Folding the identity too
-/// was affordable only because no Windows database exists — `workspace_paths.id`
-/// is stored, so on a platform with data this is a breaking identity change,
-/// not a fix.
+/// directory. Folding here (rather than only in comparison) keeps the gate and
+/// the registry from disagreeing about location on a case-insensitive volume.
 ///
 /// Unix is returned unchanged: APFS is case-insensitive by default but
 /// case-preserving, folding there would make this module's output differ from
 /// the `canonical_path` the same code stores, and stored `workspace_paths.id`
-/// values are already keyed by it —  pins those ids as literals rather
-/// than trusting the rule to look harmless.
+/// values are already keyed by it — the unit tests pin those ids as literals
+/// rather than trusting the rule to look harmless.
 pub fn identity_key(canonical: &str, style: PathStyle) -> String {
     let key = path_key(canonical);
     if style.is_windows() {
@@ -153,16 +145,15 @@ pub fn identity_key(canonical: &str, style: PathStyle) -> String {
 ///
 /// Use this, not `==` and not `path_key(a) == path_key(b)`, for every question
 /// of the form "is this the directory I already have?" — Home relocation, the
-/// reserved set, 's Home exclusion, sibling worktrees. `path_key` alone
-/// is the *display* comparison: it converges separators but keeps case, which
-/// is right for naming and wrong for location on a Windows volume.
+/// reserved set, the Home-level Git exclusion, sibling worktrees. `path_key`
+/// alone is the *display* comparison: it converges separators but keeps case,
+/// which is right for naming and wrong for location on a Windows volume.
 pub fn same_location(a: &str, b: &str) -> bool {
     same_location_with(a, b, PathStyle::current())
 }
 
 /// Fully injected form of [`same_location`], so Windows location equality can be
-/// proven from a macOS runner instead of depending on which runner runs it
-///.
+/// proven from a macOS runner instead of depending on which runner runs it.
 pub fn same_location_with(a: &str, b: &str, style: PathStyle) -> bool {
     identity_key(a, style) == identity_key(b, style)
 }
@@ -220,7 +211,7 @@ pub fn basename(canonical: &str) -> String {
     }
 }
 
-/// automatic Project naming.
+/// Automatic Project naming.
 ///
 /// `default_workspace` is the absolute, normalized NoEnding default workspace;
 /// only that exact path is called "NoEnding Workspace". A relocated NoEnding
@@ -228,16 +219,15 @@ pub fn basename(canonical: &str) -> String {
 /// the special name — which is why this is a parameter and not a
 /// `ends_with("/.noending/workspace")` test.
 ///
-/// Deviation from 's example (`/Users/me/code/noending → NoEnding`):
-/// only the first character is capitalized, so a lowercase directory yields
+/// Only the first character is capitalized, so a lowercase directory yields
 /// `Noending`. Recovering internal capitals would require a dictionary or a
 /// Git remote name, both of which are exactly the "looks smarter, is a guess"
-/// forbids.
+/// the design forbids.
 pub fn auto_project_name(canonical: &str, default_workspace: Option<&str>) -> String {
     let key = path_key(canonical);
     if let Some(dw) = default_workspace {
         // "Is this THE default workspace" is a location question, so it folds
-        // case the same way 's reservations do; on a Windows volume
+        // case the same way the reserved paths do; on a Windows volume
         // `~\.NOENDING\workspace` is the directory this names.
         if !dw.trim().is_empty() && same_location(canonical, dw.trim()) {
             return "NoEnding Workspace".to_string();
@@ -265,8 +255,8 @@ fn capitalize_first(s: &str) -> String {
 /// app paths and the Home-level Git exclusion.
 ///
 /// Compares through [`identity_key`], so on a Windows-style path a case variant
-/// of a guarded directory is still guarded. That matters because 's reserved
-/// paths and 's Home exclusion are *gates*: unlike a Project membership, a
+/// of a guarded directory is still guarded. That matters because the reserved
+/// paths and the Home exclusion are *gates*: unlike a Project membership, a
 /// missed reservation cannot self-heal later, and a missed Home exclusion
 /// classifies the whole user Home as one dotfiles Project.
 pub fn is_within(child: &str, ancestor: &str) -> bool {
@@ -340,9 +330,7 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir()
 }
 
-// --------------------------------------------------------------------------
-// internals
-// --------------------------------------------------------------------------
+// Internals
 
 /// Returns `(root_prefix, remainder)`. `root_prefix` is the platform's native
 /// root spelling without a trailing separator (`/`, `C:`, `\\server\share`,
@@ -647,7 +635,7 @@ mod tests {
         assert_eq!(path_identity("/a/b"), path_identity("/a/b"));
     }
 
-    ///  — on a Windows volume, case is not part of location, so it is
+    /// On a Windows volume, case is not part of location, so it is
     /// not part of the stored identity either. The display form still carries
     /// what the user typed: `canonical_path` is never lower-cased, and
     /// the two spellings below are proof the fold stopped at the key.
@@ -708,7 +696,7 @@ mod tests {
 
     /// The counter-check for the three above: a case difference stays two
     /// directories on Unix, which is why folding case into the Unix identity is
-    /// never an option here (pins the stored ids themselves).
+    /// never an option here (the unit tests pin the stored ids themselves).
     #[test]
     fn unix_case_variants_remain_distinct() {
         let u = PathStyle::Unix;
@@ -739,8 +727,8 @@ mod tests {
     }
 
     /// Windows treats case as part of the spelling, not the location. Both
-    /// separators and both cases must land on one containment answer, or 's
-    /// reserved app paths and 's Home-level Git exclusion leak for the
+    /// separators and both cases must land on one containment answer, or the
+    /// reserved app paths and the Home-level Git exclusion leak for the
     /// directories they exist to guard.
     #[test]
     fn windows_containment_folds_case_and_separators() {
@@ -798,10 +786,10 @@ mod tests {
         );
         assert_eq!(basename("C:\\Users\\ME\\Data"), "Data");
         assert_eq!(auto_project_name("C:\\Users\\ME\\Data", None), "Data");
-        // Since  the identity key IS the folded one, so two Windows case
+        // The identity key IS the folded one, so two Windows case
         // variants are one WorkspacePath — while `path_key`, which feeds display
-        // strings, keeps them apart. macOS is unchanged either way, and
-        // pins that as data rather than as a rule.
+        // strings, keeps them apart. macOS is unchanged either way, and the unit
+        // tests pin that as data rather than as a rule.
         assert_eq!(
             path_identity_with("C:\\A\\b", PathStyle::Windows),
             path_identity_with("C:\\a\\B", PathStyle::Windows)

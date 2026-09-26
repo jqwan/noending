@@ -5,27 +5,23 @@ import {
   AGENT_LABELS,
   type Agent,
   type AgentRuntimeOverrides,
-  type ContextDeliveryLevel,
   type CwdResolution,
   type CwdSource,
 } from "../../types";
 
 /**
- * 启动预览的公共行：Agent、Runtime、工作目录。
- *
- * 这些数据一律来自 PreparedLaunch 里冻结的意图，而不是在 UI 侧重算或重新读取
- * Settings——否则预览显示的就不是 Agent 真正收到的东西（Preview-Launch
- * Identity）。Runtime 未设置 override 时统一说「Agent 默认值」：
- * 默认值属于 Agent，NoEnding 只拥有 override。
+ * 启动预览的公共行：Agent、Runtime、工作目录。数据一律来自 PreparedLaunch 里
+ * 冻结的意图，不在 UI 侧重算或重读 Settings——否则预览显示的不是 Agent 真正收到
+ * 的东西（Preview-Launch Identity）。Runtime 未设置 override 时统一说「Agent 默认值」。
  */
 
 type Field = keyof AgentRuntimeOverrides;
 
 /** 该 Agent 真正被 override 的字段（unsupported 字段永远为 null）。 */
 function overriddenFields(agent: Agent, runtime: AgentRuntimeOverrides): Field[] {
-  // `!= null`, not `!== null`: a field the backend ever omits is "Agent
-  // default", not "overridden with the value undefined" — the looser compare is
-  // what keeps the preview from rendering `Provider undefined`.
+  // `!= null`, not `!== null`: a backend-omitted field means "Agent default",
+  // not "overridden with undefined" — this keeps the preview from rendering
+  // `Provider undefined`.
   return (Object.keys(FIELD_LABELS[agent]) as Field[]).filter((f) => runtime[f] != null);
 }
 
@@ -48,20 +44,6 @@ export function runtimeIntentHint(
   return overriddenFields(agent, runtime).length === 0
     ? "未设置 override，由 Agent 自己决定"
     : "来自设置中的 override，已随本次预览冻结";
-}
-
-/** 实验区文案：四级 delivery 的中文名。 */
-export function deliveryLevelLabel(level: ContextDeliveryLevel): string {
-  switch (level) {
-    case "off":
-      return "关闭";
-    case "compact":
-      return "精简";
-    case "balanced":
-      return "均衡";
-    case "detailed":
-      return "详细";
-  }
 }
 
 export function PreviewRow({
@@ -106,7 +88,7 @@ export function AgentRow({
   );
 }
 
-/** 每一层的中文名。「用户选择的目录」而非「explicit」——词表 说中文。 */
+/** 每一层的中文名（词表说中文，「explicit」这类词不外露）。 */
 const CWD_SOURCE_LABELS: Record<CwdSource, string> = {
   explicit: "你指定的目录",
   session_cwd: "会话上次的目录",
@@ -124,12 +106,9 @@ export function cwdSourceLabel(resolution: CwdResolution): string {
 }
 
 /**
- * 工作目录：显示 `resolve_new_cwd` / `resolve_resume_cwd` 的解析结果，不在前端
- * 重算优先级，第一版只读（开放编辑需要后端新增入参，见 默认处理第 4 条）。
- * `pending` 表示 Prepare 还没回来——此时不许把"还没算出来"说成"没有目录"。
- *
- * 发生 fallback 时必须说出来：来源标签 + 后端的 `note`，而不是只显示一个
- * 目录字符串——用户看到 `/Users/me/.noending/workspace` 猜不出那是降级结果。
+ * 工作目录：显示 `resolve_new_cwd` / `resolve_resume_cwd` 的解析结果，不在前端重算
+ * 优先级，第一版只读。`pending` 表示 Prepare 还没回来——不许把"还没算出来"说成"没有目录"。
+ * fallback 时必须说出来（来源标签 + 后端 `note`）：用户看到默认工作区路径猜不出那是降级。
  */
 export function CwdRow({
   cwd,

@@ -1,18 +1,15 @@
-//! SQLite storage: current schema and repository helpers.
-//! Owns: domain data, the Logical Session graph (members / messages / cursors
-//! / stats / context frontier / diagnostics), context items, FTS search.
+//! SQLite storage: current schema and repository helpers. Owns domain data, the
+//! Logical Session graph (members / messages / cursors / stats / context
+//! frontier / diagnostics), context items and FTS search.
 //!
-//! History integrity rules:
-//! - `session_messages` is the ONLY conversation store (root members only)
-//!   and is append-only: the row identity is an app-owned `id`, and a stable
-//!   `(member_id, source_identity_hash)` unique index makes re-scans
-//!   idempotent. Rows are never replaced or overwritten.
-//! - Member cursors track the *read* position per member; the session's
-//!   `session_context_state.processed_message_sequence` is the separate
-//!   *processed* position of Context consumption.
-//! - One member ingest = messages + stats + cursor + activity in ONE
-//!   transaction (`commit_member_ingest`), guarded by trash / membership
-//!   re-checks inside it.
+//! History integrity: `session_messages` is the ONLY conversation store (root
+//! members only), append-only and idempotent by
+//! `(member_id, source_identity_hash)` — rows are never replaced. Member cursors
+//! track the *read* position per member, while
+//! `session_contexts.processed_through_seq` is the separate *processed* position
+//! of Context consumption. One member ingest writes messages + stats + cursor +
+//! activity in ONE transaction (`commit_member_ingest`), re-checking trash and
+//! membership inside it.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -23,21 +20,28 @@ use crate::error::{other, Result};
 
 // The WorkspacePath registry, ordered WorkstreamPath list and Session→path
 // attach each live in their own impl file rather than growing this monolith.
+pub mod context_repo;
 pub mod schema;
 pub mod session_lifecycle;
 pub mod session_paths;
 pub mod workspace;
 pub mod workstream_paths;
 
+pub use context_repo::{
+    apply_projection_conn, bump_context_revision_conn, bump_input_revision_conn,
+    commit_session_context_conn, consume_input_revision_conn, delete_workstream_frontier_conn,
+    frontiers_for_workstream_conn, get_ingest_state_conn, get_session_context_conn,
+    get_workstream_context_state_conn, message_ids_for_hashes_conn, projection_ids_conn,
+    set_workstream_frontier_conn, ProjectionOutcome,
+};
+
 pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 pub use session_lifecycle::PermanentDeletionCounts;
 
-/// Two connections to one SQLite file, so the UI's reads never queue behind a
-/// background sync's writes: WAL allows one writer plus concurrent readers,
-/// every mutation goes through `writer` (serialized by its mutex), and query
-/// work goes through `reader`. Splitting at the storage layer means callers
-/// never see a database lock — there is no `Mutex<Db>` to hold across a file
-/// scan, and a long write transaction cannot freeze a list query.
+/// Two connections to one SQLite file so UI reads never queue behind writes:
+/// WAL allows one writer plus concurrent readers, every mutation goes through
+/// `writer` (serialized by its mutex), queries through `reader`. Callers never
+/// see a database lock — there is no `Mutex<Db>` to hold across a file scan.
 pub struct Db {
     writer: Mutex<Connection>,
     reader: Mutex<Connection>,
@@ -79,18 +83,15 @@ pub fn new_id() -> String {
 /// Identity of the first message in a chain (no known predecessor).
 pub const IDENTITY_GENESIS: &str = "genesis";
 
-/// Stable identity of a ROOT conversation message, used to make re-scans of
-/// the same Agent source idempotent.
+/// Stable identity of a ROOT conversation message, used to make re-scans of the
+/// same Agent source idempotent.
 ///
-/// - Messages WITH a native Agent message id: content hash of
-///   `(native_id | role | ts | content)` — the Agent guarantees the id is
-///   unique per logical message, so identity is position-independent.
-/// - Messages WITHOUT one: chained hash
-///   `H(prev_hash | role | ts | content)`. The chain encodes *adjacency*:
-///   re-scanning an unchanged prefix reproduces the chain (same logical
-///   message → dedup), while two genuinely identical turns link to different
-///   predecessors and stay distinct. A mid-file rewrite diverges the chain
-///   exactly where content changed — everything after it is new evidence.
+/// - WITH a native Agent message id: content hash of
+///   `(native_id | role | ts | content)`, so identity is position-independent.
+/// - WITHOUT one: chained hash `H(prev_hash | role | ts | content)`. The chain
+///   encodes *adjacency*: an unchanged prefix reproduces the chain (dedup),
+///   while two identical turns under different predecessors stay distinct. A
+///   mid-file rewrite diverges the chain exactly where content changed.
 pub fn message_identity_hash(
     prev_hash: &str,
     source_message_id: Option<&str>,
@@ -260,7 +261,7 @@ impl Db {
         schema::reconcile_runtime_defaults(conn)
     }
 
-    // ---------------- Projects ----------------
+    // Projects
 
     /// Every Project currently derived from at least one WorkspacePath.
     pub fn list_projects(&self) -> Result<Vec<Project>> {
@@ -291,7 +292,7 @@ impl Db {
         self.index_project(p)
     }
 
-    // ---------------- Workstreams ----------------
+    // Workstreams
 
     /// Membership is derived from the path chain:
     /// `workstream_paths → workspace_paths.project_id`. Any position counts as
@@ -325,10 +326,9 @@ impl Db {
     }
 
     /// Card stats for one Workstream: (session_count, latest session as
-    /// (id, agent), that session's activity timestamp). Only Sessions that own
-    /// this Workstream count; a Session can never be counted twice
-    /// across Workstreams. Trashed sessions are inactive and count
-    /// for nothing here.
+    /// (id, agent), that session's activity timestamp). Only Sessions that OWN
+    /// this Workstream count, so a Session is never counted twice; trashed
+    /// Sessions count for nothing.
     pub fn workstream_session_stats(
         &self,
         workstream_id: &str,
@@ -451,7 +451,7 @@ impl Db {
         Ok(())
     }
 
-    // ---------------- Logical Sessions ----------------
+    // Logical Sessions
 
     /// Session-only fixture helper. Production discovery uses
     /// `upsert_logical_root` to create the Session and Root member atomically.
@@ -557,39 +557,19 @@ impl Db {
         })
     }
 
-    /// Return a snapshot of retryable reconcile work. Ownerless sessions are
-    /// included only while a LaunchIntent is pending; owned sessions only
-    /// when the Context frontier trails stored conversation.
-    pub fn reconcile_retry_sessions(
-        &self,
-        include_ownerless: bool,
-        include_pending_context: bool,
-        agent: Option<Agent>,
-    ) -> Result<Vec<Session>> {
+    /// Sessions that may still owe a LaunchIntent match: only ownerless,
+    /// non-trashed Sessions. An owned Session has already matched.
+    pub fn reconcile_retry_sessions(&self, agent: Option<Agent>) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(
             "SELECT s.* FROM sessions s
-             WHERE s.trashed_at IS NULL AND (?3 IS NULL OR s.agent = ?3) AND (
-               (?1 AND s.owner_workstream_id IS NULL)
-               OR (?2 AND s.owner_workstream_id IS NOT NULL AND EXISTS (
-                 SELECT 1 FROM session_messages m
-                 WHERE m.session_id = s.id AND m.sequence > COALESCE((
-                   SELECT processed_message_sequence FROM session_context_state
-                   WHERE session_id = s.id
-                 ), 0)
-               ))
-             )
+             WHERE s.trashed_at IS NULL
+               AND s.owner_workstream_id IS NULL
+               AND (?1 IS NULL OR s.agent = ?1)
              ORDER BY COALESCE(s.last_conversation_at, s.last_activity_at, s.started_at) DESC",
         )?;
         let rows = st
-            .query_map(
-                params![
-                    include_ownerless,
-                    include_pending_context,
-                    agent.map(|a| a.as_str())
-                ],
-                row_session,
-            )?
+            .query_map(params![agent.map(|a| a.as_str())], row_session)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -623,11 +603,9 @@ impl Db {
     }
 
     /// Sessions discovered but not yet seen by us. Used by LaunchIntent
-    /// matching: only genuinely new sessions may claim a pending intent.
-    /// The SQL has no created_at column, so the since-filter runs in Rust.
-    /// Trashed rows can never be "genuinely new" (matching only fires for
-    /// fresh discoveries), but the predicate keeps that invariant explicit
-    /// and safe against future callers.
+    /// matching: only genuinely new sessions may claim a pending intent. The SQL
+    /// has no created_at column, so the since-filter runs in Rust; trashed rows
+    /// fail it, which keeps them out of matching.
     pub fn recently_created_sessions(&self, agent: Agent, since: &str) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(
@@ -691,7 +669,7 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Session Members ----------------
+    // Session Members
 
     /// Insert or refresh one execution member. The identity is
     /// `(agent, source_member_id)`; a member whose topology resolution moved
@@ -823,7 +801,7 @@ impl Db {
             .optional()?)
     }
 
-    // ---------------- Member Cursors ----------------
+    // Member Cursors
 
     pub fn get_member_cursor(&self, member_id: &str) -> Result<SessionMemberCursor> {
         let conn = self.read();
@@ -854,12 +832,10 @@ impl Db {
             }))
     }
 
-    /// Rewind every member cursor of a session so the next ingest re-scans
-    /// from the start. MESSAGES ARE NOT TOUCHED:
-    /// their app-owned ids and every provenance ref stay valid — unchanged
-    /// content dedups by identity on the re-scan. Stats snapshots replace on
-    /// the rescan; the Context frontier is preserved. The provenance state
-    /// frontier resets with the bytes: a fresh full scan re-derives it.
+    /// Rewind every member cursor of a session so the next ingest re-scans from
+    /// the start. MESSAGES ARE NOT TOUCHED: their ids and every provenance ref
+    /// stay valid, because unchanged content dedups by identity on the re-scan.
+    /// Stats snapshots replace on the rescan; the Context frontier is preserved.
     pub fn reset_member_cursors(&self, session_id: &str) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -872,21 +848,19 @@ impl Db {
         Ok(())
     }
 
-    // ---------------- Conversation Messages ----------------
+    // Conversation Messages
 
-    /// The atomic member-ingest commit. Messages, stats, the
-    /// member cursor and the activity stamps commit or not at all.
+    /// The atomic member-ingest commit. Messages, stats, the member cursor and
+    /// the activity stamps commit or not at all.
     ///
-    /// Guards, in order, inside the transaction:
-    /// 1. the Logical Session exists and is not trashed;
-    /// 2. the member still belongs to that session;
-    /// 3. messages require `member.relation == root` — an adapter that hands
-    ///    child text to the conversation is a bug, never silently stored.
+    /// Guards, in order, inside the transaction: the Logical Session exists and
+    /// is not trashed; the member still belongs to it; and messages require
+    /// `member.relation == root` (an adapter handing child text to the
+    /// conversation is a bug, never silently stored). A failed guard stores
+    /// NOTHING, so a Trash racing a parse cannot produce a half commit.
     ///
-    /// A failed guard stores NOTHING (no messages, no stats, no cursor move),
-    /// so a Trash racing a parse cannot produce a half commit. The identity
-    /// chain starts from genesis on a full re-scan (start offset 0) and
-    /// otherwise continues from the cursor's `identity_tail_hash` — the tail
+    /// The identity chain starts from genesis on a full re-scan (start offset 0)
+    /// and otherwise continues from the cursor's `identity_tail_hash` — the tail
     /// of the CURRENT source chain, never "last message in the store".
     pub fn commit_member_ingest(
         &self,
@@ -897,7 +871,7 @@ impl Db {
         source: &SourceCursorUpdate,
     ) -> Result<Vec<SessionMessage>> {
         self.commit_member_ingest_with_provenance_state(
-            session_id, member_id, messages, stats, source, None, None,
+            session_id, member_id, messages, stats, source, true, None, None,
         )
     }
 
@@ -912,19 +886,18 @@ impl Db {
         messages: &[ParsedSessionMessage],
         stats: Option<StatsUpdate>,
         source: &SourceCursorUpdate,
+        complete_snapshot: bool,
         next_active_provider: Option<String>,
         next_active_model: Option<String>,
     ) -> Result<Vec<SessionMessage>> {
         self.tx(|tx| {
-            // 1. commit-time trash guard. A trashed (or
-            // vanished) session takes NOTHING — the next Restore resumes from
-            // the untouched cursor.
+            // Commit-time trash guard: a trashed (or vanished) session takes
+            // NOTHING — the next Restore resumes from the untouched cursor.
             if !session_lifecycle::session_is_writable_conn(tx, session_id)? {
                 return Ok(Vec::new());
             }
-            // 2. the member must still belong to THIS session. A
-            // topology correction that moved it mid-parse invalidates the
-            // whole prepared batch.
+            // The member must still belong to THIS session: a topology
+            // correction that moved it mid-parse invalidates the whole batch.
             let relation: Option<String> = tx
                 .query_row(
                     "SELECT relation FROM session_members WHERE id = ?1 AND session_id = ?2",
@@ -935,16 +908,14 @@ impl Db {
             let Some(relation) = relation else {
                 return Ok(Vec::new());
             };
-            // 3. only the ROOT member may write Conversation.
             let is_root = relation == SessionMemberRelation::Root.as_str();
             if !messages.is_empty() && !is_root {
                 return Err(other(format!(
                     "member {member_id} (relation={relation}) 不是 root，拒绝写入会话消息"
                 )));
             }
-            // 4. provenance guard: user messages have no
-            // generation model. An adapter that hands one over is a bug, not
-            // data — reject the whole batch, the same way a child message is.
+            // Provenance guard: user messages have no generation model, so an
+            // adapter handing one over is a bug — reject the whole batch.
             if messages.iter().any(|m| {
                 m.role == SessionMessageRole::User && (m.provider.is_some() || m.model.is_some())
             }) {
@@ -1012,6 +983,7 @@ impl Db {
             next_seq += 1;
 
             let mut stored = Vec::with_capacity(messages.len());
+            let mut current_ids: Vec<String> = Vec::with_capacity(messages.len());
             let raw_path = {
                 let p: String = tx.query_row(
                     "SELECT source_path FROM session_members WHERE id = ?1",
@@ -1059,6 +1031,7 @@ impl Db {
                         raw_ref,
                     ])?;
                     if n > 0 {
+                        current_ids.push(id.clone());
                         stored.push(SessionMessage {
                             id: id.clone(),
                             session_id: session_id.to_string(),
@@ -1077,17 +1050,54 @@ impl Db {
                         });
                         next_seq += 1;
                     } else {
-                        // Dedup hit: same message
-                        // identity. `NULL → confirmed` enriches in place;
-                        // a confirmed-vs-confirmed contradiction keeps the
-                        // stored value and logs — it never becomes a second
-                        // message and never silently overwrites.
+                        // Dedup hit: same message identity. `NULL → confirmed`
+                        // enriches in place; a confirmed-vs-confirmed
+                        // contradiction keeps the stored value and logs.
                         enrich_message_provenance_conn(tx, member_id, &hash, m)?;
+                        // The message is part of THIS read's conversation even
+                        // though it was already stored: a full re-scan's
+                        // projection must contain it.
+                        if let Some(existing) = tx
+                            .query_row(
+                                "SELECT id FROM session_messages
+                                 WHERE member_id = ?1 AND source_identity_hash = ?2",
+                                params![member_id, hash],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .optional()?
+                        {
+                            current_ids.push(existing);
+                        }
                     }
                 }
             }
 
-            // 5. stats delta / snapshot, then 6. the cursor advance.
+            // The current-message projection: this is what makes a rewritten
+            // source's retired messages stop being the conversation, while their
+            // `session_messages` rows survive for provenance.
+            let projection = apply_projection_conn(
+                tx,
+                session_id,
+                is_root,
+                &current_ids,
+                source.start_byte_offset == 0,
+                complete_snapshot,
+            )?;
+            if projection == ProjectionOutcome::Incomplete {
+                // An unfinished frame means we cannot prove the whole
+                // conversation: keep the projection, the fact generation AND
+                // the cursor (and skip stats, whose delta would double-count
+                // on the retry that re-reads the same bytes).
+                eprintln!(
+                    "[ingest] member {member_id} 的完整重扫不完整，保留原投影与游标，等待重试"
+                );
+                return Ok(stored);
+            }
+
+            if is_root {
+                sync_projected_message_search_conn(tx, session_id)?;
+            }
+
             apply_stats_conn(tx, member_id, stats)?;
             let new_tail = if messages.is_empty() {
                 stored_tail.unwrap_or_default()
@@ -1171,46 +1181,44 @@ impl Db {
         })
     }
 
+    /// The CURRENT effective conversation, read through the message
+    /// projection: `after_ordinal` selects ordinals strictly greater than it,
+    /// in projection order. A re-scan that changed the conversation replaced
+    /// the projection, so an expired message can never reappear here.
     pub fn get_messages(
         &self,
         session_id: &str,
-        after: Option<i64>,
+        after_ordinal: Option<i64>,
         limit: i64,
     ) -> Result<Vec<SessionMessage>> {
         let conn = self.read();
-        get_messages_conn(&conn, session_id, after, limit)
+        get_messages_conn(&conn, session_id, after_ordinal, limit)
     }
 
-    /// The Context frontier read: root conversation messages after the
-    /// processed sequence, in order.
+    /// The Context-input read: current-projection messages after the
+    /// processed ordinal, in order.
     pub fn get_messages_after(
         &self,
         session_id: &str,
-        processed_sequence: i64,
+        processed_ordinal: i64,
         limit: i64,
     ) -> Result<Vec<SessionMessage>> {
-        self.get_messages(session_id, Some(processed_sequence), limit)
+        self.get_messages(session_id, Some(processed_ordinal), limit)
     }
 
-    /// The session's ingested conversation frontier: the highest message
-    /// sequence durably stored. Distinct from
-    /// [`Self::get_context_state`], which is how far Sync has consumed.
+    /// How many messages the CURRENT conversation holds — a projection
+    /// ordinal bound, never `session_messages.sequence`.
     pub fn ingested_message_sequence(&self, session_id: &str) -> Result<i64> {
         let conn = self.read();
         Ok(conn.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) FROM session_messages WHERE session_id = ?1",
+            "SELECT COALESCE((SELECT latest_message_seq FROM session_ingest_state WHERE session_id = ?1), 0)",
             params![session_id],
             |r| r.get(0),
         )?)
     }
 
     pub fn message_count(&self, session_id: &str) -> Result<i64> {
-        let conn = self.read();
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?1",
-            params![session_id],
-            |r| r.get(0),
-        )?)
+        self.ingested_message_sequence(session_id)
     }
 
     /// Resolve a stable provenance reference (`session-message:<id>`) to its
@@ -1229,32 +1237,7 @@ impl Db {
         Ok(None)
     }
 
-    // ---------------- Context Frontier ----------------
-
-    /// The Logical Session's Context frontier. Zero when nothing has
-    /// been processed — including before the first message exists.
-    pub fn get_context_state(&self, session_id: &str) -> Result<SessionContextState> {
-        let conn = self.read();
-        let processed: i64 = conn
-            .query_row(
-                "SELECT processed_message_sequence FROM session_context_state WHERE session_id = ?1",
-                params![session_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        Ok(SessionContextState {
-            session_id: session_id.to_string(),
-            processed_message_sequence: processed,
-        })
-    }
-
-    pub fn set_processed_message_sequence(&self, session_id: &str, seq: i64) -> Result<()> {
-        let conn = self.write();
-        set_processed_message_sequence_conn(&conn, session_id, seq)
-    }
-
-    // ---------------- Member Stats ----------------
+    // Member Stats
 
     pub fn get_member_stats(&self, member_id: &str) -> Result<Option<SessionMemberStats>> {
         let conn = self.read();
@@ -1359,7 +1342,7 @@ impl Db {
         Ok(agg)
     }
 
-    // ---------------- Ingestion Diagnostics ----------------
+    // Ingestion Diagnostics
 
     /// Record (or re-observe) an unattachable source. The first sight
     /// inserts quietly; every later reconcile bumps `observation_count` so the
@@ -1448,7 +1431,7 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Session Owner ----------------
+    // Session Owner
 
     /// Set (or clear) the single Owner Workstream of a Session.
     /// This touches exactly one column: `sessions.owner_workstream_id`.
@@ -1474,7 +1457,7 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Context Items ----------------
+    // Context Items
 
     pub fn insert_item(&self, item: &ContextItem, revision: &ContextItemRevision) -> Result<()> {
         {
@@ -1528,11 +1511,24 @@ impl Db {
         new_status: &str,
         actor: &str,
         reason: &str,
-        run_id: Option<&str>,
         source_refs: &[String],
     ) -> Result<()> {
         self.tx(|tx| {
-            apply_status_change_conn(tx, item_id, new_status, actor, reason, run_id, source_refs)
+            apply_status_change_conn(tx, item_id, new_status, actor, reason, source_refs)?;
+            // A manual status change is Context content movement: the
+            // Workstream's context revision must move with it so a concurrent
+            // AI commit cannot silently overwrite it.
+            let ws: Option<String> = tx
+                .query_row(
+                    "SELECT workstream_id FROM context_items WHERE id = ?1",
+                    params![item_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(ws) = ws {
+                bump_context_revision_conn(tx, &ws)?;
+            }
+            Ok(())
         })
     }
 
@@ -1563,7 +1559,7 @@ impl Db {
     pub fn item_history(&self, item_id: &str) -> Result<Vec<ContextItemRevision>> {
         let conn = self.read();
         let mut st = conn.prepare(
-            "SELECT id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at
+            "SELECT id, item_id, title, content, metadata, source_type, source_ref, created_at
              FROM context_item_revisions WHERE item_id = ?1 ORDER BY created_at",
         )?;
         let rows = st
@@ -1580,7 +1576,7 @@ impl Db {
         let conn = self.read();
         let mut st = conn.prepare(
             "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.created_by, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
-                    r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
+                    r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.created_at
              FROM context_items i JOIN context_item_revisions r ON r.id = i.current_revision_id
              WHERE i.workstream_id = ?1 AND i.status = 'active' AND i.updated_at > ?2
              ORDER BY i.updated_at DESC",
@@ -1611,21 +1607,19 @@ impl Db {
         let Some(rev) = rev else {
             return Ok(None);
         };
-        // Read authority strictly from the immutable revision metadata and frozen lineage!
-        // Never let subsequent item edits pollute historical revision authority.
+        // Read authority strictly from the immutable revision metadata and frozen
+        // lineage: later item edits must never pollute it.
         let authority = resolve_revision_authority(&rev);
 
-        // A redacted revision's session is GONE. This is not a
-        // tombstone: return only the fact that the source no longer exists.
-        // No session id, agent session id, title or path may resolve, and
-        // nothing may redirect to a future rediscovered session.
+        // A redacted revision's session is GONE — not a tombstone. Return only
+        // the fact that the source no longer exists: no session id, title or path
+        // may resolve, and nothing may redirect to a rediscovered session.
         if rev.source_type.as_deref() == Some("deleted_session") {
             return Ok(Some(ContextSourceDetail {
                 revision_id: rev.id,
                 authority,
                 source_type: rev.source_type,
                 source_ref: None,
-                sync_run_id: None,
                 session_id: None,
                 session_title: None,
                 agent: None,
@@ -1661,7 +1655,6 @@ impl Db {
             authority,
             source_type: rev.source_type,
             source_ref: rev.source_ref,
-            sync_run_id: rev.sync_run_id,
             session_id,
             session_title,
             agent,
@@ -1718,7 +1711,7 @@ impl Db {
         list_workstream_review_summaries_conn(&conn)
     }
 
-    // ---------------- Conflicts ----------------
+    // Conflicts
 
     pub fn insert_conflict(&self, c: &ContextConflict) -> Result<()> {
         let conn = self.write();
@@ -1813,51 +1806,18 @@ impl Db {
         list_conflict_review_cases_conn(&conn, workstream_id, include_closed)
     }
 
-    // ---------------- Sync runs ----------------
-
-    pub fn insert_sync_run(&self, run: &SyncRun) -> Result<()> {
-        let conn = self.write();
-        insert_sync_run_conn(&conn, run)
-    }
-
-    /// True when an already-committed run processed exactly this delta —
-    /// retries after a crash must not re-apply the same mutations.
-    pub fn has_completed_run(&self, session_id: &str, delta_fingerprint: &str) -> Result<bool> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT 1 FROM sync_runs WHERE session_id = ?1 AND delta_fingerprint = ?2 AND status = 'ok' LIMIT 1",
-                params![session_id, delta_fingerprint],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-    }
-
-    pub fn list_sync_runs(&self, limit: i64) -> Result<Vec<SyncRun>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint
-             FROM sync_runs ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = st
-            .query_map(params![limit], row_sync_run)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    // ---------------- Launch intents ----------------
+    // Launch intents
 
     pub fn insert_launch_intent(&self, i: &LaunchIntent) -> Result<()> {
         let conn = self.write();
         conn.execute(
             "INSERT INTO launch_intents
-             (id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, context_bundle_revisions, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             (id, launch_type, agent, owner_workstream_id, cwd, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 i.id, i.launch_type, i.agent.as_str(),
                 i.owner_workstream_id,
-                i.cwd, i.context_bundle_markdown, i.context_bundle_revisions, i.process_id.map(|p| p as i64),
+                i.cwd, i.process_id.map(|p| p as i64),
                 i.launched_at, i.matched_session_id, i.status, i.note, i.created_at, i.updated_at
             ],
         )?;
@@ -1878,7 +1838,7 @@ impl Db {
             format!(" WHERE status IN ({})", placeholders)
         };
         let sql = format!(
-            "SELECT id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
+            "SELECT id, launch_type, agent, owner_workstream_id, cwd, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
              FROM launch_intents{} ORDER BY created_at DESC LIMIT {}",
             filter, limit
         );
@@ -1893,31 +1853,7 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Context deliveries ----------------
-
-    pub fn record_delivery(&self, d: &ContextDelivery) -> Result<()> {
-        let conn = self.write();
-        record_delivery_conn(&conn, d)
-    }
-
-    /// Latest successful delivery per workstream for a session.
-    pub fn latest_deliveries(&self, session_id: &str) -> Result<Vec<ContextDelivery>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at
-             FROM context_deliveries WHERE session_id = ?1 ORDER BY delivered_at",
-        )?;
-        let all = st
-            .query_map(params![session_id], row_delivery)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut latest: std::collections::HashMap<Id, ContextDelivery> = Default::default();
-        for d in all {
-            latest.insert(d.workstream_id.clone(), d);
-        }
-        Ok(latest.into_values().collect())
-    }
-
-    // ---------------- Ingest sources ----------------
+    // Ingest sources
 
     pub fn list_ingest_sources(&self) -> Result<Vec<IngestSource>> {
         let conn = self.read();
@@ -2009,7 +1945,7 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Settings ----------------
+    // Settings
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.read();
@@ -2038,7 +1974,7 @@ impl Db {
         Ok(())
     }
 
-    // ---------------- Assistant ----------------
+    // Assistant
 
     pub fn ensure_assistant_session(&self, session_id: Option<&str>) -> Result<String> {
         let conn = self.write();
@@ -2108,7 +2044,7 @@ impl Db {
         Ok(rows)
     }
 
-    // ---------------- Agent installations cache ----------------
+    // Agent installations cache
 
     pub fn save_installation(
         &self,
@@ -2159,7 +2095,7 @@ impl Db {
         Ok(())
     }
 
-    // ---------------- FTS ----------------
+    // FTS
 
     pub fn unindex(&self, kind: &str, ref_id: &str) {
         let conn = self.write();
@@ -2207,6 +2143,25 @@ pub fn unindex_conn(conn: &Connection, kind: &str, ref_id: &str) {
     );
 }
 
+/// Rebuild a Session's message search rows from the authoritative current
+/// conversation projection. Called in the same transaction as projection
+/// replacement so retired messages can never remain searchable after commit.
+fn sync_projected_message_search_conn(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM search_index WHERE kind = 'message' AND parent_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
+         SELECT 'message', m.id, m.session_id, '', m.content
+           FROM session_message_projection p
+           JOIN session_messages m ON m.id = p.session_message_id
+          WHERE p.session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
 pub fn index_item_conn(
     conn: &Connection,
     item: &ContextItem,
@@ -2222,18 +2177,23 @@ pub fn index_item_conn(
 
 impl Db {
     /// Index newly stored conversation messages. Insert-only per message:
-    /// because message identity dedup happens at the message layer,
-    /// incremental batches never need to wipe the session's earlier index
-    /// rows. Every SessionMessage is indexed — messages ARE the curated
-    /// conversation, so no length pre-filter stands between a short
-    /// constraint and findability.
+    /// identity dedup happens at the message layer, so incremental batches never
+    /// need to wipe the session's earlier index rows. Every SessionMessage is
+    /// indexed — no length pre-filter stands between a short constraint and
+    /// findability.
     pub fn index_new_messages(&self, messages: &[SessionMessage]) -> Result<()> {
         let conn = self.write();
         for m in messages {
             unindex_conn(&conn, "message", &m.id);
         }
         let mut st = conn.prepare(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('message', ?1, ?2, '', ?3)",
+            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
+             SELECT 'message', ?1, ?2, '', ?3
+             WHERE EXISTS (
+               SELECT 1 FROM session_message_projection p
+               JOIN sessions s ON s.id = p.session_id AND s.trashed_at IS NULL
+               WHERE p.session_id = ?2 AND p.session_message_id = ?1
+             )",
         )?;
         for m in messages {
             st.execute(params![m.id, m.session_id, m.content])?;
@@ -2242,29 +2202,39 @@ impl Db {
     }
 
     /// Fill in the index rows no incremental write produced: messages whose
-    /// ingestion-time indexing was skipped, and Session documents that no
-    /// write has touched yet. Idempotent.
+    /// ingestion-time indexing was skipped, and Session documents no write has
+    /// touched yet. Idempotent.
     ///
-    /// Only ACTIVE sessions are indexed. This runs at every
-    /// startup, so an unguarded run would silently re-index everything a
-    /// Trash unindexed — the recycle bin would leak back into search after
-    /// every restart. `session_lifecycle::unindex_session_conn` and this WHERE
+    /// Only ACTIVE sessions are indexed: an unguarded run would re-index
+    /// everything a Trash unindexed, leaking the recycle bin back into search on
+    /// every startup. `session_lifecycle::unindex_session_conn` and this WHERE
     /// clause are two halves of one lifecycle invariant.
     pub fn backfill_search_index(&self) -> Result<()> {
         let conn = self.write();
         conn.execute(
+            "DELETE FROM search_index
+             WHERE kind = 'message'
+               AND NOT EXISTS (
+                 SELECT 1 FROM session_message_projection p
+                 JOIN sessions s ON s.id = p.session_id AND s.trashed_at IS NULL
+                 WHERE p.session_id = search_index.parent_id
+                   AND p.session_message_id = search_index.ref_id
+               )",
+            [],
+        )?;
+        conn.execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
              SELECT 'message', m.id, m.session_id, '', m.content
-             FROM session_messages m
-             WHERE m.session_id IN (SELECT id FROM sessions WHERE trashed_at IS NULL)
+             FROM session_message_projection p
+             JOIN session_messages m ON m.id = p.session_message_id
+             WHERE p.session_id IN (SELECT id FROM sessions WHERE trashed_at IS NULL)
                AND m.id NOT IN (
                    SELECT ref_id FROM search_index WHERE kind = 'message')",
             [],
         )?;
-        // Fill in the Session documents that are missing entirely. A
-        // document whose body can change (title, Project, Owner Workstream) is
-        // refreshed at the write that changed it, so the backfill only has to
-        // cover rows no write ever touched.
+        // A document whose body can change (title, Project, Owner Workstream)
+        // is refreshed at the write that changed it, so the backfill only covers
+        // rows no write ever touched.
         let ids: Vec<String> = {
             let mut st = conn.prepare(
                 "SELECT id FROM sessions
@@ -2280,7 +2250,7 @@ impl Db {
         Ok(())
     }
 
-    // ---------------- helpers ----------------
+    // helpers
 
     pub fn touch_project(&self, project_id: &str) -> Result<()> {
         let conn = self.write();
@@ -2293,11 +2263,10 @@ impl Db {
 
     /// Sources whose facts are already fully stored: source_path →
     /// (source_file_identity, last_seen_size, mtime) for members whose owning
-    /// session has a title. Discovery uses this to skip re-parsing sources
-    /// that cannot have changed since the last pass, so a reconcile pass costs
-    /// O(changed sources), not O(all history). Only titled sessions are listed:
-    /// an untitled row may just predate a title source, and re-parsing its
-    /// (unchanged) file is exactly what heals it.
+    /// session has a title. Discovery uses this to skip re-parsing sources that
+    /// cannot have changed, so a reconcile pass costs O(changed sources). Only
+    /// titled sessions are listed: an untitled row may just predate a title
+    /// source, and re-parsing its unchanged file is what heals it.
     pub fn member_source_skipset(
         &self,
     ) -> Result<std::collections::HashMap<String, (String, i64, Option<f64>)>> {
@@ -2325,9 +2294,8 @@ impl Db {
     }
 }
 
-// connection-level helpers --------------------------------------------------
-// Free functions over &Connection so Db methods and `Db::tx` closures share
-// exactly the same SQL paths.
+// Connection-level helpers. Free functions over `&Connection` so `Db` methods
+// and `Db::tx` closures share exactly the same SQL paths.
 
 pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
     conn.execute(
@@ -2339,9 +2307,7 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
            name = CASE WHEN name_customized = 1 THEN name ELSE ?2 END,
            description = ?3,
            -- Git identity is never cleared *or re-targeted* by a whole-object
-           -- write: losing `.git` on one path must not detach a Project,
-           -- and pointing an existing Project at a different family is a Policy
-           -- decision, not a save side effect. The one legitimate writer is
+           -- write; the one legitimate writer is
            -- `workspace::project::adopt_git_identity_conn` (first-set-only).
            git_id = COALESCE(git_id, ?4),
            name_customized = MAX(name_customized, ?5),
@@ -2360,15 +2326,14 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
 }
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
-    // A Session's search document carries its Owner's title, so a rename
-    // has to reach every Session that owns this Workstream. The previous title
-    // is read first: an update that changed nothing else must not rewrite N
-    // documents.
-    let previous_title: Option<String> = conn
+    // A Session's search document carries its Owner's title, so a rename has
+    // to reach every Session that owns this Workstream. The previous title is
+    // read first: an update that changed nothing else must not rewrite N docs.
+    let previous: Option<(String, String)> = conn
         .query_row(
-            "SELECT title FROM workstreams WHERE id = ?1",
+            "SELECT title, description FROM workstreams WHERE id = ?1",
             params![w.id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
     conn.execute(
@@ -2378,12 +2343,23 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
            title = ?2, description = ?3, lifecycle = ?4, visibility = ?5, updated_at = ?7",
         params![w.id, w.title, w.description, w.lifecycle, w.visibility, w.created_at, w.updated_at],
     )?;
+    // The two-level revision state: a Workstream starts as (0, 1, 0) so its
+    // first explicit generation is allowed, and any title / description
+    // movement is an INPUT change the next synthesis must consume.
+    let text_changed = match &previous {
+        Some((t, d)) => t != &w.title || d != &w.description,
+        None => false,
+    };
+    crate::storage::context_repo::ensure_workstream_state_conn(conn, &w.id)?;
+    if text_changed {
+        crate::storage::bump_input_revision_conn(conn, &w.id)?;
+    }
     conn.execute(
         "INSERT OR IGNORE INTO workstream_review_state (workstream_id, reviewed_through_at, reviewed_boundary_change_ids, reviewed_at)
          VALUES (?1, ?2, '[]', ?2)",
         params![w.id, w.created_at],
     )?;
-    if previous_title.as_deref() != Some(w.title.as_str()) {
+    if text_changed {
         reindex_owned_sessions_conn(conn, &w.id)?;
     }
     Ok(())
@@ -2393,10 +2369,9 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
 /// connection, so a launch match can write ownership together with everything
 /// that must agree with it in ONE transaction.
 ///
-/// The target Workstream is checked to exist: a Session pointing at a row that
-/// is not there would be a silently broken owner. The search document is
-/// refreshed inside the same connection — an ownership change that never
-/// reached the index would leave the Session searchable under its old label.
+/// The target Workstream must exist — a Session pointing at a missing row
+/// would be a silently broken owner — and the search document is refreshed in
+/// the same connection, or the Session stays searchable under its old label.
 pub fn set_session_owner_conn(
     conn: &Connection,
     session_id: &str,
@@ -2412,6 +2387,14 @@ pub fn set_session_owner_conn(
             return Err(other(format!("未知 Workstream: {id}")));
         }
     }
+    let previous_owner: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(owner_workstream_id, '') FROM sessions WHERE id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .filter(|s: &String| !s.is_empty());
     let changed = conn.execute(
         "UPDATE sessions SET owner_workstream_id = ?2 WHERE id = ?1",
         params![session_id, workstream_id],
@@ -2419,27 +2402,17 @@ pub fn set_session_owner_conn(
     if changed == 0 {
         return Err(other(format!("未知 Session: {session_id}")));
     }
+    // An Owner-set change alters BOTH Workstreams' input: the one gaining the
+    // Session and the one losing it. Either way the next synthesis must run.
+    if let Some(ws) = workstream_id {
+        crate::storage::bump_input_revision_conn(conn, ws)?;
+    }
+    if let Some(old) = previous_owner {
+        if Some(old.as_str()) != workstream_id {
+            crate::storage::bump_input_revision_conn(conn, &old)?;
+        }
+    }
     index_session_conn(conn, session_id)
-}
-
-/// Record one Context delivery through a caller-held connection. The matched
-/// Session already received this bundle, so this is normally written inside
-/// the match transaction, not as a step of its own.
-pub fn record_delivery_conn(conn: &Connection, d: &ContextDelivery) -> Result<()> {
-    conn.execute(
-        "INSERT INTO context_deliveries (id, session_id, workstream_id, bundle_id, delivered_revisions, delivered_conflicts, delivered_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            d.id,
-            d.session_id,
-            d.workstream_id,
-            d.bundle_id,
-            serde_json::to_string(&d.delivered_revisions)?,
-            serde_json::to_string(&d.delivered_conflicts)?,
-            d.delivered_at,
-        ],
-    )?;
-    Ok(())
 }
 
 /// Read one LaunchIntent through a caller-held connection — inside a matching
@@ -2447,7 +2420,7 @@ pub fn record_delivery_conn(conn: &Connection, d: &ContextDelivery) -> Result<()
 pub fn get_launch_intent_conn(conn: &Connection, id: &str) -> Result<Option<LaunchIntent>> {
     Ok(conn
         .query_row(
-            "SELECT id, launch_type, agent, owner_workstream_id, cwd, context_bundle_markdown, process_id, launched_at, matched_session_id, status, note, created_at, updated_at, context_bundle_revisions
+            "SELECT id, launch_type, agent, owner_workstream_id, cwd, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
              FROM launch_intents WHERE id = ?1",
             params![id],
             row_launch_intent,
@@ -2457,9 +2430,8 @@ pub fn get_launch_intent_conn(conn: &Connection, id: &str) -> Result<Option<Laun
 
 /// Consume a LaunchIntent's match, exactly once: the row must still be waiting
 /// (PENDING or AMBIGUOUS) and unclaimed. Returns false when someone else got
-/// there first — the caller must then abandon its own match rather than
-/// overwrite theirs. A plain `UPDATE … WHERE id` would let two resolvers both
-/// succeed and leave one Session owned by an intent that records the other.
+/// there first — the caller must abandon its own match rather than overwrite
+/// theirs: a plain `UPDATE … WHERE id` would let both succeed.
 pub fn mark_launch_intent_matched_conn(
     conn: &Connection,
     id: &str,
@@ -2486,13 +2458,11 @@ pub fn mark_launch_intent_matched_conn(
 }
 
 /// Move an intent that is still WAITING (PENDING/AMBIGUOUS, unclaimed) to
-/// another status, and report whether it still was.
-///
-/// Every transition that is not the match itself goes through here: parking a
-/// tie as AMBIGUOUS, expiring a stale intent, and recording the pid note after
-/// spawning the Agent. None of them may resurrect or overwrite a match —
-/// "still waiting" written over an already-consumed intent would make it
-/// consumable a second time and hand out an Owner twice.
+/// another status, and report whether it still was. Every transition that is not
+/// the match itself goes through here (parking a tie as AMBIGUOUS, expiring a
+/// stale intent, recording the pid note after spawning). None of them may
+/// overwrite a match: "still waiting" written over an already-consumed intent
+/// would make it consumable a second time.
 pub fn update_waiting_launch_intent_conn(
     conn: &Connection,
     id: &str,
@@ -2517,13 +2487,11 @@ pub fn update_waiting_launch_intent_conn(
     Ok(updated == 1)
 }
 
-/// Rebuild the search documents of the Sessions that OWN `workstream_id`.
-///
-/// A Session's document embeds its Owner Workstream's title, so anything
-/// that changes that title (a rename) or the ownership itself (a Workstream
-/// deletion nulling it) leaves every owned Session's document describing a fact
-/// that is no longer true. The caller runs this in the same transaction as the
-/// change.
+/// Rebuild the search documents of the Sessions that OWN `workstream_id`: a
+/// Session's document embeds its Owner Workstream's title, so a rename or an
+/// ownership change (a Workstream deletion nulling it) would otherwise leave
+/// them describing a fact that is no longer true. Runs in the caller's
+/// transaction.
 pub fn reindex_owned_sessions_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
@@ -2538,9 +2506,8 @@ pub fn reindex_owned_sessions_conn(conn: &Connection, workstream_id: &str) -> Re
     Ok(())
 }
 
-/// Rebuild the search documents of the Sessions that project onto
-/// `project_id`. Same rule as [`reindex_owned_sessions_conn`] for the other
-/// input of a Session document's body — the Project name.
+/// Rebuild the search documents of the Sessions projecting onto `project_id` —
+/// the same rule as [`reindex_owned_sessions_conn`] for the Project name.
 pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
@@ -2555,11 +2522,9 @@ pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) ->
     Ok(())
 }
 
-/// Write (or refresh) one Session's search document.
-///
-/// Title is the Session title (falling back to the Agent name); body is the
-/// Project name plus the ONE Owner Workstream title. A Session has a single
-/// Owner, so there is exactly one Workstream title to store.
+/// Write (or refresh) one Session's search document: title is the Session title
+/// (falling back to the Agent name), body is the Project name plus the ONE Owner
+/// Workstream title (a Session has a single Owner) and the cwd.
 pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
     let row: Option<(String, String, Option<String>, Option<String>)> = conn
         .query_row(
@@ -2589,9 +2554,9 @@ pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Resu
     Ok(())
 }
 
-/// Insert or refresh one execution member through a caller-held connection,
-/// so a graph-resolution pass can create members in the same transaction as
-/// the session they attach to.
+/// Insert or refresh one execution member through a caller-held connection, so a
+/// graph-resolution pass can create members in the transaction that creates the
+/// Session they attach to.
 #[allow(clippy::too_many_arguments)]
 pub fn upsert_session_member_conn(
     conn: &Connection,
@@ -2703,13 +2668,11 @@ pub fn upsert_member_cursor_conn(conn: &Connection, c: &SessionMemberCursor) -> 
     Ok(())
 }
 
-/// Provenance enrichment on a dedup hit. The message has
-/// already been recognised as the same one (identity hash matches), so a
-/// newly read provenance that the stored row lacks fills the gap in place; a
-/// contradiction with an already-confirmed value keeps the stored one and
-/// logs a warning instead of overwriting — the conflict means adapter
-/// interpretation or source behavior drifted, and the first version
-/// deliberately adds no new diagnostic type.
+/// Provenance enrichment on a dedup hit. The message is already recognised as
+/// the same one, so newly read provenance the stored row lacks fills the gap in
+/// place; a contradiction with an already-confirmed value keeps the stored one
+/// and logs instead of overwriting — the drift means adapter interpretation or
+/// source behaviour changed.
 fn enrich_message_provenance_conn(
     conn: &Connection,
     member_id: &str,
@@ -2749,10 +2712,9 @@ fn enrich_message_provenance_conn(
     Ok(())
 }
 
-/// Apply a stats update to one member's 1:1 snapshot row. A DELTA adds
-/// its observed counts; a SNAPSHOT replaces the four observed counters. Never
-/// called with `None` from callers that had nothing to say — but treated as a
-/// no-op here so "no evidence" can never zero a column.
+/// Apply a stats update to one member's 1:1 snapshot row: a DELTA adds its
+/// observed counts, a SNAPSHOT replaces the four observed counters. `None` is a
+/// no-op, so "no evidence" can never zero a column.
 pub fn apply_stats_conn(
     conn: &Connection,
     member_id: &str,
@@ -2821,33 +2783,30 @@ pub fn apply_stats_conn(
     Ok(true)
 }
 
+/// The CURRENT conversation, joined through the projection. `after_ordinal`
+/// is a projection ordinal; the rows come back in projection order.
 pub fn get_messages_conn(
     conn: &Connection,
     session_id: &str,
-    after: Option<i64>,
+    after_ordinal: Option<i64>,
     limit: i64,
 ) -> Result<Vec<SessionMessage>> {
     let mut st = conn.prepare(
-        "SELECT * FROM session_messages WHERE session_id = ?1 AND sequence > ?2
-         ORDER BY sequence LIMIT ?3",
+        "SELECT m.id, m.session_id, m.member_id, m.sequence, m.source_message_id,
+                m.source_generation, m.source_position, m.source_identity_hash, m.ts,
+                m.role, m.content, m.provider, m.model, m.raw_ref
+         FROM session_message_projection p
+         JOIN session_messages m ON m.id = p.session_message_id
+         WHERE p.session_id = ?1 AND p.ordinal > ?2
+         ORDER BY p.ordinal LIMIT ?3",
     )?;
     let rows = st
-        .query_map(params![session_id, after.unwrap_or(0), limit], row_message)?
+        .query_map(
+            params![session_id, after_ordinal.unwrap_or(0), limit],
+            row_message,
+        )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
-}
-
-pub fn set_processed_message_sequence_conn(
-    conn: &Connection,
-    session_id: &str,
-    seq: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO session_context_state (session_id, processed_message_sequence) VALUES (?1, ?2)
-         ON CONFLICT(session_id) DO UPDATE SET processed_message_sequence = ?2",
-        params![session_id, seq],
-    )?;
-    Ok(())
 }
 
 /// The stable diagnostic identity of an unattachable member: one row
@@ -2886,20 +2845,6 @@ pub struct SessionAggregateStats {
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub cost: Option<f64>,
-    // model / provider / effort removed: aggregate
-    // "session model" was a guess; per-model counts derive from
-    // session_messages WHERE role = 'assistant' when the UI needs them.
-}
-
-pub fn insert_sync_run_conn(conn: &Connection, run: &SyncRun) -> Result<()> {
-    conn.execute(
-        "INSERT INTO sync_runs (id, session_id, from_sequence, to_sequence, status, mutations, summary, error, created_at, runtime, delta_fingerprint)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![run.id, run.session_id, run.from_sequence, run.to_sequence, run.status,
-                run.mutations.to_string(), run.summary, run.error, run.created_at, run.runtime,
-                run.delta_fingerprint],
-    )?;
-    Ok(())
 }
 
 pub fn insert_item_conn(
@@ -2923,9 +2868,9 @@ pub fn insert_item_conn(
 
 pub fn insert_revision_conn(conn: &Connection, r: &ContextItemRevision) -> Result<()> {
     conn.execute(
-        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![r.id, r.item_id, r.title, r.content, r.metadata.to_string(), r.source_type, r.source_ref, r.sync_run_id, r.created_at],
+        "INSERT INTO context_item_revisions (id, item_id, title, content, metadata, source_type, source_ref, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![r.id, r.item_id, r.title, r.content, r.metadata.to_string(), r.source_type, r.source_ref, r.created_at],
     )?;
     Ok(())
 }
@@ -2939,7 +2884,6 @@ pub fn apply_status_change_conn(
     new_status: &str,
     actor: &str,
     reason: &str,
-    run_id: Option<&str>,
     source_refs: &[String],
 ) -> Result<()> {
     let (item, rev) = {
@@ -2986,7 +2930,6 @@ pub fn apply_status_change_conn(
         }),
         source_type: Some("status_change".into()),
         source_ref: source_refs.first().cloned(),
-        sync_run_id: run_id.map(|s| s.to_string()),
         created_at: now(),
     };
     insert_revision_conn(conn, &audit)?;
@@ -3011,7 +2954,7 @@ pub fn get_item_conn(conn: &Connection, id: &str) -> Result<Option<ContextItem>>
 pub fn get_revision_conn(conn: &Connection, id: &str) -> Result<Option<ContextItemRevision>> {
     Ok(conn
         .query_row(
-            "SELECT id, item_id, title, content, metadata, source_type, source_ref, sync_run_id, created_at
+            "SELECT id, item_id, title, content, metadata, source_type, source_ref, created_at
              FROM context_item_revisions WHERE id = ?1",
             params![id],
             row_revision,
@@ -3031,7 +2974,7 @@ pub fn items_for_workstream_conn(
     };
     let sql = format!(
         "SELECT i.id, i.workstream_id, i.kind, i.status, i.authority, i.created_by, i.current_revision_id, i.supersedes_item_id, i.created_at, i.updated_at,
-                r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.sync_run_id, r.created_at
+                r.id, r.item_id, r.title, r.content, r.metadata, r.source_type, r.source_ref, r.created_at
          FROM context_items i LEFT JOIN context_item_revisions r ON r.id = i.current_revision_id
          WHERE i.workstream_id = ?1{} ORDER BY i.updated_at DESC",
         status_filter
@@ -3133,12 +3076,9 @@ pub fn get_conflict_conn(conn: &Connection, conflict_id: &str) -> Result<Option<
         .optional()?)
 }
 
-/// Authoritative resolver for revision authority:
-/// 1. provenance authority stored directly in revision metadata
-/// 2. audit metadata / source_type / sync_run_id inference if determinable
-/// 3. [`authority::UNKNOWN`] — the provenance does not say
-///
-/// NEVER falls back to mutable item.authority!
+/// Authoritative resolver for revision authority: provenance authority stored in
+/// the revision metadata, else audit actor / source_type inference, else
+/// [`authority::UNKNOWN`]. NEVER falls back to the mutable `item.authority`.
 pub fn resolve_revision_authority(rev: &ContextItemRevision) -> String {
     if let Some(auth) = rev
         .metadata
@@ -3157,7 +3097,7 @@ pub fn resolve_revision_authority(rev: &ContextItemRevision) -> String {
     }
     if rev.source_type.as_deref() == Some("user_edit") {
         crate::domain::authority::USER_EDIT.into()
-    } else if rev.source_type.as_deref() == Some("session_message") || rev.sync_run_id.is_some() {
+    } else if rev.source_type.as_deref() == Some("session_message") {
         crate::domain::authority::AGENT_STATEMENT.into()
     } else {
         crate::domain::authority::UNKNOWN.into()
@@ -3181,7 +3121,6 @@ pub fn build_conflict_review_case_conn(
     conn: &Connection,
     conflict: ContextConflict,
 ) -> Result<ConflictReviewCase> {
-    // 1. Current left
     let current_left_item = get_item_conn(conn, &conflict.left_item_id)?;
     let current_left = current_left_item
         .as_ref()
@@ -3189,7 +3128,6 @@ pub fn build_conflict_review_case_conn(
         .and_then(|rid| get_revision_conn(conn, rid).ok().flatten())
         .map(|rev| revision_snapshot_from_rev(&rev));
 
-    // 2. Frozen left at conflict
     let left_at_conflict = conflict
         .left_revision_id
         .as_deref()
@@ -3202,7 +3140,6 @@ pub fn build_conflict_review_case_conn(
         _ => false,
     };
 
-    // 3. Current right
     let current_right_item = conflict
         .right_item_id
         .as_deref()
@@ -3213,7 +3150,6 @@ pub fn build_conflict_review_case_conn(
         .and_then(|rid| get_revision_conn(conn, rid).ok().flatten())
         .map(|rev| revision_snapshot_from_rev(&rev));
 
-    // 4. Frozen right at conflict
     let right_at_conflict = conflict
         .right_revision_id
         .as_deref()
@@ -3226,7 +3162,6 @@ pub fn build_conflict_review_case_conn(
         _ => false,
     };
 
-    // 5. Candidate snapshot at conflict
     let candidate_at_conflict = conflict
         .candidate_snapshot_json
         .as_deref()
@@ -3267,11 +3202,9 @@ pub fn list_conflict_review_cases_conn(
     Ok(cases)
 }
 
-// row mappers -------------------------------------------------------------
-//
-// Name-based (`r.get("col")`) wherever a struct is wide or growing: a
-// positional mapper silently re-types every field after it when someone adds a
-// column to the SELECT list.
+// Row mappers. Name-based (`r.get("col")`) wherever a struct is wide or
+// growing: a positional mapper silently re-types every field after it when
+// someone adds a column to the SELECT list.
 
 fn row_project(r: &Row) -> rusqlite::Result<Project> {
     Ok(Project {
@@ -3420,8 +3353,7 @@ fn row_revision_at(r: &Row, base: usize) -> rusqlite::Result<ContextItemRevision
             .unwrap_or_default(),
         source_type: r.get(base + 5)?,
         source_ref: r.get(base + 6)?,
-        sync_run_id: r.get(base + 7)?,
-        created_at: r.get(base + 8)?,
+        created_at: r.get(base + 7)?,
     })
 }
 
@@ -3464,45 +3396,13 @@ fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
         agent: Agent::parse(&r.get::<_, String>(2)?).unwrap_or(Agent::Codex),
         owner_workstream_id: r.get(3)?,
         cwd: r.get(4)?,
-        context_bundle_markdown: r.get(5)?,
-        process_id: r.get::<_, Option<i64>>(6)?.map(|p| p as u32),
-        launched_at: r.get(7)?,
-        matched_session_id: r.get(8)?,
-        status: r.get(9)?,
-        note: r.get(10)?,
-        created_at: r.get(11)?,
-        updated_at: r.get(12)?,
-        context_bundle_revisions: r.get(13)?,
-    })
-}
-
-fn row_delivery(r: &Row) -> rusqlite::Result<ContextDelivery> {
-    Ok(ContextDelivery {
-        id: r.get(0)?,
-        session_id: r.get(1)?,
-        workstream_id: r.get(2)?,
-        bundle_id: r.get(3)?,
-        delivered_revisions: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-        delivered_conflicts: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-        delivered_at: r.get(6)?,
-    })
-}
-
-fn row_sync_run(r: &Row) -> rusqlite::Result<SyncRun> {
-    Ok(SyncRun {
-        id: r.get(0)?,
-        session_id: r.get(1)?,
-        from_sequence: r.get(2)?,
-        to_sequence: r.get(3)?,
-        status: r.get(4)?,
-        mutations: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-        summary: r.get(6)?,
-        error: r.get(7)?,
-        created_at: r.get(8)?,
-        runtime: r
-            .get::<_, Option<String>>(9)?
-            .unwrap_or_else(|| "heuristic".into()),
-        delta_fingerprint: r.get(10)?,
+        process_id: r.get::<_, Option<i64>>(5)?.map(|p| p as u32),
+        launched_at: r.get(6)?,
+        matched_session_id: r.get(7)?,
+        status: r.get(8)?,
+        note: r.get(9)?,
+        created_at: r.get(10)?,
+        updated_at: r.get(11)?,
     })
 }
 
@@ -3592,7 +3492,6 @@ fn parse_revision_context_change(
     title: String,
     metadata_str: String,
     source_type: Option<String>,
-    sync_run_id: Option<String>,
     created_at: String,
     created_by: String,
     first_created_at: Option<String>,
@@ -3627,8 +3526,8 @@ fn parse_revision_context_change(
             normalize_change_actor(a)
         } else if source_type.as_deref() == Some("user_edit") || created_by == "user" {
             "User".to_string()
-        } else if sync_run_id.is_some()
-            || created_by.starts_with("sync:")
+        } else if created_by.starts_with("sync:")
+            || created_by == "agent"
             || source_type.as_deref() == Some("session_message")
         {
             "Agent".to_string()
@@ -3673,8 +3572,8 @@ pub fn list_workstream_context_changes_conn(
     let limit = if limit == 0 { 20 } else { limit };
     let mut changes = Vec::new();
 
-    // 1. Revisions for items belonging to this workstream
-    let sql_revs = "SELECT r.id, r.item_id, r.title, r.metadata, r.source_type, r.sync_run_id, r.created_at,
+    // Item revisions
+    let sql_revs = "SELECT r.id, r.item_id, r.title, r.metadata, r.source_type, r.created_at,
                            i.authority, i.created_by,
                            (SELECT MIN(r2.created_at) FROM context_item_revisions r2 WHERE r2.item_id = r.item_id) AS first_created_at
                     FROM context_item_revisions r
@@ -3689,18 +3588,16 @@ pub fn list_workstream_context_changes_conn(
         let title: String = r.get(2)?;
         let metadata_str: String = r.get(3)?;
         let source_type: Option<String> = r.get(4)?;
-        let sync_run_id: Option<String> = r.get(5)?;
-        let created_at: String = r.get(6)?;
-        let authority: String = r.get(7)?;
-        let created_by: String = r.get(8)?;
-        let first_created_at: Option<String> = r.get(9)?;
+        let created_at: String = r.get(5)?;
+        let authority: String = r.get(6)?;
+        let created_by: String = r.get(7)?;
+        let first_created_at: Option<String> = r.get(8)?;
         Ok((
             id,
             item_id,
             title,
             metadata_str,
             source_type,
-            sync_run_id,
             created_at,
             authority,
             created_by,
@@ -3715,7 +3612,6 @@ pub fn list_workstream_context_changes_conn(
             title,
             metadata_str,
             source_type,
-            sync_run_id,
             created_at,
             _authority,
             created_by,
@@ -3728,14 +3624,13 @@ pub fn list_workstream_context_changes_conn(
             title,
             metadata_str,
             source_type,
-            sync_run_id,
             created_at,
             created_by,
             first_created_at,
         ));
     }
 
-    // 2. Conflicts for this workstream
+    // Conflicts
     let sql_conflicts = "SELECT id, left_item_id, right_item_id, status, created_at, updated_at
                          FROM context_conflicts
                          WHERE workstream_id = ?1
@@ -3773,7 +3668,7 @@ pub fn list_workstream_context_changes_conn(
         });
     }
 
-    // 3. Conflict resolution events from context_conflict_events table
+    // Conflict resolution events
     let sql_conflict_events =
         "SELECT e.id, e.conflict_id, c.left_item_id, e.new_status, e.actor, e.created_at
                                FROM context_conflict_events e
@@ -3814,7 +3709,6 @@ pub fn list_workstream_context_changes_conn(
         }
     }
 
-    // Sort descending by created_at
     changes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     changes.truncate(limit);
 
@@ -3828,8 +3722,8 @@ pub fn list_workstream_review_changes_conn(
 ) -> Result<Vec<ContextChange>> {
     let mut unseen_changes = Vec::new();
 
-    // 1. Revisions for items in this workstream with created_at >= frontier.through_at
-    let sql_revs = "SELECT r.id, r.item_id, r.title, r.metadata, r.source_type, r.sync_run_id, r.created_at,
+    // Item revisions
+    let sql_revs = "SELECT r.id, r.item_id, r.title, r.metadata, r.source_type, r.created_at,
                            i.authority, i.created_by,
                            (SELECT MIN(r2.created_at) FROM context_item_revisions r2 WHERE r2.item_id = r.item_id) AS first_created_at
                     FROM context_item_revisions r
@@ -3843,18 +3737,16 @@ pub fn list_workstream_review_changes_conn(
         let title: String = r.get(2)?;
         let metadata_str: String = r.get(3)?;
         let source_type: Option<String> = r.get(4)?;
-        let sync_run_id: Option<String> = r.get(5)?;
-        let created_at: String = r.get(6)?;
-        let authority: String = r.get(7)?;
-        let created_by: String = r.get(8)?;
-        let first_created_at: Option<String> = r.get(9)?;
+        let created_at: String = r.get(5)?;
+        let authority: String = r.get(6)?;
+        let created_by: String = r.get(7)?;
+        let first_created_at: Option<String> = r.get(8)?;
         Ok((
             id,
             item_id,
             title,
             metadata_str,
             source_type,
-            sync_run_id,
             created_at,
             authority,
             created_by,
@@ -3869,7 +3761,6 @@ pub fn list_workstream_review_changes_conn(
             title,
             metadata_str,
             source_type,
-            sync_run_id,
             created_at,
             _authority,
             created_by,
@@ -3882,7 +3773,6 @@ pub fn list_workstream_review_changes_conn(
             title,
             metadata_str,
             source_type,
-            sync_run_id,
             created_at,
             created_by,
             first_created_at,
@@ -3901,7 +3791,7 @@ pub fn list_workstream_review_changes_conn(
         }
     }
 
-    // 2. Conflicts for this workstream with created_at >= frontier.through_at
+    // Conflicts
     let sql_conflicts = "SELECT id, left_item_id, right_item_id, status, created_at, updated_at
                          FROM context_conflicts
                          WHERE workstream_id = ?1 AND created_at >= ?2
@@ -3950,7 +3840,7 @@ pub fn list_workstream_review_changes_conn(
         }
     }
 
-    // 3. Conflict resolution events for this workstream with created_at >= frontier.through_at
+    // Conflict resolution events
     let sql_conflict_events =
         "SELECT e.id, e.conflict_id, c.left_item_id, e.new_status, e.actor, e.created_at
          FROM context_conflict_events e
@@ -4002,7 +3892,6 @@ pub fn list_workstream_review_changes_conn(
         }
     }
 
-    // Sort chronologically and deterministically
     unseen_changes.sort_by(|a, b| {
         a.created_at
             .cmp(&b.created_at)
@@ -4037,7 +3926,7 @@ pub fn get_workstream_review_state_conn(
             reviewed_at,
         }))
     } else {
-        // If the workstream exists but has no review state row, initialize baseline
+        // Baseline a Workstream that has no review state row yet.
         let ws_created_at: Option<String> = conn
             .query_row(
                 "SELECT created_at FROM workstreams WHERE id = ?1",
@@ -4327,7 +4216,6 @@ pub fn resolve_conflict_with_edit_conn(
             }),
             source_type: Some("user_edit".into()),
             source_ref: None,
-            sync_run_id: None,
             created_at: now(),
         };
         insert_revision_conn(conn, &new_rev)?;

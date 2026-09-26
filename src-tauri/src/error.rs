@@ -8,6 +8,16 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Other(String),
+    /// A failed explicit Context update, carrying the distinguishable reason
+    /// the UI needs to offer the right retry.
+    #[error("context: {0:?}")]
+    Context(crate::domain::ContextUpdateError),
+}
+
+impl AppError {
+    pub fn context(err: crate::domain::ContextUpdateError) -> Self {
+        AppError::Context(err)
+    }
 }
 
 impl serde::Serialize for AppError {

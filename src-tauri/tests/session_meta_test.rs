@@ -1,12 +1,10 @@
-//! Session row metadata under the Logical Session model.
-//!
-//! A Session row is keyed by `(agent, root_agent_session_id)` — the ROOT
-//! member's real Resume identity — and follows the source through
-//! `upsert_logical_session`:
+//! Session row metadata under the Logical Session model. A Session row is keyed
+//! by `(agent, root_agent_session_id)` — the ROOT member's real Resume identity —
+//! and follows the source through `upsert_logical_session`:
 //! - re-discovery of the same root updates the row in place (never duplicates);
 //! - cwd / workspace / activity follow the ROOT (child facts never reach here);
 //! - the title is write-once: a later pass may fill an absent title but never
-//!   overwrite one (, the authority is the root's title chain);
+//!   overwrite one (the authority is the root's title chain);
 //! - `project_id` is derived from `workspace_path_id` inside the statement, so
 //!   the cache can never drift from its source.
 

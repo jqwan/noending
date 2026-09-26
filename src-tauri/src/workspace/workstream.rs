@@ -1,70 +1,30 @@
 //! WorkstreamPaths, lifecycle and the recycle bin.
 //!
-//! This module owns the ordered path list, lifecycle and visibility policy.
+//! `position = 0` IS the primary path (`UNIQUE(workstream_id, position)`), so
+//! "secondary without primary" is not representable. Removing an entry
+//! recompacts positions; reordering takes the FULL list, and "make this primary"
+//! is a reorder to index 0. Workstream→Project is a projection through the paths.
 //!
-//! ## The ordered list is the whole model
+//! Lifecycle (`active | completed`) is a label with no behavior attached.
+//! Visibility (`normal | archived`) is separate: `archived` IS the recycle bin,
+//! `archive` / `restore` only flip visibility, and permanent deletion is
+//! reachable only from `archived`.
 //!
-//! ```text
-//! workstream_paths(workstream_id, workspace_path_id, position)
-//!   UNIQUE(workstream_id, workspace_path_id)
-//!   UNIQUE(workstream_id, position)
-//! ```
-//!
-//! `position = 0` IS the primary path. There is no second workspace authority.
-//! Therefore: `paths.is_empty() || paths[0]` exists by construction, and
-//! "secondary without primary" is not representable.
-//!
-//! * remove at index k → recompact positions, so the next entry becomes 0
-//!   without asking the user.
-//! * `reorder_workstream_paths(ordered_workspace_path_ids)` takes the FULL list;
-//!   "make this the primary path" is a reorder to index 0.
-//! * `create_workstream(title, description, initial_paths?)` creates the
-//!   Workstream plus any accepted initial paths, in submission order.
-//! * Workstream→Project is a projection through the paths.
-//!
-//! ## Lifecycle
-//!
-//! ```text
-//! lifecycle   active | completed     classification only, no behavior, free to switch
-//! visibility  normal | archived       archived IS the recycle bin
-//! ```
-//!
-//! `archive` flips visibility and nothing else; `restore` flips back, so
-//! lifecycle / paths / configuration are all still there and the previous state
-//! returns naturally. Permanent deletion is only reachable from `archived`.
-//!
-//! ## Permanent deletion table order
-//!
-//! `context_conflict_events` → `context_conflicts` → `context_item_revisions` →
-//! `context_items` → `context_deliveries` → `workstream_paths` →
-//! `workstream_review_state` (cascades) → `workstreams`.
-//!
+//! Permanent deletion order: `context_conflict_events` → `context_conflicts` →
+//! `context_item_revisions` → `context_items` → `context_deliveries` →
+//! `workstream_paths` → `workstream_review_state` (cascades) → `workstreams`.
 //! Never touched: `sessions`, `session_members`, `session_messages`,
-//! `launch_intents`, `workspace_paths`, and the Agents' raw source data.
-//! A Session survives the Workstream that referenced it; its
-//! `owner_workstream_id` is cleared by the `ON DELETE SET NULL` FK when the
-//! `workstreams` row goes.
+//! `launch_intents`, `workspace_paths`, and the Agents' raw source data. A
+//! Session survives via its `owner_workstream_id` `ON DELETE SET NULL`.
 //!
-//! ## Reindex
+//! Any path-list mutation changes the primary-path Project projection, so it must
+//! re-index the Workstream's search row. Removing a WorkstreamPath touches the
+//! path list only — Session Owner, cwd, `workspace_path_id` and `project_id` are
+//! independent facts and stay put.
 //!
-//! Any path-list mutation changes the primary-path Project projection, so it
-//! must re-index the Workstream's search row.
-//!
-//! ## Path mutation vs. Session ownership
-//!
-//! Removing a WorkstreamPath touches the path list only. It never changes a
-//! Session's Owner Workstream, cwd, `workspace_path_id` or `project_id`
-//!. A Session's cwd is historical execution fact, the path list is
-//! current configuration, ownership is semantic assignment — the three are
-//! independent.
-//!
-//! ## Add vs. create: why unresolvable paths differ
-//!
-//! `create_workstream(…, initial_paths?)` treats an unresolvable path as "not
-//! this one" and reports it per entry (the field is optional, so the Workstream
-//! stays valid with zero paths). `add_workstream_path` reports an error instead:
-//! there the user asked for exactly one named directory and a silent no-op would
-//! be a lie.
+//! `create_workstream` treats an unresolvable path as "not this one" and reports
+//! it per entry; `add_workstream_path` errors instead, because there the user
+//! asked for exactly one named directory and a silent no-op would be a lie.
 
 use serde::Serialize;
 
@@ -81,19 +41,11 @@ use crate::storage::{new_id, now, Db};
 use super::WorkspaceAttaching;
 
 /// Managed Tauri state carrying the one runtime implementation of
-/// [`WorkspaceAttaching`].
+/// [`WorkspaceAttaching`] (`workspace::wiring::WorkspaceLayer`).
 ///
-/// The concrete type is `workspace::wiring::WorkspaceLayer`, which is why every
-/// policy function below takes `&dyn WorkspaceAttaching` explicitly and stays
-/// testable with a scripted stand-in. Main wires it in `lib.rs` setup:
-///
-/// ```text
-/// let layer = Arc::new(workspace::wiring::WorkspaceLayer::new(&home));
-/// app.manage(workspace::workstream::PathService::new(layer));
-/// ```
-///
-/// and registers the commands in `generate_handler!`. Nothing else may
-/// implement or construct it.
+/// Every policy function here takes `&dyn WorkspaceAttaching` explicitly so it
+/// stays testable with a scripted stand-in; nothing else may implement or
+/// construct this.
 pub struct PathService {
     attaching: std::sync::Arc<dyn WorkspaceAttaching + Send + Sync>,
 }
@@ -108,7 +60,7 @@ impl PathService {
     }
 }
 
-// ------------------------------------------------------------- creation
+// Creation
 
 /// One entry of [`CreateWorkstreamReport::paths`]: what became of each raw
 /// string the user submitted. An entry is either accepted (with the position it
@@ -190,9 +142,8 @@ pub fn create_workstream(
                 });
                 continue;
             }
-            // `Ok(None)` — empty, relative, a reserved app path, a Home-level
-            // repository — leaves the Workstream without this path. Creating it
-            // is still what the user asked for; the report says what did not
+            // `Ok(None)` leaves the Workstream without this path; creating it is
+            // still what the user asked for, and the report says what did not
             // land. An `Err` aborts the whole creation (atomicity case).
             let Some(path_id) = attaching.ensure_path(tx, raw)? else {
                 paths.push(CreatedPath {
@@ -201,12 +152,8 @@ pub fn create_workstream(
                     canonical_path: None,
                     position: None,
                     project_name: None,
-                    // The attacher's `Ok(None)` covers several refusals
-                    // (relative with no base, a reserved path under NoEnding
-                    // Home, a Home-level repository) and reports no reason, so
-                    // the message stays true of all of them rather than
-                    // guessing at one — the same wording `add_workstream_path`
-                    // reports.
+                    // The attacher reports no reason, so the message stays true of
+                    // every `Ok(None)` case rather than guessing at one.
                     reason: Some(
                         "该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录"
                             .to_string(),
@@ -250,7 +197,7 @@ pub fn create_workstream(
     })
 }
 
-// ---------------------------------------------------------- the path list
+// The path list
 
 /// One entry of the list as the UI shows it: the row plus the physical facts
 /// behind it.
@@ -265,7 +212,7 @@ pub struct WorkstreamPathView {
     pub exists: bool,
 }
 
-/// a user action that ONLY adds a path. Nothing under the path is
+/// A user action that ONLY adds a path. Nothing under the path is
 /// scanned or imported, and an already-present path keeps its original
 /// position.
 pub fn add_workstream_path(
@@ -290,7 +237,7 @@ pub fn add_workstream_path(
     Ok(row)
 }
 
-/// remove one entry and let the next move up to primary. Sessions are
+/// Remove one entry and let the next move up to primary. Sessions are
 /// not affected: this changes the Workstream's path list, never a Session's
 /// ownership.
 pub fn remove_workstream_path(
@@ -309,7 +256,7 @@ pub fn remove_workstream_path(
     })
 }
 
-/// rewrite the order. Takes the COMPLETE list; "make this the primary
+/// Rewrite the order. Takes the COMPLETE list; "make this the primary
 /// path" is a reorder to index 0, never a role flag.
 pub fn reorder_workstream_paths(
     db: &Db,
@@ -347,7 +294,7 @@ pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<Wo
     Ok(views)
 }
 
-// ------------------------------------------------------- lifecycle & trash
+// Lifecycle & trash
 
 /// `active | completed` and nothing else. Other vocabularies (`open`,
 /// `abandoned`) are not normalized here: silently accepting one would leave the
@@ -375,8 +322,8 @@ pub fn set_workstream_lifecycle(
 /// Context and configuration all survive, and `updated_at` is the
 /// only other thing that moves.
 ///
-/// Absolute, not a toggle: the previous `archive_workstream` flipped
-/// visibility, so a retry or a double click quietly un-archived the Workstream.
+/// Absolute, not a toggle: a retry or double click must not quietly
+/// un-archive the Workstream.
 pub fn archive_workstream(db: &Db, workstream_id: &str) -> Result<Workstream> {
     set_visibility(db, workstream_id, workstream_visibility::ARCHIVED)
 }
@@ -438,9 +385,9 @@ pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()>
     Ok(())
 }
 
-// --------------------------------------------------------------- projections
+// Projections
 
-/// the card / detail `project_id` + `project_name`, read through the
+/// The card / detail `project_id` + `project_name`, read through the
 /// position-0 path.
 ///
 /// Both are `None` for a Workstream with no paths, which is a normal state and
@@ -456,19 +403,16 @@ pub fn primary_project_for_workstream(
     Ok((Some(wp.project_id), name))
 }
 
-/// the Workstream-side input to the PreparedLaunch state fingerprint.
-///
-/// Agent E owns `launcher::compute_state_fingerprint`; this is the shape it
-/// reads, defined here so the stale rule and the data live together:
+/// The Workstream-side input to the PreparedLaunch state fingerprint, defined
+/// here so the stale rule and the data live together:
 ///
 /// ```text
 /// hasher.update(workstream_launch_paths(db, ws_id)?.fingerprint_input());
 /// ```
 ///
-/// Called once per workstream id in E's existing loop, after the metadata it
-/// already hashes. `default_ws:` is NOT part of this type — the default
-/// workspace comes from `NoEndingHome`, which is not in the DB, so E must pass it
-/// in separately (note 4).
+/// `default_ws:` is NOT part of this type — the default workspace comes from
+/// `NoEndingHome`, which is not in the DB, so the caller passes it in
+/// separately.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkstreamLaunchPaths {
     /// Canonical paths in list order. Order is semantics: never sort this.
@@ -476,7 +420,7 @@ pub struct WorkstreamLaunchPaths {
 }
 
 impl WorkstreamLaunchPaths {
-    /// tier 2 — the launch directory, when this Workstream has one.
+    /// Tier 2 — the launch directory, when this Workstream has one.
     pub fn primary(&self) -> Option<&str> {
         self.ordered_paths.first().map(String::as_str)
     }
@@ -509,7 +453,7 @@ pub fn workstream_launch_paths(db: &Db, workstream_id: &str) -> Result<Workstrea
     })
 }
 
-// ------------------------------------------------------------------- helpers
+// Helpers
 
 fn require_workstream(db: &Db, workstream_id: &str) -> Result<Workstream> {
     db.get_workstream(workstream_id)?

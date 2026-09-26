@@ -18,7 +18,7 @@ use noending::workspace::resolver::{ResolverContext, WorkspaceResolver};
 use noending::workspace::wiring::HomePolicy;
 use noending::workspace::{normalize_path, PathStyle};
 
-// ------------------------------------------------------------- fixtures
+// fixtures
 
 fn temp_db() -> (PathBuf, Db) {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -69,7 +69,7 @@ fn session(db: &Db, tag: &str, cwd: &str, activity: &str) -> Session {
     db.get_session(&row_id).unwrap().expect("session row")
 }
 
-// --------------------------------------------------------------- rejections
+// rejections
 
 /// The three refusal faces of `try_observe`, named for the UI: the Home itself,
 /// a reserved app path, and an un-normalizable string. None of them may leak
@@ -98,7 +98,7 @@ fn probe_names_why_a_string_is_not_a_workspace_path() {
     assert_eq!(probe.status, ProbeStatus::Ok);
 }
 
-// ------------------------------------------------------------- predictions
+// predictions
 
 /// An observable directory the registry has never seen: the probe reports the
 /// fresh observation and predicts a NEW Project with an automatic name.
@@ -164,7 +164,7 @@ fn probe_of_a_registered_path_predicts_its_existing_project() {
     assert_eq!(probe.git_state.as_deref(), Some("none"));
 }
 
-// ------------------------------------------------------------- recent list
+// recent list
 
 /// The picker's candidates: known paths keep their Project, unknown Session
 /// cwds join as candidates in their own right, garbage and reserved cwds stay

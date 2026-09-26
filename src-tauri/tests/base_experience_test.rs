@@ -1,19 +1,17 @@
-//! Base Experience invariants (Core Workspace Experience v0.1,,).
+//! Base Experience invariants: ingestion is facts-only.
 //!
-//! Context Intelligence is a switch, not a deletion: with it off, NoEnding
-//! must still discover, ingest, index and store every Agent event, and must
-//! write ZERO Context. The processed cursor stays frozen so the corpus can be
-//! replayed after intelligence is switched back on — "sessions end, the
-//! evidence does not".
-//!
-//! These tests drive the production ingest+sync orchestration paths (the ones
-//! reconcile, launch preparation and the Session detail refresh all share),
-//! not the SyncEngine directly, because the switch lives in the orchestration.
+//! Ingestion is the AUTOMATIC half: Agent sources flow through the typed
+//! adapters, resolve against the logical Session graph, and land as messages,
+//! stats, cursors and the fact generation. It NEVER calls AI and NEVER writes
+//! Context — the Session summary and Workstream state are written only by an
+//! explicit user action. Pinned end to end through `ingestion::ingest_session`,
+//! the one path reconcilers and launch preparation share.
 
-use noending::context::ContextDeliveryLevel;
-use noending::domain::{Agent, Session, Workstream};
+use noending::domain::{
+    Agent, Session, SessionContextFields, SessionMessageRole, SourceCursorUpdate, Workstream,
+};
 use noending::storage::{new_id, now, Db};
-use noending::{ingestion, launcher, search, settings, sync};
+use noending::{ingestion, lifecycle, search};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -62,9 +60,8 @@ fn write_transcript(dir: &std::path::Path, n: usize) -> PathBuf {
     file
 }
 
-/// A Logical Session whose ROOT member's source is the transcript at `path`,
-/// both written through the production discovery path — `ingest_and_sync_session`
-/// reads the member's `source_path`, never a session-level raw_path.
+/// A Logical Session whose ROOT member's source is the transcript at `path`.
+/// Ingestion reads the member's `source_path`, never a session-level raw_path.
 fn session_row(db: &Db, path: &std::path::Path) -> Session {
     let root_agent_session_id = format!("as-{}", new_id());
     let (id, _) = db
@@ -103,92 +100,136 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
     w
 }
 
-/// (context_items, revisions, conflicts, sync_runs) — everything Intelligence writes.
-fn context_footprint(db: &Db) -> (i64, i64, i64, i64) {
-    let c = |sql: &str| {
-        db.read()
-            .query_row(sql, [], |r| r.get::<_, i64>(0))
+#[test]
+fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
+    let db = open_db("empty-generation-context");
+    let (session, member_id, _) = support::seed_conversation(
+        &db,
+        Agent::ClaudeCode,
+        "empty-generation-context",
+        &[support::parsed_message(
+            "old-message",
+            SessionMessageRole::User,
+            "old transcript",
+        )],
+    );
+    let initial_generation = db.get_session_ingest_state(&session.id).unwrap().generation;
+    db.tx(|tx| {
+        noending::storage::context_repo::commit_session_context_conn(
+            tx,
+            &session.id,
+            &SessionContextFields {
+                summary_current_state: "summary of old transcript".into(),
+                ..Default::default()
+            },
+            0,
+            initial_generation,
+            1,
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.commit_member_ingest(
+        &session.id,
+        &member_id,
+        &[],
+        None,
+        &SourceCursorUpdate {
+            file_identity: "empty-rewrite".into(),
+            generation: 1,
+            byte_offset: 0,
+            last_seen_size: 0,
+            mtime: None,
+            start_byte_offset: 0,
+            prefix_hash: String::new(),
+        },
+    )
+    .unwrap();
+
+    assert!(
+        noending::context::session_context_view(&db, &session.id)
             .unwrap()
-    };
+            .pending
+    );
+    let outcome = noending::context::update_session(&db, &session.id).unwrap();
+    assert_eq!(
+        outcome.status,
+        noending::domain::ContextUpdateStatus::Updated
+    );
+
+    let view = noending::context::session_context_view(&db, &session.id).unwrap();
+    assert!(!view.pending);
+    assert_eq!(view.fields.unwrap(), SessionContextFields::default());
+    assert_eq!(view.ingest_generation, initial_generation + 1);
+}
+
+fn count(db: &Db, table: &str) -> i64 {
+    db.read()
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+/// (context_items, context_item_revisions, context_conflicts, session_contexts)
+/// — every row an AI Context update would write. Ingestion must leave all four
+/// at zero.
+fn context_footprint(db: &Db) -> (i64, i64, i64, i64) {
     (
-        c("SELECT COUNT(*) FROM context_items"),
-        c("SELECT COUNT(*) FROM context_item_revisions"),
-        c("SELECT COUNT(*) FROM context_conflicts"),
-        c("SELECT COUNT(*) FROM sync_runs"),
+        count(db, "context_items"),
+        count(db, "context_item_revisions"),
+        count(db, "context_conflicts"),
+        count(db, "session_contexts"),
     )
 }
 
+/// The core invariant: ingestion runs, Context does not — even for a Session
+/// that already has an Owner Workstream, which is exactly the row an update
+/// WOULD write into.
 #[test]
-fn intelligence_is_off_until_explicitly_enabled() {
-    let db = open_db("switch-default");
-    assert!(
-        !settings::context_intelligence_enabled(&db).unwrap(),
-        "missing row must mean Base Experience"
-    );
-
-    settings::set_context_intelligence_enabled(&db, true).unwrap();
-    assert!(settings::context_intelligence_enabled(&db).unwrap());
-
-    // Anything that is not an explicit opt-in keeps intelligence off.
-    db.set_setting(settings::CONTEXT_INTELLIGENCE_ENABLED_KEY, "yes-please")
-        .unwrap();
-    assert!(!settings::context_intelligence_enabled(&db).unwrap());
-    db.set_setting(settings::CONTEXT_INTELLIGENCE_ENABLED_KEY, "true")
-        .unwrap();
-    assert!(settings::context_intelligence_enabled(&db).unwrap());
-}
-
-/// The switch never rewrites history: database creation seeds delivery
-/// explicitly, while intelligence stays a pure "missing row = off" default.
-#[test]
-fn creation_seeds_delivery_level_but_not_intelligence() {
-    let db = open_db("seed");
-    assert_eq!(
-        db.get_setting(settings::CONTEXT_DELIVERY_LEVEL_KEY)
-            .unwrap(),
-        Some("off".into()),
-        "creation seeds context.delivery_level as a real, editable row"
-    );
-    assert_eq!(
-        db.get_setting(settings::CONTEXT_INTELLIGENCE_ENABLED_KEY)
-            .unwrap(),
-        None,
-        "no row is seeded for a key whose missing-row default is already off"
-    );
-}
-
-/// The core invariant: ingestion runs, Context does not.
-#[test]
-fn off_stops_after_ingestion_on_the_launch_and_refresh_path() {
-    let dir = unique_dir("off-launch-path");
-    let db = open_db("off-launch-path");
+fn ingestion_writes_facts_and_zero_context() {
+    let dir = unique_dir("facts-only");
+    let db = open_db("facts-only");
     let file = write_transcript(&dir, 3);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "NoEnding");
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
-    let (ingested, applied) =
-        launcher::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
-    assert_eq!(
-        ingested, 3,
-        "events still flow in from the Agent transcript"
-    );
-    assert_eq!(applied, 0, "no extraction ran");
+    let ingested = ingestion::ingest_session(&db, &s).unwrap();
+    assert_eq!(ingested, 3, "every Agent event is ingested");
 
+    // Facts landed: messages, projection, generation, stats and cursor.
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 3);
+    let state = db.get_session_ingest_state(&s.id).unwrap();
+    assert_eq!(state.latest_message_seq, 3);
     assert_eq!(
-        db.ingested_message_sequence(&s.id).unwrap(),
-        3,
-        "read cursor advances normally while off"
+        state.generation, 1,
+        "the first genesis read establishes generation 1"
     );
+
+    let projection = db.message_projection_ids(&s.id).unwrap();
+    assert_eq!(projection.len(), 3);
+    let messages = db.get_messages(&s.id, None, 10).unwrap();
+    let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
     assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0,
-        "context processing frontier must not move while intelligence is off"
+        contents,
+        MSGS.to_vec(),
+        "the projection is the current conversation in order"
     );
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0), "zero Context writes");
+
+    let member_id = db.members_for_session(&s.id).unwrap()[0].id.clone();
+    assert!(
+        db.get_member_stats(&member_id).unwrap().is_some(),
+        "member stats were snapshotted on a genesis read"
+    );
+    let cursor = db.get_member_cursor(&member_id).unwrap();
+    assert!(cursor.byte_offset > 0, "the read cursor advanced");
+    assert!(
+        !cursor.source_file_identity.is_empty(),
+        "cursor identity set"
+    );
+
+    // Search indexing is part of ingestion and stays on.
     assert!(
         search::search(&db, "postgres-primary-store", 10)
             .unwrap()
@@ -196,122 +237,140 @@ fn off_stops_after_ingestion_on_the_launch_and_refresh_path() {
             .any(|h| h.kind == "message" && h.parent_id == s.id),
         "search indexing stays on"
     );
-}
 
-/// Background reconcile runs the same path as the interactive flow — a gate
-/// on only one of them would leave extraction running on every launch.
-#[test]
-fn off_stops_after_ingestion_on_the_reconcile_path() {
-    let dir = unique_dir("off-reconcile");
-    let file = write_transcript(&dir, 3);
-    let db = open_db("off-reconcile");
-    let s = session_row(&db, &file);
-
-    let (ingested, applied) =
-        ingestion::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
-    assert_eq!(ingested, 3);
-    assert_eq!(applied, 0, "reconcile must stop before SyncEngine::prepare");
-
-    assert_eq!(db.message_count(&s.id).unwrap(), 3);
-    assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0
-    );
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
-}
-
-/// delivery level and intelligence are two independent switches.
-/// Getting this wrong would either resurrect extraction while intelligence is
-/// off, or silently stop Context evolution when a user only muted injection.
-#[test]
-fn delivery_level_never_gates_extraction() {
-    // (a) delivery ON (balanced) + intelligence OFF → still nothing extracted.
-    let dir = unique_dir("ortho-off");
-    let db = open_db("ortho-off");
-    let file = write_transcript(&dir, 3);
-    let s = session_row(&db, &file);
-    let ws = ws_row(&db, "NoEnding");
-    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
-    settings::set_context_delivery_level(&db, ContextDeliveryLevel::Balanced).unwrap();
-
-    let (_, applied) =
-        launcher::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
-    assert_eq!(applied, 0, "balanced delivery must not restart extraction");
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
-
-    // (b) intelligence ON + delivery OFF → ingestion, sync and extraction all
-    // run exactly as before; only outbound injection is muted.
-    settings::set_context_intelligence_enabled(&db, true).unwrap();
-    settings::set_context_delivery_level(&db, ContextDeliveryLevel::Off).unwrap();
-    let (ingested, applied) =
-        launcher::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
-    assert_eq!(
-        ingested, 0,
-        "already ingested while off — nothing new to read"
+    // The Context footprint is exactly zero: no AI call, no Context write.
+    assert_eq!(context_footprint(&db), (0, 0, 0, 0), "zero Context writes");
+    assert_eq!(count(&db, "session_context_revisions"), 0);
+    assert!(
+        db.get_session_context(&s.id).unwrap().is_none(),
+        "no Session summary was ever generated"
     );
     assert!(
-        applied > 0,
-        "turning delivery off must never disable extraction (AGENTS.md)"
+        db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
+        "the Owner Workstream got no items"
     );
-    assert!(context_footprint(&db).0 > 0, "Context evolved");
+    assert!(
+        db.workstream_frontiers(&ws.id).unwrap().is_empty(),
+        "no Workstream frontier was recorded"
+    );
     assert_eq!(
-        db.get_context_state(&s.id)
+        db.get_workstream_context_state(&ws.id)
             .unwrap()
-            .processed_message_sequence,
-        db.ingested_message_sequence(&s.id).unwrap(),
-        "the frontier caught up"
+            .context_revision,
+        0,
+        "the Context revision never moved"
     );
 }
 
-/// 's whole point, stated as the only falsifiable form it has: everything
-/// ingested during the Off period is still there and replayable afterwards.
+/// Re-scanning an unchanged source adds nothing: the member cursor already
+/// covers the file, so the same content is never stored twice.
 #[test]
-fn backlog_ingested_while_off_is_replayed_after_reenabling() {
-    let dir = unique_dir("replay");
-    let db = open_db("replay");
+fn rescanning_an_unchanged_source_adds_nothing() {
+    let dir = unique_dir("idempotent");
+    let db = open_db("idempotent");
+    let file = write_transcript(&dir, 3);
+    let s = session_row(&db, &file);
+
+    assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 3);
+    assert_eq!(
+        ingestion::ingest_session(&db, &s).unwrap(),
+        0,
+        "an unchanged source is a no-op"
+    );
+    assert_eq!(
+        ingestion::ingest_session(&db, &s).unwrap(),
+        0,
+        "and stays a no-op"
+    );
+
+    assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert_eq!(db.message_projection_ids(&s.id).unwrap().len(), 3);
+    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
+}
+
+/// A source that grew between passes contributes exactly its new delta, and
+/// the fact generation still never moves a Context byte.
+#[test]
+fn appended_source_ingests_only_the_delta() {
+    let dir = unique_dir("delta");
+    let db = open_db("delta");
     let file = write_transcript(&dir, 2);
     let s = session_row(&db, &file);
-    let ws = ws_row(&db, "NoEnding");
+    let ws = ws_row(&db, "Delta");
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
-    // Two offline days: the source grows, we keep ingesting, nothing processes.
-    for n in [2, 3] {
-        write_transcript(&dir, n);
-        let (ingested, applied) =
-            launcher::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
-        assert_eq!(applied, 0);
-        if n == 3 {
-            assert_eq!(ingested, 1, "the third message arrives as one new event");
-        }
-    }
-    assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
+    let generation = db.get_session_ingest_state(&s.id).unwrap().generation;
+
+    // Two offline days: the source grows by one event.
+    write_transcript(&dir, 3);
     assert_eq!(
-        db.get_context_state(&s.id)
-            .unwrap()
-            .processed_message_sequence,
-        0
+        ingestion::ingest_session(&db, &s).unwrap(),
+        1,
+        "only the third message is new"
+    );
+
+    assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 3);
+    assert_eq!(
+        db.get_session_ingest_state(&s.id).unwrap().generation,
+        generation,
+        "an append extends the current generation"
     );
     assert_eq!(context_footprint(&db), (0, 0, 0, 0));
-
-    // Re-enable: no re-ingestion needed, the frozen frontier drives the replay.
-    settings::set_context_intelligence_enabled(&db, true).unwrap();
-    settings::set_context_delivery_level(&db, ContextDeliveryLevel::Balanced).unwrap();
-    let (ingested, applied) =
-        launcher::ingest_and_sync_session(&db, &sync::SyncEngine::default(), &s).unwrap();
-    assert_eq!(ingested, 0, "the backlog was already durable");
-    assert!(
-        applied > 0,
-        "the whole Off-period backlog must be consumable in one sync"
-    );
     assert_eq!(
-        db.get_context_state(&s.id)
+        db.get_workstream_context_state(&ws.id)
             .unwrap()
-            .processed_message_sequence,
-        db.ingested_message_sequence(&s.id).unwrap(),
-        "frontier caught up with the read cursor"
+            .context_revision,
+        0
     );
-    assert_eq!(db.message_count(&s.id).unwrap(), 3, "history intact");
-    assert!(context_footprint(&db).0 > 0);
+}
+
+/// A trashed Session takes nothing: ingestion refuses it, and the cursor is
+/// left untouched so a Restore resumes from exactly where things stopped.
+#[test]
+fn trashed_session_is_never_ingested() {
+    let dir = unique_dir("trash");
+    let db = open_db("trash");
+    let file = write_transcript(&dir, 2);
+    let s = session_row(&db, &file);
+
+    assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
+    let member_id = db.members_for_session(&s.id).unwrap()[0].id.clone();
+    let cursor_before = db.get_member_cursor(&member_id).unwrap();
+
+    lifecycle::trash_session(&db, &s.id).unwrap();
+    write_transcript(&dir, 3);
+
+    assert_eq!(
+        ingestion::ingest_session(&db, &s).unwrap(),
+        0,
+        "a trashed session is not ingested"
+    );
+    assert_eq!(db.message_count(&s.id).unwrap(), 2, "facts stay frozen");
+    assert_eq!(
+        db.get_member_cursor(&member_id).unwrap().byte_offset,
+        cursor_before.byte_offset,
+        "the member cursor is not advanced for a trashed session"
+    );
+    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
+}
+
+/// `refresh_session` is the per-Session incremental entry point (Resume
+/// trigger). It shares `ingest_session`'s facts-only contract.
+#[test]
+fn refresh_session_ingests_incrementally_and_writes_no_context() {
+    let dir = unique_dir("refresh");
+    let db = open_db("refresh");
+    let file = write_transcript(&dir, 3);
+    let s = session_row(&db, &file);
+
+    assert_eq!(ingestion::refresh_session(&db, &s.id).unwrap(), 3);
+    assert_eq!(
+        ingestion::refresh_session(&db, &s.id).unwrap(),
+        0,
+        "nothing new on an unchanged source"
+    );
+    assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 }

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { api } from "../api";
 import Sidebar from "../layout/Sidebar";
 import Router from "./Router";
 import CommandPalette from "../components/CommandPalette";
 import ToastHost from "../components/Toast";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, type Route } from "./routes";
-import { refreshBaseExperience } from "./experience";
 
 type NavigationState = { entries: Route[]; index: number };
 
@@ -60,6 +61,25 @@ export default function AppShell() {
     localStorage.setItem("noending.sidebarCollapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
+  // Returning to the foreground is a freshness trigger, never a page-open
+  // trigger. Ignore the initial focused event; startup already queued a pass.
+  useEffect(() => {
+    let wasBackgrounded = false;
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        wasBackgrounded = true;
+      } else if (wasBackgrounded) {
+        wasBackgrounded = false;
+        void api.appForeground().catch((error) => {
+          console.error("Failed to queue foreground ingestion", error);
+        });
+      }
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
   const navigate = useCallback((r: Route) => {
     setNavigation((current) => {
       const entries = current.entries.slice(0, current.index + 1);
@@ -108,11 +128,6 @@ export default function AppShell() {
     return () => window.removeEventListener("keydown", h);
   }, [goBack, goForward]);
 
-  // Base Experience 开关：整个应用读一次，判断集中在 experience.tsx。
-  useEffect(() => {
-    refreshBaseExperience();
-  }, []);
-
   // ⌘K / Ctrl+K opens the command palette
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -125,18 +140,17 @@ export default function AppShell() {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  // Background sync / reconcile completion → 通知页面做定向刷新，
+  // Background ingestion / reconcile completion → 通知页面做定向刷新，
   // 不做整页刷新：页面通过 window 事件自行 invalidate。
   useEffect(() => {
-    const un1 = listen("sync-completed", () => emitSynced());
-    const un2 = listen("reconcile-completed", () => emitSynced());
+    // 后台摄入的唯一完成事件（commands/ingestion.rs）。
+    const un1 = listen("ingestion-completed", () => emitSynced());
     // Projects Experience v0.2 工作区刷新完成后同样扇出刷新信号，
     // Sidebar 最近列表等自行 invalidate。
-    const un3 = listen("workspace-reconcile-completed", () => emitSynced());
+    const un2 = listen("workspace-reconcile-completed", () => emitSynced());
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
-      un3.then((f) => f());
     };
   }, []);
 

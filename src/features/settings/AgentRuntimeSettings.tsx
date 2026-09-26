@@ -34,10 +34,8 @@ export function isOverridable(cap: RuntimeFieldCapability) {
   return cap !== "unsupported";
 }
 
-/**
- * Preview 里的 Runtime 意图：显示的就是 Launch 将要（或不会）传给 CLI 的参数。
- * 数据来源是 PreparedLaunch 中冻结的 override，不是重新读取的设置。
- */
+/** Preview 里的 Runtime 意图：显示的就是 Launch 将要（或不会）传给 CLI 的参数，
+ *  来源是 PreparedLaunch 中冻结的 override，不是重读的设置。 */
 export function RuntimeIntentBadges({ agent, runtime }: {
   agent: Agent;
   runtime: AgentRuntimeOverrides;
@@ -61,10 +59,8 @@ export function RuntimeIntentBadges({ agent, runtime }: {
   );
 }
 
-/**
- * 设置 → Agent 的一块：安装状态 + 该 Agent 的 Runtime Overrides。
- * 每个字段只有两种状态——Agent 默认值（不传参数）或显式 Override。
- */
+/** 设置 → Agent 的一块：安装状态 + Runtime Overrides。每个字段只有两种状态——
+ *  Agent 默认值（不传参数）或显式 Override。 */
 export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
   const [st, setSt] = useState<AgentRuntimeSettings | null>(null);
   const [models, setModels] = useState<RuntimeModelOption[]>([]);
@@ -79,9 +75,8 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
     api.getAgentRuntimeSettings(agent).then(setSt).catch(console.error);
   }, [agent]);
 
-  // Discovery 是建议信息：单独取，失败只留 warning，不影响 override 显示。
-  // 进入页面 ≠ 刷新模型：mount 阶段绝不 spawn Agent CLI，
-  // 「刷新模型」按钮是唯一的 discovery 入口。
+  // Discovery 是建议信息，单独取、失败只留 warning。进入页面 ≠ 刷新模型：
+  // mount 阶段绝不 spawn Agent CLI，「刷新模型」按钮是唯一的 discovery 入口。
   const refresh = useCallback(async () => {
     setLoadingModels(true);
     try {

@@ -1,12 +1,11 @@
 //! Workspace identity integrity.
 //!
 //! `workspace_paths.id` is the join key for Sessions, WorkstreamPaths and — one
-//! hop further — every Project fact. Nothing else in the app can notice a row
-//! whose id is not the one its own `canonical_path` derives to, because every
-//! join agrees with the stored id. So these tests do not exercise a behaviour:
-//! they check that the *key itself* is the derivation, on both platforms.
-//!
-//! Temp directories only; no user Home and no real transcript.
+//! hop further — every Project fact. Nothing else can notice a row whose id is
+//! not the one its own `canonical_path` derives to, because every join agrees
+//! with the stored id. So these tests do not exercise a behaviour: they check
+//! that the *key itself* is the derivation, on both platforms. Temp dirs only;
+//! no user Home and no real transcript.
 
 use noending::domain::{GitDetection, GitWorktreeKind, WorkspaceObservation};
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -67,17 +66,15 @@ fn repo(raw: &str, common: &str, kind: GitWorktreeKind) -> WorkspaceObservation 
     }
 }
 
-// ------------------------------------------------------------------ 1. the key
+// 1. the key
 
 /// the check `registry_is_consistent` actually performs.
 ///
-/// The assertion this replaced was `GROUP BY id HAVING COUNT(DISTINCT
-/// project_id) > 1`, which can never be non-zero because `id` is the PRIMARY
-/// KEY. An assertion that cannot fail is worse than none, because it reads as
-/// coverage. A row whose id is *not* `path_identity(its own canonical_path)` is
-/// reachable — a hand-written INSERT, a bulk derivation that computes the key
-/// differently, or a second normalizer ("禁止第二份实现") — and every
-/// join keeps agreeing with it, so the corruption stays silent.
+/// Its predecessor — `GROUP BY id HAVING COUNT(DISTINCT project_id) > 1` — could
+/// never fail, because `id` is the PRIMARY KEY. A row whose id is *not*
+/// `path_identity(its own canonical_path)` is reachable (a hand-written INSERT, a
+/// second normalizer — "禁止第二份实现") and every join agrees with it anyway, so
+/// the corruption stays silent.
 #[test]
 fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
     let (_d, db) = temp_db();
@@ -125,16 +122,15 @@ fn one_git_family_cannot_be_claimed_by_two_projects() {
     );
 }
 
-// --------------------------------------------------------- 2. cross-platform
+// 2. cross-platform
 
-/// The Unix half of  as data rather than as a rule.
+/// The Unix half of the derivation, pinned as data rather than as a rule.
 ///
-/// Stored `workspace_paths.id` values are keyed by these strings, so changing
-/// the derivation would re-key every existing row — an identity change, not a
-/// fix. The literals were produced by an independent
-/// implementation of `sha256("noending:workspace-path:v1:" + path_key)` — not
-/// by running this module and copying what came out — so the test stays a check
-/// even if the module is wrong.
+/// Stored `workspace_paths.id` values are keyed by these strings, so changing the
+/// derivation would re-key every existing row — an identity change, not a fix.
+/// The literals came from an independent implementation of
+/// `sha256("noending:workspace-path:v1:" + path_key)`, not from running this
+/// module, so the test stays a check even if the module is wrong.
 #[test]
 fn unix_path_identity_vectors_are_stable() {
     const VECTORS: [(&str, &str); 6] = [
@@ -239,15 +235,14 @@ fn windows_spellings_of_one_directory_carry_one_identity() {
     );
 }
 
-/// + M30 — the premise under the launcher's path-list gate.
+/// The premise under the launcher's path-list gate (M30).
 ///
 /// `apply_match` decides whether to grow a Workstream's ordered path list by
 /// comparing `path_identity_of(default_workspace)` against
-/// `sessions.workspace_path_id`. Both sides are produced on the *host* platform,
-/// so the host form of NoEnding Home's default workspace must be exactly the
-/// string the identity door re-derives. If it were not, the gate would stop
-/// recognising the fallback and an app-invented directory would re-enter the
-/// user's path list — the failure M30 exists to prevent.
+/// `sessions.workspace_path_id`. Both sides come from the *host* platform, so
+/// Home's default workspace string must be exactly what the identity door
+/// re-derives — otherwise the gate stops recognising the fallback and an
+/// app-invented directory re-enters the user's path list.
 #[test]
 fn the_default_workspace_the_launcher_hands_round_trips_through_the_identity_door() {
     let base = std::env::temp_dir().join(format!("noending-wsid-home-{}", new_id()));

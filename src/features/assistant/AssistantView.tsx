@@ -1,12 +1,11 @@
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import { timeAgo } from "../../components/common";
 import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
 import type { AssistantScope, Route } from "../../app/routes";
 import { AGENT_LABELS } from "../../types";
 import type {
-  Agent, AgentRuntimeSettings, Project, SyncRun, WorkstreamCardData,
+  Agent, AgentRuntimeSettings, Project, WorkstreamCardData,
 } from "../../types";
 
 interface AssistantMessage {
@@ -72,10 +71,7 @@ const scopeFromValue = (v: string): AssistantScope => {
   return { type: "workstream", id };
 };
 
-/**
- * Assistant = Workspace Interface（整体设计），不是第四个 Agent。
- * Scope 只做 prompt 侧注入，不引入新协议。
- */
+/** Assistant = Workspace Interface，不是第四个 Agent。Scope 只做 prompt 侧注入，不引入新协议。 */
 export default function AssistantView({ scope, navigate }: {
   scope?: AssistantScope;
   navigate: (r: Route) => void;
@@ -87,26 +83,23 @@ export default function AssistantView({ scope, navigate }: {
   const [cfg, setCfg] = useState<AssistantConfig | null>(null);
   const [runtime, setRuntime] = useState<AgentRuntimeSettings | null>(null);
   const [cfgOpen, setCfgOpen] = useState(false);
-  const [runs, setRuns] = useState<SyncRun[]>([]);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentScope, setCurrentScope] = useState<AssistantScope>(scope ?? { type: "workspace" });
   const logRef = useRef<HTMLDivElement>(null);
 
-  // Scope 跟随 Route：从 Project Detail 进入带 scope，回 Sidebar 再进
-  // Assistant 时恢复 Workspace —— 不能只在首次 mount 读取。
+  // Scope 跟随 Route：从 Project Detail 进入带 scope，回 Sidebar 再进 Assistant
+  // 时恢复 Workspace——不能只在首次 mount 读取。
   useEffect(() => {
     setCurrentScope(scope ?? { type: "workspace" });
   }, [scope]);
 
   useEffect(() => {
     api.assistantConfigGet().then(setCfg).catch(console.error);
-    api.listSyncRuns(12).then(setRuns).catch(console.error);
     api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "active" && c.visibility === "normal"))).catch(console.error);
     api.listProjects().then(setProjects).catch(console.error);
   }, []);
-  // Runtime 是只读视图：真正的编辑发生在「设置 → Agent」，这里只显示
-  // Assistant 所选 Agent 当前的 override。
+  // Runtime 是只读视图：真正编辑在「设置 → Agent」，这里只显示所选 Agent 当前的 override。
   const loadRuntime = useCallback((agent: string) => {
     if (agent === "none") {
       setRuntime(null);
@@ -158,7 +151,6 @@ export default function AssistantView({ scope, navigate }: {
       setSessionId(reply.session_id);
       const msgs = await api.assistantMessages(reply.session_id);
       setMessages(msgs);
-      api.listSyncRuns(12).then(setRuns).catch(() => {});
     } catch (e) {
       setMessages((m) => [...m, {
         id: `err-${Date.now()}`, session_id: sessionId ?? "", role: "assistant",
@@ -264,20 +256,6 @@ export default function AssistantView({ scope, navigate }: {
           onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && send()} />
         <button className="btn primary" onClick={() => send()} disabled={busy}>发送</button>
       </div>
-
-      <details className="details-feed">
-        <summary>最近同步 <span className="muted">（后台，共 {runs.length} 条）</span></summary>
-        <div>
-          {runs.map((r) => (
-            <div key={r.id} className="feed-row">
-              <span className="when">{timeAgo(r.created_at)}</span>
-              <span style={{ flex: 1 }}>{r.summary}</span>
-              <span className="badge">{r.runtime}</span>
-            </div>
-          ))}
-          {runs.length === 0 && <div className="muted small" style={{ padding: "8px 0" }}>暂无同步记录。</div>}
-        </div>
-      </details>
 
       {cfgOpen && cfg && (
         <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCfgOpen(false)}>

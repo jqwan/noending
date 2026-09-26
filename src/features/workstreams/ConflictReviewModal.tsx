@@ -38,7 +38,6 @@ export default function ConflictReviewModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // Inline editing state for left (current) item
   const [editingLeft, setEditingLeft] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");

@@ -5,21 +5,14 @@ import type {
 } from "../../types";
 
 /**
- * 工作目录：一个 Workstream 的**有序**路径列表，position 0
- * 就是主工作目录 —— 角色完全由位置表达，没有第二个权威字段。
+ * 工作目录：一个 Workstream 的**有序**路径列表，position 0 就是主工作目录——
+ * 角色完全由位置表达，没有第二个权威字段。
  *
- * 这一页同时是三个事实的展示位：
- *   1. 启动目录；
- *   2. Project 归属；
- *   3. 增删路径只改这份配置：不删除会话，也不修改任何已有会话的所属任务。
- *
- * 所以任何一次动作都必须说清楚它连带动了什么，失败也留在原地说明原因，
- * 绝不静默回滚（AGENTS.md：宁可保住历史与用户意图，也不图省事）。
+ * 这一页同时展示三个事实：启动目录、Project 归属、增删路径只改这份配置（不删会话、
+ * 不改已有会话的所属任务）。任何动作都要说清连带动了什么，失败留在原地说明原因。
  */
 
-/* ---------------- 只读展示：物理观察状态 ---------------- */
-
-/** Git 状态徽标。`git_state` 缺失时（WorkstreamPathView 就没有这一列）不猜。 */
+/** Git 状态徽标。`git_state` 缺失时不猜。 */
 export function GitStateBadge({ state, kind }: {
   state: WorkspaceGitState | null | undefined;
   kind?: string | null;
@@ -68,10 +61,6 @@ export function PathText({ path, max = 46 }: { path: string; max?: number }) {
     </span>
   );
 }
-
-/* ---------------- 只读展示：有序工作目录列表 ---------------- */
-
-/* ---------------- 只读展示：有序工作目录列表 ---------------- */
 
 /** 只读：增 / 删 / 换序都在「••• → 编辑任务」里。 */
 export default function WorkstreamPathList({
