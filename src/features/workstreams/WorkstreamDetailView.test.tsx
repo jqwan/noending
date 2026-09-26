@@ -220,3 +220,27 @@ it("hides 更新状态 when the Context is already up to date", async () => {
   await renderDetail();
   expect(screen.queryByRole("button", { name: "更新状态" })).toBeNull();
 });
+
+it("offers a copyable operation id after a structured Context update failure", async () => {
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
+  vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1 }));
+  vi.mocked(api.updateWorkstreamContext).mockRejectedValue({
+    code: "cli_timeout",
+    message: "Agent CLI 超时，请重试或检查 CLI 状态。",
+    operation_id: "123e4567-e89b-12d3-a456-426614174001",
+  });
+  const originalClipboard = navigator.clipboard;
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByText("任务概览");
+
+  fireEvent.click(screen.getByRole("button", { name: "更新状态" }));
+  await screen.findByText(/Agent CLI 超时.*操作 ID 123e4567-e89b-12d3-a456-426614174001/);
+  fireEvent.click(screen.getByRole("button", { name: "复制错误详情" }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+    "Agent CLI 超时，请重试或检查 CLI 状态。\n错误代码：cli_timeout\n操作 ID：123e4567-e89b-12d3-a456-426614174001",
+  ));
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+});

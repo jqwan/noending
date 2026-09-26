@@ -401,6 +401,29 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             cwd: None, // headless analysis never touches user repos
         })
     }
+
+    fn build_context_extraction_command(
+        &self,
+        install: &AgentInstallation,
+        opts: &ExecOptions,
+        prompt: &str,
+        runtime_dir: &Path,
+    ) -> Result<AgentCommand> {
+        let mut args: Vec<String> = vec![
+            "exec".into(),
+            "--ephemeral".into(),
+            "-s".into(),
+            "read-only".into(),
+            "--skip-git-repo-check".into(),
+        ];
+        args.extend(runtime_args(opts));
+        args.push(prompt.to_string());
+        Ok(AgentCommand {
+            program: install.executable_path.clone(),
+            args,
+            cwd: Some(runtime_dir.to_path_buf()),
+        })
+    }
 }
 
 /// One rollout line's contribution to the member read. State events

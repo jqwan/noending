@@ -167,9 +167,9 @@ function detail(me: Session, over: Partial<SessionDetail> = {}): SessionDetail {
 async function renderDetail(d: SessionDetail) {
   vi.mocked(api.getSessionDetail).mockResolvedValue(d);
   const navigate = vi.fn();
-  render(<SessionDetailView sessionId={d.session.id} navigate={navigate} goBack={vi.fn()} />);
+  const view = render(<SessionDetailView sessionId={d.session.id} navigate={navigate} goBack={vi.fn()} />);
   await screen.findByText("会话信息");
-  return { navigate, container: document.body };
+  return { navigate, container: document.body, rerender: view.rerender };
 }
 
 // 执行信息
@@ -467,15 +467,62 @@ it("hides the update button when there is nothing pending", async () => {
   expect(screen.queryByRole("button", { name: "生成摘要" })).toBeNull();
 });
 
-it("turns a concurrency conflict into an actionable retry message", async () => {
+it("shows structured Context failure details and copies the operation id", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
   vi.mocked(api.updateSessionContext).mockRejectedValue(
-    'context: ConcurrencyConflict("snapshot moved")',
+    { code: "stale_snapshot", message: "内容已变化，请重新更新", operation_id: "123e4567-e89b-12d3-a456-426614174000" },
   );
+  const originalClipboard = navigator.clipboard;
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   await renderDetail(detail(session("me"), {
     messages: [message("me", 1, "user", "开始吧")],
   }));
 
   fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
-  await screen.findByText("内容已变化，请重新更新");
+  await screen.findByText("内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000");
+  fireEvent.click(screen.getByRole("button", { name: "复制错误详情" }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+    "内容已变化，请重新更新\n错误代码：stale_snapshot\n操作 ID：123e4567-e89b-12d3-a456-426614174000",
+  ));
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+});
+
+it("keeps an update error visible across background sync refreshes", async () => {
+  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
+  vi.mocked(api.updateSessionContext).mockRejectedValue({
+    code: "stale_snapshot",
+    message: "内容已变化，请重新更新",
+    operation_id: "123e4567-e89b-12d3-a456-426614174000",
+  });
+  await renderDetail(detail(session("me"), {
+    messages: [message("me", 1, "user", "开始吧")],
+  }));
+
+  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  const failure = "内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000";
+  await screen.findByText(failure);
+
+  window.dispatchEvent(new Event("noending:sync"));
+  await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
+  expect(screen.getByText(failure)).toBeTruthy();
+});
+
+it("clears a session's update error when the same detail view navigates to another session", async () => {
+  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
+  vi.mocked(api.updateSessionContext).mockRejectedValue({
+    code: "stale_snapshot",
+    message: "内容已变化，请重新更新",
+    operation_id: "123e4567-e89b-12d3-a456-426614174000",
+  });
+  const { navigate, rerender } = await renderDetail(detail(session("session-a"), {
+    messages: [message("session-a", 1, "user", "开始吧")],
+  }));
+
+  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  const failure = "内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000";
+  await screen.findByText(failure);
+
+  rerender(<SessionDetailView sessionId="session-b" navigate={navigate} goBack={vi.fn()} />);
+  await waitFor(() => expect(screen.queryByText(failure)).toBeNull());
 });

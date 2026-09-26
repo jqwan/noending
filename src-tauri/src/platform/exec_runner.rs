@@ -23,6 +23,7 @@ use crate::error::{other, Result};
 
 pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 120;
 
+#[derive(Debug)]
 pub struct HeadlessOutput {
     pub stdout: String,
     pub stderr: String,
@@ -32,6 +33,34 @@ pub struct HeadlessOutput {
     /// (the WorkspaceResolver collapses both into `GitDetection::Unavailable`)
     /// need this, so it is part of the payload rather than an error variant.
     pub exit_code: Option<i32>,
+}
+
+/// Safe outcome vocabulary for explicit Context extraction. It deliberately
+/// carries no command text, stderr, stdout, or OS error details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextExecFailureKind {
+    Start,
+    Wait,
+    Exit,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextExecFailure {
+    pub kind: ContextExecFailureKind,
+    /// True only after the child process was successfully spawned.
+    pub spawned: bool,
+    /// Exit status is safe to log as a numeric diagnostic.
+    pub exit_code: Option<i32>,
+    /// Whitelisted OS error kind for a start/wait failure.
+    pub io_error_kind: Option<&'static str>,
+}
+
+#[derive(Debug)]
+enum ProcessFailure {
+    Spawn(std::io::Error),
+    Wait(std::io::Error),
+    Pipe,
 }
 
 fn drain(mut reader: impl Read, buf: &mut String) {
@@ -77,6 +106,20 @@ pub fn run_with_env(
     timeout_secs: u64,
     env: &[(&str, &str)],
 ) -> Result<HeadlessOutput> {
+    run_process(program, args, cwd, timeout_secs, env).map_err(|failure| match failure {
+        ProcessFailure::Spawn(e) => other(format!("启动 {} 失败: {}", program.display(), e)),
+        ProcessFailure::Wait(e) => other(format!("等待进程失败: {}", e)),
+        ProcessFailure::Pipe => other("no process output pipe"),
+    })
+}
+
+fn run_process(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout_secs: u64,
+    env: &[(&str, &str)],
+) -> std::result::Result<HeadlessOutput, ProcessFailure> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -90,12 +133,10 @@ pub fn run_with_env(
         command.env(key, value);
     }
 
-    let mut child: Child = command
-        .spawn()
-        .map_err(|e| other(format!("启动 {} 失败: {}", program.display(), e)))?;
+    let mut child: Child = command.spawn().map_err(ProcessFailure::Spawn)?;
 
-    let mut stdout_pipe = child.stdout.take().ok_or_else(|| other("no stdout"))?;
-    let mut stderr_pipe = child.stderr.take().ok_or_else(|| other("no stderr"))?;
+    let mut stdout_pipe = child.stdout.take().ok_or(ProcessFailure::Pipe)?;
+    let mut stderr_pipe = child.stderr.take().ok_or(ProcessFailure::Pipe)?;
     let out_handle = std::thread::spawn(move || {
         let mut s = String::new();
         drain(&mut stdout_pipe, &mut s);
@@ -119,7 +160,7 @@ pub fn run_with_env(
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }
-            Err(e) => return Err(other(format!("等待进程失败: {}", e))),
+            Err(e) => return Err(ProcessFailure::Wait(e)),
         }
     };
 
@@ -140,6 +181,75 @@ pub fn run_with_env(
             exit_code: None,
         },
     })
+}
+
+/// Run a Context-only child and return a failure without any user-controlled
+/// process output. The `spawned` bit lets the operation log distinguish a
+/// failed executable lookup from a CLI that actually ran.
+pub fn run_context_extraction(
+    cmd: &AgentCommand,
+    timeout_secs: u64,
+) -> std::result::Result<HeadlessOutput, ContextExecFailure> {
+    let args: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+    let out = run_process(
+        Path::new(&cmd.program),
+        &args,
+        cmd.cwd.as_deref(),
+        timeout_secs,
+        &[],
+    )
+    .map_err(|failure| {
+        let (kind, spawned, io_error_kind) = match &failure {
+            ProcessFailure::Spawn(error) => (
+                ContextExecFailureKind::Start,
+                false,
+                Some(safe_io_error_kind(error.kind())),
+            ),
+            ProcessFailure::Pipe => (ContextExecFailureKind::Start, true, Some("broken_pipe")),
+            ProcessFailure::Wait(error) => (
+                ContextExecFailureKind::Wait,
+                true,
+                Some(safe_io_error_kind(error.kind())),
+            ),
+        };
+        ContextExecFailure {
+            kind,
+            spawned,
+            exit_code: None,
+            io_error_kind,
+        }
+    })?;
+
+    if out.exit_code.is_none() {
+        return Err(ContextExecFailure {
+            kind: ContextExecFailureKind::Timeout,
+            spawned: true,
+            exit_code: None,
+            io_error_kind: None,
+        });
+    }
+    if !out.success {
+        return Err(ContextExecFailure {
+            kind: ContextExecFailureKind::Exit,
+            spawned: true,
+            exit_code: out.exit_code,
+            io_error_kind: None,
+        });
+    }
+    Ok(out)
+}
+
+fn safe_io_error_kind(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::TimedOut => "timed_out",
+        std::io::ErrorKind::InvalidInput => "invalid_input",
+        std::io::ErrorKind::AlreadyExists => "already_exists",
+        std::io::ErrorKind::WouldBlock => "would_block",
+        std::io::ErrorKind::BrokenPipe => "broken_pipe",
+        _ => "other_io_error",
+    }
 }
 
 /// Run an AgentCommand headlessly, turning a bad exit into an error.
@@ -188,4 +298,59 @@ pub fn clean_exec_stdout(raw: &str) -> String {
     }
     let joined = lines.join("\n");
     joined.trim().to_string()
+}
+
+#[cfg(test)]
+mod context_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn missing_executable_is_not_reported_as_a_spawned_cli() {
+        let cmd = AgentCommand {
+            program: std::env::temp_dir()
+                .join(format!("noending-missing-cli-{}", uuid::Uuid::new_v4()))
+                .to_string_lossy()
+                .to_string(),
+            args: Vec::new(),
+            cwd: Some(std::env::temp_dir()),
+        };
+        let failure = run_context_extraction(&cmd, 1).unwrap_err();
+        assert_eq!(failure.kind, ContextExecFailureKind::Start);
+        assert!(!failure.spawned);
+        assert_eq!(failure.io_error_kind, Some("not_found"));
+        assert_eq!(failure.exit_code, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_cli_exposes_only_safe_status_metadata() {
+        let cmd = AgentCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf 'private stderr' >&2; exit 17".into()],
+            cwd: Some(std::env::temp_dir()),
+        };
+        let failure = run_context_extraction(&cmd, 2).unwrap_err();
+        assert_eq!(failure.kind, ContextExecFailureKind::Exit);
+        assert!(failure.spawned);
+        assert_eq!(failure.exit_code, Some(17));
+        assert_eq!(failure.io_error_kind, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_cli_is_recorded_as_invoked_without_exposing_output() {
+        let cmd = AgentCommand {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf 'private stderr' >&2; exec sleep 3".into(),
+            ],
+            cwd: Some(std::env::temp_dir()),
+        };
+        let failure = run_context_extraction(&cmd, 1).unwrap_err();
+        assert_eq!(failure.kind, ContextExecFailureKind::Timeout);
+        assert!(failure.spawned);
+        assert_eq!(failure.exit_code, None);
+        assert_eq!(failure.io_error_kind, None);
+    }
 }

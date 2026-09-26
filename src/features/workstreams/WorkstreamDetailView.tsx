@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import Icon from "../../components/Icon";
-import { copyToClipboard, contextUpdateErrorMessage, timeAgo } from "../../components/common";
+import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import NewSessionModal from "../sessions/NewSessionModal";
@@ -52,7 +52,7 @@ export default function WorkstreamDetailView({
   /** Context 状态（只读）：当前投影 + revision + 待更新。 */
   const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(null);
   const [ctxUpdating, setCtxUpdating] = useState(false);
-  const [ctxUpdateError, setCtxUpdateError] = useState("");
+  const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(null);
   const [pathsError, setPathsError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -91,7 +91,7 @@ export default function WorkstreamDetailView({
     setCtx(null);
     setLoadError("");
     setCtxState(null);
-    setCtxUpdateError("");
+    setCtxUpdateError(null);
     setPaths(null);
     setPathsError("");
     setMenuOpen(false);
@@ -104,7 +104,7 @@ export default function WorkstreamDetailView({
     }).catch(e => { if (!cancelled) setLoadError(String(e)); });
     api.getWorkstreamContextState(workstreamId).then((s) => {
       if (!cancelled) setCtxState(s);
-    }).catch(e => { if (!cancelled) setCtxUpdateError(contextUpdateErrorMessage(e)); });
+    }).catch(e => { if (!cancelled) setCtxUpdateError(contextUpdateErrorDetails(e)); });
     api.listWorkstreamPaths(workstreamId).then((rows) => {
       if (!cancelled) { setPaths(rows); setPathsError(""); }
     }).catch((e) => {
@@ -133,7 +133,7 @@ export default function WorkstreamDetailView({
   const updateContext = async () => {
     if (ctxUpdating) return;
     setCtxUpdating(true);
-    setCtxUpdateError("");
+    setCtxUpdateError(null);
     try {
       const out = await api.updateWorkstreamContext(workstreamId);
       showToast(
@@ -146,7 +146,7 @@ export default function WorkstreamDetailView({
       refresh();
     } catch (e) {
       console.error(e);
-      setCtxUpdateError(contextUpdateErrorMessage(e));
+      setCtxUpdateError(contextUpdateErrorDetails(e));
     } finally {
       setCtxUpdating(false);
     }
@@ -532,7 +532,7 @@ function IntelligenceSections({
   onChanged: () => void;
   ctxState: WorkstreamContextView | null;
   ctxUpdating: boolean;
-  ctxUpdateError: string;
+  ctxUpdateError: ReturnType<typeof contextUpdateErrorDetails> | null;
   onCopyContext: () => void;
   onUpdateContext: () => void;
 }) {
@@ -657,7 +657,15 @@ function IntelligenceSections({
               </div>
             )}
             {ctxUpdateError && (
-              <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere" }}>{ctxUpdateError}</div>
+              <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
+                <span>{ctxUpdateError.message}{ctxUpdateError.operationId ? ` · 操作 ID ${ctxUpdateError.operationId}` : ""}</span>
+                {ctxUpdateError.operationId && (
+                  <button className="btn small ghost" onClick={async () => {
+                    const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError));
+                    showToast(ok ? "已复制错误详情" : "复制失败，请手动复制错误详情");
+                  }}>复制错误详情</button>
+                )}
+              </div>
             )}
           </div>
         )}

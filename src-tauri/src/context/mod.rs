@@ -14,6 +14,8 @@
 //!
 //! CLI failure / timeout / invalid output NEVER falls back to a heuristic.
 
+pub(crate) mod diagnostics;
+
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
@@ -31,7 +33,7 @@ use crate::storage::context_repo::{
 };
 use crate::storage::Db;
 use crate::sync::extractor::{
-    self, CliExtractor, PromptInput, PromptRefs, PromptSession, INPUT_LIMIT_BYTES,
+    self, AssistantConfig, CliExtractor, PromptInput, PromptRefs, PromptSession, INPUT_LIMIT_BYTES,
     SESSION_CONTEXT_RESERVE_BYTES, WORKSTREAM_RESERVE_BYTES,
 };
 use crate::sync::merge::MergeEngine;
@@ -209,11 +211,98 @@ pub struct WorkstreamUpdateOutcome {
 
 // Session update
 
-pub fn update_session(db: &Db, session_id: &str) -> Result<SessionUpdateOutcome> {
-    let session = db
-        .get_session(session_id)?
-        .ok_or_else(|| other("会话不存在"))?;
+pub fn update_session(
+    db: &Db,
+    session_id: &str,
+    home: Option<&crate::workspace::home::NoEndingHome>,
+) -> Result<SessionUpdateOutcome> {
+    let mut runner = |cli: &CliExtractor, prompt: &str, runtime_dir: &std::path::Path| {
+        cli.run_context(prompt, runtime_dir)
+    };
+    update_session_with_runner(db, session_id, home, &mut runner)
+}
+
+type ContextRunner<'a> = dyn FnMut(
+        &CliExtractor,
+        &str,
+        &std::path::Path,
+    ) -> std::result::Result<String, extractor::ContextCallFailure>
+    + 'a;
+
+/// A single settings snapshot is used for both logging and the eventual CLI
+/// invocation. This avoids recording a different Agent/model if settings
+/// change while the extraction is being prepared.
+struct ContextLaunchConfig {
+    raw_agent: String,
+    agent: Option<crate::domain::Agent>,
+    opts: Option<crate::adapters::ExecOptions>,
+}
+
+impl ContextLaunchConfig {
+    fn from_db(db: &Db) -> Self {
+        let raw_agent = AssistantConfig::from_settings(db).agent;
+        let agent = crate::domain::Agent::parse(&raw_agent);
+        let opts =
+            agent.and_then(|agent| crate::agent_runtime::runtime_exec_options(db, agent).ok());
+        Self {
+            raw_agent,
+            agent,
+            opts,
+        }
+    }
+}
+
+fn update_session_with_runner(
+    db: &Db,
+    session_id: &str,
+    home: Option<&crate::workspace::home::NoEndingHome>,
+    runner: &mut ContextRunner<'_>,
+) -> Result<SessionUpdateOutcome> {
+    let mut operation = diagnostics::ContextOperation::new("session", session_id, home);
+    let launch = ContextLaunchConfig::from_db(db);
+    operation.record_config(&launch.raw_agent, launch.agent, launch.opts.as_ref());
+    if home.is_none() {
+        operation.fail_with(
+            "home_resolution",
+            "home_unavailable",
+            "NoEnding Home 未初始化，无法安全运行 Context Agent。",
+        );
+        let failure = operation.fail(&other("context home unavailable"));
+        return Err(AppError::ContextUpdateFailed(failure));
+    }
+    match update_session_inner(db, session_id, &launch, &mut operation, runner) {
+        Ok(outcome) => {
+            operation.succeed(match outcome.status {
+                ContextUpdateStatus::NoChange => "no_change",
+                ContextUpdateStatus::Partial => "partial",
+                _ => "updated",
+            });
+            Ok(outcome)
+        }
+        Err(error) => {
+            let failure = operation.fail(&error);
+            Err(AppError::ContextUpdateFailed(failure))
+        }
+    }
+}
+
+fn update_session_inner(
+    db: &Db,
+    session_id: &str,
+    launch: &ContextLaunchConfig,
+    operation: &mut diagnostics::ContextOperation,
+    runner: &mut ContextRunner<'_>,
+) -> Result<SessionUpdateOutcome> {
+    let session = db.get_session(session_id)?.ok_or_else(|| {
+        operation.fail_with("snapshot", "session_missing", "找不到要更新的会话。");
+        other("会话不存在")
+    })?;
     if session.trashed_at.is_some() {
+        operation.fail_with(
+            "snapshot",
+            "session_trashed",
+            "会话已移入回收站，恢复后才能更新摘要。",
+        );
         return Err(other("会话已移入回收站，暂不可更新摘要"));
     }
 
@@ -233,6 +322,7 @@ pub fn update_session(db: &Db, session_id: &str) -> Result<SessionUpdateOutcome>
                 .as_ref()
                 .map(|context| context.revision)
                 .unwrap_or(0);
+            operation.set_stage("database_commit");
             let revision = commit_session_update(
                 db,
                 session_id,
@@ -261,7 +351,8 @@ pub fn update_session(db: &Db, session_id: &str) -> Result<SessionUpdateOutcome>
         });
     }
 
-    let cli = require_cli(db)?;
+    operation.set_stage("runtime_configuration");
+    let cli = require_cli(launch, operation)?;
 
     let heading = session
         .title
@@ -287,12 +378,23 @@ pub fn update_session(db: &Db, session_id: &str) -> Result<SessionUpdateOutcome>
         extractor::build_update_prompt(&input)
     };
 
+    operation.set_stage("input_preparation");
     let (msgs, prompt, refs) = select_message_prefix(build, &all, SESSION_CONTEXT_RESERVE_BYTES)?;
     let upper = from + msgs.len() as i64;
 
-    let raw = cli
-        .run(&prompt)
-        .map_err(|e| AppError::context(ContextUpdateError::ModelCallFailed(e.to_string())))?;
+    let home = operation
+        .home()
+        .ok_or_else(|| other("context home unavailable"))?;
+    let runtime_dir = diagnostics::prepare_runtime_dir(home).map_err(|_| {
+        operation.fail_with(
+            "runtime_setup",
+            "runtime_dir_unavailable",
+            "无法创建 Context 专用运行目录，请检查 NoEnding Home。",
+        );
+        other("context runtime directory unavailable")
+    })?;
+    let raw = run_context_once(&cli, &prompt, &runtime_dir, operation, runner)?;
+    operation.set_stage("output_validation");
     let expected_targets = vec![session_id.to_string()];
     let allowed_items: HashSet<String> = HashSet::new();
     let parsed = extractor::parse_update_output(&raw, &refs, "", &expected_targets, &allowed_items)
@@ -303,6 +405,7 @@ pub fn update_session(db: &Db, session_id: &str) -> Result<SessionUpdateOutcome>
 
     let expect_rev = existing.as_ref().map(|c| c.revision).unwrap_or(0);
     let prefix: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
+    operation.set_stage("database_commit");
     let committed = commit_session_update(
         db,
         session_id,
@@ -395,11 +498,72 @@ impl Clone for TargetSession {
     }
 }
 
-pub fn update_workstream(db: &Db, workstream_id: &str) -> Result<WorkstreamUpdateOutcome> {
-    let ws = db
-        .get_workstream(workstream_id)?
-        .ok_or_else(|| other("Workstream 不存在"))?;
+pub fn update_workstream(
+    db: &Db,
+    workstream_id: &str,
+    home: Option<&crate::workspace::home::NoEndingHome>,
+) -> Result<WorkstreamUpdateOutcome> {
+    let mut runner = |cli: &CliExtractor, prompt: &str, runtime_dir: &std::path::Path| {
+        cli.run_context(prompt, runtime_dir)
+    };
+    update_workstream_with_runner(db, workstream_id, home, &mut runner)
+}
+
+fn update_workstream_with_runner(
+    db: &Db,
+    workstream_id: &str,
+    home: Option<&crate::workspace::home::NoEndingHome>,
+    runner: &mut ContextRunner<'_>,
+) -> Result<WorkstreamUpdateOutcome> {
+    let mut operation = diagnostics::ContextOperation::new("workstream", workstream_id, home);
+    let launch = ContextLaunchConfig::from_db(db);
+    operation.record_config(&launch.raw_agent, launch.agent, launch.opts.as_ref());
+    if home.is_none() {
+        operation.fail_with(
+            "home_resolution",
+            "home_unavailable",
+            "NoEnding Home 未初始化，无法安全运行 Context Agent。",
+        );
+        let failure = operation.fail(&other("context home unavailable"));
+        return Err(AppError::ContextUpdateFailed(failure));
+    }
+    match update_workstream_inner(db, workstream_id, &launch, &mut operation, runner) {
+        Ok(outcome) => {
+            operation.succeed(match outcome.status {
+                ContextUpdateStatus::NoChange => "no_change",
+                ContextUpdateStatus::Partial => "partial",
+                _ => "updated",
+            });
+            Ok(outcome)
+        }
+        Err(error) => {
+            let failure = operation.fail(&error);
+            Err(AppError::ContextUpdateFailed(failure))
+        }
+    }
+}
+
+fn update_workstream_inner(
+    db: &Db,
+    workstream_id: &str,
+    launch: &ContextLaunchConfig,
+    operation: &mut diagnostics::ContextOperation,
+    runner: &mut ContextRunner<'_>,
+) -> Result<WorkstreamUpdateOutcome> {
+    let ws = db.get_workstream(workstream_id)?.ok_or_else(|| {
+        operation.fail_with(
+            "snapshot",
+            "workstream_missing",
+            "找不到要更新的 Workstream。",
+        );
+        other("Workstream 不存在")
+    })?;
     if ws.visibility == workstream_visibility::ARCHIVED {
+        operation.fail_with(
+            "snapshot",
+            "workstream_archived",
+            "已归档的 Workstream 只读，请先恢复后再更新状态。",
+        );
         return Err(other("已归档的 Workstream 只读，恢复后才能更新状态"));
     }
 
@@ -490,18 +654,30 @@ pub fn update_workstream(db: &Db, workstream_id: &str) -> Result<WorkstreamUpdat
         });
     }
 
-    let cli = require_cli(db)?;
+    operation.set_stage("runtime_configuration");
+    let cli = require_cli(launch, operation)?;
 
     // Budget: reserve output space only for target sessions actually included.
     // Read-only sessions only carry their existing summary.
+    operation.set_stage("input_preparation");
     let (included, prompt, refs) =
         select_workstream_inputs(&ws, &item_lines, &targets, &read_only)?;
 
     let expected_targets: Vec<String> = included.iter().map(|t| t.session.id.clone()).collect();
 
-    let raw = cli
-        .run(&prompt)
-        .map_err(|e| AppError::context(ContextUpdateError::ModelCallFailed(e.to_string())))?;
+    let home = operation
+        .home()
+        .ok_or_else(|| other("context home unavailable"))?;
+    let runtime_dir = diagnostics::prepare_runtime_dir(home).map_err(|_| {
+        operation.fail_with(
+            "runtime_setup",
+            "runtime_dir_unavailable",
+            "无法创建 Context 专用运行目录，请检查 NoEnding Home。",
+        );
+        other("context runtime directory unavailable")
+    })?;
+    let raw = run_context_once(&cli, &prompt, &runtime_dir, operation, runner)?;
+    operation.set_stage("output_validation");
     let parsed = extractor::parse_update_output(
         &raw,
         &refs,
@@ -511,6 +687,7 @@ pub fn update_workstream(db: &Db, workstream_id: &str) -> Result<WorkstreamUpdat
     )
     .map_err(|e| AppError::context(ContextUpdateError::InvalidOutput(e.to_string())))?;
 
+    operation.set_stage("database_commit");
     let outcome = commit_workstream_update(
         db,
         workstream_id,
@@ -729,14 +906,64 @@ fn commit_workstream_update(
 
 // Helpers
 
-fn require_cli(db: &Db) -> Result<CliExtractor> {
-    CliExtractor::try_from_settings(db)
-        .map_err(|e| AppError::context(ContextUpdateError::AiUnavailable(e.to_string())))?
-        .ok_or_else(|| {
-            AppError::context(ContextUpdateError::AiUnavailable(
-                "Assistant Agent 未配置（none）".into(),
-            ))
-        })
+fn require_cli(
+    launch: &ContextLaunchConfig,
+    operation: &mut diagnostics::ContextOperation,
+) -> Result<CliExtractor> {
+    if launch.raw_agent == "none" {
+        operation.fail_with(
+            "runtime_configuration",
+            "agent_not_configured",
+            "未选择 Context Agent，请在 Assistant 设置中选择 Codex、Claude Code 或 Pi。",
+        );
+        return Err(AppError::context(ContextUpdateError::AiUnavailable(
+            "未选择 Context Agent".into(),
+        )));
+    }
+    let Some(agent) = launch.agent else {
+        operation.fail_with(
+            "runtime_configuration",
+            "agent_configuration_invalid",
+            "Assistant Agent 配置无效，请重新选择 Agent。",
+        );
+        return Err(AppError::context(ContextUpdateError::AiUnavailable(
+            "Assistant Agent 配置无效".into(),
+        )));
+    };
+    let Some(opts) = launch.opts.as_ref() else {
+        operation.fail_with(
+            "runtime_configuration",
+            "runtime_configuration_invalid",
+            "Agent Runtime 配置无效，请检查 Settings → Agent。",
+        );
+        return Err(AppError::context(ContextUpdateError::AiUnavailable(
+            "Agent Runtime 配置不可用".into(),
+        )));
+    };
+    Ok(CliExtractor::new(agent, opts.clone()))
+}
+
+fn run_context_once(
+    cli: &CliExtractor,
+    prompt: &str,
+    runtime_dir: &std::path::Path,
+    operation: &mut diagnostics::ContextOperation,
+    runner: &mut ContextRunner<'_>,
+) -> Result<String> {
+    operation.record_invocation_config(cli.agent, &cli.opts);
+    operation.set_stage("model_call");
+    match runner(cli, prompt, runtime_dir) {
+        Ok(raw) => {
+            operation.set_cli_result(true, Some(0), None);
+            Ok(raw)
+        }
+        Err(failure) => {
+            operation.set_cli_result(failure.spawned, failure.exit_code, failure.io_error_kind);
+            let (code, message) = diagnostics::cli_failure(failure.kind);
+            operation.fail_with("model_call", code, message);
+            Err(other("context model call failed"))
+        }
+    }
 }
 
 /// Choose the largest whole-message prefix whose prompt fits the input budget.
@@ -856,7 +1083,12 @@ fn select_workstream_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Agent, Workstream};
+    use crate::domain::{
+        Agent, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate, Workstream,
+    };
+    use crate::workspace::home::NoEndingHome;
+    use serde_json::Value;
+    use std::path::PathBuf;
 
     fn test_workstream() -> Workstream {
         Workstream {
@@ -886,6 +1118,443 @@ mod tests {
             last_conversation_at: None,
             trashed_at: None,
         }
+    }
+
+    struct ServiceFixture {
+        db: Option<Db>,
+        root: PathBuf,
+    }
+
+    impl ServiceFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "noending-context-service-{}",
+                crate::storage::new_id()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let db = Db::open(&root.join("db.sqlite")).unwrap();
+            Self { db: Some(db), root }
+        }
+
+        fn db(&self) -> &Db {
+            self.db.as_ref().unwrap()
+        }
+
+        fn home(&self) -> NoEndingHome {
+            NoEndingHome::new(self.root.join("home").to_str().unwrap(), None).unwrap()
+        }
+
+        fn add_session(&self, message_count: usize, message_size: usize) -> String {
+            let db = self.db();
+            let root_id = format!("context-service-root-{}", crate::storage::new_id());
+            let session_id = db
+                .upsert_logical_session_unchecked(
+                    Agent::Codex,
+                    &root_id,
+                    Some("Context service fixture"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .0;
+            let member_id = db
+                .upsert_session_member(
+                    &session_id,
+                    Agent::Codex,
+                    &root_id,
+                    crate::domain::SessionMemberRelation::Root,
+                    None,
+                    "context_service_test",
+                    "/tmp/context-service-fixture",
+                    None,
+                    None,
+                    None,
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+            let content = "x".repeat(message_size);
+            let messages: Vec<ParsedSessionMessage> = (0..message_count)
+                .map(|i| ParsedSessionMessage {
+                    source_message_id: Some(format!("source-{i}")),
+                    source_position: i.to_string(),
+                    ts: None,
+                    role: SessionMessageRole::User,
+                    content: content.clone(),
+                    provider: None,
+                    model: None,
+                })
+                .collect();
+            db.commit_member_ingest(
+                &session_id,
+                &member_id,
+                &messages,
+                None,
+                &SourceCursorUpdate {
+                    file_identity: "context-service-fixture".into(),
+                    generation: 0,
+                    byte_offset: 10_000,
+                    last_seen_size: 10_000,
+                    mtime: None,
+                    start_byte_offset: 0,
+                    prefix_hash: String::new(),
+                },
+            )
+            .unwrap();
+            session_id
+        }
+
+        fn add_workstream(&self, id: &str) -> Workstream {
+            let mut workstream = test_workstream();
+            workstream.id = id.into();
+            self.db().upsert_workstream(&workstream).unwrap();
+            workstream
+        }
+    }
+
+    impl Drop for ServiceFixture {
+        fn drop(&mut self) {
+            drop(self.db.take());
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn valid_output(session_id: &str) -> String {
+        format!(
+            r#"{{"session_contexts":[{{"session_id":"{session_id}","summary_current_state":"context updated","decisions":[],"open_questions":[],"next_steps":[]}}],"workstream_mutations":[]}}"#
+        )
+    }
+
+    fn log_records(home: &NoEndingHome) -> Vec<Value> {
+        std::fs::read_dir(diagnostics::log_dir(home))
+            .unwrap()
+            .flat_map(|entry| {
+                std::fs::read_to_string(entry.unwrap().path())
+                    .unwrap()
+                    .lines()
+                    .map(serde_json::from_str)
+                    .collect::<Vec<serde_json::Result<Value>>>()
+            })
+            .map(|result| result.unwrap())
+            .collect()
+    }
+
+    fn failure_code(result: crate::error::Result<impl std::fmt::Debug>) -> String {
+        match result.unwrap_err() {
+            AppError::ContextUpdateFailed(failure) => failure.code,
+            other => panic!("expected structured Context error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_no_change_and_early_config_failure_are_logged_without_cli() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let ws = fixture.add_workstream("service-no-change");
+        fixture
+            .db()
+            .tx(|tx| context_repo::consume_input_revision_conn(tx, &ws.id))
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let mut runner = |_: &CliExtractor, _: &str, _: &std::path::Path| {
+            calls.set(calls.get() + 1);
+            unreachable!("no-change workstream must not invoke the CLI")
+        };
+        let no_change =
+            update_workstream_with_runner(fixture.db(), &ws.id, Some(&home), &mut runner).unwrap();
+        assert_eq!(no_change.status, ContextUpdateStatus::NoChange);
+        assert_eq!(calls.get(), 0);
+        let record = &log_records(&home)[0];
+        assert_eq!(record["stage"], "no_change");
+        assert_eq!(record["outcome"], "no_change");
+        assert_eq!(record["cli_invoked"], false);
+
+        let empty_session_id = fixture.add_session(0, 0);
+        let empty_session =
+            update_session_with_runner(fixture.db(), &empty_session_id, Some(&home), &mut runner)
+                .unwrap();
+        assert_eq!(empty_session.status, ContextUpdateStatus::NoChange);
+        assert_eq!(calls.get(), 0);
+        assert_eq!(log_records(&home)[1]["outcome"], "no_change");
+        assert_eq!(log_records(&home)[1]["cli_invoked"], false);
+
+        let session_id = fixture.add_session(1, 64);
+        fixture.db().set_setting("assistant.agent", "none").unwrap();
+        let result =
+            update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner);
+        assert_eq!(failure_code(result), "agent_not_configured");
+        assert_eq!(calls.get(), 0);
+        let records = log_records(&home);
+        assert_eq!(records.len(), 3);
+        let record = records.last().unwrap();
+        assert_eq!(record["stage"], "runtime_configuration");
+        assert_eq!(record["cli_invoked"], false);
+        assert_eq!(record["agent"], "none");
+    }
+
+    #[test]
+    fn service_session_updates_are_partial_then_complete_and_record_each_call() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let session_id = fixture.add_session(50, 1_200);
+        let mut runner = |cli: &CliExtractor, _: &str, runtime_dir: &std::path::Path| {
+            assert_eq!(cli.agent, Agent::Codex);
+            assert_eq!(runtime_dir, diagnostics::runtime_dir(&home));
+            Ok(valid_output(&session_id))
+        };
+
+        let first = update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner)
+            .unwrap();
+        assert_eq!(first.status, ContextUpdateStatus::Partial);
+        assert!(
+            session_context_view(fixture.db(), &session_id)
+                .unwrap()
+                .pending
+        );
+
+        let second =
+            update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner)
+                .unwrap();
+        assert_eq!(second.status, ContextUpdateStatus::Updated);
+        let view = session_context_view(fixture.db(), &session_id).unwrap();
+        assert!(!view.pending);
+        assert_eq!(
+            view.fields.unwrap().summary_current_state,
+            "context updated"
+        );
+
+        let records = log_records(&home);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["outcome"], "partial");
+        assert_eq!(records[1]["outcome"], "updated");
+        assert!(records.iter().all(|record| record["cli_invoked"] == true));
+    }
+
+    #[test]
+    fn service_freezes_the_launch_agent_and_override_for_invocation_and_log() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let session_id = fixture.add_session(1, 80);
+        fixture
+            .db()
+            .set_setting("assistant.agent", "codex")
+            .unwrap();
+        fixture
+            .db()
+            .set_setting("agent.runtime.codex", r#"{"model":"gpt-context-test"}"#)
+            .unwrap();
+        let mut runner = |cli: &CliExtractor, _: &str, _: &std::path::Path| {
+            assert_eq!(cli.agent, Agent::Codex);
+            assert_eq!(cli.opts.model.as_deref(), Some("gpt-context-test"));
+            fixture.db().set_setting("assistant.agent", "none").unwrap();
+            fixture
+                .db()
+                .set_setting("agent.runtime.codex", r#"{"model":"changed-during-call"}"#)
+                .unwrap();
+            Ok(valid_output(&session_id))
+        };
+
+        update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner).unwrap();
+        let record = &log_records(&home)[0];
+        assert_eq!(record["agent"], "codex");
+        assert_eq!(record["model_override"], "model=gpt-context-test");
+    }
+
+    #[test]
+    fn service_invalid_workstream_output_logs_validation_and_preserves_context_and_frontiers() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let ws = fixture.add_workstream("service-invalid-output");
+        let session_id = fixture.add_session(1, 80);
+        fixture
+            .db()
+            .set_session_owner(&session_id, Some(&ws.id))
+            .unwrap();
+        let frontiers_before = fixture.db().workstream_frontiers(&ws.id).unwrap();
+        assert!(frontiers_before.is_empty());
+        let state_before = fixture.db().get_workstream_context_state(&ws.id).unwrap();
+        let mut runner = |_: &CliExtractor, _: &str, _: &std::path::Path| Ok("not JSON".into());
+
+        let result = update_workstream_with_runner(fixture.db(), &ws.id, Some(&home), &mut runner);
+        assert_eq!(failure_code(result), "invalid_output");
+        assert!(fixture
+            .db()
+            .get_session_context(&session_id)
+            .unwrap()
+            .is_none());
+        let state_after = fixture.db().get_workstream_context_state(&ws.id).unwrap();
+        assert_eq!(state_after.context_revision, state_before.context_revision);
+        assert_eq!(state_after.input_revision, state_before.input_revision);
+        assert_eq!(
+            state_after.consumed_input_revision,
+            state_before.consumed_input_revision
+        );
+        assert!(fixture
+            .db()
+            .workstream_frontiers(&ws.id)
+            .unwrap()
+            .is_empty());
+        let record = &log_records(&home)[0];
+        assert_eq!(record["stage"], "output_validation");
+        assert_eq!(record["cli_invoked"], true);
+        assert_eq!(record["error_code"], "invalid_output");
+    }
+
+    #[test]
+    fn service_workstream_success_commits_session_context_and_frontier() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let ws = fixture.add_workstream("service-workstream-success");
+        let session_id = fixture.add_session(1, 80);
+        fixture
+            .db()
+            .set_session_owner(&session_id, Some(&ws.id))
+            .unwrap();
+        let mut runner =
+            |_: &CliExtractor, _: &str, _: &std::path::Path| Ok(valid_output(&session_id));
+
+        let outcome =
+            update_workstream_with_runner(fixture.db(), &ws.id, Some(&home), &mut runner).unwrap();
+        assert_eq!(outcome.status, ContextUpdateStatus::Updated);
+        assert_eq!(outcome.updated_sessions, vec![session_id.clone()]);
+        assert_eq!(
+            fixture
+                .db()
+                .get_session_context(&session_id)
+                .unwrap()
+                .unwrap()
+                .fields
+                .summary_current_state,
+            "context updated"
+        );
+        let frontiers = fixture.db().workstream_frontiers(&ws.id).unwrap();
+        assert_eq!(frontiers.len(), 1);
+        assert_eq!(frontiers[0].session_id, session_id);
+        assert_eq!(frontiers[0].consumed_through_seq, 1);
+        let record = &log_records(&home)[0];
+        assert_eq!(record["stage"], "updated");
+        assert_eq!(record["cli_invoked"], true);
+    }
+
+    #[test]
+    fn service_workstream_commit_conflict_is_logged_after_the_cli_call() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let ws = fixture.add_workstream("service-commit-conflict");
+        let session_id = fixture.add_session(1, 80);
+        fixture
+            .db()
+            .set_session_owner(&session_id, Some(&ws.id))
+            .unwrap();
+        let mut runner = |_: &CliExtractor, _: &str, _: &std::path::Path| {
+            fixture
+                .db()
+                .tx(|tx| {
+                    crate::storage::context_repo::bump_input_revision_conn(tx, &ws.id)?;
+                    Ok(())
+                })
+                .expect("inject Workstream snapshot conflict");
+            Ok(valid_output(&session_id))
+        };
+
+        let result = update_workstream_with_runner(fixture.db(), &ws.id, Some(&home), &mut runner);
+        assert_eq!(failure_code(result), "stale_snapshot");
+        assert!(fixture
+            .db()
+            .get_session_context(&session_id)
+            .unwrap()
+            .is_none());
+        let record = &log_records(&home)[0];
+        assert_eq!(record["stage"], "database_commit");
+        assert_eq!(record["cli_invoked"], true);
+        assert_eq!(record["error_code"], "stale_snapshot");
+    }
+
+    #[test]
+    fn service_runtime_directory_failure_never_invokes_runner() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let session_id = fixture.add_session(1, 80);
+        std::fs::create_dir_all(&home.root).unwrap();
+        std::fs::write(&home.runtime_dir, "not a directory").unwrap();
+        let mut calls = 0;
+        let mut runner = |_: &CliExtractor, _: &str, _: &std::path::Path| {
+            calls += 1;
+            Ok(valid_output(&session_id))
+        };
+
+        let result =
+            update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner);
+        assert_eq!(failure_code(result), "runtime_dir_unavailable");
+        assert_eq!(calls, 0);
+        let record = &log_records(&home)[0];
+        assert_eq!(record["stage"], "runtime_setup");
+        assert_eq!(record["cli_invoked"], false);
+    }
+
+    #[test]
+    fn service_success_survives_unwritable_context_log_directory() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let session_id = fixture.add_session(1, 80);
+        std::fs::create_dir_all(&home.logs_dir).unwrap();
+        std::fs::write(diagnostics::log_dir(&home), "not a directory").unwrap();
+        let mut runner =
+            |_: &CliExtractor, _: &str, _: &std::path::Path| Ok(valid_output(&session_id));
+
+        let outcome =
+            update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner)
+                .unwrap();
+        assert_eq!(outcome.status, ContextUpdateStatus::Updated);
+        assert_eq!(
+            fixture
+                .db()
+                .get_session_context(&session_id)
+                .unwrap()
+                .unwrap()
+                .fields
+                .summary_current_state,
+            "context updated"
+        );
+    }
+
+    #[test]
+    fn service_target_state_errors_keep_recovery_instructions() {
+        let fixture = ServiceFixture::new();
+        let home = fixture.home();
+        let session_id = fixture.add_session(1, 80);
+        fixture
+            .db()
+            .tx(|tx| {
+                tx.execute(
+                    "UPDATE sessions SET trashed_at = ?1 WHERE id = ?2",
+                    rusqlite::params![crate::storage::now(), session_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut runner = |_: &CliExtractor, _: &str, _: &std::path::Path| {
+            unreachable!("trashed session cannot invoke the CLI")
+        };
+        let result =
+            update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner);
+        assert_eq!(failure_code(result), "session_trashed");
+        assert!(log_records(&home)[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("恢复"));
+
+        let archived = fixture.add_workstream("service-archived");
+        let mut archived = archived;
+        archived.visibility = workstream_visibility::ARCHIVED.into();
+        fixture.db().upsert_workstream(&archived).unwrap();
+        let result =
+            update_workstream_with_runner(fixture.db(), &archived.id, Some(&home), &mut runner);
+        assert_eq!(failure_code(result), "workstream_archived");
+        let records = log_records(&home);
+        assert!(records[1]["message"].as_str().unwrap().contains("恢复"));
     }
 
     #[test]

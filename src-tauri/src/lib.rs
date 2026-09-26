@@ -163,6 +163,7 @@ pub fn run() {
             commands::get_workstream_context_state,
             commands::update_session_context,
             commands::update_workstream_context,
+            commands::open_context_extraction_logs,
             commands::add_context_item,
             commands::edit_context_item,
             commands::set_item_status,
