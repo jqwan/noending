@@ -510,6 +510,24 @@ impl Db {
             {
                 return Ok((id, false));
             }
+            // Topology guard: a stored child/side member must not be promoted
+            // to a Logical Root — refuse before the session row is created, so
+            // the refusal can never strand a session without its root member.
+            let stored_relation: Option<String> = tx
+                .query_row(
+                    "SELECT relation FROM session_members
+                     WHERE agent = ?1 AND source_member_id = ?2",
+                    params![agent.as_str(), root_agent_session_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(rel) = stored_relation {
+                if rel != SessionMemberRelation::Root.as_str() {
+                    return Err(other(format!(
+                        "member {root_agent_session_id} 已是 {rel} 成员，拒绝提升为 Logical Root"
+                    )));
+                }
+            }
             let (id, is_new) = upsert_logical_session_conn(
                 tx,
                 agent,
@@ -2589,15 +2607,25 @@ pub fn upsert_session_member_conn(
     last_activity_at: Option<&str>,
     metadata: &serde_json::Value,
 ) -> Result<String> {
-    let existing: Option<(String, Option<String>)> = conn
+    let existing: Option<(String, String, Option<String>)> = conn
         .query_row(
-            "SELECT id, last_activity_at FROM session_members
+            "SELECT id, relation, last_activity_at FROM session_members
                  WHERE agent = ?1 AND source_member_id = ?2",
             params![agent.as_str(), source_member_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    if let Some((id, previous_activity)) = existing {
+    if let Some((id, existing_relation, previous_activity)) = existing {
+        // Topology guard: a member's root-ness never flips. A stored Root
+        // re-claimed as child/side (or the reverse) would re-home the member
+        // and strand its old Logical Session without a root member; such a
+        // claim is a source bug and is refused here — the row stays exactly
+        // as stored. child ↔ side changes stay allowed.
+        let root_flip = (existing_relation == SessionMemberRelation::Root.as_str())
+            != (relation == SessionMemberRelation::Root);
+        if root_flip {
+            return Ok(id);
+        }
         let activity = later_timestamp(previous_activity.as_deref(), last_activity_at);
         conn.execute(
             "UPDATE session_members SET

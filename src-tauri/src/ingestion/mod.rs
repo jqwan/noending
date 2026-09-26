@@ -26,7 +26,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use crate::adapters::{AgentAdapter, DiscoveredMember, DiscoveredMemberKind};
-use crate::domain::{Agent, Session};
+use crate::domain::{Agent, Session, SessionMember, SessionMemberRelation};
 use crate::error::Result;
 use crate::storage::Db;
 use crate::sync::SyncEngine;
@@ -231,6 +231,34 @@ fn resolve_diagnostic(db: &Db, d: &DiscoveredMember) -> Result<()> {
         d.agent,
         crate::domain::diagnostic_kind::UNRESOLVED_SESSION_MEMBER,
         &d.source_member_id,
+    )?;
+    db.resolve_ingestion_diagnostic(
+        d.agent,
+        crate::domain::diagnostic_kind::MEMBER_RELATION_CONFLICT,
+        &d.source_member_id,
+    )
+}
+
+/// Discovery claims a root-ness the stored member contradicts. The storage
+/// layer refuses the flip; this records why in the diagnostics page.
+fn note_relation_conflict(db: &Db, d: &DiscoveredMember, stored: &SessionMember) -> Result<()> {
+    db.upsert_ingestion_diagnostic(
+        d.agent,
+        crate::domain::diagnostic_kind::MEMBER_RELATION_CONFLICT,
+        Some(&d.source_member_id),
+        d.parent_source_member_id.as_deref(),
+        Some(&d.source_path.to_string_lossy()),
+        &format!(
+            "discovery claims {:?}, but the stored member is {:?} of session {}; topology change refused",
+            d.kind,
+            stored.relation,
+            stored.session_id
+        ),
+        &serde_json::json!({
+            "discovered_kind": format!("{:?}", d.kind),
+            "stored_relation": stored.relation.as_str(),
+            "stored_session_id": stored.session_id,
+        }),
     )
 }
 
@@ -256,6 +284,14 @@ fn resolve_batch(
     for d in discovered {
         if !d.kind.is_logical_root() {
             continue;
+        }
+        // Topology guard: a stored child/side member must not be promoted to
+        // a Logical Root by a later discovery.
+        if let Some(stored) = db.find_member_by_source_id(agent, &d.source_member_id)? {
+            if stored.relation != SessionMemberRelation::Root {
+                note_relation_conflict(db, d, &stored)?;
+                continue;
+            }
         }
         match ensure_logical_session(db, d, attacher.as_ref()) {
             Ok((s, is_new)) if !s.is_trashed() => {
@@ -308,6 +344,14 @@ fn resolve_batch(
                 };
                 if session.is_trashed() {
                     continue;
+                }
+                // Topology guard: a stored Root must not be re-homed as a
+                // child/side of another Logical Session.
+                if let Some(stored) = db.find_member_by_source_id(agent, &d.source_member_id)? {
+                    if stored.relation == SessionMemberRelation::Root {
+                        note_relation_conflict(db, d, &stored)?;
+                        continue;
+                    }
                 }
                 let raw_path = d.source_path.to_string_lossy().to_string();
                 if db

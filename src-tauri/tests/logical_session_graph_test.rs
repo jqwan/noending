@@ -756,7 +756,24 @@ fn a_stale_commit_after_topology_correction_is_rejected() {
     let db = open_db("topology-race");
     let (session, member_id, _) = seed_root(&db);
 
-    // Topology correction: the member is re-pointed at another session.
+    // A CHILD member of this session gets re-pointed at another session by a
+    // topology correction. (A root member cannot move: root-ness never flips —
+    // see a_stored_root_is_never_re_homed_as_a_child.)
+    let child_member_id = db
+        .upsert_session_member(
+            &session.id,
+            Agent::Codex,
+            "moved-member",
+            SessionMemberRelation::Child,
+            None,
+            "codex_rollout",
+            "/tmp/moved",
+            None,
+            None,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
     let (other_id, _) = db
         .upsert_logical_session_unchecked(
             Agent::Codex,
@@ -769,26 +786,12 @@ fn a_stale_commit_after_topology_correction_is_rejected() {
             None,
         )
         .unwrap();
+    // The correction moves the child member: re-upsert it under the other
+    // session (same identity — child to child re-homing stays allowed).
     db.upsert_session_member(
         &other_id,
         Agent::Codex,
         "moved-member",
-        SessionMemberRelation::Child,
-        None,
-        "codex_rollout",
-        "/tmp/moved",
-        None,
-        None,
-        None,
-        &serde_json::json!({}),
-    )
-    .unwrap();
-    // The correction moves OUR member: simulate by re-upserting it under the
-    // other session (same identity).
-    db.upsert_session_member(
-        &other_id,
-        Agent::Codex,
-        &db.get_member(&member_id).unwrap().unwrap().source_member_id,
         SessionMemberRelation::Child,
         None,
         "codex_rollout",
@@ -810,7 +813,13 @@ fn a_stale_commit_after_topology_correction_is_rejected() {
         content: "过期提交的提问".into(),
     }];
     let stored = db
-        .commit_member_ingest(&session.id, &member_id, &delta, None, &seed_update(1, 40))
+        .commit_member_ingest(
+            &session.id,
+            &child_member_id,
+            &delta,
+            None,
+            &seed_update(1, 40),
+        )
         .unwrap();
     assert!(stored.is_empty(), "the stale commit stores nothing");
     assert_eq!(
@@ -1250,4 +1259,135 @@ fn seed_update(generation: i64, byte_offset: u64) -> noending::domain::SourceCur
         start_byte_offset: 0,
         prefix_hash: String::new(),
     }
+}
+
+const OTHER_ROOT_ID: &str = "01a0d943-53b8-7e82-8f84-0c2b33da8802";
+
+/// Topology guard: a member that anchors a Logical Session as its Root is
+/// never re-homed as a child by a later discovery. The flip is refused, the
+/// session survives with its root member (no ghost), and the contradiction is
+/// observable as an ingestion diagnostic.
+#[test]
+fn a_stored_root_is_never_re_homed_as_a_child() {
+    let root_dir = temp_root("topo-guard");
+    write_rollout(
+        &root_dir,
+        &rollout_name(ROOT_ID),
+        &[
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "第一问"),
+        ],
+    );
+    let db = open_db("topo-guard");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
+    let session_a = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+
+    // Pass 2: the same session id is re-claimed as a subagent of a new root.
+    write_rollout(
+        &root_dir,
+        &rollout_name(ROOT_ID),
+        &[meta_line(
+            ROOT_ID,
+            serde_json::json!({"thread_source": "subagent", "parent_thread_id": OTHER_ROOT_ID}),
+        )],
+    );
+    write_rollout(
+        &root_dir,
+        &rollout_name(OTHER_ROOT_ID),
+        &[
+            meta_line(OTHER_ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "新根的提问"),
+        ],
+    );
+    reconcile(&db);
+
+    let member = db
+        .find_member_by_source_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(member.relation.as_str(), "root", "no demotion");
+    assert_eq!(member.session_id, session_a.id, "no re-home");
+    let members_a = db.members_for_session(&session_a.id).unwrap();
+    assert!(
+        members_a
+            .iter()
+            .any(|m| m.relation.as_str() == "root" && m.source_member_id == ROOT_ID),
+        "Session A keeps its root member — no ghost session"
+    );
+    let diagnostics = db.list_ingestion_diagnostics(1).unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.diagnostic_key.contains("member_relation_conflict")
+                && d.source_member_id.as_deref() == Some(ROOT_ID)),
+        "the contradiction is observable: {diagnostics:?}"
+    );
+    // The new root still resolves as its own session.
+    assert!(db
+        .find_session_by_root_agent_id(Agent::Codex, OTHER_ROOT_ID)
+        .unwrap()
+        .is_some());
+}
+
+/// The reverse direction: a stored child/side member is never promoted to a
+/// Logical Root by a later discovery.
+#[test]
+fn a_stored_child_is_never_promoted_to_a_root() {
+    let root_dir = temp_root("topo-promote");
+    write_rollout(
+        &root_dir,
+        &rollout_name(ROOT_ID),
+        &[meta_line(ROOT_ID, serde_json::json!({}))],
+    );
+    write_rollout(
+        &root_dir,
+        &rollout_name(CHILD_ID),
+        &[meta_line(
+            CHILD_ID,
+            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
+        )],
+    );
+    let db = open_db("topo-promote");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
+    let stored = db
+        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.relation.as_str(), "child");
+
+    // The source now claims CHILD_ID is a root of its own.
+    write_rollout(
+        &root_dir,
+        &rollout_name(CHILD_ID),
+        &[
+            meta_line(CHILD_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "突然自称根会话"),
+        ],
+    );
+    reconcile(&db);
+
+    let stored = db
+        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.relation.as_str(), "child", "no promotion");
+    assert!(
+        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+            .unwrap()
+            .is_none(),
+        "no Logical Session is created for the refused promotion"
+    );
+    let diagnostics = db.list_ingestion_diagnostics(1).unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.diagnostic_key.contains("member_relation_conflict")
+                && d.source_member_id.as_deref() == Some(CHILD_ID)),
+        "the contradiction is observable: {diagnostics:?}"
+    );
 }

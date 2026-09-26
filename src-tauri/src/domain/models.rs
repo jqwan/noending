@@ -629,6 +629,10 @@ pub mod diagnostic_kind {
     /// A discovered member that could not be resolved to any Logical Session
     /// (no root, or the parent chain is broken for now).
     pub const UNRESOLVED_SESSION_MEMBER: &str = "unresolved_session_member";
+    /// Discovery claims a root-ness the stored member contradicts (a Root
+    /// re-claimed as child/side, or the reverse). The flip is refused in
+    /// storage; this diagnostic is the observability.
+    pub const MEMBER_RELATION_CONFLICT: &str = "member_relation_conflict";
 }
 
 /// Adapter's strict verdict about one member's source. The semantics
