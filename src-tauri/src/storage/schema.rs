@@ -312,7 +312,13 @@ const CURRENT_SCHEMA: &str = r#"
       last_seen_size INTEGER NOT NULL DEFAULT 0,
       mtime REAL,
       prefix_hash TEXT NOT NULL DEFAULT '',
-      identity_tail_hash TEXT NOT NULL DEFAULT ''
+      identity_tail_hash TEXT NOT NULL DEFAULT '',
+      -- Stateful provenance frontier (Provenance 方案 §15). Only a stateful
+      -- evidence adapter writes these; they are cursor state, never a UI
+      -- authority, and live in the same transaction as the messages they
+      -- cover so the bytes frontier and the provenance state cannot drift.
+      active_provider TEXT,
+      active_model TEXT
     );
     -- The ONLY conversation store (§6): user/assistant turns of the ROOT
     -- member. Identity dedup is (member_id, source_identity_hash); sequence is

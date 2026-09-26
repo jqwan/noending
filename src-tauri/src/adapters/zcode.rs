@@ -215,6 +215,27 @@ fn message_of(
     if text.trim().is_empty() {
         return (None, observation);
     }
+    // Message provenance (Provenance 方案 §13A/§16.7): a settled assistant
+    // response's own `data` carries the actual generation identity at the top
+    // level — `modelID` / `providerID`, older rows spell them `modelId` /
+    // `providerId` (the two spellings never disagree when both are present;
+    // verified across the whole real store). Read together with the settled
+    // guard above: provenance is only trusted once `time.completed` exists.
+    // Rows without the fields stay NULL — unknown stays unknown.
+    let (provider, model) = if kind == "assistant_response" {
+        (
+            data.get("providerID")
+                .or_else(|| data.get("providerId"))
+                .and_then(|p| p.as_str())
+                .map(String::from),
+            data.get("modelID")
+                .or_else(|| data.get("modelId"))
+                .and_then(|m| m.as_str())
+                .map(String::from),
+        )
+    } else {
+        (None, None)
+    };
     let message = ParsedSessionMessage {
         source_message_id: Some(id.to_string()),
         source_position: format!("msg:{id}"),
@@ -228,8 +249,8 @@ fn message_of(
             SessionMessageRole::Assistant
         },
         content: text,
-        provider: None,
-        model: None,
+        provider,
+        model,
     };
     (Some(message), observation)
 }
@@ -430,6 +451,8 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             ),
             messages,
             source: Some(source),
+            next_active_provider: None,
+            next_active_model: None,
         })
     }
 
@@ -970,6 +993,51 @@ mod tests {
                 .inspect_member_source(&member_of(&broken, "s", SessionMemberRelation::Root))
                 .unwrap(),
             SourceAvailability::Unavailable
+        );
+    }
+
+    /// Provenance 方案 §28.2 — a settled assistant response's own data carries
+    /// its generation identity in either field spelling; a row without the
+    /// fields stays NULL.
+    #[test]
+    fn settled_assistant_responses_carry_their_model_and_provider() {
+        let root = unique_dir("prov");
+        let db = store(&root);
+        let conn = open(&db);
+        session_row(&conn, "s", None, "/repo", 100);
+        let mut pascal = reply(true);
+        pascal["modelID"] = serde_json::json!("GLM-5.3");
+        pascal["providerID"] = serde_json::json!("builtin:bigmodel");
+        message_row(&conn, "m1", "s", 1, pascal);
+        part_row(&conn, "p1", "m1", "s", 1, text_part("回答一"));
+        let mut camel = reply(true);
+        camel["modelId"] = serde_json::json!("GLM-5.3-Flash");
+        camel["providerId"] = serde_json::json!("bigmodel-api");
+        message_row(&conn, "m2", "s", 2, camel);
+        part_row(&conn, "p2", "m2", "s", 1, text_part("回答二"));
+        message_row(&conn, "m3", "s", 3, reply(true));
+        part_row(&conn, "p3", "m3", "s", 1, text_part("回答三"));
+        drop(conn);
+
+        let delta = ZCodeAdapter
+            .read_member_delta(
+                &member_of(&db, "s", SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        let assistant: Vec<(Option<&str>, Option<&str>)> = delta
+            .messages
+            .iter()
+            .filter(|m| m.role == SessionMessageRole::Assistant)
+            .map(|m| (m.provider.as_deref(), m.model.as_deref()))
+            .collect();
+        assert_eq!(
+            assistant,
+            vec![
+                (Some("builtin:bigmodel"), Some("GLM-5.3")),
+                (Some("bigmodel-api"), Some("GLM-5.3-Flash")),
+                (None, None),
+            ]
         );
     }
 }

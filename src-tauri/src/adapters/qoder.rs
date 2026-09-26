@@ -459,12 +459,27 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
                 return Some(ParsedLine::observation_only(observation));
             }
+            // Message provenance (Provenance 方案 §13A/§16.4): the assistant
+            // row itself carries `message.model` — same envelope position as
+            // Claude Code's actual response model, source-native opaque ids
+            // ("dfmodel", "qfmodel", …; 4728/4728 rows in the real corpus).
+            // This is NOT the `runtime-config.model` broadcast the plan
+            // forbids: the field sits on the message row. Locally synthesized
+            // rows ("<synthetic>" error notices) are not real generations and
+            // stay NULL. No provider field exists → NULL.
+            let model = if role == SessionMessageRole::Assistant {
+                msg.get("model")
+                    .and_then(|m| m.as_str())
+                    .filter(|m| *m != "<synthetic>")
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
             Some(ParsedLine {
-                message: Some(crate::adapters::parsed_message(
-                    source_message_id,
-                    role,
-                    text,
-                )),
+                message: Some(
+                    crate::adapters::parsed_message(source_message_id, role, text)
+                        .with_provenance(None, model),
+                ),
                 observation,
             })
         }
@@ -653,5 +668,55 @@ mod tests {
         assert!(!is_resolved_title(Some("provisional")));
         assert!(!is_resolved_title(None));
         let _ = SessionTitles::open_at(None);
+    }
+
+    /// Provenance 方案 §28.2/§28.5 — the assistant row's own `message.model`
+    /// attributes (this is NOT the runtime-config broadcast the plan forbids);
+    /// locally synthesized error rows ("<synthetic>") are not generations and
+    /// stay NULL. The runtime-config line itself contributes nothing.
+    #[test]
+    fn assistant_rows_carry_their_model_but_synthetic_stays_null() {
+        let dir = unique_dir("prov");
+        let file = dir.join("s.jsonl");
+        let line = |idx: usize, vtype: &str, model: Option<&str>| {
+            let mut v = serde_json::json!({
+                "type": vtype,
+                "uuid": format!("u{idx}"),
+                "timestamp": format!("2026-09-20T15:01:{idx:02}.000Z"),
+                "message": { "role": if vtype == "user" { "user" } else { "assistant" },
+                             "content": [ { "type": "text", "text": if vtype == "user" { "问" } else { "答" } } ] },
+            });
+            if let Some(m) = model {
+                v["message"]["model"] = serde_json::json!(m);
+            }
+            v.to_string()
+        };
+        std::fs::write(
+            &file,
+            [
+                r#"{"type":"runtime-config","sessionId":"s","model":"dfmodel","timestamp":1790089288825}"#.to_string(),
+                line(1, "user", None),
+                line(2, "assistant", Some("dfmodel")),
+                line(3, "assistant", Some("<synthetic>")),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let delta = QoderAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        let assistant: Vec<&crate::domain::ParsedSessionMessage> = delta
+            .messages
+            .iter()
+            .filter(|m| m.role == SessionMessageRole::Assistant)
+            .collect();
+        assert_eq!(assistant.len(), 2);
+        assert_eq!(assistant[0].model.as_deref(), Some("dfmodel"));
+        assert_eq!(assistant[0].provider, None, "no provider in the source");
+        assert_eq!(
+            assistant[1].model, None,
+            "a synthesized error notice is not a generation"
+        );
     }
 }

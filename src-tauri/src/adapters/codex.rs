@@ -14,6 +14,24 @@
 //! role user / assistant. `agent_message` envelopes, tool traffic, reasoning,
 //! compaction markers and session meta are execution observations: counted
 //! into member stats, never stored as conversation.
+//!
+//! Message provenance (Provenance 方案 §13B/§14/§16.1) — **Stateful**, the one
+//! adapter that needs the cursor provenance frontier. Verified against this
+//! machine's corpus (June → Sept 2026 schemas, 748/748 `turn_context` lines):
+//! no assistant `response_item` row ever carries a model; the model lives on
+//! the `turn_context` line that opens each turn (`payload.model`), and the
+//! provider only on `thread_settings_applied` event_msg payloads
+//! (`payload.thread_settings.model_provider_id`), which precede each turn's
+//! `turn_context`. The assistant rows carry the join key
+//! `payload.internal_chat_message_metadata_passthrough.turn_id`, so state
+//! threading in file order attributes each message exactly. Because a
+//! `turn_context` is always consumed in an EARLIER delta pass than the
+//! assistant messages of its turn, the frontier must survive across reconcile
+//! passes — it lives on the member cursor and commits in the same transaction
+//! as the messages it covers. A full re-scan resets the state and re-derives
+//! it from the file. Where a source line carries no such state (old schemas
+//! without `thread_settings_applied`), provider stays NULL; no branding
+//! inference (Codex ≠ "openai" unless the source says so).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,9 +39,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, json_str_field, read_jsonl_delta, truncate_text, AgentCommand, DiscoveredMember,
-    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta, ParsedLine,
-    SessionMessageRole,
+    detect_format, json_str_field, read_jsonl_delta_stateful, truncate_text, AgentCommand,
+    DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta,
+    ParsedLine, ProvenanceState, SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::Result;
@@ -324,12 +342,19 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         let path = PathBuf::from(&member.source_path);
         // The shared reader classifies the scan (append vs full re-scan) and
         // derives the matching stats update; the closure decides, per line,
-        // what is conversation and what is an observation.
-        read_jsonl_delta(
+        // what is conversation and what is an observation. The provenance
+        // frontier is seeded from the cursor for appends and reset by the
+        // reader on a full re-scan (Provenance 方案 §14/§15).
+        let mut state = ProvenanceState {
+            provider: cursor.active_provider.clone(),
+            model: cursor.active_model.clone(),
+        };
+        read_jsonl_delta_stateful(
             &path,
             cursor,
             crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY,
-            &|_idx, v| parse_line(v, member.relation.as_str() == "root"),
+            &mut state,
+            &mut |idx, v, state| parse_line(idx, v, member.relation.as_str() == "root", state),
         )
     }
 
@@ -397,8 +422,15 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     }
 }
 
-/// One rollout line's contribution to the member read (§26.1).
-fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
+/// One rollout line's contribution to the member read (§26.1). State events
+/// advance the provenance frontier; assistant messages carry it (Provenance
+/// 方案 §13B).
+fn parse_line(
+    _idx: usize,
+    v: &Value,
+    is_root: bool,
+    state: &mut ProvenanceState,
+) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let payload = v.get("payload").cloned().unwrap_or(Value::Null);
     let source_message_id = json_str_field(v, "id")
@@ -406,6 +438,43 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
         .map(|s| s.to_string());
 
     match vtype {
+        // Provenance state events (Provenance 方案 §13B): a turn opens with
+        // its actual model; `thread_settings_applied` precedes it and carries
+        // the provider. Both are confirmed generation scope, verified against
+        // the real corpus (see the module doc) — not configuration echoes.
+        "turn_context" => {
+            if let Some(m) = payload
+                .get("model")
+                .and_then(|m| m.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                state.model = Some(m);
+            }
+            return None;
+        }
+        "event_msg"
+            if payload.get("type").and_then(|t| t.as_str()) == Some("thread_settings_applied") =>
+        {
+            let ts = payload.get("thread_settings").unwrap_or(&Value::Null);
+            if let Some(p) = ts
+                .get("model_provider_id")
+                .and_then(|p| p.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                state.provider = Some(p);
+            }
+            if let Some(m) = ts
+                .get("model")
+                .and_then(|m| m.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                state.model = Some(m);
+            }
+            return None;
+        }
         "response_item" => {
             let ptype = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match ptype {
@@ -427,11 +496,17 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                             )))
                         }
                         ("assistant", true) => {
-                            Some(ParsedLine::message_only(crate::adapters::parsed_message(
-                                source_message_id,
-                                SessionMessageRole::Assistant,
-                                text,
-                            )))
+                            // The turn's provenance state is the only model
+                            // evidence the source offers; without a state
+                            // event the message stays NULL (Provenance §13B).
+                            Some(ParsedLine::message_only(
+                                crate::adapters::parsed_message(
+                                    source_message_id,
+                                    SessionMessageRole::Assistant,
+                                    text,
+                                )
+                                .with_provenance(state.provider.clone(), state.model.clone()),
+                            ))
                         }
                         // developer/system prompts, and every message role on a
                         // child/side member: not conversation, nothing to count.
@@ -537,6 +612,7 @@ impl ThreadNames {
 mod rollout_tests {
     use super::*;
     use crate::adapters::{AgentAdapter, DiscoveredMemberKind, MemberReadDelta};
+    use crate::domain::ParsedSessionMessage;
 
     const SESSION_ID: &str = "01a0bee7-6afb-7622-afcd-e26c61dd545d";
 
@@ -986,5 +1062,162 @@ mod rollout_tests {
             SourceAvailability::Missing
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn turn_context_line(ordinal: usize, model: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-09-20T13:02:00.000Z", "ordinal": ordinal,
+            "type": "turn_context",
+            "payload": { "turn_id": format!("t{ordinal}"), "model": model }
+        })
+        .to_string()
+    }
+
+    fn thread_settings_line(ordinal: usize, provider: &str, model: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-09-20T13:01:59.000Z", "ordinal": ordinal,
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_settings": { "model": model, "model_provider_id": provider }
+            }
+        })
+        .to_string()
+    }
+
+    /// Provenance 方案 §28.3 — per-turn attribution: two turns with different
+    /// models give each assistant message its own model; no session-wide
+    /// broadcast, and the provider comes from the source, never branding.
+    #[test]
+    fn turn_context_attributes_each_assistant_message_and_tracks_switches() {
+        let dir = temp_dir("prov-switch");
+        let path = write_rollout(
+            &dir,
+            "rollout-prov.jsonl",
+            &[
+                meta_line(),
+                thread_settings_line(1, "openai", "gpt-5.6-terra"),
+                turn_context_line(2, "gpt-5.6-terra"),
+                message_line(3, "user", "第一问"),
+                message_line(4, "assistant", "回答一"),
+                thread_settings_line(10, "openai", "gpt-5.6-luna"),
+                turn_context_line(11, "gpt-5.6-luna"),
+                message_line(12, "assistant", "回答二"),
+            ],
+        );
+        let delta = CodexAdapter
+            .read_member_delta(&root_member(&path), &SessionMemberCursor::default())
+            .unwrap();
+        let assistant: Vec<&ParsedSessionMessage> = delta
+            .messages
+            .iter()
+            .filter(|m| m.role == SessionMessageRole::Assistant)
+            .collect();
+        assert_eq!(assistant.len(), 2);
+        assert_eq!(assistant[0].model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(assistant[0].provider.as_deref(), Some("openai"));
+        assert_eq!(
+            assistant[1].model.as_deref(),
+            Some("gpt-5.6-luna"),
+            "the switch is per message, never a session broadcast"
+        );
+    }
+
+    /// Provenance 方案 §28.4 — the stateful boundary: the state events are
+    /// consumed in pass 1 while the assistant message only arrives in pass 2;
+    /// the frontier must survive on the cursor and attribute identically to
+    /// the single-pass read of the same conversation.
+    #[test]
+    fn provenance_frontier_survives_the_cursor_boundary() {
+        let dir = temp_dir("prov-boundary");
+        let path = dir.join("rollout-boundary.jsonl");
+        std::fs::write(
+            &path,
+            [
+                meta_line(),
+                thread_settings_line(1, "openai", "gpt-5.6-terra"),
+                turn_context_line(2, "gpt-5.6-terra"),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        // Pass 1: state events only, no messages — the frontier is the result.
+        let pass1 = CodexAdapter
+            .read_member_delta(&root_member(&path), &SessionMemberCursor::default())
+            .unwrap();
+        assert!(pass1.messages.is_empty());
+        let source1 = pass1.source.clone().unwrap();
+        assert_eq!(pass1.next_active_model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(pass1.next_active_provider.as_deref(), Some("openai"));
+
+        // Pass 2: the turn's assistant prose is appended.
+        let mut cursor = SessionMemberCursor::from_update("mem-codex", &source1);
+        cursor.active_provider = pass1.next_active_provider.clone();
+        cursor.active_model = pass1.next_active_model.clone();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f, "{}", message_line(5, "assistant", "跨批次的回答")).unwrap();
+        }
+        let pass2 = CodexAdapter
+            .read_member_delta(&root_member(&path), &cursor)
+            .unwrap();
+        assert_eq!(pass2.messages.len(), 1);
+        assert_eq!(pass2.messages[0].role, SessionMessageRole::Assistant);
+        assert_eq!(
+            pass2.messages[0].model.as_deref(),
+            Some("gpt-5.6-terra"),
+            "the frontier earned in pass 1 attributes the message in pass 2"
+        );
+        assert_eq!(pass2.messages[0].provider.as_deref(), Some("openai"));
+
+        // Equivalence: one pass over the same conversation attributes the same.
+        let whole = write_rollout(
+            &dir,
+            "rollout-whole.jsonl",
+            &[
+                meta_line(),
+                thread_settings_line(1, "openai", "gpt-5.6-terra"),
+                turn_context_line(2, "gpt-5.6-terra"),
+                message_line(5, "assistant", "跨批次的回答"),
+            ],
+        );
+        let one_pass = CodexAdapter
+            .read_member_delta(&root_member(&whole), &SessionMemberCursor::default())
+            .unwrap();
+        assert_eq!(one_pass.messages[0].model, pass2.messages[0].model);
+        assert_eq!(one_pass.messages[0].provider, pass2.messages[0].provider);
+    }
+
+    /// Provenance 方案 §28.5 — an old-schema rollout without the state events
+    /// attributes nothing, even though the Agent is Codex: unknown stays
+    /// unknown.
+    #[test]
+    fn no_state_event_means_no_attribution() {
+        let dir = temp_dir("prov-null");
+        let path = write_rollout(
+            &dir,
+            "rollout-old.jsonl",
+            &[
+                meta_line(),
+                message_line(1, "user", "问"),
+                message_line(2, "assistant", "答"),
+            ],
+        );
+        let delta = CodexAdapter
+            .read_member_delta(&root_member(&path), &SessionMemberCursor::default())
+            .unwrap();
+        let a = delta
+            .messages
+            .iter()
+            .find(|m| m.role == SessionMessageRole::Assistant)
+            .unwrap();
+        assert_eq!(a.model, None);
+        assert_eq!(a.provider, None);
     }
 }

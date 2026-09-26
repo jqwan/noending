@@ -557,6 +557,16 @@ pub struct SessionMemberCursor {
     /// base the next append batch continues from. Only messages advance it;
     /// stats-only batches keep the tail. Empty until a message exists.
     pub identity_tail_hash: String,
+    /// Provenance state frontier (Provenance 方案 §15): the generation
+    /// provenance an Adapter confirmed from explicit state events and that,
+    /// by the source format, still governs the messages to come. ONLY a
+    /// stateful-evidence adapter (Codex `turn_context`) uses these — every
+    /// other adapter leaves them `None`/`None`, and they are never a UI
+    /// authority or a Session "current model".
+    #[serde(default)]
+    pub active_provider: Option<String>,
+    #[serde(default)]
+    pub active_model: Option<String>,
 }
 
 impl SessionMemberCursor {
@@ -573,6 +583,8 @@ impl SessionMemberCursor {
             mtime: u.mtime,
             prefix_hash: u.prefix_hash.clone(),
             identity_tail_hash: String::new(),
+            active_provider: None,
+            active_model: None,
         }
     }
 }

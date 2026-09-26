@@ -230,11 +230,27 @@ impl ParsedLine {
 /// Result of one incremental member read: conversation messages (root members
 /// only), how the read updates stats, and the source state AFTER reading.
 /// Messages carry no sequence — the storage layer assigns stable identities.
+///
+/// `next_active_provider` / `next_active_model` are the stateful provenance
+/// frontier after this read (Provenance 方案 §15) — `None`/`None` for every
+/// adapter whose evidence is direct per-message or absent.
 #[derive(Debug, Clone, Default)]
 pub struct MemberReadDelta {
     pub messages: Vec<ParsedSessionMessage>,
     pub stats: Option<StatsUpdate>,
     pub source: Option<crate::domain::SourceCursorUpdate>,
+    pub next_active_provider: Option<String>,
+    pub next_active_model: Option<String>,
+}
+
+/// The stateful provenance frontier a stateful-evidence adapter threads
+/// through one read (Provenance 方案 §13B/§14): the generation provenance the
+/// source has explicitly confirmed and that still governs messages to come.
+/// Seeded from the member cursor on appends, reset on any full re-scan.
+#[derive(Debug, Clone, Default)]
+pub struct ProvenanceState {
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
 
 /// Stable identity of the file itself (not its content): inode/device on
@@ -532,6 +548,35 @@ pub fn read_jsonl_delta(
     capabilities: StatsCapabilities,
     parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
 ) -> Result<MemberReadDelta> {
+    read_jsonl_delta_stateful(
+        path,
+        cursor,
+        capabilities,
+        &mut ProvenanceState::default(),
+        &mut |idx, v, _state| parse_line(idx, v),
+    )
+}
+
+/// The stateful variant (Provenance 方案 §14/§15). `state` is the provenance
+/// frontier: seeded by the caller from the member cursor, and RESET by this
+/// function whenever the read starts at byte 0 (first read or any full
+/// re-scan) — a fresh scan re-derives the state from the source itself
+/// instead of trusting a frontier earned under a different file layout.
+/// The closure may mutate the state as lines are parsed and attaches the
+/// current state to the messages it emits; the final state lands on the
+/// returned delta's `next_active_*` fields and is committed with the same
+/// transaction as the messages.
+pub fn read_jsonl_delta_stateful(
+    path: &Path,
+    cursor: &SessionMemberCursor,
+    capabilities: StatsCapabilities,
+    state: &mut ProvenanceState,
+    parse_line: &mut dyn FnMut(
+        usize,
+        &serde_json::Value,
+        &mut ProvenanceState,
+    ) -> Option<ParsedLine>,
+) -> Result<MemberReadDelta> {
     let (obs, text) = observe(path)?;
     // Prefix fingerprint over the (deterministic) lossy-decoded bytes; the
     // reader's offsets live in these coordinates too.
@@ -554,7 +599,7 @@ pub fn read_jsonl_delta(
             (None, None) => false,
         };
         if !mtime_changed {
-            // nothing new at all
+            // nothing new at all — the frontier stays exactly as seeded
             return Ok(MemberReadDelta {
                 messages: vec![],
                 stats: None,
@@ -567,6 +612,8 @@ pub fn read_jsonl_delta(
                     start_byte_offset: cursor.byte_offset,
                     prefix_hash: cursor.prefix_hash.clone(),
                 }),
+                next_active_provider: state.provider.clone(),
+                next_active_model: state.model.clone(),
             });
         }
         (cursor.generation + 1, 0) // same-size rewrite / touch
@@ -583,6 +630,12 @@ pub fn read_jsonl_delta(
             (cursor.generation + 1, 0) // rewrite-grow: continuity unprovable
         }
     };
+
+    // A full re-scan re-derives provenance from the source itself: the seed
+    // was earned under a file layout that no longer governs this read.
+    if start_offset == 0 {
+        *state = ProvenanceState::default();
+    }
 
     // Byte offset of the end of the last complete (newline-terminated) line.
     let complete_end: usize = if text.ends_with('\n') {
@@ -616,7 +669,7 @@ pub fn read_jsonl_delta(
             Some(serde_json::Value::Number(n)) => n.as_i64().and_then(ms_epoch_to_rfc3339),
             _ => None,
         };
-        if let Some(p) = parse_line(idx, &v) {
+        if let Some(p) = parse_line(idx, &v, state) {
             observation.add(&p.observation);
             if let Some(mut m) = p.message {
                 if m.content.trim().is_empty() {
@@ -646,6 +699,8 @@ pub fn read_jsonl_delta(
         stats: stats_update_from(&observation, &source, capabilities),
         messages,
         source: Some(source),
+        next_active_provider: state.provider.clone(),
+        next_active_model: state.model.clone(),
     })
 }
 

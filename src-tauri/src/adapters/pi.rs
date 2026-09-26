@@ -297,11 +297,26 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                     )))
                 }
                 ("assistant", true) => {
-                    Some(ParsedLine::message_only(crate::adapters::parsed_message(
-                        source_message_id,
-                        SessionMessageRole::Assistant,
-                        text,
-                    )))
+                    // Message provenance (Provenance 方案 §13A/§16.3): the
+                    // assistant entry itself carries `message.provider` and
+                    // `message.model` — the actual generation identity
+                    // (verified: 1203/1203 assistant entries in the real
+                    // corpus carry both). Direct evidence wins over the
+                    // `model_change` events, which exist in the file but are
+                    // redundant here.
+                    Some(ParsedLine::message_only(
+                        crate::adapters::parsed_message(
+                            source_message_id,
+                            SessionMessageRole::Assistant,
+                            text,
+                        )
+                        .with_provenance(
+                            msg.get("provider")
+                                .and_then(|p| p.as_str())
+                                .map(String::from),
+                            msg.get("model").and_then(|m| m.as_str()).map(String::from),
+                        ),
+                    ))
                 }
                 // Tool output is a `toolResult` MESSAGE in pi; every other
                 // non-conversation role is runtime chatter (§36.11).
@@ -423,5 +438,46 @@ mod tests {
             SourceAvailability::Missing
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Provenance 方案 §28.2 — Direct evidence: the assistant entry's own
+    /// `message.provider` / `message.model` land on the message; an entry
+    /// without them stays NULL.
+    #[test]
+    fn assistant_entries_carry_source_provider_and_model() {
+        let dir = unique_dir("prov");
+        let file = dir.join("a.jsonl");
+        let line = |id: &str, provider: Option<&str>, model: Option<&str>| {
+            let mut m = serde_json::json!({
+                "type": "message", "id": id, "parentId": "p",
+                "timestamp": "2026-09-18T12:40:05.000Z",
+                "message": { "role": "assistant", "content": [ { "type": "text", "text": "看完了。" } ] },
+            });
+            if let Some(p) = provider {
+                m["message"]["provider"] = serde_json::json!(p);
+            }
+            if let Some(mo) = model {
+                m["message"]["model"] = serde_json::json!(mo);
+            }
+            m.to_string()
+        };
+        std::fs::write(
+            &file,
+            [
+                line("m1", Some("openai-codex"), Some("gpt-5.6-luna")),
+                line("m2", None, None),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let delta = PiAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        assert_eq!(delta.messages.len(), 2);
+        assert_eq!(delta.messages[0].provider.as_deref(), Some("openai-codex"));
+        assert_eq!(delta.messages[0].model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(delta.messages[1].provider, None);
+        assert_eq!(delta.messages[1].model, None, "missing fields stay NULL");
     }
 }

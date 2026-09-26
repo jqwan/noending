@@ -386,12 +386,16 @@ pub fn ingest_and_sync_session(
         let Some(source) = delta.source else {
             continue;
         };
-        let stored = db.commit_member_ingest(
+        // The provenance frontier travels with the commit: same transaction,
+        // same lifetime as the messages the state covers (Provenance 方案 §15).
+        let stored = db.commit_member_ingest_with_provenance_state(
             &session.id,
             &member.id,
             &delta.messages,
             delta.stats,
             &source,
+            delta.next_active_provider,
+            delta.next_active_model,
         )?;
         if !stored.is_empty() {
             stored_total += stored.len() as i64;

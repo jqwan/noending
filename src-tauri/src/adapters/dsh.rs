@@ -212,11 +212,36 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if !is_root {
                 return Some(ParsedLine::observation_only(MemberObservation::default()));
             }
-            Some(ParsedLine::message_only(crate::adapters::parsed_message(
-                source_message_id,
-                SessionMessageRole::Assistant,
-                text,
-            )))
+            // Message provenance (Provenance 方案 §13A/§16.6): the assistant
+            // record itself carries `data.message.source` — a discriminated
+            // union gated on `kind == "model"`, holding the actual generation
+            // identity (`source.provider` / `source.model`; verified: 1907/
+            // 1907 assistant records in the real corpus, in-session switches
+            // observed). Profile/preset config is NOT message-level fact and
+            // is never consulted.
+            let source_meta = v.pointer("/data/message/source").unwrap_or(&Value::Null);
+            let prov = if source_meta.get("kind").and_then(|k| k.as_str()) == Some("model") {
+                (
+                    source_meta
+                        .get("provider")
+                        .and_then(|p| p.as_str())
+                        .map(String::from),
+                    source_meta
+                        .get("model")
+                        .and_then(|m| m.as_str())
+                        .map(String::from),
+                )
+            } else {
+                (None, None)
+            };
+            Some(ParsedLine::message_only(
+                crate::adapters::parsed_message(
+                    source_message_id,
+                    SessionMessageRole::Assistant,
+                    text,
+                )
+                .with_provenance(prov.0, prov.1),
+            ))
         }
         // Compaction is a boundary worth counting, but its payload is machine
         // bookkeeping: a marker, never the pruned content itself.
@@ -486,6 +511,8 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             ),
             messages,
             source: Some(source),
+            next_active_provider: None,
+            next_active_model: None,
         })
     }
 
@@ -960,5 +987,50 @@ mod tests {
             .unwrap();
         assert!(delta.messages.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Provenance 方案 §28.2 — `data.message.source` gated on `kind=="model"`
+    /// attributes the generation identity; any other source kind stays NULL.
+    #[test]
+    fn assistant_source_kind_model_attributes_the_generation_identity() {
+        let id = "session-prov";
+        let with_model = r#"{"type":"assistant/message","seq":10,"time":1788969948545,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答一"}],"source":{"kind":"model","provider":"openai-codex","model":"gpt-5.6-luna"}}}}"#;
+        let non_model = r#"{"type":"assistant/message","seq":11,"time":1788969948546,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答二"}],"source":{"kind":"plugin","provider":"x","model":"y"}}}}"#;
+        let no_source = r#"{"type":"assistant/message","seq":12,"time":1788969948547,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答三"}]}}}"#;
+        let dir = session_dir(
+            &unique_dir("prov"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, ""),
+                RUNTIME_CTX,
+                REMINDER,
+                &user(3, "问"),
+                with_model,
+                non_model,
+                no_source,
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        let assistant: Vec<(Option<&str>, Option<&str>)> = delta
+            .messages
+            .iter()
+            .filter(|m| m.role == SessionMessageRole::Assistant)
+            .map(|m| (m.provider.as_deref(), m.model.as_deref()))
+            .collect();
+        assert_eq!(
+            assistant,
+            vec![
+                (Some("openai-codex"), Some("gpt-5.6-luna")),
+                (None, None),
+                (None, None),
+            ]
+        );
     }
 }

@@ -811,7 +811,7 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash
+                "SELECT member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash, active_provider, active_model
                  FROM session_member_cursors WHERE member_id = ?1",
                 params![member_id],
                 |r| {
@@ -824,6 +824,8 @@ impl Db {
                         mtime: r.get(5)?,
                         prefix_hash: r.get(6)?,
                         identity_tail_hash: r.get(7)?,
+                        active_provider: r.get(8)?,
+                        active_model: r.get(9)?,
                     })
                 },
             )
@@ -838,12 +840,14 @@ impl Db {
     /// from the start (Re-ingest Source, §23.1). MESSAGES ARE NOT TOUCHED:
     /// their app-owned ids and every provenance ref stay valid — unchanged
     /// content dedups by identity on the re-scan. Stats snapshots replace on
-    /// the rescan; the Context frontier is preserved.
+    /// the rescan; the Context frontier is preserved. The provenance state
+    /// frontier resets with the bytes: a fresh full scan re-derives it.
     pub fn reset_member_cursors(&self, session_id: &str) -> Result<()> {
         let conn = self.write();
         conn.execute(
             "UPDATE session_member_cursors
-             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = ''
+             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = '',
+                 active_provider = NULL, active_model = NULL
              WHERE member_id IN (SELECT id FROM session_members WHERE session_id = ?1)",
             params![session_id],
         )?;
@@ -873,6 +877,26 @@ impl Db {
         messages: &[ParsedSessionMessage],
         stats: Option<StatsUpdate>,
         source: &SourceCursorUpdate,
+    ) -> Result<Vec<SessionMessage>> {
+        self.commit_member_ingest_with_provenance_state(
+            session_id, member_id, messages, stats, source, None, None,
+        )
+    }
+
+    /// Same transaction, plus the stateful provenance frontier (Provenance
+    /// 方案 §15): the bytes frontier and the provenance state frontier are
+    /// written together, so they can never drift. Adapters with direct
+    /// per-message evidence pass `None`/`None` — their provenance travels on
+    /// the messages themselves.
+    pub fn commit_member_ingest_with_provenance_state(
+        &self,
+        session_id: &str,
+        member_id: &str,
+        messages: &[ParsedSessionMessage],
+        stats: Option<StatsUpdate>,
+        source: &SourceCursorUpdate,
+        next_active_provider: Option<String>,
+        next_active_model: Option<String>,
     ) -> Result<Vec<SessionMessage>> {
         self.tx(|tx| {
             // 1. commit-time trash guard (方案 §43 / §13.1). A trashed (or
@@ -1064,6 +1088,8 @@ impl Db {
                     mtime: source.mtime,
                     prefix_hash: source.prefix_hash.clone(),
                     identity_tail_hash: new_tail,
+                    active_provider: next_active_provider,
+                    active_model: next_active_model,
                 },
             )?;
 
@@ -2628,11 +2654,12 @@ pub fn upsert_session_member_conn(
 pub fn upsert_member_cursor_conn(conn: &Connection, c: &SessionMemberCursor) -> Result<()> {
     conn.execute(
         "INSERT INTO session_member_cursors
-         (member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         (member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash, active_provider, active_model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(member_id) DO UPDATE SET
            source_file_identity = ?2, generation = ?3, byte_offset = ?4,
-           last_seen_size = ?5, mtime = ?6, prefix_hash = ?7, identity_tail_hash = ?8",
+           last_seen_size = ?5, mtime = ?6, prefix_hash = ?7, identity_tail_hash = ?8,
+           active_provider = ?9, active_model = ?10",
         params![
             c.member_id,
             c.source_file_identity,
@@ -2641,7 +2668,9 @@ pub fn upsert_member_cursor_conn(conn: &Connection, c: &SessionMemberCursor) -> 
             c.last_seen_size as i64,
             c.mtime,
             c.prefix_hash,
-            c.identity_tail_hash
+            c.identity_tail_hash,
+            c.active_provider,
+            c.active_model
         ],
     )?;
     Ok(())

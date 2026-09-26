@@ -9,6 +9,15 @@
 //! `reasoning` (101), `file-history-snapshot` (35) and `ai-title` (7) — machine
 //! traffic that is counted, not ingested (方案 §36.11).
 //!
+//! Message provenance (Provenance 方案 §16.5): **None — stays NULL.** Assistant
+//! entries do carry a non-empty `providerData`, but in the real corpus every
+//! single one (78/78 across all three sessions) records
+//! `model = requestModelId = "auto"` / `requestModelName = "Auto"`: the USER'S
+//! model *preference* at send time, not the identity of the model that
+//! actually generated the response. Per the plan, a request preference is not
+//! message-level provenance, and inferring a provider from the WorkBuddy
+//! brand is forbidden — so nothing is attributed here.
+//!
 //! The one shape that needs real work is the user turn. WorkBuddy wraps every
 //! human turn in a `<system-reminder data-role="user-context">` envelope and
 //! puts the prompt in `<user_query>…</user_query>` at the very end — measured
@@ -533,5 +542,36 @@ mod tests {
             .discover_members_in(&[dir], &|_| false)
             .unwrap();
         assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// Provenance 方案 §28.5/§16.5 — providerData.model = "auto" is the user's
+    /// request preference, not the generating model: nothing is attributed.
+    #[test]
+    fn the_auto_preference_is_not_provenance() {
+        let dir = unique_dir("prov");
+        let file = dir.join("s1.jsonl");
+        std::fs::write(
+            &file,
+            [
+                r#"{"id":"m1","timestamp":1783137449113,"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>问</user_query>"}],"sessionId":"s1","cwd":"/repo"}"#,
+                r#"{"id":"m2","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"答"}],"providerData":{"agent":"x","model":"auto","requestModelId":"auto","requestModelName":"Auto","traceId":"t"},"sessionId":"s1","cwd":"/repo"}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let delta = WorkBuddyAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        let assistant = delta
+            .messages
+            .iter()
+            .find(|m| m.role == SessionMessageRole::Assistant)
+            .expect("the assistant turn is conversation");
+        assert_eq!(
+            assistant.model, None,
+            "a preference is not a generation fact"
+        );
+        assert_eq!(assistant.provider, None);
     }
 }

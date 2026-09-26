@@ -331,12 +331,25 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
                 return Some(ParsedLine::observation_only(observation));
             }
+            // Message provenance (Provenance 方案 §13A/§16.2): every assistant
+            // row carries `message.model` — the actual response model in the
+            // API-style envelope (verified against the real corpus: 0 rows
+            // without it; the value tracks the model that answered, e.g. a
+            // gateway spelling like "qwen/qwen3.8-27b", NOT "anthropic" from
+            // branding). No provider field exists in the source → NULL.
+            // Direct per-row evidence is safe across delta boundaries.
+            let model = if role == SessionMessageRole::Assistant {
+                msg.get("model")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
             Some(ParsedLine {
-                message: Some(crate::adapters::parsed_message(
-                    source_message_id,
-                    role,
-                    text,
-                )),
+                message: Some(
+                    crate::adapters::parsed_message(source_message_id, role, text)
+                        .with_provenance(None, model),
+                ),
                 observation,
             })
         }
@@ -522,5 +535,41 @@ mod tests {
             SourceAvailability::Missing
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Provenance 方案 §28.2 — Direct evidence: the assistant row's
+    /// `message.model` lands on the message; a missing field stays NULL and
+    /// provider stays NULL (the source has no such field).
+    #[test]
+    fn assistant_messages_carry_their_source_model() {
+        let dir = unique_dir("prov");
+        let file = dir.join("s.jsonl");
+        let line = |idx: usize, model: Option<&str>| {
+            let mut v = serde_json::json!({
+                "type": "assistant",
+                "uuid": format!("u{idx}"),
+                "timestamp": "2026-09-22T15:01:00.000Z",
+                "message": { "role": "assistant", "content": [ { "type": "text", "text": "回答" } ] },
+            });
+            if let Some(m) = model {
+                v["message"]["model"] = serde_json::json!(m);
+            }
+            v.to_string()
+        };
+        std::fs::write(
+            &file,
+            [line(1, Some("qwen/qwen3.8-27b")), line(2, None)].join("\n") + "\n",
+        )
+        .unwrap();
+        let delta = ClaudeAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        assert_eq!(delta.messages.len(), 2);
+        assert_eq!(delta.messages[0].model.as_deref(), Some("qwen/qwen3.8-27b"));
+        assert_eq!(
+            delta.messages[0].provider, None,
+            "no provider field in the source → NULL, never branding"
+        );
+        assert_eq!(delta.messages[1].model, None, "missing field stays NULL");
     }
 }

@@ -455,6 +455,8 @@ fn review_state_isolated_from_domain_state() {
             mtime: None,
             prefix_hash: String::new(),
             identity_tail_hash: String::new(),
+            active_provider: None,
+            active_model: None,
         },
     )
     .unwrap();
