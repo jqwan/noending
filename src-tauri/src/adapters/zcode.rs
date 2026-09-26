@@ -58,8 +58,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    file_identity, ms_epoch_to_rfc3339, mtime_secs, AgentCommand, DiscoveredMember,
-    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta,
+    ms_epoch_to_rfc3339, AgentCommand, DiscoveredMember, DiscoveredMemberKind, ExecOptions,
+    MemberObservation, MemberReadDelta,
 };
 use crate::domain::{
     Agent, ParsedSessionMessage, SessionMember, SessionMemberCursor, SessionMessageRole,
@@ -419,29 +419,11 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         // the source is a database that changes under us. Identity is the
         // framework's own message ids, so a re-read of the whole session
         // stores nothing; a replaced database is the only shape change worth a
-        // generation bump. Every replay is a full scan → stats SNAPSHOT.
-        let meta = std::fs::metadata(&path)?;
-        let identity = file_identity(&path);
-        let size = meta.len();
-        let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
-        let generation = if first_ever || identity != cursor.source_file_identity {
-            if first_ever {
-                0
-            } else {
-                cursor.generation + 1
-            }
-        } else {
-            cursor.generation
-        };
-        let source = crate::domain::SourceCursorUpdate {
-            file_identity: identity,
-            generation,
-            byte_offset: size,
-            last_seen_size: size,
-            mtime: mtime_secs(&meta),
-            start_byte_offset: 0,
-            prefix_hash: String::new(),
-        };
+        // generation bump. Every replay is a full scan → stats SNAPSHOT. The
+        // cursor is WAL-aware (main db + `-wal`): a checkpoint folds WAL bytes
+        // into the main file, so main-file-only stats would miss WAL-only
+        // writes and freeze `last_activity_at`.
+        let source = crate::adapters::sqlite_replay_cursor_update(&path, cursor)?;
         Ok(MemberReadDelta {
             stats: crate::adapters::stats_update_from(
                 &observation,

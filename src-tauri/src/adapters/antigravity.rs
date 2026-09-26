@@ -1,67 +1,62 @@
-//! Antigravity Adapter (Google's agentic IDE): the conversation store is one
-//! live SQLite database per conversation,
-//! `~/.gemini/antigravity/conversations/<conversation-id>.db` (WAL, mutated
-//! in place). Raw data is read-only, always.
+//! Antigravity Adapter (Google's agentic IDE). The conversation store is one
+//! live WAL SQLite database per conversation,
+//! `~/.gemini/antigravity/conversations/<conversation-id>.db`; raw data is
+//! read-only, always. No headless CLI → history ingestion only.
 //!
-//! Store layout, measured on this machine's real corpus:
-//! - `steps` — the whole event log, ordered by `idx`. Payloads are protobuf
-//!   blobs with no published schema; only these step types carry
-//!   conversation-relevant content (field paths verified against the blobs):
-//!     - 14  user turn     → `payload.19.2` (fallback `19.3.1`) is the typed
-//!       prompt, `payload.5.1` the timestamp;
-//!     - 15  agent turn    → each `payload.20` part may carry visible prose
-//!       (`20.3`); a `20.7` part only ANNOUNCES a tool call — not counted;
-//!     - 132 tool call     → the execution record of the announced call
-//!       (same call id, immediately after; 827/828 ids appear in both) —
-//!       the single tool_call authority, and 17 (API error) a tool error;
-//!     - 23/101 generation metadata and inter-agent notices → ignored.
-//!   Steps are appended once and never rewritten, so message identity is
-//!   `step:<idx>` and the full replay dedups exactly.
-//! - `conversation_summaries.db` (sibling store) — the session list: title
-//!   (may be empty; `preview` — the first user input — is the natural
-//!   fallback), `parent_conversation_id` (subagent conversations) and
-//!   `workspace_uris` (cwd).
-//! - `trajectory_metadata_blob` — workspace URI + the conversation's start
-//!   timestamp.
+//! The `steps` table is the event log, ordered by `idx`; payloads are
+//! protobuf with no published schema. Field paths verified against the real
+//! corpus:
+//! - 14 user turn: prompt at `payload.19.2` (fallback `19.3.1`), timestamp
+//!   `5.1`;
+//! - 15 agent turn: visible prose per `payload.20.3` part; a `20.7` part only
+//!   ANNOUNCES a tool call — not counted (132 is the execution record, same
+//!   call id, 827/828 ids in both; counting both would double-count);
+//! - 132 tool call → tool_call count; 17 API error → tool_error count;
+//!   23/101 metadata and inter-agent notices → ignored.
 //!
-//! Member mapping: one conversation, one member. A conversation with a
-//! `parent_conversation_id` is a CHILD of that parent; its steps contribute
-//! execution observations only. The parent relation comes from the summaries
-//! store, and a conversation whose summary row has not landed yet is SKIPPED —
-//! unknown is never promoted to Root (a root later re-homed as a child would
-//! leave a ghost Logical Session with no root member).
+//! Steps are appended once and never rewritten, so message identity is
+//! `step:<idx>` and the full replay dedups exactly.
 //!
-//! Change detection: `unchanged` is deliberately not consulted. The store is
-//! live SQLite in WAL mode — new steps can sit only in `<id>.db-wal` while
-//! the main file's size/mtime stay identical — and the title/parent half of
-//! the facts lives in a second store the skipset never sees. Discovery
-//! re-reads every conversation on every pass; the replay dedup absorbs it.
+//! The sibling `conversation_summaries.db` holds the title (empty → the
+//! `preview`, the first user input), `parent_conversation_id` and
+//! `workspace_uris`. One conversation = one member; a parent makes it a CHILD
+//! that contributes observations only. A conversation whose summary row has
+//! not landed yet is SKIPPED — unknown is never promoted to Root, or a root
+//! later re-homed as a child would leave a ghost Logical Session with no root
+//! member.
 //!
-//! Message provenance: the source carries no per-message model/provider —
-//! the model name only appears in runtime feature-flag blobs, which is
-//! configuration, not generation evidence. Everything stays NULL.
+//! `unchanged` is deliberately not consulted: WAL writes keep the main `.db`
+//! size/mtime identical, and the title/parent facts live in the second store
+//! the skipset never sees. Discovery re-reads every conversation; the replay
+//! dedup absorbs it. The read cursor is WAL-aware too (`sqlite_replay_cursor_update`):
+//! main + `-wal` size, max of both mtimes, so WAL-only writes still advance
+//! `last_activity_at`.
 //!
-//! There is no headless CLI, so this adapter ingests history only.
+//! Provenance: no per-message model/provider exists in the source (the model
+//! name appears only in runtime feature-flag blobs) — provenance stays NULL.
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, replay_cursor_update, AgentCommand, DiscoveredMember,
-    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta, ParsedLine,
-    SessionMessageRole,
+    ms_epoch_to_rfc3339, AgentCommand, DiscoveredMember, DiscoveredMemberKind, ExecOptions,
+    MemberObservation, MemberReadDelta, ParsedLine, SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
 
 pub struct AntigravityAdapter;
 
-/// The conversations directory under the data root; a root that IS a
-/// conversation `.db` file is accepted too.
+/// The conversations directory under the data root. A root that IS the
+/// conversations directory itself, or a conversation `.db` file inside it,
+/// is accepted too — so a user may register any of the three spellings.
 fn conversations_dir(root: &Path) -> Option<PathBuf> {
     if root.is_file() && root.extension().and_then(|e| e.to_str()) == Some("db") {
         return root.parent().map(|p| p.to_path_buf());
+    }
+    if root.is_dir() && root.file_name().and_then(|n| n.to_str()) == Some("conversations") {
+        return Some(root.to_path_buf());
     }
     let candidate = root.join("conversations");
     candidate.is_dir().then_some(candidate)
@@ -403,8 +398,9 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 continue;
             };
             // The summaries store sits beside the conversations directory. A
-            // missing store means every parent relation is unknown, so all
-            // members wait for it (never discovered as speculative roots).
+            // missing store means every parent relation in THIS root is
+            // unknown — members wait for it (never discovered as speculative
+            // roots), but other ingest roots must still be scanned.
             let summaries = dir
                 .parent()
                 .map(|p| p.join("conversation_summaries.db"))
@@ -413,7 +409,11 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                     Connection::open_with_flags(p, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
                 });
             if summaries.is_none() {
-                return Ok(out);
+                eprintln!(
+                    "[discover] skip {}: conversation_summaries.db missing (relations unknown)",
+                    dir.display()
+                );
+                continue;
             }
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
@@ -476,8 +476,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         drop(stmt);
         drop(conn);
 
-        let raw = std::fs::read(&path).unwrap_or_default();
-        let source = replay_cursor_update(&path, cursor, &raw)?;
+        let source = crate::adapters::sqlite_replay_cursor_update(&path, cursor)?;
         Ok(MemberReadDelta {
             stats: crate::adapters::stats_update_from(
                 &observation,
@@ -811,39 +810,264 @@ mod tests {
     #[test]
     fn missing_summary_row_is_not_promoted_to_root() {
         let root = temp_dir("late-summary");
-        let id = "336f551c-58e8-491b-a31f-13b362786c85";
-        store(&root, id, &[]);
-
-        let none = AntigravityAdapter
-            .discover_members_in(&[root.clone()], &|_| false)
-            .unwrap();
-        assert_eq!(
-            none.len(),
-            0,
-            "no summary row → relation unknown → skipped, not a speculative Root"
-        );
-
-        summaries(&root, &[(id, "", "", "[]")]);
-        let mut found = AntigravityAdapter
-            .discover_members_in(&[root.clone()], &|_| false)
-            .unwrap();
-        assert_eq!(found.len(), 1, "summary row landed → discovered now");
-        assert_eq!(found[0].kind, DiscoveredMemberKind::Root);
-
+        let rowless = "336f551c-58e8-491b-a31f-13b362786c85";
+        let top = "11111111-2222-4333-8444-555555555555";
+        let sub = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        store(&root, rowless, &[]);
+        store(&root, top, &[]);
+        store(&root, sub, &[]);
+        summaries(&root, &[(top, "", "", "[]"), (sub, "", "", "[]")]);
         let conn = Connection::open(root.join("conversation_summaries.db")).unwrap();
         conn.execute(
             "UPDATE conversation_summaries SET parent_conversation_id = ?2 WHERE conversation_id = ?1",
-            rusqlite::params![id, "22222222-3333-4444-8555-666666666666"],
+            rusqlite::params![sub, top],
         )
         .unwrap();
-        found = AntigravityAdapter
+
+        let found = AntigravityAdapter
             .discover_members_in(&[root], &|_| false)
             .unwrap();
-        assert_eq!(found.len(), 1);
+        let by_id = |id: &str| {
+            found
+                .iter()
+                .find(|m| m.source_member_id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+        };
+        // No summary row → relation unknown → skipped this round; the next
+        // reconcile picks the conversation up once the row lands.
+        assert!(
+            found.iter().all(|m| m.source_member_id != rowless),
+            "a row-less conversation must not be discovered as a speculative Root"
+        );
+        assert_eq!(by_id(top).kind, DiscoveredMemberKind::Root);
+        assert_eq!(by_id(sub).kind, DiscoveredMemberKind::Child);
+    }
+
+    /// One unusable ingest root (no summaries store) must not stop discovery
+    /// of other roots of the same agent.
+    #[test]
+    fn one_unusable_source_does_not_block_the_others() {
+        let broken = temp_dir("multi-broken");
+        std::fs::create_dir_all(broken.join("conversations")).unwrap();
+        let good = temp_dir("multi-good");
+        store(&good, "11111111-2222-4333-8444-555555555555", &[]);
+        summaries(
+            &good,
+            &[(
+                "11111111-2222-4333-8444-555555555555",
+                "judul",
+                "judul",
+                "[]",
+            )],
+        );
+
+        let found = AntigravityAdapter
+            .discover_members_in(&[broken, good], &|_| false)
+            .unwrap();
         assert_eq!(
-            found[0].kind,
-            DiscoveredMemberKind::Child,
-            "the parent is authoritative once the row exists"
+            found.len(),
+            1,
+            "the healthy source is still scanned despite the broken one"
+        );
+        assert_eq!(
+            found[0].source_member_id,
+            "11111111-2222-4333-8444-555555555555"
+        );
+    }
+
+    /// The data root may also be registered as the conversations directory
+    /// itself or as a conversation `.db` file inside it.
+    #[test]
+    fn all_three_root_spellings_resolve_to_the_same_store() {
+        let base = temp_dir("spellings");
+        let dir = base.join("conversations");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("11111111-2222-4333-8444-555555555555.db"), "").unwrap();
+
+        assert_eq!(
+            conversations_dir(&base).as_deref(),
+            Some(dir.as_path()),
+            "the default data root"
+        );
+        assert_eq!(
+            conversations_dir(&dir).as_deref(),
+            Some(dir.as_path()),
+            "the conversations directory itself"
+        );
+        assert_eq!(
+            conversations_dir(&dir.join("11111111-2222-4333-8444-555555555555.db")).as_deref(),
+            Some(dir.as_path()),
+            "a conversation db file"
+        );
+    }
+
+    /// The cursor must be WAL-aware: a child member that keeps executing tool
+    /// calls writes only into `<id>.db-wal` while the main `.db` file stays
+    /// byte-identical, and that MUST still advance the member and session
+    /// `last_activity_at` through `source_changed`.
+    #[test]
+    fn wal_only_write_advances_activity() {
+        use crate::storage::Db;
+
+        let root = temp_dir("wal-activity");
+        let root_id = "11111111-2222-4333-8444-555555555555";
+        let child_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let user_turn = [timestamp(1_789_480_258), msg(19, &str(2, "问"))].concat();
+        store(&root, root_id, &[(14, user_turn)]);
+        store(&root, child_id, &[(132, vec![])]);
+        summaries(&root, &[(root_id, "", "", "[]"), (child_id, "", "", "[]")]);
+        let conn = Connection::open(root.join("conversation_summaries.db")).unwrap();
+        conn.execute(
+            "UPDATE conversation_summaries SET parent_conversation_id = ?2 WHERE conversation_id = ?1",
+            rusqlite::params![root_id, child_id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let child_db = root.join("conversations").join(format!("{child_id}.db"));
+        let root_db = root.join("conversations").join(format!("{root_id}.db"));
+
+        let db = Db::open(&root.join("noending.db")).unwrap();
+        let (session_id, _) = db
+            .upsert_logical_session_unchecked(
+                Agent::Antigravity,
+                root_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let root_member_id = db
+            .upsert_session_member(
+                &session_id,
+                Agent::Antigravity,
+                root_id,
+                SessionMemberRelation::Root,
+                None,
+                "antigravity_conversation",
+                &root_db.to_string_lossy(),
+                None,
+                None,
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let child_member_id = db
+            .upsert_session_member(
+                &session_id,
+                Agent::Antigravity,
+                child_id,
+                SessionMemberRelation::Child,
+                Some(root_id),
+                "antigravity_conversation",
+                &child_db.to_string_lossy(),
+                None,
+                None,
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+
+        let member = |member_id: &str, source_path: &Path, relation| SessionMember {
+            id: member_id.to_string(),
+            session_id: session_id.clone(),
+            agent: Agent::Antigravity,
+            source_member_id: source_path.file_stem().unwrap().to_str().unwrap().into(),
+            relation,
+            parent_source_member_id: None,
+            source_kind: "antigravity_conversation".into(),
+            source_path: source_path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        };
+        let root_member = member(&root_member_id, &root_db, SessionMemberRelation::Root);
+        let child_member = member(&child_member_id, &child_db, SessionMemberRelation::Child);
+
+        // Pass 1: both members ingested through the commit path.
+        for (m, member_id) in [
+            (&root_member, &root_member_id),
+            (&child_member, &child_member_id),
+        ] {
+            let delta = AntigravityAdapter
+                .read_member_delta(m, &SessionMemberCursor::default())
+                .unwrap();
+            db.commit_member_ingest_with_provenance_state(
+                &session_id,
+                member_id,
+                &delta.messages,
+                delta.stats,
+                delta.source.as_ref().unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let activity_before = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at;
+
+        // WAL-only write: keep a writer open so the append never checkpoints,
+        // and verify the main `.db` file is byte-for-byte unchanged.
+        let writer = Connection::open(&child_db).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let (size_before, mtime_before) = {
+            let meta = std::fs::metadata(&child_db).unwrap();
+            (meta.len(), meta.modified().unwrap())
+        };
+        writer
+            .execute(
+                "INSERT INTO steps (idx, step_type, status, step_payload) VALUES (1, 132, 3, ?1)",
+                rusqlite::params![Vec::<u8>::new()],
+            )
+            .unwrap();
+        let meta = std::fs::metadata(&child_db).unwrap();
+        assert_eq!(
+            meta.len(),
+            size_before,
+            "the main db file must be untouched"
+        );
+        assert_eq!(meta.modified().unwrap(), mtime_before);
+
+        // Pass 2: the logical cursor must move anyway.
+        let cursor = db.get_member_cursor(&child_member_id).unwrap();
+        let delta = AntigravityAdapter
+            .read_member_delta(&child_member, &cursor)
+            .unwrap();
+        let source = delta.source.unwrap();
+        assert_ne!(
+            source.byte_offset, cursor.byte_offset,
+            "a WAL-only append must move the logical cursor"
+        );
+        assert_ne!(source.mtime, cursor.mtime);
+        db.commit_member_ingest_with_provenance_state(
+            &session_id,
+            &child_member_id,
+            &delta.messages,
+            delta.stats,
+            &source,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let activity_after = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at;
+        let parse = |s: &Option<String>| {
+            chrono::DateTime::parse_from_rfc3339(s.as_deref().unwrap()).unwrap()
+        };
+        assert!(
+            parse(&activity_after) > parse(&activity_before),
+            "a WAL-only tool execution must advance session activity: {activity_before:?} → {activity_after:?}"
         );
     }
 }

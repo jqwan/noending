@@ -745,6 +745,57 @@ pub fn replay_cursor_update(
     })
 }
 
+/// Source observation for a live SQLite store whose newest writes may sit ONLY
+/// in the `-wal` file: logical size = main + `-wal`, mtime = the LATER of the
+/// two. A WAL-only append therefore always moves this cursor, so member and
+/// session `last_activity_at` keep tracking the execution graph even when the
+/// main database file is untouched. A checkpoint folds WAL bytes back into the
+/// main file and the total may shrink slightly — that reads as a new
+/// generation and the full replay dedup absorbs it.
+///
+/// `prefix_hash` is a logical fingerprint (identity + sizes), not a byte
+/// hash: replay readers never walk an append path.
+pub fn sqlite_replay_cursor_update(
+    path: &Path,
+    cursor: &SessionMemberCursor,
+) -> Result<crate::domain::SourceCursorUpdate> {
+    let meta = std::fs::metadata(path)?;
+    let identity = file_identity(path);
+    let mut size = meta.len();
+    let mut mtime = mtime_secs(&meta);
+    let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+    if let Ok(wal_meta) = std::fs::metadata(&wal_path) {
+        size += wal_meta.len();
+        if let Some(w) = mtime_secs(&wal_meta) {
+            mtime = match mtime {
+                Some(m) => Some(m.max(w)),
+                None => Some(w),
+            };
+        }
+    }
+    let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
+    let generation = if first_ever {
+        0
+    } else if identity != cursor.source_file_identity
+        || (size as i64) < (cursor.last_seen_size as i64)
+    {
+        cursor.generation + 1
+    } else {
+        cursor.generation
+    };
+    Ok(crate::domain::SourceCursorUpdate {
+        prefix_hash: sha256_hex(
+            format!("{}:{}:{}", identity, size, mtime.unwrap_or(0.0)).as_bytes(),
+        ),
+        file_identity: identity,
+        generation,
+        byte_offset: size,
+        last_seen_size: size,
+        mtime,
+        start_byte_offset: 0,
+    })
+}
+
 /// Extract a string field from an object if present.
 pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|s| s.as_str())
