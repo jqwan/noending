@@ -467,7 +467,7 @@ impl StatsCapabilities {
     pub const COMPACTION: Self = Self::new(false, false, true, false);
     pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, false, false, true);
     pub const TOOL_COMPACTION_AND_SIDE_ACTIVITY: Self = Self::new(true, false, true, true);
-    pub const TOOL_CALLS_ERRORS_AND_COMPACTION: Self = Self::new(true, true, true, false);
+    pub const TOOL_CALLS_AND_ERRORS: Self = Self::new(true, true, false, false);
 
     const fn new(
         tool_calls: bool,

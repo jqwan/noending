@@ -566,9 +566,9 @@ where
 /// resolve the logical graph, then ingest + sync each active session.
 /// `on_session` observes each session being processed.
 ///
-/// `workspace` is 's tier-3 fact, needed because a freshly discovered
-/// root may claim a pending LaunchIntent: matching it asks whether that
-/// session's cwd is just the shared default workspace, which is not in the DB.
+/// `workspace` is a launch-level fact: a freshly discovered root may claim a
+/// pending LaunchIntent, and matching it asks whether that session's cwd is
+/// just the shared default workspace, which is not in the DB.
 pub fn reconcile_with_engine<F>(
     db: &Db,
     engine: &SyncEngine,
@@ -627,10 +627,10 @@ where
         &processed_session_ids,
     )?;
 
-    //  — the one piece of workspace work a skipped Session still
-    // owes. It runs AFTER the loop so a path first registered by this very pass
-    // is already visible to it, and it never observes a path (the identity is
-    // stored), so a pass over frozen files stays as cheap as it looks.
+    // The one piece of workspace work a skipped Session still owes. It runs
+    // AFTER the loop so a path first registered by this very pass is already
+    // visible to it, and it never observes a path (the identity is stored),
+    // so a pass over frozen files stays as cheap as it looks.
     match crate::workspace::session::attach_sessions_to_registered_paths(db) {
         Ok(0) => {}
         Ok(n) => eprintln!("[reconcile] 补绑 {} 个会话到已注册的 workspace 路径", n),

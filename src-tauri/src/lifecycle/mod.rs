@@ -52,8 +52,8 @@ pub struct PermanentDeleteResult {
 
 /// Normal → Trash. Reversible; never touches the Agent source.
 ///
-/// The FTS unindex commits INSIDE the same transaction as the lifecycle flip
-/// (review P1-1): a crash can no longer leave a trashed session searchable —
+/// The FTS unindex commits INSIDE the same transaction as the lifecycle flip:
+/// a crash can no longer leave a trashed session searchable —
 /// there is no post-commit window and no reliance on eventual self-heal.
 ///
 /// Trash freezes the session: member cursors are not touched, so ingestion

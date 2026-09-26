@@ -202,11 +202,11 @@ pub mod workstream_visibility {
 /// The rename on each variant is the IPC spelling and MUST equal `as_str()` —
 /// the sessions table, the frontend's `Agent` union and its `AGENT_LABELS` all
 /// use that same string. Declaring it per variant rather than deriving it with
-/// `rename_all = "snake_case"` is deliberate: the derive spelled three variants
-/// (`auto_claw`, `work_buddy`, `z_code`) differently from everything else, so
-/// those rows rendered as「未知 Agent」and every command taking an `agent`
-/// argument failed to deserialize. `serde_spelling_equals_as_str_for_every_agent`
-/// keeps the three spellings in step.
+/// `rename_all = "snake_case"` is deliberate: the derive spelled two variants
+/// (`work_buddy`, `z_code`) differently from everything else, so those rows
+/// rendered as「未知 Agent」and every command taking an `agent` argument
+/// failed to deserialize. `serde_spelling_equals_as_str_for_every_agent`
+/// keeps the spellings in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Agent {
     #[serde(rename = "codex")]

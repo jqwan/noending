@@ -10,9 +10,10 @@
 //!     - 14  user turn     → `payload.19.2` (fallback `19.3.1`) is the typed
 //!       prompt, `payload.5.1` the timestamp;
 //!     - 15  agent turn    → each `payload.20` part may carry visible prose
-//!       (`20.3`) or a tool call (`20.7`); timestamp at `5.1`;
-//!     - 132 tool call     → counted as execution observation;
-//!     - 17  API error     → counted as a tool error, never conversation;
+//!       (`20.3`); a `20.7` part only ANNOUNCES a tool call — not counted;
+//!     - 132 tool call     → the execution record of the announced call
+//!       (same call id, immediately after; 827/828 ids appear in both) —
+//!       the single tool_call authority, and 17 (API error) a tool error;
 //!     - 23/101 generation metadata and inter-agent notices → ignored.
 //!   Steps are appended once and never rewritten, so message identity is
 //!   `step:<idx>` and the full replay dedups exactly.
@@ -25,7 +26,16 @@
 //!
 //! Member mapping: one conversation, one member. A conversation with a
 //! `parent_conversation_id` is a CHILD of that parent; its steps contribute
-//! execution observations only. Root-only text is the user/agent prose above.
+//! execution observations only. The parent relation comes from the summaries
+//! store, and a conversation whose summary row has not landed yet is SKIPPED —
+//! unknown is never promoted to Root (a root later re-homed as a child would
+//! leave a ghost Logical Session with no root member).
+//!
+//! Change detection: `unchanged` is deliberately not consulted. The store is
+//! live SQLite in WAL mode — new steps can sit only in `<id>.db-wal` while
+//! the main file's size/mtime stay identical — and the title/parent half of
+//! the facts lives in a second store the skipset never sees. Discovery
+//! re-reads every conversation on every pass; the replay dedup absorbs it.
 //!
 //! Message provenance: the source carries no per-message model/provider —
 //! the model name only appears in runtime feature-flag blobs, which is
@@ -184,10 +194,13 @@ fn user_text(payload: &[u8]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Visible prose parts and the tool-call count of a step-15 payload.
-fn agent_turn(payload: &[u8]) -> (Vec<String>, u64) {
+/// Visible prose parts of a step-15 payload. The `20.7` tool-call parts are
+/// NOT counted here: the call is announced in the 15 and EXECUTED as its own
+/// step-132 record with the same call id (verified: 827/828 ids appear in
+/// both, announcement immediately before execution) — counting both would
+/// double-count, and 132 alone covers the calls that have no 15 announcement.
+fn agent_turn(payload: &[u8]) -> Vec<String> {
     let mut prose = Vec::new();
-    let mut tool_calls = 0u64;
     for (fnum, val) in pb_fields(payload) {
         if fnum != 20 {
             continue;
@@ -196,15 +209,20 @@ fn agent_turn(payload: &[u8]) -> (Vec<String>, u64) {
         if let Some(text) = pb_text(part, 3) {
             prose.push(text);
         }
-        if pb_sub(part, 7).is_some() {
-            tool_calls += 1;
-        }
     }
-    (prose, tool_calls)
+    prose
 }
 
 /// One conversation DB's facts for discovery: cwd + start time from its
 /// metadata blob, title / parent / workspace from the summaries store.
+///
+/// The summaries ROW is load-bearing, not decoration: `parent_conversation_id`
+/// decides Root vs Child. When the row is missing — the summaries store lags
+/// the conversation DB in normal dual-store writes — the relation is UNKNOWN,
+/// and unknown must never be promoted to Root: a member created as a root and
+/// upserted into a different logical session later would leave a ghost
+/// Logical Session with no root member behind. So a row-less conversation is
+/// skipped this round and picked up on the next reconcile.
 fn parse_member(
     db_path: &Path,
     summaries: Option<&Connection>,
@@ -256,9 +274,14 @@ fn parse_member(
         )
         .ok()
     });
-    let (title, preview, parent, workspaces) = match &summary {
-        Some(t) => t.clone(),
-        None => (String::new(), String::new(), None, String::new()),
+    let Some((title, preview, parent, workspaces)) = summary else {
+        // No summary row yet: the parent relation is unknown. Skip — the next
+        // reconcile picks the conversation up once the row has landed.
+        eprintln!(
+            "[discover] skip {}: no conversation_summaries row yet (relation unknown)",
+            db_path.display()
+        );
+        return Ok(None);
     };
 
     // `workspace_uris` is a JSON array of `file:///…` URIs; the metadata
@@ -325,24 +348,17 @@ fn parse_step(idx: i64, step_type: i64, payload: &[u8], is_root: bool) -> Option
             )))
         }
         15 if is_root => {
-            let (prose, tool_calls) = agent_turn(payload);
-            let observation = MemberObservation {
-                tool_calls,
-                ..Default::default()
-            };
+            let prose = agent_turn(payload);
             let text = prose.join("\n\n").trim().to_string();
             if text.is_empty() {
-                return Some(ParsedLine::observation_only(observation));
+                return None;
             }
-            Some(ParsedLine {
-                message: Some(parsed_message(
-                    idx,
-                    SessionMessageRole::Assistant,
-                    text,
-                    payload,
-                )),
-                observation,
-            })
+            Some(ParsedLine::message_only(parsed_message(
+                idx,
+                SessionMessageRole::Assistant,
+                text,
+                payload,
+            )))
         }
         132 => Some(ParsedLine::observation_only(MemberObservation {
             tool_calls: 1,
@@ -379,14 +395,16 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
     fn discover_members_in(
         &self,
         roots: &[PathBuf],
-        unchanged: &dyn Fn(&Path) -> bool,
+        _unchanged: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
         for root in roots {
             let Some(dir) = conversations_dir(root) else {
                 continue;
             };
-            // The summaries store sits beside the conversations directory.
+            // The summaries store sits beside the conversations directory. A
+            // missing store means every parent relation is unknown, so all
+            // members wait for it (never discovered as speculative roots).
             let summaries = dir
                 .parent()
                 .map(|p| p.join("conversation_summaries.db"))
@@ -394,6 +412,9 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 .and_then(|p| {
                     Connection::open_with_flags(p, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
                 });
+            if summaries.is_none() {
+                return Ok(out);
+            }
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -404,9 +425,11 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 .collect();
             paths.sort();
             for path in paths {
-                if unchanged(&path) {
-                    continue;
-                }
+                // `unchanged` is deliberately NOT consulted. It stats the main
+                // `.db` file, but this is a live WAL store: new steps can sit
+                // only in `<id>.db-wal` while size and mtime stay identical,
+                // and the conversation's title/parent live in a SECOND store
+                // (`conversation_summaries.db`) the skipset never sees.
                 match parse_member(&path, summaries.as_ref()) {
                     Ok(Some(m)) => out.push(m),
                     Ok(None) => {}
@@ -459,7 +482,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             stats: crate::adapters::stats_update_from(
                 &observation,
                 &source,
-                crate::adapters::StatsCapabilities::TOOL_CALLS_ERRORS_AND_COMPACTION,
+                crate::adapters::StatsCapabilities::TOOL_CALLS_AND_ERRORS,
             ),
             messages,
             source: Some(source),
@@ -683,8 +706,10 @@ mod tests {
         assert!(delta.messages[0].ts.is_some());
         match delta.stats {
             Some(crate::domain::StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, Some(2), "15.7 + 132");
+                // 20.7 only announces the call; 132 is the execution record.
+                assert_eq!(s.tool_call_count, Some(1));
                 assert_eq!(s.tool_error_count, Some(1), "the 429 step");
+                assert_eq!(s.compaction_count, None, "no compaction source known");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -755,6 +780,70 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "the id must look like a conversation id"
+        );
+    }
+
+    /// WAL regression: discovery must not consult the skipset. Even when the
+    /// caller reports every conversation "unchanged" (main-db stats frozen),
+    /// members are still re-listed.
+    #[test]
+    fn discovery_ignores_the_unchanged_skipset() {
+        let root = temp_dir("wal");
+        store(&root, "11111111-2222-4333-8444-555555555555", &[]);
+        summaries(
+            &root,
+            &[(
+                "11111111-2222-4333-8444-555555555555",
+                "judul",
+                "judul",
+                "[]",
+            )],
+        );
+        let found = AntigravityAdapter
+            .discover_members_in(&[root], &|_| true)
+            .unwrap();
+        assert_eq!(found.len(), 1, "WAL stores bypass the unchanged skipset");
+    }
+
+    /// Relation-unknown regression: a conversation DB present while its
+    /// summary row has not landed must not be discovered as a Root; once the
+    /// row lands with a parent, the next pass attaches it as a Child.
+    #[test]
+    fn missing_summary_row_is_not_promoted_to_root() {
+        let root = temp_dir("late-summary");
+        let id = "336f551c-58e8-491b-a31f-13b362786c85";
+        store(&root, id, &[]);
+
+        let none = AntigravityAdapter
+            .discover_members_in(&[root.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(
+            none.len(),
+            0,
+            "no summary row → relation unknown → skipped, not a speculative Root"
+        );
+
+        summaries(&root, &[(id, "", "", "[]")]);
+        let mut found = AntigravityAdapter
+            .discover_members_in(&[root.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1, "summary row landed → discovered now");
+        assert_eq!(found[0].kind, DiscoveredMemberKind::Root);
+
+        let conn = Connection::open(root.join("conversation_summaries.db")).unwrap();
+        conn.execute(
+            "UPDATE conversation_summaries SET parent_conversation_id = ?2 WHERE conversation_id = ?1",
+            rusqlite::params![id, "22222222-3333-4444-8555-666666666666"],
+        )
+        .unwrap();
+        found = AntigravityAdapter
+            .discover_members_in(&[root], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].kind,
+            DiscoveredMemberKind::Child,
+            "the parent is authoritative once the row exists"
         );
     }
 }

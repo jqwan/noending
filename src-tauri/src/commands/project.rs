@@ -102,7 +102,7 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
     }
 
     // Representative paths (first two, display) + the full search list
-    // (review P2-1) from one ordered scan.
+    // from one ordered scan.
     let mut representative: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut search_paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
     {

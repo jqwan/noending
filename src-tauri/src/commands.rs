@@ -548,8 +548,8 @@ pub fn sync_session(state: State<AppState>, session_id: String) -> Result<serde_
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        //  — a trashed session is inactive: sync is an explicit user
-        // action here, so reject with a reason instead of silently no-op'ing.
+        // A trashed session is inactive: sync is an explicit user action
+        // here, so reject with a reason instead of silently no-op'ing.
         if session.is_trashed() {
             return Err(other("会话已在回收站，无法同步；请先恢复会话"));
         }
@@ -1026,10 +1026,10 @@ pub fn assistant_execute_action(
     })
 }
 
-///  — the async seam test: the refresh command's blocking CLI probe
-/// must run on a blocking worker, never on the calling thread, and the seam
-/// must deliver a usable discovery for an agent whose catalog is static
-/// (no CLI spawn at all).
+/// The async seam test: the refresh command's blocking CLI probe must run on
+/// a blocking worker, never on the calling thread, and the seam must deliver
+/// a usable discovery for an agent whose catalog is static (no CLI spawn at
+/// all).
 #[cfg(test)]
 mod agent_runtime_refresh_seam_tests {
     use super::*;
