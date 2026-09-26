@@ -1,4 +1,4 @@
-//! Workspace settings commands — NoEnding Home, default workspace (§11).
+//! Workspace settings commands — NoEnding Home, default workspace.
 //!
 //! This is the wiring surface between Home resolution and the UI. Two rules
 //! make it safe to expose at all:
@@ -6,18 +6,18 @@
 //! * `get_workspace_settings` reports the Home the app is *actually* running on,
 //!   read from managed state — never a re-resolution, because a re-resolution
 //!   after a failed migration would report the new location while the database
-//!   being written is still the old one (§42.3-M14).
+//!   being written is still the old one.
 //! * `set_noending_home` writes `pending_home` and nothing else. Moving data is a
 //!   start-up operation (`home::prepare_home`), because switching a live process
 //!   onto a copied database would leave the old process writing to a diverged
-//!   file (§3).
+//!   file.
 
 use tauri::{AppHandle, Manager};
 
 use crate::error::{other, Result};
 use crate::workspace::home::{self, BootstrapPointer, HomeSource, NoEndingHome, WorkspaceSettings};
 
-/// §11 `get_workspace_settings`.
+/// `get_workspace_settings`.
 ///
 /// Also the one place the UI learns which database file it is looking at, so
 /// `get_app_info` retired into it (v0.2 had two commands reporting the same
@@ -33,7 +33,7 @@ pub fn get_workspace_settings(
         .inner()
         .clone();
     let mut settings = read_settings(&home);
-    // §42.3-M5: a failed relocation still starts the app, on the OLD Home, so
+    // a failed relocation still starts the app, on the OLD Home, so
     // "where the Home thinks the database is" can differ from "which file writes
     // are landing in". The user gets the latter.
     if let Ok(Some(path)) = super::with_db(&state, |db| Ok(db.read().path().map(str::to_string))) {
@@ -42,7 +42,7 @@ pub fn get_workspace_settings(
     Ok(settings)
 }
 
-/// §11 `set_noending_home`: request a relocation for the next launch.
+/// `set_noending_home`: request a relocation for the next launch.
 ///
 /// Returns `restart_required = true` so the UI can say what it means instead of
 /// implying the move already happened.
@@ -69,7 +69,7 @@ pub fn set_noending_home(app: AppHandle, new_home: String) -> Result<WorkspaceSe
 ///
 /// The managed `NoEndingHome` already *is* the effective Home — `prepare_home`
 /// applied `$NOENDING_HOME` at startup and never persists it — so this reads
-/// state instead of re-resolving it (§42.3-M14).
+/// state instead of re-resolving it.
 fn read_settings(home: &NoEndingHome) -> WorkspaceSettings {
     let (pointer, source) = match home::default_pointer_path().as_deref() {
         Some(path) => {

@@ -47,7 +47,7 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// whose format generation differs from this value must be discarded and
 /// rebuilt from Agent source data.
 ///
-/// v2 — the Logical Session refactor (重构方案 §24): `sessions` is keyed by the
+/// v2 — the Logical Session refactor: `sessions` is keyed by the
 /// root member's Resume identity and owns lifecycle/Owner alone; execution
 /// lives in `session_members`, conversation in `session_messages`, reading in
 /// `session_member_cursors`, observation in `session_member_stats`, the Sync
@@ -56,7 +56,7 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// `session_deletion_jobs` are gone: there is one conversation store, cursors
 /// belong to members, and NoEnding never deletes an Agent-owned source.
 ///
-/// v3 — message-level model provenance (Provenance 方案 §5/§8/§9):
+/// v3 — message-level model provenance:
 /// `session_messages` gains `provider` / `model` (source-confirmed, Assistant
 /// only — enforced by CHECK), and `session_member_stats` loses its
 /// `model` / `provider` / `effort` columns: member-level "current model" was
@@ -252,7 +252,7 @@ const CURRENT_SCHEMA: &str = r#"
     );
     -- The Logical Session: user-visible conversation + lifecycle + Owner.
     -- Identity is (agent, root_agent_session_id): the ROOT member's real
-    -- Resume identity, not any child's external id (重构方案 §10.1).
+    -- Resume identity, not any child's external id.
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       agent TEXT NOT NULL,
@@ -262,10 +262,10 @@ const CURRENT_SCHEMA: &str = r#"
       workspace_path_id TEXT,
       project_id TEXT REFERENCES projects(id),
       -- Semantic ownership: at most one Owner Workstream per Session
-      -- (方案 §3.3). Deleting the Workstream clears this, never the row.
+      --. Deleting the Workstream clears this, never the row.
       owner_workstream_id TEXT
         REFERENCES workstreams(id) ON DELETE SET NULL,
-      -- Fork provenance only (§2.2): lifecycle / Owner / Conversation stay
+      -- Fork provenance only: lifecycle / Owner / Conversation stay
       -- fully independent of the fork source.
       forked_from_session_id TEXT
         REFERENCES sessions(id) ON DELETE SET NULL,
@@ -276,7 +276,7 @@ const CURRENT_SCHEMA: &str = r#"
       trashed_at TEXT,
       UNIQUE(agent, root_agent_session_id)
     );
-    -- One internal execution unit of a Logical Session (§5). Only relation
+    -- One internal execution unit of a Logical Session. Only relation
     -- 'root' may produce session_messages; exactly one root per session is
     -- enforced by the partial unique index below.
     CREATE TABLE IF NOT EXISTS session_members (
@@ -301,7 +301,7 @@ const CURRENT_SCHEMA: &str = r#"
       ON session_members(session_id);
     CREATE INDEX IF NOT EXISTS idx_session_members_parent
       ON session_members(agent, parent_source_member_id);
-    -- Where each member stopped reading ITS source (§8.1). Member-owned, never
+    -- Where each member stopped reading ITS source. Member-owned, never
     -- session-owned; the Context frontier lives in session_context_state.
     CREATE TABLE IF NOT EXISTS session_member_cursors (
       member_id TEXT PRIMARY KEY
@@ -313,14 +313,14 @@ const CURRENT_SCHEMA: &str = r#"
       mtime REAL,
       prefix_hash TEXT NOT NULL DEFAULT '',
       identity_tail_hash TEXT NOT NULL DEFAULT '',
-      -- Stateful provenance frontier (Provenance 方案 §15). Only a stateful
+      -- Stateful provenance frontier. Only a stateful
       -- evidence adapter writes these; they are cursor state, never a UI
       -- authority, and live in the same transaction as the messages they
       -- cover so the bytes frontier and the provenance state cannot drift.
       active_provider TEXT,
       active_model TEXT
     );
-    -- The ONLY conversation store (§6): user/assistant turns of the ROOT
+    -- The ONLY conversation store: user/assistant turns of the ROOT
     -- member. Identity dedup is (member_id, source_identity_hash); sequence is
     -- NoEnding's own per-session counter.
     CREATE TABLE IF NOT EXISTS session_messages (
@@ -337,7 +337,7 @@ const CURRENT_SCHEMA: &str = r#"
       ts TEXT,
       role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
       content TEXT NOT NULL,
-      -- Message-level generation provenance (Provenance 方案 §6/§7):
+      -- Message-level generation provenance:
       -- source-confirmed only, meaningful for Assistant rows alone. NULL =
       -- the source cannot prove it; never inferred from configuration.
       provider TEXT,
@@ -352,14 +352,14 @@ const CURRENT_SCHEMA: &str = r#"
     );
     CREATE INDEX IF NOT EXISTS idx_session_messages_session
       ON session_messages(session_id, sequence);
-    -- The Logical Session's Context frontier (§8.2): how far Sync has consumed
+    -- The Logical Session's Context frontier: how far Sync has consumed
     -- root conversation messages. Completely separate lifecycle from cursors.
     CREATE TABLE IF NOT EXISTS session_context_state (
       session_id TEXT PRIMARY KEY
         REFERENCES sessions(id) ON DELETE CASCADE,
       processed_message_sequence INTEGER NOT NULL DEFAULT 0
     );
-    -- 1:1 execution snapshot per member (§7): current observable source state,
+    -- 1:1 execution snapshot per member: current observable source state,
     -- not an append-only log. NULL = source does not provide the metric.
     CREATE TABLE IF NOT EXISTS session_member_stats (
       member_id TEXT PRIMARY KEY
@@ -373,13 +373,13 @@ const CURRENT_SCHEMA: &str = r#"
       cached_tokens INTEGER,
       reasoning_tokens INTEGER,
       cost REAL,
-      -- model / provider / effort were removed in v3 (Provenance 方案 §9):
+      -- model / provider / effort were removed in v3:
       -- message provenance lives in session_messages, and a member-level
       -- "current model" was a second unclear authority, never an execution fact.
       updated_at TEXT NOT NULL,
       extra TEXT NOT NULL DEFAULT '{}'
     );
-    -- Ingestion problems that are deliberately NOT Sessions (§11): unattachable
+    -- Ingestion problems that are deliberately NOT Sessions: unattachable
     -- child/side sources and the like. Never Search / Context / Owner /
     -- lifecycle; deleted when the source resolves.
     CREATE TABLE IF NOT EXISTS ingestion_diagnostics (
@@ -546,7 +546,7 @@ const CURRENT_SCHEMA: &str = r#"
       git_kind TEXT,
       -- Named `exists_on_disk`, not `exists`: EXISTS is a SQLite keyword and
       -- `exists INTEGER NOT NULL` is a syntax error, so the spec's column name
-      -- would need quoting in every statement (方案 §42.2-E13). The domain
+      -- would need quoting in every statement. The domain
       -- field stays `exists`.
       exists_on_disk INTEGER NOT NULL DEFAULT 1,
       first_seen_at TEXT NOT NULL,

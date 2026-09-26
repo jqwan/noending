@@ -1,13 +1,13 @@
-//! Project projection and the WorkspacePath registry (方案 §17).
+//! Project projection and the WorkspacePath registry.
 //!
-//! Every §17 "必须测试" case is exactly one named test here, plus the extra doors
+//! Every "必须测试" case is exactly one named test here, plus the extra doors
 //! the registry owns: the `WorkspaceAttaching` implementation, the reconcile
-//! sweep, GC, automatic naming and the §11 detail shape.
+//! sweep, GC, automatic naming and the detail shape.
 //!
 //! No test touches a real repository, a real NoEnding Home or `git`: observations
-//! are constructed by script (§42.3-M13), which is the whole point of the
+//! are constructed by script, which is the whole point of the
 //! `WorkspaceObserving` / `WorkspacePolicy` seams. Paths are absolute strings that
-//! need not exist — path identity is lexical (§42.3-M8) — and every assertion
+//! need not exist — path identity is lexical — and every assertion
 //! compares against `canon(..)` rather than a spelled-out prefix, because
 //! `canonical_path` is stored in platform-native form and CI runs both macOS and
 //! Windows.
@@ -63,7 +63,7 @@ fn temp_db_locked() -> (PathBuf, Db) {
 }
 
 /// Platform-native canonical form of a test path — also its storage key, so every
-/// assertion compares against this rather than a literal (§42.3-M8 rule 7).
+/// assertion compares against this rather than a literal (rule 7).
 fn canon(raw: &str) -> String {
     normalize_path(raw).expect("test paths are absolute")
 }
@@ -118,7 +118,7 @@ fn ensure(db: &Db, observation: &WorkspaceObservation) -> WorkspacePath {
 }
 
 /// Register a path under an existing Project the way a bulk import does, so a
-/// test can build the multi-path Project shape §8.2 itself never produces.
+/// test can build the multi-path Project shape itself never produces.
 fn insert_plain(db: &Db, raw: &str, project_id: &str) -> WorkspacePath {
     let id = db
         .tx(|tx| insert_workspace_path_conn(tx, &canon(raw), project_id))
@@ -129,7 +129,7 @@ fn insert_plain(db: &Db, raw: &str, project_id: &str) -> WorkspacePath {
 fn project_of(db: &Db, path: &WorkspacePath) -> Project {
     db.get_project(&path.project_id)
         .unwrap()
-        .expect("a WorkspacePath always belongs to exactly one Project (§1.1)")
+        .expect("a WorkspacePath always belongs to exactly one Project")
 }
 
 /// The Git family of the Project owning `path`.
@@ -220,7 +220,7 @@ impl WorkspaceObserving for Scripted {
 }
 
 /// The NoEnding Home stand-in: its root, its reserved app subtrees, and the
-/// default workspace. `workspace/` is deliberately NOT reserved (§2, §42.3-M21) —
+/// default workspace. `workspace/` is deliberately NOT reserved
 /// a policy that reserved the whole tree would delete the default workspace.
 struct Home {
     root: String,
@@ -242,7 +242,7 @@ impl WorkspacePolicy for Home {
     fn is_reserved(&self, canonical_path: &str) -> bool {
         // Segment-wise through the same helper the real Home must use: on Windows
         // both sides are `\`-separated, so a hand-rolled `{r}/` prefix test would
-        // silently admit every reserved path there (§42.3-M8).
+        // silently admit every reserved path there.
         canonical_path == self.root || self.reserved.iter().any(|r| is_within(canonical_path, r))
     }
 
@@ -253,13 +253,13 @@ impl WorkspacePolicy for Home {
     fn exists_on_disk(&self, canonical_path: &str) -> bool {
         // Same rule the production policy uses: existence is read from the real
         // host, never assumed. Tests that hand in a non-existent path therefore
-        // get `false`, which is what §9 adoption must record.
+        // get `false`, which is what adoption must record.
         noending::workspace::resolver::exists_on_disk(canonical_path)
     }
 }
 
 // --------------------------------------------------------------------------
-// §8.1-8.3 — the door
+// the door
 // --------------------------------------------------------------------------
 
 #[test]
@@ -278,13 +278,9 @@ fn new_non_git_path_creates_exactly_one_project() {
     assert_eq!(path.git_kind, None);
 
     let projects = db.list_projects().unwrap();
-    assert_eq!(
-        projects.len(),
-        1,
-        "§8.2: one new plain directory, one Project"
-    );
+    assert_eq!(projects.len(), 1, "one new plain directory, one Project");
     assert_eq!(projects[0].id, path.project_id);
-    assert_eq!(projects[0].name, "Alpha", "§37 automatic naming");
+    assert_eq!(projects[0].name, "Alpha", "automatic naming");
     assert_eq!(projects[0].git_id, None);
     assert!(!projects[0].name_customized);
     assert_eq!(paths_of(&db, &projects[0].id).len(), 1);
@@ -296,7 +292,7 @@ fn ensuring_the_same_path_twice_is_idempotent() {
     let (_d, db) = temp_db();
     let first = ensure(&db, &plain("/work/alpha", true));
     // A different spelling of the same directory is the same identity, so it must
-    // not become a second WorkspacePath (§42.3-M8).
+    // not become a second WorkspacePath.
     let second = ensure(&db, &plain("/work/alpha/./", true));
 
     assert_eq!(first.id, second.id);
@@ -306,7 +302,7 @@ fn ensuring_the_same_path_twice_is_idempotent() {
 
     // Replaying the whole run changes nothing a caller can observe except
     // `last_seen_at`, which is what makes a retried Sync converge instead of
-    // oscillate (§42.2-E1).
+    // oscillate.
     ensure(&db, &plain("/work/alpha", true));
     assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
     let projects = db.list_projects().unwrap();
@@ -326,12 +322,9 @@ fn new_git_path_creates_a_git_backed_project() {
     assert_eq!(path.git_state, git_state::DETECTED);
     assert_eq!(path.git_kind.as_deref(), Some("main"));
     let project = project_of(&db, &path);
-    let git_id = project
-        .git_id
-        .clone()
-        .expect("§8.3: the family is recorded");
+    let git_id = project.git_id.clone().expect("the family is recorded");
 
-    // The family is a `git_identities` row keyed by the common dir (§5.2).
+    // The family is a `git_identities` row keyed by the common dir.
     let identity = db
         .find_git_identity_by_common_dir(&canon("/work/repo/.git"))
         .unwrap()
@@ -340,7 +333,7 @@ fn new_git_path_creates_a_git_backed_project() {
     assert_ne!(
         identity.id,
         path_id_of("/work/repo"),
-        "a Git id is app-assigned, not a second copy of the path hash (design §8)"
+        "a Git id is app-assigned, not a second copy of the path hash (design )"
     );
     assert_eq!(db.list_projects().unwrap().len(), 1);
     assert_eq!(
@@ -360,7 +353,7 @@ fn new_git_path_creates_a_git_backed_project() {
     assert_eq!(project_of(&db, &path).git_id, Some(git_id));
 }
 
-/// §9 + §1.3 — an adopted worktree's existence is observed, never assumed.
+/// + an adopted worktree's existence is observed, never assumed.
 ///
 /// `git worktree list` reports registrations whether or not the directory is
 /// still on this machine. Adoption used to hardcode `false`, so the Projects
@@ -391,7 +384,7 @@ fn adopted_worktrees_report_the_existence_that_was_observed() {
     );
 
     let family = paths_of(&db, &row.project_id);
-    assert_eq!(family.len(), 3, "§9: the list becomes WorkspacePaths");
+    assert_eq!(family.len(), 3, "the list becomes WorkspacePaths");
 
     let by_path = |p: &std::path::Path| {
         family
@@ -406,7 +399,7 @@ fn adopted_worktrees_report_the_existence_that_was_observed() {
     assert!(
         !by_path(&ghost).exists,
         "a registration whose directory is gone stays a legal exists=false \
-         observation (§42.3-M8), it is not silently dropped or asserted present"
+         observation, it is not silently dropped or asserted present"
     );
 }
 
@@ -429,7 +422,7 @@ fn two_worktrees_of_one_repo_share_one_project() {
 
     assert_eq!(
         main.project_id, linked.project_id,
-        "§8.3: one common dir means one Project"
+        "one common dir means one Project"
     );
     assert_eq!(db.list_projects().unwrap().len(), 1);
     assert_eq!(paths_of(&db, &main.project_id).len(), 2);
@@ -446,7 +439,7 @@ fn two_worktrees_of_one_repo_share_one_project() {
 }
 
 // --------------------------------------------------------------------------
-// §8.4 / §8.5 / §1.3 — upgrades, moves, and evidence that disappears
+// / / upgrades, moves, and evidence that disappears
 // --------------------------------------------------------------------------
 
 #[test]
@@ -464,7 +457,7 @@ fn path_project_upgrades_to_git_project_without_changing_project_id() {
     );
     let upgraded = project_of(&db, &after);
 
-    assert_eq!(upgraded.id, project.id, "§8.4: Project.id is unchanged");
+    assert_eq!(upgraded.id, project.id, "Project.id is unchanged");
     assert_eq!(after.id, path.id, "the WorkspacePath did not move either");
     assert_eq!(after.project_id, path.project_id);
     assert_eq!(after.git_state, git_state::DETECTED);
@@ -506,9 +499,9 @@ fn git_missing_does_not_detach_the_path() {
     let project = project_of(&db, &path);
     let s_keep = session(&db, "s-keep", "/work/repo", &path.id);
 
-    // The `.git` directory vanished. §1.3 allows exactly one change: `git_state`.
+    // The `.git` directory vanished. allows exactly one change: `git_state`.
     let missing = ensure(&db, &plain("/work/repo", true));
-    assert_eq!(missing.git_state, git_state::MISSING, "§8.1");
+    assert_eq!(missing.git_state, git_state::MISSING, "");
     assert_eq!(
         missing.git_kind, None,
         "kind describes evidence we no longer have"
@@ -530,7 +523,7 @@ fn git_missing_does_not_detach_the_path() {
     let again = ensure(&db, &git_gone("/work/repo"));
     assert_eq!(again.git_state, git_state::MISSING);
     assert_eq!(again.project_id, project.id);
-    // `Unavailable` (no git binary, timeout, dubious ownership) likewise (§M9).
+    // `Unavailable` (no git binary, timeout, dubious ownership) likewise.
     let unavailable = WorkspaceObservation {
         git: GitDetection::Unavailable,
         ..plain("/work/repo", true)
@@ -578,7 +571,7 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
     let s_a = session(&db, "s-a", "/work/one", &a.id);
     let s_b = session(&db, "s-b", "/work/two", &b.id);
 
-    // `/work/one` now sits inside a DIFFERENT repository. §8.5: a strong identity
+    // `/work/one` now sits inside a DIFFERENT repository. a strong identity
     // change — this path moves, its sibling keeps its own family.
     let moved = ensure(
         &db,
@@ -599,7 +592,7 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
             .project_id
             .as_deref(),
         Some(moved.project_id.as_str()),
-        "§1.11: the derived cache followed its path in the same transaction"
+        "the derived cache followed its path in the same transaction"
     );
     assert_eq!(
         db.get_session(&s_b.id)
@@ -635,13 +628,13 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
         0,
         "nothing still caches a Project that is gone"
     );
-    registry_is_consistent(&db).expect("§1.2 holds at every committed moment");
+    registry_is_consistent(&db).expect("holds at every committed moment");
 }
 
 #[test]
 fn merge_deletes_the_zero_path_project() {
     let (_d, db) = temp_db();
-    // A path-backed Project holding two plain directories. §8.2 gives every new
+    // A path-backed Project holding two plain directories. gives every new
     // path its own Project, so this shape only arrives when paths are registered
     // onto one Project in bulk — which is exactly the case that has to merge
     // cleanly. `insert_workspace_path_conn` registers a path directly.
@@ -682,7 +675,7 @@ fn merge_deletes_the_zero_path_project() {
     assert_eq!(joined.project_id, survivor);
     assert!(
         db.get_project(&merged_away).unwrap().is_none(),
-        "§8.4: the merged Project is deleted, not left empty"
+        "the merged Project is deleted, not left empty"
     );
     assert_eq!(paths_of(&db, &survivor).len(), 3, "its paths came too");
     for s in [&s1, &s2] {
@@ -698,7 +691,7 @@ fn merge_deletes_the_zero_path_project() {
     }
     assert!(
         db.get_workstream("w-1").unwrap().is_some(),
-        "a Workstream survives its Project; membership is its path list (§1.12)"
+        "a Workstream survives its Project; membership is its path list"
     );
     assert_eq!(
         noending::storage::workstream_paths::project_roles_for_workstream(&db.read(), "w-1")
@@ -721,7 +714,7 @@ fn customized_project_name_survives_merge_and_reconcile() {
             .unwrap()
             .unwrap()
             .name_customized,
-        "§17-15: a rename records that a person chose this name"
+        "a rename records that a person chose this name"
     );
 
     let owner = ensure(
@@ -744,7 +737,7 @@ fn customized_project_name_survives_merge_and_reconcile() {
         ),
     );
 
-    // §17-17: the survivor ROW is the family owner, but the NAME follows
+    // the survivor ROW is the family owner, but the NAME follows
     // `name_customized`, so a user's title is never lost to an automatic one.
     let after = db.get_project(&survivor).unwrap().unwrap();
     assert_eq!(after.name, "我的旧项目");
@@ -874,7 +867,7 @@ fn zero_path_project_cannot_survive() {
 }
 
 // --------------------------------------------------------------------------
-// §10 — GC
+// GC
 // --------------------------------------------------------------------------
 
 #[test]
@@ -901,7 +894,7 @@ fn gc_only_removes_paths_nothing_references_and_that_we_observed_gone() {
     .unwrap();
 
     assert_eq!(outcome.deleted_paths, vec![dead.id.clone()]);
-    assert_eq!(outcome.deleted_projects.len(), 1, "§1.2 goes with it");
+    assert_eq!(outcome.deleted_projects.len(), 1, "goes with it");
     assert!(db.get_workspace_path(&by_session.id).unwrap().is_some());
     assert!(db.get_workspace_path(&by_workstream.id).unwrap().is_some());
     assert!(db.get_workspace_path(&never_asked.id).unwrap().is_some());
@@ -924,7 +917,7 @@ fn gc_only_removes_paths_nothing_references_and_that_we_observed_gone() {
 }
 
 // --------------------------------------------------------------------------
-// §17-1 — the WorkspaceAttaching seam
+// the WorkspaceAttaching seam
 // --------------------------------------------------------------------------
 
 #[test]
@@ -947,15 +940,15 @@ fn workspace_attaching_returns_none_for_unresolvable_and_reserved_paths() {
     let projection = ProjectProjection::with_policy(&observer, &home);
 
     // Empty, whitespace and a relative string resolve to nothing, and nothing is
-    // fabricated (§5.5, §7.2).
+    // fabricated.
     for raw in ["", "   ", "relative/thing", "~user/other"] {
         let attached = db
             .tx(|tx| projection.ensure_path(tx, raw))
             .expect("no IO in these cases");
         assert_eq!(attached, None, "`{raw}` must not become a WorkspacePath");
     }
-    // Reserved app paths never become workspaces (§2), and the default workspace
-    // under the same Home does (§42.3-M21).
+    // Reserved app paths never become workspaces, and the default workspace
+    // under the same Home does.
     for raw in [
         "/Users/tester/.noending",
         "/Users/tester/.noending/data",
@@ -982,7 +975,7 @@ fn workspace_attaching_returns_none_for_unresolvable_and_reserved_paths() {
     assert_eq!(
         project_of(&db, &db.get_workspace_path(&workspace).unwrap().unwrap()).name,
         "NoEnding Workspace",
-        "§17-16 through the same door that created the row"
+        "through the same door that created the row"
     );
 
     // A real workspace through the string door, inside the CALLER's transaction.
@@ -998,7 +991,7 @@ fn workspace_attaching_returns_none_for_unresolvable_and_reserved_paths() {
         db.find_git_identity_by_common_dir(&canon("/work/repo/.git"))
             .unwrap()
             .map(|i| i.id),
-        "projects.git_id references git_identities.id, not a path (§5.2)"
+        "projects.git_id references git_identities.id, not a path"
     );
     registry_is_consistent(&db).expect("consistent");
 }
@@ -1007,7 +1000,7 @@ fn workspace_attaching_returns_none_for_unresolvable_and_reserved_paths() {
 fn workspace_attaching_refuses_an_observation_whose_identity_disagrees() {
     // The one case where the door says "nothing" instead of writing a row it
     // cannot name: `workspace::identity` defines the key, so an observer with a
-    // different idea must not become a second authority (§42.2-E1, §42.3-M8).
+    // different idea must not become a second authority.
     let (_d, db) = temp_db();
     struct Lying;
     impl WorkspaceObserving for Lying {
@@ -1084,7 +1077,7 @@ fn the_string_door_reports_its_effect_to_the_transaction_owner() {
 }
 
 // --------------------------------------------------------------------------
-// §26 / §42.3-M7 — reconcile
+// / reconcile
 // --------------------------------------------------------------------------
 
 #[test]
@@ -1100,7 +1093,7 @@ fn reconcile_a_single_path_reapplies_the_whole_decision_table() {
     assert_eq!(path.git_state, git_state::NONE);
 
     // Same string, new evidence: reconcile is the only reason a stored path's
-    // Project may change without a user action (§26).
+    // Project may change without a user action.
     let after = projection
         .reconcile_workspace_path(&db, &path.id)
         .expect("reconcile");
@@ -1112,10 +1105,7 @@ fn reconcile_a_single_path_reapplies_the_whole_decision_table() {
     observer.set("/work/repo", plain("/work/repo", true));
     let after = projection.reconcile_workspace_path(&db, &path.id).unwrap();
     assert_eq!(after.git_state, git_state::MISSING);
-    assert_eq!(
-        after.project_id, path.project_id,
-        "§1.3 through reconcile too"
-    );
+    assert_eq!(after.project_id, path.project_id, "through reconcile too");
 
     // An unknown id is an error, not a silent creation.
     assert!(projection
@@ -1145,7 +1135,7 @@ fn reconcile_sweep_discovers_then_cleans_unreferenced_worktrees() {
     }
 
     // Pass 1: the sweep re-observes the registry, finds the family (an in-place
-    // upgrade of the seeded Project), and §9 pulls the sibling worktree in.
+    // upgrade of the seeded Project), and pulls the sibling worktree in.
     let report = reconcile_workspace_paths(&db, &projection, 500).unwrap();
     assert_eq!(report.scanned, 1, "only /work/repo was registered yet");
     assert!(report.failed.is_empty(), "{:?}", report.failed);
@@ -1201,7 +1191,7 @@ fn reconcile_sweep_removes_unreferenced_paths_even_when_present() {
 }
 
 // --------------------------------------------------------------------------
-// §11 — naming, rename, detail
+// naming, rename, detail
 // --------------------------------------------------------------------------
 
 #[test]
@@ -1217,7 +1207,7 @@ fn default_workspace_project_is_named_noending_workspace() {
     assert_eq!(project_of(&db, &dw).name, "NoEnding Workspace");
 
     // After a Home move the OLD workspace is an ordinary directory and must not
-    // keep the special name (方案 §4; `auto_project_name`'s documented contract).
+    // keep the special name.
     let old = ensure_workspace_path(&db, &plain("/Users/other/.noending/workspace", true), &home)
         .unwrap();
     assert_eq!(project_of(&db, &old).name, "Workspace");
@@ -1241,7 +1231,7 @@ fn user_rename_is_customized_and_automatic_naming_stops() {
     );
 
     // The whole-object write Project creation uses must not rename a customized
-    // row either — `upsert_project_conn`'s `CASE` db (§37).
+    // row either — `upsert_project_conn`'s `CASE` db.
     let mut lying = renamed.clone();
     lying.name = "Auto Renamed".into();
     lying.name_customized = false;
@@ -1250,7 +1240,7 @@ fn user_rename_is_customized_and_automatic_naming_stops() {
     assert_eq!(stored.name, "重要的项目");
     assert!(stored.name_customized, "name_customized is one-way");
 
-    // And §1.3's other half: an automatic write that carries no family must never
+    // And 's other half: an automatic write that carries no family must never
     // CLEAR one. (The reverse direction — a caller-supplied non-null `git_id`
     // replacing a family — is why `update_project` leaves the command surface.)
     ensure(
@@ -1269,7 +1259,7 @@ fn user_rename_is_customized_and_automatic_naming_stops() {
     cleared.name = "Auto Renamed".into();
     db.upsert_project(&cleared).unwrap();
     let after = db.get_project(&project_id).unwrap().unwrap();
-    assert_eq!(after.git_id, with_family.git_id, "§1.3: never cleared");
+    assert_eq!(after.git_id, with_family.git_id, "never cleared");
     assert_eq!(after.name, "重要的项目");
 
     // Reconciling the same path again is still not a rename.
@@ -1330,7 +1320,7 @@ fn project_detail_has_the_frozen_shape() {
             ("w-primary".to_string(), true),
             ("w-related".to_string(), false)
         ],
-        "§1.12/E4: membership is ANY path of the Project; position 0 is what makes a row 主关联"
+        "membership is ANY path of the Project; position 0 is what makes a row 主关联"
     );
     assert_eq!(
         noending::storage::workstream_paths::workstreams_for_project(
@@ -1344,7 +1334,7 @@ fn project_detail_has_the_frozen_shape() {
         vec![("w-related".to_string(), true)]
     );
 
-    // The §11 shape is a contract with the frontend bridge: these keys, nothing else.
+    // The shape is a contract with the frontend bridge: these keys, nothing else.
     // (`serde_json::Value` orders map keys, so this asserts the SET: the wire
     // object's field order is not part of the contract.)
     let value = serde_json::to_value(&detail).unwrap();
@@ -1410,7 +1400,7 @@ fn list_projects_reports_every_derived_project_and_no_ghost() {
 
 #[test]
 fn the_core_writes_no_index_rows_and_the_wrapper_does() {
-    // §42.3-M4: the transaction-scoped core never touches `search_index`, so a
+    // the transaction-scoped core never touches `search_index`, so a
     // rolled-back transaction cannot leave search describing a Project that was
     // never committed. The effect list is the whole handover.
     let (_d, db) = temp_db();
@@ -1450,8 +1440,8 @@ fn the_core_writes_no_index_rows_and_the_wrapper_does() {
 #[test]
 fn an_unregistered_home_policy_leaves_the_registry_open() {
     // The default policy is what every creation path and every test here uses:
-    // nothing reserved, no special name — so §8 is fully exercisable with no
-    // filesystem and no Home at all (§42.3-M13).
+    // nothing reserved, no special name — so is fully exercisable with no
+    // filesystem and no Home at all.
     let (_d, db) = temp_db();
     let path = ensure(&db, &plain("/anything/at/all", true));
     assert_eq!(project_of(&db, &path).name, "All");
@@ -1461,20 +1451,20 @@ fn an_unregistered_home_policy_leaves_the_registry_open() {
     assert_eq!(projection.policy().default_workspace(), None);
 }
 
-// ------------------------------------------------ §44 Windows case aliases
+// ------------------------------------------------ Windows case aliases
 //
-// 方案 §10 settled this as 方案 A: `ensure_workspace_path_conn` re-derives the id
+//  settled this as option A: `ensure_workspace_path_conn` re-derives the id
 // through the host's rule (`project.rs:295`), so a macOS runner can prove the key
 // — `identity.rs` and `workspace_identity_test.rs` do — but not the registry.
 // Injecting a style into that door would mean bending production for the test, so
 // the claim is pinned where it is actually true: CI's `windows-latest` job.
-// 方案 §44.5 requires reading for these two names in that job's log, because on
+//  requires reading for these two names in that job's log, because on
 // macOS they compile away to nothing — which also means Main could not falsify
 // them by hand here. The falsifiable-on-any-host version is the one below.
 
-/// §44.6 — `git_identities` is found by location, not by spelling. Two spellings
-/// of one `common_dir` must return the id that was created first; before §44 the
-/// second call inserted a fresh row, and §8.5 reads a second family as license to
+/// `git_identities` is found by location, not by spelling. Two spellings
+/// of one `common_dir` must return the id that was created first; before the
+/// second call inserted a fresh row, and reads a second family as license to
 /// move a WorkspacePath into a second Project.
 ///
 /// Separator-only (rather than case) because the location relation it proves is
@@ -1513,7 +1503,7 @@ fn one_git_family_is_found_before_it_is_created() {
     );
 }
 
-/// §44: two case spellings of one directory are one WorkspacePath, and the row
+/// two case spellings of one directory are one WorkspacePath, and the row
 /// keeps the spelling that arrived first — the fold reaches the key, never the
 /// display.
 #[cfg(windows)]
@@ -1539,10 +1529,10 @@ fn windows_case_aliases_cannot_create_two_workspace_paths() {
     registry_is_consistent(&db).expect("every id derived from its own canonical_path");
 }
 
-/// §44.6's harder half: one repository reported under two spellings is one
+/// 's harder half: one repository reported under two spellings is one
 /// family. Without the location-keyed `ensure_git_identity_conn`, the second
-/// observation mints a second `git_identities` row, §8.5 reads that as a family
-/// change and moves the path into a second Project — splitting what §8.3 exists to
+/// observation mints a second `git_identities` row, reads that as a family
+/// change and moves the path into a second Project — splitting what exists to
 /// converge. Falsified by restoring the exact-string-only lookup.
 #[cfg(windows)]
 #[test]
@@ -1587,12 +1577,12 @@ fn windows_case_aliases_cannot_create_two_projects() {
 }
 
 // ===========================================================================
-// Projects Experience v0.2 §27 — workspace refresh contract.
+// Projects Experience v0.2 workspace refresh contract.
 //
 // The two refresh entries (global / per-project) ride ONE rule set: the
 // reconcile_workspace_path_ids primitive below is the same observe → ensure →
 // GC pipeline the global sweep runs. These tests lock that contract without
-// any real git or real Home (§42.3-M13).
+// any real git or real Home.
 // ===========================================================================
 
 use noending::workspace::project::{
@@ -1626,11 +1616,7 @@ fn global_refresh_reobserves_registered_paths() {
 
     assert_eq!(report.scanned, 2);
     assert_eq!(report.missing_paths, 1, "only /work/b is gone");
-    assert_eq!(
-        progress.lock().unwrap().last(),
-        Some(&(2, 2)),
-        "§12 progress"
-    );
+    assert_eq!(progress.lock().unwrap().last(), Some(&(2, 2)), "progress");
     let b = db
         .get_workspace_path(&path_id_of("/work/b"))
         .unwrap()
@@ -1694,7 +1680,7 @@ fn referenced_missing_path_survives_refresh() {
     let projection = ProjectProjection::new(&observer);
     let wp = {
         let wp = ensure(&db, &plain("/work/a", true));
-        // 一条 Session 引用让这条路径不可 GC（§15 的引用条件）。
+        // 一条 Session 引用让这条路径不可 GC（的引用条件）。
         session(&db, "s-ref", "/work/a", &wp.id);
         wp
     };
@@ -1839,7 +1825,7 @@ fn refresh_does_not_touch_workstream_paths() {
             &wp.id
         ),
         before,
-        "refresh never writes workstream_paths (§9)"
+        "refresh never writes workstream_paths"
     );
 }
 

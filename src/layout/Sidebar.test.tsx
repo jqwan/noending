@@ -1,4 +1,4 @@
-// Projects Experience v0.2 §27 — 前端契约：
+// Projects Experience v0.2 前端契约：
 // Sidebar 只有一等 Projects 导航，不再渲染单个 Project 实体。
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -50,7 +50,7 @@ describe("Sidebar projects navigation", () => {
   it("sidebar_projects_stays_weak_active_on_project_detail", async () => {
     renderSidebar({ view: "project", projectId: "p-1" });
     const item = await screen.findByText("项目");
-    // §22 — Project Detail 时保持弱高亮，与 Workstream Detail 的模式一致。
+    // Project Detail 时保持弱高亮，与 Workstream Detail 的模式一致。
     expect(item.className).toContain("weak");
   });
 

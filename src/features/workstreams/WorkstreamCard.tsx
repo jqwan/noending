@@ -15,7 +15,7 @@ const LIFECYCLE_LABELS: Record<string, string> = {
 };
 
 /**
- * Base Experience 下，Workstream 由用户显式组织的信息驱动（§14 的定义），
+ * Base Experience 下，Workstream 由用户显式组织的信息驱动，
  * 不显示冻结期留下的 Agent 摘要（`current_state` / `goal`）。智能重新开启时
  * 摘要能力原样回来，所以这里是门控而不是删除。
  */
@@ -53,7 +53,7 @@ export function searchFieldHint(intelligenceEnabled: boolean): string {
  *   继续        → 挂载全局 ResumeSessionModal
  *
  * 卡片自己不再调用 launcher：启动路径唯一
- * NewSessionModal → prepareNewSession → launchPrepared（§8.1.1、Preview-Launch
+ * NewSessionModal → prepareNewSession → launchPrepared（、Preview-Launch
  * Identity）。两个 Modal 渲染在 `<article>` 之外，否则卡片整体的
  * 「点击进详情」会吃掉弹窗里的点击。
  */
@@ -83,7 +83,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
             {(
               <span className="badge" title="任务状态">{LIFECYCLE_LABELS[card.lifecycle] ?? card.lifecycle}</span>
             )}
-            {/* visibility=archived 就是回收站（方案 §1.13）：它和 lifecycle 正交，
+            {/* visibility=archived 就是回收站：它和 lifecycle 正交，
                 所以这里单独一个徽标，而不是把 lifecycle 改成第三种值。 */}
             {card.visibility === "archived" && (
               <span className="badge warn" title="在回收站里：工作路径、会话归属与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
@@ -102,7 +102,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
           </span>
           {!archived && <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
             {/* 与 Home 同一个判断：卡片不自己宣称「没有 Agent」。`defaultAgent`
-                由 useWorkstreamCards 异步解析（返回形状按 §8.1.1 冻结，没有
+                由 useWorkstreamCards 异步解析（返回形状已冻结，没有
                 "解析完成"这一位），所以在解析期间 disabled + 「未检测到」的
                 tooltip 会说假话。是否真的没有 Agent 一律交给 NewSessionModal
                 自己判定——它同时是唯一的启动路径。 */}

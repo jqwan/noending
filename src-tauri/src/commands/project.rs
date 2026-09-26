@@ -8,8 +8,8 @@
 //!
 //! ```text
 //! list_projects                          → every derived Project
-//! get_project_detail(project_id)         → §11 frozen shape
-//! list_project_workstreams(project_id)   → 主关联 / 关联 (§42.2-E4)
+//! get_project_detail(project_id)         → frozen shape
+//! list_project_workstreams(project_id)   → 主关联 / 关联
 //! rename_project(project_id, name)       → the only user-editable Project fact
 //! ```
 //!
@@ -37,7 +37,7 @@ use super::{with_db, AppState};
 
 // ---------------- Projects: the v0.2 surface ----------------
 
-/// One Project as the Projects Board needs it (方案 §4/§8): identity, physical
+/// One Project as the Projects Board needs it: identity, physical
 /// availability, workstream/session reach and a recent-activity signal —
 /// computed server-side so the Board is ONE query instead of 1 + N detail
 /// reads. Diagnostic facts (uuid, git_id, raw identity) deliberately stay off
@@ -57,10 +57,10 @@ pub struct ProjectCardData {
     /// Workstreams with any path here but a position-0 elsewhere (关联).
     pub related_workstream_count: i64,
     /// Sessions through the authoritative
-    /// `workspace_path_id → workspace_paths.project_id` chain (§1.10),
+    /// `workspace_path_id → workspace_paths.project_id` chain,
     /// trashed sessions excluded (Trash lifecycle).
     pub session_count: i64,
-    /// Up to two canonical paths in canonical order (方案 §4: primary +
+    /// Up to two canonical paths in canonical order (: primary +
     /// "另有 N 个目录").
     pub representative_paths: Vec<String>,
     /// Every canonical path of the project, canonical order. Review P2-1:
@@ -72,7 +72,7 @@ pub struct ProjectCardData {
     pub updated_at: String,
 }
 
-/// Compose the whole Board in one call (方案 §8). Also the testable core of
+/// Compose the whole Board in one call. Also the testable core of
 /// `list_project_cards`, mirroring `workstream_cards`.
 pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
     let projects = db.list_projects()?;
@@ -159,8 +159,8 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
         }
     }
 
-    // Session reach + activity through the authoritative chain (§1.10),
-    // trashed sessions excluded (Trash lifecycle: §11).
+    // Session reach + activity through the authoritative chain,
+    // trashed sessions excluded (Trash lifecycle:).
     let mut session_count: BTreeMap<String, i64> = BTreeMap::new();
     let mut session_activity: BTreeMap<String, Option<String>> = BTreeMap::new();
     {
@@ -185,7 +185,7 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
         }
     }
 
-    // The workstream half of the activity signal (§7).
+    // The workstream half of the activity signal.
     let mut workstream_activity: BTreeMap<String, Option<String>> = BTreeMap::new();
     {
         let mut st = conn.prepare(
@@ -238,12 +238,12 @@ pub fn list_project_cards(state: State<AppState>) -> Result<Vec<ProjectCardData>
     with_db(&state, project_cards)
 }
 
-// ---------------- Workspace refresh (方案 §9-§13) ----------------
+// ---------------- Workspace refresh ----------------
 //
 // 「刷新工作区状态」不是编辑 Project，而是重新观察外部物理世界，然后让现有
-// domain rules 重新投影（§25）。Reconcile 里会跑 Path::is_dir 和 git 子进程
+// domain rules 重新投影。Reconcile 里会跑 Path::is_dir 和 git 子进程
 // （单次 probe 最长 10s），因此绝不在 command 线程上同步执行：后台线程 +
-// 事件回报（§11、§12），全局与定点共用同一套规则（§17）。
+// 事件回报，全局与定点共用同一套规则。
 
 fn spawn_workspace_reconcile<F>(
     app: &AppHandle,
@@ -309,10 +309,10 @@ where
     Ok(serde_json::json!({ "started": true }))
 }
 
-/// §10 — 重新观察全部已注册 WorkspacePath：存在性、Git 状态、Git family /
+/// 重新观察全部已注册 WorkspacePath：存在性、Git 状态、Git family /
 /// worktrees、已有的 Project merge / retire、以及既有 GC 规则。它不是
 /// Session Sync，也不做 Context 提取。长时间运行（2N 个 git 子进程可能各等
-/// 10s），因此在后台线程执行，UI 通过事件跟进（§11）。
+/// 10s），因此在后台线程执行，UI 通过事件跟进。
 #[tauri::command]
 pub fn refresh_workspace_projects(
     app: AppHandle,
@@ -330,9 +330,9 @@ pub fn refresh_workspace_projects(
     })
 }
 
-/// §16/§17 — 定点刷新：只扫当前 Project 自己拥有的 WorkspacePaths，与全局
+///  — 定点刷新：只扫当前 Project 自己拥有的 WorkspacePaths，与全局
 /// 刷新走同一个 `reconcile_workspace_path_ids` 规则集。刷新后 Project 可能
-/// 因最后一条路径 GC 而消失——那是正常生命周期（§18），前端以 gone 视图响应。
+/// 因最后一条路径 GC 而消失——那是正常生命周期，前端以 gone 视图响应。
 #[tauri::command]
 pub fn refresh_project_workspace(
     app: AppHandle,
@@ -366,13 +366,13 @@ pub fn refresh_project_workspace(
 
 /// Every Project the app derives. There is no filter and no lifecycle: a Project
 /// exists exactly while it owns a WorkspacePath, so this list is the registry
-/// grouped by owner (§1.2).
+/// grouped by owner.
 #[tauri::command]
 pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>> {
     with_db(&state, |db| db.list_projects())
 }
 
-/// §11/§42.2-E5 — the frozen detail shape
+///  — the frozen detail shape
 /// `{ project, workspace_paths[], workstreams[{workstream, is_primary}], sessions[] }`.
 /// Nothing here is read from a cached membership column: paths, Workstreams and
 /// Sessions all come through the registry.
@@ -384,7 +384,7 @@ pub fn get_project_detail(state: State<AppState>, project_id: String) -> Result<
     })
 }
 
-/// §42.2-E4 — the Workstreams of one Project with the primary/related
+/// the Workstreams of one Project with the primary/related
 /// distinction Project Detail renders (position 0 is 主关联).
 #[tauri::command]
 pub fn list_project_workstreams(
@@ -394,12 +394,12 @@ pub fn list_project_workstreams(
     with_db(&state, |db| project_workstreams(db, &project_id))
 }
 
-/// §17-14/15 — rename, and nothing else. A Project's only user-editable fact.
+/// rename, and nothing else. A Project's only user-editable fact.
 ///
 /// This sets `name_customized`, which is the durable statement that automatic
 /// naming (basename, `NoEnding Workspace`, a merge's survivor rule) may never
 /// overwrite this row's name again. No other column is touched: `git_id` in
-/// particular has exactly one writer, `workspace::project` (§8.4).
+/// particular has exactly one writer, `workspace::project`.
 #[tauri::command]
 pub fn rename_project(state: State<AppState>, project_id: String, name: String) -> Result<Project> {
     crate::storage::ensure_not_empty("项目名称", &name)?;
@@ -407,7 +407,7 @@ pub fn rename_project(state: State<AppState>, project_id: String, name: String) 
     with_db(&state, |db| {
         let project =
             db.tx(|tx| crate::storage::workspace::rename_project_conn(tx, &project_id, &name))?;
-        // The search row carries the name, so it follows the rename (§42.3-M18).
+        // The search row carries the name, so it follows the rename.
         let _ = db.index_project(&project);
         Ok(project)
     })

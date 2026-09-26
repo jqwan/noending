@@ -1,10 +1,10 @@
 //! Pi Adapter: `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`.
 //! `PI_HOME` overrides the root. Pi sessions are plain JSONL trees, read-only
-//! always (重构方案 §2.6: NoEnding never deletes an Agent-owned source).
+//! always — NoEnding never deletes an Agent-owned source.
 //!
-//! Member mapping (§26.6): today's sources are single-root — one transcript,
+//! Member mapping: today's sources are single-root — one transcript,
 //! one ROOT member. The existing conversation filters stay: thinking blocks,
-//! tool traffic and runtime injections never become conversation (§2.3); a
+//! tool traffic and runtime injections never become conversation; a
 //! compaction marker is an observation. If a future source exposes child/side
 //! identities, Member discovery extends — the Conversation schema does not.
 
@@ -23,7 +23,7 @@ use crate::platform::exec_resolver::{self, AgentInstallation};
 pub struct PiAdapter;
 
 /// Text parts only: `thinking` blocks are model reasoning, and tool calls /
-/// results are deliberately dropped (方案 §36.11) — they used to be appended
+/// results are deliberately dropped — they used to be appended
 /// to the owning message's text as `[tool:…] …`.
 fn content_text(content: &Value) -> String {
     let mut text_parts = Vec::new();
@@ -77,7 +77,7 @@ impl PiAdapter {
                         {
                             first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                         }
-                        // Last resort for a title (§37.15).
+                        // Last resort for a title.
                         if first_agent_text.is_none() && role == "assistant" && !text.is_empty() {
                             first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
                         }
@@ -297,7 +297,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                     )))
                 }
                 ("assistant", true) => {
-                    // Message provenance (Provenance 方案 §13A/§16.3): the
+                    // Message provenance: the
                     // assistant entry itself carries `message.provider` and
                     // `message.model` — the actual generation identity
                     // (verified: 1203/1203 assistant entries in the real
@@ -319,7 +319,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                     ))
                 }
                 // Tool output is a `toolResult` MESSAGE in pi; every other
-                // non-conversation role is runtime chatter (§36.11).
+                // non-conversation role is runtime chatter.
                 _ => None,
             }
         }
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(found[0].cwd.as_deref(), Some("/repo"));
     }
 
-    /// §32.2 — prose only; the injected env block and the toolResult message
+    /// Prose only; the injected env block and the toolResult message
     /// are not conversation; the compaction marker is a count.
     #[test]
     fn the_root_read_keeps_prose_and_counts_compaction() {
@@ -440,7 +440,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Provenance 方案 §28.2 — Direct evidence: the assistant entry's own
+    /// Direct evidence: the assistant entry's own
     /// `message.provider` / `message.model` land on the message; an entry
     /// without them stays NULL.
     #[test]

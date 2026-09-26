@@ -4,10 +4,10 @@
 //!
 //! ```text
 //! ensure_workspace_path(db, observation) -> Result<WorkspacePath>
-//! reconcile_workspace_path(db, path_id)  -> Result<WorkspacePath>   // §26, the only reconcile
+//! reconcile_workspace_path(db, path_id)  -> Result<WorkspacePath>   //, the only reconcile
 //! ```
 //!
-//! Both are the whole of §8's decision table, and they are the ONLY writers of
+//! Both are the whole of 's decision table, and they are the ONLY writers of
 //! `workspace_paths.project_id` and `projects.git_id`:
 //!
 //! | situation | action |
@@ -32,13 +32,13 @@
 //!   state do not keep an unreferenced path alive.
 //! * `name_customized` wins over every automatic rename: after a merge, after
 //!   worktree discovery, after a Home move.
-//! * Reconcile must not hold the DB mutex across a `git` call (§42.3-M7), must
-//!   not write `workstream_paths` (§9), and must not advance any cursor.
+//! * Reconcile must not hold the DB mutex across a `git` call, must
+//!   not write `workstream_paths`, and must not advance any cursor.
 //! * `git_identities.id` is app-assigned (uuid), unlike `workspace_paths.id`
-//!   which is derived from the path — see `identity` module docs and design §8.
+//!   which is derived from the path — see `identity` module docs and design
 //! * WorkspacePath / Project mutations must re-index the affected search rows
 //!   (`index_project` / `unindex`, and the workstream rows whose primary-path
-//!   Project changed) — §42.3-M18.
+//!   Project changed)
 //!
 //! ## How that table is actually executed
 //!
@@ -54,9 +54,9 @@
 //!                             │  against it, never the other way round
 //!   resolve Git family        ├─ Detected → git_identities row keyed by
 //!                             │  common_dir; anything else → no evidence
-//!   apply §8 branch           ├─ create / keep / upgrade / merge / reassign
+//!   apply branch           ├─ create / keep / upgrade / merge / reassign
 //!   refresh the row           ├─ exists_on_disk + git_state + git_kind only
-//!   adopt sibling worktrees   └─ §9: new WorkspacePaths, never WorkstreamPaths
+//!   adopt sibling worktrees   └─ new WorkspacePaths, never WorkstreamPaths
 //! ```
 //!
 //! Two deliberate readings of the spec, both driven by "evidence is per-path":
@@ -64,12 +64,12 @@
 //! * A merge moves **all** of the losing Project's paths — which is only ever
 //!   asked of a *path-backed* Project (one with no family identity of its own).
 //!   A *git-backed* Project never loses its other paths: when one of them
-//!   reports a different family, only that path moves (§8.5). Swallowing paths
+//!   reports a different family, only that path moves. Swallowing paths
 //!   that produced no evidence would invent membership.
 //! * Automatic naming happens **at Project creation only**. No reconcile, worktree
 //!   discovery or merge renames an existing row; a merge may only *carry over* a
 //!   `name_customized` name into a survivor that has no user-chosen name yet
-//!   (§17-17). A name that changed every time a sibling appeared is a second
+//!. A name that changed every time a sibling appeared is a second
 //!   authority for one fact.
 
 use rusqlite::{Connection, OptionalExtension};
@@ -99,23 +99,23 @@ use crate::workspace::WorkspaceAttaching;
 /// What the Project policy may ask about the surrounding world without touching
 /// it. `workspace::home` provides the real implementation; this seam exists so
 /// ownership rules are testable with a scripted answer instead of a Home
-/// directory on disk (§42.3-M13).
+/// directory on disk.
 pub trait WorkspacePolicy {
     /// The NoEnding Home itself and its reserved app directories are never a
-    /// WorkspacePath (§2). Must be segment-wise (`identity::is_within`), not
+    /// WorkspacePath. Must be segment-wise (`identity::is_within`), not
     /// `starts_with`.
     fn is_reserved(&self, canonical_path: &str) -> bool {
         let _ = canonical_path;
         false
     }
     /// The current default workspace, used ONLY for automatic naming: exactly
-    /// that path is called "NoEnding Workspace" (§37, §17-16).
+    /// that path is called "NoEnding Workspace".
     fn default_workspace(&self) -> Option<String> {
         None
     }
     /// Is this directory actually on this machine right now?
     ///
-    /// Existence is an *observation* (§1.3), and this layer never reads the
+    /// Existence is an *observation*, and this layer never reads the
     /// filesystem, so it asks rather than computing. Deliberately no default
     /// body: an implementor that has not been wired to a real host must choose
     /// an answer out loud, not inherit a guess about the user's disk.
@@ -133,7 +133,7 @@ impl WorkspacePolicy for UnrestrictedWorkspace {
     }
 }
 
-/// The WorkspacePath registry for one database. Holds the two things §8 needs
+/// The WorkspacePath registry for one database. Holds the two things needs
 /// beyond SQL: who observes paths, and what the surrounding Home forbids.
 pub struct ProjectProjection<'a> {
     observer: &'a dyn WorkspaceObserving,
@@ -164,9 +164,9 @@ impl<'a> ProjectProjection<'a> {
     }
 }
 
-/// Everything one §8 application did beyond the path row itself.
+/// Everything one application did beyond the path row itself.
 ///
-/// The two lists exist because of §42.3-M4: FTS rows may only be dropped or
+/// The two lists exist because of FTS rows may only be dropped or
 /// rewritten once the domain write has COMMITTED, so the transaction-scoped core
 /// records what happened and the `Db`-scoped wrapper performs the index work
 /// afterwards. A caller that runs the core inside its own transaction must do the
@@ -217,13 +217,13 @@ pub struct EnsureOutcome {
     /// The path row AFTER the decision, so a reassignment is visible to the
     /// caller without a second read.
     pub path: WorkspacePath,
-    /// Sibling worktrees §9 pulled in as new WorkspacePaths. They join the same
+    /// Sibling worktrees pulled in as new WorkspacePaths. They join the same
     /// Project; they are never added to any Workstream's path list.
     pub discovered: Vec<WorkspacePath>,
     pub effect: ProjectionEffect,
 }
 
-/// §8.4/§8.5 — a Project fold. `survivor`/`loser` are the outcome of
+///  — a Project fold. `survivor`/`loser` are the outcome of
 /// [`pick_canonical`], which is deterministic, so a replayed Sync run merges the
 /// same pair the same way round.
 #[derive(Debug, Clone)]
@@ -231,31 +231,31 @@ pub struct MergeOutcome {
     pub survivor: String,
     pub loser: String,
     pub moved_paths: Vec<String>,
-    /// Set when the survivor took the loser's user-chosen name (§17-17).
+    /// Set when the survivor took the loser's user-chosen name.
     pub adopted_name: Option<String>,
 }
 
-/// §10 — what a GC pass removed.
+/// what a GC pass removed.
 #[derive(Debug, Default, Clone)]
 pub struct GcOutcome {
     pub deleted_paths: Vec<String>,
     pub deleted_projects: Vec<String>,
 }
 
-/// §42.3-M7 — one reconcile sweep.
+/// one reconcile sweep.
 #[derive(Debug, Default, Clone)]
 pub struct ReconcileReport {
     pub scanned: usize,
     /// Swept paths observed as absent from disk THIS round — before the GC
     /// reference check, so this counts surviving referenced paths too. It is
-    /// the refresh summary's "N 个目录变为不可用" (方案 §12/§13).
+    /// the refresh summary's "N 个目录变为不可用".
     pub missing_paths: usize,
     /// Paths that ended up under a different Project than they started.
     pub moved_paths: usize,
-    /// New WorkspacePaths discovered through Git worktree listings (§9).
+    /// New WorkspacePaths discovered through Git worktree listings.
     pub discovered_paths: Vec<String>,
     /// Paths that could not be observed or committed. One bad path never aborts
-    /// the sweep: §42.3-M9 forbids a filesystem or `git` problem from becoming a
+    /// the sweep: forbids a filesystem or `git` problem from becoming a
     /// user-visible failure, and the registry is per-path independent anyway.
     pub failed: Vec<(String, String)>,
     pub outcome: GcOutcome,
@@ -265,10 +265,10 @@ pub struct ReconcileReport {
 // the door
 // ---------------------------------------------------------------------------
 
-/// §8 — the single door for "this path exists and belongs somewhere".
+/// the single door for "this path exists and belongs somewhere".
 ///
 /// Runs inside the CALLER's transaction: an atomic Sync run or ingest batch
-/// commits path registration together with everything derived from it (§42.3-M3).
+/// commits path registration together with everything derived from it.
 /// Post-commit work (FTS) is described by [`ProjectionEffect`].
 pub fn ensure_workspace_path_conn(
     conn: &Connection,
@@ -282,7 +282,7 @@ pub fn ensure_workspace_path_conn(
         ));
     }
     // Identity is recomputed from the canonical spelling and nowhere else
-    // (§42.2-E1). An observation whose own `path_id` copy disagrees would put the
+    //. An observation whose own `path_id` copy disagrees would put the
     // same directory under two keys and split every chain that reads through it,
     // so this door refuses it; [`WorkspaceAttaching::ensure_path`] turns the same
     // contradiction into `Ok(None)` so one bad string cannot fail an ingest run.
@@ -307,7 +307,7 @@ pub fn ensure_workspace_path_conn(
     let mut discovered = Vec::new();
 
     match known {
-        // §8.2 / §8.3 — a path the registry has never seen always ends up under a
+        // / a path the registry has never seen always ends up under a
         // Project, because `project_id` is NOT NULL. A recognized family joins
         // its existing Project; otherwise a Project is created, git-backed only
         // when there is evidence to back it.
@@ -324,13 +324,13 @@ pub fn ensure_workspace_path_conn(
             };
             insert_workspace_path_conn(conn, &canonical, &project_id)?;
         }
-        // §8.1 / §8.4 / §8.5 — a known path keeps its Project unless THIS path's
+        // / / a known path keeps its Project unless THIS path's
         // own evidence says otherwise.
         Some(row) => {
             let mine = get_project_conn(conn, &row.project_id)?
                 .ok_or_else(|| other(format!("WorkspacePath {} 指向了不存在的 Project", row.id)))?;
             match &family {
-                // §8.1/§1.3 — no evidence, so NOTHING about ownership changes.
+                //  — no evidence, so NOTHING about ownership changes.
                 // This is the branch that keeps a lost `.git` from detaching a
                 // path, splitting a Project or starting a new one.
                 None => {}
@@ -338,7 +338,7 @@ pub fn ensure_workspace_path_conn(
                     match project_by_git_id_conn(conn, &f.git_id)? {
                         Some(owner) if owner.id == mine.id => {
                             // Already the family's Project; an upgrade may still be
-                            // owed (§8.4).
+                            // owed.
                             if mine.git_id.is_none()
                                 && adopt_git_identity_conn(conn, &mine.id, &f.git_id)?
                             {
@@ -347,7 +347,7 @@ pub fn ensure_workspace_path_conn(
                         }
                         Some(owner) => {
                             if mine.git_id.is_none() {
-                                // §8.4 — this path is the first family evidence its
+                                // this path is the first family evidence its
                                 // (identity-less) Project ever had, and the family
                                 // already has a Project: the two are one thing, so
                                 // merge. `pick_canonical` makes the git-backed side
@@ -356,7 +356,7 @@ pub fn ensure_workspace_path_conn(
                                 effect.delete(&merged.loser);
                                 effect.touch(&merged.survivor);
                             } else {
-                                // §8.5 — a different family under a path that already
+                                // a different family under a path that already
                                 // belongs to a git-backed Project is a strong identity
                                 // change: only this path moves. Its siblings keep their
                                 // own family's Project.
@@ -370,14 +370,14 @@ pub fn ensure_workspace_path_conn(
                         }
                         None => {
                             if mine.git_id.is_none() {
-                                // §8.4, first branch: adopt in place. `Project.id`
+                                //, first branch: adopt in place. `Project.id`
                                 // does not move, so no Session or audit
                                 // reference has to be repaired.
                                 if adopt_git_identity_conn(conn, &mine.id, &f.git_id)? {
                                     effect.touch(&mine.id);
                                 }
                             } else {
-                                // §8.5 with an unseen family: the new Project is
+                                // with an unseen family: the new Project is
                                 // created git-backed, this path moves into it, and
                                 // the old one dies if it is now empty.
                                 let fresh = create_project_row(
@@ -419,7 +419,7 @@ pub fn ensure_workspace_path_conn(
     })
 }
 
-/// §8 — the self-transacting form. Use this when you are not already inside a
+/// the self-transacting form. Use this when you are not already inside a
 /// write; use [`ensure_workspace_path_conn`] when you are.
 pub fn ensure_workspace_path(
     db: &Db,
@@ -429,7 +429,7 @@ pub fn ensure_workspace_path(
     Ok(ensure_workspace_path_outcome(db, observation, policy)?.path)
 }
 
-/// §8 — the self-transacting form that also reports what it did to Projects.
+/// the self-transacting form that also reports what it did to Projects.
 pub fn ensure_workspace_path_outcome(
     db: &Db,
     observation: &WorkspaceObservation,
@@ -440,7 +440,7 @@ pub fn ensure_workspace_path_outcome(
     Ok(outcome)
 }
 
-/// §42.3-M4/M18 — the post-commit half of the effect: Project search rows follow
+/// the post-commit half of the effect: Project search rows follow
 /// the domain write, never lead it. Index failures are logged, not propagated:
 /// a stale search row must not roll back a committed physical fact.
 pub fn apply_projection_effect(db: &Db, effect: &ProjectionEffect) {
@@ -460,19 +460,19 @@ pub fn apply_projection_effect(db: &Db, effect: &ProjectionEffect) {
     }
 }
 
-/// §17 — the string door every caller shares: a Session cwd, a chosen working
+/// the string door every caller shares: a Session cwd, a chosen working
 /// directory, a worktree path.
 ///
 /// `Ok(None)` means "this string is not a WorkspacePath": empty or otherwise
 /// unresolvable, a reserved app path under NoEnding Home, or an observation whose
 /// identity does not agree with `workspace::identity`. Callers must then leave
-/// `workspace_path_id` NULL — never substitute a guess (§5.5, §7.2).
+/// `workspace_path_id` NULL — never substitute a guess.
 ///
 /// Lock discipline: this observes the filesystem, so a caller must not hold the
-/// DB mutex across it (§42.3-M7). Batch work belongs in
+/// DB mutex across it. Batch work belongs in
 /// [`reconcile_workspace_paths`], which releases the lock around every `git`
 /// call. A `git` failure is `GitDetection::Unavailable` inside the observation,
-/// never an `Err` from here (§42.3-M9).
+/// never an `Err` from here.
 impl WorkspaceAttaching for ProjectProjection<'_> {
     fn ensure_path(&self, conn: &Connection, raw_path: &str) -> Result<Option<String>> {
         Ok(self
@@ -520,7 +520,7 @@ impl ProjectProjection<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// §8 internals
+// internals
 // ---------------------------------------------------------------------------
 
 /// A recognized family for one observation: the `git_identities` row plus the
@@ -566,9 +566,9 @@ fn git_family(
 /// `git rev-parse --git-common-dir` answers `.git` — relative to the directory it
 /// was asked about — for a main worktree. Keying identities on that literal would
 /// give one repository as many families as it has worktrees, i.e. exactly the
-/// split §8.3 exists to prevent, so a relative answer is resolved against the
+/// split exists to prevent, so a relative answer is resolved against the
 /// path we asked about. An already-absolute common dir is untouched (the resolver
-/// is responsible for resolving git output; 方案 §42.3-M8 rule 6).
+/// is responsible for resolving git output;  rule 6).
 pub(crate) fn resolve_common_dir(observed_canonical: &str, common_dir: &str) -> String {
     let trimmed = common_dir.trim();
     if trimmed.is_empty() {
@@ -592,9 +592,9 @@ pub(crate) fn resolve_common_dir(observed_canonical: &str, common_dir: &str) -> 
 
 /// The `git_state` / `git_kind` this observation implies.
 ///
-/// `detected → missing` is §8.1; `missing → missing` is the point: a path that
+/// `detected → missing` is; `missing → missing` is the point: a path that
 /// once had evidence and does not now is remembered, not reclassified as "never
-/// was a repository" (§1.3). `none → none` for a plain directory that is merely
+/// was a repository". `none → none` for a plain directory that is merely
 /// unreadable right now.
 fn next_git_observation(
     current: Option<&str>,
@@ -623,13 +623,13 @@ fn create_project_row(
     let ts = now();
     let project = Project {
         id: new_id(),
-        // §37/§17-16: the basename, capitalized, and the exact default workspace
+        // : the basename, capitalized, and the exact default workspace
         // is "NoEnding Workspace". Never a guess about repositories or remotes.
         name: auto_project_name(canonical_path, policy.default_workspace().as_deref()),
         description: String::new(),
         // Project lifecycle is not a Project concern; it is derived from paths.
         git_id: git_id.map(|g| g.to_string()),
-        // App-named by construction; only `rename_project` may set this (§17-15).
+        // App-named by construction; only `rename_project` may set this.
         name_customized: false,
         created_at: ts.clone(),
         updated_at: ts,
@@ -639,9 +639,9 @@ fn create_project_row(
     Ok(project)
 }
 
-/// §9 — a Git family's worktree list becomes WorkspacePaths, and only that.
+/// a Git family's worktree list becomes WorkspacePaths, and only that.
 ///
-/// Nothing here may touch `workstream_paths` (§9: 发现 WorkspacePath ≠ 添加
+/// Nothing here may touch `workstream_paths` (发现 WorkspacePath ≠ 添加
 /// WorkstreamPath), and an existing row is left alone: we hold no observation of
 /// our own about a sibling, so we must not overwrite facts another call owns.
 /// A sibling therefore starts as `exists_on_disk = 0` — "learned about it, have
@@ -697,10 +697,10 @@ fn adopt_sibling_worktrees(
 }
 
 // ---------------------------------------------------------------------------
-// §8.5 merge / reassignment
+// merge / reassignment
 // ---------------------------------------------------------------------------
 
-/// §8.5 — "选定 canonical Project", made deterministic.
+/// "选定 canonical Project", made deterministic.
 ///
 /// The Git family decides first, because `projects.git_id` is UNIQUE: a family
 /// has exactly one Project, so the git-backed side is the survivor and the
@@ -726,15 +726,15 @@ fn pick_canonical(a: &Project, b: &Project) -> (Project, Project) {
     }
 }
 
-/// §8.4/§8.5 — fold two Projects into one.
+///  — fold two Projects into one.
 ///
 /// Every WorkspacePath of the loser is reassigned, which batch-refreshes the
 /// derived Session cache and the affected Workstream search parents in the same
-/// statement (§42.3-M3/M18). The survivor adopts the loser's `git_id` if it has
+/// statement. The survivor adopts the loser's `git_id` if it has
 /// none. A user-chosen name always survives: if the loser had one and the
 /// survivor did not, the name and the `name_customized` flag move together
-/// (§17-17). The loser is then deleted, because a zero-path Project may not
-/// exist (§1.2).
+///. The loser is then deleted, because a zero-path Project may not
+/// exist.
 ///
 /// Two different Git families are never merged: that is not a projection
 /// question but a real contradiction in the evidence, and the honest answer is
@@ -777,7 +777,7 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
         set_project_name_conn(conn, &survivor.id, &loser.name, true)?;
         adopted_name = Some(loser.name.clone());
     }
-    // §42.3-M18/M3: `reassign_workspace_path_project_conn` already moved each
+    // `reassign_workspace_path_project_conn` already moved each
     // path's derived Session cache AND its Workstream search parents, so there is
     // no second pass to make — one door, one job, no half-updated middle state.
     let deleted = retire_project_if_unowned(conn, &loser.id)?;
@@ -807,10 +807,10 @@ pub fn merge_projects(db: &Db, a: &str, b: &str) -> Result<MergeOutcome> {
     Ok(outcome)
 }
 
-/// §17-8 — move one path to another Project and refresh everything that reads
-/// through it. Exposed because §8.5's "批量刷新引用该 WorkspacePath 的
+/// move one path to another Project and refresh everything that reads
+/// through it. Exposed because 's "批量刷新引用该 WorkspacePath 的
 /// Session.project_id" must not be re-implemented by callers; the Project the path
-/// leaves is retired here so a caller cannot forget §1.2.
+/// leaves is retired here so a caller cannot forget
 /// `Ok(Some(project_id))` is the Project this move left with nothing, i.e. the row
 /// that was retired in the same transaction and whose FTS entry the caller must
 /// drop after commit.
@@ -824,7 +824,7 @@ pub fn reassign_workspace_path_conn(
         .ok_or_else(|| other(format!("WorkspacePath {path_id} 不存在")))?;
     reassign_workspace_path_project_conn(conn, path_id, project_id)?;
     if former != project_id && retire_project_if_unowned(conn, &former)? {
-        // Retiring it in the SAME transaction is what keeps §1.2 true at every
+        // Retiring it in the SAME transaction is what keeps true at every
         // committed moment; only its FTS row waits for the commit.
         return Ok(Some(former));
     }
@@ -832,16 +832,16 @@ pub fn reassign_workspace_path_conn(
 }
 
 // ---------------------------------------------------------------------------
-// §10 GC
+// GC
 // ---------------------------------------------------------------------------
 
-/// §10 — physically remove candidate WorkspacePaths with no references.
+/// physically remove candidate WorkspacePaths with no references.
 ///
 /// The candidate list is scoped by the caller's scan. Filesystem existence and
 /// Git state do not affect this decision; only Session and WorkstreamPath
 /// references do.
 ///
-/// Deleting the last path of a Project deletes the Project (§1.2), which is why
+/// Deleting the last path of a Project deletes the Project, which is why
 /// this returns the Project ids it retired: their FTS rows go after the commit.
 pub fn gc_unreferenced_workspace_paths_conn(
     conn: &Connection,
@@ -893,11 +893,11 @@ pub fn gc_gone_workspace_paths(db: &Db, gone_path_ids: &[String]) -> Result<GcOu
 }
 
 // ---------------------------------------------------------------------------
-// §26 / §42.3-M7 reconcile
+// / reconcile
 // ---------------------------------------------------------------------------
 
 impl ProjectProjection<'_> {
-    /// §26 — re-observe one registered path and apply §8 to it. The only
+    /// re-observe one registered path and apply to it. The only
     /// reconcile for a single path: it refreshes `exists`, Git detectability, the
     /// family, the Project, the derived Session cache and the affected Workstream
     /// parents, in that order, and it is the ONLY reason a stored path's Project
@@ -910,7 +910,7 @@ impl ProjectProjection<'_> {
     ///
     /// An unknown `path_id` is an error, not a silent no-op: reconcile operates on
     /// the registry, and creating a path from here would bypass the door that owns
-    /// that decision (§26).
+    /// that decision.
     pub fn reconcile_workspace_path(&self, db: &Db, path_id: &str) -> Result<WorkspacePath> {
         let row = db.get_workspace_path(path_id)?.ok_or_else(|| {
             other(format!(
@@ -923,18 +923,18 @@ impl ProjectProjection<'_> {
     }
 }
 
-/// §42.3-M7 — the startup / explicit refresh sweep, in the one shape that keeps
+/// the startup / explicit refresh sweep, in the one shape that keeps
 /// the lock discipline by construction: read the registry, drop the lock, observe
 /// each path, re-take it for one short transaction, repeat.
 ///
 /// * Ordered by `path_id` and capped by `limit`, so a restart cannot reshuffle the
-///   pass and move `last_seen_at` across the whole table at once (§42.3-M7).
+///   pass and move `last_seen_at` across the whole table at once.
 /// * GC only ever considers paths THIS sweep observed as absent AND that no
-///   detected family still lists as a work tree (§10's three conditions), and even
+///   detected family still lists as a work tree ('s three conditions), and even
 ///   then only after the reference check — so a capped sweep can never mistake
 ///   "not scanned yet" for "gone".
 /// * Writes `workspace_paths` / `projects` / the derived Session cache and the FTS
-///   parents, nothing else. It never writes `workstream_paths` (§9) and never
+///   parents, nothing else. It never writes `workstream_paths` and never
 ///   advances a cursor.
 pub fn reconcile_workspace_paths(
     db: &Db,
@@ -944,7 +944,7 @@ pub fn reconcile_workspace_paths(
     reconcile_workspace_paths_with_progress(db, projection, limit, &|_, _| {})
 }
 
-/// `reconcile_workspace_paths` with a progress callback (方案 §12): called
+/// `reconcile_workspace_paths` with a progress callback: called
 /// after every path with (scanned, total) so a refresh UI can show movement
 /// without any Git internals leaving the backend.
 pub fn reconcile_workspace_paths_with_progress(
@@ -957,7 +957,7 @@ pub fn reconcile_workspace_paths_with_progress(
     reconcile_workspace_path_targets(db, projection, targets, progress)
 }
 
-/// 方案 §17 — the shared targeted primitive: reconcile an explicit SUBSET of
+///  — the shared targeted primitive: reconcile an explicit SUBSET of
 /// registered path ids through exactly the same observe → ensure → GC rules
 /// as the global sweep. The global refresh passes every registered id; a
 /// Project refresh passes only the Project's own ids. One rule set, no drift.
@@ -1022,7 +1022,7 @@ fn reconcile_workspace_path_targets(
                     // The stored spelling and the resolver's answer hashed to
                     // different ids, so this sweep registered a second row rather
                     // than refreshing the first. Loud, because it means two
-                    // components disagree about one directory (§42.3-M8).
+                    // components disagree about one directory.
                     eprintln!(
                         "[workspace] reconcile {path_id} 的观察落在 {}，registry 出现了同一目录的第二条路径",
                         outcome.path.id
@@ -1045,18 +1045,18 @@ fn reconcile_workspace_path_targets(
 }
 
 // ---------------------------------------------------------------------------
-// §11 read projections
+// read projections
 // ---------------------------------------------------------------------------
 
 /// One Workstream as seen from a Project: `is_primary` means it reaches this
-/// Project through its position-0 path (§1.12 主关联, otherwise 关联).
+/// Project through its position-0 path (主关联, otherwise 关联).
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectWorkstream {
     pub workstream: Workstream,
     pub is_primary: bool,
 }
 
-/// §11/§42.2-E5 — the frozen Project detail shape.
+///  — the frozen Project detail shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectDetail {
     pub project: Project,
@@ -1065,7 +1065,7 @@ pub struct ProjectDetail {
     pub sessions: Vec<Session>,
 }
 
-/// §13/§11 — Project detail as one read, derived entirely through the registry:
+///  — Project detail as one read, derived entirely through the registry:
 /// the paths it owns, the Workstreams that reach it through any of them, and the
 /// Sessions whose cwd is one of them.
 ///
@@ -1097,7 +1097,7 @@ pub fn project_detail(db: &Db, project_id: &str) -> Result<Option<ProjectDetail>
     }))
 }
 
-/// §11/E4 — the Workstreams of one Project with the 主关联/关联 distinction.
+/// the Workstreams of one Project with the 主关联/关联 distinction.
 pub fn project_workstreams(db: &Db, project_id: &str) -> Result<Vec<ProjectWorkstream>> {
     Ok(
         crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
@@ -1111,7 +1111,7 @@ pub fn project_workstreams(db: &Db, project_id: &str) -> Result<Vec<ProjectWorks
 }
 
 /// Every Project the app currently derives, plus the paths behind it. Used by the
-/// reconcile reporting surface and by §25's integrity audit.
+/// reconcile reporting surface and by 's integrity audit.
 pub fn list_projects_with_paths(db: &Db) -> Result<Vec<(Project, Vec<WorkspacePath>)>> {
     let mut out = Vec::new();
     for project in db.list_projects()? {
@@ -1123,7 +1123,7 @@ pub fn list_projects_with_paths(db: &Db) -> Result<Vec<(Project, Vec<WorkspacePa
     Ok(out)
 }
 
-/// §42.5-style mechanical check, available to tests and to the integrity audit:
+/// mechanical check, available to tests and to the integrity audit:
 /// no WorkspacePath is shared, no Project is empty, no path is unparented.
 pub fn registry_is_consistent(db: &Db) -> std::result::Result<(), String> {
     let conn = db.read();
@@ -1147,13 +1147,13 @@ pub fn registry_is_consistent(db: &Db) -> std::result::Result<(), String> {
     )?;
     // Structural through `idx_projects_git_id` (a partial UNIQUE index), so this
     // can only fire if that index is ever dropped or made conditional — which is
-    // precisely the §25 row "non-null git_id unique", and the reason §8.3's
+    // precisely the row "non-null git_id unique", and the reason 's
     // worktree convergence works at all.
     check(
         "SELECT COUNT(*) FROM (SELECT git_id FROM projects WHERE git_id IS NOT NULL GROUP BY git_id HAVING COUNT(*) > 1)",
         "git family owned by two projects",
     )?;
-    // §1.1 is "every WorkspacePath belongs to exactly one Project". The obvious
+    // is "every WorkspacePath belongs to exactly one Project". The obvious
     // SQL for that (`GROUP BY id HAVING COUNT(DISTINCT project_id) > 1`) is
     // vacuous and used to sit here: `id` is the PRIMARY KEY, so no group can
     // ever hold two values. What is *not* structural is that the key is the one
@@ -1199,7 +1199,7 @@ mod tests {
     fn a_relative_git_common_dir_cannot_split_a_family() {
         // `git rev-parse --git-common-dir` answers `.git` for a main worktree. Keyed
         // literally, every worktree of one repository would look like its own
-        // family and §8.3's convergence would never happen.
+        // family and 's convergence would never happen.
         assert_eq!(
             resolve_common_dir("/repo", ".git"),
             normalize_path("/repo/.git").unwrap()
@@ -1236,7 +1236,7 @@ mod tests {
             next_git_observation(Some(git_state::NONE), &no_family),
             (git_state::NONE.to_string(), None)
         );
-        // §8.1: evidence, then silence, is `missing` — and it stays missing, because
+        // evidence, then silence, is `missing` — and it stays missing, because
         // `Unavailable` (no git binary, timeout, dubious ownership) is not a
         // reclassification of a repository into a plain directory.
         assert_eq!(

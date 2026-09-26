@@ -23,7 +23,7 @@ export type ResumeSessionModalProps = {
 /**
  * 打开即准备（后端会先摄入这个 Session 自己的最新消息），预览显示
  * Agent / 工作目录 / 所属任务 / Runtime；「继续」消费这份 PreparedLaunch。
- * 不要求用户重新选择任何已经确定的参数，也不再有额外的 Workstream 入参（§16）。
+ * 不要求用户重新选择任何已经确定的参数，也不再有额外的 Workstream 入参。
  *
  * PreparedLaunch 是 single-use 能力令牌；关闭预览后会重新准备，卸载时会回收。
  */
@@ -110,7 +110,7 @@ export default function ResumeSessionModal({
   const ownerTitle = owner_workstream && owner_workstream.id === ownerWorkstreamId
     ? owner_workstream.title.trim() || "未命名任务"
     : null;
-  // §33：一次只有零个或一个任务，不再出现多任务计数。
+  // 一次只有零个或一个任务，不再出现多任务计数。
   const ownerDisplay = ownerWorkstreamId === null
     ? "未归属任务"
     : ownerTitle ?? "未命名任务";

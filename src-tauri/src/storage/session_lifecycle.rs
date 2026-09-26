@@ -1,4 +1,4 @@
-//! Session lifecycle storage (重构方案 §19 / §20).
+//! Session lifecycle storage.
 //!
 //! Owns the SQL behind three lifecycle concerns:
 //! - **Trash / Restore** — one guarded `UPDATE` on `sessions.trashed_at`,
@@ -7,7 +7,7 @@
 //!   Session-owned row and the in-place redaction of Context provenance that
 //!   pointed at the dying session. There is no deletion job, no crash
 //!   recovery and no filesystem step: NoEnding never deletes an Agent-owned
-//!   source (§20), so the purge is one SQLite transaction and nothing else.
+//!   source, so the purge is one SQLite transaction and nothing else.
 //!
 //! Free functions over `&Connection` / `&Transaction`, matching the `_conn`
 //! convention, so `Db` methods and `Db::tx` closures share the same paths.
@@ -39,7 +39,7 @@ pub fn restore_session_conn(conn: &Connection, session_id: &str) -> Result<bool>
     Ok(n > 0)
 }
 
-/// Commit-time guard for every Session write path (方案 §43 / 重构方案 §13):
+/// Commit-time guard for every Session write path :
 /// the session must exist AND be Normal, otherwise work prepared against it
 /// (messages, stats, cursors, sync runs, context mutations) must not be
 /// committed.
@@ -62,7 +62,7 @@ pub fn session_is_writable_conn(conn: &Connection, session_id: &str) -> Result<b
 /// Drop a trashed / deleted session's message rows from the FTS index. Message
 /// rows carry `parent_id = session_id`, so one delete covers the session.
 ///
-/// Errors PROPAGATE (review P1-1): inside the lifecycle transaction a failed
+/// Errors PROPAGATE: inside the lifecycle transaction a failed
 /// index write rolls the lifecycle flip back, so "trashed" and "unindexed"
 /// really do commit atomically.
 pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
@@ -70,7 +70,7 @@ pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
         "DELETE FROM search_index WHERE kind = 'message' AND parent_id = ?1",
         params![session_id],
     )?;
-    // §39 — the Session's own document goes with it (Trash and permanent
+    // The Session's own document goes with it (Trash and permanent
     // deletion both route through here; a Restore rebuilds it).
     conn.execute(
         "DELETE FROM search_index WHERE kind = 'session' AND ref_id = ?1",
@@ -101,7 +101,7 @@ pub fn reindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
 // ---------------- Preview counts ----------------
 
 /// What a permanent LOCAL deletion will remove, for the confirmation preview
-/// (重构方案 §20.2). Workstreams / WorkstreamPaths / WorkspacePaths / Projects
+///. Workstreams / WorkstreamPaths / WorkspacePaths / Projects
 /// and surviving Context content are deliberately absent — they are KEPT.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PermanentDeletionCounts {
@@ -138,7 +138,7 @@ impl PermanentDeletionCounts {
 // ---------------- Provenance redaction ----------------
 
 /// Session-linked provenance keys, collected while the message store and sync
-/// history are still readable (§20.3 step 1).
+/// history are still readable.
 struct SessionProvenance {
     /// Stable message refs: `session-message:<message-id>`.
     message_refs: Vec<String>,
@@ -241,7 +241,7 @@ fn redacted_metadata(metadata: &serde_json::Value) -> String {
     m.to_string()
 }
 
-/// How many revisions would be redacted for this session (preview, §20.2).
+/// How many revisions would be redacted for this session (preview).
 pub fn count_redactable_revisions_conn(conn: &Connection, session_id: &str) -> Result<i64> {
     let prov = collect_session_provenance(conn, session_id)?;
     if prov.message_refs.is_empty() && prov.sync_run_ids.is_empty() {
@@ -315,12 +315,12 @@ pub fn redact_session_provenance_conn(tx: &Transaction, session_id: &str) -> Res
 
 // ---------------- Permanent local purge ----------------
 
-/// §20.3: the whole NoEnding LOCAL purge in ONE transaction, in the fixed
+/// The whole NoEnding LOCAL purge in ONE transaction, in the fixed
 /// order. Callers have already required Trash + a fresh `Missing` verdict on
 /// the ROOT source. Returns the number of redacted revisions. Never touches
 /// Workstreams, WorkstreamPaths, WorkspacePaths, Projects, surviving Context
 /// content, or anything on the Agent's side — there is no filesystem step and
-/// no tombstone (§20.4: a reappearing source is simply re-ingested as a new
+/// no tombstone (a reappearing source is simply re-ingested as a new
 /// Session).
 pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usize> {
     // 1+2. Redact Context provenance while the refs still resolve.

@@ -1,4 +1,4 @@
-//! Base Experience launch tests (方案 v0.1 §15).
+//! Base Experience launch tests.
 //!
 //! These cover the invariants the simplified New / Resume flow leans on, because
 //! the UI-side direct-launch path is gone: New Session now always runs
@@ -41,8 +41,8 @@ fn open_db(tag: &str) -> Db {
     db
 }
 
-/// A directory that exists — §13 only launches into a usable one, and
-/// §42.3-M8 note 7 says never compare a canonical path against a literal.
+/// A directory that exists — only launches into a usable one, and
+/// note 7 says never compare a canonical path against a literal.
 fn real_dir(tag: &str, name: &str) -> String {
     let dir = std::env::temp_dir().join(format!("noending-base-launch-{}-{}", tag, new_id()));
     let dir = dir.join(name);
@@ -355,7 +355,7 @@ fn prepared_launch_capability_is_single_use() {
 
 /// The cwd the New Session form shows is the backend's resolution, not a
 /// frontend guess: the selected Workstream's primary `WorkstreamPath` is what
-/// `prepare_new` reports (§13), together with the tier that produced it.
+/// `prepare_new` reports, together with the tier that produced it.
 #[test]
 fn prepared_launch_reports_the_resolved_working_directory() {
     let db = open_db("prepared-cwd");
@@ -401,8 +401,8 @@ fn prepared_launch_reports_the_resolved_working_directory() {
     assert_eq!(standalone.cwd_resolution.source, CwdSource::Unresolved);
 }
 
-/// §21-2 — the same flow against a real Home: a standalone New Session starts in
-/// NoEnding's default workspace, and the payload says so (§13, §42.3-M21).
+/// the same flow against a real Home: a standalone New Session starts in
+/// NoEnding's default workspace, and the payload says so.
 #[test]
 fn standalone_prepared_launch_reports_the_default_workspace() {
     let db = open_db("prepared-default-ws");

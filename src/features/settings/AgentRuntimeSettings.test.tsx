@@ -1,4 +1,4 @@
-// 方案 §14 — Agent Settings 的 discovery 行为契约：
+//  — Agent Settings 的 discovery 行为契约：
 //
 //   1. mount 只读已保存设置，绝不 spawn Agent CLI（进入页面 ≠ 刷新模型）；
 //   2. 「刷新模型」按钮是唯一 discovery 入口；

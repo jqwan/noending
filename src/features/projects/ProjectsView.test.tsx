@@ -1,7 +1,7 @@
 import { viewState } from "../../hooks/useViewState";
-// Projects Experience v0.2 §27 — Projects Board 契约：
-// 一次卡片查询（§8）、名称/路径搜索（§5）、缺失筛选（§6）、
-// 以及刷新期间卡片保持可见（§13）。
+// Projects Experience v0.2 Projects Board 契约：
+// 一次卡片查询、名称/路径搜索、缺失筛选、
+// 以及刷新期间卡片保持可见。
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

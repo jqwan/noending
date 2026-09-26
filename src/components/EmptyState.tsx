@@ -1,5 +1,5 @@
 
-/** 统一空状态（整体设计方案 §77）：说明 + 具体下一步动作。 */
+/** 统一空状态（整体设计）：说明 + 具体下一步动作。 */
 export default function EmptyState({ title, hint, actions }: {
   title: string;
   hint?: string;

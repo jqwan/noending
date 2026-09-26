@@ -21,7 +21,7 @@ use super::{with_db, AppState};
 
 // ---------------- Workstreams ----------------
 
-/// §11 — `create_workstream(title, description, initial_paths?)`.
+/// `create_workstream(title, description, initial_paths?)`.
 ///
 /// Project is derived through the paths, and the launch anchor is the ordered
 /// path list. Each entry of `initial_paths` is a raw string, resolved by the
@@ -97,7 +97,7 @@ pub fn list_workstreams(
     with_db(&state, |db| db.list_workstreams(project_id.as_deref()))
 }
 
-// ---------------- ordered workstream paths (§1.5) ----------------
+// ---------------- ordered workstream paths ----------------
 
 /// The ordered list with the physical facts behind each entry. Position 0 is the
 /// primary path; there is no separate role to read.
@@ -111,7 +111,7 @@ pub fn list_workstream_paths(
     })
 }
 
-/// §1.7 — add a working directory. Appends last, or becomes position 0 when the
+/// add a working directory. Appends last, or becomes position 0 when the
 /// list is empty. Never imports the Sessions under that path.
 #[tauri::command]
 pub fn add_workstream_path(
@@ -125,7 +125,7 @@ pub fn add_workstream_path(
     })
 }
 
-/// §1.6 — remove one entry. Sessions and their ownership are untouched.
+/// remove one entry. Sessions and their ownership are untouched.
 #[tauri::command]
 pub fn remove_workstream_path(
     state: State<AppState>,
@@ -137,7 +137,7 @@ pub fn remove_workstream_path(
     })
 }
 
-/// §1.5 — full-list reorder. "设为主路径" is this with the chosen id first.
+/// full-list reorder. "设为主路径" is this with the chosen id first.
 #[tauri::command]
 pub fn reorder_workstream_paths(
     state: State<AppState>,
@@ -149,7 +149,7 @@ pub fn reorder_workstream_paths(
     })
 }
 
-// ---------------- lifecycle and the recycle bin (§1.13) ----------------
+// ---------------- lifecycle and the recycle bin ----------------
 
 #[tauri::command]
 pub fn set_workstream_lifecycle(
@@ -182,7 +182,7 @@ pub fn restore_workstream(state: State<AppState>, workstream_id: String) -> Resu
 
 /// The irreversible one, and only legal from the recycle bin. Deletes the
 /// Workstream and everything only it owned; every Session it referenced
-/// survives with its events (§18-12).
+/// survives with its events.
 #[tauri::command]
 pub fn delete_workstream_permanently(state: State<AppState>, workstream_id: String) -> Result<()> {
     with_db(&state, |db| {

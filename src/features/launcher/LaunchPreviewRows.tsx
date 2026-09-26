@@ -11,11 +11,11 @@ import {
 } from "../../types";
 
 /**
- * 启动预览的公共行（方案 §15「Preview 仅展示」）：Agent、Runtime、工作目录。
+ * 启动预览的公共行：Agent、Runtime、工作目录。
  *
  * 这些数据一律来自 PreparedLaunch 里冻结的意图，而不是在 UI 侧重算或重新读取
  * Settings——否则预览显示的就不是 Agent 真正收到的东西（Preview-Launch
- * Identity）。Runtime 未设置 override 时统一说「Agent 默认值」（§2 词表）：
+ * Identity）。Runtime 未设置 override 时统一说「Agent 默认值」：
  * 默认值属于 Agent，NoEnding 只拥有 override。
  */
 
@@ -50,7 +50,7 @@ export function runtimeIntentHint(
     : "来自设置中的 override，已随本次预览冻结";
 }
 
-/** 实验区文案：四级 delivery 的中文名（§2.1，只在 Delivery 未关闭时出现）。 */
+/** 实验区文案：四级 delivery 的中文名。 */
 export function deliveryLevelLabel(level: ContextDeliveryLevel): string {
   switch (level) {
     case "off":
@@ -106,7 +106,7 @@ export function AgentRow({
   );
 }
 
-/** §13 每一层的中文名。「用户选择的目录」而非「explicit」——词表 §2 说中文。 */
+/** 每一层的中文名。「用户选择的目录」而非「explicit」——词表 说中文。 */
 const CWD_SOURCE_LABELS: Record<CwdSource, string> = {
   explicit: "你指定的目录",
   session_cwd: "会话上次的目录",
@@ -125,10 +125,10 @@ export function cwdSourceLabel(resolution: CwdResolution): string {
 
 /**
  * 工作目录：显示 `resolve_new_cwd` / `resolve_resume_cwd` 的解析结果，不在前端
- * 重算优先级，第一版只读（开放编辑需要后端新增入参，见 §15 默认处理第 4 条）。
+ * 重算优先级，第一版只读（开放编辑需要后端新增入参，见 默认处理第 4 条）。
  * `pending` 表示 Prepare 还没回来——此时不许把"还没算出来"说成"没有目录"。
  *
- * 发生 fallback 时必须说出来（§13）：来源标签 + 后端的 `note`，而不是只显示一个
+ * 发生 fallback 时必须说出来：来源标签 + 后端的 `note`，而不是只显示一个
  * 目录字符串——用户看到 `/Users/me/.noending/workspace` 猜不出那是降级结果。
  */
 export function CwdRow({

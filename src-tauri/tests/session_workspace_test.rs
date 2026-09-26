@@ -1,4 +1,4 @@
-//! Session workspace semantics (重构方案 §1/§4/§18) and the storage ingredients
+//! Session workspace semantics and the storage ingredients
 //! of the Session detail view.
 //!
 //! Every workspace test pins one edge of the fact chain
@@ -15,7 +15,7 @@
 //!   app-wide seam (`register_workspace_attacher`), so the shared instance is
 //!   created once per process and every test reads facts, not call counts;
 //! * every path is a plain `/repo/...` string — no temp-dir prefix is ever
-//!   asserted, because `std::env::temp_dir()` is a symlink on macOS (§42.3-M8).
+//!   asserted, because `std::env::temp_dir` is a symlink on macOS.
 //!
 //! The Tauri detail command is a thin map over storage/lifecycle calls, so the
 //! detail-shape tests exercise exactly those calls (`members_for_session`,
@@ -208,7 +208,7 @@ fn discovered_session_gets_a_workspace_path() {
 
 /// A trailing separator is the same directory, so the same path identity: an
 /// attach through another spelling cannot move the Session or duplicate the
-/// WorkspacePath (§42.3-M8: one directory, one identity).
+/// WorkspacePath (one directory, one identity).
 #[test]
 fn a_different_spelling_of_the_same_cwd_does_not_move_the_session() {
     let (_d, db) = temp_db("spell");
@@ -253,7 +253,7 @@ fn a_different_spelling_of_the_same_cwd_does_not_move_the_session() {
 }
 
 /// The unwired seam answers "no path" to everything — an absent WorkspacePath
-/// is a fact we do not know, a fabricated one is a fact that is wrong (§5.5).
+/// is a fact we do not know, a fabricated one is a fact that is wrong.
 #[test]
 fn an_unwired_workspace_layer_resolves_no_path() {
     let (_d, db) = temp_db("unwired");
@@ -304,7 +304,7 @@ fn session_gets_a_derived_project() {
     assert_eq!(wp.project_id.as_str(), "p-repo");
     assert!(
         after.owner_workstream_id.is_none(),
-        "§3.3 — a standalone Session has no Owner Workstream"
+        "a standalone Session has no Owner Workstream"
     );
 }
 
@@ -391,7 +391,7 @@ fn workspace_path_move_does_not_mutate_a_trashed_session() {
 
 #[test]
 fn project_id_writers_are_confined_to_the_derived_doors() {
-    // §42.5-T2 as an executable check: `sessions.project_id` is a cache, and a
+    // as an executable check: `sessions.project_id` is a cache, and a
     // cache with a fourth writer stops being a cache.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let offenders = rust_files(&manifest.join("src"))
@@ -673,7 +673,7 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
     );
 }
 
-// ───────────────────────────────────────────────────────── 方案 §42.5 T1–T4
+// ─────────────────────────────────────────────────────────  T1–T4
 //
 // The mechanical anti-drift assertions. `project_id_writers_are_confined_to_the_
 // derived_doors` above is T2; these are the rest of the same family, and they
@@ -698,7 +698,7 @@ fn code_only(text: &str) -> String {
 /// The argument list of `tauri::generate_handler![ … ]` as entries, comments
 /// removed. Counting *entries* rather than "mentions" is the whole point: the
 /// retired commands are named repeatedly in this file's own rationale comments
-/// (§43.9-3), and a substring grep would read that as them being registered.
+///, and a substring grep would read that as them being registered.
 fn registered_commands() -> Vec<String> {
     let src = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -735,7 +735,7 @@ fn registered_commands() -> Vec<String> {
         .collect()
 }
 
-/// §42.5-T1 — the retired Project / Session / Workstream commands are not
+/// the retired Project / Session / Workstream commands are not
 /// registered. Breaks if any of them is added back to `generate_handler!`.
 #[test]
 fn retired_commands_are_not_registered() {
@@ -765,14 +765,14 @@ fn retired_commands_are_not_registered() {
         .collect();
     assert!(
         leaked.is_empty(),
-        "§11: these left the product API and must not be re-registered: {leaked:?}"
+        "these left the product API and must not be re-registered: {leaked:?}"
     );
     // The read side of the same freeze: the UI still gets exactly three Project
     // commands, and `list_sessions` is the Session list.
     for kept in ["list_projects", "get_project_detail", "rename_project"] {
         assert!(
             live.iter().any(|e| e.ends_with(&format!("::{kept}"))),
-            "{kept} must stay registered (§11)"
+            "{kept} must stay registered"
         );
     }
 }
@@ -796,8 +796,8 @@ fn balanced_paren(window: &str, from: usize) -> Option<&str> {
     None
 }
 
-/// §42.5-T3 — every product write to `workstreams` names `lifecycle`
-/// explicitly (§42.2-E2: the column default is not a safety net for a field the
+/// every product write to `workstreams` names `lifecycle`
+/// explicitly (the column default is not a safety net for a field the
 /// user sees), and nothing writes the retired vocabulary. Reading the old value
 /// is a different statement shape, so only the write form is matched, as
 /// `SET lifecycle = …`.
@@ -840,10 +840,10 @@ fn workstream_writes_name_lifecycle_and_never_write_the_retired_vocabulary() {
             }
         }
     }
-    assert!(offenders.is_empty(), "§42.5-T3 / §5.7: {offenders:?}");
+    assert!(offenders.is_empty(), "/ {offenders:?}");
 }
 
-/// §42.5-T4 — `git` is reached only through the executable resolver (M10: a
+/// `git` is reached only through the executable resolver (M10: a
 /// Finder-launched macOS app has no shell PATH, and `git` is exactly the binary
 /// that lives in Homebrew), and the Git *protocol* strings live in
 /// `workspace/` alone. Breaks on `Command::new("git")` anywhere, or on a second
@@ -870,7 +870,7 @@ fn git_is_only_reached_through_the_resolver_and_only_from_workspace() {
     }
     assert!(
         offenders.is_empty(),
-        "§42.3-M9/M10/M11 put exactly one place allowed to run git: {offenders:?}"
+        "put exactly one place allowed to run git: {offenders:?}"
     );
     // Prove the scan reaches the file that is allowed to do it: if this assert
     // ever fails, the walker is broken and every assertion above is vacuous.
@@ -878,9 +878,9 @@ fn git_is_only_reached_through_the_resolver_and_only_from_workspace() {
     assert!(code_only(&resolver).contains("--git-common-dir"));
 }
 
-/// §42.3-M31 + §43.9-2 — no launcher entry point may resolve a launch without
+/// + no launcher entry point may resolve a launch without
 /// being told the NoEnding Home. The Home-less spellings were the risk: with
-/// `default_workspace: None`, §13's third tier is simply absent, and M30's
+/// `default_workspace: None`, 's third tier is simply absent, and M30's
 /// "do not teach the Workstream the fallback directory" gate in `apply_match`
 /// *inverts* to growing the list. Enforced here as well as by the compiler,
 /// because `LaunchWorkspace::default()` is how the mistake would come back.
@@ -896,7 +896,7 @@ fn no_launch_entry_point_can_forget_the_home() {
         .collect();
     assert!(
         offenders.is_empty(),
-        "§13 tier 3 must be injected, never defaulted: {offenders:?}"
+        "tier 3 must be injected, never defaulted: {offenders:?}"
     );
     // Every public prepare/launch entry point takes the workspace explicitly.
     for name in [
@@ -926,15 +926,15 @@ fn no_launch_entry_point_can_forget_the_home() {
     ] {
         assert!(
             !launcher.contains(gone),
-            "{gone} is a Home-less launcher entry point and was removed (§43.8 E-(f))"
+            "{gone} is a Home-less launcher entry point and was removed (E-(f))"
         );
     }
 }
 
-/// §2/§3, and the §25 row "migration occurs before DB open": the Home pointer
+///, and the row "migration occurs before DB open": the Home pointer
 /// decides *which file* `Db::open` is handed, so a relocation that has not been
 /// applied yet must not be skipped past. Breaks if `Db::open` is hoisted above
-/// `prepare_home`, which is precisely the §41 failure mode §43.4-4 exists to
+/// `prepare_home`, which is precisely the failure mode exists to
 /// avoid (the user's history looks deleted).
 #[test]
 fn noending_home_is_resolved_before_the_database_opens() {
@@ -946,14 +946,14 @@ fn noending_home_is_resolved_before_the_database_opens() {
     let db = src.find("Db::open(").expect("Db::open call in setup");
     assert!(
         home < db,
-        "§3: relocation runs inside prepare_home, so it must precede opening the db ({home} vs {db})"
+        "relocation runs inside prepare_home, so it must precede opening the db ({home} vs {db})"
     );
 }
 
-/// §1.10 — a Session is a member of a Project because its own path says so.
+/// a Session is a member of a Project because its own path says so.
 /// The derived cache is a cache: a row still holding only a hand-attached
 /// label is not in that Project, and `list_sessions` must agree with
-/// `get_project_detail` instead of disagreeing with it (§42.3-M29).
+/// `get_project_detail` instead of disagreeing with it.
 #[test]
 fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     let (_d, db) = temp_db("cache-is-not-membership");
@@ -1016,7 +1016,7 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     );
 }
 
-/// §4.2/§37.15 — a Session's title comes from the first source that has one:
+///  — a Session's title comes from the first source that has one:
 /// the root's native title, else the first user text, else the first agent
 /// text. The order is the whole point (an Agent's own title beats a derived
 /// one, and a human prompt beats a machine reply), and the rule lives in
@@ -1072,7 +1072,7 @@ fn a_session_title_prefers_the_native_then_the_user_then_the_agent() {
     }
 }
 
-/// §37.19 — discovery skips a transcript whose cursor says "unchanged", so a
+/// discovery skips a transcript whose cursor says "unchanged", so a
 /// Session ingested before its directory was registered keeps
 /// `workspace_path_id = NULL` forever: the branch that exists for exactly that
 /// case sits behind the gate. One cheap pass over the registered paths repairs
@@ -1132,7 +1132,7 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
     );
 }
 
-// ------------------------------- 6. the detail ingredients (重构方案 §28) ----
+// ------------------------------- 6. the detail ingredients ----
 
 /// `get_session_detail` is a thin Tauri command over storage/lifecycle queries.
 /// This pins exactly the rows those queries hand it, so the detail page's
@@ -1226,7 +1226,7 @@ fn the_detail_ingredients_come_from_storage_queries() {
     assert_eq!(members[0].relation.as_str(), "root");
     assert_eq!(members[0].id, root_member);
     assert_eq!(members[1].id, child_member);
-    // Child cwd never reached the session (§4.1/§18).
+    // Child cwd never reached the session.
     assert_eq!(stored(&db, &s).cwd.as_deref(), Some("/repo/detail"));
 
     // The aggregate is query-time and covers the whole graph.

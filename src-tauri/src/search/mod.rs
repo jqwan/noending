@@ -1,6 +1,6 @@
 //! Search — FTS5, with a LIKE fallback for queries its tokenizer cannot match.
 //! Prioritizes current context (items / workstreams), then the conversation
-//! (§21): only Logical Session documents and ROOT SessionMessages are
+//!: only Logical Session documents and ROOT SessionMessages are
 //! indexed — never child/side transcripts, tool traffic, thinking bodies,
 //! MemberStats or IngestionDiagnostics.
 

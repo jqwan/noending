@@ -24,7 +24,7 @@ it("shows the ordered paths and marks only the first as primary", () => {
   screen.getByText("工作目录");
   screen.getByText("/repo/main");
   screen.getByText("/repo/docs");
-  // 顺序就是角色（§1.5）：第 1 条即主工作目录，第 2 条没有徽标。
+  // 顺序就是角色：第 1 条即主工作目录，第 2 条没有徽标。
   expect(screen.getAllByText("主目录")).toHaveLength(1);
 });
 

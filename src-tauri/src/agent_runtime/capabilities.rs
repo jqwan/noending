@@ -73,13 +73,13 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             effort: Unsupported,
         },
         // dsh's model/effort come from its own profile bundle, and NoEnding
-        // cannot launch it at all, so it offers no override (方案 §37.8).
+        // cannot launch it at all, so it offers no override.
         Agent::Dsh => AgentRuntimeCapabilities {
             model: Unsupported,
             provider: Unsupported,
             effort: Unsupported,
         },
-        // Desktop app, no CLI at all (方案 §37.10).
+        // Desktop app, no CLI at all.
         Agent::ZCode => AgentRuntimeCapabilities {
             model: Unsupported,
             provider: Unsupported,

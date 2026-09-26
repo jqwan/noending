@@ -1,4 +1,4 @@
-//! Workstream lifecycle and the recycle bin (方案 §1.13, §18-8…§18-13).
+//! Workstream lifecycle and the recycle bin.
 //!
 //! `lifecycle` (`active | completed`) is a label with no behaviour.
 //! `visibility = archived` IS the recycle bin. Permanent deletion is the only
@@ -97,7 +97,7 @@ fn count(db: &Db, sql: &str, arg: &str) -> i64 {
 
 // ------------------------------------------------------------- lifecycle
 
-/// §18 must-test — the label is a label: switching it changes the label.
+/// must-test — the label is a label: switching it changes the label.
 #[test]
 fn active_to_completed_changes_nothing_else() {
     let (_d, db) = temp_db();
@@ -144,10 +144,10 @@ fn active_to_completed_changes_nothing_else() {
     );
 }
 
-/// §1.13 — the vocabulary is `active | completed` and nothing else. `open` and
+/// the vocabulary is `active | completed` and nothing else. `open` and
 /// `abandoned` are outside that closed set; a caller still writing one is a bug,
 /// and silently accepting it would put a value no reader understands in the
-/// column (§42.2-E2/E10).
+/// column.
 #[test]
 fn lifecycle_rejects_the_retired_vocabulary() {
     let (_d, db) = temp_db();
@@ -166,7 +166,7 @@ fn lifecycle_rejects_the_retired_vocabulary() {
     );
 }
 
-/// §18-9 — archived IS the bin: everything the user built is still there.
+/// archived IS the bin: everything the user built is still there.
 #[test]
 fn archive_preserves_lifecycle_paths_and_ownership() {
     let (_d, db) = temp_db();
@@ -192,7 +192,7 @@ fn archive_preserves_lifecycle_paths_and_ownership() {
 
     let archived = archive_workstream(&db, &w.id).unwrap();
     assert_eq!(archived.visibility, workstream_visibility::ARCHIVED);
-    // lifecycle survives the trip, which is why restore needs no snapshot (§1.13)
+    // lifecycle survives the trip, which is why restore needs no snapshot
     assert_eq!(archived.lifecycle, workstream_lifecycle::COMPLETED);
 
     let after = Snapshot::take(&db, &w.id);
@@ -210,7 +210,7 @@ fn archive_preserves_lifecycle_paths_and_ownership() {
     assert_eq!(db.get_session(&s.id).unwrap().unwrap().id, s.id);
 }
 
-/// §18-10 — restore flips visibility back and nothing else, so the lifecycle the
+/// restore flips visibility back and nothing else, so the lifecycle the
 /// user had set before archiving is still the one they get.
 #[test]
 fn restore_returns_the_previous_lifecycle() {
@@ -264,7 +264,7 @@ fn archiving_is_idempotent_and_never_a_toggle() {
 
 // -------------------------------------------------------- permanent deletion
 
-/// §1.13 / §18-11 — the destructive door only opens from the bin.
+/// / the destructive door only opens from the bin.
 #[test]
 fn permanent_delete_is_refused_until_archived() {
     let (_d, db) = temp_db();
@@ -291,7 +291,7 @@ fn permanent_delete_is_refused_until_archived() {
     assert!(delete_workstream_permanently(&db, &w.id).is_err());
 }
 
-/// §18-12 — the Workstream dies; the Sessions that worked on it do not.
+/// the Workstream dies; the Sessions that worked on it do not.
 #[test]
 fn permanent_delete_preserves_sessions_and_their_events() {
     let (_d, db) = temp_db();
@@ -316,7 +316,7 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     db.commit_member_ingest(&s.id, &member_id, &messages, None, &support::seed_source(0))
         .unwrap();
     db.set_processed_message_sequence(&s.id, 2).unwrap();
-    // A LaunchIntent naming this Workstream is historical evidence: §42.3-M24
+    // A LaunchIntent naming this Workstream is historical evidence:
     // forbids a fourth path column on it, and M6 forbids touching it at all.
     let intent = noending::domain::LaunchIntent {
         id: new_id(),
@@ -377,7 +377,7 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
 }
 
-/// §42.3-M6 — the cleanup list has to be COMPLETE or the first real delete dies
+/// the cleanup list has to be COMPLETE or the first real delete dies
 /// on a foreign key. This builds one row of every kind a Workstream can own and
 /// deletes it all, then checks each of them by hand.
 #[test]
@@ -481,7 +481,7 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     archive_workstream(&db, &w.id).unwrap();
     delete_workstream_permanently(&db, &w.id).unwrap();
 
-    // …and all of it is gone, in the order §42.3-M6 fixes.
+    // …and all of it is gone, in the order fixes.
     for (label, sql) in [
         ("conflict events", "SELECT COUNT(*) FROM context_conflict_events WHERE conflict_id IN (SELECT id FROM context_conflicts WHERE workstream_id = ?1)"),
         ("conflicts", "SELECT COUNT(*) FROM context_conflicts WHERE workstream_id = ?1"),
@@ -593,7 +593,7 @@ fn permanent_delete_leaves_a_sibling_alone() {
 }
 
 /// A `create_workstream` with an initial path, archived and purged: the whole
-/// lifecycle in one pass, as the product runs it (§22's flow).
+/// lifecycle in one pass, as the product runs it ('s flow).
 #[test]
 fn created_archived_and_purged_leaves_no_trace_of_itself() {
     let (_d, db) = temp_db();
@@ -705,7 +705,7 @@ impl Snapshot {
             review_state: count(db, "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1", workstream_id),
         }
     }
-    /// The projection every card and detail page publishes (§42.3-M19).
+    /// The projection every card and detail page publishes.
     fn project_projection(&self) -> Option<String> {
         self.paths.first().map(|(id, _)| id.clone())
     }

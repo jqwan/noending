@@ -1,4 +1,4 @@
-//! Base Experience invariants (Core Workspace Experience v0.1 §6, §7, §11.3).
+//! Base Experience invariants (Core Workspace Experience v0.1,,).
 //!
 //! Context Intelligence is a switch, not a deletion: with it off, NoEnding
 //! must still discover, ingest, index and store every Agent event, and must
@@ -194,7 +194,7 @@ fn off_stops_after_ingestion_on_the_launch_and_refresh_path() {
             .unwrap()
             .iter()
             .any(|h| h.kind == "message" && h.parent_id == s.id),
-        "search indexing stays on (§6)"
+        "search indexing stays on"
     );
 }
 
@@ -222,7 +222,7 @@ fn off_stops_after_ingestion_on_the_reconcile_path() {
     assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 }
 
-/// §11.1: delivery level and intelligence are two independent switches.
+/// delivery level and intelligence are two independent switches.
 /// Getting this wrong would either resurrect extraction while intelligence is
 /// off, or silently stop Context evolution when a user only muted injection.
 #[test]
@@ -265,7 +265,7 @@ fn delivery_level_never_gates_extraction() {
     );
 }
 
-/// §7's whole point, stated as the only falsifiable form it has: everything
+/// 's whole point, stated as the only falsifiable form it has: everything
 /// ingested during the Off period is still there and replayable afterwards.
 #[test]
 fn backlog_ingested_while_off_is_replayed_after_reenabling() {

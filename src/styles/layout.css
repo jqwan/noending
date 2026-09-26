@@ -70,7 +70,7 @@
 }
 
 
-/* ---------- Sidebar (整体设计方案 §5-§11) ---------- */
+/* ---------- Sidebar (整体设计) ---------- */
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
@@ -271,7 +271,7 @@
 }
 .back-link:hover { color: var(--text-primary); }
 
-/* section label — small uppercase section titles (§71) */
+/* section label — small uppercase section titles */
 .section-label {
   font-size: 12px;
   font-weight: 600;

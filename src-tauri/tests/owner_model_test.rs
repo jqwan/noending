@@ -1,4 +1,4 @@
-//! Session single-Owner invariant suite (方案 §43).
+//! Session single-Owner invariant suite.
 //!
 //! Every test here pins one rule of the converged model:
 //!
@@ -8,9 +8,9 @@
 //!
 //! The point of the file is not the happy path alone — it is that the two
 //! directions stay INDEPENDENT: setting an Owner never mutates the Workstream's
-//! path list, and mutating the path list never changes an Owner (§5).
+//! path list, and mutating the path list never changes an Owner.
 //!
-//! Logical-Session shape (重构方案): a Session is keyed by its ROOT member's
+//! Logical-Session shape: a Session is keyed by its ROOT member's
 //! Resume identity (`root_agent_session_id`); conversation is seeded through
 //! the production commit path (`commit_member_ingest`) and read back through
 //! `get_messages` — there are no session events any more.
@@ -120,7 +120,7 @@ fn workstream(db: &Db, title: &str) -> Workstream {
 
 /// A Logical Session + its ROOT member. The root source is a REAL file inside
 /// the test's temp dir, because resume preparation refuses a Session whose
-/// ROOT member source is not present on disk (§17.2) — a resumable fixture
+/// ROOT member source is not present on disk — a resumable fixture
 /// must be resumable.
 fn session(db: &TestDb, cwd: Option<&str>) -> Session {
     session_of_agent(db, Agent::Codex, cwd)
@@ -154,7 +154,7 @@ fn owner_of(db: &Db, session_id: &str) -> Option<String> {
         .owner_workstream_id
 }
 
-// ------------------------------------------------- §43 Session Owner basics
+// ------------------------------------------------- Session Owner basics
 
 #[test]
 fn newly_ingested_session_has_no_owner() {
@@ -211,7 +211,7 @@ fn unknown_workstream_and_unknown_session_are_refused() {
     assert!(db.set_session_owner("no-such-session", None).is_err());
 }
 
-// --------------------------------------------------------- §43 lifecycle
+// --------------------------------------------------------- lifecycle
 
 #[test]
 fn deleting_a_workstream_clears_the_owner_but_keeps_the_session() {
@@ -256,7 +256,7 @@ fn trash_and_restore_preserve_the_owner() {
 
     noending::lifecycle::trash_session(&db, &s.id).unwrap();
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
-    // Trashed Sessions are inactive: they leave the Workstream's list (§11).
+    // Trashed Sessions are inactive: they leave the Workstream's list.
     assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
 
     noending::lifecycle::restore_session(&db, &s.id).unwrap();
@@ -264,7 +264,7 @@ fn trash_and_restore_preserve_the_owner() {
     assert_eq!(db.sessions_for_workstream(&a.id).unwrap().len(), 1);
 }
 
-// ------------------------------------------- §43 workspace independence (§5)
+// ------------------------------------------- workspace independence
 
 #[test]
 fn removing_a_workstream_path_does_not_change_the_owner() {
@@ -328,9 +328,9 @@ fn changing_the_session_cwd_or_project_does_not_change_the_owner() {
     assert_eq!(after.owner_workstream_id.as_deref(), Some(w.id.as_str()));
 }
 
-// ---------------------------------------------- §43 launcher → matched intent
+// ---------------------------------------------- launcher → matched intent
 
-/// §43-14 — a New Session launched for Workstream A records A on its
+/// a New Session launched for Workstream A records A on its
 /// LaunchIntent, and when discovery matches that intent the discovered Session
 /// inherits exactly that one owner.
 #[test]
@@ -370,7 +370,7 @@ fn matched_launch_intent_gives_the_discovered_session_that_owner() {
     assert_eq!(stored.matched_session_id.as_deref(), Some(s.id.as_str()));
 }
 
-/// §43-15 — a standalone launch (no owner chosen) matches too, and the matched
+/// a standalone launch (no owner chosen) matches too, and the matched
 /// Session stays unowned. Matching must not invent an owner.
 #[test]
 fn matched_ownerless_intent_leaves_the_session_unowned() {
@@ -405,7 +405,7 @@ fn matched_ownerless_intent_leaves_the_session_unowned() {
     assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
 }
 
-// ------------------------------------------------------------ §43 launcher
+// ------------------------------------------------------------ launcher
 
 #[test]
 fn new_session_launch_intent_carries_the_chosen_owner() {
@@ -427,7 +427,7 @@ fn new_session_launch_intent_carries_the_chosen_owner() {
     .unwrap();
 
     assert_eq!(prepared.owner_workstream_id.as_deref(), Some(w.id.as_str()));
-    // §13 — with no explicit cwd the Owner's first usable path is the tier.
+    // with no explicit cwd the Owner's first usable path is the tier.
     assert_eq!(prepared.cwd.as_deref(), Some(dir.as_str()));
 }
 
@@ -514,7 +514,7 @@ fn ownerless_session_with_no_usable_cwd_resolves_to_unresolved() {
     assert_eq!(resolution.source, noending::launcher::CwdSource::Unresolved);
 }
 
-// ---------------------------------------------------------------- §43 sync
+// ---------------------------------------------------------------- sync
 
 /// A stub extractor: it never looks at the transcript, it just records the
 /// workstream it was routed to and proposes one `add` there. Enough to pin the
@@ -629,7 +629,7 @@ fn ownerless_session_does_not_run_context_processing_or_advance_the_frontier() {
     );
     let engine = SyncEngine::default();
 
-    // The messages ARE stored: an ownerless session keeps ingesting (§21).
+    // The messages ARE stored: an ownerless session keeps ingesting.
     assert_eq!(messages.len(), 1);
     assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 1);
 
@@ -706,7 +706,7 @@ fn owner_change_during_extraction_makes_the_run_stale() {
         .unwrap();
     assert_eq!(job.status, "stale");
     assert_eq!(job.applied, 0);
-    // §20 — a stale run must not write Context and must not move the frontier.
+    // a stale run must not write Context and must not move the frontier.
     assert!(db.items_for_workstream(&a.id, false).unwrap().is_empty());
     assert!(db.items_for_workstream(&b.id, false).unwrap().is_empty());
     assert_eq!(
@@ -736,7 +736,7 @@ fn sync_never_invents_an_owner() {
     assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
 }
 
-// ----------------------------------------------------------- §43 workstream
+// ----------------------------------------------------------- workstream
 
 #[test]
 fn a_session_never_appears_in_two_workstream_lists() {
@@ -755,9 +755,9 @@ fn a_session_never_appears_in_two_workstream_lists() {
     assert_eq!(in_b[0].id, s.id);
 }
 
-// ------------------------------------------- §5.1 the owner side-effect rule
+// ------------------------------------------- the owner side-effect rule
 
-/// §5.1 — `set_session_owner` writes `sessions.owner_workstream_id` and
+/// `set_session_owner` writes `sessions.owner_workstream_id` and
 /// NOTHING else. The Workstream's path list is untouched (no path is appended
 /// on the Session's behalf), and the Session's cwd, `workspace_path_id` and
 /// derived `project_id` stay exactly as they were.
@@ -813,11 +813,11 @@ fn clearing_the_owner_moves_nothing() {
     assert_eq!(after.workspace_path_id, before.workspace_path_id);
 }
 
-// ------------------------------------------ §43-23 Workstream statistics
+// ------------------------------------------ Workstream statistics
 
-/// §43-23 — a Workstream's stats count exactly the Sessions that OWN it. An
+/// a Workstream's stats count exactly the Sessions that OWN it. An
 /// unowned Session is counted by no Workstream, and re-homing a Session moves
-/// its count instead of duplicating it (§41).
+/// its count instead of duplicating it.
 #[test]
 fn workstream_session_stats_count_only_owned_sessions() {
     let db = open_db("ws-stats-owner");
@@ -847,9 +847,9 @@ fn workstream_session_stats_count_only_owned_sessions() {
     assert_eq!(db.workstream_session_stats(&b.id).unwrap().0, 1);
 }
 
-// --------------------------------- §43 the Owner is the only write target
+// --------------------------------- the Owner is the only write target
 
-/// §3.3/§20 — a run writes its Owner Workstream and nothing else.
+///  — a run writes its Owner Workstream and nothing else.
 ///
 /// `update` / `supersede` / `resolve` name their target by `item_id`, and that
 /// id comes from model output: untrusted text that may echo an identifier
@@ -965,9 +965,9 @@ fn mutations_outside_the_owner_are_skipped_not_written() {
     assert_eq!(db.items_for_workstream(&a.id, true).unwrap().len(), 1);
 }
 
-// ------------------------- §43 resume reads the Owner after the sync seam
+// ------------------------- resume reads the Owner after the sync seam
 
-/// §21-3 — Resume preparation reads ownership AFTER its sync, never from the
+/// Resume preparation reads ownership AFTER its sync, never from the
 /// snapshot taken before it.
 ///
 /// Sync runs without the DB lock, so the user can move the Session to another
@@ -990,7 +990,7 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
 
     // The Session's own cwd is gone, so the OWNER decides the launch
     // directory — the only way the result can be evidence of which Owner was
-    // used (§13 tier 2). The ROOT SOURCE is present (real fixture file), so
+    // used (tier 2). The ROOT SOURCE is present (real fixture file), so
     // the resume gate passes.
     let s = session(&db, Some("/gone/workspace"));
     db.set_session_owner(&s.id, Some(&a.id)).unwrap();
@@ -1029,7 +1029,7 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
     assert_eq!(full.cwd.as_deref(), Some(dir_b.as_str()));
 }
 
-// ------------------- §43 first discovery, whichever door found the session
+// ------------------- first discovery, whichever door found the session
 
 /// A Codex rollout the real adapter discovers, so the source-scoped
 /// reconcile below runs the production discovery → row → ingest path.
@@ -1203,7 +1203,7 @@ fn source_scoped_reconcile_retries_only_that_sources_pending_context() {
     );
 }
 
-// ---------------------- §43 a match is one atomic ownership handover
+// ---------------------- a match is one atomic ownership handover
 
 /// A match writes the Owner, the delivery snapshot and the intent status as
 /// ONE unit: an intent that says MATCHED always has a Session that exists.
@@ -1322,7 +1322,7 @@ fn a_deleted_workstream_cannot_leave_a_dangling_intent_owner() {
     );
 }
 
-// -------------------- §20/§21 prepare-time consistency (Preview = Launch)
+// --------------------  prepare-time consistency (Preview = Launch)
 
 /// The consistency predicate a Resume preparation ends with: it may only hand
 /// back a plan while the Session still names the Owner it was built for.
@@ -1385,7 +1385,7 @@ fn new_preparation_refuses_a_workstream_that_no_longer_exists() {
     );
 }
 
-// --------------------- §15.1 a LaunchIntent is spent exactly once
+// --------------------- a LaunchIntent is spent exactly once
 
 /// An intent is a one-shot capability: the second consumer must not be able to
 /// re-point it at its own Session, and the first Session keeps what it got.
@@ -1531,7 +1531,7 @@ fn matching_refuses_a_foreign_agent_or_a_trashed_session() {
     assert!(owner_of(&db, &s.id).is_none());
 }
 
-// ---------------- §15.1 the discovery retry window for an unclaimed intent
+// ---------------- the discovery retry window for an unclaimed intent
 
 /// An ownerless Session gets more than one chance to claim a pending intent.
 ///
@@ -1640,10 +1640,10 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     assert!(owner_of(&db, &stray.id).is_none());
 }
 
-// ------------------ §39 search projections follow the facts they copy
+// ------------------ search projections follow the facts they copy
 
 /// A Session's search document embeds its Owner's title and its Project's name
-/// (§39). Every write that changes either fact must rebuild those documents —
+///. Every write that changes either fact must rebuild those documents
 /// otherwise a rename leaves the old name searchable, and a deletion keeps a
 /// Workstream findable through the Sessions that used to own it.
 #[test]
@@ -1655,7 +1655,7 @@ fn session_search_documents_follow_workstream_and_project_renames() {
         .unwrap();
     let a = workstream(&db, "Alpha");
     // A real directory + WorkspacePath row, so the Project membership comes
-    // from the authoritative chain (`workspace_path_id → project_id`, §1.10).
+    // from the authoritative chain (`workspace_path_id → project_id`,).
     let dir = db.dir.join("repo-search");
     std::fs::create_dir_all(&dir).unwrap();
     let dir_str = dir.to_string_lossy().to_string();

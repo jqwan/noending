@@ -1,4 +1,4 @@
-//! The ordered WorkstreamPath list (方案 §1.5–§1.7, §18).
+//! The ordered WorkstreamPath list.
 //!
 //! Every test here is about ONE thing: that the list is the whole model, and
 //! that "position 0 is primary" is a property of the list rather than a second
@@ -42,7 +42,7 @@ fn temp_db() -> (PathBuf, Db) {
     (dir, db)
 }
 
-/// §42.3-M8 note 7: never compare a stored canonical path against a literal, and
+/// note 7: never compare a stored canonical path against a literal, and
 /// never against a raw spelling either — run it through the same normalizer the
 /// production door uses, or the assertion is a Unix-only assertion.
 fn canonical(raw: &str) -> String {
@@ -195,7 +195,7 @@ fn search_parent(db: &Db, workstream_id: &str) -> Option<String> {
 
 // ---------------------------------------------------------------- creation
 
-/// §18 must-test: an empty list is a legal Workstream, not a half-built one.
+/// must-test: an empty list is a legal Workstream, not a half-built one.
 #[test]
 fn empty_path_list_is_valid() {
     let (_d, db) = temp_db();
@@ -216,7 +216,7 @@ fn empty_path_list_is_valid() {
     );
 }
 
-/// §11 + §18-7 — `create_workstream(title, description, initial_path?)`: the
+/// + `create_workstream(title, description, initial_path?)`: the
 /// path arrives as a raw string, is resolved by the attacher, and the one path a
 /// new Workstream has is its primary without anyone saying so.
 #[test]
@@ -244,7 +244,7 @@ fn first_path_becomes_primary_automatically() {
     );
 }
 
-/// A `None` from the attacher means "no path", never "no Workstream" (§18-7).
+/// A `None` from the attacher means "no path", never "no Workstream".
 #[test]
 fn unresolvable_initial_path_leaves_a_zero_path_workstream() {
     let (_d, db) = temp_db();
@@ -305,7 +305,7 @@ fn create_requires_a_title() {
 
 // ------------------------------------------------------------ append / order
 
-/// §1.5 — a second entry lands last and the primary does not move.
+/// a second entry lands last and the primary does not move.
 #[test]
 fn append_is_secondary() {
     let (_d, db) = temp_db();
@@ -332,7 +332,7 @@ fn append_is_secondary() {
 }
 
 /// Appending to a Workstream with no paths at all gives position 0 — which is
-/// why "become the primary path" needs no branch in the append helper (§1.8).
+/// why "become the primary path" needs no branch in the append helper.
 #[test]
 fn appending_to_an_empty_list_makes_it_primary() {
     let (_d, db) = temp_db();
@@ -351,7 +351,7 @@ fn appending_to_an_empty_list_makes_it_primary() {
     );
 }
 
-/// §1.6 — the promotion is automatic: nobody is asked to choose a new primary.
+/// the promotion is automatic: nobody is asked to choose a new primary.
 #[test]
 fn removing_the_first_path_promotes_the_second() {
     let f = fixture();
@@ -373,7 +373,7 @@ fn removing_the_first_path_promotes_the_second() {
     );
 }
 
-/// §1.5 — positions stay dense after any removal, so no append can fall into a
+/// positions stay dense after any removal, so no append can fall into a
 /// hole and no `position = 0` read can miss.
 #[test]
 fn removing_a_middle_path_recompacts() {
@@ -405,7 +405,7 @@ fn removing_a_middle_path_recompacts() {
     assert_eq!(positions(&f.db, &w.id), vec![0]);
 }
 
-/// §1.5 — the reorder is the only way to move position 0, it is deterministic,
+/// the reorder is the only way to move position 0, it is deterministic,
 /// and it refuses to finish a partial list.
 #[test]
 fn reorder_is_deterministic() {
@@ -431,7 +431,7 @@ fn reorder_is_deterministic() {
     assert_eq!(again[0].workspace_path_id, rotated[0]);
     assert_eq!(positions(&f.db, &w.id), vec![0, 1, 2]);
 
-    // "设为主路径" (§22) is a reorder to index 0 with no role column involved.
+    // "设为主路径" is a reorder to index 0 with no role column involved.
     let promoted = vec![before[1].clone(), rotated[0].clone(), rotated[1].clone()];
     let result = reorder_workstream_paths(&f.db, &w.id, &promoted).unwrap();
     assert_eq!(result[0].workspace_path_id, before[1]);
@@ -450,7 +450,7 @@ fn reorder_is_deterministic() {
     assert_eq!(ordered_path_ids(&f.db, &w.id), promoted);
 }
 
-/// §1.5 + §42.3-M1 — one directory is one entry, however many ways there are to
+/// + one directory is one entry, however many ways there are to
 /// spell it.
 #[test]
 fn duplicate_path_is_idempotent() {
@@ -499,7 +499,7 @@ fn duplicate_path_is_idempotent() {
 }
 
 /// The two UNIQUE keys are what make "secondary without primary" unrepresentable
-/// (§18-2): the policy does not have to remember a rule the schema can state.
+///: the policy does not have to remember a rule the schema can state.
 #[test]
 fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
     let f = fixture();
@@ -508,7 +508,7 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
     // A fourth, real WorkspacePath that is not in this Workstream's list yet.
     let spare = insert_workspace_path_conn(&f.db.write(), &canonical("/repo/spare"), "p1").unwrap();
 
-    // Two entries cannot both claim position 0 — that is the whole of §1.5's
+    // Two entries cannot both claim position 0 — that is the whole of 's
     // "no primary + has secondary" impossibility.
     let clash = f.db.write().execute(
         "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, created_at)
@@ -533,7 +533,7 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
     assert_eq!(positions(&f.db, &w.id), vec![0, 1, 2]);
 }
 
-/// §1.7 — adding a path adds a path. Nothing under it is imported.
+/// adding a path adds a path. Nothing under it is imported.
 #[test]
 fn adding_a_path_imports_no_sessions() {
     let (_d, db) = temp_db();
@@ -571,7 +571,7 @@ fn adding_a_path_imports_no_sessions() {
     assert_eq!(db.list_workstream_paths(&w.id).unwrap().len(), 1);
 }
 
-/// §18-7 — the path must be a real path: an unresolvable string on an explicit
+/// the path must be a real path: an unresolvable string on an explicit
 /// add is reported, not swallowed (contrast with `create_workstream`, where the
 /// field is optional).
 #[test]
@@ -590,9 +590,9 @@ fn adding_an_unresolvable_path_is_an_error_not_a_noop() {
     assert!(add_workstream_path(&db, &attacher, "gone", "/repo/main").is_err());
 }
 
-// ---------------------------------------------- removal reach (§5.2 / §12)
+// ---------------------------------------------- removal reach
 
-/// §5.2 / §12 — a path removal changes only the path list. Sessions that were
+/// / a path removal changes only the path list. Sessions that were
 /// launched through the removed directory keep their Owner Workstream, and the
 /// Session rows themselves are untouched.
 #[test]
@@ -636,7 +636,7 @@ fn a_path_row_of_another_workstream_is_not_accepted() {
     assert_eq!(of_b.workstream_id, b.id);
 }
 
-/// §18-15 + §42.3-M18 — the search row and the card's Project columns follow the
+/// + the search row and the card's Project columns follow the
 /// position-0 path, never the frozen `workstreams.project_id`.
 #[test]
 fn the_primary_path_projection_moves_the_search_row_and_the_card() {
@@ -695,7 +695,7 @@ fn work_cards(db: &Db, workstream_id: &str) -> noending::commands::workstream::W
         .expect("card")
 }
 
-/// §12 — the list the launcher hashes is ordered, and ordering is what makes a
+/// the list the launcher hashes is ordered, and ordering is what makes a
 /// reorder stale an unreconsumed PreparedLaunch.
 #[test]
 fn launch_path_fingerprint_is_order_sensitive() {
@@ -715,7 +715,7 @@ fn launch_path_fingerprint_is_order_sensitive() {
     assert_eq!(
         forward.primary(),
         Some(canonical("/repo/main").as_str()),
-        "position 0 IS the launch directory (§13 tier 2)"
+        "position 0 IS the launch directory"
     );
 
     let reversed = WorkstreamLaunchPaths {
@@ -741,7 +741,7 @@ fn launch_path_fingerprint_is_order_sensitive() {
     );
 
     // Every value is labelled and terminated, so a longer list can never collide
-    // with a shorter one by shifting a boundary (§42.3-M17).
+    // with a shorter one by shifting a boundary.
     assert_ne!(
         WorkstreamLaunchPaths {
             ordered_paths: vec!["/a".into(), "/b".into()]
@@ -782,7 +782,7 @@ fn path_views_carry_the_facts_the_detail_page_needs() {
 
 // ------------------------------------------------- multi-path creation (report)
 
-/// §11 — several initial paths land in submission order, and the report names
+/// several initial paths land in submission order, and the report names
 /// each one's canonical spelling, position and derived Project.
 #[test]
 fn initial_paths_keep_submission_order_and_report_each_entry() {
@@ -828,7 +828,7 @@ fn initial_paths_keep_submission_order_and_report_each_entry() {
 }
 
 /// The primary seat is "first ACCEPTED", not "first submitted": a refused
-/// string must not leave a hole in the ordered list (§1.5: positions are
+/// string must not leave a hole in the ordered list (positions are
 /// contiguous by construction).
 #[test]
 fn first_accepted_path_wins_the_primary_seat_even_after_rejections() {

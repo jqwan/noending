@@ -1,4 +1,4 @@
-/* NoEnding global styles — base, typography, controls, modal (实施方案 §55) */
+/* NoEnding global styles — base, typography, controls, modal */
 
 * { box-sizing: border-box; }
 
@@ -35,7 +35,7 @@ h3 { font-size: 13px; font-weight: 600; margin: 16px 0 6px; }
 .mono { font-family: var(--mono); font-size: 12px; }
 a { color: inherit; }
 
-/* ---------- Buttons (§74 hierarchy: primary / secondary / ghost) ---------- */
+/* ---------- Buttons ---------- */
 button.btn {
   font-family: inherit;
   font-size: 13px;
@@ -52,7 +52,7 @@ button.btn.primary { background: var(--text-primary); color: var(--bg-app); bord
 button.btn.primary:hover { opacity: 0.88; }
 button.btn.accent { background: var(--accent); border-color: var(--accent); color: #ffffff; }
 button.btn.accent:hover { opacity: 0.9; }
-/* 破坏性确认（Session 永久删除 §37）：与 primary 同形、不同色，只用在
+/* 破坏性确认（Session 永久删除）：与 primary 同形、不同色，只用在
    modal 内的最终确认键上——红底大面积出现会稀释它的警示价值。 */
 button.btn.danger { background: var(--danger); border-color: var(--danger); color: #ffffff; }
 button.btn.danger:hover { opacity: 0.9; }
@@ -83,7 +83,7 @@ textarea { resize: vertical; min-height: 64px; }
 label.field { display: block; margin-bottom: 14px; }
 label.field span { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 
-/* ---------- Badges: state / category only (§59) ---------- */
+/* ---------- Badges: state / category only ---------- */
 .badge {
   display: inline-block;
   font-size: 11px;
@@ -153,7 +153,7 @@ label.field span { display: block; font-size: 12px; color: var(--text-muted); ma
 .empty .invite { margin-top: 10px; }
 .empty .invite button { margin-right: 8px; }
 
-/* ---------- Modal: create / confirm / edit-relationship / danger only (§65) ---------- */
+/* ---------- Modal: create / confirm / edit-relationship / danger only ---------- */
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(17,17,17,0.32);
   display: flex; align-items: center; justify-content: center; z-index: 50;
@@ -177,7 +177,7 @@ label.field span { display: block; font-size: 12px; color: var(--text-muted); ma
   .modal > .row:last-child { bottom: -20px; flex-wrap: wrap; }
 }
 
-/* ---------- Skeleton (§75: no full-page spinner) ---------- */
+/* ---------- Skeleton ---------- */
 @keyframes skeleton-pulse {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1; }

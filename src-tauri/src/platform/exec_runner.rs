@@ -43,7 +43,7 @@ fn drain(mut reader: impl Read, buf: &mut String) {
 /// Run a program headlessly with a hard timeout.
 ///
 /// The mechanism behind [`run_headless`], extracted so it is not locked to the
-/// adapter namespace (方案 §42.3-M11): the WorkspaceResolver has to run `git`
+/// adapter namespace: the WorkspaceResolver has to run `git`
 /// in a *specific* directory, and the old `run_headless` fell back to a
 /// hardcoded `/tmp` when `cwd` was `None` — wrong on Windows, and wrong for any
 /// caller that cares which directory it is asking about.
@@ -68,7 +68,7 @@ pub fn run(
 /// [`run`] plus per-child environment.
 ///
 /// Git detection needs `GIT_OPTIONAL_LOCKS=0` / `GIT_TERMINAL_PROMPT=0`
-/// (方案 §42.3-M9); keeping them out of `run`'s signature leaves the Agent
+///; keeping them out of `run`'s signature leaves the Agent
 /// path (which must inherit the user's environment verbatim) untouched.
 pub fn run_with_env(
     program: &Path,

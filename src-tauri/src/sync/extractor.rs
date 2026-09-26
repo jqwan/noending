@@ -13,7 +13,7 @@
 //! real message; unknown refs are dropped with a diagnostic instead of being
 //! misinterpreted as message sequences.
 //!
-//! Input is `session_messages` only (§15): every message the store holds is
+//! Input is `session_messages` only: every message the store holds is
 //! already root user/assistant prose, so the extractor's one judgment call is
 //! "does this text carry Context value" — never "is this conversation".
 
@@ -36,7 +36,7 @@ pub struct PromptInputs {
 
 /// Snapshot the workstream / item context an extraction prompt needs.
 /// Snapshot the prompt material for the ONE Workstream this extraction routes
-/// to (方案 §22). A Session has a single Owner, so there is no candidate set and
+/// to. A Session has a single Owner, so there is no candidate set and
 /// no cross-workstream item stitching.
 pub fn collect_prompt_inputs(db: &Db, workstream_id: &str) -> Result<PromptInputs> {
     let mut ws_lines = Vec::new();
@@ -198,7 +198,7 @@ pub struct CliExtractor {
 ///
 /// This is ONLY the agent choice: which CLI the built-in Assistant runs on is
 /// a product decision, while model / provider / effort are owned by
-/// Settings → Agents like every other consumer's runtime (§14). There is no
+/// Settings → Agents like every other consumer's runtime. There is no
 /// second model configuration and no cross-Agent default left to leak.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AssistantConfig {
@@ -806,8 +806,8 @@ mod tests {
         }
     }
 
-    /// §32.6 — a short user message reaches the extractor untouched: there is
-    /// no length pre-filter between the store and extraction (§2.4).
+    /// a short user message reaches the extractor untouched: there is
+    /// no length pre-filter between the store and extraction.
     #[test]
     fn heuristic_uses_user_authority_for_user_messages() {
         let db_dir = std::env::temp_dir().join(format!("noending-ext-{}", uuid::Uuid::new_v4()));

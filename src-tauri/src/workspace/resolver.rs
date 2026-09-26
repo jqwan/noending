@@ -11,20 +11,20 @@
 //! * `canonical_path` / `path_id` come from [`crate::workspace::identity`] and
 //!   nowhere else. `path_id` is `identity::path_identity(&canonical_path)`.
 //! * `exists` is a plain `Path::is_dir()`. A missing directory is a legal
-//!   observation — identity does not depend on it (§42.3-M8).
+//!   observation — identity does not depend on it.
 //! * `git` is one of `None | Detected{..} | Missing | Unavailable`. `Missing` is
 //!   decided by the *caller's* prior state (a path that was `detected` and now
 //!   reports no evidence), so the resolver reports the raw evidence and
 //!   `workspace::project` maps it to `git_state`.
 //!
-//! ## Home-level Git is not evidence (§1.4)
+//! ## Home-level Git is not evidence
 //!
 //! If `git root == user home` or `common dir == <home>/.git`, return
 //! `GitDetection::None`. Without this a dotfiles repository swallows the entire
 //! Home into one Project — and it is exactly the false-positive that the retired
 //! `Project.name`-substring affinity used to amplify.
 //!
-//! ## Calling git (§42.3-M9/M10/M11)
+//! ## Calling git
 //!
 //! * Resolve the binary through `platform::exec_resolver::resolve_executable`,
 //!   never `Command::new("git")`.
@@ -38,15 +38,15 @@
 //!   visible error, because `AppError` serializes to a bare string and the UI
 //!   cannot tell "not a repository" from "git is broken".
 //! * `worktree list` output is discovery of *WorkspacePaths*; feeding it into any
-//!   Workstream's path list is forbidden (§9).
+//!   Workstream's path list is forbidden.
 //!
 //! ## What a caller must not read into this
 //!
 //! [`WorkspaceObserving::observe`] is total, so "this string is not a path at
 //! all" has no `None` to return. It returns the sentinel built by
 //! [`unobservable`] instead, and [`is_observable`] is the gate: an empty
-//! `canonical_path` means reserved (§2), un-normalizable, or the user Home
-//! itself (§1.4). `workspace::project::WorkspaceAttaching::ensure_path` must
+//! `canonical_path` means reserved, un-normalizable, or the user Home
+//! itself. `workspace::project::WorkspaceAttaching::ensure_path` must
 //! therefore answer `Ok(None)` for it, never insert a row.
 
 use std::path::{Path, PathBuf};
@@ -100,9 +100,9 @@ pub fn is_observable(obs: &WorkspaceObservation) -> bool {
 pub enum ProbeRejection {
     /// Empty, un-normalizable, or a relative path with no base.
     Unresolvable,
-    /// A reserved NoEnding Home path (§2).
+    /// A reserved NoEnding Home path.
     Reserved,
-    /// The user Home itself (§1.4).
+    /// The user Home itself.
     Home,
 }
 
@@ -128,7 +128,7 @@ pub fn classify_rejection(ctx: &ResolverContext, raw: &str) -> ProbeRejection {
 
 /// Existence, observed in the one layer allowed to read the filesystem.
 ///
-/// `workspace::project` never touches disk, but §9 worktree adoption has to
+/// `workspace::project` never touches disk, but worktree adoption has to
 /// record whether the directory it just learned about is actually present —
 /// otherwise the Projects page says "目录不存在" about a directory that exists
 /// until some later sweep corrects the row. It asks through
@@ -138,11 +138,11 @@ pub fn exists_on_disk(canonical_path: &str) -> bool {
 }
 
 /// How long a single `git` call may take. A hung credential prompt or a stalled
-/// network mount must not stall Workspace Reconcile (§42.3-M7): the answer is
+/// network mount must not stall Workspace Reconcile: the answer is
 /// `Unavailable`, which is also what a missing binary produces.
 pub const GIT_TIMEOUT_SECS: u64 = 10;
 
-/// Environment for every `git` invocation (§42.3-M9).
+/// Environment for every `git` invocation.
 ///
 /// `GIT_OPTIONAL_LOCKS=0` keeps us off the user's `index.lock`;
 /// `GIT_TERMINAL_PROMPT=0` guarantees a credential prompt fails instead of
@@ -185,7 +185,7 @@ pub struct WorktreeEntry {
 }
 
 /// Raw evidence from git. Strings are exactly as git printed them; canonicalizing
-/// them is [`classify_git`]'s job (§42.3-M8 rule 6: `fs::canonicalize` may be
+/// them is [`classify_git`]'s job (rule 6: `fs::canonicalize` may be
 /// applied to git output, never to produce `canonical_path`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProbe {
@@ -222,7 +222,7 @@ impl Default for GitAccess {
 }
 
 impl GitAccess {
-    /// Locate `git` through the same resolver the Agent CLIs use (§42.3-M10).
+    /// Locate `git` through the same resolver the Agent CLIs use.
     pub fn auto() -> Self {
         Self {
             program: resolve_executable("git"),
@@ -243,7 +243,7 @@ impl GitAccess {
         self.program.is_some()
     }
 
-    /// Ask git about `dir`. The two allowed read-only commands, no more (§42.3-M9).
+    /// Ask git about `dir`. The two allowed read-only commands, no more.
     pub fn probe(&self, dir: &Path) -> GitProbe {
         let Some(program) = self.program.as_deref() else {
             return GitProbe::nothing(GitProbeState::Unavailable);
@@ -286,7 +286,7 @@ impl GitAccess {
         };
         let toplevel = lines.get(1).map(|s| s.to_string());
 
-        // §9: worktree discovery is part of the same observation. A failure here
+        // worktree discovery is part of the same observation. A failure here
         // is not fatal — the repository is still detected with one worktree.
         let worktrees = match exec_runner::run_with_env(
             program,
@@ -309,19 +309,19 @@ impl GitAccess {
 }
 
 /// Everything that makes observation deterministic and injectable. No ambient
-/// state is read except through the explicit constructors, so the §42.3-M13 rule
+/// state is read except through the explicit constructors, so the rule
 /// ("tests never resolve the real user Home") holds by construction.
 #[derive(Debug, Clone, Default)]
 pub struct ResolverContext {
     /// Separator rules. `None` = the host's.
     pub style: Option<PathStyle>,
-    /// The user's home directory: expands `~`, and §1.4 needs it to recognize a
+    /// The user's home directory: expands `~`, and needs it to recognize a
     /// dotfiles repository.
     pub user_home: Option<String>,
     /// Base for relative paths. `None` means a relative input is not observable
-    /// rather than being guessed against the process cwd (§42.3-M8 rule 2).
+    /// rather than being guessed against the process cwd (rule 2).
     pub base: Option<String>,
-    /// The §2 reserved set; empty means "NoEnding Home is unknown", which
+    /// The reserved set; empty means "NoEnding Home is unknown", which
     /// reserves nothing rather than reserving everything.
     pub reserved: ReservedPaths,
     pub git: GitAccess,
@@ -367,7 +367,7 @@ impl ResolverContext {
         tidy(identity::normalize_path_with(raw, self.opts()))
     }
 
-    /// The user's Home in canonical form, used by the §1.4 exclusions.
+    /// The user's Home in canonical form, used by the exclusions.
     pub fn user_home_canonical(&self) -> Option<String> {
         self.user_home.as_deref().and_then(|h| {
             tidy(identity::normalize_path_with(
@@ -409,10 +409,10 @@ impl ResolverContext {
     /// Are these two `canonical_path`s the *same location*?
     ///
     /// Not `==`, and not `path_key`: on a Windows volume case is not part of
-    /// location, and §1.4's two exclusions are gates rather than memberships. A
+    /// location, and 's two exclusions are gates rather than memberships. A
     /// case-sensitive read there lets a dotfiles repository whose `toplevel`
     /// git spelled as `C:\Users\ME` slip past, which then makes the entire user
-    /// Home one Project — the exact outcome §1.4 exists to forbid. There is no
+    /// Home one Project — the exact outcome exists to forbid. There is no
     /// later convergence to save it, because the Home is not in a Git family.
     pub fn same_location(&self, a: &str, b: &str) -> bool {
         let style = self.style();
@@ -435,7 +435,7 @@ impl ResolverContext {
 /// segments all collapse away — `.` from a bare repository's
 /// `--git-common-dir`, or a `/x/y/.` cwd — because otherwise the same directory
 /// gets two different `canonical_path` values, and `canonical_path` is a UNIQUE
-/// identity column (§42.3-M8).
+/// identity column.
 ///
 /// Roots keep theirs: `C:\` is the drive root, and `identity` deliberately
 /// returns it with the separator (`C:` alone means drive-*relative*).
@@ -468,12 +468,12 @@ impl WorkspaceResolver {
     }
 
     /// The fallible half of [`WorkspaceObserving::observe`]: `None` for a string
-    /// that is not a WorkspacePath at all (un-normalizable, reserved (§2), or
-    /// the user Home itself (§1.4)).
+    /// that is not a WorkspacePath at all (un-normalizable, reserved, or
+    /// the user Home itself).
     pub fn try_observe(&self, raw: &str) -> Option<WorkspaceObservation> {
         let canonical = self.ctx.canonicalize(raw)?;
         // The reservation question is asked in the context's own style, not the
-        // host's: an injected `PathStyle::Windows` must fold for §2 exactly like
+        // host's: an injected `PathStyle::Windows` must fold for exactly like
         // a Windows host does, or the seam only half-applies.
         if self
             .ctx
@@ -482,7 +482,7 @@ impl WorkspaceResolver {
         {
             return None;
         }
-        // §1.4, second face: never let the user's Home become a Project. The
+        //, second face: never let the user's Home become a Project. The
         // repositories *inside* it are unaffected — they are separate paths with
         // their own evidence.
         if self
@@ -498,7 +498,7 @@ impl WorkspaceResolver {
         let git = if exists {
             classify_git(&self.ctx, &canonical, &self.ctx.git.probe(&path))
         } else {
-            // A missing directory is a legal observation (§42.3-M8); there is
+            // A missing directory is a legal observation; there is
             // simply nothing to detect in it, and no child process to ask.
             GitDetection::None
         };
@@ -525,7 +525,7 @@ impl WorkspaceObserving for WorkspaceResolver {
 }
 
 /// Pure half of Git detection: raw git output in, [`GitDetection`] out, with the
-/// §1.4 Home exclusions applied. No filesystem, no process — this is what makes
+/// Home exclusions applied. No filesystem, no process — this is what makes
 /// the dotfiles-swallowing-the-Home case testable without a repository.
 pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> GitDetection {
     match probe.state {
@@ -549,7 +549,7 @@ pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> 
                     parent_of(&common_dir).and_then(|p| ctx.canonicalize_from(&p, observed))
                 });
 
-            // §1.4 — a repository rooted at the user's Home is not evidence.
+            // a repository rooted at the user's Home is not evidence.
             if let Some(home) = ctx.user_home_canonical() {
                 let same = |a: &str, b: &str| ctx.same_location(a, b);
                 if toplevel.as_deref().is_some_and(|t| same(&t, &home)) {
@@ -589,7 +589,7 @@ pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> 
     }
 }
 
-/// Which checkout the observed path belongs to (§14).
+/// Which checkout the observed path belongs to.
 ///
 /// `gitdir == common dir` identifies the main worktree, which is a fact of git's
 /// own layout rather than a heuristic about path names or ordering. When
@@ -662,7 +662,7 @@ pub fn worktree_kind(
     }
 }
 
-/// `git worktree list --porcelain` (§9/§14).
+/// `git worktree list --porcelain`.
 ///
 /// Format: blocks starting with `worktree <path>`, followed by `HEAD`,
 /// `branch`, optional `bare` / `detached`, and `gitdir`. A path may contain
@@ -712,20 +712,20 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
     out
 }
 
-/// §16-11, spelled out for the caller that owns persistence: losing `.git` is
+///, spelled out for the caller that owns persistence: losing `.git` is
 /// `detected → missing`, and nothing else. `workspace::project` is the only place
 /// with the prior state this needs, so the resolver reports `None` and stops.
 ///
 /// [`GitProbeState::Unavailable`] keeps the stored value on purpose: "we could
-/// not ask" must never be recorded as "this is not a repository", because §1.3
+/// not ask" must never be recorded as "this is not a repository", because
 /// forbids losing a Project's Git identity on a transient failure.
 pub fn git_state_after_observation(prior: &str, detection: &GitDetection) -> String {
     match detection {
         GitDetection::Detected { .. } => git_state::DETECTED.to_string(),
         GitDetection::Missing => git_state::MISSING.to_string(),
         // "No evidence right now" keeps a path that was once Git-backed in
-        // `missing`: §1.3 forbids a lost `.git` from detaching the WorkspacePath
-        // or clearing anything, and §10 forbids forgetting that it was ever a
+        // `missing`: forbids a lost `.git` from detaching the WorkspacePath
+        // or clearing anything, and forbids forgetting that it was ever a
         // repository. Demoting `missing → none` would erase that fact.
         GitDetection::None if prior == git_state::DETECTED || prior == git_state::MISSING => {
             git_state::MISSING.to_string()
@@ -750,7 +750,7 @@ fn parent_of(common_dir: &str) -> Option<String> {
     })
 }
 
-/// `<home>/.git`, the exact §1.4 spelling.
+/// `<home>/.git`, the exact spelling.
 fn home_git_of(home: &str) -> String {
     format!("{}.git", home.trim_end_matches(['/', '\\']))
 }
@@ -786,7 +786,7 @@ mod tests {
         }
     }
 
-    /// 必须测试: home `.git` exclusion — both spellings §1.4 names, and the
+    /// 必须测试: home `.git` exclusion — both spellings names, and the
     /// near-miss that must NOT be excluded.
     #[test]
     fn home_level_repository_is_not_evidence() {
@@ -904,7 +904,7 @@ bare
                 assert_eq!(kind, GitWorktreeKind::Linked);
                 assert_eq!(common_dir, "/Users/me/code/noending/.git");
                 // Bare repositories are not working directories, so they are not
-                // WorkspacePath candidates (§9).
+                // WorkspacePath candidates.
                 assert_eq!(
                     worktrees,
                     vec!["/Users/me/code/noending".to_string(), observed.to_string()]
@@ -967,7 +967,7 @@ bare
     }
 
     /// Paths git hands back relative to the cwd must be resolved against the
-    /// observed directory, not the process (§42.3-M8 rule 6).
+    /// observed directory, not the process (rule 6).
     #[test]
     fn git_output_is_resolved_against_the_observed_path() {
         let c = ctx();
@@ -1009,7 +1009,7 @@ bare
     }
 
     /// 必须测试: missing `.git` — the resolver's raw answer is `None`, and only
-    /// the caller's prior state turns it into `missing` (§1.3, §16-11).
+    /// the caller's prior state turns it into `missing`.
     #[test]
     fn missing_git_is_the_callers_derivation_not_the_resolvers() {
         let c = ctx();
@@ -1032,7 +1032,7 @@ bare
             git_state::MISSING,
             "already-missing stays missing"
         );
-        // §1.3: losing Git must not detach a path from its Project, so a value
+        // losing Git must not detach a path from its Project, so a value
         // that was never detected is never reported as `missing`.
         assert_eq!(
             git_state_after_observation(git_state::DETECTED, &GitDetection::None),
@@ -1062,7 +1062,7 @@ bare
         );
     }
 
-    /// Every way git can fail collapses into an enum, never an error (§42.3-M9).
+    /// Every way git can fail collapses into an enum, never an error.
     #[test]
     fn git_failures_never_bubble_up() {
         let c = ctx();
@@ -1083,10 +1083,7 @@ bare
         let missing = resolver.observe(&absent);
         assert!(!missing.exists);
         assert_eq!(missing.git, GitDetection::None);
-        assert!(
-            is_observable(&missing),
-            "a missing directory is legal (§42.3-M8)"
-        );
+        assert!(is_observable(&missing), "a missing directory is legal");
         // Not-a-repository stderr vs. everything else.
         assert!(is_not_a_repository(
             "fatal: not a git repository (or any of the parent directories): .git"
@@ -1102,10 +1099,10 @@ bare
         assert!(matches!(sentinel.git, GitDetection::None));
     }
 
-    /// 必须测试: relative → absolute (rejected without a base) and the §2 / §1.4
+    /// 必须测试: relative → absolute (rejected without a base) and the /
     /// exclusions, seen through the resolver rather than the predicate.
     ///
-    /// The style is pinned, not inherited (方案 §44.3-C1): this module's own
+    /// The style is pinned, not inherited: this module's own
     /// convention is that a lexical test says which platform's spelling it means,
     /// so both are proven on every runner instead of one of them.
     #[test]
@@ -1130,11 +1127,14 @@ bare
         assert!(resolver
             .observe("/Users/tester/.noending")
             .is_none_sentinel());
-        assert!(resolver.observe("/Users/tester").is_none_sentinel(), "§1.4");
+        assert!(
+            resolver.observe("/Users/tester").is_none_sentinel(),
+            "sentinel"
+        );
         assert!(!resolver
             .observe("/Users/tester/.noending/workspace")
             .is_none_sentinel());
-        // Same directory, three spellings, one identity (§42.3-M8).
+        // Same directory, three spellings, one identity.
         let a = resolver.observe("/Users/tester/code/noending");
         let b = resolver.observe("/Users/tester/code/x/../noending/");
         let c = resolver.observe("~/code/noending");
@@ -1179,18 +1179,18 @@ bare
         assert!(
             win.observe("C:\\USERS\\tester\\.NoEnding")
                 .is_none_sentinel(),
-            "a case variant of the Home is still the Home (§2, §44)"
+            "a case variant of the Home is still the Home"
         );
         assert!(
             win.observe("C:\\Users\\TESTER").is_none_sentinel(),
-            "§1.4 folds case too"
+            "folds case too"
         );
         let repo = win.observe("c:/tester/code/../code/noending\\");
         assert_eq!(repo.canonical_path, "C:\\tester\\code\\noending");
         // The stored key is the host's rule, deliberately: a database belongs to
         // one machine, so an injected *spelling* must not decide what its ids
         // mean. That is why the Windows identity convergence itself is asserted
-        // by 方案 §8's key tests and §44's `#[cfg(windows)]` registry tests, not
+        // by 's key tests and 's `#[cfg(windows)]` registry tests, not
         // here.
         assert_eq!(repo.path_id, identity::path_identity(&repo.canonical_path));
     }

@@ -1,4 +1,4 @@
-//! New Session launch directory resolution (方案 §13, Workspace Domain v0.2).
+//! New Session launch directory resolution.
 //!
 //! ```text
 //! explicit cwd
@@ -8,10 +8,10 @@
 //! ```
 //!
 //! The ordered path list is the only Workstream workspace authority; an owned
-//! Session's cwd is never a suggestion for a new launch (方案 §15).
+//! Session's cwd is never a suggestion for a new launch.
 //!
 //! Every directory a test expects to be *chosen* is a real temp directory,
-//! because §42.3-M21 forbids handing the terminal a directory that is not there
+//! because forbids handing the terminal a directory that is not there
 //! (macOS would print a hint and quietly cd to `$HOME`).
 
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ fn db(tag: &str) -> Db {
 
 /// The launcher is a *reader* of WorkspacePaths, so a test fixture needs a real
 /// one. This is the stand-in for `workspace::project`: pure lexical resolution
-/// into a WorkspacePath row, no Git (§42.3-M8 keeps identity filesystem-free).
+/// into a WorkspacePath row, no Git (keeps identity filesystem-free).
 #[derive(Default)]
 struct LexicalPaths;
 
@@ -56,9 +56,9 @@ fn temp_root(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("noending-launch-cwd-{}-{}", tag, new_id()))
 }
 
-/// A directory that really exists — "usable" in §13's sense.
+/// A directory that really exists — "usable" in 's sense.
 ///
-/// §42.3-M8 note 7: never assert a stored canonical path against a literal. The
+/// note 7: never assert a stored canonical path against a literal. The
 /// temp dir is handed to the same normalizer production uses, so this file says
 /// the same thing on macOS, Linux and a Windows `C:\…` temp path.
 fn real_dir(tag: &str, name: &str) -> String {
@@ -71,7 +71,7 @@ fn canonical(path: impl AsRef<Path>) -> String {
     normalize_path(&path.as_ref().to_string_lossy()).expect("fixture path is normalizable")
 }
 
-/// A default workspace that does NOT exist yet: §42.3-M21 requires the launcher
+/// A default workspace that does NOT exist yet: requires the launcher
 /// to treat Home's default workspace as creatable rather than skip it.
 fn missing_dir(tag: &str, name: &str) -> String {
     canonical(temp_root(tag).join(name))
@@ -120,7 +120,7 @@ fn new_cwd(
 
 // ------------------------------------------------------------- the tiers
 
-/// §21 "explicit cwd wins": a directory the user named outranks everything,
+/// "explicit cwd wins": a directory the user named outranks everything,
 /// including a Workstream whose primary path is a perfectly good directory.
 #[test]
 fn explicit_cwd_wins_over_everything() {
@@ -133,7 +133,7 @@ fn explicit_cwd_wins_over_everything() {
     );
 }
 
-/// §21 "primary path wins": position 0 of the ordered list is the launch
+/// "primary path wins": position 0 of the ordered list is the launch
 /// directory, ahead of every other entry and ahead of the default workspace.
 #[test]
 fn primary_workstream_path_wins() {
@@ -156,8 +156,8 @@ fn primary_workstream_path_wins() {
     assert_eq!(resolution.workstream_id.as_deref(), Some(w.as_str()));
 }
 
-/// §21 "no Workstream path → default workspace": a Workstream with zero paths
-/// is fully valid (§1.5), and the launch falls to Home's default workspace —
+/// "no Workstream path → default workspace": a Workstream with zero paths
+/// is fully valid, and the launch falls to Home's default workspace
 /// marked as a fallback, because the user picked a Workstream expecting to work
 /// in *its* directory.
 #[test]
@@ -178,11 +178,11 @@ fn workstream_without_paths_falls_back_to_the_default_workspace() {
         std::fs::metadata(&default)
             .map(|m| m.is_dir())
             .unwrap_or(false),
-        "§42.3-M21 — the default workspace is created, never handed over missing"
+        "the default workspace is created, never handed over missing"
     );
 }
 
-/// §21 "standalone → default workspace": with no Workstream at all the default
+/// "standalone → default workspace": with no Workstream at all the default
 /// workspace IS the documented answer, so it is not a fallback.
 #[test]
 fn standalone_new_session_uses_the_default_workspace() {
@@ -354,6 +354,6 @@ fn an_unusable_explicit_directory_is_honored_and_annotated() {
     assert!(
         resolution.note.is_some(),
         "a `cd` that cannot succeed prints a hint and lands in $HOME on macOS, \
-         so the preview must not pretend otherwise (§42.3-M21)"
+         so the preview must not pretend otherwise"
     );
 }

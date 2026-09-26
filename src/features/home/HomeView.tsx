@@ -10,13 +10,13 @@ import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 import NewSessionModal from "../sessions/NewSessionModal";
 
 /**
- * Home = Continue where you left off（整体设计方案 §12）。
+ * Home = Continue where you left off（整体设计）。
  * 唯一任务：让用户用最短路径回到最近推进的 Workstream。
  *
- * Base Experience（方案 §11.5）：Home 不消费 reviewSummaries，也不挂载任何智能
- * 段落（Context Updates / Review / Conflict 一律不出现在主路径，§24）。这里的
+ * Base Experience：Home 不消费 reviewSummaries，也不挂载任何智能
+ * 段落（Context Updates / Review / Conflict 一律不出现在主路径，）。这里的
  * 「新建 Session」不自己启动进程，而是打开全局唯一的启动路径
- * NewSessionModal → prepareNewSession → launchPrepared（§8.1.1、Preview-Launch
+ * NewSessionModal → prepareNewSession → launchPrepared（、Preview-Launch
  * Identity）。Home 也从不推进 ReviewState（Home Attention Integrity）。
  */
 export default function HomeView({ navigate }: { navigate: (r: Route) => void }) {
@@ -67,7 +67,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
                 判断（避免在 Agent 还在解析时把按钮误标成「未检测」）。
                 也正因为如此，这里不再额外挂一个 `!defaultAgent` 的「配置 Agent」
                 链接：defaultAgent 从 hook 里异步解析，链接会在解析期间闪一下，
-                而它承诺的「没有 Agent」那时还只是未知（§25 状态必须是真的）。 */}
+                而它承诺的「没有 Agent」那时还只是未知——状态必须是真的。 */}
             <button className="btn ws-btn" onClick={() => setCreatingSession(true)}>
               {defaultAgent ? (
                 <>

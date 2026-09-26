@@ -13,17 +13,17 @@ import type {
 } from "./types";
 
 export const api = {
-  // ---------------- Projects (方案 §11) ----------------
+  // ---------------- Projects ----------------
   //
   // v0.2 derives Projects from WorkspacePaths; reads and rename are the full
   // client surface.
   listProjects: () => invoke<Project[]>("list_projects"),
-  /** §8 — 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
+  /** 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
   listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
-  /** §10 — 全局「刷新工作区状态」：后台 reconcile，事件回报，立即返回。 */
+  /** 全局「刷新工作区状态」：后台 reconcile，事件回报，立即返回。 */
   refreshWorkspaceProjects: () =>
     invoke<{ started: boolean }>("refresh_workspace_projects"),
-  /** §16 — 定点刷新：只重观察这个 Project 自己的工作目录。 */
+  /** 定点刷新：只重观察这个 Project 自己的工作目录。 */
   refreshProjectWorkspace: (projectId: string) =>
     invoke<{ started: boolean }>("refresh_project_workspace", { projectId }),
   getProjectDetail: (projectId: string) =>
@@ -33,7 +33,7 @@ export const api = {
   renameProject: (projectId: string, name: string) =>
     invoke<Project>("rename_project", { projectId, name }),
 
-  // ---------------- NoEnding Home (方案 §11, §22) ----------------
+  // ---------------- NoEnding Home ----------------
   getWorkspaceSettings: () => invoke<WorkspaceSettings>("get_workspace_settings"),
   /** Requests a relocation for the NEXT launch; `restart_required` says so. */
   setNoendingHome: (newHome: string) =>
@@ -70,7 +70,7 @@ export const api = {
     invoke<RecentWorkspacePath[]>("list_recent_workspace_paths", { limit }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
 
-  // ---------------- Workstream paths, lifecycle, recycle bin (方案 §11, §18) ----------------
+  // ---------------- Workstream paths, lifecycle, recycle bin ----------------
   listWorkstreamPaths: (workstreamId: string) =>
     invoke<WorkstreamPathRow[]>("list_workstream_paths", { workstreamId }),
   addWorkstreamPath: (workstreamId: string, path: string) =>
@@ -146,19 +146,19 @@ export const api = {
       agent: agent ?? null,
       scope: scope ?? null,
     }),
-  // Session Lifecycle (重构方案 §19/§20): the UI submits session ids only —
+  // Session Lifecycle: the UI submits session ids only —
   // there is no deletion job and no source deletion anywhere: NoEnding never
   // deletes Agent-owned sources; permanent delete is a LOCAL purge.
   trashSession: (sessionId: string) => invoke<Session>("trash_session", { sessionId }),
   restoreSession: (sessionId: string) => invoke<Session>("restore_session", { sessionId }),
-  /** §20.2 无状态预览：fresh root source verdict + counts，没有 job。 */
+  /** 无状态预览：fresh root source verdict + counts，没有 job。 */
   getSessionLocalDeletePreview: (sessionId: string) =>
     invoke<LocalDeletePreview>("get_session_local_delete_preview", { sessionId }),
-  /** §20.3 执行本地清除：trashed + fresh root missing 才允许。 */
+  /** 执行本地清除：trashed + fresh root missing 才允许。 */
   permanentlyDeleteSession: (sessionId: string) =>
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
-  /** §11 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */
+  /** 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */
   listIngestionDiagnostics: (minObservations?: number) =>
     invoke<IngestionDiagnostic[]>("list_ingestion_diagnostics", {
       minObservations: minObservations ?? null,
@@ -181,14 +181,14 @@ export const api = {
     ),
   listSyncRuns: (limit?: number) => invoke<SyncRun[]>("list_sync_runs", { limit: limit ?? 50 }),
 
-  /** §15 — 新建 Session 最多带一个所属任务（`null` = standalone）。 */
+  /** 新建 Session 最多带一个所属任务（`null` = standalone）。 */
   prepareNewSession: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string) =>
     invoke<import("./types").PreparedLaunch>("prepare_new_session", {
       agent,
       ownerWorkstreamId,
       cwd: cwd ?? null,
     }),
-  /** §16 — Resume 不再传任何 Workstream：用 Session 当前的 Owner。 */
+  /** Resume 不再传任何 Workstream：用 Session 当前的 Owner。 */
   prepareResumeSession: (sessionId: string) =>
     invoke<import("./types").PreparedLaunch>("prepare_resume_session", { sessionId }),
   launchPrepared: (preparedId: string) =>

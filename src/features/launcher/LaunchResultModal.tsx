@@ -6,7 +6,7 @@ import { showToast } from "../../components/Toast";
 /**
  * What happened after a launch: command, context file, delivered bundle.
  *
- * 「注入了什么」按这次启动**实际投递**的内容决定显隐（§15、§24）：不注入时
+ * 「注入了什么」按这次启动**实际投递**的内容决定显隐：不注入时
  * markdown 为空，这块内容直接不存在，而不是显示零计数或「未注入」占位。
  * 用实际结果而不是当前设置判断，因为设置可能在启动之后、弹窗关闭之前被改过。
  */

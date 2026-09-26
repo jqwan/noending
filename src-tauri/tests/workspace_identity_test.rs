@@ -1,4 +1,4 @@
-//! Workspace identity integrity (方案 §1.1, §2, §42.3-M8).
+//! Workspace identity integrity.
 //!
 //! `workspace_paths.id` is the join key for Sessions, WorkstreamPaths and — one
 //! hop further — every Project fact. Nothing else in the app can notice a row
@@ -6,7 +6,7 @@
 //! join agrees with the stored id. So these tests do not exercise a behaviour:
 //! they check that the *key itself* is the derivation, on both platforms.
 //!
-//! Temp directories only; no user Home and no real transcript (§42.3-M13).
+//! Temp directories only; no user Home and no real transcript.
 
 use noending::domain::{GitDetection, GitWorktreeKind, WorkspaceObservation};
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -69,14 +69,14 @@ fn repo(raw: &str, common: &str, kind: GitWorktreeKind) -> WorkspaceObservation 
 
 // ------------------------------------------------------------------ 1. the key
 
-/// §1.1 — the check `registry_is_consistent` actually performs.
+/// the check `registry_is_consistent` actually performs.
 ///
 /// The assertion this replaced was `GROUP BY id HAVING COUNT(DISTINCT
 /// project_id) > 1`, which can never be non-zero because `id` is the PRIMARY
 /// KEY. An assertion that cannot fail is worse than none, because it reads as
 /// coverage. A row whose id is *not* `path_identity(its own canonical_path)` is
 /// reachable — a hand-written INSERT, a bulk derivation that computes the key
-/// differently, or a second normalizer (§42.3-M8: "禁止第二份实现") — and every
+/// differently, or a second normalizer ("禁止第二份实现") — and every
 /// join keeps agreeing with it, so the corruption stays silent.
 #[test]
 fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
@@ -104,7 +104,7 @@ fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
     assert!(err.contains("not derived from its canonical_path"), "{err}");
 }
 
-/// §8.3 — one Git family, one Project, structurally rather than by convention.
+/// one Git family, one Project, structurally rather than by convention.
 #[test]
 fn one_git_family_cannot_be_claimed_by_two_projects() {
     let (_d, db) = temp_db();
@@ -127,7 +127,7 @@ fn one_git_family_cannot_be_claimed_by_two_projects() {
 
 // --------------------------------------------------------- 2. cross-platform
 
-/// The Unix half of 方案 §42.3-M8.4, frozen as data rather than as a rule.
+/// The Unix half of  as data rather than as a rule.
 ///
 /// Stored `workspace_paths.id` values are keyed by these strings, so changing
 /// the derivation would re-key every existing row — an identity change, not a
@@ -152,7 +152,7 @@ fn unix_path_identity_vectors_are_stable() {
             "/Users/dev/projects/noending",
             "path-f89dfc8b3a07fb0b6083631898a33217",
         ),
-        // The case pair that §8's Test 4 keeps apart, pinned as data too.
+        // The case pair that 's Test 4 keeps apart, pinned as data too.
         ("/var/data/Repo", "path-ee90d2b156a11b39705abc879aebcde4"),
     ];
     for (canonical, expected) in VECTORS {
@@ -175,7 +175,7 @@ fn unix_path_identity_vectors_are_stable() {
         assert_ne!(
             path_identity_with(VECTORS[0].0, PathStyle::Windows),
             VECTORS[0].1,
-            "the fold must actually change Windows ids, or §44 fixed nothing"
+            "the fold must actually change Windows ids, or fixed nothing"
         );
     }
     // A trailing separator is trimmed by the key itself, because an
@@ -191,8 +191,8 @@ fn unix_path_identity_vectors_are_stable() {
     );
 }
 
-/// §42.3-M8 + §44 — every Windows spelling of one directory carries one
-/// identity, including the case variants §44 folded into the key, and the
+/// + every Windows spelling of one directory carries one
+/// identity, including the case variants folded into the key, and the
 /// *display* form keeps the case the user typed.
 #[test]
 fn windows_spellings_of_one_directory_carry_one_identity() {
@@ -202,7 +202,7 @@ fn windows_spellings_of_one_directory_carry_one_identity() {
     let expected = path_identity_with(&canonical, w);
     // Separator, trailing-separator, verbatim-prefix, `.`-hop and *case*
     // spellings. Case joins them because on a Windows volume it names the same
-    // directory, and 方案 §44 made the stored key agree with that comparison
+    // directory, and  made the stored key agree with that comparison
     // rather than leaving `same_location` and `path_identity` apart.
     for raw in [
         "C:\\Users\\me\\.noending\\workspace",
@@ -220,7 +220,7 @@ fn windows_spellings_of_one_directory_carry_one_identity() {
         );
     }
     // The fold reaches the key only. Two case variants remain two *strings*,
-    // and the row keeps the spelling that got there first (§44.2).
+    // and the row keeps the spelling that got there first.
     assert_ne!(
         win("C:\\Users\\me\\.noending\\WORKSPACE"),
         canonical,
@@ -239,7 +239,7 @@ fn windows_spellings_of_one_directory_carry_one_identity() {
     );
 }
 
-/// §42.3-M8 + M30 — the premise under the launcher's path-list gate.
+/// + M30 — the premise under the launcher's path-list gate.
 ///
 /// `apply_match` decides whether to grow a Workstream's ordered path list by
 /// comparing `path_identity_of(default_workspace)` against
@@ -261,19 +261,19 @@ fn the_default_workspace_the_launcher_hands_round_trips_through_the_identity_doo
     );
     assert!(
         !home.reserved().contains(&stored),
-        "workspace/ is the one path under Home that is a normal WorkspacePath (§2)"
+        "workspace/ is the one path under Home that is a normal WorkspacePath"
     );
     assert!(
         home.reserved().contains(&home.db_path_str()),
-        "data/ is not (§2)"
+        "data/ is not"
     );
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// §2 — on a Windows volume a case variant of a reserved app directory is still
+/// on a Windows volume a case variant of a reserved app directory is still
 /// that directory, so it is still reserved. Proven with an injected
 /// [`PathStyle`], because CI's Windows behavior cannot otherwise be reached from
-/// a macOS runner (§42.3-M8).
+/// a macOS runner.
 #[test]
 fn a_case_variant_of_a_reserved_windows_directory_is_still_reserved() {
     let home = NoEndingHome::new_with_style(
@@ -300,7 +300,7 @@ fn a_case_variant_of_a_reserved_windows_directory_is_still_reserved() {
             &win("C:\\Users\\me\\.noending\\workspace"),
             PathStyle::Windows
         ),
-        "folding must not reserve the Home wholesale (§2)"
+        "folding must not reserve the Home wholesale"
     );
     assert!(
         !home.reserved().contains_with(
@@ -311,7 +311,7 @@ fn a_case_variant_of_a_reserved_windows_directory_is_still_reserved() {
     );
 }
 
-/// §42.3-M8 rule 5 — the aliasing cost is only acceptable because Git
+/// rule 5 — the aliasing cost is only acceptable because Git
 /// convergence actually runs. Without this, "two spellings, one Project" would
 /// be an unverified claim rather than a mechanism.
 #[test]
@@ -342,7 +342,7 @@ fn git_convergence_reunites_two_paths_that_report_one_family() {
     assert_ne!(main.id, alias.id, "two directories, two rows");
     assert_eq!(
         main.project_id, alias.project_id,
-        "one Git family, so one Project (§8.3)"
+        "one Git family, so one Project"
     );
     registry_is_consistent(&db).expect("consistent after convergence");
 }

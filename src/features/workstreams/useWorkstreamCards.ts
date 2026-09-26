@@ -16,8 +16,8 @@ export function useWorkstreamCards() {
     setLoadError("");
     api.listWorkstreamCards().then(setCards).catch(e => setLoadError(String(e)));
     api.getDefaultAgent().then(setDefaultAgent).catch(console.error);
-    // §34 要求 review 五支在 Base Experience 下不可达 —— 不是"发了请求再藏起来"。
-    // 返回形状按 §8.1.1 冻结，所以这里只跳过请求，留下 null。
+    // 要求 review 五支在 Base Experience 下不可达 —— 不是"发了请求再藏起来"。
+    // 返回形状按 冻结，所以这里只跳过请求，留下 null。
     if (intelligenceEnabled) {
       api.listWorkstreamReviewSummaries().then(setReviewSummaries).catch(console.error);
     }

@@ -27,7 +27,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // NoEnding Home first, always before the database opens (§2, §3):
+            // NoEnding Home first, always before the database opens:
             // it resolves $NOENDING_HOME → bootstrap.current_home → ~/.noending,
             // applies any pending relocation, and creates data/ runtime/ logs/
             // workspace/. A *migration* failure
@@ -45,8 +45,7 @@ pub fn run() {
 
             // The physical layer behind the one `WorkspaceAttaching` door.
             // Managed as state for the commands, and registered for
-            // ingestion, whose discovery resolves Session cwds through it
-            // (§19).
+            // ingestion, whose discovery resolves Session cwds through it.
             app.manage(home.clone());
             let layer = std::sync::Arc::new(workspace::wiring::WorkspaceLayer::new(&home));
             app.manage(layer.clone());
@@ -128,7 +127,7 @@ pub fn run() {
                         Err(e) => eprintln!("[reconcile] failed: {}", e),
                     }
 
-                    // Workspace Reconcile (§8, §26, §42.3-M7): Git detection on
+                    // Workspace Reconcile: Git detection on
                     // paths that so far exist only as strings. It runs after
                     // ingestion because a Session's cwd is what tells us a
                     // directory is real, and it re-observes per path instead of
@@ -182,7 +181,7 @@ pub fn run() {
             commands::workstream::restore_workstream,
             commands::workstream::delete_workstream_permanently,
             // `merge_workstreams` left the API: it moved Context items between
-            // Workstreams without leaving a Revision (§42.2-E10).
+            // Workstreams without leaving a Revision.
             commands::get_default_agent,
             commands::set_default_agent,
             commands::get_context_delivery_level,
@@ -210,7 +209,7 @@ pub fn run() {
             commands::session_workspace::get_session_detail,
             commands::session_workspace::set_session_owner_workstream,
             commands::session_workspace::list_ingestion_diagnostics,
-            // Session Lifecycle (重构方案 §19/§20): Trash / Restore and the
+            // Session Lifecycle: Trash / Restore and the
             // stateless permanent LOCAL deletion. The UI submits ids only.
             commands::session_lifecycle::trash_session,
             commands::session_lifecycle::restore_session,

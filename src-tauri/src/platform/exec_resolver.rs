@@ -146,7 +146,7 @@ fn probe_version(exec: &PathBuf) -> Option<String> {
 /// Extracted out of [`resolve`] because the candidate-dir logic exists for a
 /// reason that has nothing to do with Agents: a GUI app started by Finder /
 /// Explorer does not inherit the shell PATH, so `Command::new("git")` fails
-/// even when git is installed (方案 §42.3-M10). The WorkspaceResolver needs
+/// even when git is installed. The WorkspaceResolver needs
 /// the same guarantee for `git`, so the locator is generic and `resolve`
 /// becomes one of its callers.
 ///
@@ -186,7 +186,7 @@ fn is_executable_file(p: &Path) -> bool {
 
 /// Executable names to probe for an Agent, in order. **Empty means the Agent
 /// has no headless CLI at all** (Qoder is IDE-hosted): its adapter still
-/// reads history, but it can never be launched or resumed (方案 §37.3).
+/// reads history, but it can never be launched or resumed.
 pub fn cli_names(agent: Agent) -> Vec<&'static str> {
     match agent {
         Agent::Codex => vec!["codex"],
@@ -200,10 +200,10 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         // `$DSH_HOME/profiles`; the name is the user's own setup, and NoEnding
         // cannot know it. Guessing one would boot the wrong tree — or nothing —
         // so launching waits until a profile can be chosen deliberately
-        // (方案 §37.8).
+        //.
         Agent::Dsh => vec![],
         // Desktop app: `~/.zcode/cli` is its own data directory, not a command
-        // the user can run (方案 §37.10).
+        // the user can run.
         Agent::ZCode => vec![],
         // Desktop IDE with no headless CLI.
         Agent::Antigravity => vec![],
@@ -276,7 +276,7 @@ mod tests {
     use super::*;
 
     /// `resolve_executable` is what lets `git` be found at all from a
-    /// Finder-launched app (方案 §42.3-M10), so its own contract is pinned here
+    /// Finder-launched app, so its own contract is pinned here
     /// without depending on what happens to be installed: an empty name and a
     /// missing explicit path resolve to nothing, and an explicit path that *is*
     /// executable is used verbatim rather than re-searched.

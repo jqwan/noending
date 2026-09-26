@@ -79,7 +79,7 @@ pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
 ///
 /// This is the platform-facing wrapper over
 /// [`crate::workspace::identity::expand_tilde`], which is the repository's only
-/// expander (方案 §42.3-M23): the previous copy here ignored `~\`, so a Windows
+/// expander: the previous copy here ignored `~\`, so a Windows
 /// user typing `~\.noending` got a literal `~` directory, and `launcher` had a
 /// *third* expander. One semantics, two spellings (Unix `PathBuf`, domain
 /// `String`), because that is all the type systems allow.
@@ -97,7 +97,7 @@ pub const APP_IDENTIFIER: &str = "app.noending.desktop";
 ///
 /// Two things live here and nothing else may:
 /// * `home.json`, the bootstrap pointer that tells us where NoEnding Home is
-///   (方案 §42.3-M12) — it must be outside the Home, since the database inside
+/// — it must be outside the Home, since the database inside
 ///   the Home is precisely what it locates;
 /// macOS/Windows differ because `dirs` maps the two concepts onto different
 /// known folders: we want *Application Support* on macOS and *Roaming AppData*
@@ -119,11 +119,11 @@ pub fn resolve_app_support_dir() -> Option<PathBuf> {
 /// `%APPDATA%\<bundle>`. Same resolution as [`resolve_app_support_dir`] with
 /// the identifier parameterised.
 ///
-/// This is for reading another vendor's store as a title sidecar (方案 §37.16),
+/// This is for reading another vendor's store as a title sidecar,
 /// and it is a *lookup*, not a dependency: a wrong or missing path yields no
-/// titles rather than an error. `[实测]` on macOS, `com.qodercn.app.stable`
+/// titles rather than an error. Verified on macOS: `com.qodercn.app.stable`
 /// holds Qoder's `main.sqlite`; the Windows spelling follows Electron's own
-/// `app.getPath('userData')` rule (`[推断]`).
+/// `app.getPath('userData')` rule (inferred).
 pub fn resolve_external_app_support(bundle_id: &str) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = dirs::data_dir();
@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(agent_env_override(Agent::ClaudeCode), "CLAUDE_CONFIG_DIR");
     }
 
-    /// 必须测试-adjacent (§42.3-M23): the expander merged here must keep every
+    /// 必须测试-adjacent: the expander merged here must keep every
     /// spelling the two predecessors handled, and the one only `launcher` handled.
     #[test]
     fn tilde_expansion_covers_both_separators() {
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn app_support_dir_is_outside_noending_home() {
-        // §42.3-M12: the bootstrap pointer's folder must be resolvable without
+        // the bootstrap pointer's folder must be resolvable without
         // knowing the NoEnding Home, so it can never be inside it.
         let Some(dir) = resolve_app_support_dir() else {
             return; // no known folder: the caller falls back to `~/.noending`

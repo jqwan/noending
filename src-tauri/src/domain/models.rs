@@ -85,7 +85,7 @@ pub mod git_state {
     pub const DETECTED: &str = "detected";
     /// This path used to be Git-backed and the evidence is gone. Distinct from
     /// `none` on purpose: losing `.git` must never detach the path from its
-    /// Project (§1.3), and `missing` is how we remember that.
+    /// Project, and `missing` is how we remember that.
     pub const MISSING: &str = "missing";
 }
 
@@ -130,14 +130,14 @@ pub struct WorkspaceObservation {
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitDetection {
     /// Nothing Git-like found, or the only evidence was the excluded Home-level
-    /// repository (§1.4) / a reserved app path (§2).
+    /// repository / a reserved app path.
     None,
     Detected {
         common_dir: String,
         toplevel: Option<String>,
         kind: GitWorktreeKind,
         /// `git worktree list --porcelain` result. Discovery of a worktree
-        /// never adds a WorkstreamPath (§9).
+        /// never adds a WorkstreamPath.
         worktrees: Vec<String>,
     },
     /// A path that was previously detected now has no `.git`. Not a resolver
@@ -183,7 +183,7 @@ pub struct Workstream {
 
 pub mod workstream_lifecycle {
     /// Basic status classification. No behavioral difference from `COMPLETED`,
-    /// and the user may switch freely (§1.13).
+    /// and the user may switch freely.
     pub const ACTIVE: &str = "active";
     pub const COMPLETED: &str = "completed";
 }
@@ -197,7 +197,7 @@ pub mod workstream_visibility {
 
 /// Every Agent NoEnding knows how to READ. Not every entry can be launched:
 /// Qoder ships no headless CLI, so its adapter ingests history only and
-/// `exec_resolver::resolve` fails by design (方案 §37.1).
+/// `exec_resolver::resolve` fails by design.
 ///
 /// The rename on each variant is the IPC spelling and MUST equal `as_str()` —
 /// the sessions table, the frontend's `Agent` union and its `AGENT_LABELS` all
@@ -205,7 +205,7 @@ pub mod workstream_visibility {
 /// `rename_all = "snake_case"` is deliberate: the derive spelled three variants
 /// (`auto_claw`, `work_buddy`, `z_code`) differently from everything else, so
 /// those rows rendered as「未知 Agent」and every command taking an `agent`
-/// argument failed to deserialize (方案 §37.14). `serde_spelling_equals_as_str_for_every_agent`
+/// argument failed to deserialize. `serde_spelling_equals_as_str_for_every_agent`
 /// keeps the three spellings in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Agent {
@@ -285,19 +285,19 @@ impl Agent {
 }
 
 /// A Logical Session: the one user-visible conversation plus every internal
-/// execution member (child agents, sidechains) it spawned (重构方案 §2.1/§4).
+/// execution member (child agents, sidechains) it spawned.
 ///
 /// A Session is NOT an Agent thread — it is keyed by the ROOT member's real
 /// Resume identity (`root_agent_session_id`), while children/sides live on as
 /// [`SessionMember`] rows of the same Session and can never own, rename or
-/// resume it (§4.1).
+/// resume it.
 ///
 /// Workspace facts on a Session:
 /// - `workspace_path_id` is the authoritative link to the physical workspace;
 ///   it is set only when the ROOT member really has a cwd. A Session without
 ///   one stays `None` — the default workspace is a *launch* convenience and is
 ///   never retrofitted onto historical Sessions. Child/side cwds are execution
-///   facts on their member rows and never flow up (§4.1, §18).
+///   facts on their member rows and never flow up.
 /// - `project_id` is a **derived cache** of
 ///   `workspace_path_id → workspace_paths.project_id`. It is written by exactly
 ///   two code paths (see `storage::session_paths`); a manual write into it is a
@@ -306,20 +306,20 @@ impl Agent {
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
     pub agent: Agent,
-    /// The ROOT member's Agent-side Resume identity (方案 §17.2). Authority for
+    /// The ROOT member's Agent-side Resume identity. Authority for
     /// LaunchIntent matching and `resume` — never a child's external id.
     pub root_agent_session_id: String,
     pub title: Option<String>,
     /// Semantic ownership: the one Workstream this Logical Session belongs to,
-    /// or `None`. At most one Owner (方案 §3.3). Only an explicit user action
-    /// or a matched LaunchIntent sets it — never fork inheritance (§2.2).
+    /// or `None`. At most one Owner. Only an explicit user action
+    /// or a matched LaunchIntent sets it — never fork inheritance.
     pub owner_workstream_id: Option<Id>,
     pub cwd: Option<String>,
     pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
     /// When this Session is an independently continuable fork, the Logical
     /// Session its source forked from. Lifecycle, Owner, Conversation and
-    /// Context stay fully independent of that source (§2.2); this is a
+    /// Context stay fully independent of that source; this is a
     /// provenance note, not a parent link in the old sense.
     pub forked_from_session_id: Option<Id>,
     pub started_at: Option<String>,
@@ -343,7 +343,7 @@ impl Session {
     }
 }
 
-/// How a [`SessionMember`] relates to its Logical Session's root (§5).
+/// How a [`SessionMember`] relates to its Logical Session's root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMemberRelation {
@@ -373,11 +373,11 @@ impl SessionMemberRelation {
 
 /// One internal execution unit of a Logical Session — the Agent-side thread,
 /// subagent transcript or sidechain file that together make up the session
-/// (§5). Only the `root` member produces [`SessionMessage`]s; every member is
+///. Only the `root` member produces [`SessionMessage`]s; every member is
 /// an observation surface for stats.
 ///
 /// `source_member_id` is the Adapter's stable execution identity and need not
-/// equal the Agent's native session id (§5.1): Qoder subagent transcripts
+/// equal the Agent's native session id: Qoder subagent transcripts
 /// repeat the parent's id, so the adapter derives `root-id:subagent:<stem>`.
 /// A source with no stable identity produces NO member — never a fabricated
 /// row just to make the topology look complete.
@@ -406,7 +406,7 @@ pub struct SessionMember {
 }
 
 /// The role of a [`SessionMessage`] — the only two shapes a conversation has
-/// (§6). The database CHECK constraint is the last line of defense; adapters
+///. The database CHECK constraint is the last line of defense; adapters
 /// must already have dropped everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -425,7 +425,7 @@ impl SessionMessageRole {
 }
 
 /// One user-visible conversation turn of the ROOT member — the ONLY
-/// conversation store NoEnding keeps (§6). Thinking, tool traffic, system /
+/// conversation store NoEnding keeps. Thinking, tool traffic, system /
 /// developer prompts, compaction summaries and child/side transcripts never
 /// become rows here; every visible prose segment of an assistant turn is kept
 /// (no "final answer" guessing).
@@ -435,7 +435,7 @@ pub struct SessionMessage {
     pub session_id: Id,
     /// Must reference the Session's ROOT member — enforced again at commit
     /// time (`commit_member_ingest`), even though the FK chain would accept a
-    /// child: a stray child message is an ingestion bug, not silent data (§6).
+    /// child: a stray child message is an ingestion bug, not silent data.
     pub member_id: Id,
     /// NoEnding's own per-session monotonic sequence. Never a source line
     /// number; never reused or rolled back.
@@ -443,7 +443,7 @@ pub struct SessionMessage {
     pub role: SessionMessageRole,
     pub content: String,
     pub ts: Option<String>,
-    /// Message-level generation provenance (Provenance 方案 §5/§6). Only
+    /// Message-level generation provenance. Only
     /// meaningful for Assistant messages; source-confirmed only — never
     /// inferred from configuration, branding or runtime preference. Unknown
     /// stays unknown (`NULL`).
@@ -457,11 +457,11 @@ pub struct SessionMessage {
     pub raw_ref: String,
 }
 
-/// Per-member execution statistics, stored as a 1:1 snapshot (§7). This is
+/// Per-member execution statistics, stored as a 1:1 snapshot. This is
 /// "current observable source state", not an append-only telemetry log.
 ///
 /// `NULL` = the source does not provide / cannot reliably compute the metric;
-/// `0` = observed zero. Unknown is never folded into 0 (§7.1).
+/// `0` = observed zero. Unknown is never folded into 0.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionMemberStats {
     pub member_id: Id,
@@ -474,14 +474,14 @@ pub struct SessionMemberStats {
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub cost: Option<f64>,
-    // model / provider / effort removed (Provenance 方案 §9): message
+    // model / provider / effort removed: message
     // provenance lives on SessionMessage; a member-level "current model"
     // was a second, semantically unclear authority.
     pub updated_at: String,
     pub extra: serde_json::Value,
 }
 
-/// Incremental stats for an append-only read (§7.3): each field is the number
+/// Incremental stats for an append-only read: each field is the number
 /// of new observations since the last commit. `None` = nothing observed this
 /// batch (the column is left untouched, not zeroed).
 #[derive(Debug, Clone, Copy, Default)]
@@ -508,7 +508,7 @@ impl MemberStatsDelta {
     }
 }
 
-/// Full-scan stats for a rescan (§7.3). `Some(0)` is observed zero; `None` is
+/// Full-scan stats for a rescan. `Some(0)` is observed zero; `None` is
 /// unsupported and leaves the stored counter unchanged.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionMemberStatsSnapshot {
@@ -518,7 +518,7 @@ pub struct SessionMemberStatsSnapshot {
     pub side_activity_count: Option<i64>,
 }
 
-/// How a read updates member stats (§7.3).
+/// How a read updates member stats.
 #[derive(Debug, Clone, Copy)]
 pub enum StatsUpdate {
     Delta(MemberStatsDelta),
@@ -544,7 +544,7 @@ impl MemberObservation {
     }
 }
 
-/// Where a member's Agent source stands, as far as reading is concerned (§8.1).
+/// Where a member's Agent source stands, as far as reading is concerned.
 /// Belongs to the MEMBER, never to the Session — each member reads its own
 /// source at its own pace. The Context frontier is the separate
 /// [`SessionContextState`].
@@ -563,7 +563,7 @@ pub struct SessionMemberCursor {
     /// base the next append batch continues from. Only messages advance it;
     /// stats-only batches keep the tail. Empty until a message exists.
     pub identity_tail_hash: String,
-    /// Provenance state frontier (Provenance 方案 §15): the generation
+    /// Provenance state frontier: the generation
     /// provenance an Adapter confirmed from explicit state events and that,
     /// by the source format, still governs the messages to come. ONLY a
     /// stateful-evidence adapter (Codex `turn_context`) uses these — every
@@ -595,7 +595,7 @@ impl SessionMemberCursor {
     }
 }
 
-/// The Logical Session's Context frontier (§8.2): how far Sync has consumed
+/// The Logical Session's Context frontier: how far Sync has consumed
 /// ROOT conversation messages. Lifecycle is completely independent of the
 /// member cursors — Trash/Restore never touches it.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -604,7 +604,7 @@ pub struct SessionContextState {
     pub processed_message_sequence: i64,
 }
 
-/// An ingestion problem that is deliberately NOT a Session (§11): a child or
+/// An ingestion problem that is deliberately NOT a Session: a child or
 /// side source whose root has not been seen. Diagnostics never enter the
 /// Sessions UI, Search, Context, ownership or lifecycle; when the root shows
 /// up and the member attaches, the row is deleted.
@@ -631,7 +631,7 @@ pub mod diagnostic_kind {
     pub const UNRESOLVED_SESSION_MEMBER: &str = "unresolved_session_member";
 }
 
-/// Adapter's strict verdict about one member's source (§9.1). The semantics
+/// Adapter's strict verdict about one member's source. The semantics
 /// are load-bearing for permanent deletion:
 ///
 /// ```text
@@ -642,7 +642,7 @@ pub mod diagnostic_kind {
 /// ```
 ///
 /// No exception may degrade to `Missing`: only a confirmed-missing ROOT makes
-/// a trashed Session permanently deletable (§20).
+/// a trashed Session permanently deletable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceAvailability {
@@ -663,7 +663,7 @@ impl SourceAvailability {
 
 /// One parsed conversation message, before NoEnding assigns identity and
 /// sequence (adapter → core hand-off shape). `provider` / `model` carry only
-/// what the source itself confirms about THIS message (Provenance 方案 §12);
+/// what the source itself confirms about THIS message;
 /// adapters must never fill them from configuration or branding.
 #[derive(Debug, Clone)]
 pub struct ParsedSessionMessage {
@@ -677,10 +677,10 @@ pub struct ParsedSessionMessage {
 }
 
 impl ParsedSessionMessage {
-    /// Attach source-confirmed provenance to a parsed message (Provenance
-    /// 方案 §26). The minimal normalization allowed (§18): trim whitespace,
-    /// empty string → `None`. No alias remap, no family guessing, no
-    /// provider prefixing — the strings stay source-native.
+    /// Attach source-confirmed provenance to a parsed message. The only
+    /// normalization allowed: trim whitespace, empty string → `None`. No
+    /// alias remap, no family guessing, no provider prefixing — the strings
+    /// stay source-native.
     pub fn with_provenance(mut self, provider: Option<String>, model: Option<String>) -> Self {
         self.provider = normalize_provenance(provider);
         self.model = normalize_provenance(model);
@@ -706,7 +706,7 @@ pub fn normalize_provenance(v: Option<String>) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
-/// Listing scope for Sessions (方案 §11). Default projections (Sessions page,
+/// Listing scope for Sessions. Default projections (Sessions page,
 /// Project / Workstream / Home) show Active only; the recycle bin queries
 /// Trash directly from the DB, not through FTS.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -772,7 +772,7 @@ pub mod ingest_origin {
 
 /// Stable, recoverable record of "user launched an agent and chose this
 /// Workstream" — created before the agent session id is knowable, matched
-/// when discovery finds the new external session (方案 §15.1).
+/// when discovery finds the new external session.
 #[derive(Debug, Clone, Serialize)]
 pub struct LaunchIntent {
     pub id: Id,
@@ -1076,8 +1076,7 @@ mod agent_wire_spelling_tests {
     /// "snake_case"` spelled them `work_buddy` / `z_code` while everything else
     /// — the sessions table, the frontend's `Agent` union, `AGENT_LABELS` —
     /// spells them `workbuddy` / `zcode`, so those rows rendered as「未知 Agent」
-    /// and every command taking an `agent` argument failed to deserialize
-    /// (方案 §37.14).
+    /// and every command taking an `agent` argument failed to deserialize.
     #[test]
     fn serde_spelling_equals_as_str_for_every_agent() {
         for agent in Agent::all() {

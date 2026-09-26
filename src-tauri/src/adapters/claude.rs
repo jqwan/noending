@@ -1,10 +1,10 @@
 //! Claude Code Adapter: `~/.claude/projects/<encoded-cwd>/<session>.jsonl`.
 //! `CLAUDE_CONFIG_DIR` overrides the root. Raw transcripts stay untouched,
-//! always (重构方案 §2.6: NoEnding never deletes an Agent-owned source).
+//! always — NoEnding never deletes an Agent-owned source.
 //!
-//! Member mapping (§26.2): the main transcript is the ROOT member. Claude
+//! Member mapping: the main transcript is the ROOT member. Claude
 //! interleaves `isSidechain=true` lines into the same file but gives them no
-//! stable execution identity of their own — so per §5.1 no side member is
+//! stable execution identity of their own — so no side member is
 //! fabricated: they are counted as `side_activity` on the root member and
 //! their text never becomes conversation.
 
@@ -23,7 +23,7 @@ use crate::platform::exec_resolver::{self, AgentInstallation};
 pub struct ClaudeAdapter;
 
 /// Conversation text: `text` blocks only. `tool_use` / `tool_result` blocks
-/// are machine traffic (§36.11) — counted, never folded into the message.
+/// are machine traffic — counted, never folded into the message.
 fn content_parts(content: &Value) -> (String, u64) {
     match content {
         Value::String(s) => (s.clone(), 0),
@@ -109,7 +109,7 @@ impl ClaudeAdapter {
                     }
                 }
             }
-            // Last resort for a title when the session has no user turn (§37.15).
+            // Last resort for a title when the session has no user turn.
             if first_agent_text.is_none()
                 && v.get("type").and_then(|t| t.as_str()) == Some("assistant")
                 && v.get("isSidechain").and_then(|s| s.as_bool()) != Some(true)
@@ -287,7 +287,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
     }
 }
 
-/// One transcript line's contribution (§26.2). `is_root` is false only for a
+/// One transcript line's contribution. `is_root` is false only for a
 /// hypothetical non-root Claude member — none exists today, and the flag keeps
 /// the "child text is never conversation" rule explicit rather than implied.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
@@ -307,7 +307,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             let (text, tool_calls) = content_parts(msg.get("content").unwrap_or(&Value::Null));
             if sidechain {
                 // Sub-agent chatter in the same file: no stable identity → no
-                // member (§5.1), no message (§26.2) — observed only.
+                // member, no message — observed only.
                 return Some(ParsedLine::observation_only(MemberObservation {
                     side_activity: 1,
                     ..Default::default()
@@ -327,11 +327,11 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             } else {
                 SessionMessageRole::Assistant
             };
-            // Injected context is never conversation (§2.3).
+            // Injected context is never conversation.
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
                 return Some(ParsedLine::observation_only(observation));
             }
-            // Message provenance (Provenance 方案 §13A/§16.2): every assistant
+            // Message provenance: every assistant
             // row carries `message.model` — the actual response model in the
             // API-style envelope (verified against the real corpus: 0 rows
             // without it; the value tracks the model that answered, e.g. a
@@ -353,7 +353,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 observation,
             })
         }
-        // A compaction summary line is a boundary marker (§26.2), never the
+        // A compaction summary line is a boundary marker, never the
         // pruned content itself.
         "summary" => Some(ParsedLine::observation_only(MemberObservation {
             compactions: 1,
@@ -415,7 +415,7 @@ mod tests {
         v.to_string()
     }
 
-    /// §32.2 — prose in, machine traffic out: sidechain text becomes a side
+    /// Prose in, machine traffic out: sidechain text becomes a side
     /// activity count, a tool_use block a tool call, `summary` a compaction,
     /// and two visible assistant prose segments around a tool call both stay.
     #[test]
@@ -467,7 +467,7 @@ mod tests {
     }
 
     /// isMeta user lines are runtime output, and `<…>`/`#` preambles are
-    /// injected context — neither is a human turn (§2.3).
+    /// injected context — neither is a human turn.
     #[test]
     fn meta_and_injected_user_lines_are_not_conversation() {
         let dir = unique_dir("meta");
@@ -537,7 +537,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Provenance 方案 §28.2 — Direct evidence: the assistant row's
+    /// Direct evidence: the assistant row's
     /// `message.model` lands on the message; a missing field stays NULL and
     /// provider stays NULL (the source has no such field).
     #[test]

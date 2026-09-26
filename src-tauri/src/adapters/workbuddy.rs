@@ -7,14 +7,14 @@
 //! (95; role `user` / `assistant`, content blocks typed `input_text` /
 //! `output_text`), `function_call` / `function_call_result` (237 each),
 //! `reasoning` (101), `file-history-snapshot` (35) and `ai-title` (7) — machine
-//! traffic that is counted, not ingested (方案 §36.11).
+//! traffic that is counted, not ingested.
 //!
-//! Message provenance (Provenance 方案 §16.5): **None — stays NULL.** Assistant
+//! Message provenance: **None — stays NULL.** Assistant
 //! entries do carry a non-empty `providerData`, but in the real corpus every
 //! single one (78/78 across all three sessions) records
 //! `model = requestModelId = "auto"` / `requestModelName = "Auto"`: the USER'S
 //! model *preference* at send time, not the identity of the model that
-//! actually generated the response. Per the plan, a request preference is not
+//! actually generated the response. A request preference is not
 //! message-level provenance, and inferring a provider from the WorkBuddy
 //! brand is forbidden — so nothing is attributed here.
 //!
@@ -30,13 +30,13 @@
 //!   summary;
 //! - anything else that starts with `<` is system noise → dropped.
 //!
-//! Member mapping (§26.6): one transcript, one ROOT member.
+//! Member mapping: one transcript, one ROOT member.
 //!
 //! Two things this adapter deliberately does not use:
 //! - `ai-title` carries the app's own AI-generated title (`aiTitle`) — it IS
-//!   reported as the native title (§37.15), the last one written wins.
+//!   reported as the native title, the last one written wins.
 //! - `function_call` / `function_call_result` have `name` / `arguments` /
-//!   `output`; per §36.11 they are observations, not text.
+//!   `output`; they are observations, not text.
 //!
 //! There is no CLI (the bundle's only executable is Electron), so this adapter
 //! ingests history only: `detect()` never succeeds and no command is built.
@@ -165,7 +165,7 @@ impl WorkBuddyAdapter {
             // conversation moves on (one session here carries four, drifting
             // from 「通达信连接功能介绍」 to 「分析国轩高科股票」). The last one
             // written is the Agent's final word on what the session is about,
-            // so it is the one worth showing (§37.15).
+            // so it is the one worth showing.
             if v.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
                 if let Some(t) = v
                     .get("aiTitle")
@@ -183,7 +183,7 @@ impl WorkBuddyAdapter {
                         first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
                 }
-                // Last resort for a title (§37.15).
+                // Last resort for a title.
                 if first_agent_text.is_none() && role == "assistant" {
                     let raw = content_text(v.get("content").unwrap_or(&Value::Null));
                     if !raw.trim().is_empty() {
@@ -316,7 +316,7 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
     }
 }
 
-/// One line's contribution (§26.6): message lines only, prose only, machine
+/// One line's contribution: message lines only, prose only, machine
 /// traffic counted.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     if v.get("type").and_then(|t| t.as_str()) != Some("message") {
@@ -333,7 +333,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             UserTurn::Prompt(p) if is_root => Some(ParsedLine::message_only(
                 crate::adapters::parsed_message(source_message_id, SessionMessageRole::User, p),
             )),
-            // A compaction replay is a boundary count, never content (§7.2).
+            // A compaction replay is a boundary count, never content.
             UserTurn::Compaction => Some(ParsedLine::observation_only(MemberObservation {
                 compactions: 1,
                 ..Default::default()
@@ -426,7 +426,7 @@ mod tests {
 
     /// WorkBuddy rewrites its `ai-title` as the conversation moves on — one real
     /// session here carries four, drifting from 「通达信连接功能介绍」 to
-    /// 「分析国轩高科股票」. The last one written is the current one (§37.15).
+    /// 「分析国轩高科股票」. The last one written is the current one.
     #[test]
     fn the_last_ai_title_wins() {
         let dir = unique_dir("ai-title");
@@ -451,7 +451,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// §32.2 — prose survives the envelope; the compaction replay is a count;
+    /// Prose survives the envelope; the compaction replay is a count;
     /// reasoning and function traffic never appear.
     #[test]
     fn ingest_keeps_prose_and_counts_the_machine_traffic() {
@@ -492,7 +492,7 @@ mod tests {
         }
     }
 
-    /// The user turn is the app's envelope, not the human's words (§37.7).
+    /// The user turn is the app's envelope, not the human's words.
     #[test]
     fn the_envelope_is_not_the_user_turn() {
         let enveloped = "<system-reminder data-role=\"user-context\">\n<user_info>\nOS Version: darwin\n</user_info>\n</system-reminder>\n<user_query>看一下这只股票</user_query>";
@@ -544,7 +544,7 @@ mod tests {
         assert!(found.is_empty(), "{found:#?}");
     }
 
-    /// Provenance 方案 §28.5/§16.5 — providerData.model = "auto" is the user's
+    /// providerData.model = "auto" is the user's
     /// request preference, not the generating model: nothing is attributed.
     #[test]
     fn the_auto_preference_is_not_provenance() {

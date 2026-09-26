@@ -9,13 +9,13 @@ type Field = keyof AgentRuntimeOverrides;
 const DEFAULT_VALUE = "__default__";
 const CUSTOM_VALUE = "__custom__";
 
-/** 同一种 override，在三家 CLI 里的叫法不同；unsupported 的字段不展示（§11）。 */
+/** 同一种 override，在三家 CLI 里的叫法不同；unsupported 的字段不展示。 */
 export const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
   codex: { model: "Model", provider: "Provider", effort: "Reasoning" },
   claude_code: { model: "Model", provider: "Provider", effort: "Effort" },
   pi: { model: "Model", provider: "Provider", effort: "Thinking" },
   // Qoder 没有 CLI，三个字段都是 unsupported（后端 capabilities 也是这么给的），
-  // 这里的字面量只是为了让 Record 完整——unsupported 的字段不会渲染（§37.5）。
+  // 这里的字面量只是为了让 Record 完整——unsupported 的字段不会渲染。
   qoder: { model: "Model", provider: "Provider", effort: "Effort" },
   workbuddy: { model: "Model", provider: "Provider", effort: "Effort" },
   dsh: { model: "Model", provider: "Provider", effort: "Effort" },
@@ -80,7 +80,7 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
   }, [agent]);
 
   // Discovery 是建议信息：单独取，失败只留 warning，不影响 override 显示。
-  // 进入页面 ≠ 刷新模型：mount 阶段绝不 spawn Agent CLI（方案 §1/§9），
+  // 进入页面 ≠ 刷新模型：mount 阶段绝不 spawn Agent CLI，
   // 「刷新模型」按钮是唯一的 discovery 入口。
   const refresh = useCallback(async () => {
     setLoadingModels(true);
@@ -91,7 +91,7 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
       setWarnings(d.warnings);
       setError(null);
     } catch (e) {
-      // 失败只降级 catalog：已保存的 override 原样保留（方案 §11）。
+      // 失败只降级 catalog：已保存的 override 原样保留。
       setModelSource("unavailable");
       setWarnings([String(e)]);
     } finally {

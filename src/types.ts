@@ -2,7 +2,7 @@
 //
 // Workspace Domain v0.2: these shapes are FROZEN by the foundation commit so
 // the parallel agents could build against them before the UI caught up. Change
-// them only together with the Rust struct they mirror (方案 §11, §15-8).
+// them only together with the Rust struct they mirror.
 
 export type Agent =
   | "codex"
@@ -35,7 +35,7 @@ export interface Project {
 
 /** A normalized physical working directory. Identity is `id`, a pure lexical
  *  hash of `canonical_path` — never the path string itself. */
-/** list_project_cards 的一张卡片（Projects Experience v0.2 §4/§8）。
+/** list_project_cards 的一张卡片（Projects Experience v0.2）。
  *  诊断信息（uuid、git_id）不上卡片——那是 Detail 的事。 */
 export interface ProjectCardData {
   id: string;
@@ -100,7 +100,7 @@ export interface PathProbe {
 }
 
 /** `list_recent_workspace_paths` — picker candidates. `known: false` rows come
- *  from Session cwd history and are NOT WorkspacePaths yet (方案 §1.7）。 */
+ *  from Session cwd history and are NOT WorkspacePaths yet。 */
 export interface RecentWorkspacePath {
   path: string;
   known: boolean;
@@ -122,7 +122,7 @@ export interface CreatedPathOutcome {
 }
 
 /** `create_workstream` — the Workstream plus the per-path outcome. Rejected
- *  paths are reported, never guessed into paths (方案 §42.3）。 */
+ *  paths are reported, never guessed into paths。 */
 export interface CreateWorkstreamReport {
   workstream: Workstream;
   paths: CreatedPathOutcome[];
@@ -137,18 +137,18 @@ export interface WorkstreamPath {
   created_at: string;
 }
 
-/** 方案 §11 Workspace settings surface (backend: get_workspace_settings). */
+/**  Workspace settings surface (backend: get_workspace_settings). */
 export interface WorkspaceSettings {
   noending_home: string;
   default_workspace: string;
   pending_home: string | null;
   restart_required: boolean;
   db_path: string;
-  /** "explicit_env" | "bootstrap" | "default_home" — why it is there (§11). */
+  /** "explicit_env" | "bootstrap" | "default_home" — why it is there. */
   home_source: string;
 }
 
-/** 方案 §11 Project detail (backend: get_project_detail). */
+/**  Project detail (backend: get_project_detail). */
 export interface ProjectDetailData {
   project: Project;
   workspace_paths: WorkspacePath[];
@@ -180,7 +180,7 @@ export interface LatestSessionInfo {
 /** Card view for Home / Workstreams pages (backend: list_workstream_cards). */
 export interface WorkstreamCardData {
   id: string;
-  /** Position-0 path projection, not a user assignment (方案 §42.3-M19). */
+  /** Position-0 path projection, not a user assignment. */
   project_id: string | null;
   title: string;
   description: string;
@@ -201,7 +201,7 @@ export interface WorkstreamCardData {
 }
 
 /**
- * 逻辑会话（重构方案 §4）：一次用户可感知、可 Resume 的主会话。身份是
+ * 逻辑会话：一次用户可感知、可 Resume 的主会话。身份是
  * `(agent, root_agent_session_id)`——Root 成员真实的 Resume 身份；内部执行
  * （child/side）是 `session_members` 行，永远不会拥有/重命名/Resume 本会话。
  */
@@ -236,7 +236,7 @@ export interface Session {
 /** Member relation：root（唯一）| child | side。fork 不是 relation。 */
 export type SessionMemberRelation = "root" | "child" | "side";
 
-/** 执行图的一个成员（重构方案 §5）：Agent 内部的执行单元，不是另一个 Session。 */
+/** 执行图的一个成员：Agent 内部的执行单元，不是另一个 Session。 */
 export interface SessionMember {
   id: string;
   session_id: string;
@@ -253,10 +253,10 @@ export interface SessionMember {
   metadata: Record<string, unknown>;
 }
 
-/** `role` 只有 user | assistant——Conversation 的全部形状（重构方案 §6）。 */
+/** `role` 只有 user | assistant——Conversation 的全部形状。 */
 export type SessionMessageRole = "user" | "assistant";
 
-/** 会话消息：只来自 Root 成员的用户可见 prose（重构方案 §6）。 */
+/** 会话消息：只来自 Root 成员的用户可见 prose。 */
 export interface SessionMessage {
   id: string;
   session_id: string;
@@ -265,7 +265,7 @@ export interface SessionMessage {
   role: SessionMessageRole;
   content: string;
   ts: string | null;
-  /** 消息级生成溯源（Provenance 方案 §5/§6）：仅 Assistant 有意义，来源可证实才非 null。 */
+  /** 消息级生成溯源：仅 Assistant 有意义，来源可证实才非 null。 */
   provider: string | null;
   model: string | null;
   source_message_id: string | null;
@@ -275,7 +275,7 @@ export interface SessionMessage {
   raw_ref: string;
 }
 
-/** 成员的执行统计快照（重构方案 §7）：NULL = 源不提供，0 = 观测为零。 */
+/** 成员的执行统计快照：NULL = 源不提供，0 = 观测为零。 */
 export interface SessionMemberStats {
   member_id: string;
   tool_call_count: number | null;
@@ -287,12 +287,12 @@ export interface SessionMemberStats {
   cached_tokens: number | null;
   reasoning_tokens: number | null;
   cost: number | null;
-  // model / provider / effort 已删除（Provenance 方案 §9）：消息级溯源在
+  // model / provider / effort 已删除：消息级溯源在
   // SessionMessage 上，Member 级"当前模型"语义不清。
   updated_at: string;
 }
 
-/** 查询时聚合的执行图统计（重构方案 §7.4，无 cache 表）。 */
+/** 查询时聚合的执行图统计。 */
 export interface SessionAggregateStats {
   member_count: number;
   child_count: number;
@@ -307,14 +307,14 @@ export interface SessionAggregateStats {
   cached_tokens: number | null;
   reasoning_tokens: number | null;
   cost: number | null;
-  // model / provider / effort 已删除（Provenance 方案 §9）：需要按模型统计时
+  // model / provider / effort 已删除：需要按模型统计时
   // 直接从 session_messages WHERE role='assistant' 派生。
 }
 
-/** Adapter 对成员源可用性的严格结论（重构方案 §9.1）：任何异常都不等于 missing。 */
+/** Adapter 对成员源可用性的严格结论：任何异常都不等于 missing。 */
 export type SourceAvailability = "present" | "missing" | "unavailable";
 
-/** 摄入诊断（重构方案 §11）：无法归属的内部源。不是 Session——无 Owner/
+/** 摄入诊断：无法归属的内部源。不是 Session——无 Owner/
  *  Resume/Trash/Context，只出现在 Settings 的诊断页。 */
 export interface IngestionDiagnostic {
   id: string;
@@ -331,7 +331,7 @@ export interface IngestionDiagnostic {
   details: Record<string, unknown>;
 }
 
-/** §20.2 无状态本地删除预览：永久删除只清 NoEnding 本地数据。 */
+/** 无状态本地删除预览：永久删除只清 NoEnding 本地数据。 */
 export interface LocalDeletePreview {
   session_id: string;
   session_title: string | null;
@@ -347,7 +347,7 @@ export interface LocalDeletePreview {
   context_revision_redaction_count: number;
 }
 
-/** §20.3 outcome of permanently_delete_session. */
+/** outcome of permanently_delete_session. */
 export interface PermanentDeleteResult {
   purged: boolean;
   redacted_revisions: number;
@@ -573,7 +573,7 @@ export interface WorkstreamReviewSummary {
   needs_attention: boolean;
 }
 
-/** `get_session_detail.workspace_path` — the derived, read-only facts (§22). */
+/** `get_session_detail.workspace_path` — the derived, read-only facts. */
 export interface SessionWorkspacePath {
   id: string;
   canonical_path: string;
@@ -582,27 +582,27 @@ export interface SessionWorkspacePath {
   project_name: string;
 }
 
-/** `get_session_detail` — 逻辑会话详情（重构方案 §28）。没有 parent/children
+/** `get_session_detail` — 逻辑会话详情。没有 parent/children
  *  Session 链接：执行图以 members 呈现，是执行信息而非可进入的其他会话。 */
 export interface SessionDetail {
   session: Session;
-  /** Conversation：只含 root 的 user/assistant 消息（§22.1）。 */
+  /** Conversation：只含 root 的 user/assistant 消息。 */
   messages: SessionMessage[];
   /** 唯一的所属任务；`null` = 未归属任务。 */
   owner_workstream: Workstream | null;
   workspace_path: SessionWorkspacePath | null;
-  /** 执行图（§22.2）：root / children / sides，root 在前。 */
+  /** 执行图：root / children / sides，root 在前。 */
   members: (SessionMember & { stats: SessionMemberStats | null })[];
   /** 查询时聚合的执行图统计。 */
   stats: SessionAggregateStats;
   ingested_message_sequence: number;
   processed_message_sequence: number;
-  /** 详情加载时对 Root 源的新鲜结论（§20.1）。 */
+  /** 详情加载时对 Root 源的新鲜结论。 */
   root_source_status: SourceAvailability;
   can_resume: boolean;
-  /** trashed + fresh root missing 才为 true（§20.1）。 */
+  /** trashed + fresh root missing 才为 true。 */
   can_permanently_delete: boolean;
-  /** §22.3 — fork 来源会话摘要（当本地仍存在时）。 */
+  /** fork 来源会话摘要（当本地仍存在时）。 */
   forked_from: Session | null;
 }
 
@@ -632,7 +632,7 @@ export interface SessionContextBundle {
 }
 
 /**
- * §13 的解析层级——Agent 的启动目录是**谁**决定的。后端 `CwdSource`，
+ * 的解析层级——Agent 的启动目录是**谁**决定的。后端 `CwdSource`，
  * `rename_all = "snake_case"`。
  */
 export type CwdSource =
@@ -668,7 +668,7 @@ export interface PreparedLaunch {
   /** 这次启动唯一的所属任务；`null` = standalone。 */
   owner_workstream_id: string | null;
   cwd?: string | null;
-  /** `cwd` 由哪一层决定，以及发生 fallback 时的说明（§13）。 */
+  /** `cwd` 由哪一层决定，以及发生 fallback 时的说明。 */
   cwd_resolution: CwdResolution;
   delivery_level: ContextDeliveryLevel;
   bundle: SessionContextBundle;
@@ -709,7 +709,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
   antigravity: "Antigravity",
 };
 
-// ---------- Agent Runtime Configuration (commands.rs §Agent Runtime) ----------
+// ---------- Agent Runtime Configuration ----------
 
 export type RuntimeFieldCapability = "unsupported" | "free_form" | "suggested" | "discoverable";
 

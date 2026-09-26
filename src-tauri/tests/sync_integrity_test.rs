@@ -240,7 +240,7 @@ fn member_cursor_and_context_frontier_are_separate() {
         &["我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据"],
     );
     let ws = ws_row(&db, "ws-cursors", "cursor ws");
-    // Routing is the Session's single Owner Workstream (方案 §19).
+    // Routing is the Session's single Owner Workstream.
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     let parsed = |id: String, text: &str| ParsedSessionMessage {
@@ -775,7 +775,7 @@ fn stale_commit_is_discarded_when_context_frontier_moved() {
 }
 
 /// The Owner Workstream is the Context routing decision, so it is also the
-/// commit-phase CAS (方案 §20). If the user re-routes the Session while
+/// commit-phase CAS. If the user re-routes the Session while
 /// extraction runs (minutes, no lock held), the prepared mutations target a
 /// routing that no longer exists — commit must discard the run WITHOUT
 /// advancing the frontier, so the next sync prepares against the user's new
@@ -842,7 +842,7 @@ fn stale_commit_when_owner_changes_during_extraction() {
 /// Clearing the Owner during extraction is a routing change like any other:
 /// prepare saw Owner A, the user cleared it, so the run must be discarded
 /// rather than committing context into a Workstream the Session no longer
-/// belongs to (方案 §20/§21).
+/// belongs to.
 #[test]
 fn stale_commit_when_owner_cleared_during_extraction() {
     let db = open_db("stale-owner-cleared");
@@ -881,7 +881,7 @@ fn stale_commit_when_owner_cleared_during_extraction() {
     );
 }
 
-/// §43 / §21 — a run prepared against a Session that was trashed while its
+/// / a run prepared against a Session that was trashed while its
 /// extraction ran must not write message-derived context, a SyncRun, or a
 /// frontier advance. The data stays frozen at the moment of trashing; a
 /// Restore re-syncs from the unchanged frontier.

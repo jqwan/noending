@@ -5,12 +5,12 @@ import type {
 } from "../../types";
 
 /**
- * 工作目录（方案 §1.5 / §22）：一个 Workstream 的**有序**路径列表，position 0
+ * 工作目录：一个 Workstream 的**有序**路径列表，position 0
  * 就是主工作目录 —— 角色完全由位置表达，没有第二个权威字段。
  *
  * 这一页同时是三个事实的展示位：
- *   1. 启动目录（§13：explicit cwd → WorkstreamPaths[0] → 默认 workspace）；
- *   2. Project 归属（§1.12：WorkstreamPath → WorkspacePath → Project 的投影）；
+ *   1. 启动目录；
+ *   2. Project 归属；
  *   3. 增删路径只改这份配置：不删除会话，也不修改任何已有会话的所属任务。
  *
  * 所以任何一次动作都必须说清楚它连带动了什么，失败也留在原地说明原因，
@@ -108,7 +108,7 @@ export default function WorkstreamPathList({
               <PathText path={p.canonical_path} max={72} />
             </div>
           </div>
-          {/* 顺序就是角色（§1.5）：第 1 条即主工作目录。 */}
+          {/* 顺序就是角色：第 1 条即主工作目录。 */}
           {p.position === 0 && (
             <span className="badge accent" title="新建会话默认从这里启动，也决定项目归属">
               主目录

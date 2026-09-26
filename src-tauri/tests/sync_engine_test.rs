@@ -1,6 +1,6 @@
 //! End-to-end domain test: ingest a Logical Session's conversation through
 //! the production commit path, run the sync engine, and verify context items,
-//! dedup and frontier advancement — plus the §32.6 Context matrix: a short
+//! dedup and frontier advancement — plus the Context matrix: a short
 //! user message reaches the extractor, an ownerless session ingests with a
 //! frozen frontier, and assigning an Owner replays the pending messages.
 
@@ -235,7 +235,7 @@ fn search_finds_ingested_messages() {
 
 /// The default member cursor for a fresh ROOT member is the zero state; the
 /// adapter layer treats it as "first ingest". Cursors belong to the MEMBER,
-/// never to the session (§8.1).
+/// never to the session.
 #[test]
 fn member_cursor_defaults_are_empties() {
     let db = open_temp_db();
@@ -252,8 +252,8 @@ fn member_cursor_defaults_are_empties() {
     assert_eq!(processed_of(&db, &session.id), 0);
 }
 
-/// §32.6 — a short user message reaches the extractor untouched: there is no
-/// length pre-filter between the store and extraction (§2.4); a short
+/// a short user message reaches the extractor untouched: there is no
+/// length pre-filter between the store and extraction; a short
 /// message can be the constraint that matters.
 #[test]
 fn short_user_message_reaches_extractor() {
@@ -296,7 +296,7 @@ fn short_user_message_reaches_extractor() {
     assert_eq!(processed_of(&db, &session.id), 1);
 }
 
-/// §32.6 — ownerless semantics: messages keep ingesting, the Context frontier
+/// ownerless semantics: messages keep ingesting, the Context frontier
 /// stays frozen, and a later Owner assignment replays everything pending.
 #[test]
 fn ownerless_frontier_frozen_then_owner_replays() {

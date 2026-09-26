@@ -4,7 +4,7 @@
 //! headless mode (codex exec / claude -p / pi -p), fed with a retrieval
 //! snapshot from the same Domain API the background sync uses. Proposed
 //! write-actions come back as a fenced `noending-action` JSON block that
-//! the UI must confirm before execution (policy: 技术实现方案 §25/§26).
+//! the UI must confirm before execution (policy: 技术实现).
 
 use serde::Serialize;
 
@@ -214,7 +214,7 @@ impl AssistantService {
 
     /// Execute a user-confirmed action proposal via the Session Launcher.
     ///
-    /// The launcher and the §13 tier-3 [`crate::launcher::LaunchWorkspace`] are
+    /// The launcher and the tier-3 [`crate::launcher::LaunchWorkspace`] are
     /// injected rather than built here: an Assistant launch must resolve its
     /// directory through the same Home the New Session modal previewed, and
     /// `NoEnding Home` is a fact only the command layer holds.

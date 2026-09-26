@@ -74,7 +74,7 @@ pub struct AgentRuntimeDiscovery {
 /// What the user may set for one Agent: capabilities (contract), a model
 /// catalog (advice), and the effort vocabulary.
 ///
-/// Timing log (方案 §17): agent + duration + outcome only — never CLI output,
+/// Timing log: agent + duration + outcome only — never CLI output,
 /// tokens, credentials or environment. Slow CLIs show up as long durations.
 pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
     let started = std::time::Instant::now();

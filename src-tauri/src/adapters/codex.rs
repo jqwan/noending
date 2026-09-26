@@ -1,8 +1,8 @@
 //! Codex Adapter: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 //! `CODEX_HOME` overrides the root. Raw data is read-only, always
-//! (重构方案 §2.6: NoEnding never deletes an Agent-owned source).
+//! — NoEnding never deletes an Agent-owned source.
 //!
-//! Member mapping (§26.1):
+//! Member mapping:
 //! - normal root rollout       → `Root`;
 //! - `thread_source=subagent`  → `Child` (a task thread Codex spawned);
 //! - `thread_source=guardian_review` → `Side` (a review lane beside the main
@@ -15,7 +15,7 @@
 //! compaction markers and session meta are execution observations: counted
 //! into member stats, never stored as conversation.
 //!
-//! Message provenance (Provenance 方案 §13B/§14/§16.1) — **Stateful**, the one
+//! Message provenance — **Stateful**, the one
 //! adapter that needs the cursor provenance frontier. Verified against this
 //! machine's corpus (June → Sept 2026 schemas, 748/748 `turn_context` lines):
 //! no assistant `response_item` row ever carries a model; the model lives on
@@ -65,7 +65,7 @@ fn extract_text(content: &Value) -> String {
 
 /// The uuid Codex wrote into a rollout's name: the file's OWN thread id.
 /// 77 of this machine's 78 rollouts have it equal to `payload.id`, and the one
-/// that does not is exactly the forked page below (方案 §37.12).
+/// that does not is exactly the forked page below.
 fn thread_id_from_filename(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_string_lossy().to_string();
     let rest = stem.strip_prefix("rollout-")?;
@@ -79,7 +79,7 @@ fn thread_id_from_filename(path: &Path) -> Option<String> {
 
 /// A forked page's name carries `_<own uuid>` after the id it forked from;
 /// this is Codex's own mark that the file continues another rollout rather than
-/// being it (方案 §37.12).
+/// being it.
 fn is_forked_page_name(path: &Path) -> bool {
     path.file_stem()
         .and_then(|s| s.to_str())
@@ -88,7 +88,7 @@ fn is_forked_page_name(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Which side of the execution graph one rollout sits on (§26.1).
+/// Which side of the execution graph one rollout sits on.
 fn member_kind_of(thread_source: Option<&str>, forked: bool) -> DiscoveredMemberKind {
     if forked {
         // A forked page is independently continuable — the fork wins over any
@@ -132,7 +132,7 @@ impl CodexAdapter {
                 meta_id = p.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
                 // Legacy last resort only: `session_id` is the conversation the
                 // writer was joined to, not this thread, so it never decides
-                // identity while a real thread id is available (§37.12).
+                // identity while a real thread id is available.
                 legacy_session_id = p
                     .get("session_id")
                     .and_then(|s| s.as_str())
@@ -204,7 +204,7 @@ impl CodexAdapter {
         // names the thread it forked FROM, so there the name has to decide;
         // everywhere else the meta is Codex's own statement of the thread id
         // and leads. Keying on `session_id` instead is what collapsed this
-        // machine's 78 rollouts into 37 sessions (§37.12).
+        // machine's 78 rollouts into 37 sessions.
         let by_name = || thread_id_from_filename(path);
         let forked = is_forked_page_name(path);
         let session_id = if forked {
@@ -243,7 +243,7 @@ impl CodexAdapter {
             last_activity_at: last_activity,
             // Codex writes no title of its own anywhere in a rollout. Its name
             // for the thread lives in the session index, and discovery fills
-            // this in from there (§37.16).
+            // this in from there.
             native_title: None,
             first_user_text: is_logical_root.then_some(first_user_text).flatten(),
             first_agent_text: is_logical_root
@@ -344,7 +344,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         // derives the matching stats update; the closure decides, per line,
         // what is conversation and what is an observation. The provenance
         // frontier is seeded from the cursor for appends and reset by the
-        // reader on a full re-scan (Provenance 方案 §14/§15).
+        // reader on a full re-scan.
         let mut state = ProvenanceState {
             provider: cursor.active_provider.clone(),
             model: cursor.active_model.clone(),
@@ -422,9 +422,8 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     }
 }
 
-/// One rollout line's contribution to the member read (§26.1). State events
-/// advance the provenance frontier; assistant messages carry it (Provenance
-/// 方案 §13B).
+/// One rollout line's contribution to the member read. State events
+/// advance the provenance frontier; assistant messages carry it.
 fn parse_line(
     _idx: usize,
     v: &Value,
@@ -438,7 +437,7 @@ fn parse_line(
         .map(|s| s.to_string());
 
     match vtype {
-        // Provenance state events (Provenance 方案 §13B): a turn opens with
+        // Provenance state events: a turn opens with
         // its actual model; `thread_settings_applied` precedes it and carries
         // the provider. Both are confirmed generation scope, verified against
         // the real corpus (see the module doc) — not configuration echoes.
@@ -487,7 +486,7 @@ fn parse_line(
                     match (role, is_root) {
                         // Conversation is the ROOT member's user/assistant
                         // prose only. Injected context (`<…>` blocks,
-                        // `#`-pasted headers) is never conversation (§2.3).
+                        // `#`-pasted headers) is never conversation.
                         ("user", true) if !crate::adapters::is_injected_preamble(&text) => {
                             Some(ParsedLine::message_only(crate::adapters::parsed_message(
                                 source_message_id,
@@ -498,7 +497,7 @@ fn parse_line(
                         ("assistant", true) => {
                             // The turn's provenance state is the only model
                             // evidence the source offers; without a state
-                            // event the message stays NULL (Provenance §13B).
+                            // event the message stays NULL.
                             Some(ParsedLine::message_only(
                                 crate::adapters::parsed_message(
                                     source_message_id,
@@ -514,7 +513,7 @@ fn parse_line(
                     }
                 }
                 // A message that crossed between two threads: execution
-                // observation (§26.1) — topology lives in discovery, the text
+                // observation — topology lives in discovery, the text
                 // is not conversation.
                 "agent_message" => {
                     if text_of_envelope(&payload).trim().is_empty() {
@@ -525,7 +524,7 @@ fn parse_line(
                         ..Default::default()
                     }))
                 }
-                // Tool traffic is deliberately not ingested (方案 §36.11):
+                // Tool traffic is deliberately not ingested:
                 // machine chatter whose payload shape also drifts across
                 // Codex versions (function_call vs custom_tool_call).
                 "function_call" | "custom_tool_call" => {
@@ -559,9 +558,9 @@ fn text_of_envelope(payload: &Value) -> String {
 }
 
 /// Codex's own name for each thread: `<root>/session_index.jsonl`, one
-/// `{"id": <thread id>, "thread_name": <name>}` per line (方案 §37.16).
+/// `{"id": <thread id>, "thread_name": <name>}` per line.
 ///
-/// `[实测]` this file is a row-for-row mirror of `threads.name` in
+/// This file is a row-for-row mirror of `threads.name` in
 /// `~/.codex/state_5.sqlite` (31 rows, same ids, same names, 0 differences), so
 /// reading it needs neither the WAL nor the version number baked into that
 /// file's name (`state_5` → the next release's `state_6`).
@@ -743,7 +742,7 @@ mod rollout_tests {
 
     /// A forked page carries `_<own uuid>` in its name yet still names the
     /// thread it forked FROM in `payload.id`: identity must follow the name, or
-    /// the fork collapses back into the thread it came from (方案 §37.12).
+    /// the fork collapses back into the thread it came from.
     #[test]
     fn a_forked_page_is_its_own_logical_root_with_the_fork_as_parent() {
         const BASE: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
@@ -769,7 +768,7 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `thread_source=subagent` → Child, `guardian_review` → Side (§26.1);
+    /// `thread_source=subagent` → Child, `guardian_review` → Side;
     /// both carry the parent as the topology hint and neither carries any
     /// title source.
     #[test]
@@ -818,9 +817,9 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- Root conversation vs execution observations (§26.1) --------------
+    // ---- Root conversation vs execution observations ----------------
 
-    /// §32.2 — only root user/assistant prose becomes messages; thinking,
+    /// Only root user/assistant prose becomes messages; thinking,
     /// tool traffic and compaction markers become stats observations; and two
     /// visible assistant prose segments around a tool call are BOTH kept.
     #[test]
@@ -870,7 +869,7 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An injected preamble in the user role is not the user's words (§2.3).
+    /// An injected preamble in the user role is not the user's words.
     #[test]
     fn an_injected_user_block_is_not_conversation() {
         let dir = temp_dir("injected");
@@ -897,7 +896,7 @@ mod rollout_tests {
     }
 
     /// Inter-agent envelopes are execution observations, never conversation
-    /// (§26.1) — on the root and on internal members alike.
+    /// — on the root and on internal members alike.
     #[test]
     fn an_agent_message_envelope_is_observed_not_stored() {
         let dir = temp_dir("envelope");
@@ -934,7 +933,7 @@ mod rollout_tests {
     }
 
     /// A CHILD member never produces messages — its transcript text stays out
-    /// of the Conversation by construction (§26.1), not by downstream filters.
+    /// of the Conversation by construction, not by downstream filters.
     #[test]
     fn a_child_member_produces_observations_only() {
         let dir = temp_dir("child-read");
@@ -963,7 +962,7 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- The session index as a title source (方案 §37.16) ----------------
+    // ---- The session index as a title source ----------------
 
     fn index_line(id: &str, name: &str) -> String {
         serde_json::json!({ "id": id, "thread_name": name, "updated_at": "2026-09-20T13:00:00Z" })
@@ -1045,7 +1044,7 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// §9.1 — strict availability: NotFound is Missing, everything else is
+    /// Strict availability: NotFound is Missing, everything else is
     /// not.
     #[test]
     fn inspect_reports_missing_only_for_a_confirmed_absent_file() {
@@ -1085,7 +1084,7 @@ mod rollout_tests {
         .to_string()
     }
 
-    /// Provenance 方案 §28.3 — per-turn attribution: two turns with different
+    /// Per-turn attribution: two turns with different
     /// models give each assistant message its own model; no session-wide
     /// broadcast, and the provider comes from the source, never branding.
     #[test]
@@ -1123,7 +1122,7 @@ mod rollout_tests {
         );
     }
 
-    /// Provenance 方案 §28.4 — the stateful boundary: the state events are
+    /// The stateful boundary: the state events are
     /// consumed in pass 1 while the assistant message only arrives in pass 2;
     /// the frontier must survive on the cursor and attribute identically to
     /// the single-pass read of the same conversation.
@@ -1194,7 +1193,7 @@ mod rollout_tests {
         assert_eq!(one_pass.messages[0].provider, pass2.messages[0].provider);
     }
 
-    /// Provenance 方案 §28.5 — an old-schema rollout without the state events
+    /// An old-schema rollout without the state events
     /// attributes nothing, even though the Agent is Codex: unknown stays
     /// unknown.
     #[test]

@@ -85,7 +85,7 @@ export default function SourceDetailModal({
             </div>
           )}
 
-          {/* 来源会话已永久删除（Session Lifecycle §20）：这不是
+          {/* 来源会话已永久删除（Session Lifecycle）：这不是
               tombstone，只是「来源已不存在」的事实陈述。后端此时不再返回
               Session / 消息 / 证据等字段，UI 也不该再尝试渲染它们。 */}
           {detail.source_type === "deleted_session" ? (

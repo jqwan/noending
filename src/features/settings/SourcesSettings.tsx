@@ -1,6 +1,6 @@
 import SourcesView from "../sources/SourcesView";
 
-/** 设置 → Session 来源（方案 §2.1 词表）：复用现有 SourcesView（实施方案 §10/§49）。 */
+/** 设置 → Session 来源：复用现有 SourcesView。 */
 export default function SourcesSettings() {
   return (
     <section>

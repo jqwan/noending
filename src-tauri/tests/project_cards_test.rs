@@ -1,4 +1,4 @@
-//! Projects Experience v0.2 — the `list_project_cards` projection (方案 §8),
+//! Projects Experience v0.2 — the `list_project_cards` projection,
 //! plus the review P2-1 contract: search_paths covers EVERY workspace path
 //! while representative_paths stays a display-only truncation.
 
@@ -97,7 +97,7 @@ fn board_card_projection_counts_and_paths() {
         .unwrap();
 
     // ws-primary 的 position-0 落在 p-1 → 主关联；ws-related 的 position-0 在
-    // p-2、第二条路径在 p-1 → 对 p-1 是关联（方案 §1.12）。
+    // p-2、第二条路径在 p-1 → 对 p-1 是关联。
     workstream_with_path(&db, "ws-primary", "Primary", &a);
     workstream_with_path(&db, "ws-related", "Related", &other);
     db.tx(|tx| {

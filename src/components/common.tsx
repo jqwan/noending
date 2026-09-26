@@ -23,7 +23,7 @@ export function timeAgo(iso: string | null | undefined): string {
 }
 
 /**
- * 共用的确认 / 编辑 / 关系弹窗外壳（整体设计方案 §65）。
+ * 共用的确认 / 编辑 / 关系弹窗外壳（整体设计）。
  *
  * Escape 与点击背板走的是同一个 `onClose`，所以调用方挂在 `onClose` 上的收尾
  * （例如 New / Resume 释放 PreparedLaunch 令牌）不会因为键盘退出而漏掉。

@@ -1,4 +1,4 @@
-//! WorkspaceResolver regression tests (方案 §16 “必须测试”).
+//! WorkspaceResolver regression tests.
 //!
 //! The pure, lexical half of the resolver is unit-tested inside
 //! `workspace/resolver.rs` with injected fixtures. This file covers what a
@@ -6,16 +6,16 @@
 //! `platform::exec_resolver` + `platform::exec_runner`, produces the
 //! observation the domain claims.
 //!
-//! Environment rules (§42.3-M13):
+//! Environment rules:
 //! * Nothing here reads or writes the process environment: the Home, the user
 //!   home and the reserved set are all passed in explicitly.
 //! * Nothing here resolves the real `~/.noending`.
 //! * Every repository is created under a real temp directory whose path has been
 //!   `fs::canonicalize`d first — because on macOS `std::env::temp_dir()` is
 //!   `/tmp`, a symlink, and an assertion against an unresolved prefix would
-//!   compare two different spellings of the same directory (§42.3-M8 rule 7).
+//!   compare two different spellings of the same directory (rule 7).
 //! * `git init` / `git worktree add` appear ONLY in these fixtures. The product
-//!   path runs two read-only commands and nothing else (§42.3-M9).
+//!   path runs two read-only commands and nothing else.
 //! * Every test returns early when the `git` binary cannot be located, so a
 //!   machine without git reports green rather than lying.
 
@@ -42,7 +42,7 @@ fn scratch(tag: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&raw).unwrap();
     let real = std::fs::canonicalize(&raw).unwrap_or(raw);
-    // §42.3-M8 rule 7: never assert on a temp prefix without normalizing it.
+    // rule 7: never assert on a temp prefix without normalizing it.
     // The call below used to compute the normalized string and discard it, so
     // every fixture handed the resolver — and compared against — the raw
     // `fs::canonicalize` answer. On macOS that is harmless (`/private/var/…` is
@@ -205,7 +205,7 @@ fn a_linked_worktree_is_detected_as_linked() {
     };
     assert_eq!(*kind, GitWorktreeKind::Linked);
     // The family identity is the MAIN checkout's `.git`, from which the linked
-    // worktree is only a `.git` file away (§8.3 converges them this way).
+    // worktree is only a `.git` file away (converges them this way).
     assert_eq!(
         path_key_of(&main.join(".git")),
         common_dir.replace('\\', "/"),
@@ -232,7 +232,7 @@ fn a_linked_worktree_is_detected_as_linked() {
 }
 
 /// 必须测试: `.git` missing. The resolver's answer is the raw evidence, `None`;
-/// `git_state::MISSING` is derived by the caller from prior state (§1.3, §16-11).
+/// `git_state::MISSING` is derived by the caller from prior state.
 #[test]
 fn a_removed_git_directory_leaves_the_path_but_not_the_evidence() {
     let Some(program) = git() else {
@@ -249,7 +249,7 @@ fn a_removed_git_directory_leaves_the_path_but_not_the_evidence() {
         GitDetection::Detected { .. }
     ));
 
-    // The whole point of §1.3: the path survives, the evidence does not.
+    // The whole point of the path survives, the evidence does not.
     std::fs::remove_dir_all(repo.join(".git")).unwrap();
     let after = resolver.observe(&repo.to_string_lossy());
     assert!(is_observable(&after), "the WorkspacePath identity survives");
@@ -293,7 +293,7 @@ fn a_home_level_dotfiles_repository_is_not_evidence() {
 
     let resolver = resolver_for(Some(&fake_home), ReservedPaths::default());
 
-    // Without the §1.4 rule the dotfiles repo would swallow the whole Home.
+    // Without the rule the dotfiles repo would swallow the whole Home.
     let obs = resolver.observe(&nested.to_string_lossy());
     assert!(
         is_observable(&obs),
@@ -302,7 +302,7 @@ fn a_home_level_dotfiles_repository_is_not_evidence() {
     assert_eq!(
         obs.git,
         GitDetection::None,
-        "a repository rooted at the user Home is ignored (§1.4)"
+        "a repository rooted at the user Home is ignored"
     );
     // Including the Home directory itself, which is not a WorkspacePath at all.
     assert!(!is_observable(
@@ -328,7 +328,7 @@ fn a_home_level_dotfiles_repository_is_not_evidence() {
 }
 
 /// 必须测试: reserved `~/.noending/data` exclusion and `~/.noending/workspace`
-/// ALLOWED, on a real Home created by `ensure_dirs` (§42.3-M21).
+/// ALLOWED, on a real Home created by `ensure_dirs`.
 #[test]
 fn a_real_noending_home_reserves_app_paths_and_allows_workspace() {
     let root = scratch("home");
@@ -371,7 +371,7 @@ fn a_real_noending_home_reserves_app_paths_and_allows_workspace() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// §42.3-M11: git must run IN the observed directory. The old `/tmp` fallback
+/// git must run IN the observed directory. The old `/tmp` fallback
 /// would answer a question about the wrong directory — and on Windows `/tmp`
 /// does not exist at all.
 #[test]
@@ -437,7 +437,7 @@ fn the_child_process_runs_in_the_requested_directory() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// §16-12: observation only. Nothing a resolver run touches may change the
+/// observation only. Nothing a resolver run touches may change the
 /// repository, and nothing it returns may be a Project.
 #[test]
 fn observing_is_not_mutation() {

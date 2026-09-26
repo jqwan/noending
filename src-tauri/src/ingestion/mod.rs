@@ -1,6 +1,6 @@
 //! Session ingestion: discover members → resolve the logical graph → ensure
 //! Sessions + SessionMembers → ingest changed members → Context sync
-//! (重构方案 §10 / §12).
+//!.
 //!
 //! Invariants (Context Integrity):
 //! - raw agent sources are never modified;
@@ -12,11 +12,11 @@
 //!   transaction inside `Db::commit_member_ingest`, which re-checks the
 //!   session's lifecycle and the member's attachment first.
 //!
-//! Graph resolution never lets scan order decide identity (§10): the batch is
+//! Graph resolution never lets scan order decide identity: the batch is
 //! resolved in two passes — roots first, then children/sides walk their
 //! parent chain against the batch AND the database — so a parent that appears
 //! later in the same batch still attaches. A child/side that resolves to
-//! nothing is an ingestion diagnostic, never a Session (§2.5/§11).
+//! nothing is an ingestion diagnostic, never a Session.
 //!
 //! Concurrency: the storage layer owns it (`Db` = one writer + a WAL reader),
 //! so ingestion just reads files and calls the store; a (possibly minutes-long,
@@ -32,7 +32,7 @@ use crate::storage::Db;
 use crate::sync::SyncEngine;
 
 /// A Session's display title: the first of the three sources that has one, in
-/// this order (§4.2 / §37.15) — the root's native title, the first real user
+/// this order — the root's native title, the first real user
 /// text, the first visible assistant text. Child / side members can never
 /// rename a Logical Session because they never reach this function.
 ///
@@ -69,7 +69,7 @@ impl<'a> DiscoveryBatch<'a> {
 const MAX_CHAIN_DEPTH: usize = 32;
 
 /// The Logical Session a child/side member belongs to, walked through the
-/// source's own parent chain (§10.2). Resolution order per step:
+/// source's own parent chain. Resolution order per step:
 /// 1. the parent sits in THIS batch → keep walking (roots resolve below);
 /// 2. the parent is already a member row in the DB → its session is the
 ///    answer (attached in an earlier pass, possibly under a diagnostic the
@@ -112,14 +112,14 @@ fn resolve_logical_session(
     Ok(None)
 }
 
-/// Ensure the Logical Session row for a Root/ForkRoot discovery (§10.1/§10.3):
+/// Ensure the Logical Session row for a Root/ForkRoot discovery:
 /// create or refresh keyed by the root's Resume identity, attach its
 /// WorkspacePath through the app-wide seam, and resolve fork provenance.
 ///
 /// The Session→WorkspacePath attach is discovery's only piece of workspace
 /// work, and it is deliberately not per-message: `workspace_path_id` is
 /// re-resolved only when the row is created, when its cwd moved, or when a
-/// Session with a cwd has never been attached (§1.11).
+/// Session with a cwd has never been attached.
 fn ensure_logical_session(
     db: &Db,
     d: &DiscoveredMember,
@@ -209,7 +209,7 @@ fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> 
 }
 
 /// Record (or re-observe) an unattachable member, and clear the diagnostic of
-/// one that resolved (§11). Diagnostics never enter Sessions/Search/Context/
+/// one that resolved. Diagnostics never enter Sessions/Search/Context/
 /// lifecycle — they are a Settings page, nothing else.
 fn note_unresolved(db: &Db, d: &DiscoveredMember, reason: &str) -> Result<()> {
     db.upsert_ingestion_diagnostic(
@@ -234,7 +234,7 @@ fn resolve_diagnostic(db: &Db, d: &DiscoveredMember) -> Result<()> {
     )
 }
 
-/// One full discovery→resolve→attach pass for one agent's batch (§10). Roots
+/// One full discovery→resolve→attach pass for one agent's batch. Roots
 /// first, children/sides second — so a parent discovered later in the same
 /// batch is still found, and scan order never decides identity.
 struct ResolvedBatch {
@@ -340,7 +340,7 @@ fn resolve_batch(
 }
 
 /// Ingest + sync ONE logical session: read every changed member's delta,
-/// commit each atomically, then sync the root conversation (§12). Shared by
+/// commit each atomically, then sync the root conversation. Shared by
 /// interactive single-session flows (resume, per-session sync) and background
 /// reconcile alike — source parsing needs no database lock, and the storage
 /// layer serializes the writes itself.
@@ -349,13 +349,13 @@ fn resolve_batch(
 /// stored and indexed, member cursors advance, and nothing is prepared,
 /// extracted or committed, so the context frontier stays frozen for a later
 /// replay. The same happens for an ownerless session — the sync engine's
-/// prepare refuses (§15.1: ownerless semantics preserved).
+/// prepare refuses (ownerless semantics preserved).
 pub fn ingest_and_sync_session(
     db: &Db,
     engine: &SyncEngine,
     session: &Session,
 ) -> Result<(i64, usize)> {
-    // §9 — re-read the lifecycle state: the caller's struct may predate a
+    // re-read the lifecycle state: the caller's struct may predate a
     // concurrent Trash. The authoritative guard lives inside
     // `commit_member_ingest` anyway; this just avoids reading files that
     // cannot commit.
@@ -387,7 +387,7 @@ pub fn ingest_and_sync_session(
             continue;
         };
         // The provenance frontier travels with the commit: same transaction,
-        // same lifetime as the messages the state covers (Provenance 方案 §15).
+        // same lifetime as the messages the state covers.
         let stored = db.commit_member_ingest_with_provenance_state(
             &session.id,
             &member.id,
@@ -422,7 +422,7 @@ pub fn ingest_and_sync_session(
     Ok((stored_total, applied))
 }
 
-/// Root-only LaunchIntent matching (§17.1). The gate is "new OR still
+/// Root-only LaunchIntent matching. The gate is "new OR still
 /// ownerless", not `is_new` alone: the ROW is already persisted by the time
 /// this runs, so `is_new` is true exactly once, and a single transient failure
 /// would burn that one chance for good. Re-attempting while the session has no
@@ -562,11 +562,11 @@ where
     Ok(total_messages)
 }
 
-/// Full reconcile over every agent's enabled sources (§12): discover members,
+/// Full reconcile over every agent's enabled sources: discover members,
 /// resolve the logical graph, then ingest + sync each active session.
 /// `on_session` observes each session being processed.
 ///
-/// `workspace` is §13's tier-3 fact, needed because a freshly discovered
+/// `workspace` is 's tier-3 fact, needed because a freshly discovered
 /// root may claim a pending LaunchIntent: matching it asks whether that
 /// session's cwd is just the shared default workspace, which is not in the DB.
 pub fn reconcile_with_engine<F>(
@@ -627,7 +627,7 @@ where
         &processed_session_ids,
     )?;
 
-    // §19-4/§37.19 — the one piece of workspace work a skipped Session still
+    //  — the one piece of workspace work a skipped Session still
     // owes. It runs AFTER the loop so a path first registered by this very pass
     // is already visible to it, and it never observes a path (the identity is
     // stored), so a pass over frozen files stays as cheap as it looks.
@@ -669,7 +669,7 @@ where
 }
 
 /// Re-ingest one source: rewind the member cursors of every session found
-/// under its path and re-scan from scratch (§23.1). THE MESSAGE STORE IS
+/// under its path and re-scan from scratch. THE MESSAGE STORE IS
 /// NEVER DELETED — message ids and every provenance ref stay valid, because
 /// unchanged content dedups by identity and only genuinely new/changed source
 /// content appends. Stats snapshots replace on the re-scan; Context items,
@@ -699,7 +699,7 @@ where
 
 /// Sessions with pending (un-ingested) activity, used by "sync stale" flows.
 ///
-/// Scoped to the Sessions that OWN this Workstream (方案 §40) — a Session
+/// Scoped to the Sessions that OWN this Workstream — a Session
 /// belongs to at most one, so it can never be synced twice under this rule.
 /// "Stale" = any member's source was modified after the Session's last
 /// recorded activity, so there may be a delta the cursors have not seen.

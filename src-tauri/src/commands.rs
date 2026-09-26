@@ -74,7 +74,7 @@ pub(crate) fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> 
     f(&state.db)
 }
 
-/// The launcher, pointed at NoEnding Home's `runtime/` (§42.3-M14).
+/// The launcher, pointed at NoEnding Home's `runtime/`.
 ///
 /// The temp-dir fallback is deliberate: a context bundle is a launch artifact,
 /// and failing a launch because the Home could not be resolved would trade a
@@ -93,7 +93,7 @@ fn noending_home(app: &AppHandle) -> Option<crate::workspace::home::NoEndingHome
         .map(|h| h.inner().clone())
 }
 
-/// §13 tier 3 — the non-database fact a launch needs.
+/// tier 3 — the non-database fact a launch needs.
 ///
 /// Prepare and Launch must resolve this from the *same* Home, so both go through
 /// here rather than one of them defaulting. `None` (Home never initialized)
@@ -226,9 +226,9 @@ pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<Con
             None,
             "user",
         )?;
-        // §42.3-M19 — the Project this activity belongs to is its position-0
+        // the Project this activity belongs to is its position-0
         // path's Project. The current projection is read from the primary
-        // path: the derived cache can name a Project §7.4 deleted or §8.3
+        // path: the derived cache can name a Project deleted or
         // merged away, which would reorder `list_projects` (ORDER BY
         // updated_at) by a membership that no longer exists.
         let (pid, _) =
@@ -312,7 +312,7 @@ pub struct WorkstreamContext {
     pub project_name: Option<String>,
     pub core: Vec<crate::context::ContextSection>,
     pub items: Vec<(ContextItem, ContextItemRevision)>,
-    /// Sessions that own this Workstream (方案 §25). At most one Workstream
+    /// Sessions that own this Workstream. At most one Workstream
     /// per Session, so a Session never appears in two of these lists.
     pub sessions: Vec<Session>,
     pub conflicts: Vec<ContextConflict>,
@@ -332,14 +332,14 @@ pub fn get_workstream_context(
             .ok_or_else(|| other("Workstream 不存在"))?;
         let core = crate::context::resolve_core_context(db, &workstream_id)?;
         let items = db.items_for_workstream(&workstream_id, true)?;
-        // §11 — the Workstream context view is a default projection: trashed
+        // the Workstream context view is a default projection: trashed
         // Sessions are not shown here (the query filters them out).
         let sessions = db.sessions_for_workstream(&workstream_id)?;
         let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
         let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
         let relations = db.item_relations_for_workstream(&workstream_id)?;
         let recent_changes = db.list_workstream_context_changes(&workstream_id, 20)?;
-        // §42.3-M19: the name shown beside a Workstream is its position-0 path's
+        // the name shown beside a Workstream is its position-0 path's
         // Project.
         let (_, project_name) =
             crate::workspace::workstream::primary_project_for_workstream(db, &workstream_id)?;
@@ -548,7 +548,7 @@ pub fn sync_session(state: State<AppState>, session_id: String) -> Result<serde_
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        // §3/§10 — a trashed session is inactive: sync is an explicit user
+        //  — a trashed session is inactive: sync is an explicit user
         // action here, so reject with a reason instead of silently no-op'ing.
         if session.is_trashed() {
             return Err(other("会话已在回收站，无法同步；请先恢复会话"));
@@ -604,7 +604,7 @@ pub fn resolve_launch_intent(
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        // §43 — owner/delivery writes are Session write paths: a trashed
+        // owner/delivery writes are Session write paths: a trashed
         // session must not claim an intent. (Reconcile-side matching only
         // ever fires for brand-new sessions, which are never trashed.)
         if session.is_trashed() {
@@ -940,7 +940,7 @@ where
         .map_err(|e| other(format!("后台任务失败: {e}")))
 }
 
-/// The blocking-worker seam behind `refresh_agent_runtime_options` (方案 §7/§15):
+/// The blocking-worker seam behind `refresh_agent_runtime_options`:
 /// the CLI probe (`codex debug models` / `pi --list-models`, up to
 /// DISCOVERY_TIMEOUT_SECS) must run on a blocking worker thread, never on the
 /// async command thread or the Tauri main thread. Split out as a named helper
@@ -956,8 +956,8 @@ pub(crate) async fn discover_runtime_options_async(
 /// Agent default plus custom input.
 ///
 /// Async on purpose: the Agent CLI probe blocks for up to 20s, so it goes to
-/// `spawn_blocking` and the UI thread stays responsive (方案 §7). Explicit
-/// user action only — opening Settings never reaches this command (§1).
+/// `spawn_blocking` and the UI thread stays responsive. Explicit
+/// user action only — opening Settings never reaches this command.
 #[tauri::command]
 pub async fn refresh_agent_runtime_options(
     agent: String,
@@ -1026,7 +1026,7 @@ pub fn assistant_execute_action(
     })
 }
 
-/// 方案 §15 — the async seam test: the refresh command's blocking CLI probe
+///  — the async seam test: the refresh command's blocking CLI probe
 /// must run on a blocking worker, never on the calling thread, and the seam
 /// must deliver a usable discovery for an agent whose catalog is static
 /// (no CLI spawn at all).

@@ -2,7 +2,7 @@
 //!
 //! This module owns the ordered path list, lifecycle and visibility policy.
 //!
-//! ## The ordered list is the whole model (§1.5)
+//! ## The ordered list is the whole model
 //!
 //! ```text
 //! workstream_paths(workstream_id, workspace_path_id, position)
@@ -15,14 +15,14 @@
 //! "secondary without primary" is not representable.
 //!
 //! * remove at index k → recompact positions, so the next entry becomes 0
-//!   without asking the user (§1.6).
+//!   without asking the user.
 //! * `reorder_workstream_paths(ordered_workspace_path_ids)` takes the FULL list;
-//!   "make this the primary path" is a reorder to index 0 (§21).
+//!   "make this the primary path" is a reorder to index 0.
 //! * `create_workstream(title, description, initial_paths?)` creates the
 //!   Workstream plus any accepted initial paths, in submission order.
 //! * Workstream→Project is a projection through the paths.
 //!
-//! ## Lifecycle (§1.13 / §5.7)
+//! ## Lifecycle
 //!
 //! ```text
 //! lifecycle   active | completed     classification only, no behavior, free to switch
@@ -33,7 +33,7 @@
 //! lifecycle / paths / configuration are all still there and the previous state
 //! returns naturally. Permanent deletion is only reachable from `archived`.
 //!
-//! ## Permanent deletion table order (§42.3-M6)
+//! ## Permanent deletion table order
 //!
 //! `context_conflict_events` → `context_conflicts` → `context_item_revisions` →
 //! `context_items` → `context_deliveries` → `workstream_paths` →
@@ -43,18 +43,18 @@
 //! `launch_intents`, `workspace_paths`, and the Agents' raw source data.
 //! A Session survives the Workstream that referenced it; its
 //! `owner_workstream_id` is cleared by the `ON DELETE SET NULL` FK when the
-//! `workstreams` row goes (方案 §13, §37).
+//! `workstreams` row goes.
 //!
 //! ## Reindex
 //!
 //! Any path-list mutation changes the primary-path Project projection, so it
-//! must re-index the Workstream's search row (§42.3-M18).
+//! must re-index the Workstream's search row.
 //!
 //! ## Path mutation vs. Session ownership
 //!
 //! Removing a WorkstreamPath touches the path list only. It never changes a
 //! Session's Owner Workstream, cwd, `workspace_path_id` or `project_id`
-//! (方案 §5.2). A Session's cwd is historical execution fact, the path list is
+//!. A Session's cwd is historical execution fact, the path list is
 //! current configuration, ownership is semantic assignment — the three are
 //! independent.
 //!
@@ -108,7 +108,7 @@ impl PathService {
     }
 }
 
-// ------------------------------------------------------------- creation (§11)
+// ------------------------------------------------------------- creation
 
 /// One entry of [`CreateWorkstreamReport::paths`]: what became of each raw
 /// string the user submitted. An entry is either accepted (with the position it
@@ -141,8 +141,8 @@ pub struct CreateWorkstreamReport {
 /// Accepted paths take consecutive positions in submission order — position 0
 /// IS the primary path by construction, so "first accepted wins the primary
 /// seat" needs no special case. A string the attacher refuses (`Ok(None)`:
-/// unresolvable, reserved (§2), the Home itself (§1.4)) is reported, never
-/// guessed into a path (§42.3: 不能确定就不猜), and a Workstream whose strings
+/// unresolvable, reserved, the Home itself) is reported, never
+/// guessed into a path (不能确定就不猜), and a Workstream whose strings
 /// all bounce is still created with zero paths.
 ///
 /// Duplicates inside one call are refused without a second attach: the same raw
@@ -250,7 +250,7 @@ pub fn create_workstream(
     })
 }
 
-// ---------------------------------------------------------- the path list (§1.5)
+// ---------------------------------------------------------- the path list
 
 /// One entry of the list as the UI shows it: the row plus the physical facts
 /// behind it.
@@ -265,7 +265,7 @@ pub struct WorkstreamPathView {
     pub exists: bool,
 }
 
-/// §1.7 — a user action that ONLY adds a path. Nothing under the path is
+/// a user action that ONLY adds a path. Nothing under the path is
 /// scanned or imported, and an already-present path keeps its original
 /// position.
 pub fn add_workstream_path(
@@ -290,9 +290,9 @@ pub fn add_workstream_path(
     Ok(row)
 }
 
-/// §1.6 — remove one entry and let the next move up to primary. Sessions are
+/// remove one entry and let the next move up to primary. Sessions are
 /// not affected: this changes the Workstream's path list, never a Session's
-/// ownership (方案 §5.2, §13).
+/// ownership.
 pub fn remove_workstream_path(
     db: &Db,
     workstream_id: &str,
@@ -309,7 +309,7 @@ pub fn remove_workstream_path(
     })
 }
 
-/// §1.5 — rewrite the order. Takes the COMPLETE list; "make this the primary
+/// rewrite the order. Takes the COMPLETE list; "make this the primary
 /// path" is a reorder to index 0, never a role flag.
 pub fn reorder_workstream_paths(
     db: &Db,
@@ -347,7 +347,7 @@ pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<Wo
     Ok(views)
 }
 
-// ------------------------------------------------------- lifecycle & trash (§1.13)
+// ------------------------------------------------------- lifecycle & trash
 
 /// `active | completed` and nothing else. Other vocabularies (`open`,
 /// `abandoned`) are not normalized here: silently accepting one would leave the
@@ -371,7 +371,7 @@ pub fn set_workstream_lifecycle(
     Ok(w)
 }
 
-/// Move to the recycle bin. `archived` IS the trash (§1.13): paths, lifecycle,
+/// Move to the recycle bin. `archived` IS the trash: paths, lifecycle,
 /// Context and configuration all survive, and `updated_at` is the
 /// only other thing that moves.
 ///
@@ -421,7 +421,7 @@ pub fn apply_whole_object_edit(db: &Db, payload: &Workstream) -> Result<Workstre
 
 /// The only irreversible action in this module, and the reason it is gated on
 /// `archived`: the user must have already moved the Workstream out of the way,
-/// and the recycle bin is where "delete for real" is offered (§1.13, §22).
+/// and the recycle bin is where "delete for real" is offered.
 ///
 /// Deleting the Workstream ends its Context. That is the point of the action,
 /// and the only part that is not recoverable from a backup — which is why
@@ -440,7 +440,7 @@ pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()>
 
 // --------------------------------------------------------------- projections
 
-/// §42.3-M19 — the card / detail `project_id` + `project_name`, read through the
+/// the card / detail `project_id` + `project_name`, read through the
 /// position-0 path.
 ///
 /// Both are `None` for a Workstream with no paths, which is a normal state and
@@ -456,7 +456,7 @@ pub fn primary_project_for_workstream(
     Ok((Some(wp.project_id), name))
 }
 
-/// §12 — the Workstream-side input to the PreparedLaunch state fingerprint.
+/// the Workstream-side input to the PreparedLaunch state fingerprint.
 ///
 /// Agent E owns `launcher::compute_state_fingerprint`; this is the shape it
 /// reads, defined here so the stale rule and the data live together:
@@ -468,7 +468,7 @@ pub fn primary_project_for_workstream(
 /// Called once per workstream id in E's existing loop, after the metadata it
 /// already hashes. `default_ws:` is NOT part of this type — the default
 /// workspace comes from `NoEndingHome`, which is not in the DB, so E must pass it
-/// in separately (§42.3-M17 note 4).
+/// in separately (note 4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkstreamLaunchPaths {
     /// Canonical paths in list order. Order is semantics: never sort this.
@@ -476,12 +476,12 @@ pub struct WorkstreamLaunchPaths {
 }
 
 impl WorkstreamLaunchPaths {
-    /// §13 tier 2 — the launch directory, when this Workstream has one.
+    /// tier 2 — the launch directory, when this Workstream has one.
     pub fn primary(&self) -> Option<&str> {
         self.ordered_paths.first().map(String::as_str)
     }
 
-    /// Tagged, delimited hash bytes (§42.3-M17).
+    /// Tagged, delimited hash bytes.
     ///
     /// Every value is preceded by its label and followed by `|`, so no two
     /// different states can produce the same stream by shifting a boundary, and

@@ -31,15 +31,15 @@
 //! ## Rules this layer must never break
 //!
 //! * Losing `.git` changes `WorkspacePath.git_state` and nothing else — not the
-//!   path's Project, not the Project's `git_id` (§1.3).
-//! * Discovering a worktree adds a `WorkspacePath`, never a `WorkstreamPath` (§9).
-//! * Adding a `WorkstreamPath` never imports the Sessions under that path (§1.7).
+//!   path's Project, not the Project's `git_id`.
+//! * Discovering a worktree adds a `WorkspacePath`, never a `WorkstreamPath`.
+//! * Adding a `WorkstreamPath` never imports the Sessions under that path.
 //! * Removing a `WorkstreamPath` never changes a Session's Owner, cwd or
-//!   `workspace_path_id` (§12).
-//! * A Home-level Git repository is not evidence (§1.4), and the reserved app
-//!   paths under NoEnding Home never become a WorkspacePath (§2).
+//!   `workspace_path_id`.
+//! * A Home-level Git repository is not evidence, and the reserved app
+//!   paths under NoEnding Home never become a WorkspacePath.
 //! * Git detection runs *after* the database opens, in Workspace Reconcile —
-//!   never inside schema initialization, and never while holding the DB mutex (§6, §42.3-M7).
+//!   never inside schema initialization, and never while holding the DB mutex.
 
 pub mod home;
 pub mod identity;
@@ -68,11 +68,11 @@ pub use identity::{
 /// Contract:
 /// * `Ok(None)` means "this string resolves to no path" (empty, or relative with
 ///   no base). Callers must then leave `workspace_path_id` NULL — never guess
-///   (§5.5, §7.2).
+///.
 /// * A reserved app path under NoEnding Home and a Home-level repository are not
-///   WorkspacePaths (§2, §1.4); they also yield `Ok(None)`.
+///   WorkspacePaths; they also yield `Ok(None)`.
 /// * Implementations write through the caller's connection so an atomic Sync run
-///   commits or rolls back as one (§42.3-M3).
+///   commits or rolls back as one.
 pub trait WorkspaceAttaching {
     fn ensure_path(
         &self,

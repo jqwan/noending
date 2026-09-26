@@ -1,4 +1,4 @@
-/** Route model (实施方案 §5) — 手写 union 保留，但集中在此管理。 */
+/** Route model — 手写 union 保留，但集中在此管理。 */
 
 export type AssistantScope =
   | { type: "workspace" }

@@ -15,7 +15,7 @@
 //!   cwd, …}`; it is the only record without a `seq`;
 //! - every later record is `{type, seq, time, data}`. The header's
 //!   `parentSession` / `origin` / `delegationDepth` name the member graph
-//!   directly (§26.4): a transcript with a `parentSession` is a CHILD member
+//!   directly: a transcript with a `parentSession` is a CHILD member
 //!   of that parent; without one it is a ROOT.
 //! - Only the ROOT's conversation is ingested: `user/message` (real user
 //!   turns) and `assistant/message`. A `user/message` that carries
@@ -23,7 +23,7 @@
 //!   observation (side activity), never conversation. `assistant/chunk`
 //!   (v0/v1 token deltas), `tool/call`, `tool/result`, `todo/write`,
 //!   `request/*`, `session/title*` and the turn/step bookkeeping are machine
-//!   traffic and are dropped or counted (§36.11).
+//!   traffic and are dropped or counted.
 //! - `seq` is writer-assigned, contiguous and monotonic within a generation,
 //!   so it is the native message id — dedup is exact and position-independent.
 //!
@@ -42,7 +42,7 @@
 //!
 //! There is no launchable CLI: `dsh --profile <name>` needs a profile name
 //! that is the user's own setup, and NoEnding cannot know it — guessing one
-//! would boot the wrong tree (方案 §37.8).
+//! would boot the wrong tree.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -84,7 +84,7 @@ fn is_session_header(v: &Value) -> bool {
 }
 
 /// Text of a content-block array, keeping only human prose. Reasoning and
-/// tool-call blocks are machine traffic (§36.11).
+/// tool-call blocks are machine traffic.
 fn text_blocks(content: Option<&Value>) -> String {
     let mut parts = Vec::new();
     if let Some(arr) = content.and_then(|c| c.as_array()) {
@@ -107,9 +107,9 @@ fn is_machine_context(text: &str) -> bool {
 
 /// dsh's own task envelope: the parent's task description, pasted in as the
 /// first "user" turn of a delegated session. It is not a human turn — the same
-/// call this codebase makes for Codex's review prompts (§37.13) — and its first
+/// call this codebase makes for Codex's review prompts — and its first
 /// line names the envelope, not the session: three sessions here would
-/// otherwise be titled `## Task context task title:` (§37.15).
+/// otherwise be titled `## Task context task title:`.
 ///
 /// Deliberately NOT folded into [`is_machine_context`]: that one also decides
 /// what gets stored as a user turn, and this is a title-only call.
@@ -168,14 +168,14 @@ fn session_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// One decoded record's contribution to the member read (§26.4). Root members
+/// One decoded record's contribution to the member read. Root members
 /// produce conversation; child members produce observations only.
 fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str())?;
     let source_message_id = v.get("seq").and_then(|s| s.as_i64()).map(|s| s.to_string());
     // A `user/message` is not necessarily the user: dsh labels the writer in
     // `data.source`, and the kinds that bring a `senderSessionId` are the
-    // messages another session sent (§37.17). That one field is the whole test
+    // messages another session sent. That one field is the whole test
     // — a fifth cross-agent kind would need no change here.
     let counterpart_id = v
         .pointer("/data/source/senderSessionId")
@@ -189,7 +189,7 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 return None;
             }
             if counterpart_id.is_some() {
-                // Agent-to-agent relay: observed, never conversation (§2.3).
+                // Agent-to-agent relay: observed, never conversation.
                 return Some(ParsedLine::observation_only(MemberObservation {
                     side_activity: 1,
                     ..Default::default()
@@ -212,7 +212,7 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if !is_root {
                 return Some(ParsedLine::observation_only(MemberObservation::default()));
             }
-            // Message provenance (Provenance 方案 §13A/§16.6): the assistant
+            // Message provenance: the assistant
             // record itself carries `data.message.source` — a discriminated
             // union gated on `kind == "model"`, holding the actual generation
             // identity (`source.provider` / `source.model`; verified: 1907/
@@ -290,7 +290,7 @@ impl DshAdapter {
                         first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
                 }
-                // Only consulted when the session has no user turn (§37.15).
+                // Only consulted when the session has no user turn.
                 Some("assistant/message") if first_agent_text.is_none() => {
                     let text = text_blocks(v.pointer("/data/message/content"));
                     if !text.trim().is_empty() {
@@ -306,7 +306,7 @@ impl DshAdapter {
                 // this machine's sessions that produced the literal machine
                 // preamble `## Task context task title:`, i.e. exactly the
                 // naive truncation this tier exists to beat, so it is skipped
-                // and the derived title stands (§37.15).
+                // and the derived title stands.
                 Some("session/title") => {
                     let named_by = v
                         .pointer("/data/source/kind")
@@ -328,7 +328,7 @@ impl DshAdapter {
             // one written and a record can appear at any position. Measured
             // cost of a full pass over this machine's 104 dsh sessions
             // (198 MB decompressed, 123 k records) is ~1.5 s, and only
-            // CHANGED files are read at all (§37.15).
+            // CHANGED files are read at all.
             true
         });
 
@@ -344,7 +344,7 @@ impl DshAdapter {
             .and_then(|p| p.as_str())
             .filter(|p| !p.is_empty())
             .map(|p| p.to_string());
-        // The header names the member graph directly (§26.4): a parentSession
+        // The header names the member graph directly: a parentSession
         // makes this a CHILD of that parent; origin/delegationDepth ride along
         // as metadata facts.
         let kind = if parent.is_some() {
@@ -406,7 +406,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
     }
 
     /// Always `None`: `dsh` has a CLI, but every invocation must name a profile
-    /// under `$DSH_HOME/profiles` that only the user knows (方案 §37.8).
+    /// under `$DSH_HOME/profiles` that only the user knows.
     fn detect(&self) -> Option<AgentInstallation> {
         None
     }
@@ -472,7 +472,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         // Decoded text cannot be seeked into, so every read replays the whole
         // body and leans on message identity: each record carries the writer's
         // own `seq`, so a replay stores nothing it already has. Every replay
-        // is a full scan, so the observations become a stats SNAPSHOT (§7.3).
+        // is a full scan, so the observations become a stats SNAPSHOT.
         let is_root = member.relation.as_str() == "root";
         let mut messages = Vec::new();
         let mut observation = MemberObservation::default();
@@ -662,7 +662,7 @@ mod tests {
         assert!(m.parent_source_member_id.is_none());
     }
 
-    /// The header names the member graph (§26.4): a `parentSession` makes the
+    /// The header names the member graph: a `parentSession` makes the
     /// transcript a CHILD of that parent, and a child never carries a title
     /// source.
     #[test]
@@ -739,7 +739,7 @@ mod tests {
         );
     }
 
-    /// §32.2 — the root read keeps the conversation and drops machine traffic;
+    /// the root read keeps the conversation and drops machine traffic;
     /// the writer's own `seq` is the native message id.
     #[test]
     fn the_root_read_keeps_the_conversation_and_drops_machine_traffic() {
@@ -795,8 +795,8 @@ mod tests {
     }
 
     /// A `user/message` that carries a `senderSessionId` was written by another
-    /// session, not by the user — dsh says so in `data.source` (§37.17). It is
-    /// execution observation now (§26.4), never conversation.
+    /// session, not by the user — dsh says so in `data.source`. It is
+    /// execution observation now, never conversation.
     #[test]
     fn a_message_from_another_session_is_side_activity() {
         let id = "session-agent-msg";
@@ -843,7 +843,7 @@ mod tests {
 
     /// dsh names its own sessions and rewrites the name; measured order is
     /// always `fallback` → `provider` → `user`, so the last record is the
-    /// current one — no ranking table needed (§37.15).
+    /// current one — no ranking table needed.
     #[test]
     fn the_last_session_title_wins() {
         let root = unique_dir("dsh-title");
@@ -869,8 +869,8 @@ mod tests {
 
     /// `fallback` is dsh truncating the first line of the first message, which
     /// on three of this machine's sessions is the literal machine preamble
-    /// `## Task context task title:` — not a title anyone wrote (§37.15).
-    /// The task envelope is the parent's words, not the user's (§37.15).
+    /// `## Task context task title:` — not a title anyone wrote.
+    /// The task envelope is the parent's words, not the user's.
     #[test]
     fn the_task_envelope_is_not_the_user_turn() {
         let root = unique_dir("dsh-envelope");
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(texts, vec!["first prompt", "first reply"], "{texts:?}");
     }
 
-    /// A child member replays to observations only (§26.4).
+    /// A child member replays to observations only.
     #[test]
     fn a_child_member_produces_observations_only() {
         let id = "session-child";
@@ -989,7 +989,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Provenance 方案 §28.2 — `data.message.source` gated on `kind=="model"`
+    ///  — `data.message.source` gated on `kind=="model"`
     /// attributes the generation identity; any other source kind stays NULL.
     #[test]
     fn assistant_source_kind_model_attributes_the_generation_identity() {

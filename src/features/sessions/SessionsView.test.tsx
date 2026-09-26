@@ -1,4 +1,4 @@
-// Sessions 页的 Workstream 筛选口径（方案 §30）：筛选直接看
+// Sessions 页的 Workstream 筛选口径：筛选直接看
 // `session.owner_workstream_id`，未归属看 null。不存在"关联任务"这一层。
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";

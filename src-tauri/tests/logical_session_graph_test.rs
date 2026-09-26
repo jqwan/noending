@@ -1,5 +1,5 @@
-//! Logical Session graph resolution end-to-end tests (重构方案 §10/§11/§13 and
-//! the §32.3–§32.5/§32.10 test matrix): discovery batch → root/child/side
+//! Logical Session graph resolution end-to-end tests (and
+//! the  test matrix): discovery batch → root/child/side
 //! resolution → diagnostics → atomic member commit → LaunchIntent root-only.
 //!
 //! Fixtures are Codex rollouts (plain JSONL): the one adapter whose sources
@@ -134,7 +134,7 @@ fn logical_root_creation_rolls_back_if_root_member_cannot_be_written() {
 }
 
 // ---------------------------------------------------------------------------
-// §32.3 — child/side resolution and diagnostics
+// child/side resolution and diagnostics
 // ---------------------------------------------------------------------------
 
 /// A child discovered with no root anywhere: no Logical Session is created
@@ -169,7 +169,7 @@ fn a_child_without_a_root_is_a_diagnostic_not_a_session() {
 
 /// The root shows up in a LATER batch: one Logical Session, the child (and a
 /// side) attach to it, and the diagnostic from the earlier pass is removed.
-/// Scan order never decides identity (§10.2).
+/// Scan order never decides identity.
 #[test]
 fn a_root_discovered_later_attaches_the_child_and_resolves_the_diagnostic() {
     let root_dir = temp_root("late-root");
@@ -224,7 +224,7 @@ fn a_root_discovered_later_attaches_the_child_and_resolves_the_diagnostic() {
     );
 }
 
-/// Child transcript text never becomes conversation (§6/§26.1); only the
+/// Child transcript text never becomes conversation; only the
 /// root's user/assistant prose is stored.
 #[test]
 fn child_transcript_text_never_becomes_conversation() {
@@ -271,7 +271,7 @@ fn child_transcript_text_never_becomes_conversation() {
 }
 
 /// A child whose cwd differs never moves the Session's physical location
-/// (§4.1/§18): Session.cwd is Root authority only.
+///: Session.cwd is Root authority only.
 #[test]
 fn a_child_cwd_never_moves_the_session() {
     let root_dir = temp_root("child-cwd");
@@ -321,7 +321,7 @@ fn a_child_cwd_never_moves_the_session() {
 }
 
 /// Child activity moves `last_activity_at` (the whole graph's activity) but
-/// never `last_conversation_at` (root conversation only) (§4.1).
+/// never `last_conversation_at` (root conversation only).
 #[test]
 fn child_activity_moves_last_activity_but_not_last_conversation() {
     let root_dir = temp_root("child-activity");
@@ -456,11 +456,11 @@ fn trash_freezes_discovery_until_restore() {
 }
 
 // ---------------------------------------------------------------------------
-// §32.4 — Fork
+// Fork
 // ---------------------------------------------------------------------------
 
 /// A forked page becomes its OWN Logical Session with the fork source recorded
-/// — and the source session's Owner is NOT inherited (§2.2/§17.3).
+/// — and the source session's Owner is NOT inherited.
 #[test]
 fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
     let root_dir = temp_root("fork");
@@ -515,7 +515,7 @@ fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
 
     // Now give the PARENT an owner via the explicit user door and re-reconcile:
     // ownership is decided once, by explicit action or a matched intent —
-    // discovery never copies it onto the fork (§2.2).
+    // discovery never copies it onto the fork.
     let owner = support_workstream("ws-owner");
     db.upsert_workstream(&owner).unwrap();
     db.set_session_owner(&parent.id, Some(&owner.id)).unwrap();
@@ -539,7 +539,7 @@ fn support_workstream(id: &str) -> noending::domain::Workstream {
     }
 }
 
-/// §17.1 — LaunchIntent matching is ROOT-only: a child/side discovery can
+/// LaunchIntent matching is ROOT-only: a child/side discovery can
 /// never claim a pending intent; the root discovery does.
 #[test]
 fn launch_intents_match_roots_only() {
@@ -711,11 +711,11 @@ fn owner_assignment_replays_pending_context_on_reconcile() {
 }
 
 // ---------------------------------------------------------------------------
-// §32.5 — ingestion atomicity
+// ingestion atomicity
 // ---------------------------------------------------------------------------
 
 /// A Trash racing a member commit: the whole delta is refused — no messages,
-/// no stats, no cursor move (§13: trash racing ingestion commits either all
+/// no stats, no cursor move (trash racing ingestion commits either all
 /// of it or none of it).
 #[test]
 fn a_trash_racing_the_commit_takes_nothing() {
@@ -750,7 +750,7 @@ fn a_trash_racing_the_commit_takes_nothing() {
 }
 
 /// A member that moved to another session while its delta was being prepared:
-/// the stale commit is rejected in full (§13.2).
+/// the stale commit is rejected in full.
 #[test]
 fn a_stale_commit_after_topology_correction_is_rejected() {
     let db = open_db("topology-race");
@@ -821,7 +821,7 @@ fn a_stale_commit_after_topology_correction_is_rejected() {
 }
 
 /// Append duplicate: the same messages committed again store nothing new
-/// (identity dedup, §14).
+/// (identity dedup,).
 #[test]
 fn duplicate_commits_dedup() {
     let db = open_db("dedup");
@@ -857,7 +857,7 @@ fn duplicate_commits_dedup() {
 
 /// A source rewrite (new generation, full rescan): the old conversation is
 /// retained, identical messages dedup, genuinely new ones append — and a
-/// stats snapshot replaces the previous counters atomically (§14/§7.3).
+/// stats snapshot replaces the previous counters atomically.
 #[test]
 fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
     let db = open_db("rescan");
@@ -1065,8 +1065,8 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
     );
 }
 
-/// §32.5 — the core's last line of defense: messages handed to a CHILD member
-/// are an error, never silently stored (§6).
+/// the core's last line of defense: messages handed to a CHILD member
+/// are an error, never silently stored.
 #[test]
 fn a_child_member_cannot_write_conversation() {
     let db = open_db("child-write");
@@ -1112,7 +1112,7 @@ fn a_child_member_cannot_write_conversation() {
 }
 
 // ---------------------------------------------------------------------------
-// §32.10 — diagnostics stay out of everything
+// diagnostics stay out of everything
 // ---------------------------------------------------------------------------
 
 /// A repeat offender becomes visible at observation_count >= 2, and resolving
@@ -1138,7 +1138,7 @@ fn diagnostics_are_repeat_visible_and_resolvable() {
     assert_eq!(visible[0].observation_count, 2);
     let reason = visible[0].reason.clone();
 
-    // Diagnostics are not searchable documents (§11: no Search).
+    // Diagnostics are not searchable documents (no Search).
     let hits = noending::search::search(&db, &reason, 20).unwrap();
     assert!(
         hits.is_empty(),

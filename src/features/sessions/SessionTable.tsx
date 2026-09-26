@@ -43,7 +43,7 @@ export function sessionDisplayTitle(title: string | null | undefined): string {
 }
 
 /**
- * Project 单元格（方案 §1.10 / §43.4-2）。
+ * Project 单元格。
  *
  * v0.2 里 Project 只有一条事实链：`workspace_path_id → WorkspacePath.project_id`。
  * `sessions.project_id` 仍是缓存列，所以表格读它，但**读到什么就要说什么**：
@@ -233,10 +233,10 @@ export function activityLabel(iso: string | null | undefined): string {
 const W_WORKSTREAM = 16;
 
 /**
- * Sessions 卡片（整体设计方案 §38/§40）：信息按卡片分组，随窗口宽度自适应。
+ * Sessions 卡片（整体设计）：信息按卡片分组，随窗口宽度自适应。
  * 点击卡片进入详情，操作区提供继续（Resume）和移入回收站。
  *
- * 一行最多一个任务（方案 §31）：`session.owner_workstream_id` 指向的那一个，
+ * 一行最多一个任务：`session.owner_workstream_id` 指向的那一个，
  * 标题由调用方给出的 id → title 投影解析；未归属时显示「未归属任务」。
  */
 export default function SessionCards({ sessions, workstreamTitleById, projectNameById, onOpen, onResume, onTrash }: {

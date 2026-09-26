@@ -10,7 +10,7 @@
 //! item is never silently overwritten). Every applied mutation produces a
 //! new revision with full source trail.
 //!
-//! Owner boundary (方案 §3.3/§20): a run may only write the Workstream the
+//! Owner boundary: a run may only write the Workstream the
 //! Session owns. `update` / `supersede` / `resolve` name their target by
 //! `item_id`, and that id comes from model output — untrusted input that may
 //! echo an id found anywhere in the transcript. The check therefore lives
@@ -255,7 +255,7 @@ impl MergeEngine {
         }
     }
 
-    /// §3.3/§20 — may this mutation touch the run's Owner Workstream at all?
+    ///  — may this mutation touch the run's Owner Workstream at all?
     ///
     /// Checked once, before any write, so "a SyncRun only ever writes its
     /// Owner" holds for every op instead of by per-arm inspection:

@@ -1,7 +1,7 @@
 //! WorkstreamPath persistence: the ordered working-path list.
 //!
 //! The ordering IS the role — position 0 is the primary path, so there is no
-//! `is_primary` column to drift out of agreement with the list (方案 §1.5). The
+//! `is_primary` column to drift out of agreement with the list. The
 //! invariant these helpers must keep at all times:
 //!
 //! ```text
@@ -16,9 +16,9 @@
 //! position)` stops two paths claiming the same slot.
 //!
 //! Policy that calls these — add/remove/reorder endpoints, the recycle bin —
-//! is `workspace::workstream` (方案 §18). Two of them
+//! is `workspace::workstream`. Two of them
 //! live here rather than there because they are mechanical and total:
-//! [`purge_workstream_data_conn`] (the whole §42.3-M6 delete order, in the
+//! [`purge_workstream_data_conn`] (the full delete order, in the
 //! caller's transaction) and [`reindex_workstream_search_conn`] (one Workstream's
 //! search row, re-derived from position 0).
 //!
@@ -56,7 +56,7 @@ impl Db {
         Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// §13 tier 2 — the launch directory for a New Session on this Workstream.
+    /// The launch directory for a New Session on this Workstream.
     pub fn primary_workspace_path_id(&self, workstream_id: &str) -> Result<Option<String>> {
         let conn = self.read();
         Ok(conn
@@ -97,7 +97,7 @@ pub fn primary_workspace_path(
         .optional()?)
 }
 
-/// §1.8 — append at the end (an empty list yields position 0, which is why
+/// Append at the end (an empty list yields position 0, which is why
 /// "become the primary path" needs no special case).
 ///
 /// Idempotent by `(workstream_id, workspace_path_id)`: re-adding a path that is
@@ -152,12 +152,12 @@ pub fn find_workstream_path_conn(
         .optional()?)
 }
 
-/// §1.6 — delete the WorkstreamPath and renumber the survivors, in the caller's
+/// Delete the WorkstreamPath and renumber the survivors, in the caller's
 /// transaction. Deleting position 0 therefore promotes position 1 automatically:
 /// the user never has to pick a new primary path.
 ///
 /// This touches the path list only. It never changes a Session — not its cwd,
-/// not its workspace path, and not its Owner Workstream (方案 §5.2, §12). A
+/// not its workspace path, and not its Owner Workstream. A
 /// Session's cwd is historical execution fact; the Workstream's path list is
 /// current configuration; the owner is semantic assignment. They are
 /// independent.
@@ -194,7 +194,7 @@ pub fn recompact_workstream_positions_conn(conn: &Connection, workstream_id: &st
     Ok(())
 }
 
-/// §21 — "make this the primary path" is a reorder, not a role change.
+/// "Make this the primary path" is a reorder, not a role change.
 ///
 /// Takes the COMPLETE ordered list of workspace path ids and rewrites positions
 /// to match. Anything not listed is not silently appended: an incomplete list is
@@ -260,12 +260,12 @@ pub fn workstream_path_by_id_conn(
         .optional()?)
 }
 
-/// §12/§13 — the list as canonical path strings, **in position order**.
+/// The list as canonical path strings, **in position order**.
 ///
 /// Ordering is the contract: this is the byte sequence the PreparedLaunch
 /// fingerprint hashes, so a reorder that moves position 0 changes the launch
 /// plan and a sorted copy of the list can never make two different orders look
-/// equal (§42.3-M17).
+/// equal.
 pub fn ordered_canonical_paths_for_workstream(
     conn: &Connection,
     workstream_id: &str,
@@ -279,7 +279,7 @@ pub fn ordered_canonical_paths_for_workstream(
     Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
-/// §42.3-M18 — rewrite one Workstream's search row so its `parent_id` follows
+/// Rewrite one Workstream's search row so its `parent_id` follows
 /// the CURRENT position-0 path.
 ///
 /// The generic [`super::workspace::refresh_workstream_search_parents_conn`]
@@ -305,7 +305,7 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
     Ok(())
 }
 
-/// §42.3-M6 — delete every row a Workstream owns, in FK order, inside the
+/// Delete every row a Workstream owns, in FK order, inside the
 /// caller's transaction. A permanent delete is all-or-nothing: a half-purged
 /// Workstream would keep Context rows whose owner no longer exists.
 ///
@@ -320,9 +320,9 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
 /// by the FK in step 9, the rows themselves survive), `session_members`,
 /// `session_messages`, `launch_intents`, `workspace_paths`, `projects`,
 /// `sync_runs` and the Agents' raw source data. A Session survives the
-/// Workstream that referenced it (方案 §37); `launch_intents` keep their
+/// Workstream that referenced it; `launch_intents` keep their
 /// recorded `cwd` as historical evidence even when it names a Workstream that
-/// is gone (§42.3-M24).
+/// is gone.
 pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> Result<()> {
     // 1. conflict audit trail — references context_conflicts.
     tx.execute(
@@ -358,9 +358,9 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
     )?;
     // 7. the ordered path list. `workspace_paths` rows survive: they are
     //    physical facts other Sessions and Workstreams may share, and Project /
-    //    WorkspacePath GC is `workspace::project`'s job (§10). Sessions keep
+    //    WorkspacePath GC is `workspace::project`'s job. Sessions keep
     //    their `owner_workstream_id` until the Workstream row itself is removed
-    //    in step 9, where the FK's ON DELETE SET NULL clears it (方案 §37).
+    //    in step 9, where the FK's ON DELETE SET NULL clears it.
     tx.execute(
         "DELETE FROM workstream_paths WHERE workstream_id = ?1",
         params![workstream_id],
@@ -378,7 +378,7 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
     //    is cleared by the FK's ON DELETE SET NULL in the same statement.
     //
     //    Their search documents are rebuilt right after, in this same
-    //    transaction: a Session document embeds its Owner's title (§39), so
+    //    transaction: a Session document embeds its Owner's title, so
     //    leaving it would keep the deleted Workstream's name findable through
     //    the Sessions that used to own it. The ids are collected BEFORE the
     //    delete — afterwards the owner column no longer names them.
@@ -399,7 +399,7 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
     Ok(())
 }
 
-/// §1.12 — the Project projection for one Workstream: which Projects it appears
+/// The Project projection for one Workstream: which Projects it appears
 /// in, and whether it appears there through its primary path.
 pub fn project_roles_for_workstream(
     conn: &Connection,
@@ -420,7 +420,7 @@ pub fn project_roles_for_workstream(
     Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
-/// §36 — the Workstreams visible in one Project, with the primary/related
+/// The Workstreams visible in one Project, with the primary/related
 /// distinction. Any position counts as membership; position 0 makes it 主关联.
 pub fn workstreams_for_project(
     conn: &Connection,

@@ -10,7 +10,7 @@ use noending::platform::exec_resolver::{cli_names, AgentInstallation};
 
 /// The argv contract only exists for Agents that HAVE a CLI. Qoder is
 /// IDE-hosted: there is no command line to render, and its builders must fail
-/// instead of inventing one (方案 §37.5).
+/// instead of inventing one.
 fn launchable() -> Vec<Agent> {
     Agent::all()
         .iter()
@@ -219,7 +219,7 @@ fn an_override_value_is_passed_literally_as_one_argv_element() {
 /// An Agent without a CLI must fail loudly. Returning an empty argv (or a
 /// guessed program) would look like a successful launch and hand the user a
 /// terminal that never opens — the failure mode "Agent owns defaults" exists
-/// to prevent (方案 §37.3).
+/// to prevent.
 #[test]
 fn agents_without_a_cli_refuse_to_build_a_command() {
     let cli_less: Vec<Agent> = Agent::all()

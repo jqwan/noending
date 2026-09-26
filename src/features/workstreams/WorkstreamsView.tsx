@@ -15,7 +15,7 @@ import type { Route, ViewAction, WorkstreamScope } from "../../app/routes";
 
 type SortKey = "recent" | "created" | "name";
 /**
- * 筛选按**两个正交维度**表达（方案 §1.13）：lifecycle（进行中 / 已完成）与
+ * 筛选按**两个正交维度**表达：lifecycle（进行中 / 已完成）与
  * visibility（normal / archived）。回收站就是 archived —— 它不是第三种状态，
  * 也不改变 lifecycle，所以「回收站」只能按 visibility 判，
  * 不能像旧代码那样把「非进行中」统统算成已归档。
@@ -30,7 +30,7 @@ const SORTERS: Record<SortKey, (a: WorkstreamCardData, b: WorkstreamCardData) =>
   name: (a, b) => a.title.localeCompare(b.title, "zh-Hans"),
 };
 
-/** Workstreams = Organize：浏览、搜索、排序、整理（整体设计方案 §22-§27）。 */
+/** Workstreams = Organize：浏览、搜索、排序、整理（整体设计）。 */
 export default function WorkstreamsView({ navigate, action, scope, actionSeq }: {
   navigate: (r: Route) => void;
   action?: ViewAction;

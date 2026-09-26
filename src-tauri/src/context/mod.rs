@@ -120,7 +120,7 @@ pub struct SessionContextBundle {
     pub mode: String, // new | resume
     pub delivery_level: String,
     /// The single Workstream this bundle routes to, or `None` for an empty
-    /// bundle (方案 §17.1). A Session has at most one Owner Workstream, so a
+    /// bundle. A Session has at most one Owner Workstream, so a
     /// bundle never aggregates several — no primary/related, no cross-workstream
     /// dedup.
     pub workstream_id: Option<String>,
@@ -168,7 +168,7 @@ pub fn resolve_core_context(db: &Db, workstream_id: &str) -> Result<Vec<ContextS
 
 /// Build the markdown bundle for one Workstream.
 ///
-/// `workstream_id == None` yields an EMPTY bundle (方案 §17.2): a Session with
+/// `workstream_id == None` yields an EMPTY bundle: a Session with
 /// no Owner Workstream has no context route, and nothing is assembled from
 /// elsewhere. The token budget applies at SECTION SELECTION time, before
 /// rendering: `bundle.sections` contains exactly the sections the rendered

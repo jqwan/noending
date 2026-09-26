@@ -12,7 +12,7 @@ import type {
   Workstream,
 } from "../../types";
 
-// 只覆盖重构后的详情页（§22）：执行信息（聚合统计 + 成员树）、源会话状态、
+// 只覆盖重构后的详情页：执行信息（聚合统计 + 成员树）、源会话状态、
 // fork 链接、回收站横幅的永久删除门槛，以及「所属任务」这个单 Owner 入口。
 vi.mock("../../api", () => ({
   api: {
@@ -157,7 +157,7 @@ async function renderDetail(d: SessionDetail) {
   return { navigate, container: document.body };
 }
 
-// ---------------- 执行信息（§22.2） ----------------
+// ---------------- 执行信息 ----------------
 
 it("shows aggregate execution stats and an expandable member tree", async () => {
   const me = session("me");
@@ -228,7 +228,7 @@ it("shows tool / token / cost rows only when the data is present", async () => {
   expect(body).toContain("成本 0.5");
 });
 
-// ---------------- 源会话（§22.4） ----------------
+// ---------------- 源会话 ----------------
 
 it("shows the root member's source as 源会话 without status noise when present", async () => {
   await renderDetail(detail(session("me")));
@@ -263,7 +263,7 @@ it("treats a missing root member as unavailable even when the verdict says prese
   screen.getByText("无法确认源会话状态");
 });
 
-// ---------------- 消息（§22.1） ----------------
+// ---------------- 消息 ----------------
 
 it("renders only the user/assistant conversation", async () => {
   await renderDetail(detail(session("me"), {
@@ -277,7 +277,7 @@ it("renders only the user/assistant conversation", async () => {
   screen.getByText("好的，我在看");
 });
 
-// ---------------- Fork（§22.3） ----------------
+// ---------------- Fork ----------------
 
 it("links to the session it forked from", async () => {
   const me = session("me", { forked_from_session_id: "orig" });
@@ -303,7 +303,7 @@ it("shows no fork field for a session that is not a fork", async () => {
   expect(screen.queryByText(/分叉自/)).toBeNull();
 });
 
-// ---------------- 回收站横幅（§36 + §22.4） ----------------
+// ---------------- 回收站横幅 ----------------
 
 it("offers permanent delete in the trash banner only when allowed", async () => {
   await renderDetail(detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
@@ -326,7 +326,7 @@ it("explains why permanent delete is unavailable while trashed", async () => {
   screen.getByText(/永久删除不可用（Root 源仍存在或无法确认）/);
 });
 
-// ---------------- 所属任务（单 Owner，方案 §28/§29） ----------------
+// ---------------- 所属任务（单 Owner，） ----------------
 
 it("shows the one owner workstream and links to it", async () => {
   const owner = workstream("w1", "会话与 Workstream 重构");

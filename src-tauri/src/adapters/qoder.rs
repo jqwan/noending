@@ -7,12 +7,12 @@
 //! nothing would look wrong — which is exactly how provenance gets lost
 //! (AGENTS.md: Provenance Fidelity).
 //!
-//! Member mapping (§26.3):
+//! Member mapping:
 //! - `<encoded-cwd>/<main>.jsonl` → the ROOT member;
 //! - `<encoded-cwd>/<main>/subagents/agent-*.jsonl` → CHILD members. Their
 //!   every line repeats the ROOT's `sessionId`, so the member identity is
-//!   Adapter-derived and stable: `<root-session-id>:subagent:<file-stem>`
-//!   (§5.1). Their text never becomes conversation — they contribute
+//!   Adapter-derived and stable: `<root-session-id>:subagent:<file-stem>`.
+//!   Their text never becomes conversation — they contribute
 //!   execution observations only.
 //!
 //! Qoder is an IDE with no headless CLI, so this adapter **ingests history
@@ -22,7 +22,7 @@
 //! **One fact comes from a second store.** The transcript carries no title, so
 //! discovery reads the app's own `chat_sessions` for it — read-only, looked up
 //! by the very session id the transcript reports, and silent when that store is
-//! absent (方案 §37.16). Nothing else about the session is taken from there.
+//! absent. Nothing else about the session is taken from there.
 
 use std::path::{Path, PathBuf};
 
@@ -43,10 +43,10 @@ const QODER_BUNDLE: &str = "com.qodercn.app.stable";
 /// The app database inside that folder; `chat_sessions` is the table we read.
 const QODER_DB: &str = "main.sqlite";
 
-/// The titles Qoder itself shows, read from the app's own database (方案 §37.16).
+/// The titles Qoder itself shows, read from the app's own database.
 ///
 /// The transcript has none, which is why discovery reads a second source for
-/// this one fact. `[实测]` `chat_sessions.session_id` is the id the transcript
+/// this one fact. `chat_sessions.session_id` is the id the transcript
 /// carries (7/7 on this machine), so the join is exact; `title` is the model's
 /// short name for the session — except when Qoder says otherwise, which it does
 /// out loud: `extra_json.titleSource`.
@@ -99,7 +99,7 @@ impl SessionTitles {
 
 /// Whether Qoder's `title` is a name it settled on.
 ///
-/// `[实测]` the two values it writes: `ai` (6 of 7 sessions locally — 「修改任务
+/// The two values it writes: `ai` (6 of 7 sessions locally — 「修改任务
 /// 编辑功能」, 「了解工程概况」) and `provisional` (the first user message, shown
 /// until the model answers). The rule is therefore a deny-list, not an
 /// allow-list: a future `custom` (the user renaming the session) is a title too.
@@ -111,7 +111,7 @@ fn is_resolved_title(source: Option<&str>) -> bool {
 
 /// Text of a message's content blocks. Only `type:"text"` counts: Qoder folds
 /// tool results into `user`-role lines (`toolUseResult` + a `tool_result`
-/// block), and tool traffic is deliberately not ingested (方案 §36.11).
+/// block), and tool traffic is deliberately not ingested.
 fn content_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -133,7 +133,7 @@ fn content_text(content: &Value) -> String {
 impl QoderAdapter {
     /// `<encoded-cwd>/<main>/subagents/agent-*.jsonl` is a sub-agent
     /// transcript: the directory shape is the marker (the real files' head is
-    /// plain Claude-shaped, so no content test can decide this — §37.3/§26.3).
+    /// plain Claude-shaped, so no content test can decide this).
     /// The stem and the enclosing session directory are the stable identity.
     fn subagent_member(path: &Path) -> Option<(String, String)> {
         let name = path.file_name()?.to_str()?;
@@ -225,7 +225,7 @@ impl QoderAdapter {
                     first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                 }
             }
-            // Last resort for a title (§37.15).
+            // Last resort for a title.
             if first_agent_text.is_none()
                 && v.get("type").and_then(|t| t.as_str()) == Some("assistant")
                 && v.get("isSidechain").and_then(|s| s.as_bool()) != Some(true)
@@ -260,7 +260,7 @@ impl QoderAdapter {
             started_at,
             last_activity_at: last_activity.or(last_ts),
             // The transcript carries no title; discovery fills this in from the
-            // app's own database (§37.16).
+            // app's own database.
             native_title: None,
             first_user_text,
             first_agent_text,
@@ -268,10 +268,10 @@ impl QoderAdapter {
         }))
     }
 
-    /// A sub-agent transcript as its own CHILD member (§26.3): identity is the
+    /// A sub-agent transcript as its own CHILD member: identity is the
     /// Adapter-derived `<root>:subagent:<stem>`, the parent is the root id the
     /// transcript itself repeats. No title sources — a child never names a
-    /// Logical Session (§4.2).
+    /// Logical Session.
     fn parse_subagent_member(
         path: &Path,
         session_dir: &str,
@@ -312,7 +312,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
     }
 
     /// Always `None`: Qoder ships no CLI, so there is nothing to detect and
-    /// nothing to launch. Ingestion does not consult this (方案 §37.3).
+    /// nothing to launch. Ingestion does not consult this.
     fn detect(&self) -> Option<crate::platform::exec_resolver::AgentInstallation> {
         None
     }
@@ -420,7 +420,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
     }
 }
 
-/// One transcript line's contribution (§26.3). Root members produce
+/// One transcript line's contribution. Root members produce
 /// conversation; child members produce observations only.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -455,16 +455,16 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             } else {
                 SessionMessageRole::Assistant
             };
-            // Injected context is never conversation (§2.3).
+            // Injected context is never conversation.
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
                 return Some(ParsedLine::observation_only(observation));
             }
-            // Message provenance (Provenance 方案 §13A/§16.4): the assistant
+            // Message provenance: the assistant
             // row itself carries `message.model` — same envelope position as
             // Claude Code's actual response model, source-native opaque ids
             // ("dfmodel", "qfmodel", …; 4728/4728 rows in the real corpus).
-            // This is NOT the `runtime-config.model` broadcast the plan
-            // forbids: the field sits on the message row. Locally synthesized
+            // This is NOT the `runtime-config.model` broadcast: the field sits
+            // on the message row. Locally synthesized
             // rows ("<synthetic>" error notices) are not real generations and
             // stay NULL. No provider field exists → NULL.
             let model = if role == SessionMessageRole::Assistant {
@@ -485,7 +485,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
         }
         // `attachment` lines are injected context (skill listings, system
         // reminders) — machine chatter, same category as the tool events
-        // dropped in §36.11.
+        // deliberately dropped.
         _ => None,
     }
 }
@@ -536,7 +536,7 @@ mod tests {
         }
     }
 
-    /// §32.2 — prose survives; attachments, tool results and bookkeeping lines
+    /// Prose survives; attachments, tool results and bookkeeping lines
     /// never become messages.
     #[test]
     fn the_root_read_keeps_prose_and_counts_the_rest() {
@@ -570,7 +570,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// §26.3 — sub-agent transcripts become CHILD members with an
+    /// Sub-agent transcripts become CHILD members with an
     /// Adapter-derived stable identity, while their text stays out of the
     /// Conversation.
     #[test]
@@ -635,7 +635,7 @@ mod tests {
         );
     }
 
-    /// The app database still names the root session (§37.16).
+    /// The app database still names the root session.
     #[test]
     fn discovery_reads_session_facts() {
         let dir = unique_dir("discover");
@@ -670,8 +670,8 @@ mod tests {
         let _ = SessionTitles::open_at(None);
     }
 
-    /// Provenance 方案 §28.2/§28.5 — the assistant row's own `message.model`
-    /// attributes (this is NOT the runtime-config broadcast the plan forbids);
+    /// The assistant row's own `message.model`
+    /// attributes (this is NOT the runtime-config broadcast);
     /// locally synthesized error rows ("<synthetic>") are not generations and
     /// stay NULL. The runtime-config line itself contributes nothing.
     #[test]

@@ -96,7 +96,7 @@
 
 .ws-btn { display: inline-flex; align-items: center; gap: 6px; }
 .ws-btn .agent-icon { flex: none; }
-/* Resume is the highest-frequency action on Home — slightly stronger than New (§74) */
+/* Resume is the highest-frequency action on Home — slightly stronger than New */
 .ws-btn.resume-primary { border-color: var(--text-primary); font-weight: 550; }
 
 /* ---------- Workstreams board controls ---------- */
@@ -108,7 +108,7 @@
 /* ---------- Recent sessions (Home) ---------- */
 .recent-sessions .list-row { padding: 10px 4px; }
 
-/* ---------- Workstream Detail: two-column (§30) ---------- */
+/* ---------- Workstream Detail: two-column ---------- */
 .ws-detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
@@ -199,7 +199,7 @@
 
 .ctx-edit textarea { min-height: 88px; margin-bottom: 8px; }
 
-/* ---------- Extended context compact rows (§34) ---------- */
+/* ---------- Extended context compact rows ---------- */
 .ext-row {
   display: flex;
   align-items: baseline;
@@ -260,7 +260,7 @@
 .activity-row:first-of-type { border-top: 0; }
 .activity-row .when { color: var(--text-muted); flex: none; width: 44px; font-family: var(--mono); font-size: 11px; }
 
-/* ---------- Sessions cards and trash table (§38/§40) ---------- */
+/* ---------- Sessions cards and trash table ---------- */
 .session-grid {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
 }
@@ -330,7 +330,7 @@
 .session-table .cell-agent-content { display: flex; align-items: center; gap: 7px; }
 .session-table .cell-title { font-weight: 550; }
 
-/* ---------- Session detail messages (§43/§44, 聊天观感 §36.23) ---------- */
+/* ---------- Session detail messages ---------- */
 /* 左右各留 8px 内距再负 margin 抵消：悬停底色才不会贴着文字，而独立事件的分隔线
    也保持同宽（正文位置一点没动）。 */
 .event { display: flex; flex-direction: column; padding: 6px 8px; margin: 0 -8px; border-radius: var(--radius-sm); }
@@ -340,7 +340,7 @@
 .event.is-tech:first-of-type { border-top: 0; }
 .event .head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
 .event .who { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
-/* 「来自谁」：只有跨线程信封（agent_message）才有，跟在 who 后面弱化显示（§37.13）。
+/* 「来自谁」：只有跨线程信封（agent_message）才有，跟在 who 后面弱化显示。
    它可能是一条很长的 agent 路径，所以自己是唯一可压缩的那一项：截断加省略号，
    时间戳与标签都不跟着折行（全文在 title 提示里）。 */
 .event .from {
@@ -348,7 +348,7 @@
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .event .when { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
-/* 消息级模型标签（Provenance 方案 §22）：低干扰，只有来源证实的 Assistant
+/* 消息级模型标签：低干扰，只有来源证实的 Assistant
    消息才有；与 .when 同级弱化显示，不占独立行。 */
 .event .prov { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
 .event .body { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -370,20 +370,20 @@
 }
 .event.is-agent .body { align-self: flex-start; border-bottom-left-radius: var(--radius-sm); }
 .event.tool .body { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); }
-/* 系统事件里的 Markdown（§36.25）：一份文档用 11.5px 等宽字渲染就不叫预览了。
+/* 系统事件里的 Markdown：一份文档用 11.5px 等宽字渲染就不叫预览了。
    字号归回 .md-body 的 13px、字体归回正文字体；仍然保持 muted 颜色与 system 的降低
    不透明度——它是系统噪音，只是有结构。 */
 .event.is-tech .body.md-body { font-family: inherit; font-size: 13px; }
 .event.system { opacity: 0.65; }
 .event.system .body { font-size: 12px; color: var(--text-muted); }
-/* §36.24：热区从整行收到气泡——整行的悬停底色是条与内容无关的宽条，而点开这件事
+/* 热区从整行收到气泡——整行的悬停底色是条与内容无关的宽条，而点开这件事
    属于这条消息本身。按钮删掉了（气泡自己就是入口），键盘可达靠 role + tabIndex，
    焦点环由全局的 :focus-visible 给。正文仍要能拖选复制，所以点击时只确认
    「没有选中文字」，不阻止选择。 */
 .event .body.clickable { cursor: pointer; transition: background .12s; }
 .event.is-user .body.clickable:hover { background: var(--accent-wash-hover); }
 .event.is-agent .body.clickable:hover { background: var(--bg-hover); }
-/* Markdown 预览直接渲染在气泡里（§36.24）：不能再按字数切——切在 ``` 或 ** 中间会把
+/* Markdown 预览直接渲染在气泡里：不能再按字数切——切在 ``` 或 ** 中间会把
    后半段整块渲染成代码。改成按高度收口 + 底部渐隐，点开看全文。
    is-clamped 由 JS 量出来：内容本来就短的时候挂渐隐，会把最后两行擦掉。 */
 .event .body.md-body { white-space: normal; max-height: 132px; overflow: hidden; }
@@ -396,7 +396,7 @@
    （不在这里再套一层滚动区，否则会出现嵌套滚动条）。 */
 .msg-full { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.65; }
 
-/* Markdown 预览（§36.22）。样式只落在这一个容器里，不去动全局标签：
+/* Markdown 预览。样式只落在这一个容器里，不去动全局标签：
    渲染结果来自转录，外观越"普通"越好，免得读者以为这是 NoEnding 自己的排版。 */
 .md-body { font-size: 13px; line-height: 1.7; }
 .md-body > :first-child { margin-top: 0; }
@@ -417,7 +417,7 @@
 .md-body .md-link { color: var(--accent); }
 .md-body .md-img { color: var(--text-muted); font-size: 12px; }
 
-/* ---------- Session trash / permanent delete (Session Lifecycle & Deletion §35-§38) ---------- */
+/* ---------- Session trash / permanent delete (Session Lifecycle & Deletion) ---------- */
 .session-trash-banner {
   display: flex;
   align-items: center;
@@ -436,7 +436,7 @@
   gap: 12px;
   margin: 0 0 10px;
 }
-/* 永久删除预览里的「将永久删除 / 保留」清单（§20）。 */
+/* 永久删除预览里的「将永久删除 / 保留」清单。 */
 .purge-list { margin: 6px 0 0; padding-left: 18px; }
 .purge-list li { margin: 3px 0; font-size: 13px; overflow-wrap: anywhere; }
 
@@ -525,7 +525,7 @@
 .palette-item .hint { color: var(--text-muted); font-size: 11px; flex: none; }
 .palette-empty { padding: 18px; color: var(--text-muted); font-size: 13px; }
 
-/* ---------- Settings (§56 two-pane inside Main) ---------- */
+/* ---------- Settings ---------- */
 .settings-layout {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);

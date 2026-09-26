@@ -3,11 +3,11 @@
 //! These are thin: they take the lock, map the wire shape and hand over to
 //! `workspace::session`, which owns the rules.
 //!
-//! A Session has at most ONE Owner Workstream (方案 §3.3). Setting it writes
+//! A Session has at most ONE Owner Workstream. Setting it writes
 //! `sessions.owner_workstream_id` and nothing else — it never touches the
-//! Workstream's ordered path list, the Session's cwd or its Project (§5.1).
+//! Workstream's ordered path list, the Session's cwd or its Project.
 //!
-//! The detail shape is the Logical Session view (重构方案 §28): the
+//! The detail shape is the Logical Session view: the
 //! conversation (`session_messages` only — the UI never sees compact/system/
 //! sidechain kinds), the execution graph as MEMBERS (not other Sessions),
 //! query-time aggregate stats, the two frontiers, and the source/lifecycle
@@ -37,33 +37,33 @@ pub struct SessionMemberView {
 #[derive(Serialize)]
 pub struct SessionDetail {
     pub session: Session,
-    /// The Conversation: root user/assistant messages only (§22.1).
+    /// The Conversation: root user/assistant messages only.
     pub messages: Vec<SessionMessage>,
-    /// The one Workstream this Session belongs to, or `None` (方案 §24).
+    /// The one Workstream this Session belongs to, or `None`.
     pub owner_workstream: Option<Workstream>,
-    /// §22: Session Detail shows the WorkspacePath and the Project behind it,
+    /// Session Detail shows the WorkspacePath and the Project behind it,
     /// read-only. They travel as display strings because `workspace_path_id`
     /// alone would make the UI join a table it has no command for — and the
     /// Project shown here is derived through that path, never picked by a user.
     pub workspace_path: Option<SessionWorkspacePath>,
-    /// The execution graph (§22.2): root / children / sides. Execution info,
+    /// The execution graph: root / children / sides. Execution info,
     /// never other user-visible Sessions.
     pub members: Vec<SessionMemberView>,
-    /// Query-time aggregate over the whole graph (§7.4 — no cache to drift).
+    /// Query-time aggregate over the whole graph (no cache to drift).
     pub stats: crate::storage::SessionAggregateStats,
     /// The two frontiers the detail page shows: messages ingested, and how
     /// far Context processing has consumed them.
     pub ingested_message_sequence: i64,
     pub processed_message_sequence: i64,
-    /// Fresh (detail-load time) verdict on the ROOT source (§20.1).
+    /// Fresh (detail-load time) verdict on the ROOT source.
     /// `missing` means the adapter confirmed it absent; every other failure
     /// stays `unavailable`.
     pub root_source_status: SourceAvailability,
     /// Resume eligibility: active session + a present root source.
     pub can_resume: bool,
-    /// Permanent-delete eligibility: trashed + fresh root `missing` (§20.1).
+    /// Permanent-delete eligibility: trashed + fresh root `missing`.
     pub can_permanently_delete: bool,
-    /// §22.3 — when this session is a fork, its source Session summary.
+    /// when this session is a fork, its source Session summary.
     pub forked_from: Option<Session>,
 }
 
@@ -76,7 +76,7 @@ pub struct SessionWorkspacePath {
     pub project_name: String,
 }
 
-// scope: active (default) | trash | all — 方案 §11; the recycle bin passes "trash".
+// scope: active (default) | trash | all —; the recycle bin passes "trash".
 #[tauri::command]
 pub fn list_sessions(
     state: State<AppState>,
@@ -146,7 +146,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             }),
             None => None,
         };
-        // §22.3 — the fork provenance, resolved to a summary when the source
+        // the fork provenance, resolved to a summary when the source
         // session still exists locally.
         let forked_from = match session.forked_from_session_id.as_deref() {
             Some(id) => db.get_session(id)?,
@@ -169,7 +169,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
     })
 }
 
-/// Set (or clear) a Session's Owner Workstream (方案 §23).
+/// Set (or clear) a Session's Owner Workstream.
 ///
 /// `workstream_id = None` clears ownership. This is the ONLY write path for
 /// semantic ownership; it changes one column and nothing else.
@@ -184,7 +184,7 @@ pub fn set_session_owner_workstream(
     })
 }
 
-// ---------------- Ingestion diagnostics (§11) ----------------
+// ---------------- Ingestion diagnostics ----------------
 
 /// The Settings → Ingestion Diagnostics list: repeat offenders only by
 /// default (`observation_count >= 2`). Diagnostics are NOT sessions — they

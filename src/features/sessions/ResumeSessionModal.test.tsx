@@ -270,7 +270,7 @@ describe("ResumeSessionModal owner display", () => {
     render(<ResumeSessionModal sessionId="s1" onClose={vi.fn()} />);
 
     await screen.findByText("NoEnding 会话模型重构");
-    // §33：不再出现「X 个任务」这种多任务计数，只显示这一个任务的名字。
+    // 不再出现「X 个任务」这种多任务计数，只显示这一个任务的名字。
     screen.getByText("1 个");
     expect(screen.queryByText(/个任务/)).toBeNull();
   });

@@ -31,14 +31,14 @@ type DetailMember = SessionDetail["members"][number];
 const MEMBER_ID_WIDTH = 24;
 
 /**
- * Session Detail = 一个逻辑会话（重构方案 §4/§28）：一次用户可感知、可 Resume
- * 的主会话。§22 的四块内容——Conversation（只有 user/assistant prose）、
+ * Session Detail = 一个逻辑会话：一次用户可感知、可 Resume
+ * 的主会话。 的四块内容——Conversation（只有 user/assistant prose）、
  * Execution Info（聚合统计 + 成员树）、Source / Lifecycle（源会话 + 回收站）、
  * Context / Owner（所属任务）。
  *
  * parent/children Session 链接已删除：执行图以 members 呈现，成员是执行信息，
- * 不是可进入的「另一个 Session 页面」（§22.2）。唯一的会话链接是 fork 来源
- * （§22.3）。右栏的 WorkspacePath / Project 事实照旧（v0.2 §43.3-M29）。
+ * 不是可进入的「另一个 Session 页面」。唯一的会话链接是 fork 来源
+ *。右栏的 WorkspacePath / Project 事实照旧（v0.2 M29）。
  */
 export default function SessionDetailView({ sessionId, navigate, goBack }: {
   sessionId: string;
@@ -50,16 +50,16 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const [ownerOpen, setOwnerOpen] = useState(false);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  // 回收站动作（Session Lifecycle & Deletion §36）：确认弹窗、执行中的 busy、
+  // 回收站动作（Session Lifecycle & Deletion）：确认弹窗、执行中的 busy、
   // 以及从详情页直接发起的永久删除 Modal。
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [trashBusy, setTrashBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
-  // 执行成员树默认收起：统计常看，整棵图偶看（§22.2「可展开 Members」）。
+  // 执行成员树默认收起：统计常看，整棵图偶看。
   const [membersOpen, setMembersOpen] = useState(false);
   /**
    * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字
-   * （§43.4-2）。派生链自带名字，所以正常情况下不多这一次读取。
+   *。派生链自带名字，所以正常情况下不多这一次读取。
    */
   const [projects, setProjects] = useState<Project[] | null>(null);
 
@@ -107,9 +107,9 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const { session, owner_workstream } = detail;
 
   /**
-   * 刷新 = 只摄入。Context 提取只在智能开启时才会发生（方案 v0.1 §11.6），
+   * 刷新 = 只摄入。Context 提取只在智能开启时才会发生，
    * 所以提取结果只跟随后端的 context_processing_enabled 走：智能关闭时它恒为 false，
-   * 这一屏永远不会出现「Context 变更」（§13 移除清单）。
+   * 这一屏永远不会出现「Context 变更」。
    */
   const doSync = async () => {
     if (syncing) return;
@@ -136,11 +136,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const title = sessionDisplayTitle(session.title);
   const untitled = title === UNTITLED_SESSION;
   const cwd = (session.cwd ?? "").trim();
-  /** 单一生命周期权威：null = 正常，时间戳 = 在回收站（§3）。 */
+  /** 单一生命周期权威：null = 正常，时间戳 = 在回收站。 */
   const trashed = session.trashed_at !== null;
 
   /**
-   * 移入回收站（§36）：全局隐藏，不删任何数据。成功后返回上一个界面——
+   * 移入回收站：全局隐藏，不删任何数据。成功后返回上一个界面——
    * 这个页面展示的执行事实仍然有效，但入口动作（继续 / 刷新）已经不适用。
    */
   const doTrash = async () => {
@@ -173,7 +173,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       setTrashBusy(false);
     }
   };
-  /** 派生链自带的路径与 Project（§43.3-M29：详情只承认这一种真相）。 */
+  /** 派生链自带的路径与 Project。 */
   const workspacePath = detail.workspace_path;
   const projectIdOnlyCell = projectCellFor(session, projectNameById);
   const derivedProjectName = workspacePath && workspacePath.project_name.trim() !== ""
@@ -183,7 +183,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const sessionProjectId = workspacePath?.project_id ?? session.project_id ?? null;
 
   /**
-   * 设置所属任务（方案 §29）：一次提交一个 id 或 null（未归属）。只改
+   * 设置所属任务：一次提交一个 id 或 null（未归属）。只改
    * `sessions.owner_workstream_id`，不碰工作路径与 Project —— 那两件事由后端保证，
    * 这里也不做任何补偿动作。
    */
@@ -193,7 +193,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     setOwnerOpen(false);
   };
 
-  /** Conversation（§22.1）：只有 root 的 user/assistant prose。 */
+  /** Conversation：只有 root 的 user/assistant prose。 */
   const messages: SessionMessageData[] = detail.messages.map((m) => ({
     sequence: m.sequence,
     role: m.role,
@@ -205,14 +205,14 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   }));
 
   /**
-   * 源会话（§22.4）：Root 成员的源文件 + 详情加载时的新鲜结论。
+   * 源会话：Root 成员的源文件 + 详情加载时的新鲜结论。
    * members 里没有 root 行本身就是一个异常，按 unavailable 对待。
    */
   const rootMember = detail.members.find((m) => m.relation === "root") ?? null;
   const sourceMissing = rootMember !== null && detail.root_source_status === "missing";
   const sourceUnavailable = rootMember === null || detail.root_source_status === "unavailable";
 
-  /** Resume 的门（§22.4）：源 missing / unavailable 时禁用，并说清为什么。 */
+  /** Resume 的门：源 missing / unavailable 时禁用，并说清为什么。 */
   const resumeDisabled = !detail.can_resume;
   const resumeTitle = detail.can_resume
     ? "继续会话"
@@ -243,7 +243,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         )}
       />
 
-      {/* 回收站横幅（§36 + §22.4）：恢复永远可用；「永久删除」只在
+      {/* 回收站横幅：恢复永远可用；「永久删除」只在
           can_permanently_delete（trashed + fresh root missing）时出现。 */}
       {trashed && (
         <div className="session-trash-banner">
@@ -270,13 +270,13 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         </div>
       )}
 
-      {/* §36.19：右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（所属任务、消息）。 */}
+      {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（所属任务、消息）。 */}
       <div className="task-detail-layout">
       <div className="task-detail-main">
       <div className="row between" style={{ marginBottom: 8 }}>
         <div className="section-label" style={{ margin: 0 }}>所属任务</div>
       </div>
-      {/* 一次最多一个 Owner（方案 §3.3）：要么一条任务，要么「未归属任务」。
+      {/* 一次最多一个 Owner：要么一条任务，要么「未归属任务」。
           没有「再添加一条」的入口——更换与清空都在这一个入口里。 */}
       {owner_workstream ? (
         <div className="rail-row">
@@ -317,7 +317,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       </div>
 
       <aside className="task-detail-aside">
-      {/* 只读事实一律在右栏（§36.19），并且与另外两个详情页同形：rail-section + section-label，
+      {/* 只读事实一律在右栏，并且与另外两个详情页同形：rail-section + section-label，
           直接用展开的正文，不用 <details>——默认收起把这页最有用的事实藏了起来。 */}
       <section className="rail-section">
       <div className="section-label">会话信息</div>
@@ -411,7 +411,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             <span className="muted">{NO_CWD}（该会话的原始记录里没有目录信息）</span>
           )}
         </Field>
-        {/* 源会话（§22.4）：Root 成员的源文件，不再是 session.raw_path。
+        {/* 源会话：Root 成员的源文件，不再是 session.raw_path。
             状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。 */}
         <Field label="源会话">
           {rootMember ? (
@@ -442,7 +442,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           <CopyValue value={session.root_agent_session_id} mono
             title="Root 成员在 Agent 侧的会话身份；Resume 与 LaunchIntent 匹配的唯一依据" />
         </Field>
-        {/* Fork（§22.3）：唯一的会话→会话链接。来源只是 provenance，
+        {/* Fork：唯一的会话→会话链接。来源只是 provenance，
             生命周期完全独立；来源不在本地库时也如实说明。 */}
         {(detail.forked_from || session.forked_from_session_id) && (
           <Field label="来源">
@@ -471,7 +471,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       </div>
       </section>
 
-      {/* 执行信息（§22.2）：聚合统计 + 可展开的成员树。成员不是链接——
+      {/* 执行信息：聚合统计 + 可展开的成员树。成员不是链接——
           它们是 Agent 内部的执行单元，不是另一个 Session 页面。 */}
       <section className="rail-section">
       <div className="section-label">执行信息</div>
@@ -496,13 +496,13 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       </aside>
       </div>
 
-      {/* 危险操作（§36）：只在正常状态下出现；回收站里的动作在顶部横幅。 */}
+      {/* 危险操作：只在正常状态下出现；回收站里的动作在顶部横幅。 */}
       {confirmTrash && (
         <Modal title="移入回收站" onClose={() => { if (!trashBusy) setConfirmTrash(false); }}>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             <b>{title}</b> 会从 Sessions 列表、搜索与继续入口中消失，出现在 Sessions 页的「回收站」里。
           </p>
-          {/* §36 要求把两个概念摆在同一处明确区分：「从任务移除」只改这条会话的
+          {/* 要求把两个概念摆在同一处明确区分：「从任务移除」只改这条会话的
               所属任务（详情页的「更改 / 选择」），这里是全局回收站。 */}
           <div className="card hairline" style={{ marginBottom: 12 }}>
             <p style={{ margin: "0 0 6px" }}>
@@ -560,7 +560,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 const fmtCount = (n: number | null): string => (n === null ? "—" : n.toLocaleString("en-US"));
 
 /**
- * 聚合执行统计（§22.2）。基础形状（成员 / 子 / 边 / 深度）永远显示；
+ * 聚合执行统计。基础形状（成员 / 子 / 边 / 深度）永远显示；
  * 工具、token、成本、模型这些行只在数据真的在场上时出现——有数据才显示，
  * 没有就不画一行「0」去冒称观测。
  */
@@ -577,7 +577,7 @@ function ExecutionStats({ stats }: { stats: SessionDetail["stats"] }) {
   if (stats.cached_tokens !== null) tokenBits.push(`缓存 ${fmtCount(stats.cached_tokens)}`);
   if (stats.reasoning_tokens !== null) tokenBits.push(`推理 ${fmtCount(stats.reasoning_tokens)}`);
 
-  // 不再显示"Session 的 model/provider/effort"（Provenance 方案 §9）：一个
+  // 不再显示"Session 的 model/provider/effort"：一个
   // Logical Session 完全可能中途切模型，不存在天然的 Session model。消息级
   // 的模型标签在会话消息上；将来要按模型统计时从 assistant 消息派生。
 
@@ -625,7 +625,7 @@ function MemberRow({ member, depth }: { member: DetailMember; depth: number }) {
 }
 
 /**
- * 成员树（§22.2）：root 在顶，child / side 挂在自己的 parent 下，缩进呈现。
+ * 成员树：root 在顶，child / side 挂在自己的 parent 下，缩进呈现。
  * parent 记录缺席（未摄入或被清理）的成员不能消失——按顶层孤儿如实列出。
  */
 function MemberTree({ members }: { members: DetailMember[] }) {
@@ -685,9 +685,9 @@ function CopyValue({ value, mono, title }: { value: string; mono?: boolean; titl
 }
 
 /**
- * 选择所属任务（方案 §29）：单选，一次只能选一个，也可以选「未归属」清空。
+ * 选择所属任务：单选，一次只能选一个，也可以选「未归属」清空。
  *
- * 候选按「当前 Project → 其他任务」分组（§29.1）：与这条会话的工作目录有路径
+ * 候选按「当前 Project → 其他任务」分组：与这条会话的工作目录有路径
  * 关联的任务优先出现。后端不建立这个限制，所以其他任务仍然可选中。
  * 归档的任务不接收新的归属（和列表里的候选同一套口径）。
  */

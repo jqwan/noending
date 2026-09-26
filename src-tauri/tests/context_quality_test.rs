@@ -24,7 +24,7 @@ const FIXTURE_TODO_RESOLUTION: &str = include_str!("fixtures/context_quality/tod
 const FIXTURE_CONSTRAINT_CONFLICT: &str =
     include_str!("fixtures/context_quality/constraint_conflict.json");
 /// Single-owner routing: a Session has exactly one Owner Workstream, so every
-/// extracted fact lands there and nowhere else (方案 §19, §43).
+/// extracted fact lands there and nowhere else.
 const FIXTURE_OWNER_ROUTING: &str =
     include_str!("fixtures/context_quality/workstream_routing_reverse.json");
 

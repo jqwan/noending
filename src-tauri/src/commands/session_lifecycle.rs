@@ -1,5 +1,5 @@
 //! Session lifecycle commands: Trash / Restore and the permanent LOCAL
-//! deletion (重构方案 §19 / §20). Thin Tauri surface over `crate::lifecycle`,
+//! deletion. Thin Tauri surface over `crate::lifecycle`,
 //! which owns the rules. The frontend only ever submits session ids — never
 //! paths, agent session ids or deletion targets, and there is no deletion job
 //! to coordinate: preview is stateless, execute re-checks everything.
@@ -22,7 +22,7 @@ pub fn restore_session(state: State<AppState>, session_id: String) -> Result<Ses
     with_db(&state, |db| lifecycle::restore_session(db, &session_id))
 }
 
-/// Stateless preview of the permanent LOCAL deletion (§20.2): fresh ROOT
+/// Stateless preview of the permanent LOCAL deletion: fresh ROOT
 /// source verdict plus the counts. No job row, nothing to cancel.
 #[tauri::command]
 pub fn get_session_local_delete_preview(
@@ -34,7 +34,7 @@ pub fn get_session_local_delete_preview(
     })
 }
 
-/// Execute the permanent LOCAL deletion (§20.3). NoEnding data only — the
+/// Execute the permanent LOCAL deletion. NoEnding data only — the
 /// Agent source was already (re-)confirmed Missing inside, and no code path
 /// here can touch it: NoEnding never deletes Agent-owned sources.
 #[tauri::command]

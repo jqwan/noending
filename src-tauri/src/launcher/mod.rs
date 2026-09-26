@@ -1,21 +1,21 @@
-//! Session Launcher — New / Resume flows (技术实现方案 §23/§24).
+//! Session Launcher — New / Resume flows (技术实现).
 //!
 //! New Session: a durable LaunchIntent is created BEFORE the agent starts
 //! (the external session id is unknowable at that point). When reconcile
 //! later discovers the new external session, the intent is matched and the
-//! user's chosen Workstream becomes the Session's single Owner (方案 §15.1).
+//! user's chosen Workstream becomes the Session's single Owner.
 //! Nothing else is written: no WorkstreamPath and no confidence.
 //!
 //! Resume: builds a delta against the last delivered revision snapshot and
 //! records a fresh ContextDelivery only after a successful launch.
 //!
-//! Working directory (方案 §13, Workspace Domain v0.2): every launch resolves
+//! Working directory: every launch resolves
 //! its directory through `resolve_new_cwd` / `resolve_resume_cwd`, which read
 //! the ordered `WorkstreamPath` list and NoEnding Home's default workspace. The
 //! answer, including *which tier*
 //! produced it, is carried on the PreparedLaunch and hashed into its state
 //! fingerprint, so Preview-Launch Identity covers the directory as well as the
-//! context (§42.3-M16/M17).
+//! context.
 
 use std::path::PathBuf;
 
@@ -44,20 +44,20 @@ const INTENT_TTL_SECS: i64 = 24 * 3600;
 const PREPARE_ATTEMPTS: usize = 3;
 
 /// How a prepared launch decided the directory the Agent will start in
-/// (方案 §13). This is a *user-visible* fact, not an implementation detail:
+///. This is a *user-visible* fact, not an implementation detail:
 /// every tier below the one the flow normally uses has to be sayable out loud
-/// in the UI (§21-4), and it is part of the state fingerprint, so a tier that
+/// in the UI, and it is part of the state fingerprint, so a tier that
 /// changes between Preview and Launch aborts the launch instead of quietly
-/// moving the Agent somewhere else (§42.3-M16).
+/// moving the Agent somewhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CwdSource {
     /// The caller (the New Session form) named a directory.
     Explicit,
     /// Resume: the Session's own recorded cwd, which stays authoritative
-    /// whenever it is a real directory (§1.5 "Sessions keep their own cwd").
+    /// whenever it is a real directory ("Sessions keep their own cwd").
     SessionCwd,
-    /// A selected Workstream's ordered `WorkstreamPath` list (§1.5). Position 0
+    /// A selected Workstream's ordered `WorkstreamPath` list. Position 0
     /// is primary; `path_position` says which entry was actually used.
     WorkstreamPath,
     /// NoEnding Home's default workspace (`<home>/workspace`).
@@ -98,7 +98,7 @@ pub struct CwdResolution {
     pub workstream_id: Option<String>,
     /// Its position in that Workstream's ordered path list (0 = primary).
     pub path_position: Option<i64>,
-    /// Why a fallback happened, for the UI (§13 "发生 fallback 必须在 UI 明确显示").
+    /// Why a fallback happened, for the UI ("发生 fallback 必须在 UI 明确显示").
     pub note: Option<String>,
 }
 
@@ -107,7 +107,7 @@ impl CwdResolution {
         // The user named this directory, so it is launched in even when it is
         // not there yet — silently substituting another tier would override
         // explicit intent. It is *annotated*, because macOS would cd to $HOME
-        // after a failed `cd` (§42.3-M21), and the user deserves to know that.
+        // after a failed `cd`, and the user deserves to know that.
         let note = if is_usable_directory(&cwd) {
             None
         } else {
@@ -121,7 +121,7 @@ impl CwdResolution {
         }
     }
 
-    /// §42.3-M17 — labelled, delimited hash bytes: `["/a","/b"]` can never
+    /// labelled, delimited hash bytes: `["/a","/b"]` can never
     /// collide with a concatenation of one field's value with another's.
     fn fingerprint_input(&self) -> Vec<u8> {
         let mut out = b"cwd:".to_vec();
@@ -154,10 +154,10 @@ impl CwdResolution {
 /// The non-database facts a launch needs.
 ///
 /// Today that is exactly one thing: NoEnding Home's default workspace, which is
-/// a *filesystem/Home* fact (§2) — no DB row holds it, so a DB-only fingerprint
+/// a *filesystem/Home* fact — no DB row holds it, so a DB-only fingerprint
 /// can never notice it moving. Production passes one built from the managed
 /// [`crate::workspace::home::NoEndingHome`]; tests pass literals, which is what
-/// keeps §42.3-M13 ("no test may resolve the real Home") true here.
+/// keeps ("no test may resolve the real Home") true here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchWorkspace {
     /// `<home>/workspace`. `None` means "not known to this launcher", which
@@ -180,16 +180,16 @@ pub struct PreparedLaunch {
     pub mode: String, // "new" | "resume"
     pub agent: Agent,
     pub session_id: Option<String>,
-    /// The single Owner Workstream of this launch, or `None` (方案 §14.1).
+    /// The single Owner Workstream of this launch, or `None`.
     /// A Session has at most one, so there is no "extra" list.
     pub owner_workstream_id: Option<String>,
-    /// The directory the Agent WILL start in — authoritative. Since §42.3-M16
+    /// The directory the Agent WILL start in — authoritative. Since
     /// the spawn step uses this value and nothing else: `launch_prepared` no
     /// longer re-reads `sessions.cwd`, because re-reading let background
     /// discovery move a launch between Preview and Launch.
     pub cwd: Option<String>,
-    /// Which of §13's tiers produced `cwd`, so the UI can name it and a
-    /// downgrade can never be silent (§21-4). Part of `state_fingerprint`.
+    /// Which of 's tiers produced `cwd`, so the UI can name it and a
+    /// downgrade can never be silent. Part of `state_fingerprint`.
     #[serde(default)]
     pub cwd_resolution: CwdResolution,
     pub delivery_level: ContextDeliveryLevel,
@@ -218,7 +218,7 @@ pub struct SessionLauncher {
     /// Where launch artifacts go. Since v0.2 that is NoEnding Home's `runtime/`
     /// rather than the pre-Home `app_data_dir()`: a context bundle is an app
     /// artifact, and the Home is the one place that says where app data lives
-    /// (§42.3-M14).
+    ///.
     pub runtime_dir: PathBuf,
 }
 
@@ -261,12 +261,12 @@ impl SessionLauncher {
     /// INVARIANT: Zero premature side effects. Does NOT insert LaunchIntent,
     /// does NOT write context files, and does NOT record delivery snapshots.
     ///
-    /// §21-1/2 — Prepare New Session against an explicit [`LaunchWorkspace`].
+    /// Prepare New Session against an explicit [`LaunchWorkspace`].
     ///
     /// `cwd` is the caller's explicit directory: when present it IS the launch
-    /// directory (§13 tier 1) and nothing below it is consulted. Otherwise the
+    /// directory (tier 1) and nothing below it is consulted. Otherwise the
     /// Owner Workstream's ordered paths decide, then the default workspace
-    /// (方案 §15).
+    ///.
     pub fn prepare_new_in(
         &self,
         db: &Db,
@@ -277,7 +277,7 @@ impl SessionLauncher {
     ) -> Result<PreparedLaunch> {
         self.sync_stale_for_workstreams(db, owner_workstream_id)?;
 
-        // §12 — the preview and the launch must describe the SAME state, so the
+        // the preview and the launch must describe the SAME state, so the
         // state is hashed on both sides of building the bundle. A Context edit,
         // a path reorder or a delivery-level change that lands while the bundle
         // is being rendered would otherwise hand the user a plan that no longer
@@ -349,12 +349,12 @@ impl SessionLauncher {
     ///
     /// INVARIANT: Zero premature side effects. Does NOT change ownership,
     /// does NOT write context files, and does NOT advance delivery snapshots.
-    /// §21-3 — Prepare Resume against an explicit [`LaunchWorkspace`].
+    /// Prepare Resume against an explicit [`LaunchWorkspace`].
     ///
     /// The Session's own cwd wins while it is a real directory; when it is gone
     /// the launch falls back to the Owner Workstream's primary path and then to
     /// the default workspace, and the fallback is recorded in
-    /// `cwd_resolution` instead of being absorbed (§13, §42.3-M16).
+    /// `cwd_resolution` instead of being absorbed.
     pub fn prepare_resume_in(
         &self,
         db: &Db,
@@ -364,14 +364,14 @@ impl SessionLauncher {
         let session = db
             .get_session(session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        // §10 — a trashed session is inactive and must not resume. All resume
+        // a trashed session is inactive and must not resume. All resume
         // entries (command layer, Assistant, one-shot launch) funnel through
         // here, so this is the single prepare-side gate. This first read is the
         // early exit only; the preparation below re-reads after the sync.
         if session.is_trashed() {
             return Err(other("会话已在回收站，无法继续；请先恢复会话"));
         }
-        // §17.2 — Resume targets `sessions.root_agent_session_id` through the
+        // Resume targets `sessions.root_agent_session_id` through the
         // ROOT member's source; a source the adapter cannot confirm present is
         // a refusal with an explicit reason, never a launch into a dead
         // thread. Unavailable (permission, parse, store problems) is NOT
@@ -426,7 +426,7 @@ impl SessionLauncher {
             let delivery_level = crate::settings::context_delivery_level_of(db)?;
             let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, session.agent)?;
 
-            // §12 — hash the launch state on BOTH sides of building the bundle:
+            // hash the launch state on BOTH sides of building the bundle:
             // the fingerprint covers the Workstream's items, revisions,
             // conflicts, path list, delivery level and runtime intent, so
             // anything that moved while the bundle rendered is caught here.
@@ -499,14 +499,14 @@ impl SessionLauncher {
     /// 2. Identity preservation: Writes the EXACT prepared bundle markdown
     ///    (NO re-building), passes the EXACT prepared runtime overrides (NO
     ///    re-reading Settings) and starts the Agent in `prepared.cwd` (NO
-    ///    re-resolving — §42.3-M16).
+    ///    re-resolving —).
     /// 3. Commits the LaunchIntent (new) or a cumulative delivery snapshot (resume)
     ///    only upon actual launch.
     /// `launch_prepared` with the current [`LaunchWorkspace`].
     ///
     /// The default workspace is a Home fact the fingerprint has to re-read from
     /// *now*: if the Home moved after Preview, the prepared launch must abort,
-    /// not start the Agent in a directory the user never saw (§12, §42.3-M17).
+    /// not start the Agent in a directory the user never saw.
     pub fn launch_prepared_in(
         &self,
         db: &Db,
@@ -543,7 +543,7 @@ impl SessionLauncher {
                 "Prepared launch is stale: context delivery level changed since preview. Please refresh preview.",
             ));
         }
-        // §42.3-M16/M17: re-resolve the launch directory from the state that
+        // re-resolve the launch directory from the state that
         // exists NOW (ordered Workstream paths, the Session's own cwd, the Home
         // default workspace) and hash it. A drift in any of those inputs lands
         // on a different fingerprint, so a plan whose directory moved is
@@ -677,7 +677,7 @@ impl SessionLauncher {
             let session = db
                 .get_session(session_id)?
                 .ok_or_else(|| other("Session 不存在"))?;
-            // §10 — belt and braces beside the fingerprint term: a trashed
+            // belt and braces beside the fingerprint term: a trashed
             // session never launches, even if every other input managed to
             // match a stale-but-legal fingerprint.
             if session.is_trashed() {
@@ -688,12 +688,12 @@ impl SessionLauncher {
 
             let install = resolve_install(db, session.agent)?;
             let adapter = crate::adapters::adapter_for(session.agent);
-            // §42.3-M16 — resume starts in the directory the Preview showed, not
+            // resume starts in the directory the Preview showed, not
             // in whatever `sessions.cwd` says right now. Reading it here was the
             // violation: discovery could rewrite it between Preview and Launch
             // and the Agent silently opened somewhere else.
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
-            // §17.2 — the resume identity is the ROOT's, never a member's
+            // the resume identity is the ROOT's, never a member's
             // arbitrary external id.
             let cmd = adapter.build_resume_command(
                 &install,
@@ -705,7 +705,7 @@ impl SessionLauncher {
             let outcome = spawn(&cmd)?;
 
             // Resume never changes ownership: it uses the Session's current
-            // Owner Workstream (方案 §16), so the only write here is the
+            // Owner Workstream, so the only write here is the
             // delivery ledger entry for what the Agent was just handed.
             if let Some(ws_id) = prepared.owner_workstream_id.as_deref() {
                 if ctx_file.is_some() {
@@ -767,13 +767,13 @@ impl SessionLauncher {
 }
 
 /// Recompute the fingerprint of a launch **from the database as it is now**,
-/// resolving the §13 chain the same way `prepare_*` does.
+/// resolving the chain the same way `prepare_*` does.
 ///
 /// This is the "has anything the user saw moved?" question. It takes the same
 /// [`LaunchWorkspace`] the prepare step used: `None` in `default_workspace`
-/// means "this launcher has no Home", which drops §13's third tier from the
+/// means "this launcher has no Home", which drops 's third tier from the
 /// chain, so the answer is a different statement than the one a real Home
-/// produces (§42.3-M31).
+/// produces.
 ///
 /// A caller that already holds a `PreparedLaunch` — where the resolved tier is
 /// a recorded fact, not something to re-derive — uses
@@ -807,20 +807,20 @@ pub fn compute_state_fingerprint(
     )
 }
 
-/// §12 — the full fingerprint. Everything that decides what the Agent receives:
+/// the full fingerprint. Everything that decides what the Agent receives:
 ///
 /// * the delivery level and the Agent runtime override intent;
 /// * the Owner Workstream (or none): title / description / `updated_at`, its
 ///   active Context items with their current revisions, its open conflicts —
-///   and its **ordered path list** (§12, §21-5..7);
-/// * the resolved launch directory and the tier that produced it (§42.3-M16);
+///   and its **ordered path list**;
+/// * the resolved launch directory and the tier that produced it;
 /// * NoEnding Home's default workspace, which is not in the DB at all
-///   (§42.3-M17 note 4);
+///   (note 4);
 /// * in resume mode: whether the Session still exists, its `last_activity_at`,
 ///   its source cursor, its **`workspace_path_id`**, its Owner Workstream and
 ///   its delivery snapshots.
 ///
-/// Every added input is labelled and terminated by `|` (§42.3-M17), so a value
+/// Every added input is labelled and terminated by `|`, so a value
 /// cannot be re-read as a different field by shifting a boundary, and the path
 /// list is hashed **in list order** because position 0 is the fact the launch
 /// depends on. A WorkstreamPath mutation does not bump `workstreams.updated_at`
@@ -855,7 +855,7 @@ pub fn compute_state_fingerprint_in(
     hasher.update(runtime.intent_summary().as_bytes());
     hasher.update(b"|");
 
-    // §13 tier 3: the Home's default workspace. It lives outside the database,
+    // tier 3: the Home's default workspace. It lives outside the database,
     // so a DB-only fingerprint could never see it move — which would let a
     // preview made under one Home launch under another.
     hasher.update(b"default_ws:");
@@ -864,7 +864,7 @@ pub fn compute_state_fingerprint_in(
     }
     hasher.update(b"|");
 
-    // The directory the Agent will actually start in, and why (§42.3-M16).
+    // The directory the Agent will actually start in, and why.
     hasher.update(resolution.fingerprint_input());
 
     if let Some(ws_id) = owner_workstream_id {
@@ -930,7 +930,7 @@ pub fn compute_state_fingerprint_in(
             hasher.update(b":");
             if let Some(s) = db.get_session(sid)? {
                 hasher.update(b"session_exists:1:");
-                // §10 — the lifecycle state is part of the launch state: a
+                // the lifecycle state is part of the launch state: a
                 // Prepare → Trash → launch_prepared sequence must fail as
                 // stale even when nothing else about the row moved.
                 if s.is_trashed() {
@@ -942,7 +942,7 @@ pub fn compute_state_fingerprint_in(
                     hasher.update(la.as_bytes());
                     hasher.update(b"|");
                 }
-                // §12 "Session workspace path": the identity of the directory
+                // "Session workspace path": the identity of the directory
                 // this Session was observed in. A cwd string that now resolves
                 // to a different WorkspacePath row (or to none) is a different
                 // launch, even when the string itself survived.
@@ -951,7 +951,7 @@ pub fn compute_state_fingerprint_in(
                     hasher.update(path_id.as_bytes());
                 }
                 hasher.update(b"|");
-                // §8 — the read state is the ROOT member's cursor; the
+                // the read state is the ROOT member's cursor; the
                 // ingested conversation frontier rides with it, so a preview
                 // made before a member ingest cannot silently launch against
                 // a different conversation.
@@ -973,7 +973,7 @@ pub fn compute_state_fingerprint_in(
             }
             // The Session's Owner Workstream is part of the launch state: an
             // owner edit between Preview and Launch must abort, not resume
-            // against a different Context route (方案 §20).
+            // against a different Context route.
             hasher.update(b"session_owner:");
             if let Some(owner) = db.get_session(sid)?.and_then(|s| s.owner_workstream_id) {
                 hasher.update(owner.as_bytes());
@@ -1007,7 +1007,7 @@ pub fn compute_state_fingerprint_in(
 /// The bundle's delivered revision ids and conflict ids, in section order.
 ///
 /// A bundle describes ONE Workstream, so there is nothing to group by any
-/// more: the ids ARE the delivery's lists (方案 §20). Duplicates are dropped
+/// more: the ids ARE the delivery's lists. Duplicates are dropped
 /// because a revision can appear in two sections of the same bundle.
 pub fn delivered_revisions_and_conflicts(
     bundle: &crate::context::SessionContextBundle,
@@ -1152,7 +1152,7 @@ fn resolve_install(
 /// silently cds to $HOME. `~user` is intentionally unsupported.
 ///
 /// A thin alias on purpose: the rules live in `workspace::identity`, which is
-/// the only tilde expander in the crate (§42.3-M23). Two expanders means two
+/// the only tilde expander in the crate. Two expanders means two
 /// answers for one path.
 pub fn expand_tilde(p: &str) -> String {
     crate::workspace::expand_tilde(p)
@@ -1160,30 +1160,30 @@ pub fn expand_tilde(p: &str) -> String {
 
 /// Is this recorded directory something an Agent can actually be started in?
 ///
-/// An *observation*, never an identity (方案 §1.5, §42.3-M8): the path's
+/// An *observation*, never an identity: the path's
 /// WorkspacePath row and its `canonical_path` stay exactly as they are whether
-/// or not the volume is mounted. It matters here because of §42.3-M21 — handing
+/// or not the volume is mounted. It matters here because of handing
 /// the terminal a directory that is not there does not fail loudly everywhere:
 /// macOS prints a hint and cds to `$HOME` instead, and `$HOME` is the one place
-/// §1.4 refuses to treat as a workspace. So an unusable tier is *skipped and
+/// refuses to treat as a workspace. So an unusable tier is *skipped and
 /// reported*, not launched into.
 fn is_usable_directory(path: &str) -> bool {
     !path.trim().is_empty() && std::path::Path::new(path).is_dir()
 }
 
-/// §42.3-M21 — the default workspace is a directory NoEnding owns, so the
+/// the default workspace is a directory NoEnding owns, so the
 /// launcher may create it if Home bootstrap did not. This is the only
 /// filesystem effect a launch resolution has, it is idempotent, and it creates
-/// no domain fact: no row, no Revision, no delivery (§Launch
-/// Preparation Integrity is about *storage*).
+/// no domain fact: no row, no Revision, no delivery. Preparation
+/// integrity is about *storage*.
 fn ensure_default_workspace(dir: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     Ok(())
 }
 
-/// The `(cwd, source)` of §13's WorkstreamPath tier: walk the Owner
+/// The `(cwd, source)` of 's WorkstreamPath tier: walk the Owner
 /// Workstream's ordered path list in position order and return the first
-/// usable directory (方案 §15).
+/// usable directory.
 ///
 /// Position 0 wins whenever it can (that is what "primary" means); a later
 /// position is only reached because the earlier ones are unusable, and it is
@@ -1226,7 +1226,7 @@ fn first_workstream_path(
     Ok((None, blocked))
 }
 
-/// §13 tier 3 — the default workspace, or `None` when this launcher was not
+/// tier 3 — the default workspace, or `None` when this launcher was not
 /// given one.
 fn default_workspace_resolution(workspace: &LaunchWorkspace) -> Result<Option<CwdResolution>> {
     let Some(dir) = workspace.default_workspace.as_deref().map(str::trim) else {
@@ -1244,7 +1244,7 @@ fn default_workspace_resolution(workspace: &LaunchWorkspace) -> Result<Option<Cw
     }))
 }
 
-/// §13 — New Session launch directory, in priority order (方案 §15):
+/// New Session launch directory, in priority order:
 ///
 /// ```text
 /// explicit cwd  →  the Owner Workstream's ordered WorkstreamPaths
@@ -1292,7 +1292,7 @@ pub fn resolve_new_cwd(
     })
 }
 
-/// §13 — Resume launch directory:
+/// Resume launch directory:
 ///
 /// ```text
 /// the Session's own cwd  →  the Owner Workstream's available path
@@ -1301,7 +1301,7 @@ pub fn resolve_new_cwd(
 ///
 /// "Unavailable" here means missing, empty, or not a directory. Before v0.2 this
 /// chain did not exist: a Session whose cwd had gone simply handed `None` to the
-/// terminal, which on macOS means `$HOME` (§42.3-M21) — a silent, and per §1.4
+/// terminal, which on macOS means `$HOME` — a silent, and per
 /// forbidden, destination. Every step below the Session's own directory is
 /// reported in `cwd_resolution` and hashed into the fingerprint.
 ///
@@ -1371,8 +1371,8 @@ pub fn resolve_resume_cwd(
 }
 
 /// Re-resolve what a prepared launch resolved, from the state that exists at
-/// launch time. This is the *staleness* side of §13; the Agent still starts in
-/// `prepared.cwd` (see §42.3-M16), so a difference here is a refusal, never a
+/// launch time. This is the *staleness* side of; the Agent still starts in
+/// `prepared.cwd` (see), so a difference here is a refusal, never a
 /// absorbed change.
 fn recompute_launch_cwd(
     db: &Db,
@@ -1402,12 +1402,12 @@ fn recompute_launch_cwd(
 /// winner → auto-match; several close candidates → ambiguous (never
 /// silently guess); nothing → stays pending for a later reconcile.
 ///
-/// Run against the real Home so §42.3-M15's shared-default-workspace rule can
+/// Run against the real Home so 's shared-default-workspace rule can
 /// be applied.
 ///
 /// The matcher is told which directory every "no Workstream path" launch shares.
 ///
-/// §42.3-M15: §13's third tier routes several independent launches into the
+/// 's third tier routes several independent launches into the
 /// *same* cwd, and cwd was worth `+3.0` — enough on its own to look decisive.
 /// A directory that many intents share carries no distinguishing evidence, so
 /// against the default workspace it is worth `+1.0`, and a real cwd match still
@@ -1454,7 +1454,7 @@ pub fn try_match_launch_intents_in(
         match (&intent.cwd, &session.cwd) {
             (Some(ic), Some(sc)) if !ic.is_empty() => {
                 if sc.starts_with(ic) || ic.starts_with(sc) {
-                    // §42.3-M15: the shared default workspace is not a
+                    // the shared default workspace is not a
                     // discriminator, however exact the match looks.
                     score += if Some(ic) == workspace.default_workspace.as_ref() {
                         1.0
@@ -1507,7 +1507,7 @@ pub fn try_match_launch_intents_in(
                 apply_match(db, &selected[0].id, session, workspace)?;
                 Ok(true)
             } else {
-                // §42.3-M15: every tied top candidate is awaiting the user, not
+                // every tied top candidate is awaiting the user, not
                 // just the first one — marking only one would hide the other
                 // behind a PENDING state that says "still being discovered".
                 let note = format!(
@@ -1516,7 +1516,7 @@ pub fn try_match_launch_intents_in(
                 );
                 // One transaction, and every write is guarded: "still waiting"
                 // must never be written over an intent another match already
-                // consumed (§42.3-M15, one-shot capability).
+                // consumed (, one-shot capability).
                 db.tx(|tx| {
                     for (intent, _) in scored.iter().filter(|(_, s)| tied(*s)) {
                         crate::storage::update_waiting_launch_intent_conn(
@@ -1596,7 +1596,7 @@ pub fn apply_match(
         }
 
         // The matched Session inherits the intent's Owner Workstream verbatim
-        // (方案 §15.1). Nothing else is written: no WorkstreamPath is added, and
+        //. Nothing else is written: no WorkstreamPath is added, and
         // the Session's cwd / workspace_path_id / project_id stay untouched.
         // Reading the intent here also means a Workstream deleted after the
         // match was computed is seen as the NULL the FK already wrote, rather
@@ -1717,7 +1717,7 @@ pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
 // ---------------------------------------------------------------------------
 
 /// Ingest + sync one session's members and pending root conversation. The
-/// single path lives in `ingestion` (§12); the launcher only needs its result
+/// single path lives in `ingestion`; the launcher only needs its result
 /// for the pre-sync steps of New / Resume.
 pub fn ingest_and_sync_session(
     db: &Db,

@@ -7,8 +7,8 @@
 //! ```
 //!
 //! `sessions.project_id` survives as a **derived cache** so the Project pages do
-//! not have to re-join on every read, and 方案 §29 forbids it ever being an
-//! independent fact. That prohibition is enforced by making the write space
+//! not have to re-join on every read, and it must never be an independent
+//! fact. That prohibition is enforced by making the write space
 //! small and closed — exactly three call sites, and each one computes the value
 //! from the path in the same statement instead of taking a Project from the
 //! caller:
@@ -24,13 +24,11 @@
 //! Plus one referential-cleanup case: [`clear_sessions_project_for_project_conn`]
 //! invalidates the cache for a Project that is going away. The workspace layer's
 //! zero-path auto-delete funnels through it, so the cleanup stays one statement
-//! in one file. Anything else is a domain violation, guarded by
-//! 方案 §42.5-T2 (and executably by
-//! `tests/session_workspace_test::project_id_writers_are_confined_to_the_derived_doors`).
+//! in one file. Anything else is a domain violation, enforced by
+//! `tests/session_workspace_test::project_id_writers_are_confined_to_the_derived_doors`.
 //!
 //! Nothing here reads or writes `owner_workstream_id`: physical Project
-//! membership and semantic Workstream ownership are independent (方案 §3.1,
-//! §4, §5.2).
+//! membership and semantic Workstream ownership are independent.
 
 use rusqlite::{params, Connection};
 
@@ -39,10 +37,9 @@ use crate::error::Result;
 use super::Db;
 
 impl Db {
-    /// §24 — standalone Sessions belong to a Project too, straight from their
+    /// Standalone Sessions belong to a Project too, straight from their
     /// own path, with no Workstream involved. Active sessions only: the
-    /// Project detail is a default projection and hides the recycle bin
-    /// (方案 §11).
+    /// Project detail is a default projection and hides the recycle bin.
     pub fn list_sessions_for_workspace_path(
         &self,
         path_id: &str,
@@ -57,7 +54,7 @@ impl Db {
     }
 }
 
-/// §1.11 — point a Session at a WorkspacePath and recompute its cached Project
+/// Point a Session at a WorkspacePath and recompute its cached Project
 /// in the same statement. Passing a Project is not an option here by design.
 pub fn attach_session_workspace_path_conn(
     conn: &Connection,
@@ -73,7 +70,7 @@ pub fn attach_session_workspace_path_conn(
     )? == 1)
 }
 
-/// §1.11 — the ONLY reason a Session's cached Project changes without the Session
+/// The ONLY reason a Session's cached Project changes without the Session
 /// moving: the path it hangs off changed owner (Git upgrade, Project merge, new
 /// Git family). Batch, so the cache cannot be left half-updated if one row
 /// fails.

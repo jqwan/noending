@@ -29,7 +29,7 @@ function sameRoute(a: Route, b: Route): boolean {
 }
 
 /**
- * AppShell（实施方案 §4/§80）：只负责骨架 —— Sidebar、RouterOutlet、
+ * AppShell：只负责骨架 —— Sidebar、RouterOutlet、
  * CommandPalette、全局事件与 Toast。业务数据由各页面自己加载。
  */
 export default function AppShell() {
@@ -108,7 +108,7 @@ export default function AppShell() {
     return () => window.removeEventListener("keydown", h);
   }, [goBack, goForward]);
 
-  // Base Experience 开关：整个应用读一次，判断集中在 experience.tsx（§11.9）。
+  // Base Experience 开关：整个应用读一次，判断集中在 experience.tsx。
   useEffect(() => {
     refreshBaseExperience();
   }, []);
@@ -125,12 +125,12 @@ export default function AppShell() {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  // Background sync / reconcile completion → 通知页面做定向刷新（§86），
+  // Background sync / reconcile completion → 通知页面做定向刷新，
   // 不做整页刷新：页面通过 window 事件自行 invalidate。
   useEffect(() => {
     const un1 = listen("sync-completed", () => emitSynced());
     const un2 = listen("reconcile-completed", () => emitSynced());
-    // Projects Experience v0.2 §12 — 工作区刷新完成后同样扇出刷新信号，
+    // Projects Experience v0.2 工作区刷新完成后同样扇出刷新信号，
     // Sidebar 最近列表等自行 invalidate。
     const un3 = listen("workspace-reconcile-completed", () => emitSynced());
     return () => {

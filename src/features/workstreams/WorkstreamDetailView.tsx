@@ -25,20 +25,20 @@ import RecentChangesTimeline from "./RecentChangesTimeline";
 import SinceLastReview from "./SinceLastReview";
 
 /**
- * Workstream Detail = 持续相关 Sessions 的组织容器（方案 §14）。
+ * Workstream Detail = 持续相关 Sessions 的组织容器。
  *
  * Base Experience 下这一页只有五块内容：概览（描述）、Sessions、工作目录、
  * Project、状态。Context 智能段落（Current Context / Since Last Review /
  * Needs Attention / Recent Changes / Conflict Review）全部保留代码但不挂载
- * ——见 §11.9，off 就是 `<IntelligenceOnly>` 里不渲染。
+ * ——见 ，off 就是 `<IntelligenceOnly>` 里不渲染。
  *
  * 启动路径唯一：本页不再自己调 launcher，而是挂载 New Session / Resume 的
- * 同一个 Modal（§8.1.1 契约），由它们走 prepare → 状态指纹 → launch_prepared
+ * 同一个 Modal，由它们走 prepare → 状态指纹 → launch_prepared
  * （Preview-Launch Identity / Launch Preparation Integrity）。
  *
  * 编辑入口唯一：标题 / 描述 / 工作目录都在 ••• → 编辑任务（WorkstreamFormModal）。
  *
- * v0.2 的边界（§1.5 / §1.13 / §42.3-M19）：
+ * v0.2 的边界：
  *   • 工作目录 = **有序 WorkstreamPath 列表**；
  *   • Project 是**只读投影**（主路径 → WorkspacePath → Project），所以链接取的是
  *     列表第 1 条路径所属 Project；
@@ -72,7 +72,7 @@ export default function WorkstreamDetailView({
   const menuRef = useRef<HTMLDivElement>(null);
 
   // ••• 菜单：点击外部与 Escape 都要收起。之前只有再点一次 ••• 才关得掉，
-  // 点别处它一直悬着（§25 交互一致性）。mousedown 阶段监听，先于 click，
+  // 点别处它一直悬着。mousedown 阶段监听，先于 click，
   // 所以菜单项自己的 click 仍然正常触发。
   useEffect(() => {
     if (!menuOpen) return;
@@ -155,7 +155,7 @@ export default function WorkstreamDetailView({
   const adopt = (next: Workstream) => setCtx((c) => (c ? { ...c, workstream: next } : c));
 
   /**
-   * §1.13：lifecycle 只是分类，没有任何行为差异，随时可切；它不碰路径、
+   * lifecycle 只是分类，没有任何行为差异，随时可切；它不碰路径、
    * 会话归属、visibility 或 Context。
    */
   const setLifecycle = async (next: WorkstreamLifecycle) => {
@@ -177,7 +177,7 @@ export default function WorkstreamDetailView({
   };
 
   /**
-   * 归档与恢复是**两个单向命令**（§43.4-1）：`archive_workstream` 只进回收站，
+   * 归档与恢复是**两个单向命令**：`archive_workstream` 只进回收站，
    * `restore_workstream` 只出来。旧代码把 archive 当翻转用，于是「再点一次取消
    * 归档」和「重复点击」会互相抵消 —— 那正是 v0.2 要消掉的双权威。
    * 之前这里 `await` 完不判成败就跳走：失败时菜单收起、页面不动、没有任何
@@ -222,7 +222,7 @@ export default function WorkstreamDetailView({
     }
   };
 
-  /** 唯一不可逆的动作，且后端只接受从回收站出发（§1.13）。 */
+  /** 唯一不可逆的动作，且后端只接受从回收站出发。 */
   const purge = async () => {
     setConfirmPurge(false);
     if (busyRef.current) return;
@@ -257,7 +257,7 @@ export default function WorkstreamDetailView({
   };
 
   const archived = workstream.visibility === "archived";
-  // §1.12：一个 Workstream 可以因为不同路径同时出现在多个 Project 里；
+  // 一个 Workstream 可以因为不同路径同时出现在多个 Project 里；
   // 经由 position 0 那条路径到达的才是「主关联」。
   const projectRows = (() => {
     const byId = new Map<string, { id: string; name: string | null; primary: boolean; count: number }>();
@@ -320,7 +320,7 @@ export default function WorkstreamDetailView({
         )}
       </PageHeader>
 
-      {/* ---------- Base Experience：Workstream 自身（§14） ---------- */}
+      {/* ---------- Base Experience：Workstream 自身 ---------- */}
       <div className="task-detail-layout">
         <div className="task-detail-main">
         <section className="rail-section">
@@ -398,7 +398,7 @@ export default function WorkstreamDetailView({
         </aside>
       </div>
 
-      {/* ---------- 智能段落：off 时整块不挂载（§11.9、§14） ---------- */}
+      {/* ---------- 智能段落：off 时整块不挂载 ---------- */}
       <IntelligenceOnly>
         <div className="ws-detail-grid">
           <IntelligenceSections
@@ -486,7 +486,7 @@ export default function WorkstreamDetailView({
 /**
  * Context 智能段落。单独成一个组件，是为了让这些开关只在「真的挂载」时才发生：
  * getWorkstreamReviewWindow / Summary / markWorkstreamReviewed / conflict 命令在
- * Base Experience 下不出请求（§34），而不是发了请求再藏起来。
+ * Base Experience 下不出请求，而不是发了请求再藏起来。
  */
 function IntelligenceSections({
   ctx,

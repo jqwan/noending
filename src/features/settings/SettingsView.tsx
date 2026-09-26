@@ -20,10 +20,10 @@ const SECTIONS: { key: SettingsSection; label: string; icon: "settings" | "spark
 ];
 
 /**
- * Settings（整体设计方案 §56-§62）：Main 内部二级导航 + 内容区。
+ * Settings（整体设计）：Main 内部二级导航 + 内容区。
  * 只暴露真正有用户价值的设置；实现细节（threshold/authority/cursor）不进 UI。
  *
- * Base Experience（方案 v0.1 §11.7）：Context 相关设置不再是普通入口，
+ * Base Experience：Context 相关设置不再是普通入口，
  * 统一收进「数据与高级 → 实验性功能」。
  */
 export default function SettingsView({ section, navigate }: {
@@ -64,7 +64,7 @@ export default function SettingsView({ section, navigate }: {
 }
 
 /**
- * §11 摄入诊断：无法归属到任何会话的内部执行源（child / side 等）。
+ * 摄入诊断：无法归属到任何会话的内部执行源（child / side 等）。
  * 只展示、没有任何动作——它们不是会话，不参与搜索、上下文与归属。
  * 默认只看反复出现的（后端 minObservations 默认 2）。
  */
@@ -121,7 +121,7 @@ function truncatePath(path: string, max: number): string {
   return `…${path.slice(-(max - 1))}`;
 }
 
-/** General：Default Agent 是最重要设置（§57）；Startup Page 第一版固定 Home。 */
+/** General：Default Agent 是最重要设置；Startup Page 第一版固定 Home。 */
 function GeneralSettings() {
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [agents, setAgents] = useState<Record<string, { detected: boolean }>>({});
@@ -192,7 +192,7 @@ function GeneralSettings() {
   );
 }
 
-/** Agents：安装状态 + Runtime Override（§10）。NoEnding 不解析 Agent 默认配置。 */
+/** Agents：安装状态 + Runtime Override。NoEnding 不解析 Agent 默认配置。 */
 function AgentsSettings() {
   return (
     <section>
@@ -214,7 +214,7 @@ const DELIVERY_LEVELS: { key: ContextDeliveryLevel; label: string; hint: string 
   { key: "detailed", label: "详细", hint: "在需要更多背景时送更广的支撑信息。" },
 ];
 
-/** 智能处理开关（§11.1）。它与注入梯度是两个正交开关。 */
+/** 智能处理开关。它与注入梯度是两个正交开关。 */
 function IntelligenceSettings() {
   const { intelligenceEnabled } = useBaseExperience();
   const [busy, setBusy] = useState(false);
@@ -260,7 +260,7 @@ function IntelligenceSettings() {
   );
 }
 
-/** Context Delivery：注入梯度（实验区，§11.7）。 */
+/** Context Delivery：注入梯度（实验区，）。 */
 function ContextDeliverySettings() {
   const [level, setLevel] = useState<ContextDeliveryLevel>("off");
   const [loading, setLoading] = useState<boolean>(true);
@@ -341,7 +341,7 @@ function ContextDeliverySettings() {
   );
 }
 
-/** 自动化：只读说明，状态必须是真的（§6）。 */
+/** 自动化：只读说明，状态必须是真的。 */
 function AutomationSettings() {
   const { intelligenceEnabled, deliveryLevel } = useBaseExperience();
   const deliveryLabel = DELIVERY_LEVELS.find((d) => d.key === deliveryLevel)?.label ?? deliveryLevel;
@@ -382,7 +382,7 @@ function AutomationSettings() {
   );
 }
 
-/** Appearance：Theme（tokens 支持暗色，§61/§88）；Density 暂缓。 */
+/** Appearance：Theme（tokens 支持暗色，）；Density 暂缓。 */
 type Theme = "system" | "light" | "dark";
 const THEME_LABELS: Record<Theme, string> = { system: "跟随系统", light: "浅色", dark: "深色" };
 function AppearanceSettings() {
@@ -420,7 +420,7 @@ function AppearanceSettings() {
   );
 }
 
-/** Data & Advanced（§62）：NoEnding Home + 实验性功能（含 Context 相关设置，§11.7）。 */
+/** Data & Advanced：NoEnding Home + 实验性功能（含 Context 相关设置，）。 */
 function AdvancedSettings() {
   return (
     <>
@@ -433,17 +433,17 @@ function AdvancedSettings() {
 }
 
 /* ------------------------------------------------------------------ *
- * NoEnding Home（方案 §2 / §3 / §4 / §22）
+ * NoEnding Home
  *
  * 这一屏只有一个硬规矩：**说的必须是当前真正在写的那一份**。
  * `get_workspace_settings` 读的是启动时解析并 manage 进应用的 Home，
- * 不是重新解析一遍（§42.3-M14：迁移没跑完就报新路径，UI 就在说谎）。
+ * 不是重新解析一遍。
  * 改位置因此不切库，只写 bootstrap 指针的 `pending_home`，
- * 下一次启动、打开数据库之前才移动（§3），所以 `restart_required`
+ * 下一次启动、打开数据库之前才移动，所以 `restart_required`
  * 与 `pending_home` 必须原样显示出来，不能吞掉。
  * ------------------------------------------------------------------ */
 
-/** `home_source` 的中文说明（§11 冻结的三个取值；未知值原样显示，不留空白）。 */
+/** `home_source` 的中文说明。 */
 function homeSourceLabel(source: string | null | undefined): string {
   switch (source) {
     case "explicit_env":
@@ -634,10 +634,10 @@ function WarnCallout({ title, children }: {
 }
 
 /**
- * 更改 NoEnding Home（方案 §3、§4）：只登记下一次启动要搬去的地方。
+ * 更改 NoEnding Home：只登记下一次启动要搬去的地方。
  *
  * 这里不说「已迁移」，也不给「立即生效」—— 在同一个进程里换数据库会留下两份
- * 分叉的写入（§3）。同样要在按钮之前说清的两句：只搬应用拥有的
+ * 分叉的写入。同样要在按钮之前说清的两句：只搬应用拥有的
  * data/ runtime/ logs/，旧 Home 的 workspace/ 里的用户文件不动。
  */
 function ChangeHomeModal({ current, onClose, onSaved }: {

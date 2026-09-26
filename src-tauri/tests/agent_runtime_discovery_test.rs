@@ -8,7 +8,7 @@ use noending::domain::Agent;
 
 #[test]
 fn capabilities_are_the_backend_contract_not_the_discovery_result() {
-    // §11: a field the CLI cannot receive must be Unsupported here, because
+    // a field the CLI cannot receive must be Unsupported here, because
     // this — not the UI — is what rejects the override.
     let codex = capabilities_of(Agent::Codex);
     assert_eq!(codex.model, RuntimeFieldCapability::Discoverable);
@@ -31,7 +31,7 @@ fn capabilities_are_the_backend_contract_not_the_discovery_result() {
 #[ignore]
 fn real_agents_answer_discovery_or_warn() {
     // Only Agents with a CLI can be asked anything: a history-only Agent has
-    // no catalog and no effort vocabulary to report (方案 §37.5).
+    // no catalog and no effort vocabulary to report.
     for agent in Agent::all()
         .iter()
         .copied()

@@ -73,8 +73,8 @@ const scopeFromValue = (v: string): AssistantScope => {
 };
 
 /**
- * Assistant = Workspace Interface（整体设计方案 §46-§50），不是第四个 Agent。
- * Scope 只做 prompt 侧注入（§38），不引入新协议。
+ * Assistant = Workspace Interface（整体设计），不是第四个 Agent。
+ * Scope 只做 prompt 侧注入，不引入新协议。
  */
 export default function AssistantView({ scope, navigate }: {
   scope?: AssistantScope;
@@ -144,7 +144,7 @@ export default function AssistantView({ scope, navigate }: {
     if (!base || busy) return;
     setInput("");
     setBusy(true);
-    // Scope 以元数据前缀注入 prompt（§38），不改变协议
+    // Scope 以元数据前缀注入 prompt，不改变协议
     const scoped = currentScope.type === "workspace"
       ? base
       : `[Scope: ${scopeLabel(currentScope)}]\n${base}`;
@@ -325,7 +325,7 @@ export default function AssistantView({ scope, navigate }: {
   );
 }
 
-/** Action Card（§50）：所有改变 Domain 的操作先摘要、确认后才执行。 */
+/** Action Card：所有改变 Domain 的操作先摘要、确认后才执行。 */
 function ActionCard({ json, onExecute, navigate }: {
   json: string;
   onExecute: () => void;

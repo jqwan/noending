@@ -1,4 +1,4 @@
-//! Search behavior contract (重构方案 §21/§22, doc §32.9).
+//! Search behavior contract.
 //!
 //! FTS5 answers token queries; a query its tokenizer cannot match still finds
 //! the document through the LIKE pass. Only Logical Session documents and ROOT
@@ -99,9 +99,9 @@ fn like_wildcards_are_matched_literally() {
     );
 }
 
-/// A ROOT conversation message is searchable by its content (doc §32.9), with
+/// A ROOT conversation message is searchable by its content (doc), with
 /// `ref_id` = the message id and `parent_id` = the session id — and there is NO
-/// length filter: a short message is as findable as a long one (§21, every
+/// length filter: a short message is as findable as a long one (, every
 /// stored message IS the curated conversation).
 #[test]
 fn a_root_message_is_searchable_regardless_of_length() {
@@ -147,7 +147,7 @@ fn a_root_message_is_searchable_regardless_of_length() {
 
 /// The Logical Session's own document (`kind = 'session'`) carries the title
 /// and is searchable — this is how a session without a matching message body
-/// is still found (§39).
+/// is still found.
 #[test]
 fn a_session_is_searchable_by_its_document() {
     let db = open_db("session-doc");
@@ -191,7 +191,7 @@ fn a_session_is_searchable_by_its_document() {
     );
 }
 
-/// Lifecycle × search (doc §32.7/§32.9): trashing unindexes the session's
+/// Lifecycle × search (doc): trashing unindexes the session's
 /// messages and its own document; restoring reindexes the same durable rows.
 #[test]
 fn trash_hides_a_session_and_restore_brings_it_back() {

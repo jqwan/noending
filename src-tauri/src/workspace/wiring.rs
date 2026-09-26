@@ -8,7 +8,7 @@
 //! behind the single [`WorkspaceAttaching`] door that command,
 //! ingestion and launch code call.
 //!
-//! Keeping it here is what preserves 方案 §29: there is exactly one object that
+//! Keeping it here is what preserves : there is exactly one object that
 //! turns a raw path string into a `WorkspacePath`, so there is exactly one place
 //! that decides which Project a directory belongs to.
 
@@ -22,7 +22,7 @@ use crate::workspace::project::{ProjectProjection, WorkspacePolicy};
 use crate::workspace::resolver::{ResolverContext, WorkspaceObserving, WorkspaceResolver};
 use crate::workspace::WorkspaceAttaching;
 
-/// NoEnding Home, seen through Project policy (§2, §37).
+/// NoEnding Home, seen through Project policy.
 ///
 /// Reserved means "the Home itself and its app directories" — never
 /// `<home>/workspace`, which is an ordinary working directory that happens to be
@@ -67,7 +67,7 @@ pub struct WorkspaceLayer {
 
 impl WorkspaceLayer {
     /// Production wiring: Git detection against the real environment, resolved
-    /// once because locating the binary is not free (§42.3-M10).
+    /// once because locating the binary is not free.
     pub fn new(home: &NoEndingHome) -> Self {
         Self::with_resolver(
             Arc::new(WorkspaceResolver::new(ResolverContext::from_environment(

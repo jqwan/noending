@@ -152,7 +152,7 @@ pub struct FixtureEnv {
     pub db: Db,
     pub session: Session,
     pub session_messages: Vec<SessionMessage>,
-    /// The single Owner Workstream this fixture routes to (方案 §19): the
+    /// The single Owner Workstream this fixture routes to: the
     /// first workstream of the fixture. A fixture with more than one
     /// workstream no longer describes a legal Session — a Session has at most
     /// one Owner — so only the first is ever the routing target.

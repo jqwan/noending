@@ -14,9 +14,9 @@
 //!   `text` / `reasoning` / `tool` / `step-start` / `step-finish` / `timeline`
 //!   / `compaction` / `file`.
 //!
-//! Member mapping (§26.5): every live session row is a member; a row with a
+//! Member mapping: every live session row is a member; a row with a
 //! `parent_id` is a CHILD member of that parent. ZCode's source cannot express
-//! a genuine user fork, so the conservative rule (§26.5) applies and no member
+//! a genuine user fork, so the conservative rule applies and no member
 //! is ever a ForkRoot — only seeing an explicit fork marker would change that,
 //! and an adapter test pins the rule.
 //!
@@ -36,8 +36,7 @@
 //!   `system_reminder`, 14 `background_notification`, 10 `compact_summary` and
 //!   2 `system` reminders. Reading `role` would have ingested three times as
 //!   much machine chatter as human prose — and titled every session after a
-//!   reminder. Only `real_user`/`user_prompt` is a human turn (this is
-//!   WorkBuddy's envelope lesson again, §37.7, in a different costume).
+//!   reminder. Only `real_user`/`user_prompt` is a human turn.
 //! - **Only settled assistant messages.** A row is inserted when generation
 //!   starts (`time.created`) and updated as it streams, and storage dedups by
 //!   id — so ingesting a half-written message would freeze a truncated reply
@@ -215,7 +214,7 @@ fn message_of(
     if text.trim().is_empty() {
         return (None, observation);
     }
-    // Message provenance (Provenance 方案 §13A/§16.7): a settled assistant
+    // Message provenance: a settled assistant
     // response's own `data` carries the actual generation identity at the top
     // level — `modelID` / `providerID`, older rows spell them `modelId` /
     // `providerId` (the two spellings never disagree when both are present;
@@ -265,15 +264,15 @@ impl ZCodeAdapter {
         let title: Option<String> = row.get(5)?;
         let title_source: Option<String> = row.get(6)?;
         let task_type: Option<String> = row.get(7)?;
-        // ZCode says where each title came from. `generated` is a real title
-        // (「实施 NoEnding 首页与 Workstream 看板设计方案」); `first_input` is
-        // ZCode truncating the first input, which is the same naive derivation
+        // ZCode says where each title came from. `generated` is a real title;
+        // `first_input` is ZCode truncating the first input, the same naive
+        // derivation
         // as ours and is often worse (`You are running a verification smoke
         // tes`, `研究 /Users/jqk/projects/deepseek-harness `), so it is skipped
-        // and our own derivation stands (§37.15).
+        // and our own derivation stands.
         let native_title = title
             .filter(|t| !t.trim().is_empty() && title_source.as_deref() != Some("first_input"));
-        // §26.5 — the conservative rule: a parent_id makes this a CHILD member
+        // the conservative rule: a parent_id makes this a CHILD member
         // of that parent. The source cannot distinguish an internal child from
         // a genuine user fork, so nothing here is ever a ForkRoot; `task_type`
         // rides along as metadata for a future explicit fork marker.
@@ -321,7 +320,7 @@ impl ZCodeAdapter {
         Ok(None)
     }
 
-    /// The first settled agent reply — the last resort for a title (§37.15).
+    /// The first settled agent reply — the last resort for a title.
     /// Settled only: the row appears when streaming starts and is rewritten in
     /// place, so an early read would name the session after a half sentence.
     fn first_agent_text(conn: &Connection, session_id: &str) -> Result<Option<String>> {
@@ -344,7 +343,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         Agent::ZCode
     }
 
-    /// Always `None`: ZCode is a desktop app, not a CLI (方案 §37.10).
+    /// Always `None`: ZCode is a desktop app, not a CLI.
     fn detect(&self) -> Option<AgentInstallation> {
         None
     }
@@ -373,7 +372,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             // and strand every new session until the next checkpoint. Reading
             // all live sessions every pass costs one indexed query per session
             // and is absorbed by message-identity dedup, which is the right
-            // trade for never losing a session (方案 §37.10).
+            // trade for never losing a session.
             let conn = open_read_only(&db)?;
             let mut stmt = conn
                 .prepare(
@@ -420,7 +419,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         // the source is a database that changes under us. Identity is the
         // framework's own message ids, so a re-read of the whole session
         // stores nothing; a replaced database is the only shape change worth a
-        // generation bump. Every replay is a full scan → stats SNAPSHOT (§7.3).
+        // generation bump. Every replay is a full scan → stats SNAPSHOT.
         let meta = std::fs::metadata(&path)?;
         let identity = file_identity(&path);
         let size = meta.len();
@@ -456,9 +455,8 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         })
     }
 
-    /// The store decides (§2.6): the member's record is present → Present;
-    /// the record is gone → Missing (a shared-store Adapter may confirm
-    /// missing by the record's absence — 重构方案 §2.6); a store that cannot
+    /// The store decides: the member's record is present → Present;
+    /// the record is gone → Missing; a store that cannot
     /// be opened or has an unexpected shape is NEVER missing, only
     /// Unavailable.
     fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
@@ -468,7 +466,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         };
         // Three verdicts, strictly: the record is there → Present; the store
         // opened fine and does NOT hold the record → Missing (the shared-store
-        // form of confirmed absence, 重构方案 §2.6); anything the query could
+        // form of confirmed absence); anything the query could
         // not answer (broken store, locked, wrong shape) → Unavailable — an
         // unreadable store must never read as an absent source.
         let record = match conn.query_row(
@@ -693,7 +691,7 @@ mod tests {
         assert_eq!(db_path(&root.join("cli")), None, "not every dir is a store");
     }
 
-    /// §26.5 — a `parent_id` makes a live row a CHILD member of that parent,
+    /// a `parent_id` makes a live row a CHILD member of that parent,
     /// never a fork: the source cannot express one, so the conservative rule
     /// holds and the child carries no title source.
     #[test]
@@ -734,7 +732,7 @@ mod tests {
     /// A `first_input` title is ZCode's own naive truncation of the first
     /// input — the same thing we would derive, and measurably worse
     /// (`You are running a verification smoke tes`). It is not a title the
-    /// Agent thought about, so the derived one stands (§37.15).
+    /// Agent thought about, so the derived one stands.
     #[test]
     fn a_first_input_title_is_not_treated_as_native() {
         let root = unique_dir("title-source");
@@ -767,7 +765,7 @@ mod tests {
         let conn = open(&db);
         session_row(&conn, "s", None, "/repo", 100);
         // The runtime speaks first and much more often: a reminder would have
-        // supplied the title if `role` were trusted (方案 §37.10).
+        // supplied the title if `role` were trusted.
         message_row(&conn, "m1", "s", 0, reminder("todo_reminder"));
         part_row(
             &conn,
@@ -788,7 +786,7 @@ mod tests {
         assert_eq!(found[0].first_user_text.as_deref(), Some("真正的问题"));
     }
 
-    /// §32.2 — reminders, reasoning and tool traffic are observed, not stored;
+    /// reminders, reasoning and tool traffic are observed, not stored;
     /// only the `text` parts of a settled root conversation become messages.
     #[test]
     fn reminders_reasoning_and_tool_traffic_are_not_conversation() {
@@ -944,7 +942,7 @@ mod tests {
         }
     }
 
-    /// §26.5 — no ZCode member is ever a ForkRoot: the source cannot express a
+    /// no ZCode member is ever a ForkRoot: the source cannot express a
     /// genuine user fork, and only an explicit fork marker would change that.
     #[test]
     fn no_member_is_ever_a_fork_root() {
@@ -962,8 +960,8 @@ mod tests {
             .all(|m| m.kind != DiscoveredMemberKind::ForkRoot));
     }
 
-    /// §9.1 for a shared store: the record's absence is a confirmed Missing;
-    /// an unopenable store is only ever Unavailable (重构方案 §2.6).
+    /// for a shared store: the record's absence is a confirmed Missing;
+    /// an unopenable store is only ever Unavailable.
     #[test]
     fn inspect_reads_the_record_not_the_file() {
         let root = unique_dir("inspect");
@@ -996,7 +994,7 @@ mod tests {
         );
     }
 
-    /// Provenance 方案 §28.2 — a settled assistant response's own data carries
+    ///  — a settled assistant response's own data carries
     /// its generation identity in either field spelling; a row without the
     /// fields stays NULL.
     #[test]

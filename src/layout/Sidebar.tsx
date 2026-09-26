@@ -7,10 +7,10 @@ import SidebarLogo from "../components/SidebarLogo";
 import type { WorkstreamCardData } from "../types";
 
 /**
- * Sidebar（Projects Experience v0.2 §1-§2、§21-§23）：Brand→Home、Search、
+ * Sidebar（Projects Experience v0.2 、）：Brand→Home、Search、
  * 工作区一级导航（Workstreams / Projects / Sessions / Assistant）、
- * 最近（最近 6 个 open Workstream，§21 保留）、底部固定 Settings。
- * Project 不再逐个铺在导航上——它们整体进入 Projects Board（§1）；
+ * 最近（最近 6 个 open Workstream， 保留）、底部固定 Settings。
+ * Project 不再逐个铺在导航上——它们整体进入 Projects Board；
  * 自己负责自己的数据；AppShell 只传 route/navigate。
  */
 export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
@@ -52,10 +52,10 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
 
   const workspaceActive = (v: "workstreams" | "projects" | "sessions" | "assistant") => {
     if (route.view === v) return "active";
-    // Workstream Detail → Workstreams 保持弱高亮（§10）
+    // Workstream Detail → Workstreams 保持弱高亮
     if (v === "workstreams" && route.view === "workstream") return "weak";
     if (v === "sessions" && route.view === "session") return "active";
-    // §22 — Project Detail → Projects 弱高亮，与 Workstreams 同一模式
+    // Project Detail → Projects 弱高亮，与 Workstreams 同一模式
     if (v === "projects" && route.view === "project") return "weak";
     return "";
   };
@@ -83,7 +83,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
           onClick={() => navigate({ view: "workstreams" })}>
           <Icon name="tasks" />任务
         </button>
-        {/* §2 — Projects 成为一等导航项：Workstream=我正在做什么，
+        {/* Projects 成为一等导航项：Workstream=我正在做什么，
             Project=我在哪里做，Session=我做过哪些执行 */}
         <button className={`nav-item ${workspaceActive("projects")}`}
           onClick={() => navigate({ view: "projects" })}>

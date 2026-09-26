@@ -1,4 +1,4 @@
-//! Database format contract (Logical Session refactor, 重构方案 §24).
+//! Database format contract (Logical Session refactor,).
 //!
 //! NoEnding supports exactly one SQLite format generation at a time, identified
 //! by the header pair (`application_id`, `user_version`) that creation stamps.
@@ -15,7 +15,7 @@
 //! `ingestion_diagnostics`. `session_events`, `session_cursors` and
 //! `session_deletion_jobs` are gone.
 //!
-//! Format v3 adds message-level model provenance (Provenance 方案 §5–§9):
+//! Format v3 adds message-level model provenance:
 //! `session_messages` carries `provider` / `model` (Assistant only, enforced by
 //! CHECK), and `session_member_stats` loses `model` / `provider` / `effort` —
 //! a member-level "current model" was a second, semantically unclear
@@ -115,7 +115,7 @@ fn fresh_database_uses_current_format_generation() {
     assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
     assert_eq!(user_version(&db.read()), DATABASE_FORMAT_VERSION);
 
-    // 重构方案 §24/§33 — the old-generation tables are gone, not carried
+    // the old-generation tables are gone, not carried
     // forward: one conversation store, member-owned cursors, and no deletion
     // job machinery (NoEnding never deletes an Agent-owned source).
     for table in [
@@ -149,7 +149,7 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
 
-    // The Logical Session graph is the replacement (重构方案 §5–§11): every
+    // The Logical Session graph is the replacement: every
     // table of the new model exists, and so does the one-root guard.
     for object in [
         "session_members",
@@ -167,7 +167,7 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
 
-    // Provenance 方案 §5/§8/§9 — message-level model provenance lives on
+    //  — message-level model provenance lives on
     // session_messages; the member-level runtime facts are gone.
     assert!(
         has_column(&db.read(), "session_messages", "provider"),
@@ -226,8 +226,8 @@ fn fresh_database_uses_current_format_generation() {
 }
 
 /// The integrity rules the Logical Session tables promise are actually
-/// enforced by the schema itself, not only by the storage code (重构方案
-/// §5/§6/§13, doc §32.10): the relation/role CHECKs, the one-root partial
+/// enforced by the schema itself, not only by the storage code: the
+/// relation/role CHECKs, the one-root partial
 /// unique index, member identity, sequence identity, session identity, and the
 /// cascade that keeps a purge atomic.
 #[test]
@@ -784,7 +784,7 @@ fn creation_stamps_identity_with_the_schema() {
     assert_eq!(user_version(&conn), DATABASE_FORMAT_VERSION);
 }
 
-/// Provenance 方案 §28.1/§11 — message-level model provenance: Assistant rows
+/// message-level model provenance: Assistant rows
 /// round-trip source-native provider/model, User rows refuse provenance at both
 /// the commit guard and the schema CHECK, and a dedup re-read enriches
 /// `NULL → confirmed` in place without creating a second message or letting a
@@ -873,7 +873,7 @@ fn message_provenance_round_trip_guard_and_enrichment() {
     assert_eq!(all[1].provider, None);
     assert_eq!(all[1].model, None);
 
-    // §7 — the commit guard: a User message with provenance is an adapter bug,
+    // the commit guard: a User message with provenance is an adapter bug,
     // and the whole batch is refused, not silently cleaned.
     let user_with_model = db.commit_member_ingest(
         &s_id,
@@ -908,7 +908,7 @@ fn message_provenance_round_trip_guard_and_enrichment() {
         "CHECK (user → provider IS NULL) must hold"
     );
 
-    // §11 — dedup enrichment: the same identity re-read with a provenance the
+    // dedup enrichment: the same identity re-read with a provenance the
     // stored row lacks fills the gap; one message stays one message.
     let enriched = db
         .commit_member_ingest(
@@ -936,7 +936,7 @@ fn message_provenance_round_trip_guard_and_enrichment() {
         "NULL → confirmed enrichment lands in place"
     );
 
-    // §11 — a confirmed-vs-confirmed contradiction keeps the stored value.
+    // a confirmed-vs-confirmed contradiction keeps the stored value.
     let conflict = db
         .commit_member_ingest(
             &s_id,

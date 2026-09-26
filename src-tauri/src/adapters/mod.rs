@@ -7,7 +7,7 @@
 //!
 //! The source unit is the **member** (`DiscoveredMember` / `SessionMember`),
 //! not the session: one Logical Session is the root member plus every child /
-//! side member that resolves to it (重构方案 §9).
+//! side member that resolves to it.
 //!
 //! Context Integrity rules enforced here:
 //! - adapters never generate shell fragments (no `$(cat …)`): context is
@@ -69,7 +69,7 @@ impl AgentCommand {
     }
 }
 
-/// What a discovered member IS in the execution graph (重构方案 §9).
+/// What a discovered member IS in the execution graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveredMemberKind {
     /// Establishes / joins the Logical Session as its root conversation.
@@ -103,12 +103,12 @@ impl DiscoveredMemberKind {
     }
 }
 
-/// One discovered execution member before ingestion (重构方案 §9).
+/// One discovered execution member before ingestion.
 #[derive(Debug, Clone)]
 pub struct DiscoveredMember {
     pub agent: Agent,
     /// Adapter-stable execution identity. Not required to equal the Agent's
-    /// native session id (§5.1) — e.g. Qoder subagent transcripts repeat the
+    /// native session id — e.g. Qoder subagent transcripts repeat the
     /// parent id, so the adapter derives `root-id:subagent:<file-stem>`.
     pub source_member_id: String,
     pub kind: DiscoveredMemberKind,
@@ -127,7 +127,7 @@ pub struct DiscoveredMember {
     pub last_activity_at: Option<String>,
     /// Root only; child/side must leave it `None`.
     pub native_title: Option<String>,
-    /// Root only: first real user prose, for the title chain (§4.2).
+    /// Root only: first real user prose, for the title chain.
     pub first_user_text: Option<String>,
     /// Root only: first visible assistant prose — the last title resort.
     pub first_agent_text: Option<String>,
@@ -233,7 +233,7 @@ impl ParsedLine {
 /// Messages carry no sequence — the storage layer assigns stable identities.
 ///
 /// `next_active_provider` / `next_active_model` are the stateful provenance
-/// frontier after this read (Provenance 方案 §15) — `None`/`None` for every
+/// frontier after this read — `None`/`None` for every
 /// adapter whose evidence is direct per-message or absent.
 #[derive(Debug, Clone, Default)]
 pub struct MemberReadDelta {
@@ -245,7 +245,7 @@ pub struct MemberReadDelta {
 }
 
 /// The stateful provenance frontier a stateful-evidence adapter threads
-/// through one read (Provenance 方案 §13B/§14): the generation provenance the
+/// through one read: the generation provenance the
 /// source has explicitly confirmed and that still governs messages to come.
 /// Seeded from the member cursor on appends, reset on any full re-scan.
 #[derive(Debug, Clone, Default)]
@@ -290,7 +290,7 @@ pub fn file_identity(path: &Path) -> String {
     }
 }
 
-/// Strict source availability for a FILE-backed member (§9.1). `NotFound` is
+/// Strict source availability for a FILE-backed member. `NotFound` is
 /// the only missing; every other failure is `Unavailable` — an unreadable
 /// path must never read as an absent source.
 pub fn inspect_file_source(path: &Path) -> SourceAvailability {
@@ -331,7 +331,7 @@ pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
 ///
 /// Returns None when the file is not a recognizable session file of any
 /// known agent — including files whose content is genuinely ambiguous, which
-/// must be left unclaimed rather than guessed at (方案 §37.5).
+/// must be left unclaimed rather than guessed at.
 pub fn detect_format(path: &Path) -> Option<Agent> {
     const MAX_PARSE_LINES: usize = 10;
     let file = std::fs::File::open(path).ok()?;
@@ -368,7 +368,7 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
     {
         return Some(Agent::Codex);
     }
-    // Qoder BEFORE Claude, and deliberately so (方案 §37.5): its transcript is
+    // Qoder BEFORE Claude, and deliberately so: its transcript is
     // Claude-shaped, so every Qoder message line would satisfy the Claude
     // branch below. These five line types are Qoder's own bookkeeping and are
     // re-emitted throughout the file (workspace-directories alone repeats
@@ -559,7 +559,7 @@ pub fn read_jsonl_delta(
     )
 }
 
-/// The stateful variant (Provenance 方案 §14/§15). `state` is the provenance
+/// The stateful variant. `state` is the provenance
 /// frontier: seeded by the caller from the member cursor, and RESET by this
 /// function whenever the read starts at byte 0 (first read or any full
 /// re-scan) — a fresh scan re-derives the state from the source itself
@@ -707,7 +707,7 @@ pub fn read_jsonl_delta_stateful(
 }
 
 /// Cursor update for readers that replay the whole source on every read (dsh's
-/// zstd frames — 方案 §37.8; ZCode's live store).
+/// zstd frames; ZCode's live store).
 ///
 /// Their offsets must stay in the source's OWN coordinates: that is what the
 /// reconcile pre-filter stats, and it is the only thing known without decoding
@@ -715,7 +715,7 @@ pub fn read_jsonl_delta_stateful(
 /// identity — the writer's own ids — absorbs it: re-reading a source stores
 /// nothing. A new generation is a change of shape (the file was replaced, or
 /// truncation removed bytes), never a mere append. Because every replay is a
-/// full scan, its observations become a stats SNAPSHOT (§7.3).
+/// full scan, its observations become a stats SNAPSHOT.
 pub fn replay_cursor_update(
     path: &Path,
     cursor: &SessionMemberCursor,
@@ -773,16 +773,16 @@ pub trait AgentAdapter: Send + Sync {
     /// Read only the delta since `cursor` for THIS member, detecting append /
     /// truncate / rewrite / replacement. Only Root members may return
     /// messages; child/side members contribute observations only — the core
-    /// commit rejects any message whose member is not the root (§6).
+    /// commit rejects any message whose member is not the root.
     fn read_member_delta(
         &self,
         member: &SessionMember,
         cursor: &SessionMemberCursor,
     ) -> Result<MemberReadDelta>;
 
-    /// Strict availability verdict for the member's source (§9.1). For a
+    /// Strict availability verdict for the member's source. For a
     /// ROOT member this is the permanent-delete and Resume authority: only a
-    /// fresh `Missing` may ever enable a local purge (§20).
+    /// fresh `Missing` may ever enable a local purge.
     fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability>;
 
     /// Build the command line for a New Session. `context_file` is None when
@@ -888,10 +888,9 @@ pub fn truncate_text(s: &str, max: usize) -> String {
 ///
 /// The test is on the trimmed text because the runtime does not always put the
 /// marker first: Codex writes the pasted-file block as `"\n# Files pasted by
-/// the user: …"`, and testing the raw text let exactly that become a title
-/// (§37.15). Adapters call this when picking their first human turn AND when
-/// deciding what is Conversation (§2.3: injected context never becomes a
-/// SessionMessage).
+/// the user: …"`, and testing the raw text let exactly that become a title.
+/// Adapters call this when picking their first human turn AND when deciding
+/// what is Conversation (injected context never becomes a SessionMessage).
 pub fn is_injected_preamble(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with('<') || t.starts_with('#')
@@ -900,7 +899,7 @@ pub fn is_injected_preamble(text: &str) -> bool {
 /// Session display title from one text candidate. `None` when there is
 /// nothing title-worthy in it.
 ///
-/// A machine blob is not a title (§37.15): Codex's review threads open with
+/// A machine blob is not a title: Codex's review threads open with
 /// `{"risk_level":"medium","user_authorization":"high","outcome":"allow"}` (27
 /// of the 50 internal threads on this machine do), and putting that in the
 /// session list is noise, not a title. Same call the user-text tier already
@@ -923,7 +922,7 @@ pub fn title_from_text(text: &str) -> Option<String> {
 /// A conversation message out of one parsed line — the spelling every
 /// adapter's closure constructs. Provenance defaults to `None`/`None`:
 /// most messages (every user message, unknown-provenance assistant turns)
-/// need nothing more (Provenance 方案 §26).
+/// need nothing more.
 pub fn parsed_message(
     source_message_id: Option<String>,
     role: SessionMessageRole,
@@ -985,7 +984,7 @@ mod fingerprint_tests {
 
     /// Qoder's transcript IS Claude's format plus bookkeeping lines, so the
     /// only thing standing between a Qoder file and being read as Claude is
-    /// branch order in `fingerprint_line` (方案 §37.5).
+    /// branch order in `fingerprint_line`.
     #[test]
     fn qoder_is_claimed_before_claude() {
         // A Qoder bookkeeping line: no uuid/sessionId pair, but decisive.
@@ -1023,7 +1022,7 @@ mod fingerprint_tests {
 
     /// WorkBuddy keeps its message payload at the top level (`role` /
     /// `content` next to `type`), unlike pi, whose `type:"message"` line nests
-    /// the same fields under `message` (方案 §37.7). Its bookkeeping line types
+    /// the same fields under `message`. Its bookkeeping line types
     /// are decisive on their own.
     #[test]
     fn workbuddy_is_claimed_by_its_top_level_shape() {
@@ -1079,7 +1078,7 @@ mod fingerprint_tests {
     /// returns a member belonging to another agent**. It is stated at the
     /// discovery level rather than per file, because a file's content can be
     /// genuinely ambiguous — Qoder's sub-agent transcripts repeat Claude
-    /// Code's line shapes and are therefore claimed by nobody (方案 §37.5) —
+    /// Code's line shapes and are therefore claimed by nobody —
     /// and a file nobody claims is not a misattribution.
     #[test]
     #[ignore]
@@ -1139,8 +1138,7 @@ mod title_tests {
 
     /// A structured blob is a machine payload, not a title. Codex's review
     /// threads open with one — 27 of this machine's 50 internal threads do — and
-    /// the session list is the wrong place for `{"risk_level":"medium",…}`
-    /// (方案 §37.15).
+    /// the session list is the wrong place for `{"risk_level":"medium",…}`.
     #[test]
     fn a_machine_blob_is_not_a_title() {
         assert_eq!(
@@ -1157,7 +1155,7 @@ mod title_tests {
 
     /// The runtime does not always put the marker on the first byte: Codex's
     /// pasted-file block opens with a blank line, and testing the raw text let
-    /// `"\n# Files pasted by the user: …"` through as a title (§37.15).
+    /// `"\n# Files pasted by the user: …"` through as a title.
     #[test]
     fn an_injected_preamble_is_recognized_after_leading_whitespace() {
         assert!(is_injected_preamble("# Files pasted by the user: ## a.png"));

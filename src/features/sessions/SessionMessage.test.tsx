@@ -89,8 +89,8 @@ it("looksLikeMarkdown 认代码块 / 标题 / 列表，不认普通句子", () =
   expect(looksLikeMarkdown("就是一段普通的话，没有别的。")).toBe(false);
 });
 
-it("用户消息右、Agent 左（§22.1：只有两种气泡）", () => {
-  // 左右对齐全靠这两个类（§36.23）；CSS 挂了测试也看不出来，所以在这里钉住类名。
+it("用户消息右、Agent 左：只有两种气泡", () => {
+  // 左右对齐全靠这两个类；CSS 挂了测试也看不出来，所以在这里钉住类名。
   const { container } = render(
     <>
       <SessionMessage msg={msg("提问", "user")} />
@@ -111,7 +111,7 @@ it("头部显示调用方给出的 who 与序号", () => {
   expect(head.textContent).toContain("#7");
 });
 
-describe("消息级模型标签（Provenance 方案 §22）", () => {
+describe("消息级模型标签", () => {
   it("provider + model → \"model · provider\"", () => {
     const { container } = render(
       <SessionMessage msg={{ ...msg("回答"), provider: "anthropic", model: "claude-opus-x" }} />,

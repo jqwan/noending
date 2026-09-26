@@ -2,7 +2,7 @@
 //!
 //! `probe_workspace_path` must describe what the attacher WOULD decide, from
 //! the same observation the attacher runs — never write anything, and never
-//! guess past the resolver's three refusal faces (§2, §1.4). The recent-paths
+//! guess past the resolver's three refusal faces. The recent-paths
 //! list must be pure reads over the registry and the Session cwd history.
 
 use std::path::PathBuf;
@@ -92,7 +92,7 @@ fn probe_names_why_a_string_is_not_a_workspace_path() {
     let probe = probe_workspace_path(&db, &resolver, &policy, "relative/path").unwrap();
     assert_eq!(probe.status, ProbeStatus::Unresolvable);
 
-    // The default workspace under the Home is deliberately NOT reserved (§2).
+    // The default workspace under the Home is deliberately NOT reserved.
     let probe =
         probe_workspace_path(&db, &resolver, &policy, "/Users/tester/.noending/workspace").unwrap();
     assert_eq!(probe.status, ProbeStatus::Ok);
@@ -159,7 +159,7 @@ fn probe_of_a_registered_path_predicts_its_existing_project() {
     assert!(hint.known);
     assert_eq!(hint.id.as_deref(), Some("p1"));
     assert_eq!(hint.name.as_deref(), Some("P1"));
-    // A missing directory is a legal observation (§42.3-M8): usable, with a warn.
+    // A missing directory is a legal observation: usable, with a warn.
     assert!(!probe.exists);
     assert_eq!(probe.git_state.as_deref(), Some("none"));
 }

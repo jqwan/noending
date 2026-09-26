@@ -6,7 +6,7 @@
 //! * [`probe_workspace_path`] — what would `ensure_path` decide about this
 //!   string, and which Project would it land in? The acceptance answer here is
 //!   advisory only: the attacher's `Ok(None)` inside the caller's transaction
-//!   stays the only authority (§8). Everything the probe reports is derived
+//!   stays the only authority. Everything the probe reports is derived
 //!   from the same observation the attacher would run, so the two cannot
 //!   disagree about facts — only about timing.
 //! * [`list_recent_workspace_paths`] — the recent/known directories a picker
@@ -14,7 +14,7 @@
 //!   history. Ranking is pure reads; nothing here creates a WorkspacePath.
 //!
 //! Both run on the `Db` read half and never observe inside a write guard
-//! (§42.3-M7: a `git` call never holds the DB lock).
+//! (a `git` call never holds the DB lock).
 
 use serde::Serialize;
 
@@ -39,9 +39,9 @@ pub enum ProbeStatus {
     Ok,
     /// Empty, un-normalizable, or relative with no base.
     Unresolvable,
-    /// A reserved NoEnding Home path (§2).
+    /// A reserved NoEnding Home path.
     Reserved,
-    /// The user Home itself (§1.4).
+    /// The user Home itself.
     Home,
 }
 
@@ -146,7 +146,7 @@ pub fn probe_workspace_path(
                     _ => None,
                 };
                 match family_project {
-                    // An identity without a Project cannot happen through §8 (the
+                    // An identity without a Project cannot happen through (the
                     // Project is created with the family); if the data says
                     // otherwise, "would create one" stays the honest prediction.
                     Some(project) => ProjectHint {
@@ -171,7 +171,7 @@ pub fn probe_workspace_path(
 
 /// One entry of the picker's "recent / known directories" list. `known = false`
 /// entries come straight from Session cwd history and are NOT WorkspacePaths
-/// yet — attaching one is still the user's explicit act (§1.7).
+/// yet — attaching one is still the user's explicit act.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecentWorkspacePath {
     pub path: String,
@@ -188,7 +188,7 @@ pub struct RecentWorkspacePath {
 /// each directory. Trashed Sessions still count as usage — they were real work
 /// in a real directory, and the trash says so about the Session, not the path.
 ///
-/// Unknown cwds are normalized and checked against §2/§1.4, but never probed
+/// Unknown cwds are normalized and checked against, but never probed
 /// with git: a picker listing must stay cheap, and the per-entry probe run
 /// answers that properly once the user focuses a candidate.
 pub fn list_recent_workspace_paths(

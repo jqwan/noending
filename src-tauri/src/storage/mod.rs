@@ -9,7 +9,7 @@
 //!   idempotent. Rows are never replaced or overwritten.
 //! - Member cursors track the *read* position per member; the session's
 //!   `session_context_state.processed_message_sequence` is the separate
-//!   *processed* position of Context consumption (重构方案 §8).
+//!   *processed* position of Context consumption.
 //! - One member ingest = messages + stats + cursor + activity in ONE
 //!   transaction (`commit_member_ingest`), guarded by trash / membership
 //!   re-checks inside it.
@@ -80,7 +80,7 @@ pub fn new_id() -> String {
 pub const IDENTITY_GENESIS: &str = "genesis";
 
 /// Stable identity of a ROOT conversation message, used to make re-scans of
-/// the same Agent source idempotent (重构方案 §14).
+/// the same Agent source idempotent.
 ///
 /// - Messages WITH a native Agent message id: content hash of
 ///   `(native_id | role | ts | content)` — the Agent guarantees the id is
@@ -293,7 +293,7 @@ impl Db {
 
     // ---------------- Workstreams ----------------
 
-    /// Membership is derived from the path chain (方案 §1.12):
+    /// Membership is derived from the path chain:
     /// `workstream_paths → workspace_paths.project_id`. Any position counts as
     /// membership; `workspace::project` decides the primary/related distinction
     /// from `position = 0` when it renders a Project page.
@@ -326,8 +326,8 @@ impl Db {
 
     /// Card stats for one Workstream: (session_count, latest session as
     /// (id, agent), that session's activity timestamp). Only Sessions that own
-    /// this Workstream count (方案 §40); a Session can never be counted twice
-    /// across Workstreams. Trashed sessions are inactive (方案 §11) and count
+    /// this Workstream count; a Session can never be counted twice
+    /// across Workstreams. Trashed sessions are inactive and count
     /// for nothing here.
     pub fn workstream_session_stats(
         &self,
@@ -437,8 +437,8 @@ impl Db {
         )?)
     }
 
-    /// Delete a Workstream and everything it owns — in the full FK order of
-    /// §42.3-M6, which a bare `DELETE FROM workstreams` violates under
+    /// Delete a Workstream and everything it owns — in full FK order, which a
+    /// bare `DELETE FROM workstreams` violates under
     /// `PRAGMA foreign_keys = ON` (it fails the moment the Workstream has ever
     /// had a Context item or a path).
     ///
@@ -587,7 +587,7 @@ impl Db {
             .optional()?)
     }
 
-    /// The Logical Session for a root Resume identity (§10.1). This is THE
+    /// The Logical Session for a root Resume identity. This is THE
     /// session lookup for LaunchIntent matching and Resume.
     pub fn find_session_by_root_agent_id(
         &self,
@@ -631,7 +631,7 @@ impl Db {
             .collect())
     }
 
-    /// §1.10 — a `project_id` filter reads the **authoritative chain**
+    /// A `project_id` filter reads the **authoritative chain**
     /// (`sessions.workspace_path_id → workspace_paths.project_id`), never the
     /// `sessions.project_id` cache.
     ///
@@ -675,11 +675,11 @@ impl Db {
 
     // ---------------- Session Members ----------------
 
-    /// Insert or refresh one execution member (§5). The identity is
+    /// Insert or refresh one execution member. The identity is
     /// `(agent, source_member_id)`; a member whose topology resolution moved
     /// to another Logical Session is re-pointed by the same upsert.
     /// Child / side cwds land on the MEMBER row only — they can never reach
-    /// `sessions.cwd` / `project_id` (§4.1, §18).
+    /// `sessions.cwd` / `project_id`.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_session_member(
         &self,
@@ -837,7 +837,7 @@ impl Db {
     }
 
     /// Rewind every member cursor of a session so the next ingest re-scans
-    /// from the start (Re-ingest Source, §23.1). MESSAGES ARE NOT TOUCHED:
+    /// from the start. MESSAGES ARE NOT TOUCHED:
     /// their app-owned ids and every provenance ref stay valid — unchanged
     /// content dedups by identity on the re-scan. Stats snapshots replace on
     /// the rescan; the Context frontier is preserved. The provenance state
@@ -856,20 +856,20 @@ impl Db {
 
     // ---------------- Conversation Messages ----------------
 
-    /// The atomic member-ingest commit (重构方案 §13). Messages, stats, the
+    /// The atomic member-ingest commit. Messages, stats, the
     /// member cursor and the activity stamps commit or not at all.
     ///
     /// Guards, in order, inside the transaction:
     /// 1. the Logical Session exists and is not trashed;
     /// 2. the member still belongs to that session;
     /// 3. messages require `member.relation == root` — an adapter that hands
-    ///    child text to the conversation is a bug, never silently stored (§6).
+    ///    child text to the conversation is a bug, never silently stored.
     ///
     /// A failed guard stores NOTHING (no messages, no stats, no cursor move),
     /// so a Trash racing a parse cannot produce a half commit. The identity
     /// chain starts from genesis on a full re-scan (start offset 0) and
     /// otherwise continues from the cursor's `identity_tail_hash` — the tail
-    /// of the CURRENT source chain, never "last message in the store" (§14).
+    /// of the CURRENT source chain, never "last message in the store".
     pub fn commit_member_ingest(
         &self,
         session_id: &str,
@@ -883,11 +883,10 @@ impl Db {
         )
     }
 
-    /// Same transaction, plus the stateful provenance frontier (Provenance
-    /// 方案 §15): the bytes frontier and the provenance state frontier are
-    /// written together, so they can never drift. Adapters with direct
-    /// per-message evidence pass `None`/`None` — their provenance travels on
-    /// the messages themselves.
+    /// Same transaction, plus the stateful provenance frontier: the bytes
+    /// frontier and the provenance state frontier are written together, so
+    /// they can never drift. Adapters with direct per-message evidence pass
+    /// `None`/`None` — their provenance travels on the messages themselves.
     pub fn commit_member_ingest_with_provenance_state(
         &self,
         session_id: &str,
@@ -899,13 +898,13 @@ impl Db {
         next_active_model: Option<String>,
     ) -> Result<Vec<SessionMessage>> {
         self.tx(|tx| {
-            // 1. commit-time trash guard (方案 §43 / §13.1). A trashed (or
+            // 1. commit-time trash guard. A trashed (or
             // vanished) session takes NOTHING — the next Restore resumes from
             // the untouched cursor.
             if !session_lifecycle::session_is_writable_conn(tx, session_id)? {
                 return Ok(Vec::new());
             }
-            // 2. the member must still belong to THIS session (§13.2). A
+            // 2. the member must still belong to THIS session. A
             // topology correction that moved it mid-parse invalidates the
             // whole prepared batch.
             let relation: Option<String> = tx
@@ -918,14 +917,14 @@ impl Db {
             let Some(relation) = relation else {
                 return Ok(Vec::new());
             };
-            // 3. only the ROOT member may write Conversation (§13.3 / §6).
+            // 3. only the ROOT member may write Conversation.
             let is_root = relation == SessionMemberRelation::Root.as_str();
             if !messages.is_empty() && !is_root {
                 return Err(other(format!(
                     "member {member_id} (relation={relation}) 不是 root，拒绝写入会话消息"
                 )));
             }
-            // 4. provenance guard (Provenance 方案 §7): user messages have no
+            // 4. provenance guard: user messages have no
             // generation model. An adapter that hands one over is a bug, not
             // data — reject the whole batch, the same way a child message is.
             if messages.iter().any(|m| {
@@ -1060,7 +1059,7 @@ impl Db {
                         });
                         next_seq += 1;
                     } else {
-                        // Dedup hit (Provenance 方案 §11): same message
+                        // Dedup hit: same message
                         // identity. `NULL → confirmed` enriches in place;
                         // a confirmed-vs-confirmed contradiction keeps the
                         // stored value and logs — it never becomes a second
@@ -1070,7 +1069,7 @@ impl Db {
                 }
             }
 
-            // 5. stats delta / snapshot (§7.3), then 6. the cursor advance.
+            // 5. stats delta / snapshot, then 6. the cursor advance.
             apply_stats_conn(tx, member_id, stats)?;
             let new_tail = if messages.is_empty() {
                 stored_tail.unwrap_or_default()
@@ -1164,7 +1163,7 @@ impl Db {
         get_messages_conn(&conn, session_id, after, limit)
     }
 
-    /// The Context frontier read (§15): root conversation messages after the
+    /// The Context frontier read: root conversation messages after the
     /// processed sequence, in order.
     pub fn get_messages_after(
         &self,
@@ -1214,7 +1213,7 @@ impl Db {
 
     // ---------------- Context Frontier ----------------
 
-    /// The Logical Session's Context frontier (§8.2). Zero when nothing has
+    /// The Logical Session's Context frontier. Zero when nothing has
     /// been processed — including before the first message exists.
     pub fn get_context_state(&self, session_id: &str) -> Result<SessionContextState> {
         let conn = self.read();
@@ -1253,7 +1252,7 @@ impl Db {
             .optional()?)
     }
 
-    /// Query-time aggregate over the whole execution graph (§7.4): no cache
+    /// Query-time aggregate over the whole execution graph: no cache
     /// table — the member count is small and this can never drift.
     pub fn aggregate_session_stats(&self, session_id: &str) -> Result<SessionAggregateStats> {
         let members = self.members_for_session(session_id)?;
@@ -1344,7 +1343,7 @@ impl Db {
 
     // ---------------- Ingestion Diagnostics ----------------
 
-    /// Record (or re-observe) an unattachable source (§11). The first sight
+    /// Record (or re-observe) an unattachable source. The first sight
     /// inserts quietly; every later reconcile bumps `observation_count` so the
     /// Settings page can show only repeat offenders.
     pub fn upsert_ingestion_diagnostic(
@@ -1398,7 +1397,7 @@ impl Db {
         Ok(())
     }
 
-    /// The member resolved: its diagnostic goes away (§11). Missing key is a
+    /// The member resolved: its diagnostic goes away. Missing key is a
     /// no-op — resolution must never depend on a diagnostic having existed.
     pub fn resolve_ingestion_diagnostic(
         &self,
@@ -1414,7 +1413,7 @@ impl Db {
         Ok(())
     }
 
-    /// The Settings page list: repeat offenders only by default (§11).
+    /// The Settings page list: repeat offenders only by default.
     pub fn list_ingestion_diagnostics(
         &self,
         min_observation_count: i64,
@@ -1433,17 +1432,17 @@ impl Db {
 
     // ---------------- Session Owner ----------------
 
-    /// Set (or clear) the single Owner Workstream of a Session (方案 §9.2).
+    /// Set (or clear) the single Owner Workstream of a Session.
     /// This touches exactly one column: `sessions.owner_workstream_id`.
     /// `None` clears ownership. No implicit WorkstreamPath / cwd / Project
-    /// mutation happens here (方案 §5.1).
+    /// mutation happens here.
     pub fn set_session_owner(&self, session_id: &str, workstream_id: Option<&str>) -> Result<()> {
         let conn = self.write();
         set_session_owner_conn(&conn, session_id, workstream_id)
     }
 
-    /// Active Sessions that own `workstream_id`, most recent activity first
-    /// (方案 §9.2). A Session appears in at most one Workstream's list.
+    /// Active Sessions that own `workstream_id`, most recent activity first.
+    /// A Session appears in at most one Workstream's list.
     pub fn sessions_for_workstream(&self, workstream_id: &str) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(
@@ -1598,10 +1597,10 @@ impl Db {
         // Never let subsequent item edits pollute historical revision authority.
         let authority = resolve_revision_authority(&rev);
 
-        // §28 — a redacted revision's session is GONE. This is not a
+        // A redacted revision's session is GONE. This is not a
         // tombstone: return only the fact that the source no longer exists.
         // No session id, agent session id, title or path may resolve, and
-        // nothing may redirect to a future rediscovered session (§34).
+        // nothing may redirect to a future rediscovered session.
         if rev.source_type.as_deref() == Some("deleted_session") {
             return Ok(Some(ContextSourceDetail {
                 revision_id: rev.id,
@@ -2208,7 +2207,7 @@ impl Db {
     /// because message identity dedup happens at the message layer,
     /// incremental batches never need to wipe the session's earlier index
     /// rows. Every SessionMessage is indexed — messages ARE the curated
-    /// conversation (§21), so no length pre-filter stands between a short
+    /// conversation, so no length pre-filter stands between a short
     /// constraint and findability.
     pub fn index_new_messages(&self, messages: &[SessionMessage]) -> Result<()> {
         let conn = self.write();
@@ -2228,7 +2227,7 @@ impl Db {
     /// ingestion-time indexing was skipped, and Session documents that no
     /// write has touched yet. Idempotent.
     ///
-    /// Review P1-1: only ACTIVE sessions are indexed. This runs at every
+    /// Only ACTIVE sessions are indexed. This runs at every
     /// startup, so an unguarded run would silently re-index everything a
     /// Trash unindexed — the recycle bin would leak back into search after
     /// every restart. `session_lifecycle::unindex_session_conn` and this WHERE
@@ -2244,7 +2243,7 @@ impl Db {
                    SELECT ref_id FROM search_index WHERE kind = 'message')",
             [],
         )?;
-        // §39 — fill in the Session documents that are missing entirely. A
+        // Fill in the Session documents that are missing entirely. A
         // document whose body can change (title, Project, Owner Workstream) is
         // refreshed at the write that changed it, so the backfill only has to
         // cover rows no write ever touched.
@@ -2318,11 +2317,11 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
            -- A customized name is user intent: no automatic rename (worktree
-           -- discovery, Git upgrade, Project merge) may overwrite it (§37).
+           -- discovery, Git upgrade, Project merge) may overwrite it.
            name = CASE WHEN name_customized = 1 THEN name ELSE ?2 END,
            description = ?3,
            -- Git identity is never cleared *or re-targeted* by a whole-object
-           -- write: losing `.git` on one path must not detach a Project (§1.3),
+           -- write: losing `.git` on one path must not detach a Project,
            -- and pointing an existing Project at a different family is a Policy
            -- decision, not a save side effect. The one legitimate writer is
            -- `workspace::project::adopt_git_identity_conn` (first-set-only).
@@ -2343,7 +2342,7 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
 }
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
-    // §39 — a Session's search document carries its Owner's title, so a rename
+    // A Session's search document carries its Owner's title, so a rename
     // has to reach every Session that owns this Workstream. The previous title
     // is read first: an update that changed nothing else must not rewrite N
     // documents.
@@ -2378,7 +2377,7 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
 ///
 /// The target Workstream is checked to exist: a Session pointing at a row that
 /// is not there would be a silently broken owner. The search document is
-/// refreshed inside the same connection (§39) — an ownership change that never
+/// refreshed inside the same connection — an ownership change that never
 /// reached the index would leave the Session searchable under its old label.
 pub fn set_session_owner_conn(
     conn: &Connection,
@@ -2502,7 +2501,7 @@ pub fn update_waiting_launch_intent_conn(
 
 /// Rebuild the search documents of the Sessions that OWN `workstream_id`.
 ///
-/// §39 — a Session's document embeds its Owner Workstream's title, so anything
+/// A Session's document embeds its Owner Workstream's title, so anything
 /// that changes that title (a rename) or the ownership itself (a Workstream
 /// deletion nulling it) leaves every owned Session's document describing a fact
 /// that is no longer true. The caller runs this in the same transaction as the
@@ -2523,7 +2522,7 @@ pub fn reindex_owned_sessions_conn(conn: &Connection, workstream_id: &str) -> Re
 
 /// Rebuild the search documents of the Sessions that project onto
 /// `project_id`. Same rule as [`reindex_owned_sessions_conn`] for the other
-/// input of a Session document's body — the Project name (§39).
+/// input of a Session document's body — the Project name.
 pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
@@ -2538,7 +2537,7 @@ pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) ->
     Ok(())
 }
 
-/// §39 — write (or refresh) one Session's search document.
+/// Write (or refresh) one Session's search document.
 ///
 /// Title is the Session title (falling back to the Agent name); body is the
 /// Project name plus the ONE Owner Workstream title. A Session has a single
@@ -2676,7 +2675,7 @@ pub fn upsert_member_cursor_conn(conn: &Connection, c: &SessionMemberCursor) -> 
     Ok(())
 }
 
-/// Provenance enrichment on a dedup hit (Provenance 方案 §11). The message has
+/// Provenance enrichment on a dedup hit. The message has
 /// already been recognised as the same one (identity hash matches), so a
 /// newly read provenance that the stored row lacks fills the gap in place; a
 /// contradiction with an already-confirmed value keeps the stored one and
@@ -2722,10 +2721,10 @@ fn enrich_message_provenance_conn(
     Ok(())
 }
 
-/// Apply a stats update to one member's 1:1 snapshot row (§7.3). A DELTA adds
+/// Apply a stats update to one member's 1:1 snapshot row. A DELTA adds
 /// its observed counts; a SNAPSHOT replaces the four observed counters. Never
 /// called with `None` from callers that had nothing to say — but treated as a
-/// no-op here so "no evidence" can never zero a column (§7.1).
+/// no-op here so "no evidence" can never zero a column.
 pub fn apply_stats_conn(
     conn: &Connection,
     member_id: &str,
@@ -2823,7 +2822,7 @@ pub fn set_processed_message_sequence_conn(
     Ok(())
 }
 
-/// The stable diagnostic identity of an unattachable member (§11): one row
+/// The stable diagnostic identity of an unattachable member: one row
 /// per (agent, kind, source member), so repeat sightings update instead of
 /// duplicating.
 pub fn diagnostic_key(agent: Agent, kind: &str, source_member_id: Option<&str>) -> String {
@@ -2835,7 +2834,7 @@ pub fn diagnostic_key(agent: Agent, kind: &str, source_member_id: Option<&str>) 
     )
 }
 
-/// `Some(a) + Some(b)`; `None` never erases a known total (§7.1).
+/// `Some(a) + Some(b)`; `None` never erases a known total.
 fn or_add(current: Option<i64>, next: Option<i64>) -> Option<i64> {
     match (current, next) {
         (a, Some(b)) => Some(a.unwrap_or(0) + b),
@@ -2843,7 +2842,7 @@ fn or_add(current: Option<i64>, next: Option<i64>) -> Option<i64> {
     }
 }
 
-/// Query-time aggregate over a session's execution graph (§7.4).
+/// Query-time aggregate over a session's execution graph.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SessionAggregateStats {
     pub member_count: i64,
@@ -2859,7 +2858,7 @@ pub struct SessionAggregateStats {
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub cost: Option<f64>,
-    // model / provider / effort removed (Provenance 方案 §9): aggregate
+    // model / provider / effort removed: aggregate
     // "session model" was a guess; per-model counts derive from
     // session_messages WHERE role = 'assistant' when the UI needs them.
 }
@@ -3495,7 +3494,7 @@ pub struct SessionFilter {
     pub project_id: Option<String>,
     pub agent: Option<Agent>,
     /// Defaults to Active: trashed Sessions are hidden from every default
-    /// projection (方案 §11). The recycle bin passes Trash explicitly.
+    /// projection. The recycle bin passes Trash explicitly.
     pub scope: SessionListScope,
 }
 

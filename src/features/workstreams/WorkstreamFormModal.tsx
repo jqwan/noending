@@ -5,10 +5,10 @@ import PathListEditor, { type PathEntryDraft } from "./PathListEditor";
 import type { CreateWorkstreamReport, Workstream, WorkstreamPathRow } from "../../types";
 
 /**
- * 任务表单弹窗：新建与编辑共用（方案 §14/§22）。传 `workstream` 即为编辑模式。
+ * 任务表单弹窗：新建与编辑共用。传 `workstream` 即为编辑模式。
  *
- * Project 是从工作目录派生的，用户既不能挑也不能造（§0）；被拒绝的路径在这里
- * 逐条说破，而不是静默丢掉（§42.3 不能确定就不猜）。
+ * Project 是从工作目录派生的，用户既不能挑也不能造；被拒绝的路径在这里
+ * 逐条说破，而不是静默丢掉。
  */
 
 type PathOutcome = CreateWorkstreamReport["paths"][number];

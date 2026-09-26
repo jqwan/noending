@@ -297,7 +297,7 @@ describe("WorkstreamFormModal edit mode", () => {
     expect(screen.queryByText(/保存后会从当前任务移除/)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "移除 /repo/docs" }));
-    // §35：删路径不再牵连 Session —— 只说移除目录，并说明不改会话归属。
+    // 删路径不再牵连 Session —— 只说移除目录，并说明不改会话归属。
     screen.getByText(/保存后会从当前任务移除 1 条工作目录/);
     screen.getByText(/不会删除会话，也不会修改已有会话的所属任务/);
 

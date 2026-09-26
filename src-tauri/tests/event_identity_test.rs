@@ -12,7 +12,7 @@
 //! `Db::commit_member_ingest`, which chains `message_identity_hash` from
 //! IDENTITY_GENESIS on a full re-scan (`start_byte_offset == 0`) and from the
 //! member cursor's `identity_tail_hash` on an append. The cursor — not the
-//! session — owns the read position (§8.1).
+//! session — owns the read position.
 
 use noending::adapters::AgentAdapter;
 use noending::domain::{
@@ -45,7 +45,7 @@ fn open_db(tag: &str) -> Db {
 // ---- per-source write strategies -----------------------------------------
 //
 // Plain JSONL is written as text; dsh's transcript is zstd, appended one
-// complete frame per write batch (方案 §37.8). Both must pass the same suite.
+// complete frame per write batch. Both must pass the same suite.
 
 fn write_plain(file: &std::path::Path, body: &str) {
     std::fs::write(file, body).unwrap();
@@ -73,7 +73,7 @@ fn append_framed(file: &std::path::Path, extra: &str) {
 
 /// A Logical Session + its ROOT member, pointed at a fixture transcript file.
 /// The member identity is the session's root Resume identity, exactly as
-/// discovery creates it (§10.1).
+/// discovery creates it.
 fn fixture_session(
     db: &Db,
     agent: Agent,
@@ -420,8 +420,7 @@ identity_suite!(
 );
 // ZCode has no entry: its source is a live SQLite store, and this suite works
 // by mutating a transcript file under the adapter's own reader. Its cursor and
-// identity behaviour is covered by the adapter's unit tests instead (方案
-// §37.10).
+// identity behaviour is covered by the adapter's unit tests instead.
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a
 /// rewrite: generation bump + rescan, old history intact, new text stored.
@@ -571,7 +570,7 @@ fn identity_dedup_follows_chain_semantics() {
 
 /// A stats-only batch (no messages) advances the member cursor's read
 /// position but must NOT move the identity tail: only messages advance the
-/// chain, so the next append keeps chaining from the last real message (§8.1).
+/// chain, so the next append keeps chaining from the last real message.
 #[test]
 fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
     let db = open_db("stats-only-tail");
@@ -656,7 +655,7 @@ fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
 
 /// Only the ROOT member may produce Conversation rows: an adapter handing
 /// child text to the conversation is a bug, and the commit must reject the
-/// whole batch — nothing stored, nothing moved (§6 / §13.3).
+/// whole batch — nothing stored, nothing moved.
 #[test]
 fn child_member_messages_are_rejected_not_stored() {
     let db = open_db("child-guard");
@@ -700,7 +699,7 @@ fn child_member_messages_are_rejected_not_stored() {
         "the rejected batch stored nothing"
     );
 
-    // observations without messages stay legal for a child (stats surface §7)
+    // observations without messages stay legal for a child (stats surface)
     let observations = db.commit_member_ingest(
         &s.id,
         &child_id,
@@ -721,7 +720,7 @@ fn child_member_messages_are_rejected_not_stored() {
 /// frontier is a separate lifecycle: a source truncation (compaction) never
 /// deletes old messages, never reuses sequences, and never moves the
 /// processed frontier that Sync consumed ("conversation ends, context
-/// doesn't", §8.2).
+/// doesn't",).
 #[test]
 fn truncate_preserves_history_and_leaves_the_context_frontier_alone() {
     let db = open_db("truncate-frontier");
@@ -961,7 +960,7 @@ fn reingest_preserves_message_ids_and_dedups() {
     assert_eq!(db.get_messages(&s.id, None, 100).unwrap().len(), 3);
 }
 
-/// A commit racing a Trash stores NOTHING (§13.1): the trashed session takes
+/// A commit racing a Trash stores NOTHING: the trashed session takes
 /// no messages, no stats and no cursor move, so a Restore resumes from the
 /// untouched cursor.
 #[test]

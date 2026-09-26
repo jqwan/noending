@@ -18,11 +18,11 @@ import {
 import type { Route } from "../../app/routes";
 
 /**
- * Project Detail（方案 §11 / §22 / §42.3-M22）。
+ * Project Detail。
  *
  * 一次 `get_project_detail` 读到全部真相：它拥有的 WorkspacePaths、经由这些路径
- * 到达的 Workstreams（含「主关联 / 关联」，§1.12）、以及 cwd 落在这些路径上的
- * Sessions（走权威链，不走缓存列，§43.3-M29）。
+ * 到达的 Workstreams（含「主关联 / 关联」，）、以及 cwd 落在这些路径上的
+ * Sessions（走权威链，不走缓存列，M29）。
  *
  * 用户在这页唯一能做的编辑是**改名**：Project 的其余事实都是派生的，
  * 手工新建 / 删除 / 加引用资料 / 移动 Workstream / 移动 Session 都已退出产品 API。
@@ -66,9 +66,9 @@ export default function ProjectDetail({ projectId, navigate }: {
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  // §16 — 定点刷新在后台执行；完成/失败事件把按钮恢复。Review P2-2：
+  // 定点刷新在后台执行；完成/失败事件把按钮恢复。Review P2-2：
   // detail 重读统一走 useRefreshSignal（AppShell 扇出），这里不再直接读。
-  // §18 — 刷新可能让 Project 自己消失（最后一条路径被 GC）：
+  // 刷新可能让 Project 自己消失（最后一条路径被 GC）：
   // get_project_detail 的「Project <id> 不存在」会把页面切到 gone 视图。
   const [refreshingWorkspace, setRefreshingWorkspace] = useState(false);
   useEffect(() => {
@@ -189,7 +189,7 @@ export default function ProjectDetail({ projectId, navigate }: {
         </div>
       )}
 
-      {/* §19 — 概览三个数字 + §36.17 的类型 / 命名 / 创建时间，都收在右栏「属性」块里：
+      {/* 概览三个数字 + 的类型 / 命名 / 创建时间，都收在右栏「属性」块里：
           标题栏只放标题与图标动作，只读事实一律放右栏。 */}
       <div className="project-detail-layout">
       <div>

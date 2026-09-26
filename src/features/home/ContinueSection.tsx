@@ -8,7 +8,7 @@ import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Session } from "../../types";
 import type { Route } from "../../app/routes";
 
-/** Continue 区：最近 4 个（最多 6）Workstream，双列网格（§12/§13）。 */
+/** Continue 区：最近 4 个（最多 6）Workstream，双列网格。 */
 export function ContinueSection({ navigate, defaultAgent, cards }: {
   navigate: (r: Route) => void;
   defaultAgent: ReturnType<typeof useWorkstreamCards>["defaultAgent"];
@@ -38,7 +38,7 @@ export function ContinueSection({ navigate, defaultAgent, cards }: {
   );
 }
 
-/** 最近 Sessions：最多 3 条的轻量区域（§21），视觉中心仍是 Workstream。 */
+/** 最近 Sessions：最多 3 条的轻量区域，视觉中心仍是 Workstream。 */
 export function RecentSessions({ navigate, onNewSession }: {
   navigate: (r: Route) => void;
   /** 有 Workstream 但还没有任何 Session 时给出的下一步。 */

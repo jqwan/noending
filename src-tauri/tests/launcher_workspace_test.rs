@@ -1,22 +1,22 @@
-//! Workspace Domain v0.2 launcher integration (方案 §21, §42.3-M15/M16/M17/M21).
+//! Workspace Domain v0.2 launcher integration.
 //!
 //! Three things are pinned here, and they are the three that used to be
 //! silently wrong:
 //!
 //! 1. **The launch directory comes from the ordered `WorkstreamPath` list** and
 //!    NoEnding Home's default workspace — never from the frozen
-//!    `workstreams.default_cwd` (§42.2-E6) and never from another Session's cwd.
+//!    `workstreams.default_cwd` and never from another Session's cwd.
 //! 2. **Those inputs are in the PreparedLaunch fingerprint.** A WorkstreamPath
 //!    mutation does *not* bump `workstreams.updated_at`, so before this existed
 //!    a reorder, an added path or a removed primary could leave a preview that
-//!    no longer described reality looking fresh (§12). Every stale test below
+//!    no longer described reality looking fresh. Every stale test below
 //!    changes exactly ONE input and asserts the launch is refused.
-//! 3. **A resume launches in the directory the preview showed** (§42.3-M16), and
+//! 3. **A resume launches in the directory the preview showed**, and
 //!    when the Session's own directory is gone the fallback is data in the
-//!    payload, not a silent substitution (§13 "发生 fallback 必须在 UI 明确显示").
+//!    payload, not a silent substitution ("发生 fallback 必须在 UI 明确显示").
 //!
 //! Everything is hermetic: temp databases, temp directories, and a
-//! `LaunchWorkspace` literal standing in for the user's real Home (§42.3-M13).
+//! `LaunchWorkspace` literal standing in for the user's real Home.
 //! The spawn step is injected, so no Terminal window opens and no Agent process
 //! starts; the fake echoes the directory it was handed.
 
@@ -53,7 +53,7 @@ fn open_db(tag: &str) -> Db {
     db
 }
 
-/// Lexical, filesystem-free path identity (§42.3-M8): a fixture must hand the
+/// Lexical, filesystem-free path identity: a fixture must hand the
 /// production code the same spelling the production door would have stored, or
 /// the assertion is a Unix-only assertion.
 fn canonical(dir: &std::path::Path) -> String {
@@ -64,7 +64,7 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("noending-lws-{}-{}", tag, new_id()))
 }
 
-/// A directory that exists: §13 only launches into a usable one.
+/// A directory that exists: only launches into a usable one.
 fn real_dir(tag: &str, name: &str) -> String {
     let dir = temp_root(tag).join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -88,7 +88,7 @@ impl WorkspaceAttaching for LexicalPaths {
 }
 
 fn path_id(db: &Db, canonical_path: &str) -> String {
-    // 方案 §44.3-C2 — read the row through the key the app writes it with. A
+    //  — read the row through the key the app writes it with. A
     // lookup by spelling can miss a row stored under another case, which is what
     // a Windows host may now do to the same directory; a test that missed it
     // would assert against nothing.
@@ -162,7 +162,7 @@ fn fake_spawn(cmd: &AgentCommand) -> Result<LaunchOutcome> {
 
 /// A Logical Session keyed by its ROOT member's Resume identity, with a REAL
 /// root source file: resume preparation refuses a Session whose ROOT member
-/// source is not present on disk (§17.2), so every fixture session is
+/// source is not present on disk, so every fixture session is
 /// resumable. `workspace_path_id` goes through the production upsert, which
 /// derives `project_id` from the path row in the same statement.
 fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> Session {
@@ -190,9 +190,9 @@ fn is_stale(err: &str) -> bool {
     err.contains("stale")
 }
 
-// ----------------------------------------------------- §12 staleness of paths
+// ----------------------------------------------------- staleness of paths
 
-/// §21 "reorder primary makes plan stale". Position 0 is the whole meaning of
+/// "reorder primary makes plan stale". Position 0 is the whole meaning of
 /// the ordered list, and reordering it changes no `updated_at` anywhere — the
 /// only thing that can catch it is the list itself being a fingerprint input.
 #[test]
@@ -253,7 +253,7 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
     );
 }
 
-/// §21 "remove primary makes plan stale" — and the same for any other entry:
+/// "remove primary makes plan stale" — and the same for any other entry:
 /// the list is hashed as a list, so an addition is a change too.
 #[test]
 fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
@@ -276,7 +276,7 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
     assert_eq!(prepared.cwd.as_deref(), Some(primary.as_str()));
 
     // Removing the *non-primary* entry is also a state change: the launch did
-    // not use it, but the plan described this Workstream's work locations.
+    // not use it; this Workstream's work locations cover it.
     let rows = db.list_workstream_paths(&w).unwrap();
     let other_row = rows
         .iter()
@@ -326,7 +326,7 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
     assert!(is_stale(&err.to_string()), "got: {err}");
 }
 
-/// §21 "default workspace change makes plan stale". The default workspace is a
+/// "default workspace change makes plan stale". The default workspace is a
 /// Home fact with no DB row, so a DB-only fingerprint cannot see it — it is
 /// hashed as its own labelled input, which is why this launch is refused.
 #[test]
@@ -359,9 +359,9 @@ fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     assert!(same.command_line.ends_with(&before));
 }
 
-// ------------------------------------------------------------------- §13 resume
+// ------------------------------------------------------------------- resume
 
-/// §21 "resume uses original cwd": the Session's own directory is tier 1 and it
+/// "resume uses original cwd": the Session's own directory is tier 1 and it
 /// reaches the OS.
 #[test]
 fn a_resume_launches_in_the_sessions_own_cwd() {
@@ -405,7 +405,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
         .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
 
-    // Discovery rewrites the cwd (§7.2: the transcript is the source of truth)
+    // Discovery rewrites the cwd (the transcript is the source of truth)
     // through the production upsert, keyed by the ROOT Resume identity.
     let moved = real_dir("resume-drift", "moved");
     let drifted = db.get_session(&s.id).unwrap().unwrap();
@@ -436,8 +436,8 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     assert!(result.command_line.ends_with(&moved));
 }
 
-/// §21 "resume fallback visible": a Session whose directory is gone no longer
-/// resolves to "no cwd, land in $HOME" — it falls back through §13, and the
+/// "resume fallback visible": a Session whose directory is gone no longer
+/// resolves to "no cwd, land in $HOME" — it falls back through, and the
 /// payload says which tier and why.
 #[test]
 fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
@@ -503,7 +503,7 @@ fn a_resume_falls_back_to_the_default_workspace_and_says_so() {
     assert!(result.command_line.ends_with(&default_ws));
 }
 
-/// §12 "Session cwd/path change" is a stale input on the *identity* side as
+/// "Session cwd/path change" is a stale input on the *identity* side as
 /// well: the same cwd string resolving to a different WorkspacePath row is a
 /// different launch, and `sessions.workspace_path_id` is hashed for it.
 #[test]
@@ -524,7 +524,7 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
 
     // Re-point the Session at a *different row*. Nothing about the cwd string
     // changed, so only `session_path:` can notice it — which is the point of
-    // §12 listing "Session workspace path" as a stale input.
+    // listing "Session workspace path" as a stale input.
     let other = db
         .tx(|tx| insert_workspace_path_conn(tx, &format!("{dir}-reidentified"), PROJECT))
         .unwrap();
@@ -538,11 +538,11 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
     assert!(is_stale(&err.to_string()), "got: {err}");
 }
 
-// ------------------------------------------------ §21-9/10 no phantom Session
+// ------------------------------------------------ no phantom Session
 
-/// §21-9 — a launch records a durable `LaunchIntent` and creates **no** Session,
+/// a launch records a durable `LaunchIntent` and creates **no** Session,
 /// no WorkspacePath and no WorkstreamPath. Those appear only when the real
-/// Agent transcript is discovered (§21-10).
+/// Agent transcript is discovered.
 #[test]
 fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     let db = open_db("phantom");
@@ -597,10 +597,10 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     assert_eq!(intents[0].owner_workstream_id.as_deref(), Some(w.as_str()));
 }
 
-/// §21-10 / §15.1 — when discovery finds the real Session and its transcript
+/// / when discovery finds the real Session and its transcript
 /// matches the intent, the Session's Owner becomes the intent's Owner and
 /// NOTHING else is written: matching never grows a WorkstreamPath and never
-/// invents a path row (§5.1). Project membership keeps coming from the derived
+/// invents a path row. Project membership keeps coming from the derived
 /// cache on the Session's own WorkspacePath, independently of the Owner.
 #[test]
 fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
@@ -644,7 +644,7 @@ fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
     let matched = db.get_session(&s.id).unwrap().unwrap();
     assert_eq!(matched.owner_workstream_id.as_deref(), Some(w.as_str()));
 
-    // §5.1 — setting an Owner is the ONLY write: the Workstream's path list is
+    // setting an Owner is the ONLY write: the Workstream's path list is
     // not grown by the physical directory the Session happened to use.
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM workstream_paths"),
@@ -674,9 +674,9 @@ fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
     assert_eq!(stored.matched_session_id.as_deref(), Some(s.id.as_str()));
 }
 
-// ---------------------------------------------------------------- §42.3-M15
+// ----------------------------------------------------------------
 
-/// §13's third tier routes independent launches into ONE shared directory, so
+/// 's third tier routes independent launches into ONE shared directory, so
 /// cwd stops being evidence: two standalone launches at the default workspace
 /// must not auto-match each other's Session. They stay unresolved for a human,
 /// and a human decision applies each intent's Owner to its own Session.
@@ -719,7 +719,7 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
             .filter(|i| i.status == launch_status::AMBIGUOUS)
             .count(),
         2,
-        "§42.3-M15: 双双 AMBIGUOUS — every tied candidate surfaces for the user, \
+        "双双 AMBIGUOUS — every tied candidate surfaces for the user, \
          and neither may be auto-consumed by a directory they merely share"
     );
     assert_eq!(
@@ -752,11 +752,11 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
     );
 }
 
-/// §1.7 / §5.1 — matching a Session back never teaches the Workstream the
+/// / matching a Session back never teaches the Workstream the
 /// directory it happened to run in.
 ///
 /// A New Session in a Workstream whose own paths are unusable lands in NoEnding
-/// Home's shared `workspace/` (§13 tier 3). When that Session is matched back,
+/// Home's shared `workspace/` (tier 3). When that Session is matched back,
 /// the Owner is the user's launch-time decision and is recorded verbatim, but
 /// the directory NoEnding invented must not be appended to the Workstream's
 /// ordered list: it would outlive the fallback and misrepresent where the work

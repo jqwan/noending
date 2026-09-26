@@ -12,9 +12,9 @@ interface PaletteItem {
   route: Route;
 }
 
-/** 固定命令（实施方案 §53）：导航 + New 动作，不与实体搜索混淆。
+/** 固定命令：导航 + New 动作，不与实体搜索混淆。
  *  New 动作以 route.action 携带意图，目标页已挂载时同样会打开 Modal。
- *  cmd-assistant 只在 Context Intelligence 开启时出现（§11.4）。 */
+ *  cmd-assistant 只在 Context Intelligence 开启时出现。 */
 const FIXED_COMMANDS: PaletteItem[] = [
   { key: "cmd-home", kind: "命令", label: "前往首页", hint: "继续最近的工作", route: { view: "home" } },
   { key: "cmd-workstreams", kind: "命令", label: "前往任务", route: { view: "workstreams" } },

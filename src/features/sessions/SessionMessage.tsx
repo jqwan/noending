@@ -7,7 +7,7 @@ import { showToast } from "../../components/Toast";
 import { formatDateTime } from "./SessionTable";
 
 /**
- * 一条会话消息（重构方案 §6/§22.1）：Conversation 只剩 user | assistant 两种
+ * 一条会话消息：Conversation 只剩 user | assistant 两种
  * role 的 prose——compact / system / agent_message / sidechain 这些概念不再
  * 进入 UI，`who` 由调用方给出（用户 / Codex / …）。
  */
@@ -17,13 +17,13 @@ export interface SessionMessageData {
   content: string;
   ts: string | null;
   who: string;
-  /** 消息级生成溯源（Provenance 方案 §22）：仅 Assistant 有意义。 */
+  /** 消息级生成溯源：仅 Assistant 有意义。 */
   provider?: string | null;
   model?: string | null;
 }
 
 /**
- * Assistant 消息头上的低干扰模型标签（Provenance 方案 §22）：
+ * Assistant 消息头上的低干扰模型标签：
  * provider+model → "model · provider"；只有其一 → 那一个；两者皆空 → null（不占位）。
  * User 消息永远没有生成模型，调用方应根本不传。
  */
@@ -40,8 +40,8 @@ export function provenanceLabel(
 }
 
 /**
- * 纯文本消息在列表里最多显示这么多字，全文点开弹窗看（§36.21）。
- * Markdown 消息不走这里——渲染结果不能按字数切（§36.24），改用高度收口。
+ * 纯文本消息在列表里最多显示这么多字，全文点开弹窗看。
+ * Markdown 消息不走这里——渲染结果不能按字数切，改用高度收口。
  *
  * 不在这里「展开全文」：这个流是密排的一列，就地展开会把后面的消息越推越远，
  * 而且长内容（代码、JSON、diff）在 724px 宽的消息列里折行折得很难读；
@@ -49,7 +49,7 @@ export function provenanceLabel(
  */
 const TRUNCATE_AT = 240;
 
-/** 两种气泡（§22.1）：用户右、Agent 左。 */
+/** 两种气泡：用户右、Agent 左。 */
 export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   const [open, setOpen] = useState(false);
   const [clamped, setClamped] = useState(false);
@@ -61,7 +61,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
 
   const cls = msg.role === "user" ? "is-user" : "is-agent";
 
-  // 气泡里显示的就是 Markdown 预览（§36.24）。判断只认内容、不认来源。
+  // 气泡里显示的就是 Markdown 预览。判断只认内容、不认来源。
   const md = looksLikeMarkdown(text);
 
   // 只有真的收了角才渐隐。内容本来就短的时候挂一层渐隐，会把最后两行擦掉。
@@ -71,11 +71,11 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   }, [text, md]);
 
   const stamp = `#${msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
-  // User 消息没有生成模型（Provenance 方案 §22）——即使调用方误传也不显示。
+  // User 消息没有生成模型——即使调用方误传也不显示。
   const prov = msg.role === "assistant" ? provenanceLabel(msg.provider, msg.model) : null;
 
   // 整行可点会让「悬停到哪儿」变成一条与内容无关的宽条，而点开这件事属于这条消息本身，
-  // 所以热区和悬浮效果都只落在气泡上（§36.24）。键盘可达靠 role + tabIndex，
+  // 所以热区和悬浮效果都只落在气泡上。键盘可达靠 role + tabIndex，
   // 焦点环由全局的 :focus-visible 给。
   return (
     <>
@@ -116,7 +116,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   );
 }
 
-/** 全文弹窗：整块宽度显示，可复制；是 Markdown 的话默认就停在预览上（§36.24）。 */
+/** 全文弹窗：整块宽度显示，可复制；是 Markdown 的话默认就停在预览上。 */
 function MessageModal({ who, stamp, text, previewable, onClose }: {
   who: string;
   stamp: string;

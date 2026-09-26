@@ -1,4 +1,4 @@
-//! Session row metadata under the Logical Session model (重构方案 §4/§10).
+//! Session row metadata under the Logical Session model.
 //!
 //! A Session row is keyed by `(agent, root_agent_session_id)` — the ROOT
 //! member's real Resume identity — and follows the source through
@@ -6,7 +6,7 @@
 //! - re-discovery of the same root updates the row in place (never duplicates);
 //! - cwd / workspace / activity follow the ROOT (child facts never reach here);
 //! - the title is write-once: a later pass may fill an absent title but never
-//!   overwrite one (§4.2, the authority is the root's title chain);
+//!   overwrite one (, the authority is the root's title chain);
 //! - `project_id` is derived from `workspace_path_id` inside the statement, so
 //!   the cache can never drift from its source.
 
@@ -188,7 +188,7 @@ fn upsert_without_cwd_keeps_stored_value() {
     );
 }
 
-/// §4.2 — the title is write-once: a discovery that finds a title source
+/// the title is write-once: a discovery that finds a title source
 /// fills an absent title, and no later pass may overwrite it.
 #[test]
 fn title_is_write_once() {
@@ -285,7 +285,7 @@ fn unchanged_upsert_rewrites_nothing() {
 
 /// The derived Project cache: `project_id` is read off
 /// `workspace_paths.project_id` inside the upsert statement, so a Session is a
-/// Project member exactly while its own path says so (§1.10).
+/// Project member exactly while its own path says so.
 #[test]
 fn project_cache_follows_workspace_path() {
     let database = db("project-cache");
@@ -337,7 +337,7 @@ fn project_cache_follows_workspace_path() {
 }
 
 /// A child member's execution identity never resolves as a root: only the
-/// session's `root_agent_session_id` is the Resume/lookup authority (§4.1).
+/// session's `root_agent_session_id` is the Resume/lookup authority.
 #[test]
 fn a_child_member_identity_never_resolves_as_a_root() {
     let database = db("child-not-root");
@@ -370,7 +370,7 @@ fn a_child_member_identity_never_resolves_as_a_root() {
             .is_none(),
         "a child's source id must never look up the Logical Session"
     );
-    // ...and the child's cwd never flowed up onto the Session row (§4.1/§18).
+    //...and the child's cwd never flowed up onto the Session row.
     let stored = database.get_session(&session.id).unwrap().unwrap();
     assert_eq!(stored.cwd, None);
     assert_eq!(stored.project_id, None);

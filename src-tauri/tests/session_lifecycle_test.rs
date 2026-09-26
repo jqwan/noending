@@ -1,11 +1,11 @@
 //! Session lifecycle — Trash / Restore / permanent LOCAL delete
-//! (重构方案 §19 / §20, doc matrix §32.7 / §32.8).
+//!.
 //!
 //! The invariants locked here:
 //! - Trash freezes a session: no member ingestion commits against it (the
 //!   commit-time guard stores nothing and moves no cursor), it leaves search,
 //!   cannot resume, and never touches the Agent source file — NoEnding never
-//!   deletes an Agent-owned source (§2.6).
+//!   deletes an Agent-owned source.
 //! - Restore keeps the same session id, Owner, messages, cursors and Context
 //!   frontier, and reindexes the conversation; the next commit resumes.
 //! - Permanent delete is a NoEnding-LOCAL purge with no job, no filesystem
@@ -20,7 +20,7 @@
 //! Adapter verdicts are driven with REAL files: `inspect_file_source` answers
 //! Present for an existing file, Missing for a NotFound path, and Unavailable
 //! for a non-regular file (a directory). Only temp dirs are used; the real
-//! ~/.codex / ~/.claude / ~/.pi are never touched (方案 §46).
+//! ~/.codex / ~/.claude / ~/.pi are never touched.
 
 use noending::domain::diagnostic_kind;
 use noending::domain::{
@@ -100,7 +100,7 @@ fn seeded_session(
             file
         }
         // A directory: symlink_metadata succeeds, is_file() is false → the
-        // adapter answers Unavailable (any doubt ≠ missing, §9.1).
+        // adapter answers Unavailable (any doubt ≠ missing,).
         SourceKind::Directory => dir.path().join("source-dir"),
     };
     if matches!(source, SourceKind::Directory) {
@@ -241,7 +241,7 @@ fn context_item_pointing_at(
     (item.id, message)
 }
 
-// ---- lifecycle §32.7: trash / restore -------------------------------------
+// ---- lifecycle trash / restore -------------------------------------
 
 #[test]
 fn trash_freezes_the_session_and_keeps_every_fact() {
@@ -265,7 +265,7 @@ fn trash_freezes_the_session_and_keeps_every_fact() {
     );
     assert!(trashed.is_trashed());
 
-    // The Agent source is untouched — NoEnding never deletes it (§2.6).
+    // The Agent source is untouched — NoEnding never deletes it.
     assert!(
         source_file.exists(),
         "trash must never touch the Agent source"
@@ -276,7 +276,7 @@ fn trash_freezes_the_session_and_keeps_every_fact() {
     assert_eq!(
         db.get_session(&s.id).unwrap().unwrap().owner_workstream_id,
         Some(ws.id.clone()),
-        "Trash keeps the Owner Workstream (§43: Trash Session → Owner 保留)"
+        "Trash keeps the Owner Workstream (Trash Session → Owner 保留)"
     );
     let cursor_after = db.get_member_cursor(&member).unwrap();
     assert_eq!(
@@ -292,7 +292,7 @@ fn trash_freezes_the_session_and_keeps_every_fact() {
             .unwrap()
             .processed_message_sequence,
         1,
-        "the Context frontier is member-lifecycle-independent (§8.2)"
+        "the Context frontier is member-lifecycle-independent"
     );
 }
 
@@ -322,20 +322,20 @@ fn trash_is_hidden_from_list_projections_and_cards() {
 
     assert!(
         !active(&db, Scope::Active).iter().any(|x| x.id == s.id),
-        "trash hidden from the default list (方案 §11)"
+        "trash hidden from the default list"
     );
     let trash = active(&db, Scope::Trash);
     assert!(trash.iter().any(|x| x.id == s.id));
     let all = active(&db, Scope::All);
     assert!(all.iter().any(|x| x.id == s.id));
 
-    // Workstream cards no longer count the trashed session (方案 §11).
+    // Workstream cards no longer count the trashed session.
     let (count_after, latest_after, _) = db.workstream_session_stats(&ws.id).unwrap();
     assert_eq!(count_after, 0);
     assert!(latest_after.is_none());
 }
 
-/// §32.5/§32.7 — an in-flight member batch that tries to commit after a Trash
+///  — an in-flight member batch that tries to commit after a Trash
 /// stores NOTHING: no message, no stats, no cursor move. A Restore resumes
 /// from the untouched cursor and picks up what was suppressed.
 #[test]
@@ -349,7 +349,7 @@ fn inflight_ingest_cannot_commit_after_trash_and_resumes_after_restore() {
     // T1: the user trashes while the next batch is in flight…
     lifecycle::trash_session(&db, &s.id).unwrap();
 
-    // …T2: the staged batch tries to commit and is rejected (§13.1).
+    // …T2: the staged batch tries to commit and is rejected.
     let stored = commit_message(&db, &s.id, &member, "second round message", 200);
     assert!(stored.is_empty(), "a trashed session takes no messages");
 
@@ -375,7 +375,7 @@ fn inflight_ingest_cannot_commit_after_trash_and_resumes_after_restore() {
     assert_eq!(db.message_count(&s.id).unwrap(), 2);
 }
 
-/// §32.7 — Restore keeps the same id/Owner/messages/cursors/frontier and
+/// Restore keeps the same id/Owner/messages/cursors/frontier and
 /// reindexes the conversation.
 #[test]
 fn restore_keeps_identity_data_and_reindexes() {
@@ -391,7 +391,7 @@ fn restore_keeps_identity_data_and_reindexes() {
     lifecycle::trash_session(&db, &s.id).unwrap();
     let restored = lifecycle::restore_session(&db, &s.id).unwrap();
 
-    // 方案 §1.1: Trash → Restore keeps the same identity and every fact.
+    // : Trash → Restore keeps the same identity and every fact.
     assert_eq!(restored.id, s.id);
     assert!(restored.trashed_at.is_none());
     assert_eq!(restored.owner_workstream_id, Some(ws.id));
@@ -421,8 +421,8 @@ fn restore_keeps_identity_data_and_reindexes() {
     );
 }
 
-/// §32.7 — Resume is refused for a trashed session; the launcher gate is the
-/// single funnel every resume entry goes through (§10).
+/// Resume is refused for a trashed session; the launcher gate is the
+/// single funnel every resume entry goes through.
 #[test]
 fn trashed_session_cannot_resume() {
     let db = open_db("no-resume");
@@ -443,7 +443,7 @@ fn trashed_session_cannot_resume() {
 }
 
 /// An ACTIVE session with a freshly Missing root must NOT be purgeable —
-/// whatever the source state, only Trash heads toward deletion (§32.8 row 1).
+/// whatever the source state, only Trash heads toward deletion (row 1).
 #[test]
 fn active_session_is_never_purgeable_even_when_root_is_missing() {
     let db = open_db("active-no-purge");
@@ -471,7 +471,7 @@ fn active_session_is_never_purgeable_even_when_root_is_missing() {
     assert!(db.get_session(&s.id).unwrap().is_some());
 }
 
-/// §32.8 row 2 — Trash + Root Present refuses the purge.
+/// row 2 — Trash + Root Present refuses the purge.
 #[test]
 fn trashed_with_root_present_refuses_the_purge() {
     let db = open_db("present-refuses");
@@ -499,7 +499,7 @@ fn trashed_with_root_present_refuses_the_purge() {
     assert!(source_file.exists(), "the file was never touched");
 }
 
-/// §32.8 row 3 — Trash + Root Unavailable refuses: any doubt ≠ missing (§9.1).
+/// row 3 — Trash + Root Unavailable refuses: any doubt ≠ missing.
 /// The deterministic Unavailable fixture is a DIRECTORY at the source path
 /// (`inspect_file_source`: non-regular file → Unavailable).
 #[test]
@@ -524,7 +524,7 @@ fn trashed_with_root_unavailable_refuses_the_purge() {
     assert!(source_path.is_dir(), "nothing on disk was touched");
 }
 
-/// §32.8 rows 4-5 — the full purge: Trash + fresh Missing, execute re-checks
+/// rows 4-5 — the full purge: Trash + fresh Missing, execute re-checks
 /// the source freshly, and ONE transaction removes exactly the session-owned
 /// rows while redacting provenance in place. Content, authority and actor
 /// survive; another session's identical-looking context is untouched.
@@ -613,7 +613,7 @@ fn permanent_delete_purges_local_rows_only() {
     assert!(result.purged);
     assert!(result.redacted_revisions >= 1);
 
-    // Every session-owned row is gone (§20.3's fixed order).
+    // Every session-owned row is gone ('s fixed order).
     assert!(db.get_session(&s.id).unwrap().is_none(), "session row gone");
     assert!(db.root_member_for_session(&s.id).unwrap().is_none());
     assert_eq!(
@@ -711,7 +711,7 @@ fn permanent_delete_purges_local_rows_only() {
         "no FTS row survives the purge"
     );
 
-    // Surviving context: content preserved, provenance redacted (§27/§28/§30).
+    // Surviving context: content preserved, provenance redacted.
     let rev_id: String = db
         .read()
         .query_row(
@@ -724,7 +724,7 @@ fn permanent_delete_purges_local_rows_only() {
     assert_eq!(source.source_type.as_deref(), Some("deleted_session"));
     assert!(source.source_ref.is_none(), "the message ref dies");
     assert!(source.sync_run_id.is_none(), "the sync run ref dies");
-    assert!(source.session_id.is_none(), "no session may resolve (§28)");
+    assert!(source.session_id.is_none(), "no session may resolve");
     let rev = db.get_revision(&rev_id).unwrap().unwrap();
     assert_eq!(rev.title, "Use SQLite", "the title survives");
     assert_eq!(
@@ -732,7 +732,7 @@ fn permanent_delete_purges_local_rows_only() {
         "the content survives"
     );
     // The redaction keeps authority/actor — the provenance the authority
-    // resolver reads is scrubbed of refs only (§20.3).
+    // resolver reads is scrubbed of refs only.
     let metadata: serde_json::Value = rev.metadata;
     assert_eq!(
         metadata["provenance"]["authority"], "agent_statement",
@@ -745,7 +745,7 @@ fn permanent_delete_purges_local_rows_only() {
     );
 
     // The OTHER session's identical-looking context is untouched, its source
-    // file still on disk, and the Workstream survives (§30).
+    // file still on disk, and the Workstream survives.
     let other_rev_id: String = db
         .read()
         .query_row(
@@ -767,7 +767,7 @@ fn permanent_delete_purges_local_rows_only() {
     assert!(db.get_workstream(&ws.id).unwrap().is_some());
 }
 
-/// §32.8 row 5 — execute takes the source verdict FRESHLY: a file that
+/// row 5 — execute takes the source verdict FRESHLY: a file that
 /// reappeared between preview and execute aborts the purge.
 #[test]
 fn execute_rechecks_the_source_and_a_reappearing_file_blocks_the_purge() {
@@ -799,7 +799,7 @@ fn execute_rechecks_the_source_and_a_reappearing_file_blocks_the_purge() {
     );
 }
 
-/// §32.8 row 6 — only the ROOT source is the deletion authority: a child
+/// row 6 — only the ROOT source is the deletion authority: a child
 /// member's source may well still exist while the root is gone, and the purge
 /// proceeds — without ever touching that child file.
 #[test]
@@ -846,7 +846,7 @@ fn child_source_may_survive_when_root_is_missing() {
     );
 }
 
-/// §20.4 — no tombstone: after a purge the root identity is free, and a
+/// no tombstone: after a purge the root identity is free, and a
 /// reappearing source may be re-ingested as a NEW session with no Owner.
 #[test]
 fn a_purged_root_may_be_reingested_as_a_new_session() {
@@ -888,12 +888,12 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
             None,
         )
         .unwrap();
-    assert!(is_new, "rediscovery creates a fresh lifecycle (方案 §1.9)");
+    assert!(is_new, "rediscovery creates a fresh lifecycle");
     assert_ne!(s2, s.id);
     let stored = db.get_session(&s2).unwrap().unwrap();
     assert!(
         stored.owner_workstream_id.is_none(),
-        "no old Owner resurrects (§10/§33)"
+        "no old Owner resurrects"
     );
 }
 
@@ -972,7 +972,7 @@ fn search_filters_stale_rows_of_dead_sessions() {
     );
 }
 
-/// §32.5 — an in-flight Sync run that tries to commit after a Trash is
+/// an in-flight Sync run that tries to commit after a Trash is
 /// discarded: no message-derived context, no SyncRun, no frontier advance.
 #[test]
 fn inflight_sync_cannot_commit_after_trash() {

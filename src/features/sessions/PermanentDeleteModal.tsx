@@ -6,10 +6,10 @@ import { agentDisplayLabel, sessionDisplayTitle } from "./SessionTable";
 import type { LocalDeletePreview } from "../../types";
 
 /**
- * Session 永久删除（重构方案 §20）：无状态的本地清除。
+ * Session 永久删除：无状态的本地清除。
  *
- * 打开即读 §20.2 的删除预览（新鲜结论 + 计数），确认后以 sessionId 执行
- * §20.3 的 `permanently_delete_session`。没有 job、没有取消、没有重试状态机：
+ * 打开即读 的删除预览（新鲜结论 + 计数），确认后以 sessionId 执行
+ * 的 `permanently_delete_session`。没有 job、没有取消、没有重试状态机：
  * 后端只在（trashed + fresh root missing）时允许执行，且只删除 NoEnding
  * 本地数据——Agent 保存的源会话永远不被触碰。
  */

@@ -1,7 +1,7 @@
 //! LaunchIntent, Resume Delta and Storage/Domain consistency tests
 //! (Issues #5, #6, #8).
 //!
-//! Refactored for the single-Owner model (方案 §14–§21): a Session has at most
+//! Refactored for the single-Owner model: a Session has at most
 //! one Owner Workstream, so an intent's `owner_workstream_id` is inherited by
 //! the matched Session verbatim. There are no primary/related roles and no
 //! multi-workstream bundles.
@@ -51,7 +51,7 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
 
 /// A Logical Session keyed by its ROOT member's Resume identity, with a REAL
 /// root source file: resume preparation refuses a Session whose ROOT member
-/// source is not present on disk (§17.2), so every fixture session is
+/// source is not present on disk, so every fixture session is
 /// resumable.
 fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<String>) -> Session {
     let root_id = format!("root-{}", new_id());
@@ -464,7 +464,7 @@ fn resume_delta_shows_changes_and_disappearances() {
 /// The list_sessions parameter bug: filtering by agent ONLY used to bind
 /// ?2 with a single parameter and fail. All four filter combinations work.
 ///
-/// The Project half goes through the authoritative chain (§1.10): the Session is
+/// The Project half goes through the authoritative chain: the Session is
 /// a member because its `workspace_path_id` says so, not because the derived
 /// cache happens to hold a value.
 #[test]

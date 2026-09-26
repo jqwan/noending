@@ -1,4 +1,4 @@
-/* NoEnding design tokens (整体设计方案 §67 / 实施方案 §56)
+/* NoEnding design tokens (整体设计)
    Components reference semantic tokens only — never raw colors — so
    [data-theme="dark"] can re-skin the whole app by overriding variables. */
 

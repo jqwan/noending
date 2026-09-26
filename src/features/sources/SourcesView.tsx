@@ -5,7 +5,7 @@ import WorkspacePathField from "../../components/WorkspacePathField";
 import { AGENT_LABELS, type Agent, type IngestSource } from "../../types";
 
 /**
- * Session 来源管理 + 摄入入口（方案 §2.1：Sources → Session 来源）。
+ * Session 来源管理 + 摄入入口。
  * - 默认 agent 根目录（~/.codex 等）以"未启用"状态预置，是否摄入由用户决定；
  * - 每个来源可以单独「同步」（增量）或「重新摄入」（从头重扫源文件，
  *   重新抓取，会话归属与上下文条目保留）；
@@ -187,7 +187,7 @@ export default function SourcesView() {
             {src.origin === "default" && <span className="badge">默认</span>}
             {!src.exists && <span className="badge warn" title="该目录当前不存在">目录不存在</span>}
             {/* 徽标说的是这一行的配置状态，不是"此刻正在摄入"——
-                真正的进行中状态由顶部的 progress 表达（§25：状态必须是真的）。 */}
+                真正的进行中状态由顶部的 progress 表达——状态必须是真的。 */}
             {src.enabled ? (
               <span className="badge accent">已启用</span>
             ) : (

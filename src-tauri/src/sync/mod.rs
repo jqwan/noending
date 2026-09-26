@@ -7,14 +7,14 @@
 //! together with the SyncRun row and the frontier advance. Any failure rolls
 //! the whole run back; retries are idempotent via the delta fingerprint.
 //!
-//! The input is exactly `session_messages` (§15): the Conversation is already
+//! The input is exactly `session_messages`: the Conversation is already
 //! curated at ingestion (only root user/assistant prose is stored), so there
 //! is no second kind-based filter and no length heuristic here — a short
-//! message can be the constraint that matters (§2.4). Adapter and Extractor
+//! message can be the constraint that matters. Adapter and Extractor
 //! own the two judgment calls the design names: the adapter decides what is
 //! real conversation text, the extractor decides what carries Context value.
 //!
-//! Routing has exactly one input: `session.owner_workstream_id` (方案 §19).
+//! Routing has exactly one input: `session.owner_workstream_id`.
 //! There is no automatic classification and no candidate set.
 //!
 //! Locking model (non-blocking UI): a run is split into three phases.
@@ -23,9 +23,9 @@
 //! UI commands interleave freely. `prepare` snapshots everything extraction
 //! needs.
 //!
-//! Policy (docs §13/§26, Issue #3/#4):
+//! Policy (docs, Issue #3/#4):
 //! - the member cursors (read position) and the session's context frontier
-//!   (processed position) are separate lifecycles (§8);
+//!   (processed position) are separate lifecycles;
 //! - every mutation passes the unified AuthorityPolicy; user authority is
 //!   never silently overridden — disagreement becomes a ContextConflict;
 //! - every mutation leaves a full source trail (`session-message:<id>`).
@@ -122,7 +122,7 @@ pub trait ContextExtractor: Send + Sync {
     fn name(&self) -> String;
 
     /// `workstream_id` is the Session's Owner Workstream — the single routing
-    /// target of this extraction (方案 §19, §22).
+    /// target of this extraction.
     fn extract(
         &self,
         session: &Session,
@@ -141,10 +141,10 @@ pub struct PreparedSync {
     pub from_sequence: i64,
     pub to_sequence: i64,
     /// Snapshot of `sessions.owner_workstream_id` taken at prepare time. It is
-    /// both the routing target and the commit-phase CAS (方案 §19.2, §20).
+    /// both the routing target and the commit-phase CAS.
     pub owner_workstream_id: Option<String>,
     /// The conversation messages this run processes — already exactly the
-    /// user/assistant prose the store curates (§15: no pre-filter here).
+    /// user/assistant prose the store curates (no pre-filter here).
     pub messages: Vec<SessionMessage>,
     pub inputs: extractor::PromptInputs,
 }
@@ -155,7 +155,7 @@ pub struct MergeContext {
     pub run_id: String,
     /// extractor runtime name; recorded as `created_by = sync:<runtime>`.
     pub runtime: String,
-    /// The ONE Workstream this run may write (方案 §3.3/§20). Every mutation is
+    /// The ONE Workstream this run may write. Every mutation is
     /// checked against it before anything is stored: a Session has a single
     /// Owner, so a SyncRun that wrote another Workstream's Context would make
     /// routing a suggestion again. The check lives here rather than only in the
@@ -200,7 +200,7 @@ impl SyncEngine {
 
     /// Phase A (DB lock held): idempotency check, Owner snapshot, prompt-input
     /// snapshot. Returns None when this delta was already processed by a
-    /// committed run, or when the Session has no Owner Workstream (方案 §21 —
+    /// committed run, or when the Session has no Owner Workstream (—
     /// ownerless: messages keep ingesting, the frontier stays put, and a later
     /// owner assignment re-processes from here).
     pub fn prepare(
@@ -220,7 +220,7 @@ impl SyncEngine {
         }
 
         // 1. routing: the Session's single Owner Workstream, read fresh from
-        //    the DB. No Owner means no Context processing at all (方案 §21):
+        //    the DB. No Owner means no Context processing at all:
         //    messages keep ingesting, the frontier stays put, and a later
         //    owner assignment re-processes from here.
         let owner_workstream_id: Option<String> = db
@@ -302,7 +302,7 @@ impl SyncEngine {
         runtime: &str,
         diagnostics: Vec<String>,
     ) -> Result<SyncJobOutput> {
-        // §21 — the Owner IS the routing target. `prepare` refuses to prepare an
+        // the Owner IS the routing target. `prepare` refuses to prepare an
         // ownerless Session, so arriving here without one means a caller built a
         // `PreparedSync` by hand: never write Context, a SyncRun or a frontier
         // advance for a Session that has no Workstream to route into.
@@ -322,7 +322,7 @@ impl SyncEngine {
             workstream_id: run_workstream,
         };
         db.tx(|tx| {
-            // §43 — commit-time trash guard, FIRST of the re-checks: a run
+            // commit-time trash guard, FIRST of the re-checks: a run
             // prepared against a session that was trashed while its
             // extraction ran must not write message-derived context, a
             // SyncRun, or a frontier advance. The session keeps its
@@ -377,7 +377,7 @@ impl SyncEngine {
                 });
             }
 
-            // CAS on the routing target (方案 §20): the Session's Owner
+            // CAS on the routing target: the Session's Owner
             // Workstream IS the Context routing decision. If the user changed
             // the Owner while the extractor ran without the lock, the prepared
             // mutations target a routing that no longer exists — discard the
