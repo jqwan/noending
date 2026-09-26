@@ -21,6 +21,7 @@
 //! - re-ingesting already-seen content is prevented by the storage layer's
 //!   content-identity dedup, so compaction can never overwrite history.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod dsh;
@@ -466,6 +467,7 @@ impl StatsCapabilities {
     pub const COMPACTION: Self = Self::new(false, false, true, false);
     pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, false, false, true);
     pub const TOOL_COMPACTION_AND_SIDE_ACTIVITY: Self = Self::new(true, false, true, true);
+    pub const TOOL_CALLS_ERRORS_AND_COMPACTION: Self = Self::new(true, true, true, false);
 
     const fn new(
         tool_calls: bool,
@@ -826,6 +828,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(workbuddy::WorkBuddyAdapter),
         Box::new(dsh::DshAdapter),
         Box::new(zcode::ZCodeAdapter),
+        Box::new(antigravity::AntigravityAdapter),
     ]
 }
 

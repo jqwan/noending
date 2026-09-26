@@ -11,7 +11,8 @@ export type Agent =
   | "qoder"
   | "workbuddy"
   | "dsh"
-  | "zcode";
+  | "zcode"
+  | "antigravity";
 
 /** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
 export type WorkstreamLifecycle = "active" | "completed";
@@ -705,6 +706,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
   workbuddy: "WorkBuddy",
   dsh: "dsh",
   zcode: "ZCode",
+  antigravity: "Antigravity",
 };
 
 // ---------- Agent Runtime Configuration (commands.rs §Agent Runtime) ----------

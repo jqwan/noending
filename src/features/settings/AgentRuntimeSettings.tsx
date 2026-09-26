@@ -20,6 +20,7 @@ export const FIELD_LABELS: Record<Agent, Record<Field, string>> = {
   workbuddy: { model: "Model", provider: "Provider", effort: "Effort" },
   dsh: { model: "Model", provider: "Provider", effort: "Effort" },
   zcode: { model: "Model", provider: "Provider", effort: "Effort" },
+  antigravity: { model: "Model", provider: "Provider", effort: "Effort" },
 };
 
 const SOURCE_NOTE: Record<ModelSource, string | null> = {

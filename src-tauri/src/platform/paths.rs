@@ -40,6 +40,9 @@ pub fn agent_env_override(agent: Agent) -> &'static str {
         Agent::Dsh => "DSH_HOME",
         // Desktop app with no documented override; its data root is `~/.zcode`.
         Agent::ZCode => "",
+        // Desktop IDE, no documented override; conversations under
+        // `~/.gemini/antigravity`.
+        Agent::Antigravity => "",
     }
 }
 
@@ -53,6 +56,7 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
         Agent::WorkBuddy => [".workbuddy"].iter().collect(),
         Agent::Dsh => [".dsh"].iter().collect(),
         Agent::ZCode => [".zcode"].iter().collect(),
+        Agent::Antigravity => [".gemini", "antigravity"].iter().collect(),
     }
 }
 

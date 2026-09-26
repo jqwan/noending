@@ -223,6 +223,8 @@ pub enum Agent {
     Dsh,
     #[serde(rename = "zcode")]
     ZCode,
+    #[serde(rename = "antigravity")]
+    Antigravity,
 }
 
 impl Agent {
@@ -237,6 +239,7 @@ impl Agent {
             Agent::WorkBuddy,
             Agent::Dsh,
             Agent::ZCode,
+            Agent::Antigravity,
         ]
     }
 
@@ -249,6 +252,7 @@ impl Agent {
             Agent::WorkBuddy => "WorkBuddy",
             Agent::Dsh => "dsh",
             Agent::ZCode => "ZCode",
+            Agent::Antigravity => "Antigravity",
         }
     }
 
@@ -261,6 +265,7 @@ impl Agent {
             Agent::WorkBuddy => "workbuddy",
             Agent::Dsh => "dsh",
             Agent::ZCode => "zcode",
+            Agent::Antigravity => "antigravity",
         }
     }
 
@@ -273,6 +278,7 @@ impl Agent {
             "workbuddy" | "work_buddy" => Some(Agent::WorkBuddy),
             "dsh" | "deepseek_harness" => Some(Agent::Dsh),
             "zcode" | "z_code" => Some(Agent::ZCode),
+            "antigravity" => Some(Agent::Antigravity),
             _ => None,
         }
     }
@@ -678,6 +684,18 @@ impl ParsedSessionMessage {
     pub fn with_provenance(mut self, provider: Option<String>, model: Option<String>) -> Self {
         self.provider = normalize_provenance(provider);
         self.model = normalize_provenance(model);
+        self
+    }
+
+    /// Source position, when the adapter has a stable native one.
+    pub fn with_position(mut self, position: String) -> Self {
+        self.source_position = position;
+        self
+    }
+
+    /// Timestamp, when the adapter read one off the source.
+    pub fn with_ts(mut self, ts: Option<String>) -> Self {
+        self.ts = ts;
         self
     }
 }
