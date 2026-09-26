@@ -440,26 +440,25 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 /// Turn the observations of one read into the right [`StatsUpdate`] (§7.3):
 /// a read that starts at genesis IS a full scan of the observable source, so
 /// its counts REPLACE the snapshot; an append only ADDS its counts.
-/// `None` when the portion observed nothing — absent evidence must not zero
-/// anything.
+/// A full scan reports observed zeroes too; only an empty append yields `None`.
 pub fn stats_update_from(
     observation: &MemberObservation,
     source: &crate::domain::SourceCursorUpdate,
 ) -> Option<StatsUpdate> {
+    if source.start_byte_offset == 0 {
+        return Some(StatsUpdate::Snapshot(SessionMemberStatsSnapshot {
+            tool_call_count: observation.tool_calls as i64,
+            tool_error_count: observation.tool_errors as i64,
+            compaction_count: observation.compactions as i64,
+            side_activity_count: observation.side_activity as i64,
+        }));
+    }
     let empty = observation.tool_calls == 0
         && observation.tool_errors == 0
         && observation.compactions == 0
         && observation.side_activity == 0;
     if empty {
-        return None;
-    }
-    if source.start_byte_offset == 0 {
-        Some(StatsUpdate::Snapshot(SessionMemberStatsSnapshot {
-            tool_call_count: observation.tool_calls as i64,
-            tool_error_count: observation.tool_errors as i64,
-            compaction_count: observation.compactions as i64,
-            side_activity_count: observation.side_activity as i64,
-        }))
+        None
     } else {
         Some(StatsUpdate::Delta(MemberStatsDelta {
             tool_call_count: (observation.tool_calls > 0).then_some(observation.tool_calls as i64),

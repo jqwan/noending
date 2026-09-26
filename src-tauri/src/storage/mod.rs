@@ -47,6 +47,31 @@ pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn later_timestamp(current: Option<&str>, observed: Option<&str>) -> Option<String> {
+    match (current, observed) {
+        (None, None) => None,
+        (Some(v), None) => Some(v.to_string()),
+        (None, Some(v)) => Some(v.to_string()),
+        (Some(a), Some(b)) => {
+            let ordering = match (
+                chrono::DateTime::parse_from_rfc3339(a),
+                chrono::DateTime::parse_from_rfc3339(b),
+            ) {
+                (Ok(a), Ok(b)) => a.cmp(&b),
+                _ => a.cmp(b),
+            };
+            Some(if ordering.is_lt() { b } else { a }.to_string())
+        }
+    }
+}
+
+fn mtime_timestamp(mtime: Option<f64>) -> Option<String> {
+    let mtime = mtime?;
+    let seconds = mtime.floor() as i64;
+    let nanos = ((mtime - seconds as f64) * 1_000_000_000.0).clamp(0.0, 999_999_999.0) as u32;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, nanos).map(|t| t.to_rfc3339())
+}
+
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -93,6 +118,79 @@ pub fn message_identity_hash(
         write!(out, "{:02x}", b).ok();
     }
     out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_logical_session_conn(
+    conn: &Connection,
+    agent: Agent,
+    root_agent_session_id: &str,
+    title: Option<&str>,
+    cwd: Option<&str>,
+    workspace_path_id: Option<&str>,
+    forked_from_session_id: Option<&str>,
+    started_at: Option<&str>,
+    last_activity_at: Option<&str>,
+) -> Result<(String, bool)> {
+    let existing: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT id, last_activity_at FROM sessions
+             WHERE agent = ?1 AND root_agent_session_id = ?2",
+            params![agent.as_str(), root_agent_session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((id, previous_activity)) = existing {
+        let activity = later_timestamp(previous_activity.as_deref(), last_activity_at);
+        conn.execute(
+            "UPDATE sessions SET
+               title = COALESCE(title, ?2),
+               cwd = COALESCE(?3, cwd),
+               workspace_path_id = COALESCE(?4, workspace_path_id),
+               project_id = COALESCE(
+                 (SELECT wp.project_id FROM workspace_paths wp
+                   WHERE wp.id = COALESCE(?4, workspace_path_id)),
+                 (SELECT wp.project_id FROM workspace_paths wp
+                   WHERE wp.id = workspace_path_id)),
+               forked_from_session_id = COALESCE(forked_from_session_id, ?5),
+               started_at = COALESCE(started_at, ?6),
+               last_activity_at = ?7
+             WHERE id = ?1",
+            params![
+                id,
+                title,
+                cwd,
+                workspace_path_id,
+                forked_from_session_id,
+                started_at,
+                activity
+            ],
+        )?;
+        index_session_conn(conn, &id)?;
+        return Ok((id, false));
+    }
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO sessions
+           (id, agent, root_agent_session_id, title, cwd, workspace_path_id, project_id,
+            forked_from_session_id, started_at, last_activity_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                 (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = ?6),
+                 ?7, ?8, ?9)",
+        params![
+            id,
+            agent.as_str(),
+            root_agent_session_id,
+            title,
+            cwd,
+            workspace_path_id,
+            forked_from_session_id,
+            started_at,
+            last_activity_at
+        ],
+    )?;
+    index_session_conn(conn, &id)?;
+    Ok((id, true))
 }
 
 impl Db {
@@ -382,63 +480,107 @@ impl Db {
         last_activity_at: Option<&str>,
     ) -> Result<(String, bool)> {
         let conn = self.write();
-        let existing: Option<String> = conn
-            .query_row(
-                "SELECT id FROM sessions WHERE agent = ?1 AND root_agent_session_id = ?2",
-                params![agent.as_str(), root_agent_session_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            conn.execute(
-                "UPDATE sessions SET
-                   title = COALESCE(title, ?2),
-                   cwd = COALESCE(?3, cwd),
-                   workspace_path_id = COALESCE(?4, workspace_path_id),
-                   project_id = COALESCE(
-                     (SELECT wp.project_id FROM workspace_paths wp
-                       WHERE wp.id = COALESCE(?4, workspace_path_id)),
-                     (SELECT wp.project_id FROM workspace_paths wp
-                       WHERE wp.id = workspace_path_id)),
-                   forked_from_session_id = COALESCE(forked_from_session_id, ?5),
-                   started_at = COALESCE(started_at, ?6),
-                   last_activity_at = COALESCE(?7, last_activity_at)
-                 WHERE id = ?1",
-                params![
-                    id,
-                    title,
-                    cwd,
-                    workspace_path_id,
-                    forked_from_session_id,
-                    started_at,
-                    last_activity_at
-                ],
-            )?;
-            index_session_conn(&conn, &id)?;
-            return Ok((id, false));
-        }
-        let id = new_id();
-        conn.execute(
-            "INSERT INTO sessions
-               (id, agent, root_agent_session_id, title, cwd, workspace_path_id, project_id,
-                forked_from_session_id, started_at, last_activity_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6,
-                     (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = ?6),
-                     ?7, ?8, ?9)",
-            params![
-                id,
-                agent.as_str(),
+        upsert_logical_session_conn(
+            &conn,
+            agent,
+            root_agent_session_id,
+            title,
+            cwd,
+            workspace_path_id,
+            forked_from_session_id,
+            started_at,
+            last_activity_at,
+        )
+    }
+
+    /// Atomically upsert a Logical Session and its required Root member.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_logical_root(
+        &self,
+        agent: Agent,
+        root_agent_session_id: &str,
+        title: Option<&str>,
+        cwd: Option<&str>,
+        workspace_path_id: Option<&str>,
+        forked_from_session_id: Option<&str>,
+        started_at: Option<&str>,
+        last_activity_at: Option<&str>,
+        source_kind: &str,
+        source_path: &str,
+        parent_source_member_id: Option<&str>,
+        metadata: &serde_json::Value,
+    ) -> Result<(String, bool)> {
+        self.tx(|tx| {
+            if let Some((id, true)) = tx
+                .query_row(
+                    "SELECT id, trashed_at IS NOT NULL FROM sessions
+                     WHERE agent = ?1 AND root_agent_session_id = ?2",
+                    params![agent.as_str(), root_agent_session_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+                )
+                .optional()?
+            {
+                return Ok((id, false));
+            }
+            let (id, is_new) = upsert_logical_session_conn(
+                tx,
+                agent,
                 root_agent_session_id,
                 title,
                 cwd,
                 workspace_path_id,
                 forked_from_session_id,
                 started_at,
-                last_activity_at
-            ],
+                last_activity_at,
+            )?;
+            upsert_session_member_conn(
+                tx,
+                &id,
+                agent,
+                root_agent_session_id,
+                SessionMemberRelation::Root,
+                parent_source_member_id,
+                source_kind,
+                source_path,
+                cwd,
+                started_at,
+                last_activity_at,
+                metadata,
+            )?;
+            Ok((id, is_new))
+        })
+    }
+
+    /// Return a snapshot of retryable reconcile work. Ownerless sessions are
+    /// included only while a LaunchIntent is pending; owned sessions only
+    /// when the Context frontier trails stored conversation.
+    pub fn reconcile_retry_sessions(
+        &self,
+        include_ownerless: bool,
+        include_pending_context: bool,
+    ) -> Result<Vec<Session>> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT s.* FROM sessions s
+             WHERE s.trashed_at IS NULL AND (
+               (?1 AND s.owner_workstream_id IS NULL)
+               OR (?2 AND s.owner_workstream_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM session_messages m
+                 WHERE m.session_id = s.id AND m.sequence > COALESCE((
+                   SELECT processed_message_sequence FROM session_context_state
+                   WHERE session_id = s.id
+                 ), 0)
+               ))
+             )
+             ORDER BY COALESCE(s.last_conversation_at, s.last_activity_at, s.started_at) DESC",
         )?;
-        index_session_conn(&conn, &id)?;
-        Ok((id, true))
+        let rows = st
+            .query_map(
+                params![include_ownerless, include_pending_context],
+                row_session,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
@@ -575,6 +717,44 @@ impl Db {
             last_activity_at,
             metadata,
         )
+    }
+
+    /// Attach an observed non-root member only while its Logical Session is
+    /// active. The lifecycle check and topology write share one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_active_session_member(
+        &self,
+        session_id: &str,
+        agent: Agent,
+        source_member_id: &str,
+        relation: SessionMemberRelation,
+        parent_source_member_id: Option<&str>,
+        source_kind: &str,
+        source_path: &str,
+        cwd: Option<&str>,
+        started_at: Option<&str>,
+        last_activity_at: Option<&str>,
+        metadata: &serde_json::Value,
+    ) -> Result<Option<String>> {
+        self.tx(|tx| {
+            if !session_lifecycle::session_is_writable_conn(tx, session_id)? {
+                return Ok(None);
+            }
+            Ok(Some(upsert_session_member_conn(
+                tx,
+                session_id,
+                agent,
+                source_member_id,
+                relation,
+                parent_source_member_id,
+                source_kind,
+                source_path,
+                cwd,
+                started_at,
+                last_activity_at,
+                metadata,
+            )?))
+        })
     }
 
     /// The member with this Adapter identity, in ANY session — the anchor for
@@ -729,6 +909,29 @@ impl Db {
                 )));
             }
 
+            let old_cursor: Option<(String, i64, i64, i64, Option<f64>)> = tx
+                .query_row(
+                    "SELECT source_file_identity, generation, byte_offset, last_seen_size, mtime
+                     FROM session_member_cursors WHERE member_id = ?1",
+                    params![member_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()?;
+            let source_changed = old_cursor
+                .as_ref()
+                .map(|(identity, generation, offset, size, mtime)| {
+                    identity != &source.file_identity
+                        || *generation != source.generation
+                        || *offset != source.byte_offset as i64
+                        || *size != source.last_seen_size as i64
+                        || match (mtime, source.mtime) {
+                            (Some(a), Some(b)) => (a - b).abs() > 1e-6,
+                            (None, None) => false,
+                            _ => true,
+                        }
+                })
+                .unwrap_or(true);
+
             let stored_tail: Option<String> = tx
                 .query_row(
                     "SELECT identity_tail_hash FROM session_member_cursors WHERE member_id = ?1",
@@ -849,24 +1052,51 @@ impl Db {
                 },
             )?;
 
-            // 7/8/9. activity stamps: the member moved, the session moved, and
-            // real conversation moves `last_conversation_at` — but only for
-            // NEW root messages, and only forward (COALESCE-guarded).
-            let ts = now();
-            tx.execute(
-                "UPDATE session_members SET last_activity_at = ?2 WHERE id = ?1",
-                params![member_id, ts],
-            )?;
-            tx.execute(
-                "UPDATE sessions SET last_activity_at = ?2 WHERE id = ?1",
-                params![session_id, ts],
-            )?;
-            if let Some(latest) = stored.last() {
+            // Source activity advances only when its observed cursor changes;
+            // reading an unchanged file is not Agent activity.
+            if source_changed {
+                let member_activity: Option<String> = tx.query_row(
+                    "SELECT last_activity_at FROM session_members WHERE id = ?1",
+                    params![member_id],
+                    |r| r.get(0),
+                )?;
+                let observed = later_timestamp(
+                    member_activity.as_deref(),
+                    mtime_timestamp(source.mtime).as_deref(),
+                );
+                if let Some(observed) = observed {
+                    let current: Option<String> = tx.query_row(
+                        "SELECT last_activity_at FROM sessions WHERE id = ?1",
+                        params![session_id],
+                        |r| r.get(0),
+                    )?;
+                    let activity = later_timestamp(current.as_deref(), Some(&observed));
+                    tx.execute(
+                        "UPDATE session_members SET last_activity_at = ?2 WHERE id = ?1",
+                        params![member_id, observed],
+                    )?;
+                    tx.execute(
+                        "UPDATE sessions SET last_activity_at = ?2 WHERE id = ?1",
+                        params![session_id, activity],
+                    )?;
+                }
+            }
+            let latest = stored
+                .iter()
+                .filter_map(|message| message.ts.as_deref())
+                .fold(None, |latest, ts| {
+                    later_timestamp(latest.as_deref(), Some(ts))
+                });
+            if let Some(latest) = latest {
+                let previous: Option<String> = tx.query_row(
+                    "SELECT last_conversation_at FROM sessions WHERE id = ?1",
+                    params![session_id],
+                    |r| r.get(0),
+                )?;
+                let latest = later_timestamp(previous.as_deref(), Some(&latest));
                 tx.execute(
-                    "UPDATE sessions
-                     SET last_conversation_at = COALESCE(?2, ?3)
-                     WHERE id = ?1",
-                    params![session_id, latest.ts, ts],
+                    "UPDATE sessions SET last_conversation_at = ?2 WHERE id = ?1",
+                    params![session_id, latest],
                 )?;
             }
             Ok(stored)
@@ -2326,14 +2556,16 @@ pub fn upsert_session_member_conn(
     last_activity_at: Option<&str>,
     metadata: &serde_json::Value,
 ) -> Result<String> {
-    let existing: Option<String> = conn
+    let existing: Option<(String, Option<String>)> = conn
         .query_row(
-            "SELECT id FROM session_members WHERE agent = ?1 AND source_member_id = ?2",
+            "SELECT id, last_activity_at FROM session_members
+                 WHERE agent = ?1 AND source_member_id = ?2",
             params![agent.as_str(), source_member_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if let Some(id) = existing {
+    if let Some((id, previous_activity)) = existing {
+        let activity = later_timestamp(previous_activity.as_deref(), last_activity_at);
         conn.execute(
             "UPDATE session_members SET
                session_id = ?2,
@@ -2343,7 +2575,7 @@ pub fn upsert_session_member_conn(
                source_path = ?6,
                cwd = COALESCE(?7, cwd),
                started_at = COALESCE(started_at, ?8),
-               last_activity_at = COALESCE(?9, last_activity_at),
+               last_activity_at = ?9,
                metadata = ?10
              WHERE id = ?1",
             params![
@@ -2355,7 +2587,7 @@ pub fn upsert_session_member_conn(
                 source_path,
                 cwd,
                 started_at,
-                last_activity_at,
+                activity,
                 metadata.to_string()
             ],
         )?;

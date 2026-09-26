@@ -22,7 +22,7 @@
 //! so ingestion just reads files and calls the store; a (possibly minutes-long,
 //! LLM-backed) sync cannot stall UI commands.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use crate::adapters::{AgentAdapter, DiscoveredMember, DiscoveredMemberKind};
@@ -125,13 +125,18 @@ fn ensure_logical_session(
     d: &DiscoveredMember,
     attacher: &dyn crate::workspace::WorkspaceAttaching,
 ) -> Result<(Session, bool)> {
+    if let Some(existing) = db.find_session_by_root_agent_id(d.agent, &d.source_member_id)? {
+        if existing.is_trashed() {
+            return Ok((existing, false));
+        }
+    }
     let title = session_title(d);
     let raw_path = d.source_path.to_string_lossy().to_string();
     let observed_cwd = d.cwd.as_deref().map(str::trim).filter(|p| !p.is_empty());
     let path_id =
         crate::workspace::session::resolve_session_path(&db.write(), attacher, observed_cwd)?;
 
-    let (session_id, is_new) = db.upsert_logical_session(
+    let (session_id, is_new) = db.upsert_logical_root(
         d.agent,
         &d.source_member_id,
         title.as_deref(),
@@ -140,32 +145,25 @@ fn ensure_logical_session(
         None, // fork provenance is resolved separately, below
         d.started_at.as_deref(),
         d.last_activity_at.as_deref(),
-    )?;
-
-    // The member row: relation root, identity = the session's Resume identity.
-    db.upsert_session_member(
-        &session_id,
-        d.agent,
-        &d.source_member_id,
-        crate::domain::SessionMemberRelation::Root,
-        d.parent_source_member_id.as_deref(),
         &d.source_kind,
         &raw_path,
-        d.cwd.as_deref(),
-        d.started_at.as_deref(),
-        d.last_activity_at.as_deref(),
+        d.parent_source_member_id.as_deref(),
         &d.metadata,
     )?;
+
+    let stored = db
+        .get_session(&session_id)?
+        .unwrap_or_else(|| unreachable!());
+    if stored.is_trashed() {
+        return Ok((stored, false));
+    }
 
     // A topology refresh may have moved the root's cwd: the attachment moves
     // in the one transaction below, so an interrupted pass can never leave the
     // row claiming a path it no longer has.
     if !is_new {
         if let Some(new_path) = path_id {
-            let s = db
-                .get_session(&session_id)?
-                .unwrap_or_else(|| unreachable!());
-            if s.workspace_path_id.as_deref() != Some(new_path.as_str()) {
+            if stored.workspace_path_id.as_deref() != Some(new_path.as_str()) {
                 db.tx(|tx| {
                     crate::workspace::session::move_session_to_path_conn(tx, &session_id, &new_path)
                 })?;
@@ -239,35 +237,37 @@ fn resolve_diagnostic(db: &Db, d: &DiscoveredMember) -> Result<()> {
 /// One full discovery→resolve→attach pass for one agent's batch (§10). Roots
 /// first, children/sides second — so a parent discovered later in the same
 /// batch is still found, and scan order never decides identity.
+struct ResolvedBatch {
+    roots_for_intent: Vec<(Session, bool)>,
+    touched_session_ids: BTreeSet<String>,
+}
+
 fn resolve_batch(
     db: &Db,
     adapter: &dyn AgentAdapter,
     discovered: &[DiscoveredMember],
-) -> Result<Vec<(Session, bool)>> {
+) -> Result<ResolvedBatch> {
     let agent = adapter.agent();
     let batch = DiscoveryBatch::new(discovered);
     let attacher = crate::workspace::session::workspace_attacher();
-    let mut roots = Vec::new();
+    let mut roots_for_intent = Vec::new();
+    let mut touched_session_ids = BTreeSet::new();
 
-    // Pass 1 — Root / ForkRoot establish (or join) their Logical Session.
     for d in discovered {
         if !d.kind.is_logical_root() {
             continue;
         }
         match ensure_logical_session(db, d, attacher.as_ref()) {
-            Ok((s, is_new)) => {
+            Ok((s, is_new)) if !s.is_trashed() => {
                 resolve_diagnostic(db, d)?;
-                roots.push((s, is_new));
+                touched_session_ids.insert(s.id.clone());
+                roots_for_intent.push((s, is_new));
             }
+            Ok(_) => {}
             Err(e) => eprintln!("[ingest] root {} failed: {}", d.source_member_id, e),
         }
     }
 
-    // Pass 1b — fork provenance (§10.3), resolved AFTER every root member of
-    // this batch exists: a fork whose source sits in the SAME batch must
-    // resolve no matter which file the walker saw first (§10 — scan order
-    // never decides identity). A fork whose source is still unknown keeps
-    // NULL provenance; the next reconcile's pass over ForkRoots fills it.
     for d in discovered {
         if d.kind != DiscoveredMemberKind::ForkRoot {
             continue;
@@ -282,13 +282,14 @@ fn resolve_batch(
         else {
             continue;
         };
-        if fork_session.forked_from_session_id.is_none()
+        if !fork_session.is_trashed()
+            && fork_session.forked_from_session_id.is_none()
             && parent_member.session_id != fork_session.id
         {
             let _ = db.tx(|tx| {
                 tx.execute(
                     "UPDATE sessions SET forked_from_session_id = ?2
-                     WHERE id = ?1 AND forked_from_session_id IS NULL",
+                     WHERE id = ?1 AND forked_from_session_id IS NULL AND trashed_at IS NULL",
                     rusqlite::params![fork_session.id, parent_member.session_id],
                 )?;
                 Ok(())
@@ -296,42 +297,46 @@ fn resolve_batch(
         }
     }
 
-    // Pass 2 — Child / Side walk their parent chain. Only a resolved root
-    // attaches; everything else is a diagnostic (§2.5: no root, no Session —
-    // and never a promoted fake root).
     for d in discovered {
         if d.kind.is_logical_root() {
             continue;
         }
         match resolve_logical_session(db, agent, &batch, d)? {
             Some(session_id) => {
+                let Some(session) = db.get_session(&session_id)? else {
+                    continue;
+                };
+                if session.is_trashed() {
+                    continue;
+                }
                 let raw_path = d.source_path.to_string_lossy().to_string();
-                db.upsert_session_member(
-                    &session_id,
-                    agent,
-                    &d.source_member_id,
-                    d.kind.relation(),
-                    d.parent_source_member_id.as_deref(),
-                    &d.source_kind,
-                    &raw_path,
-                    d.cwd.as_deref(),
-                    d.started_at.as_deref(),
-                    d.last_activity_at.as_deref(),
-                    &d.metadata,
-                )?;
-                resolve_diagnostic(db, d)?;
+                if db
+                    .upsert_active_session_member(
+                        &session_id,
+                        agent,
+                        &d.source_member_id,
+                        d.kind.relation(),
+                        d.parent_source_member_id.as_deref(),
+                        &d.source_kind,
+                        &raw_path,
+                        d.cwd.as_deref(),
+                        d.started_at.as_deref(),
+                        d.last_activity_at.as_deref(),
+                        &d.metadata,
+                    )?
+                    .is_some()
+                {
+                    resolve_diagnostic(db, d)?;
+                    touched_session_ids.insert(session_id);
+                }
             }
-            None => {
-                note_unresolved(db, d, "尚未发现其 Root 会话，无法归属到任何逻辑会话")?;
-            }
+            None => note_unresolved(db, d, "尚未发现其 Root 会话，无法归属到任何逻辑会话")?,
         }
     }
-
-    // A Session acquires its Owner in exactly two ways: a user action, or the
-    // LaunchIntent that started it (方案 §15.1 / §17.1). Matching is ROOT-only
-    // (§17.1) and happens in the caller's loop over `roots` — a child can
-    // never claim an intent.
-    Ok(roots)
+    Ok(ResolvedBatch {
+        roots_for_intent,
+        touched_session_ids,
+    })
 }
 
 /// Ingest + sync ONE logical session: read every changed member's delta,
@@ -450,6 +455,47 @@ pub fn finalize_newly_discovered_root(
     Ok(())
 }
 
+fn process_resolved_batch<F>(
+    db: &Db,
+    engine: &SyncEngine,
+    workspace: &crate::launcher::LaunchWorkspace,
+    batch: ResolvedBatch,
+    on_session: &F,
+    reingest: bool,
+) -> Result<(i64, BTreeSet<String>)>
+where
+    F: Fn(&Session),
+{
+    for (session, is_new) in &batch.roots_for_intent {
+        finalize_newly_discovered_root(db, session, *is_new, workspace)?;
+    }
+    let mut total_messages = 0;
+    let mut processed = BTreeSet::new();
+    for id in batch.touched_session_ids {
+        let Some(session) = db.get_session(&id)? else {
+            continue;
+        };
+        if session.is_trashed() {
+            continue;
+        }
+        processed.insert(id.clone());
+        if reingest {
+            db.reset_member_cursors(&id)?;
+        }
+        on_session(&session);
+        match ingest_and_sync_session(db, engine, &session) {
+            Ok((messages, _)) => total_messages += messages,
+            Err(e) => eprintln!(
+                "[{}] ingest {} failed: {}",
+                if reingest { "reingest" } else { "reconcile" },
+                session.id,
+                e
+            ),
+        }
+    }
+    Ok((total_messages, processed))
+}
+
 /// Full reconcile over every agent's enabled sources (§12): discover members,
 /// resolve the logical graph, then ingest + sync each active session.
 /// `on_session` observes each session being processed.
@@ -470,6 +516,7 @@ where
     let unchanged = unchanged_since_cursor(db)?;
     let mut total_discovered = 0usize;
     let mut total_messages = 0i64;
+    let mut processed_session_ids = BTreeSet::new();
 
     // housekeeping: expire launch intents that never got a session
     let _ = crate::launcher::expire_stale_launch_intents(db);
@@ -492,27 +539,38 @@ where
             }
         };
         total_discovered += discovered.len();
-        let logical_roots = match resolve_batch(db, adapter.as_ref(), &discovered) {
+        let resolved = match resolve_batch(db, adapter.as_ref(), &discovered) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[reconcile] resolve failed: {}", e);
                 continue;
             }
         };
-        for (s, is_new) in logical_roots {
-            // A brand-new root may claim a pending LaunchIntent (crash
-            // recovery included); a still-ownerless one gets the retry.
-            finalize_newly_discovered_root(db, &s, is_new, workspace)?;
-            // §19 — a trashed session is inactive: no ingest, no sync. Its
-            // member cursors stay untouched, so a Restore resumes cleanly.
-            if s.is_trashed() {
-                continue;
-            }
-            on_session(&s);
-            match ingest_and_sync_session(db, engine, &s) {
-                Ok((messages, _applied)) => total_messages += messages,
-                Err(e) => eprintln!("[reconcile] ingest {} failed: {}", s.id, e),
-            }
+        let (messages, processed) =
+            process_resolved_batch(db, engine, workspace, resolved, on_session, false)?;
+        total_messages += messages;
+        processed_session_ids.extend(processed);
+    }
+
+    let retry_intents = db.has_pending_launch_intents()?;
+    let retry_context = crate::settings::context_intelligence_enabled(db)?;
+    for candidate in db.reconcile_retry_sessions(retry_intents, retry_context)? {
+        if processed_session_ids.contains(&candidate.id) {
+            continue;
+        }
+        if candidate.owner_workstream_id.is_none() {
+            finalize_newly_discovered_root(db, &candidate, false, workspace)?;
+        }
+        let Some(session) = db.get_session(&candidate.id)? else {
+            continue;
+        };
+        if session.is_trashed() || session.owner_workstream_id.is_none() {
+            continue;
+        }
+        on_session(&session);
+        match ingest_and_sync_session(db, engine, &session) {
+            Ok((messages, _)) => total_messages += messages,
+            Err(e) => eprintln!("[reconcile] retry {} failed: {}", session.id, e),
         }
     }
 
@@ -548,19 +606,8 @@ where
     let discovered = adapter.discover_members_in(&roots, &unchanged)?;
     let discovered_count = discovered.len();
     let mut total_messages = 0i64;
-    let logical_roots = resolve_batch(db, adapter, &discovered)?;
-    for (s, is_new) in logical_roots {
-        finalize_newly_discovered_root(db, &s, is_new, workspace)?;
-        // §19 — trashed sessions are skipped entirely.
-        if s.is_trashed() {
-            continue;
-        }
-        on_session(&s);
-        match ingest_and_sync_session(db, engine, &s) {
-            Ok((messages, _)) => total_messages += messages,
-            Err(e) => eprintln!("[reconcile] ingest {} failed: {}", s.id, e),
-        }
-    }
+    let resolved = resolve_batch(db, adapter, &discovered)?;
+    total_messages += process_resolved_batch(db, engine, workspace, resolved, on_session, false)?.0;
     Ok((discovered_count, total_messages))
 }
 
@@ -588,21 +635,8 @@ where
     let discovered = adapter.discover_members_in(&roots, &|_| false)?;
     let discovered_count = discovered.len();
     let mut total_messages = 0i64;
-    let logical_roots = resolve_batch(db, adapter, &discovered)?;
-    for (s, is_new) in logical_roots {
-        finalize_newly_discovered_root(db, &s, is_new, workspace)?;
-        // §23.1 — a trashed session keeps its cursors untouched: no rewind,
-        // no re-scan.
-        if s.is_trashed() {
-            continue;
-        }
-        db.reset_member_cursors(&s.id)?;
-        on_session(&s);
-        match ingest_and_sync_session(db, engine, &s) {
-            Ok((messages, _)) => total_messages += messages,
-            Err(e) => eprintln!("[reingest] ingest {} failed: {}", s.id, e),
-        }
-    }
+    let resolved = resolve_batch(db, adapter, &discovered)?;
+    total_messages += process_resolved_batch(db, engine, workspace, resolved, on_session, true)?.0;
     Ok((discovered_count, total_messages))
 }
 

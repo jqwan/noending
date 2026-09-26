@@ -100,6 +100,39 @@ const CHILD_ID: &str = "019fbbd3-47be-78f2-89fd-9deec2e4c6d9";
 const SIDE_ID: &str = "019fccd3-47be-78f2-89fd-9deec2e4c6d9";
 const FORK_ID: &str = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
 
+#[test]
+fn logical_root_creation_rolls_back_if_root_member_cannot_be_written() {
+    let db = open_db("root-transaction");
+    db.write()
+        .execute_batch(
+            "CREATE TRIGGER reject_root_member BEFORE INSERT ON session_members
+             WHEN NEW.relation = 'root'
+             BEGIN SELECT RAISE(ABORT, 'test root insert failure'); END;",
+        )
+        .unwrap();
+
+    assert!(db
+        .upsert_logical_root(
+            Agent::Codex,
+            ROOT_ID,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            "/tmp/root",
+            None,
+            &serde_json::json!({}),
+        )
+        .is_err());
+    assert!(db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .is_none());
+}
+
 // ---------------------------------------------------------------------------
 // §32.3 — child/side resolution and diagnostics
 // ---------------------------------------------------------------------------
@@ -314,6 +347,22 @@ fn child_activity_moves_last_activity_but_not_last_conversation() {
     let session_id = db.list_sessions(Default::default()).unwrap()[0].id.clone();
     let before = db.get_session(&session_id).unwrap().unwrap();
     let conversation_before = before.last_conversation_at.clone();
+    let child = db
+        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+        .unwrap()
+        .unwrap();
+    let cursor_before = db.get_member_cursor(&child.id).unwrap();
+
+    // A no-change read is not source activity.
+    let engine = noending::sync::SyncEngine::default();
+    ingestion::ingest_and_sync_session(&db, &engine, &before).unwrap();
+    assert_eq!(
+        db.get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at,
+        before.last_activity_at
+    );
 
     // The child's source GROWS (a new reply lands in the child transcript) —
     // same-size-mtime would be skipped, so append real bytes.
@@ -326,14 +375,84 @@ fn child_activity_moves_last_activity_but_not_last_conversation() {
     reconcile(&db);
 
     let after = db.get_session(&session_id).unwrap().unwrap();
+    let cursor_after = db.get_member_cursor(&child.id).unwrap();
     assert_eq!(
         after.last_conversation_at, conversation_before,
         "child chatter is not conversation"
     );
-    assert!(
-        after.last_activity_at.is_some(),
-        "member commits stamp the session's activity"
+    assert!(cursor_after.byte_offset > cursor_before.byte_offset);
+    assert!(after.last_activity_at > before.last_activity_at);
+}
+
+#[test]
+fn trash_freezes_discovery_until_restore() {
+    let root_dir = temp_root("trash-freeze");
+    let root_path = rollout_name(ROOT_ID);
+    write_rollout(
+        &root_dir,
+        &root_path,
+        &[
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "提问"),
+        ],
     );
+    let db = open_db("trash-freeze");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
+    let session = db.list_sessions(Default::default()).unwrap()[0].clone();
+    let root_member = db.root_member_for_session(&session.id).unwrap().unwrap();
+    let before_cursor = db.get_member_cursor(&root_member.id).unwrap();
+    let before_members = db.members_for_session(&session.id).unwrap();
+    noending::lifecycle::trash_session(&db, &session.id).unwrap();
+
+    write_rollout(
+        &root_dir,
+        &root_path,
+        &[
+            meta_line(ROOT_ID, serde_json::json!({"cwd": "/repo-after-restore"})),
+            message_line(1, "m1", "user", "提问"),
+        ],
+    );
+    write_rollout(
+        &root_dir,
+        &rollout_name(CHILD_ID),
+        &[meta_line(
+            CHILD_ID,
+            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
+        )],
+    );
+    reconcile(&db);
+
+    let frozen = db.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(frozen.cwd, session.cwd);
+    assert_eq!(frozen.last_activity_at, session.last_activity_at);
+    assert_eq!(
+        db.members_for_session(&session.id)
+            .unwrap()
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>(),
+        before_members
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        db.get_member_cursor(&root_member.id).unwrap().byte_offset,
+        before_cursor.byte_offset
+    );
+
+    noending::lifecycle::restore_session(&db, &session.id).unwrap();
+    reconcile(&db);
+    assert_eq!(
+        db.get_session(&session.id).unwrap().unwrap().cwd.as_deref(),
+        Some("/repo-after-restore")
+    );
+    assert!(db
+        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+        .unwrap()
+        .is_some());
+    assert!(db.get_member_cursor(&root_member.id).unwrap().byte_offset > before_cursor.byte_offset);
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +609,104 @@ fn launch_intents_match_roots_only() {
         root_session.owner_workstream_id.as_deref(),
         Some(ws.id.as_str()),
         "the matched intent sets the Root session's Owner"
+    );
+}
+
+#[test]
+fn unchanged_root_retries_a_pending_launch_intent() {
+    let root_dir = temp_root("intent-retry");
+    write_rollout(
+        &root_dir,
+        &rollout_name(ROOT_ID),
+        &[
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "提问"),
+        ],
+    );
+    let db = open_db("intent-retry");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
+    let session = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    let owner = support_workstream("ws-intent-retry");
+    db.upsert_workstream(&owner).unwrap();
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(owner.id.clone()),
+        cwd: Some("/repo-a".into()),
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: chrono_now(),
+        matched_session_id: None,
+        status: "pending".into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+
+    reconcile(&db);
+
+    assert_eq!(
+        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
+        "matched"
+    );
+    assert_eq!(
+        db.get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+            .as_deref(),
+        Some(owner.id.as_str())
+    );
+}
+
+#[test]
+fn owner_assignment_replays_pending_context_on_reconcile() {
+    let root_dir = temp_root("owner-replay");
+    write_rollout(
+        &root_dir,
+        &rollout_name(ROOT_ID),
+        &[
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "请记住这个重要约定"),
+            message_line(2, "m2", "assistant", "我会记住"),
+        ],
+    );
+    let db = open_db("owner-replay");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
+    let session = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.get_context_state(&session.id)
+            .unwrap()
+            .processed_message_sequence,
+        0
+    );
+
+    let owner = support_workstream("ws-owner-replay");
+    db.upsert_workstream(&owner).unwrap();
+    db.set_session_owner(&session.id, Some(&owner.id)).unwrap();
+    noending::settings::set_context_intelligence_enabled(&db, true).unwrap();
+    reconcile(&db);
+
+    assert_eq!(
+        db.get_context_state(&session.id)
+            .unwrap()
+            .processed_message_sequence,
+        db.get_messages(&session.id, None, 100)
+            .unwrap()
+            .last()
+            .unwrap()
+            .sequence
     );
 }
 
@@ -688,6 +905,84 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
     assert_eq!(stats.tool_call_count, Some(7));
     assert_eq!(stats.compaction_count, Some(1));
     assert_eq!(stats.side_activity_count, Some(2));
+}
+
+#[test]
+fn empty_full_scan_replaces_old_stats_with_zeroes() {
+    let db = open_db("zero-stats-rescan");
+    let (session, member_id, _) = seed_root(&db);
+    db.commit_member_ingest(
+        &session.id,
+        &member_id,
+        &[],
+        Some(noending::domain::StatsUpdate::Snapshot(
+            noending::domain::SessionMemberStatsSnapshot {
+                tool_call_count: 7,
+                tool_error_count: 3,
+                compaction_count: 2,
+                side_activity_count: 4,
+            },
+        )),
+        &seed_update(1, 40),
+    )
+    .unwrap();
+    let source = seed_update(2, 40);
+    let stats = noending::adapters::stats_update_from(
+        &noending::domain::MemberObservation::default(),
+        &source,
+    );
+    db.commit_member_ingest(&session.id, &member_id, &[], stats, &source)
+        .unwrap();
+
+    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
+    assert_eq!(stats.tool_call_count, Some(0));
+    assert_eq!(stats.tool_error_count, Some(0));
+    assert_eq!(stats.compaction_count, Some(0));
+    assert_eq!(stats.side_activity_count, Some(0));
+}
+
+#[test]
+fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
+    let db = open_db("conversation-monotonic");
+    let (session, member_id, _) = seed_root(&db);
+    let before = db
+        .get_session(&session.id)
+        .unwrap()
+        .unwrap()
+        .last_conversation_at;
+    let stored = db
+        .commit_member_ingest(
+            &session.id,
+            &member_id,
+            &[
+                ParsedSessionMessage {
+                    source_message_id: Some("m1".into()),
+                    source_position: "line:1".into(),
+                    ts: Some("2026-09-20T13:01:48Z".into()),
+                    role: SessionMessageRole::User,
+                    content: "第一次的提问".into(),
+                },
+                ParsedSessionMessage {
+                    source_message_id: Some("old".into()),
+                    source_position: "line:0".into(),
+                    ts: Some("2020-01-01T00:00:00Z".into()),
+                    role: SessionMessageRole::Assistant,
+                    content: "旧历史".into(),
+                },
+            ],
+            None,
+            &seed_update(2, 80),
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].ts.as_deref(), Some("2020-01-01T00:00:00Z"));
+    assert_eq!(
+        db.get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_conversation_at,
+        before
+    );
 }
 
 /// §32.5 — the core's last line of defense: messages handed to a CHILD member

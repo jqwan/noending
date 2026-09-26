@@ -246,7 +246,7 @@ fn logical_session_schema_enforces_its_invariants() {
         "relation CHECK must reject values outside root|child|side"
     );
 
-    // Partial unique index — exactly ONE root member per session.
+    // Partial unique index — at most ONE root member per session.
     let second_root = insert_member(&db, "m-root2", "s1", "root-2", "root");
     assert!(
         second_root.is_err(),
