@@ -34,9 +34,6 @@ pub fn agent_env_override(agent: Agent) -> &'static str {
         Agent::ClaudeCode => "CLAUDE_CONFIG_DIR",
         Agent::Pi => "PI_HOME",
         Agent::Qoder => "",
-        // Documented by AutoClaw itself: its CLI reads the state root from here,
-        // and the desktop app keeps it under `~/.openclaw-autoclaw`.
-        Agent::AutoClaw => "OPENCLAW_STATE_DIR",
         // Electron app; no documented override.
         Agent::WorkBuddy => "",
         // Documented by dsh's own settings loader: `$DSH_HOME` ?? `~/.dsh`.
@@ -53,7 +50,6 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
         Agent::ClaudeCode => [".claude"].iter().collect(),
         Agent::Pi => [".pi"].iter().collect(),
         Agent::Qoder => [".qoder-cn"].iter().collect(),
-        Agent::AutoClaw => [".openclaw-autoclaw"].iter().collect(),
         Agent::WorkBuddy => [".workbuddy"].iter().collect(),
         Agent::Dsh => [".dsh"].iter().collect(),
         Agent::ZCode => [".zcode"].iter().collect(),

@@ -9,7 +9,6 @@ export type Agent =
   | "claude_code"
   | "pi"
   | "qoder"
-  | "autoclaw"
   | "workbuddy"
   | "dsh"
   | "zcode";
@@ -702,7 +701,6 @@ export const AGENT_LABELS: Record<Agent, string> = {
   claude_code: "Claude Code",
   pi: "Pi",
   qoder: "Qoder",
-  autoclaw: "AutoClaw",
   workbuddy: "WorkBuddy",
   dsh: "dsh",
   zcode: "ZCode",

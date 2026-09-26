@@ -196,8 +196,7 @@ pub mod workstream_visibility {
 }
 
 /// Every Agent NoEnding knows how to READ. Not every entry can be launched:
-/// Qoder ships no headless CLI and AutoClaw's CLI cannot be pointed at its own
-/// state directory from here, so those adapters ingest history only and
+/// Qoder ships no headless CLI, so its adapter ingests history only and
 /// `exec_resolver::resolve` fails by design (方案 §37.1).
 ///
 /// The rename on each variant is the IPC spelling and MUST equal `as_str()` —
@@ -218,8 +217,6 @@ pub enum Agent {
     Pi,
     #[serde(rename = "qoder")]
     Qoder,
-    #[serde(rename = "autoclaw")]
-    AutoClaw,
     #[serde(rename = "workbuddy")]
     WorkBuddy,
     #[serde(rename = "dsh")]
@@ -237,7 +234,6 @@ impl Agent {
             Agent::ClaudeCode,
             Agent::Pi,
             Agent::Qoder,
-            Agent::AutoClaw,
             Agent::WorkBuddy,
             Agent::Dsh,
             Agent::ZCode,
@@ -250,7 +246,6 @@ impl Agent {
             Agent::ClaudeCode => "Claude Code",
             Agent::Pi => "Pi",
             Agent::Qoder => "Qoder",
-            Agent::AutoClaw => "AutoClaw",
             Agent::WorkBuddy => "WorkBuddy",
             Agent::Dsh => "dsh",
             Agent::ZCode => "ZCode",
@@ -263,7 +258,6 @@ impl Agent {
             Agent::ClaudeCode => "claude_code",
             Agent::Pi => "pi",
             Agent::Qoder => "qoder",
-            Agent::AutoClaw => "autoclaw",
             Agent::WorkBuddy => "workbuddy",
             Agent::Dsh => "dsh",
             Agent::ZCode => "zcode",
@@ -276,7 +270,6 @@ impl Agent {
             "claude_code" | "claude" => Some(Agent::ClaudeCode),
             "pi" => Some(Agent::Pi),
             "qoder" | "qcoder" => Some(Agent::Qoder),
-            "autoclaw" | "openclaw" => Some(Agent::AutoClaw),
             "workbuddy" | "work_buddy" => Some(Agent::WorkBuddy),
             "dsh" | "deepseek_harness" => Some(Agent::Dsh),
             "zcode" | "z_code" => Some(Agent::ZCode),

@@ -67,13 +67,6 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             provider: Unsupported,
             effort: Unsupported,
         },
-        // AutoClaw's own `--model` / `--thinking` flags exist, but NoEnding
-        // cannot launch it, so it must not offer an override either.
-        Agent::AutoClaw => AgentRuntimeCapabilities {
-            model: Unsupported,
-            provider: Unsupported,
-            effort: Unsupported,
-        },
         Agent::WorkBuddy => AgentRuntimeCapabilities {
             model: Unsupported,
             provider: Unsupported,

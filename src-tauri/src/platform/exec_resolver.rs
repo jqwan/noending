@@ -193,21 +193,14 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         Agent::ClaudeCode => vec!["claude"],
         Agent::Pi => vec!["pi"],
         Agent::Qoder => vec![],
-        // AutoClaw HAS a CLI (`openclaw`, inside its app bundle), but every
-        // invocation must be pointed at its state root through
-        // `OPENCLAW_STATE_DIR` and `AgentCommand` carries no environment.
-        // Launching without it would silently target the default `~/.openclaw`
-        // — a different, empty state — so launching is not offered until the
-        // platform layer can pass env (方案 §37.6).
-        Agent::AutoClaw => vec![],
         // Electron GUI: only /Applications/WorkBuddy.app/Contents/MacOS/Electron.
         Agent::WorkBuddy => vec![],
         // dsh HAS a CLI (`dsh --profile <name> …`, bin `@deepseek-ai/dsh`), but
         // every invocation must name a profile that lives under
         // `$DSH_HOME/profiles`; the name is the user's own setup, and NoEnding
         // cannot know it. Guessing one would boot the wrong tree — or nothing —
-        // so launching waits until a profile can be chosen deliberately, the
-        // same wait AutoClaw is in (方案 §37.8).
+        // so launching waits until a profile can be chosen deliberately
+        // (方案 §37.8).
         Agent::Dsh => vec![],
         // Desktop app: `~/.zcode/cli` is its own data directory, not a command
         // the user can run (方案 §37.10).

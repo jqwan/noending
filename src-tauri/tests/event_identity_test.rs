@@ -157,15 +157,6 @@ fn pi_line(role: &str, text: &str) -> String {
     )
 }
 
-fn autoclaw_line(role: &str, text: &str) -> String {
-    // AutoClaw = the pi core's entry shape (方案 §37.6); ids derive from
-    // content so rescans hash identically.
-    let id = format!("e-{}-{}", role, text);
-    format!(
-        r#"{{"type":"message","id":"{id}","parentId":"prev","timestamp":"2026-09-13T10:00:00Z","message":{{"role":"{role}","content":[{{"type":"text","text":"{text}"}}]}}}}"#
-    )
-}
-
 fn workbuddy_line(role: &str, text: &str) -> String {
     // WorkBuddy: append-only JSONL with no session header; the content block
     // is typed by role (`input_text` / `output_text`) and the timestamp is
@@ -404,15 +395,6 @@ identity_suite!(
     noending::adapters::qoder::QoderAdapter,
     qoder_line,
     qoder_line,
-    write_plain,
-    append_plain
-);
-identity_suite!(
-    autoclaw_truncate_rewrite_dedup,
-    Agent::AutoClaw,
-    noending::adapters::autoclaw::AutoClawAdapter,
-    autoclaw_line,
-    autoclaw_line,
     write_plain,
     append_plain
 );

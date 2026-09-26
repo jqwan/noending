@@ -232,7 +232,6 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
         "claude_code" | "claude" => Agent::ClaudeCode,
         "pi" => Agent::Pi,
         "qoder" | "qcoder" => Agent::Qoder,
-        "autoclaw" | "openclaw" => Agent::AutoClaw,
         "workbuddy" | "work_buddy" => Agent::WorkBuddy,
         "dsh" | "deepseek_harness" => Agent::Dsh,
         "zcode" | "z_code" => Agent::ZCode,
