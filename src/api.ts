@@ -33,6 +33,8 @@ export const api = {
     invoke<Project>("rename_project", { projectId, name }),
 
   getWorkspaceSettings: () => invoke<WorkspaceSettings>("get_workspace_settings"),
+  /** Open the active Home's Context extraction diagnostics folder. */
+  openContextExtractionLogs: () => invoke<void>("open_context_extraction_logs"),
   /** Requests a relocation for the NEXT launch; `restart_required` says so. */
   setNoendingHome: (newHome: string) =>
     invoke<WorkspaceSettings>("set_noending_home", { newHome }),

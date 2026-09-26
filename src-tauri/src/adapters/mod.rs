@@ -855,6 +855,19 @@ pub trait AgentAdapter: Send + Sync {
         opts: &ExecOptions,
         prompt: &str,
     ) -> Result<AgentCommand>;
+
+    /// Build the isolated command used only for explicit Context extraction.
+    /// Adapters must opt in so an unsupported Agent can never silently run an
+    /// ordinary assistant command in the extraction runtime directory.
+    fn build_context_extraction_command(
+        &self,
+        _install: &AgentInstallation,
+        _opts: &ExecOptions,
+        _prompt: &str,
+        _runtime_dir: &Path,
+    ) -> Result<AgentCommand> {
+        Err(other("该 Agent 不支持 Context 提取"))
+    }
 }
 
 pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
@@ -1026,6 +1039,108 @@ mod jsonl_integrity_tests {
             "discovery must retry the damaged tail"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod context_extraction_command_tests {
+    use super::*;
+
+    #[test]
+    fn context_commands_use_isolated_cwd_ephemeral_flags_and_runtime_overrides() {
+        let install = |agent| AgentInstallation {
+            agent,
+            executable_path: "/usr/bin/agent-cli".into(),
+            version: None,
+            source: "test".into(),
+            last_verified_at: "test".into(),
+        };
+        let cwd = Path::new("/custom/noending/runtime/context-extraction");
+        let prompt = "do not persist this prompt";
+
+        for (agent, opts, expected) in [
+            (
+                Agent::Codex,
+                ExecOptions {
+                    model: Some("model-codex".into()),
+                    effort: Some("high".into()),
+                    ..Default::default()
+                },
+                vec![
+                    "--ephemeral",
+                    "-m",
+                    "model-codex",
+                    "model_reasoning_effort=\"high\"",
+                ],
+            ),
+            (
+                Agent::ClaudeCode,
+                ExecOptions {
+                    model: Some("model-claude".into()),
+                    effort: Some("high".into()),
+                    ..Default::default()
+                },
+                vec![
+                    "--no-session-persistence",
+                    "--model",
+                    "model-claude",
+                    "--effort",
+                    "high",
+                ],
+            ),
+            (
+                Agent::Pi,
+                ExecOptions {
+                    model: Some("model-pi".into()),
+                    provider: Some("provider-pi".into()),
+                    effort: Some("high".into()),
+                },
+                vec![
+                    "--no-session",
+                    "--no-tools",
+                    "--provider",
+                    "provider-pi",
+                    "--model",
+                    "model-pi",
+                    "--thinking",
+                    "high",
+                ],
+            ),
+        ] {
+            let adapter = adapter_for(agent);
+            let installation = install(agent);
+            let extraction = adapter
+                .build_context_extraction_command(&installation, &opts, prompt, cwd)
+                .unwrap();
+            assert_eq!(extraction.cwd.as_deref(), Some(cwd));
+            assert_eq!(extraction.args.last().map(String::as_str), Some(prompt));
+            for arg in expected {
+                assert!(
+                    extraction.args.iter().any(|actual| actual == arg),
+                    "{agent:?} missing {arg}"
+                );
+            }
+
+            let ordinary = adapter
+                .build_exec_command(&installation, &opts, prompt)
+                .unwrap();
+            assert_eq!(
+                ordinary.cwd, None,
+                "ordinary Assistant exec keeps its old cwd policy"
+            );
+            match agent {
+                Agent::Codex => assert!(!ordinary.args.iter().any(|arg| arg == "--ephemeral")),
+                Agent::ClaudeCode => assert!(!ordinary
+                    .args
+                    .iter()
+                    .any(|arg| arg == "--no-session-persistence")),
+                Agent::Pi => {
+                    assert!(ordinary.args.iter().any(|arg| arg == "--no-session"));
+                    assert!(ordinary.args.iter().any(|arg| arg == "--no-tools"));
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }
 

@@ -152,7 +152,10 @@ fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
             .unwrap()
             .pending
     );
-    let outcome = noending::context::update_session(&db, &session.id).unwrap();
+    let home_dir = unique_dir("context-empty-rewrite-home");
+    let home =
+        noending::workspace::home::NoEndingHome::new(home_dir.to_str().unwrap(), None).unwrap();
+    let outcome = noending::context::update_session(&db, &session.id, Some(&home)).unwrap();
     assert_eq!(
         outcome.status,
         noending::domain::ContextUpdateStatus::Updated

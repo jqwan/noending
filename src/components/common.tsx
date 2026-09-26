@@ -22,14 +22,44 @@ export function timeAgo(iso: string | null | undefined): string {
   return new Date(iso).toLocaleDateString();
 }
 
-/** 显式 Context 更新失败时的用户文案。后端把失败序列化成 `context: <ContextUpdateError>`
- *  的 Debug 字符串；两种可行动原因要能认出来（快照变化 → 重按；没配 Agent → 去设置），
- *  其余给通用失败提示，绝不假装成功。 */
-export function contextUpdateErrorMessage(err: unknown): string {
+export interface ContextUpdateErrorDetails {
+  code: string;
+  message: string;
+  operationId: string | null;
+}
+
+/** Context commands reject with a structured, privacy-safe backend failure. */
+export function contextUpdateErrorDetails(err: unknown): ContextUpdateErrorDetails {
+  let value: unknown = err;
+  if (typeof value === "string" && value.trimStart().startsWith("{")) {
+    try { value = JSON.parse(value); } catch { /* keep the original value */ }
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    if (typeof record.code === "string" && typeof record.message === "string") {
+      return {
+        code: record.code,
+        message: record.message,
+        operationId: typeof record.operation_id === "string" ? record.operation_id : null,
+      };
+    }
+  }
   const text = String(err);
-  if (text.includes("ConcurrencyConflict")) return "内容已变化，请重新更新";
-  if (text.includes("AiUnavailable")) return "未配置 Assistant Agent（Settings → Agents）";
-  return `更新失败：${text}`;
+  if (text.includes("ConcurrencyConflict")) {
+    return { code: "stale_snapshot", message: "内容已变化，请重新更新", operationId: null };
+  }
+  if (text.includes("AiUnavailable")) {
+    return { code: "ai_unavailable", message: "未配置 Assistant Agent（Settings → Agents）", operationId: null };
+  }
+  return { code: "update_failed", message: "更新失败，请重试", operationId: null };
+}
+
+export function contextUpdateErrorCopyText(error: ContextUpdateErrorDetails): string {
+  return [
+    error.message,
+    `错误代码：${error.code}`,
+    ...(error.operationId ? [`操作 ID：${error.operationId}`] : []),
+  ].join("\n");
 }
 
 /**

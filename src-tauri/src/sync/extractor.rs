@@ -68,6 +68,25 @@ pub struct CliExtractor {
     pub timeout_secs: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextCallFailureKind {
+    AgentUnavailable,
+    UnsupportedAgent,
+    CommandInvalid,
+    Start,
+    Wait,
+    Exit,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextCallFailure {
+    pub kind: ContextCallFailureKind,
+    pub spawned: bool,
+    pub exit_code: Option<i32>,
+    pub io_error_kind: Option<&'static str>,
+}
+
 impl CliExtractor {
     /// Strict lookup for the interactive path: `Ok(None)` means the user set
     /// Assistant to `none`; anything else that cannot be honoured is an `Err`.
@@ -114,6 +133,70 @@ impl CliExtractor {
         let adapter = crate::adapters::adapter_for(self.agent);
         let cmd = adapter.build_exec_command(&install, &self.opts, prompt)?;
         let out = crate::platform::exec_runner::run_headless(&cmd, self.timeout_secs)?;
+        Ok(crate::platform::exec_runner::clean_exec_stdout(&out.stdout))
+    }
+
+    /// Run the extraction-only policy in an explicit app-owned working
+    /// directory. Unlike `run`, this never calls the generic Assistant exec
+    /// builder and never permits an inherited cwd.
+    pub fn run_context(
+        &self,
+        prompt: &str,
+        runtime_dir: &std::path::Path,
+    ) -> std::result::Result<String, ContextCallFailure> {
+        if !matches!(self.agent, Agent::Codex | Agent::ClaudeCode | Agent::Pi) {
+            return Err(ContextCallFailure {
+                kind: ContextCallFailureKind::UnsupportedAgent,
+                spawned: false,
+                exit_code: None,
+                io_error_kind: None,
+            });
+        }
+        let install = crate::platform::exec_resolver::resolve(self.agent).map_err(|_| {
+            ContextCallFailure {
+                kind: ContextCallFailureKind::AgentUnavailable,
+                spawned: false,
+                exit_code: None,
+                io_error_kind: None,
+            }
+        })?;
+        let adapter = crate::adapters::adapter_for(self.agent);
+        let cmd = adapter
+            .build_context_extraction_command(&install, &self.opts, prompt, runtime_dir)
+            .map_err(|_| ContextCallFailure {
+                kind: ContextCallFailureKind::UnsupportedAgent,
+                spawned: false,
+                exit_code: None,
+                io_error_kind: None,
+            })?;
+        if cmd.cwd.as_deref() != Some(runtime_dir) {
+            return Err(ContextCallFailure {
+                kind: ContextCallFailureKind::CommandInvalid,
+                spawned: false,
+                exit_code: None,
+                io_error_kind: None,
+            });
+        }
+        let out = crate::platform::exec_runner::run_context_extraction(&cmd, self.timeout_secs)
+            .map_err(|failure| ContextCallFailure {
+                kind: match failure.kind {
+                    crate::platform::exec_runner::ContextExecFailureKind::Start => {
+                        ContextCallFailureKind::Start
+                    }
+                    crate::platform::exec_runner::ContextExecFailureKind::Wait => {
+                        ContextCallFailureKind::Wait
+                    }
+                    crate::platform::exec_runner::ContextExecFailureKind::Exit => {
+                        ContextCallFailureKind::Exit
+                    }
+                    crate::platform::exec_runner::ContextExecFailureKind::Timeout => {
+                        ContextCallFailureKind::Timeout
+                    }
+                },
+                spawned: failure.spawned,
+                exit_code: failure.exit_code,
+                io_error_kind: failure.io_error_kind,
+            })?;
         Ok(crate::platform::exec_runner::clean_exec_stdout(&out.stdout))
     }
 }

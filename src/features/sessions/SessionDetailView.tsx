@@ -1,9 +1,9 @@
 import Icon from "../../components/Icon";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { Modal, contextUpdateErrorMessage, copyToClipboard, timeAgo, useRefreshSignal } from "../../components/common";
+import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { type SessionMessageData } from "./SessionMessage";
 import ResumeSessionModal from "./ResumeSessionModal";
@@ -49,7 +49,10 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   /** Context：纯读取的四字段摘要 + 显式「生成 / 更新摘要」。 */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
-  const [ctxError, setCtxError] = useState("");
+  const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
+  const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
+  const currentSessionId = useRef(sessionId);
+  currentSessionId.current = sessionId;
   // 回收站动作（Session Lifecycle & Deletion）：确认弹窗、执行中的 busy、
   // 以及从详情页直接发起的永久删除 Modal。
   const [confirmTrash, setConfirmTrash] = useState(false);
@@ -63,14 +66,20 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
    */
   const [projects, setProjects] = useState<Project[] | null>(null);
 
+  useEffect(() => {
+    setCtxError(null);
+    setCtxReadError(null);
+    setCtxBusy(false);
+  }, [sessionId]);
+
   /** 打开 / 刷新这一页：详情与 Session Context 都是纯读取。 */
   const refresh = useCallback(() => {
     api.getSessionDetail(sessionId)
       .then((d) => { setDetail(d); setFailed(false); })
       .catch((e) => { console.error(e); setFailed(true); });
     api.getSessionContext(sessionId)
-      .then((c) => { setSessionCtx(c); setCtxError(""); })
-      .catch((e) => { console.error(e); setCtxError(contextUpdateErrorMessage(e)); });
+      .then((c) => { setSessionCtx(c); setCtxReadError(null); })
+      .catch((e) => { console.error(e); setCtxReadError(contextUpdateErrorDetails(e)); });
   }, [sessionId]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
@@ -112,10 +121,13 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   /** 一次点击 → 最多一次模型调用 → 一份新的四字段摘要。失败按后端原因给可行动文案。 */
   const updateSummary = async () => {
     if (ctxBusy) return;
+    const updateSessionId = sessionId;
     setCtxBusy(true);
-    setCtxError("");
+    setCtxReadError(null);
+    setCtxError(null);
     try {
-      const out = await api.updateSessionContext(sessionId);
+      const out = await api.updateSessionContext(updateSessionId);
+      if (currentSessionId.current !== updateSessionId) return;
       showToast(
         out.status === "no_change"
           ? "没有新内容，摘要保持不变"
@@ -126,9 +138,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       refresh();
     } catch (e) {
       console.error(e);
-      setCtxError(contextUpdateErrorMessage(e));
+      if (currentSessionId.current === updateSessionId) {
+        setCtxError(contextUpdateErrorDetails(e));
+      }
     } finally {
-      setCtxBusy(false);
+      if (currentSessionId.current === updateSessionId) setCtxBusy(false);
     }
   };
 
@@ -332,8 +346,21 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           有新消息尚未并入摘要{sessionCtx.fields === null ? "，点击「生成摘要」" : "，点击「更新摘要」"}。
         </div>
       )}
+      {ctxReadError && (
+        <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere" }}>
+          {ctxReadError.message}
+        </div>
+      )}
       {ctxError && (
-        <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere" }}>{ctxError}</div>
+        <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
+          <span>{ctxError.message}{ctxError.operationId ? ` · 操作 ID ${ctxError.operationId}` : ""}</span>
+          {ctxError.operationId && (
+            <button className="btn small ghost" onClick={async () => {
+              const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxError));
+              showToast(ok ? "已复制错误详情" : "复制失败，请手动复制错误详情");
+            }}>复制错误详情</button>
+          )}
+        </div>
       )}
       {sessionCtx?.fields ? (
         <div style={{ display: "grid", gap: 12, marginTop: 10, maxWidth: "72ch" }}>

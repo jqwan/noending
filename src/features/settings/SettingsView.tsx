@@ -273,8 +273,36 @@ function AdvancedSettings() {
   return (
     <>
       <AutomationSettings />
+      <ContextDiagnosticsSettings />
       <WorkspaceStorageSettings />
     </>
+  );
+}
+
+function ContextDiagnosticsSettings() {
+  const openLogs = async () => {
+    try {
+      await api.openContextExtractionLogs();
+      showToast("已打开 Context 更新日志目录");
+    } catch (error) {
+      console.error(error);
+      showToast("无法打开 Context 更新日志目录");
+    }
+  };
+
+  return (
+    <section>
+      <h3>Context 更新诊断</h3>
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label">本地运行日志</div>
+          <div className="settings-row-hint">
+            记录更新时间、目标、Agent 和失败阶段；不记录提示词、模型输出或终端错误文本，保留 14 天。
+          </div>
+        </div>
+        <button className="btn small" onClick={openLogs}>打开日志目录</button>
+      </div>
+    </section>
   );
 }
 

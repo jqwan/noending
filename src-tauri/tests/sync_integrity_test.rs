@@ -613,7 +613,11 @@ fn trashed_session_refuses_explicit_update() {
 
     noending::lifecycle::trash_session(&db, &s.id).unwrap();
 
-    let outcome = noending::context::update_session(&db, &s.id);
+    let home_dir =
+        std::env::temp_dir().join(format!("noending-integrity-context-home-{}", new_id()));
+    let home =
+        noending::workspace::home::NoEndingHome::new(home_dir.to_str().unwrap(), None).unwrap();
+    let outcome = noending::context::update_session(&db, &s.id, Some(&home));
     assert!(
         outcome.is_err(),
         "a trashed session refuses an explicit summary update"

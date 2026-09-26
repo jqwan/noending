@@ -280,6 +280,28 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
             cwd: None,
         })
     }
+
+    fn build_context_extraction_command(
+        &self,
+        install: &AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
+        prompt: &str,
+        runtime_dir: &Path,
+    ) -> Result<AgentCommand> {
+        let mut args: Vec<String> = vec![
+            "-p".into(),
+            "--no-session-persistence".into(),
+            "--output-format".into(),
+            "text".into(),
+        ];
+        args.extend(runtime_args(opts));
+        args.push(prompt.to_string());
+        Ok(AgentCommand {
+            program: install.executable_path.clone(),
+            args,
+            cwd: Some(runtime_dir.to_path_buf()),
+        })
+    }
 }
 
 /// One transcript line's contribution. `is_root` is false only for a

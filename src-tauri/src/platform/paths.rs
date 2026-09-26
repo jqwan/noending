@@ -87,6 +87,71 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(crate::workspace::identity::expand_tilde(path))
 }
 
+/// Ask the desktop shell to show a directory in the platform's file manager.
+pub fn open_directory(path: &std::path::Path) -> crate::error::Result<()> {
+    #[cfg(target_os = "macos")]
+    let opener = directory_opener(path, DirectoryPlatform::MacOs);
+    #[cfg(target_os = "windows")]
+    let opener = directory_opener(path, DirectoryPlatform::Windows);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let opener = directory_opener(path, DirectoryPlatform::Other);
+
+    let mut child = std::process::Command::new(opener.program)
+        .args(&opener.args)
+        .spawn()
+        .map_err(|_| crate::error::other("无法启动系统文件管理器，请检查系统配置"))?;
+
+    // macOS `open` and `xdg-open` are short-lived launch helpers. Wait for
+    // them so Unix reaps the child and reports a failed handoff. Explorer is
+    // different: it may keep the launched process alive, so Windows returns
+    // after a successful spawn and lets the OS own that process handle.
+    if opener.wait_for_exit {
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(_) => {
+                // A rare wait error should still not leave a short-lived Unix
+                // child unreaped. Try once more from a background reaper so a
+                // transient interruption cannot leave a zombie behind.
+                let _ = std::thread::spawn(move || child.wait());
+                return Err(crate::error::other("无法确认系统文件管理器是否已打开目录"));
+            }
+        };
+        if !status.success() {
+            return Err(crate::error::other(
+                "系统文件管理器无法打开目录，请检查目录是否可访问",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Non-host platforms are exercised by path/argv unit tests.
+enum DirectoryPlatform {
+    MacOs,
+    Windows,
+    Other,
+}
+
+struct DirectoryOpener {
+    program: &'static str,
+    args: Vec<std::ffi::OsString>,
+    wait_for_exit: bool,
+}
+
+fn directory_opener(path: &std::path::Path, platform: DirectoryPlatform) -> DirectoryOpener {
+    let (program, wait_for_exit) = match platform {
+        DirectoryPlatform::MacOs => ("open", true),
+        DirectoryPlatform::Windows => ("explorer.exe", false),
+        DirectoryPlatform::Other => ("xdg-open", true),
+    };
+    DirectoryOpener {
+        program,
+        args: vec![path.as_os_str().to_owned()],
+        wait_for_exit,
+    }
+}
+
 /// Identifier used for both the Tauri bundle and the OS-native app folder.
 pub const APP_IDENTIFIER: &str = "app.noending.desktop";
 
@@ -142,6 +207,22 @@ mod tests {
     fn agent_override_env() {
         assert_eq!(agent_env_override(Agent::Codex), "CODEX_HOME");
         assert_eq!(agent_env_override(Agent::ClaudeCode), "CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn directory_openers_preserve_paths_as_single_arguments() {
+        let unix_path = PathBuf::from("/Users/Ada/No Ending/logs/context extraction");
+        let mac = directory_opener(&unix_path, DirectoryPlatform::MacOs);
+        assert_eq!(mac.program, "open");
+        assert_eq!(mac.args, vec![unix_path.as_os_str().to_owned()]);
+        assert!(mac.wait_for_exit);
+
+        let windows_path =
+            PathBuf::from(r"C:\Users\Ada Lovelace\No Ending\logs\context extraction");
+        let windows = directory_opener(&windows_path, DirectoryPlatform::Windows);
+        assert_eq!(windows.program, "explorer.exe");
+        assert_eq!(windows.args, vec![windows_path.as_os_str().to_owned()]);
+        assert!(!windows.wait_for_exit);
     }
 
     /// 必须测试-adjacent: the expander merged here must keep every

@@ -154,22 +154,38 @@ pub fn get_workstream_context_state(
 /// carrying the `stale_snapshot` reason so the UI can ask for a re-click.
 #[tauri::command]
 pub fn update_session_context(
+    app: AppHandle,
     state: State<AppState>,
     session_id: String,
 ) -> Result<crate::context::SessionUpdateOutcome> {
-    with_db(&state, |db| crate::context::update_session(db, &session_id))
+    let home = noending_home(&app);
+    with_db(&state, |db| {
+        crate::context::update_session(db, &session_id, home.as_ref())
+    })
 }
 
 /// ONE user action → AT MOST ONE model call → every affected Session Context AND
 /// the Workstream Context mutations, committed atomically.
 #[tauri::command]
 pub fn update_workstream_context(
+    app: AppHandle,
     state: State<AppState>,
     workstream_id: String,
 ) -> Result<crate::context::WorkstreamUpdateOutcome> {
+    let home = noending_home(&app);
     with_db(&state, |db| {
-        crate::context::update_workstream(db, &workstream_id)
+        crate::context::update_workstream(db, &workstream_id, home.as_ref())
     })
+}
+
+/// Open the active Home's Context extraction log folder in the system file
+/// manager. The directory may not exist until the first update, so create it.
+#[tauri::command]
+pub fn open_context_extraction_logs(app: AppHandle) -> Result<()> {
+    let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 尚未初始化"))?;
+    let path = crate::context::diagnostics::log_dir(&home);
+    std::fs::create_dir_all(&path)?;
+    crate::platform::paths::open_directory(&path)
 }
 
 // ---------------- Context Items ----------------
