@@ -251,7 +251,7 @@ fn another_sessions_cwd_is_not_a_launch_authority() {
     // keyed by its ROOT member's Resume identity (no raw_path on the row).
     let root_id = new_id();
     let (sid, _) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &root_id,
             None,

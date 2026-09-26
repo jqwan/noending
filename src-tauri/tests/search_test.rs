@@ -152,7 +152,7 @@ fn a_root_message_is_searchable_regardless_of_length() {
 fn a_session_is_searchable_by_its_document() {
     let db = open_db("session-doc");
     let (session, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "root-doc-1",
             Some("quant script debug"),
@@ -172,7 +172,7 @@ fn a_session_is_searchable_by_its_document() {
 
     // An untitled session is still documented, under the agent's name.
     let (untitled, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "root-doc-2",
             None,

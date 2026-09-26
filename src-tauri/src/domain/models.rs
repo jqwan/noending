@@ -503,16 +503,14 @@ impl MemberStatsDelta {
     }
 }
 
-/// Full-replace stats for a full rescan / rewrite (§7.3): the four observed
-/// counters describe the WHOLE source. Token/cost/model columns are outside
-/// the snapshot — no current source provides them, and an absent observation
-/// must never null a column another writer could legitimately have set.
+/// Full-scan stats for a rescan (§7.3). `Some(0)` is observed zero; `None` is
+/// unsupported and leaves the stored counter unchanged.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionMemberStatsSnapshot {
-    pub tool_call_count: i64,
-    pub tool_error_count: i64,
-    pub compaction_count: i64,
-    pub side_activity_count: i64,
+    pub tool_call_count: Option<i64>,
+    pub tool_error_count: Option<i64>,
+    pub compaction_count: Option<i64>,
+    pub side_activity_count: Option<i64>,
 }
 
 /// How a read updates member stats (§7.3).

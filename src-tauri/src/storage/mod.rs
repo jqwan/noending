@@ -453,22 +453,10 @@ impl Db {
 
     // ---------------- Logical Sessions ----------------
 
-    /// Everything discovery knows about a Logical Session, in one write. The
-    /// row is keyed by `(agent, root_agent_session_id)` — the ROOT member's
-    /// real Resume identity (重构方案 §10.1) — so re-discovering the same root
-    /// updates in place instead of duplicating.
-    ///
-    /// `project_id` is NOT taken from the caller: it is derived from
-    /// `workspace_paths.project_id` inside the statement, so the cache and its
-    /// source can never be set apart (方案 §42.3-M3). Title is write-once
-    /// (§4.2); a later discovery can fill an absent title but never overwrite
-    /// one. Fork provenance is only ever set while NULL (§2.2), and child /
-    /// side activity never touches these columns — this upsert runs for
-    /// Root/ForkRoot discoveries alone.
-    ///
-    /// Returns the row id and whether this session is NEW to us.
+    /// Session-only fixture helper. Production discovery uses
+    /// `upsert_logical_root` to create the Session and Root member atomically.
     #[allow(clippy::too_many_arguments)]
-    pub fn upsert_logical_session(
+    pub fn upsert_logical_session_unchecked(
         &self,
         agent: Agent,
         root_agent_session_id: &str,
@@ -558,11 +546,12 @@ impl Db {
         &self,
         include_ownerless: bool,
         include_pending_context: bool,
+        agent: Option<Agent>,
     ) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(
             "SELECT s.* FROM sessions s
-             WHERE s.trashed_at IS NULL AND (
+             WHERE s.trashed_at IS NULL AND (?3 IS NULL OR s.agent = ?3) AND (
                (?1 AND s.owner_workstream_id IS NULL)
                OR (?2 AND s.owner_workstream_id IS NOT NULL AND EXISTS (
                  SELECT 1 FROM session_messages m
@@ -576,7 +565,11 @@ impl Db {
         )?;
         let rows = st
             .query_map(
-                params![include_ownerless, include_pending_context],
+                params![
+                    include_ownerless,
+                    include_pending_context,
+                    agent.map(|a| a.as_str())
+                ],
                 row_session,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1087,6 +1080,16 @@ impl Db {
                 .fold(None, |latest, ts| {
                     later_timestamp(latest.as_deref(), Some(ts))
                 });
+            let source_mtime = stored
+                .iter()
+                .any(|message| message.ts.is_none())
+                .then(|| mtime_timestamp(source.mtime))
+                .flatten();
+            let latest = if stored.is_empty() {
+                None
+            } else {
+                later_timestamp(latest.as_deref(), source_mtime.as_deref())
+            };
             if let Some(latest) = latest {
                 let previous: Option<String> = tx.query_row(
                     "SELECT last_conversation_at FROM sessions WHERE id = ?1",
@@ -2651,15 +2654,6 @@ pub fn apply_stats_conn(
     let Some(update) = update else {
         return Ok(false);
     };
-    // Ensure the snapshot row exists; DO NOTHING keeps an existing row's
-    // NULL-vs-0 meanings intact (§7.1).
-    conn.execute(
-        "INSERT INTO session_member_stats
-         (member_id, tool_call_count, tool_error_count, compaction_count, side_activity_count, updated_at)
-         VALUES (?1, 0, 0, 0, 0, ?2)
-         ON CONFLICT(member_id) DO NOTHING",
-        params![member_id, now()],
-    )?;
     // Dynamic SET list: only the fields this update speaks for move, so an
     // absent observation leaves the column (and its NULL-vs-0 meaning) alone.
     // A delta adds over COALESCE: a NULL column (never observed) starts from 0.
@@ -2688,15 +2682,30 @@ pub fn apply_stats_conn(
             }
         }
         StatsUpdate::Snapshot(s) => {
-            sets.push(format!("tool_call_count = {}", s.tool_call_count));
-            sets.push(format!("tool_error_count = {}", s.tool_error_count));
-            sets.push(format!("compaction_count = {}", s.compaction_count));
-            sets.push(format!("side_activity_count = {}", s.side_activity_count));
+            if let Some(v) = s.tool_call_count {
+                sets.push(format!("tool_call_count = {v}"));
+            }
+            if let Some(v) = s.tool_error_count {
+                sets.push(format!("tool_error_count = {v}"));
+            }
+            if let Some(v) = s.compaction_count {
+                sets.push(format!("compaction_count = {v}"));
+            }
+            if let Some(v) = s.side_activity_count {
+                sets.push(format!("side_activity_count = {v}"));
+            }
         }
     }
     if sets.is_empty() {
         return Ok(false);
     }
+    conn.execute(
+        "INSERT INTO session_member_stats
+         (member_id, tool_call_count, tool_error_count, compaction_count, side_activity_count, updated_at)
+         VALUES (?1, NULL, NULL, NULL, NULL, ?2)
+         ON CONFLICT(member_id) DO NOTHING",
+        params![member_id, now()],
+    )?;
     let sql = format!(
         "UPDATE session_member_stats SET {}, updated_at = ?1 WHERE member_id = ?2",
         sets.join(", ")

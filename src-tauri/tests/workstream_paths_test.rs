@@ -168,7 +168,7 @@ fn ordered_path_ids(db: &Db, workstream_id: &str) -> Vec<String> {
 /// id), so callers use the returned Session instead of a fixture id.
 fn session(db: &Db, tag: &str) -> Session {
     let (row_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &format!("src-{tag}"),
             None,
@@ -547,7 +547,7 @@ fn adding_a_path_imports_no_sessions() {
     // A Session already working in that directory, owned by no Workstream.
     // The WorkspacePath row does not exist yet — that is the point.
     let (s_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "src-in-dir",
             None,

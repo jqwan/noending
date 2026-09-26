@@ -70,7 +70,7 @@ pub fn ensure_session(
 ) -> Session {
     let root_id = root_agent_session_id.into();
     let (row_id, _) = db
-        .upsert_logical_session(agent, &root_id, None, None, None, None, None, None)
+        .upsert_logical_session_unchecked(agent, &root_id, None, None, None, None, None, None)
         .expect("ensure logical session");
     let _ = id; // the row id is store-assigned; callers use the returned Session
     db.get_session(&row_id).unwrap().expect("session row")
@@ -127,7 +127,7 @@ pub fn seed_conversation(
     messages: &[noending::domain::ParsedSessionMessage],
 ) -> (Session, String, Vec<noending::domain::SessionMessage>) {
     let (session_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             agent,
             root_agent_session_id,
             None,

@@ -437,36 +437,74 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
         })
 }
 
-/// Turn the observations of one read into the right [`StatsUpdate`] (§7.3):
-/// a read that starts at genesis IS a full scan of the observable source, so
-/// its counts REPLACE the snapshot; an append only ADDS its counts.
-/// A full scan reports observed zeroes too; only an empty append yields `None`.
+/// Counters an adapter can reliably observe in its source format.
+#[derive(Debug, Clone, Copy)]
+pub struct StatsCapabilities {
+    tool_calls: bool,
+    tool_errors: bool,
+    compactions: bool,
+    side_activity: bool,
+}
+
+impl StatsCapabilities {
+    pub const TOOL_AND_COMPACTION: Self = Self::new(true, false, true, false);
+    pub const COMPACTION: Self = Self::new(false, false, true, false);
+    pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, false, false, true);
+    pub const TOOL_COMPACTION_AND_SIDE_ACTIVITY: Self = Self::new(true, false, true, true);
+
+    const fn new(
+        tool_calls: bool,
+        tool_errors: bool,
+        compactions: bool,
+        side_activity: bool,
+    ) -> Self {
+        Self {
+            tool_calls,
+            tool_errors,
+            compactions,
+            side_activity,
+        }
+    }
+}
+
+/// A genesis read is a full scan, so supported counters replace the snapshot;
+/// an append only adds supported observations. `None` means unsupported.
 pub fn stats_update_from(
     observation: &MemberObservation,
     source: &crate::domain::SourceCursorUpdate,
+    capabilities: StatsCapabilities,
 ) -> Option<StatsUpdate> {
     if source.start_byte_offset == 0 {
         return Some(StatsUpdate::Snapshot(SessionMemberStatsSnapshot {
-            tool_call_count: observation.tool_calls as i64,
-            tool_error_count: observation.tool_errors as i64,
-            compaction_count: observation.compactions as i64,
-            side_activity_count: observation.side_activity as i64,
+            tool_call_count: capabilities
+                .tool_calls
+                .then_some(observation.tool_calls as i64),
+            tool_error_count: capabilities
+                .tool_errors
+                .then_some(observation.tool_errors as i64),
+            compaction_count: capabilities
+                .compactions
+                .then_some(observation.compactions as i64),
+            side_activity_count: capabilities
+                .side_activity
+                .then_some(observation.side_activity as i64),
         }));
     }
-    let empty = observation.tool_calls == 0
-        && observation.tool_errors == 0
-        && observation.compactions == 0
-        && observation.side_activity == 0;
+    let empty = (!capabilities.tool_calls || observation.tool_calls == 0)
+        && (!capabilities.tool_errors || observation.tool_errors == 0)
+        && (!capabilities.compactions || observation.compactions == 0)
+        && (!capabilities.side_activity || observation.side_activity == 0);
     if empty {
         None
     } else {
         Some(StatsUpdate::Delta(MemberStatsDelta {
-            tool_call_count: (observation.tool_calls > 0).then_some(observation.tool_calls as i64),
-            tool_error_count: (observation.tool_errors > 0)
+            tool_call_count: (capabilities.tool_calls && observation.tool_calls > 0)
+                .then_some(observation.tool_calls as i64),
+            tool_error_count: (capabilities.tool_errors && observation.tool_errors > 0)
                 .then_some(observation.tool_errors as i64),
-            compaction_count: (observation.compactions > 0)
+            compaction_count: (capabilities.compactions && observation.compactions > 0)
                 .then_some(observation.compactions as i64),
-            side_activity_count: (observation.side_activity > 0)
+            side_activity_count: (capabilities.side_activity && observation.side_activity > 0)
                 .then_some(observation.side_activity as i64),
         }))
     }
@@ -492,6 +530,7 @@ pub fn stats_update_from(
 pub fn read_jsonl_delta(
     path: &Path,
     cursor: &SessionMemberCursor,
+    capabilities: StatsCapabilities,
     parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
 ) -> Result<MemberReadDelta> {
     let (obs, text) = observe(path)?;
@@ -605,7 +644,7 @@ pub fn read_jsonl_delta(
         prefix_hash: prefix_hash_of(complete_end),
     };
     Ok(MemberReadDelta {
-        stats: stats_update_from(&observation, &source),
+        stats: stats_update_from(&observation, &source, capabilities),
         messages,
         source: Some(source),
     })

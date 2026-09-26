@@ -479,7 +479,11 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 
         let source = replay_cursor_update(&path, cursor, &raw)?;
         Ok(MemberReadDelta {
-            stats: crate::adapters::stats_update_from(&observation, &source),
+            stats: crate::adapters::stats_update_from(
+                &observation,
+                &source,
+                crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY,
+            ),
             messages,
             source: Some(source),
         })
@@ -756,8 +760,8 @@ mod tests {
         );
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, 1);
-                assert_eq!(s.compaction_count, 1);
+                assert_eq!(s.tool_call_count, Some(1));
+                assert_eq!(s.compaction_count, Some(1));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -803,7 +807,7 @@ mod tests {
         );
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.side_activity_count, 2);
+                assert_eq!(s.side_activity_count, Some(2));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

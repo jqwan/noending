@@ -68,7 +68,7 @@ fn write_transcript(dir: &std::path::Path, n: usize) -> PathBuf {
 fn session_row(db: &Db, path: &std::path::Path) -> Session {
     let root_agent_session_id = format!("as-{}", new_id());
     let (id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_agent_session_id,
             None,

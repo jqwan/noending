@@ -33,7 +33,7 @@ fn ensure(
     activity: &str,
 ) -> noending::domain::Session {
     let (row_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             agent,
             root_id,
             Some("帮我看看这个量化脚本"),
@@ -66,7 +66,7 @@ fn upsert_follows_the_root_identity_in_place() {
 
     // Re-discovery of the same root: same row, not a duplicate.
     let (second_id, is_new) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
@@ -91,7 +91,7 @@ fn upsert_follows_the_root_identity_in_place() {
 
     // A different root is a different Logical Session.
     let (other_id, is_new) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             "another-root",
             None,
@@ -122,7 +122,7 @@ fn a_later_upsert_refreshes_cwd_and_activity() {
     // Discovery re-read the root transcript: the cwd moved and activity
     // advanced, and the row follows.
     let (second_id, _) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
@@ -166,7 +166,7 @@ fn upsert_without_cwd_keeps_stored_value() {
     // A later scan that fails to read cwd (parse gap) must not wipe the
     // stored value — the absence of a fact is not a new fact.
     let (_, _) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
@@ -197,7 +197,7 @@ fn title_is_write_once() {
 
     // Row created without a title (no usable title source yet).
     let (row_id, _) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             None,
@@ -213,7 +213,7 @@ fn title_is_write_once() {
 
     // The title source appears on the next pass: the absent title is filled.
     database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
@@ -229,7 +229,7 @@ fn title_is_write_once() {
 
     // A later source (or a source that changed its mind) never overwrites.
     database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("一个全新的标题"),
@@ -263,7 +263,7 @@ fn unchanged_upsert_rewrites_nothing() {
 
     // Identical scan: row must come back byte-identical (same id, no churn).
     let (again, is_new) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
@@ -299,7 +299,7 @@ fn project_cache_follows_workspace_path() {
     let root_id = format!("meta-{}", new_id());
 
     let (row_id, _) = database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("t"),
@@ -320,7 +320,7 @@ fn project_cache_follows_workspace_path() {
 
     // A later upsert with no path leaves the attachment alone.
     database
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::ClaudeCode,
             &root_id,
             Some("t"),

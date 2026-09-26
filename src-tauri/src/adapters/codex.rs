@@ -325,9 +325,12 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         // The shared reader classifies the scan (append vs full re-scan) and
         // derives the matching stats update; the closure decides, per line,
         // what is conversation and what is an observation.
-        read_jsonl_delta(&path, cursor, &|_idx, v| {
-            parse_line(v, member.relation.as_str() == "root")
-        })
+        read_jsonl_delta(
+            &path,
+            cursor,
+            crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY,
+            &|_idx, v| parse_line(v, member.relation.as_str() == "root"),
+        )
     }
 
     fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
@@ -781,9 +784,10 @@ mod rollout_tests {
         // reasoning → nothing, tool call → tool_call_count, compact → count.
         match delta.stats {
             Some(crate::domain::StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, 1);
-                assert_eq!(s.compaction_count, 1);
-                assert_eq!(s.side_activity_count, 0);
+                assert_eq!(s.tool_call_count, Some(1));
+                assert_eq!(s.compaction_count, Some(1));
+                assert_eq!(s.side_activity_count, Some(0));
+                assert_eq!(s.tool_error_count, None);
             }
             other => panic!("expected a full-scan snapshot, got {other:?}"),
         }
@@ -846,7 +850,7 @@ mod rollout_tests {
         assert_eq!(delta.messages.len(), 1, "the envelope is not conversation");
         match delta.stats {
             Some(crate::domain::StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.side_activity_count, 1);
+                assert_eq!(s.side_activity_count, Some(1));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

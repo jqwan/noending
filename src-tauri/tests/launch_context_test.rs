@@ -58,7 +58,7 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
     let raw = std::env::temp_dir().join(format!("noending-raw-{}.jsonl", new_id()));
     std::fs::write(&raw, "").unwrap();
     let (id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             agent,
             &root_id,
             None,

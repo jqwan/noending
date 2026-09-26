@@ -16,7 +16,7 @@ fn db(tag: &str) -> Db {
 /// and the activity timestamps are the facts the card reads.
 fn discovered(db: &Db, agent: Agent, root_agent_session_id: &str, activity: &str) -> Session {
     let (row_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             agent,
             root_agent_session_id,
             Some("继续上次的工作"),

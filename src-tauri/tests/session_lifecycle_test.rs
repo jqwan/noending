@@ -877,7 +877,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     // brand-new Logical Session.
     std::fs::write(&source_file, "the source came back\n").unwrap();
     let (s2, is_new) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &root_id,
             Some("fresh start"),

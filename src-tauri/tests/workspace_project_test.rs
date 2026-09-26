@@ -145,7 +145,7 @@ fn paths_of(db: &Db, project_id: &str) -> Vec<WorkspacePath> {
 /// id), so callers use the returned Session instead of a fixture id.
 fn session(db: &Db, id: &str, cwd: &str, path_id: &str) -> Session {
     let (row_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &format!("src-{id}"),
             None,

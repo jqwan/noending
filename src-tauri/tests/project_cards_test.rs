@@ -45,7 +45,7 @@ fn session_at(db: &Db, id: &str, path_id: &str, trashed: bool) {
     // The Logical Session is keyed by (agent, root identity); project_id is
     // derived from workspace_paths inside upsert_logical_session.
     let (sid, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &format!("root-{id}"),
             Some(id),

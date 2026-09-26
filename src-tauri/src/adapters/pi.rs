@@ -205,9 +205,12 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         cursor: &SessionMemberCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
-        read_jsonl_delta(&path, cursor, &|_idx, v| {
-            parse_line(v, member.relation.as_str() == "root")
-        })
+        read_jsonl_delta(
+            &path,
+            cursor,
+            crate::adapters::StatsCapabilities::COMPACTION,
+            &|_idx, v| parse_line(v, member.relation.as_str() == "root"),
+        )
     }
 
     fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
@@ -394,7 +397,10 @@ mod tests {
         assert_eq!(delta.messages[0].source_message_id.as_deref(), Some("m1"));
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.compaction_count, 1);
+                assert_eq!(s.compaction_count, Some(1));
+                assert_eq!(s.tool_call_count, None);
+                assert_eq!(s.tool_error_count, None);
+                assert_eq!(s.side_activity_count, None);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

@@ -171,7 +171,7 @@ fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> S
     std::fs::write(&raw, "").unwrap();
     let ts = now();
     let (id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &root_id,
             None,
@@ -409,7 +409,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     // through the production upsert, keyed by the ROOT Resume identity.
     let moved = real_dir("resume-drift", "moved");
     let drifted = db.get_session(&s.id).unwrap().unwrap();
-    db.upsert_logical_session(
+    db.upsert_logical_session_unchecked(
         drifted.agent,
         &drifted.root_agent_session_id,
         None,

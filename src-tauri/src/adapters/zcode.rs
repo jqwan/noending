@@ -421,7 +421,11 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             prefix_hash: String::new(),
         };
         Ok(MemberReadDelta {
-            stats: crate::adapters::stats_update_from(&observation, &source),
+            stats: crate::adapters::stats_update_from(
+                &observation,
+                &source,
+                crate::adapters::StatsCapabilities::TOOL_AND_COMPACTION,
+            ),
             messages,
             source: Some(source),
         })
@@ -816,7 +820,7 @@ mod tests {
         );
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, 1, "the tool part is observed");
+                assert_eq!(s.tool_call_count, Some(1), "the tool part is observed");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -909,7 +913,7 @@ mod tests {
         assert!(delta.messages.is_empty());
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.compaction_count, 1);
+                assert_eq!(s.compaction_count, Some(1));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

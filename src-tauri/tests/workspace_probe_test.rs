@@ -55,7 +55,7 @@ fn canonical(raw: &str) -> String {
 /// id), so callers use the returned Session instead of a fixture id.
 fn session(db: &Db, tag: &str, cwd: &str, activity: &str) -> Session {
     let (row_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &format!("src-{tag}"),
             None,
@@ -185,7 +185,7 @@ fn recent_paths_union_the_registry_with_session_cwd_history() {
     // A session working in the known path boosts its activity; its cwd
     // resolved to the registered WorkspacePath.
     let (s3_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "src-m1",
             None,

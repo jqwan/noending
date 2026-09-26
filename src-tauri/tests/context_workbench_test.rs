@@ -31,7 +31,7 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
 fn session_row(db: &Db, agent: Agent) -> noending::domain::Session {
     let root_id = format!("as-{}", new_id());
     let (id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             agent,
             &root_id,
             Some("Implement Context Delivery"),

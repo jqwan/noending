@@ -496,6 +496,68 @@ where
     Ok((total_messages, processed))
 }
 
+fn retry_candidate_in_source(
+    db: &Db,
+    session: &Session,
+    source: &crate::domain::IngestSource,
+) -> Result<bool> {
+    let members = if session.owner_workstream_id.is_none() {
+        db.root_member_for_session(&session.id)?
+            .into_iter()
+            .collect()
+    } else {
+        db.members_for_session(&session.id)?
+    };
+    Ok(members
+        .iter()
+        .any(|member| crate::workspace::is_within(&member.source_path, &source.path)))
+}
+
+fn process_retry_sessions<F>(
+    db: &Db,
+    engine: &SyncEngine,
+    workspace: &crate::launcher::LaunchWorkspace,
+    on_session: &F,
+    scope: Option<&crate::domain::IngestSource>,
+    skip: &BTreeSet<String>,
+) -> Result<i64>
+where
+    F: Fn(&Session),
+{
+    let retry_intents = db.has_pending_launch_intents()?;
+    let retry_context = crate::settings::context_intelligence_enabled(db)?;
+    let agent = scope.map(|source| source.agent);
+    let mut total_messages = 0;
+    for candidate in db.reconcile_retry_sessions(retry_intents, retry_context, agent)? {
+        if skip.contains(&candidate.id) {
+            continue;
+        }
+        if let Some(source) = scope {
+            if !retry_candidate_in_source(db, &candidate, source)? {
+                continue;
+            }
+        }
+        if candidate.is_trashed() {
+            continue;
+        }
+        if candidate.owner_workstream_id.is_none() {
+            finalize_newly_discovered_root(db, &candidate, false, workspace)?;
+        }
+        let Some(session) = db.get_session(&candidate.id)? else {
+            continue;
+        };
+        if session.is_trashed() || session.owner_workstream_id.is_none() {
+            continue;
+        }
+        on_session(&session);
+        match ingest_and_sync_session(db, engine, &session) {
+            Ok((messages, _)) => total_messages += messages,
+            Err(e) => eprintln!("[reconcile] retry {} failed: {}", session.id, e),
+        }
+    }
+    Ok(total_messages)
+}
+
 /// Full reconcile over every agent's enabled sources (§12): discover members,
 /// resolve the logical graph, then ingest + sync each active session.
 /// `on_session` observes each session being processed.
@@ -552,27 +614,14 @@ where
         processed_session_ids.extend(processed);
     }
 
-    let retry_intents = db.has_pending_launch_intents()?;
-    let retry_context = crate::settings::context_intelligence_enabled(db)?;
-    for candidate in db.reconcile_retry_sessions(retry_intents, retry_context)? {
-        if processed_session_ids.contains(&candidate.id) {
-            continue;
-        }
-        if candidate.owner_workstream_id.is_none() {
-            finalize_newly_discovered_root(db, &candidate, false, workspace)?;
-        }
-        let Some(session) = db.get_session(&candidate.id)? else {
-            continue;
-        };
-        if session.is_trashed() || session.owner_workstream_id.is_none() {
-            continue;
-        }
-        on_session(&session);
-        match ingest_and_sync_session(db, engine, &session) {
-            Ok((messages, _)) => total_messages += messages,
-            Err(e) => eprintln!("[reconcile] retry {} failed: {}", session.id, e),
-        }
-    }
+    total_messages += process_retry_sessions(
+        db,
+        engine,
+        workspace,
+        on_session,
+        None,
+        &processed_session_ids,
+    )?;
 
     // §19-4/§37.19 — the one piece of workspace work a skipped Session still
     // owes. It runs AFTER the loop so a path first registered by this very pass
@@ -607,7 +656,11 @@ where
     let discovered_count = discovered.len();
     let mut total_messages = 0i64;
     let resolved = resolve_batch(db, adapter, &discovered)?;
-    total_messages += process_resolved_batch(db, engine, workspace, resolved, on_session, false)?.0;
+    let (messages, processed) =
+        process_resolved_batch(db, engine, workspace, resolved, on_session, false)?;
+    total_messages += messages;
+    total_messages +=
+        process_retry_sessions(db, engine, workspace, on_session, Some(source), &processed)?;
     Ok((discovered_count, total_messages))
 }
 

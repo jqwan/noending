@@ -240,7 +240,7 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
     };
     let root_agent_session_id = format!("as-{name}");
     let (session_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             agent,
             &root_agent_session_id,
             Some(&fixture.input.session.title),

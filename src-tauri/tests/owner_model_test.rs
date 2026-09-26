@@ -132,7 +132,7 @@ fn session_of_agent(db: &TestDb, agent: Agent, cwd: Option<&str>) -> Session {
     std::fs::write(&raw, "").unwrap();
     let ts = now();
     let (id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             agent,
             &root_id,
             Some("Owner Model"),
@@ -1049,13 +1049,10 @@ fn codex_rollout(dir: &std::path::Path, session_id: &str, cwd: &str) -> std::pat
     file
 }
 
-/// §15.1/§21 — a Session's Owner is decided ONCE, at first discovery: by a
-/// user action, or by the LaunchIntent that started it. A source-scoped sync
-/// discovers sessions too, so it must offer the same chance — otherwise the
-/// intent stays pending forever (the later full reconcile sees a known
-/// Session) and the Session is left permanently ownerless.
+/// A source-scoped sync retries a pending LaunchIntent after discovery skips
+/// the unchanged root file.
 #[test]
-fn source_scoped_reconcile_lets_a_first_discovery_claim_its_intent() {
+fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
     use noending::domain::{ingest_origin, launch_status, IngestSource, LaunchIntent};
     use noending::ingestion::reconcile_source;
     use noending::sync::SyncEngine;
@@ -1066,26 +1063,6 @@ fn source_scoped_reconcile_lets_a_first_discovery_claim_its_intent() {
     let dir = db.dir.join("codex-source");
     std::fs::create_dir_all(&dir).unwrap();
     codex_rollout(&dir, "rollout-thread-1", "/repo/app");
-
-    // The user launched a New Session for A: the intent exists BEFORE the
-    // agent session is discoverable (方案 §15.1).
-    let intent = LaunchIntent {
-        id: new_id(),
-        launch_type: "new".into(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(a.id.clone()),
-        cwd: None,
-        context_bundle_markdown: None,
-        context_bundle_revisions: None,
-        process_id: None,
-        launched_at: "2026-09-22T21:17:07Z".into(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
 
     let source = IngestSource {
         id: new_id(),
@@ -1105,16 +1082,41 @@ fn source_scoped_reconcile_lets_a_first_discovery_claim_its_intent() {
         .find_session_by_root_agent_id(Agent::Codex, "rollout-thread-1")
         .unwrap()
         .expect("discovery created the Session row");
+    assert!(stored.owner_workstream_id.is_none());
+    assert_eq!(db.ingested_message_sequence(&stored.id).unwrap(), 1);
+
+    let intent = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(a.id.clone()),
+        cwd: None,
+        context_bundle_markdown: None,
+        context_bundle_revisions: None,
+        process_id: None,
+        launched_at: "2026-09-22T21:17:07Z".into(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&intent).unwrap();
+    let (discovered, _) =
+        reconcile_source(&db, &engine, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    assert_eq!(discovered, 0, "the unchanged root is skipped");
+
+    let stored = db.get_session(&stored.id).unwrap().unwrap();
     assert_eq!(
         stored.owner_workstream_id.as_deref(),
         Some(a.id.as_str()),
-        "first discovery must claim the pending LaunchIntent"
+        "the source retry must claim the pending LaunchIntent"
     );
     assert_eq!(
         db.get_launch_intent(&intent.id).unwrap().unwrap().status,
         launch_status::MATCHED
     );
-    // The discovered root's conversation arrived through the member commit.
+    // Initial discovery ingested the conversation before the intent arrived.
     assert_eq!(
         db.ingested_message_sequence(&stored.id).unwrap(),
         1,
@@ -1122,6 +1124,83 @@ fn source_scoped_reconcile_lets_a_first_discovery_claim_its_intent() {
     );
     let root = db.root_member_for_session(&stored.id).unwrap().unwrap();
     assert_eq!(root.source_member_id, "rollout-thread-1");
+}
+
+#[test]
+fn source_scoped_reconcile_retries_only_that_sources_pending_context() {
+    use noending::domain::{ingest_origin, IngestSource};
+    use noending::ingestion::reconcile_source;
+    use noending::settings::set_context_intelligence_enabled;
+    use noending::sync::SyncEngine;
+    use std::cell::RefCell;
+
+    let db = open_db("source-retry-scope");
+    let owner = workstream(&db, "Retry owner");
+    set_context_intelligence_enabled(&db, false).unwrap();
+    let source = |root: &std::path::Path| IngestSource {
+        id: new_id(),
+        agent: Agent::Codex,
+        path: root.to_string_lossy().to_string(),
+        enabled: true,
+        origin: ingest_origin::USER.into(),
+        created_at: now(),
+    };
+    let root_a = db.dir.join("retry-source-a");
+    let root_b = db.dir.join("retry-source-b");
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    codex_rollout(&root_a, "retry-a", "/repo/app");
+    codex_rollout(&root_b, "retry-b", "/repo/app");
+    let source_a = source(&root_a);
+    let source_b = source(&root_b);
+    let engine = SyncEngine::default();
+
+    for source in [&source_a, &source_b] {
+        assert_eq!(
+            reconcile_source(&db, &engine, source, &LaunchWorkspace::default(), &|_| {})
+                .unwrap()
+                .0,
+            1
+        );
+    }
+    let session_a = db
+        .find_session_by_root_agent_id(Agent::Codex, "retry-a")
+        .unwrap()
+        .unwrap();
+    let session_b = db
+        .find_session_by_root_agent_id(Agent::Codex, "retry-b")
+        .unwrap()
+        .unwrap();
+    db.set_session_owner(&session_a.id, Some(&owner.id))
+        .unwrap();
+    db.set_session_owner(&session_b.id, Some(&owner.id))
+        .unwrap();
+    set_context_intelligence_enabled(&db, true).unwrap();
+
+    let seen = RefCell::new(Vec::new());
+    let (discovered, _) = reconcile_source(
+        &db,
+        &engine,
+        &source_a,
+        &LaunchWorkspace::default(),
+        &|session| seen.borrow_mut().push(session.id.clone()),
+    )
+    .unwrap();
+    assert_eq!(discovered, 0, "the source file is unchanged");
+    assert_eq!(*seen.borrow(), vec![session_a.id.clone()]);
+    assert_eq!(
+        db.get_context_state(&session_a.id)
+            .unwrap()
+            .processed_message_sequence,
+        db.ingested_message_sequence(&session_a.id).unwrap()
+    );
+    assert_eq!(
+        db.get_context_state(&session_b.id)
+            .unwrap()
+            .processed_message_sequence,
+        0,
+        "syncing source A must not retry source B"
+    );
 }
 
 // ---------------------- §43 a match is one atomic ownership handover
@@ -1585,7 +1664,7 @@ fn session_search_documents_follow_workstream_and_project_renames() {
         .unwrap();
     let root_id = format!("root-{}", new_id());
     let (s_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &root_id,
             None,

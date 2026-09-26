@@ -756,7 +756,7 @@ fn a_stale_commit_after_topology_correction_is_rejected() {
 
     // Topology correction: the member is re-pointed at another session.
     let (other_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "other-root",
             None,
@@ -892,10 +892,10 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
         &[],
         Some(noending::domain::StatsUpdate::Snapshot(
             noending::domain::SessionMemberStatsSnapshot {
-                tool_call_count: 7,
-                tool_error_count: 0,
-                compaction_count: 1,
-                side_activity_count: 2,
+                tool_call_count: Some(7),
+                tool_error_count: Some(0),
+                compaction_count: Some(1),
+                side_activity_count: Some(2),
             },
         )),
         &seed_update(1, 80),
@@ -908,7 +908,7 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
 }
 
 #[test]
-fn empty_full_scan_replaces_old_stats_with_zeroes() {
+fn empty_full_scan_zeros_only_supported_stats() {
     let db = open_db("zero-stats-rescan");
     let (session, member_id, _) = seed_root(&db);
     db.commit_member_ingest(
@@ -917,10 +917,10 @@ fn empty_full_scan_replaces_old_stats_with_zeroes() {
         &[],
         Some(noending::domain::StatsUpdate::Snapshot(
             noending::domain::SessionMemberStatsSnapshot {
-                tool_call_count: 7,
-                tool_error_count: 3,
-                compaction_count: 2,
-                side_activity_count: 4,
+                tool_call_count: Some(7),
+                tool_error_count: Some(3),
+                compaction_count: Some(2),
+                side_activity_count: Some(4),
             },
         )),
         &seed_update(1, 40),
@@ -930,15 +930,36 @@ fn empty_full_scan_replaces_old_stats_with_zeroes() {
     let stats = noending::adapters::stats_update_from(
         &noending::domain::MemberObservation::default(),
         &source,
+        noending::adapters::StatsCapabilities::TOOL_AND_COMPACTION,
     );
     db.commit_member_ingest(&session.id, &member_id, &[], stats, &source)
         .unwrap();
 
     let stats = db.get_member_stats(&member_id).unwrap().unwrap();
     assert_eq!(stats.tool_call_count, Some(0));
-    assert_eq!(stats.tool_error_count, Some(0));
+    assert_eq!(stats.tool_error_count, Some(3));
     assert_eq!(stats.compaction_count, Some(0));
-    assert_eq!(stats.side_activity_count, Some(0));
+    assert_eq!(stats.side_activity_count, Some(4));
+}
+
+#[test]
+fn unsupported_stats_stay_null_on_a_full_scan() {
+    let db = open_db("unknown-stats-rescan");
+    let (session, member_id, _) = seed_root(&db);
+    let source = seed_update(1, 40);
+    let stats = noending::adapters::stats_update_from(
+        &noending::domain::MemberObservation::default(),
+        &source,
+        noending::adapters::StatsCapabilities::COMPACTION,
+    );
+    db.commit_member_ingest(&session.id, &member_id, &[], stats, &source)
+        .unwrap();
+
+    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
+    assert_eq!(stats.tool_call_count, None);
+    assert_eq!(stats.tool_error_count, None);
+    assert_eq!(stats.compaction_count, Some(0));
+    assert_eq!(stats.side_activity_count, None);
 }
 
 #[test]
@@ -982,6 +1003,47 @@ fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
             .unwrap()
             .last_conversation_at,
         before
+    );
+}
+
+#[test]
+fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
+    let db = open_db("conversation-mtime-fallback");
+    let (session, member_id, _) = seed_root(&db);
+    let mut source = seed_update(1, 80);
+    source.mtime = Some(1_893_456_000.0);
+    let stored = db
+        .commit_member_ingest(
+            &session.id,
+            &member_id,
+            &[
+                ParsedSessionMessage {
+                    source_message_id: Some("m2".into()),
+                    source_position: "line:2".into(),
+                    ts: Some("2027-01-01T00:00:00Z".into()),
+                    role: SessionMessageRole::Assistant,
+                    content: "带时间戳的新回复".into(),
+                },
+                ParsedSessionMessage {
+                    source_message_id: Some("m3".into()),
+                    source_position: "line:3".into(),
+                    ts: None,
+                    role: SessionMessageRole::Assistant,
+                    content: "没有时间戳的新回复".into(),
+                },
+            ],
+            None,
+            &source,
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(
+        db.get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_conversation_at
+            .as_deref(),
+        Some("2030-01-01T00:00:00+00:00")
     );
 }
 
@@ -1120,7 +1182,7 @@ fn seed_root(
     Vec<noending::domain::SessionMessage>,
 ) {
     let (session_id, _) = db
-        .upsert_logical_session(Agent::Codex, ROOT_ID, None, None, None, None, None, None)
+        .upsert_logical_session_unchecked(Agent::Codex, ROOT_ID, None, None, None, None, None, None)
         .unwrap();
     let member_id = db
         .upsert_session_member(

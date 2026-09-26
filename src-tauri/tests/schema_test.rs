@@ -369,7 +369,16 @@ fn storage_round_trip_matches_the_schema_promises() {
     let db = Db::open(path.path()).unwrap();
 
     let (s_id, _) = db
-        .upsert_logical_session(Agent::Codex, "root-1", None, None, None, None, None, None)
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "root-1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     let member = db
         .upsert_session_member(

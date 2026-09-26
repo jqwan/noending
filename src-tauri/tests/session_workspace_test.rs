@@ -43,7 +43,8 @@ use noending::storage::workspace::{
 use noending::storage::Db;
 use noending::sync::SyncEngine;
 use noending::workspace::session::{
-    attach_sessions_to_registered_paths, register_workspace_attacher, UnattachedWorkspacePaths,
+    attach_sessions_to_registered_paths, move_session_to_path_conn, register_workspace_attacher,
+    UnattachedWorkspacePaths,
 };
 use noending::workspace::{normalize_path, path_identity_of, WorkspaceAttaching};
 
@@ -213,7 +214,7 @@ fn a_different_spelling_of_the_same_cwd_does_not_move_the_session() {
     let (_d, db) = temp_db("spell");
     project(&db, "p1", "repo");
     let (s, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "spell-root",
             Some("t"),
@@ -315,7 +316,7 @@ fn an_explicit_attach_recomputes_the_cached_project_from_the_path() {
     project(&db, "p1", "one");
     project(&db, "p2", "two");
     let (s, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "reattach-root",
             Some("t"),
@@ -340,6 +341,52 @@ fn an_explicit_attach_recomputes_the_cached_project_from_the_path() {
     let after = stored(&db, &s);
     assert_eq!(after.workspace_path_id.as_deref(), Some(first.as_str()));
     assert_eq!(after.project_id.as_deref(), Some("p1"));
+}
+
+#[test]
+fn workspace_path_move_does_not_mutate_a_trashed_session() {
+    let (_d, db) = temp_db("trash-freeze-move");
+    project(&db, "p1", "one");
+    project(&db, "p2", "two");
+    let (session_id, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "trash-freeze-root",
+            Some("t"),
+            Some("/repo/one"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let path_one = normalize_path("/repo/one").unwrap();
+    let path_two = normalize_path("/repo/two").unwrap();
+    let first = db
+        .tx(|tx| insert_workspace_path_conn(tx, &path_one, "p1"))
+        .unwrap();
+    let second = db
+        .tx(|tx| insert_workspace_path_conn(tx, &path_two, "p2"))
+        .unwrap();
+    assert!(db
+        .tx(|tx| move_session_to_path_conn(tx, &session_id, &first))
+        .unwrap());
+    db.tx(|tx| {
+        noending::storage::session_lifecycle::trash_session_conn(
+            tx,
+            &session_id,
+            &noending::storage::now(),
+        )
+    })
+    .unwrap();
+
+    assert!(!db
+        .tx(|tx| move_session_to_path_conn(tx, &session_id, &second))
+        .unwrap());
+    assert_eq!(
+        stored(&db, &session_id).workspace_path_id.as_deref(),
+        Some(first.as_str())
+    );
 }
 
 #[test]
@@ -422,7 +469,7 @@ fn changing_a_workspace_paths_project_refreshes_all_its_sessions() {
             insert_workspace_path_conn(&conn, cwd, "p1").unwrap()
         };
         let (sid, _) = db
-            .upsert_logical_session(
+            .upsert_logical_session_unchecked(
                 Agent::Codex,
                 &format!("root-{id}"),
                 Some("t"),
@@ -463,7 +510,7 @@ fn the_batch_refresh_is_alone_sufficient_and_idempotent() {
         insert_workspace_path_conn(&conn, "/repo/app", "p1").unwrap()
     };
     let (a, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             "refresh-root",
             Some("t"),
@@ -1044,7 +1091,7 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
     // with — cwd observed, no WorkspacePath attached.
     let orphan = |root: &str, cwd: &str| {
         let (id, _) = db
-            .upsert_logical_session(
+            .upsert_logical_session_unchecked(
                 Agent::Codex,
                 root,
                 Some("t"),
@@ -1107,7 +1154,7 @@ fn the_detail_ingredients_come_from_storage_queries() {
     };
     let root_id = "detail-root";
     let (s, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             root_id,
             Some("detail title"),

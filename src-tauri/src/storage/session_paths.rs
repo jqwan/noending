@@ -63,15 +63,14 @@ pub fn attach_session_workspace_path_conn(
     conn: &Connection,
     session_id: &str,
     workspace_path_id: Option<&str>,
-) -> Result<()> {
-    conn.execute(
+) -> Result<bool> {
+    Ok(conn.execute(
         "UPDATE sessions
             SET workspace_path_id = ?2,
                 project_id = (SELECT project_id FROM workspace_paths WHERE id = ?2)
-          WHERE id = ?1",
+          WHERE id = ?1 AND trashed_at IS NULL",
         params![session_id, workspace_path_id],
-    )?;
-    Ok(())
+    )? == 1)
 }
 
 /// §1.11 — the ONLY reason a Session's cached Project changes without the Session

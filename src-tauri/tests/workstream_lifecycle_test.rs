@@ -66,7 +66,7 @@ fn session_row_at(
     workspace_path_id: Option<&str>,
 ) -> Session {
     let (row_id, _) = db
-        .upsert_logical_session(
+        .upsert_logical_session_unchecked(
             Agent::Codex,
             &format!("src-{tag}"),
             None,

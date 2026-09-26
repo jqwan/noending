@@ -132,7 +132,7 @@ pub fn move_session_to_path_conn(
     conn: &Connection,
     session_id: &str,
     workspace_path_id: &str,
-) -> Result<()> {
+) -> Result<bool> {
     session_paths::attach_session_workspace_path_conn(conn, session_id, Some(workspace_path_id))
 }
 
@@ -166,8 +166,7 @@ pub fn attach_session_conn(
     if current.as_deref() == Some(path_id.as_str()) {
         return Ok(false);
     }
-    move_session_to_path_conn(conn, session_id, &path_id)?;
-    Ok(true)
+    move_session_to_path_conn(conn, session_id, &path_id)
 }
 
 /// §19-4 — attach the Sessions that owe a WorkspacePath but were never given
@@ -201,12 +200,12 @@ pub fn attach_sessions_to_registered_paths(db: &Db) -> Result<usize> {
         return Ok(0);
     }
     db.tx(|tx| {
+        let mut attached = 0;
         for (session_id, path_id) in &pairs {
-            move_session_to_path_conn(tx, session_id, path_id)?;
+            attached += usize::from(move_session_to_path_conn(tx, session_id, path_id)?);
         }
-        Ok(())
-    })?;
-    Ok(pairs.len())
+        Ok(attached)
+    })
 }
 
 // ------------------------------------------------------- owner assignment
