@@ -192,6 +192,8 @@ fn get_context_revision_source_resolution() {
         "/tmp/workbench-test.jsonl",
     );
     let parsed = noending::domain::ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: Some("codex-ev-42".into()),
         source_position: "42".into(),
         ts: Some("2026-09-17T20:14:00Z".into()),

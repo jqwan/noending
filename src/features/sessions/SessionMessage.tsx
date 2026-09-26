@@ -17,6 +17,26 @@ export interface SessionMessageData {
   content: string;
   ts: string | null;
   who: string;
+  /** 消息级生成溯源（Provenance 方案 §22）：仅 Assistant 有意义。 */
+  provider?: string | null;
+  model?: string | null;
+}
+
+/**
+ * Assistant 消息头上的低干扰模型标签（Provenance 方案 §22）：
+ * provider+model → "model · provider"；只有其一 → 那一个；两者皆空 → null（不占位）。
+ * User 消息永远没有生成模型，调用方应根本不传。
+ */
+export function provenanceLabel(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): string | null {
+  const m = model?.trim();
+  const p = provider?.trim();
+  if (m && p) return `${m} · ${p}`;
+  if (m) return m;
+  if (p) return p;
+  return null;
 }
 
 /**
@@ -51,6 +71,8 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   }, [text, md]);
 
   const stamp = `#${msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
+  // User 消息没有生成模型（Provenance 方案 §22）——即使调用方误传也不显示。
+  const prov = msg.role === "assistant" ? provenanceLabel(msg.provider, msg.model) : null;
 
   // 整行可点会让「悬停到哪儿」变成一条与内容无关的宽条，而点开这件事属于这条消息本身，
   // 所以热区和悬浮效果都只落在气泡上（§36.24）。键盘可达靠 role + tabIndex，
@@ -60,6 +82,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
       <div className={`event ${cls}`}>
         <div className="head">
           <span className="who">{msg.who}</span>
+          {prov && <span className="prov mono">{prov}</span>}
           <span className="when mono">{stamp}</span>
         </div>
         <div

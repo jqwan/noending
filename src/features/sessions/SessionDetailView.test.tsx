@@ -77,9 +77,6 @@ function stats(over: Partial<SessionAggregateStats> = {}): SessionAggregateStats
     cached_tokens: null,
     reasoning_tokens: null,
     cost: null,
-    model: null,
-    provider: null,
-    effort: null,
     ...over,
   };
 }
@@ -128,6 +125,8 @@ function message(
     source_generation: 0,
     source_position: "",
     source_identity_hash: "",
+    provider: null,
+    model: null,
     raw_ref: "",
   };
 }
@@ -204,7 +203,7 @@ it("shows aggregate execution stats and an expandable member tree", async () => 
   expect(screen.queryByRole("button", { name: /side-src-1/ })).toBeNull();
 });
 
-it("shows tool / token / cost / runtime rows only when the data is present", async () => {
+it("shows tool / token / cost rows only when the data is present", async () => {
   const me = session("me");
   await renderDetail(detail(me, { stats: stats() }));
 
@@ -220,9 +219,6 @@ it("shows tool / token / cost / runtime rows only when the data is present", asy
       input_tokens: 1000,
       output_tokens: 200,
       cost: 0.5,
-      model: "gpt-5",
-      provider: "openai",
-      effort: "high",
     }),
   }));
 
@@ -230,7 +226,6 @@ it("shows tool / token / cost / runtime rows only when the data is present", asy
   expect(body).toContain("工具调用 4");
   expect(body).toContain("Tokens 输入 1,000 · 输出 200");
   expect(body).toContain("成本 0.5");
-  expect(body).toContain("gpt-5 · openai · high");
 });
 
 // ---------------- 源会话（§22.4） ----------------

@@ -264,6 +264,9 @@ export interface SessionMessage {
   role: SessionMessageRole;
   content: string;
   ts: string | null;
+  /** 消息级生成溯源（Provenance 方案 §5/§6）：仅 Assistant 有意义，来源可证实才非 null。 */
+  provider: string | null;
+  model: string | null;
   source_message_id: string | null;
   source_generation: number;
   source_position: string;
@@ -283,9 +286,8 @@ export interface SessionMemberStats {
   cached_tokens: number | null;
   reasoning_tokens: number | null;
   cost: number | null;
-  model: string | null;
-  provider: string | null;
-  effort: string | null;
+  // model / provider / effort 已删除（Provenance 方案 §9）：消息级溯源在
+  // SessionMessage 上，Member 级"当前模型"语义不清。
   updated_at: string;
 }
 
@@ -304,9 +306,8 @@ export interface SessionAggregateStats {
   cached_tokens: number | null;
   reasoning_tokens: number | null;
   cost: number | null;
-  model: string | null;
-  provider: string | null;
-  effort: string | null;
+  // model / provider / effort 已删除（Provenance 方案 §9）：需要按模型统计时
+  // 直接从 session_messages WHERE role='assistant' 派生。
 }
 
 /** Adapter 对成员源可用性的严格结论（重构方案 §9.1）：任何异常都不等于 missing。 */

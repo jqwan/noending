@@ -348,6 +348,9 @@
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .event .when { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
+/* 消息级模型标签（Provenance 方案 §22）：低干扰，只有来源证实的 Assistant
+   消息才有；与 .when 同级弱化显示，不占独立行。 */
+.event .prov { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
 .event .body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 气泡只占 82%，对侧留白——一眼能看出「这句是谁说的」。标题行跟着气泡走，
    而不是横铺整列，否则右对齐的气泡下面挂着一行左起的名字，读起来是断裂的。 */

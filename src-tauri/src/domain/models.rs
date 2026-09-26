@@ -437,6 +437,12 @@ pub struct SessionMessage {
     pub role: SessionMessageRole,
     pub content: String,
     pub ts: Option<String>,
+    /// Message-level generation provenance (Provenance 方案 §5/§6). Only
+    /// meaningful for Assistant messages; source-confirmed only — never
+    /// inferred from configuration, branding or runtime preference. Unknown
+    /// stays unknown (`NULL`).
+    pub provider: Option<String>,
+    pub model: Option<String>,
     // ---- source provenance (Context Integrity) ----
     pub source_message_id: Option<String>,
     pub source_generation: i64,
@@ -462,9 +468,9 @@ pub struct SessionMemberStats {
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub cost: Option<f64>,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub effort: Option<String>,
+    // model / provider / effort removed (Provenance 方案 §9): message
+    // provenance lives on SessionMessage; a member-level "current model"
+    // was a second, semantically unclear authority.
     pub updated_at: String,
     pub extra: serde_json::Value,
 }
@@ -638,7 +644,9 @@ impl SourceAvailability {
 }
 
 /// One parsed conversation message, before NoEnding assigns identity and
-/// sequence (adapter → core hand-off shape).
+/// sequence (adapter → core hand-off shape). `provider` / `model` carry only
+/// what the source itself confirms about THIS message (Provenance 方案 §12);
+/// adapters must never fill them from configuration or branding.
 #[derive(Debug, Clone)]
 pub struct ParsedSessionMessage {
     pub source_message_id: Option<String>,
@@ -646,6 +654,26 @@ pub struct ParsedSessionMessage {
     pub ts: Option<String>,
     pub role: SessionMessageRole,
     pub content: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+impl ParsedSessionMessage {
+    /// Attach source-confirmed provenance to a parsed message (Provenance
+    /// 方案 §26). The minimal normalization allowed (§18): trim whitespace,
+    /// empty string → `None`. No alias remap, no family guessing, no
+    /// provider prefixing — the strings stay source-native.
+    pub fn with_provenance(mut self, provider: Option<String>, model: Option<String>) -> Self {
+        self.provider = normalize_provenance(provider);
+        self.model = normalize_provenance(model);
+        self
+    }
+}
+
+/// `trim` + empty→`None` — the only provenance normalization the domain allows.
+pub fn normalize_provenance(v: Option<String>) -> Option<String> {
+    let v = v?.trim().to_string();
+    (!v.is_empty()).then_some(v)
 }
 
 /// Listing scope for Sessions (方案 §11). Default projections (Sessions page,

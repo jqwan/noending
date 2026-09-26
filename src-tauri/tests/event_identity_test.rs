@@ -99,6 +99,8 @@ fn msg(
     content: impl Into<String>,
 ) -> ParsedSessionMessage {
     ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: Some(source_message_id.into()),
         source_position: String::new(),
         ts: Some("2026-09-13T10:00:00Z".into()),
@@ -475,6 +477,8 @@ fn identity_dedup_follows_chain_semantics() {
     );
 
     let mk = |pos: &str, text: &str| ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: None,
         source_position: pos.into(),
         ts: Some("t".into()),
@@ -482,6 +486,8 @@ fn identity_dedup_follows_chain_semantics() {
         content: text.into(),
     };
     let mk_native = |pos: &str, id: &str| ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: Some(id.into()),
         source_position: pos.into(),
         ts: Some("t".into()),
@@ -628,6 +634,8 @@ fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
             &s.id,
             &member_id,
             &[ParsedSessionMessage {
+                provider: None,
+                model: None,
                 source_message_id: None,
                 source_position: String::new(),
                 ts: Some("2026-09-13T10:00:00Z".into()),

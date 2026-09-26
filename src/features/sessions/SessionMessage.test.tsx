@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import SessionMessage, { looksLikeMarkdown } from "./SessionMessage";
+import SessionMessage, { looksLikeMarkdown, provenanceLabel } from "./SessionMessage";
+import { describe } from "vitest";
 import type { SessionMessageData } from "./SessionMessage";
 
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
@@ -108,4 +109,38 @@ it("头部显示调用方给出的 who 与序号", () => {
   const head = container.querySelector(".event .head")!;
   expect(head.textContent).toContain("Codex");
   expect(head.textContent).toContain("#7");
+});
+
+describe("消息级模型标签（Provenance 方案 §22）", () => {
+  it("provider + model → \"model · provider\"", () => {
+    const { container } = render(
+      <SessionMessage msg={{ ...msg("回答"), provider: "anthropic", model: "claude-opus-x" }} />,
+    );
+    const prov = container.querySelector(".event .head .prov")!;
+    expect(prov.textContent).toBe("claude-opus-x · anthropic");
+  });
+
+  it("只有 model / 只有 provider → 只显示那一个", () => {
+    const { container: a } = render(<SessionMessage msg={{ ...msg("回答"), model: "gpt-x" }} />);
+    expect(a.querySelector(".prov")!.textContent).toBe("gpt-x");
+    const { container: b } = render(<SessionMessage msg={{ ...msg("回答"), provider: "openai" }} />);
+    expect(b.querySelector(".prov")!.textContent).toBe("openai");
+  });
+
+  it("两者皆空 → 不渲染占位", () => {
+    const { container } = renderMessage("回答");
+    expect(container.querySelector(".prov")).toBeNull();
+  });
+
+  it("User 消息永远没有模型标签", () => {
+    const { container } = render(
+      <SessionMessage msg={{ ...msg("提问", "user"), provider: "anthropic", model: "claude-opus-x" }} />,
+    );
+    expect(container.querySelector(".prov")).toBeNull();
+  });
+
+  it("空白字符串按空对待", () => {
+    expect(provenanceLabel("  ", "\n")).toBeNull();
+    expect(provenanceLabel(" anthropic ", " claude-x ")).toBe("claude-x · anthropic");
+  });
 });

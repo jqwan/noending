@@ -309,6 +309,8 @@ pub fn setup_fixture(fixture: &ContextQualityFixture) -> Result<FixtureEnv> {
                     ts: None,
                     role,
                     content: fe.text.clone(),
+                    provider: None,
+                    model: None,
                 }],
                 None,
                 &crate::domain::SourceCursorUpdate {

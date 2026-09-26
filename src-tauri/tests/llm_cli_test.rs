@@ -54,6 +54,8 @@ fn msg(session: &Session, seq: i64, role: SessionMessageRole, content: &str) -> 
         source_generation: 0,
         source_position: format!("line:{}", seq),
         source_identity_hash: String::new(),
+        provider: None,
+        model: None,
         raw_ref: format!("test#line:{}", seq),
     }
 }

@@ -14,6 +14,12 @@
 //! `session_context_state`, and unattachable sources in
 //! `ingestion_diagnostics`. `session_events`, `session_cursors` and
 //! `session_deletion_jobs` are gone.
+//!
+//! Format v3 adds message-level model provenance (Provenance 方案 §5–§9):
+//! `session_messages` carries `provider` / `model` (Assistant only, enforced by
+//! CHECK), and `session_member_stats` loses `model` / `provider` / `effort` —
+//! a member-level "current model" was a second, semantically unclear
+//! authority.
 
 use noending::domain::{Agent, SessionMemberRelation, SessionMessageRole};
 use noending::domain::{ParsedSessionMessage, SourceCursorUpdate};
@@ -158,6 +164,23 @@ fn fresh_database_uses_current_format_generation() {
         assert!(
             object_exists(&db.read(), object),
             "Logical Session object is missing: {object}"
+        );
+    }
+
+    // Provenance 方案 §5/§8/§9 — message-level model provenance lives on
+    // session_messages; the member-level runtime facts are gone.
+    assert!(
+        has_column(&db.read(), "session_messages", "provider"),
+        "session_messages.provider is missing"
+    );
+    assert!(
+        has_column(&db.read(), "session_messages", "model"),
+        "session_messages.model is missing"
+    );
+    for column in ["model", "provider", "effort"] {
+        assert!(
+            !has_column(&db.read(), "session_member_stats", column),
+            "retired column remains: session_member_stats.{column}"
         );
     }
 
@@ -397,6 +420,8 @@ fn storage_round_trip_matches_the_schema_promises() {
         .unwrap();
     let messages = [
         ParsedSessionMessage {
+            provider: None,
+            model: None,
             source_message_id: Some("m1".into()),
             source_position: "0".into(),
             ts: None,
@@ -404,6 +429,8 @@ fn storage_round_trip_matches_the_schema_promises() {
             content: "first".into(),
         },
         ParsedSessionMessage {
+            provider: None,
+            model: None,
             source_message_id: Some("m2".into()),
             source_position: "1".into(),
             ts: None,
@@ -755,4 +782,187 @@ fn creation_stamps_identity_with_the_schema() {
     let conn = Connection::open(path.path()).unwrap();
     assert!(object_exists(&conn, "sessions"));
     assert_eq!(user_version(&conn), DATABASE_FORMAT_VERSION);
+}
+
+/// Provenance 方案 §28.1/§11 — message-level model provenance: Assistant rows
+/// round-trip source-native provider/model, User rows refuse provenance at both
+/// the commit guard and the schema CHECK, and a dedup re-read enriches
+/// `NULL → confirmed` in place without creating a second message or letting a
+/// confirmed value be overwritten.
+#[test]
+fn message_provenance_round_trip_guard_and_enrichment() {
+    let path = db_path("provenance");
+    let db = Db::open(path.path()).unwrap();
+
+    let (s_id, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "root-prov",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let member = db
+        .upsert_session_member(
+            &s_id,
+            Agent::Codex,
+            "root-prov",
+            SessionMemberRelation::Root,
+            None,
+            "test",
+            "/tmp/source",
+            None,
+            None,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+    let source = |offset: u64| SourceCursorUpdate {
+        file_identity: "identity".into(),
+        generation: 1,
+        byte_offset: offset,
+        last_seen_size: offset,
+        mtime: None,
+        start_byte_offset: 0,
+        prefix_hash: String::new(),
+    };
+    let stored = db
+        .commit_member_ingest(
+            &s_id,
+            &member,
+            &[ParsedSessionMessage {
+                provider: Some("anthropic".into()),
+                model: Some("claude-opus-x".into()),
+                source_message_id: Some("a1".into()),
+                source_position: "0".into(),
+                ts: None,
+                role: SessionMessageRole::Assistant,
+                content: "这里存在一个并发问题。".into(),
+            }],
+            None,
+            &source(10),
+        )
+        .unwrap();
+    assert_eq!(stored[0].provider.as_deref(), Some("anthropic"));
+    assert_eq!(stored[0].model.as_deref(), Some("claude-opus-x"));
+
+    // Round-trip through the row mapper, plus the NULL/NULL Assistant case.
+    let _ = db
+        .commit_member_ingest(
+            &s_id,
+            &member,
+            &[ParsedSessionMessage {
+                provider: None,
+                model: None,
+                source_message_id: Some("a2".into()),
+                source_position: "1".into(),
+                ts: None,
+                role: SessionMessageRole::Assistant,
+                content: "unknown provenance".into(),
+            }],
+            None,
+            &source(20),
+        )
+        .unwrap();
+    let all = db.get_messages(&s_id, None, 100).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].provider, None);
+    assert_eq!(all[1].model, None);
+
+    // §7 — the commit guard: a User message with provenance is an adapter bug,
+    // and the whole batch is refused, not silently cleaned.
+    let user_with_model = db.commit_member_ingest(
+        &s_id,
+        &member,
+        &[ParsedSessionMessage {
+            provider: Some("openai".into()),
+            model: Some("gpt-x".into()),
+            source_message_id: Some("u1".into()),
+            source_position: "2".into(),
+            ts: None,
+            role: SessionMessageRole::User,
+            content: "你好".into(),
+        }],
+        None,
+        &source(30),
+    );
+    assert!(
+        user_with_model.is_err(),
+        "user messages must not carry provider/model"
+    );
+    // The schema CHECK backs the guard up even against direct SQL.
+    let direct = rusqlite::Connection::open(path.path()).unwrap();
+    let refused = direct.execute(
+        "INSERT INTO session_messages
+         (id, session_id, member_id, sequence, source_generation, source_position,
+          source_identity_hash, role, content, provider, raw_ref)
+         VALUES ('x', ?1, ?2, 99, 0, '', 'h', 'user', 'hi', 'openai', '')",
+        rusqlite::params![s_id, member],
+    );
+    assert!(
+        refused.is_err(),
+        "CHECK (user → provider IS NULL) must hold"
+    );
+
+    // §11 — dedup enrichment: the same identity re-read with a provenance the
+    // stored row lacks fills the gap; one message stays one message.
+    let enriched = db
+        .commit_member_ingest(
+            &s_id,
+            &member,
+            &[ParsedSessionMessage {
+                provider: None,
+                model: Some("claude-opus-x".into()),
+                source_message_id: Some("a2".into()),
+                source_position: "1".into(),
+                ts: None,
+                role: SessionMessageRole::Assistant,
+                content: "unknown provenance".into(),
+            }],
+            None,
+            &source(20),
+        )
+        .unwrap();
+    assert!(enriched.is_empty(), "enrichment is not a new message");
+    let all = db.get_messages(&s_id, None, 100).unwrap();
+    assert_eq!(all.len(), 2, "identity dedup must not duplicate");
+    assert_eq!(
+        all[1].model.as_deref(),
+        Some("claude-opus-x"),
+        "NULL → confirmed enrichment lands in place"
+    );
+
+    // §11 — a confirmed-vs-confirmed contradiction keeps the stored value.
+    let conflict = db
+        .commit_member_ingest(
+            &s_id,
+            &member,
+            &[ParsedSessionMessage {
+                provider: None,
+                model: Some("some-other-model".into()),
+                source_message_id: Some("a1".into()),
+                source_position: "0".into(),
+                ts: None,
+                role: SessionMessageRole::Assistant,
+                content: "这里存在一个并发问题。".into(),
+            }],
+            None,
+            &source(10),
+        )
+        .unwrap();
+    assert!(
+        conflict.is_empty(),
+        "a conflict is not a new message either"
+    );
+    let all = db.get_messages(&s_id, None, 100).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        all[0].model.as_deref(),
+        Some("claude-opus-x"),
+        "stored provenance is never silently overwritten"
+    );
 }

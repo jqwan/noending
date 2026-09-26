@@ -228,6 +228,8 @@ fn message_of(
             SessionMessageRole::Assistant
         },
         content: text,
+        provider: None,
+        model: None,
     };
     (Some(message), observation)
 }

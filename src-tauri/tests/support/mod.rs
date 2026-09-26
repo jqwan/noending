@@ -113,6 +113,8 @@ pub fn parsed_message(
         ts: None,
         role,
         content: content.into(),
+        provider: None,
+        model: None,
     }
 }
 

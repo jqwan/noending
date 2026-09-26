@@ -723,6 +723,8 @@ fn a_trash_racing_the_commit_takes_nothing() {
     let (session, member_id, _) = seed_root(&db);
 
     let delta = vec![ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: Some("m1".into()),
         source_position: "line:1".into(),
         ts: None,
@@ -799,6 +801,8 @@ fn a_stale_commit_after_topology_correction_is_rejected() {
     .unwrap();
 
     let delta = vec![ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: Some("m1".into()),
         source_position: "line:1".into(),
         ts: None,
@@ -833,6 +837,8 @@ fn duplicate_commits_dedup() {
             &session.id,
             &member_id,
             &[noending::domain::ParsedSessionMessage {
+                provider: None,
+                model: None,
                 source_message_id: Some("m1".into()),
                 source_position: "line:1".into(),
                 ts: Some("2026-09-20T13:01:48Z".into()),
@@ -864,6 +870,8 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
             &member_id,
             &[
                 ParsedSessionMessage {
+                    provider: None,
+                    model: None,
                     source_message_id: Some("m1".into()),
                     source_position: "line:1".into(),
                     ts: Some("2026-09-20T13:01:48Z".into()),
@@ -871,6 +879,8 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
                     content: "第一次的提问".into(),
                 },
                 ParsedSessionMessage {
+                    provider: None,
+                    model: None,
                     source_message_id: Some("m2".into()),
                     source_position: "line:2".into(),
                     ts: None,
@@ -977,6 +987,8 @@ fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
             &member_id,
             &[
                 ParsedSessionMessage {
+                    provider: None,
+                    model: None,
                     source_message_id: Some("m1".into()),
                     source_position: "line:1".into(),
                     ts: Some("2026-09-20T13:01:48Z".into()),
@@ -984,6 +996,8 @@ fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
                     content: "第一次的提问".into(),
                 },
                 ParsedSessionMessage {
+                    provider: None,
+                    model: None,
                     source_message_id: Some("old".into()),
                     source_position: "line:0".into(),
                     ts: Some("2020-01-01T00:00:00Z".into()),
@@ -1018,6 +1032,8 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
             &member_id,
             &[
                 ParsedSessionMessage {
+                    provider: None,
+                    model: None,
                     source_message_id: Some("m2".into()),
                     source_position: "line:2".into(),
                     ts: Some("2027-01-01T00:00:00Z".into()),
@@ -1025,6 +1041,8 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
                     content: "带时间戳的新回复".into(),
                 },
                 ParsedSessionMessage {
+                    provider: None,
+                    model: None,
                     source_message_id: Some("m3".into()),
                     source_position: "line:3".into(),
                     ts: None,
@@ -1069,6 +1087,8 @@ fn a_child_member_cannot_write_conversation() {
         )
         .unwrap();
     let delta = vec![ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: Some("c1".into()),
         source_position: "line:1".into(),
         ts: None,
@@ -1204,6 +1224,8 @@ fn seed_root(
             &session_id,
             &member_id,
             &[ParsedSessionMessage {
+                provider: None,
+                model: None,
                 source_message_id: Some("m1".into()),
                 source_position: "line:1".into(),
                 ts: Some("2026-09-20T13:01:48Z".into()),

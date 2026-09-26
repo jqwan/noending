@@ -55,7 +55,13 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// `ingestion_diagnostics`. `session_events`, `session_cursors` and
 /// `session_deletion_jobs` are gone: there is one conversation store, cursors
 /// belong to members, and NoEnding never deletes an Agent-owned source.
-pub const DATABASE_FORMAT_VERSION: i64 = 2;
+///
+/// v3 — message-level model provenance (Provenance 方案 §5/§8/§9):
+/// `session_messages` gains `provider` / `model` (source-confirmed, Assistant
+/// only — enforced by CHECK), and `session_member_stats` loses its
+/// `model` / `provider` / `effort` columns: member-level "current model" was
+/// a second, semantically unclear authority over the same question.
+pub const DATABASE_FORMAT_VERSION: i64 = 3;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -325,7 +331,16 @@ const CURRENT_SCHEMA: &str = r#"
       ts TEXT,
       role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
       content TEXT NOT NULL,
+      -- Message-level generation provenance (Provenance 方案 §6/§7):
+      -- source-confirmed only, meaningful for Assistant rows alone. NULL =
+      -- the source cannot prove it; never inferred from configuration.
+      provider TEXT,
+      model TEXT,
       raw_ref TEXT NOT NULL,
+      CHECK (
+        role = 'assistant'
+        OR (provider IS NULL AND model IS NULL)
+      ),
       UNIQUE(session_id, sequence),
       UNIQUE(member_id, source_identity_hash)
     );
@@ -352,9 +367,9 @@ const CURRENT_SCHEMA: &str = r#"
       cached_tokens INTEGER,
       reasoning_tokens INTEGER,
       cost REAL,
-      model TEXT,
-      provider TEXT,
-      effort TEXT,
+      -- model / provider / effort were removed in v3 (Provenance 方案 §9):
+      -- message provenance lives in session_messages, and a member-level
+      -- "current model" was a second unclear authority, never an execution fact.
       updated_at TEXT NOT NULL,
       extra TEXT NOT NULL DEFAULT '{}'
     );

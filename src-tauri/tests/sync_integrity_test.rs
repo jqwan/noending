@@ -244,6 +244,8 @@ fn member_cursor_and_context_frontier_are_separate() {
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     let parsed = |id: String, text: &str| ParsedSessionMessage {
+        provider: None,
+        model: None,
         source_message_id: Some(id),
         source_position: String::new(),
         ts: Some(now()),

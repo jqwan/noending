@@ -863,7 +863,9 @@ pub fn title_from_text(text: &str) -> Option<String> {
 }
 
 /// A conversation message out of one parsed line — the spelling every
-/// adapter's closure constructs.
+/// adapter's closure constructs. Provenance defaults to `None`/`None`:
+/// most messages (every user message, unknown-provenance assistant turns)
+/// need nothing more (Provenance 方案 §26).
 pub fn parsed_message(
     source_message_id: Option<String>,
     role: SessionMessageRole,
@@ -875,6 +877,8 @@ pub fn parsed_message(
         ts: None,
         role,
         content,
+        provider: None,
+        model: None,
     }
 }
 

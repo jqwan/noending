@@ -200,6 +200,8 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     content: m.content,
     ts: m.ts,
     who: m.role === "user" ? "用户" : agentDisplayLabel(session.agent),
+    provider: m.role === "assistant" ? m.provider : null,
+    model: m.role === "assistant" ? m.model : null,
   }));
 
   /**
@@ -575,9 +577,9 @@ function ExecutionStats({ stats }: { stats: SessionDetail["stats"] }) {
   if (stats.cached_tokens !== null) tokenBits.push(`缓存 ${fmtCount(stats.cached_tokens)}`);
   if (stats.reasoning_tokens !== null) tokenBits.push(`推理 ${fmtCount(stats.reasoning_tokens)}`);
 
-  const runtimeBits = [stats.model, stats.provider, stats.effort].filter(
-    (v): v is string => v !== null && v.trim() !== "",
-  );
+  // 不再显示"Session 的 model/provider/effort"（Provenance 方案 §9）：一个
+  // Logical Session 完全可能中途切模型，不存在天然的 Session model。消息级
+  // 的模型标签在会话消息上；将来要按模型统计时从 assistant 消息派生。
 
   return (
     <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
@@ -589,7 +591,6 @@ function ExecutionStats({ stats }: { stats: SessionDetail["stats"] }) {
       {stats.cost !== null && (
         <div className="small muted">成本 {stats.cost.toLocaleString("en-US", { maximumFractionDigits: 4 })}</div>
       )}
-      {runtimeBits.length > 0 && <div className="small muted">{runtimeBits.join(" · ")}</div>}
     </div>
   );
 }

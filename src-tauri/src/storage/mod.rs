@@ -901,6 +901,16 @@ impl Db {
                     "member {member_id} (relation={relation}) 不是 root，拒绝写入会话消息"
                 )));
             }
+            // 4. provenance guard (Provenance 方案 §7): user messages have no
+            // generation model. An adapter that hands one over is a bug, not
+            // data — reject the whole batch, the same way a child message is.
+            if messages.iter().any(|m| {
+                m.role == SessionMessageRole::User && (m.provider.is_some() || m.model.is_some())
+            }) {
+                return Err(other(
+                    "user 消息不允许携带 provider/model provenance，拒绝整批提交",
+                ));
+            }
 
             let old_cursor: Option<(String, i64, i64, i64, Option<f64>)> = tx
                 .query_row(
@@ -973,8 +983,8 @@ impl Db {
                 let mut ins = tx.prepare(
                     "INSERT INTO session_messages
                      (id, session_id, member_id, sequence, source_message_id, source_generation,
-                      source_position, source_identity_hash, ts, role, content, raw_ref)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                      source_position, source_identity_hash, ts, role, content, provider, model, raw_ref)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                      ON CONFLICT(member_id, source_identity_hash) DO NOTHING",
                 )?;
                 for m in messages {
@@ -990,6 +1000,7 @@ impl Db {
                     );
                     prev_hash = hash.clone();
                     let id = new_id();
+                    let raw_ref = format!("{}#{}", raw_path, m.source_position);
                     let n = ins.execute(params![
                         id,
                         session_id,
@@ -1002,7 +1013,9 @@ impl Db {
                         m.ts,
                         m.role.as_str(),
                         m.content,
-                        format!("{}#{}", raw_path, m.source_position),
+                        m.provider,
+                        m.model,
+                        raw_ref,
                     ])?;
                     if n > 0 {
                         stored.push(SessionMessage {
@@ -1013,13 +1026,22 @@ impl Db {
                             role: m.role,
                             content: m.content.clone(),
                             ts: m.ts.clone(),
+                            provider: m.provider.clone(),
+                            model: m.model.clone(),
                             source_message_id: m.source_message_id.clone(),
                             source_generation: source.generation,
                             source_position: m.source_position.clone(),
                             source_identity_hash: hash,
-                            raw_ref: format!("{}#{}", raw_path, m.source_position),
+                            raw_ref,
                         });
                         next_seq += 1;
+                    } else {
+                        // Dedup hit (Provenance 方案 §11): same message
+                        // identity. `NULL → confirmed` enriches in place;
+                        // a confirmed-vs-confirmed contradiction keeps the
+                        // stored value and logs — it never becomes a second
+                        // message and never silently overwrites.
+                        enrich_message_provenance_conn(tx, member_id, &hash, m)?;
                     }
                 }
             }
@@ -1197,7 +1219,7 @@ impl Db {
             .query_row(
                 "SELECT member_id, tool_call_count, tool_error_count, compaction_count,
                         side_activity_count, input_tokens, output_tokens, cached_tokens,
-                        reasoning_tokens, cost, model, provider, effort, updated_at, extra
+                        reasoning_tokens, cost, updated_at, extra
                  FROM session_member_stats WHERE member_id = ?1",
                 params![member_id],
                 row_member_stats,
@@ -1230,9 +1252,9 @@ impl Db {
                 if let Some(s) = conn
                     .query_row(
                         "SELECT tool_call_count, tool_error_count, compaction_count,
-                                side_activity_count, input_tokens, output_tokens,
-                                cached_tokens, reasoning_tokens, cost, model, provider, effort
-                         FROM session_member_stats WHERE member_id = ?1",
+                                    side_activity_count, input_tokens, output_tokens,
+                                    cached_tokens, reasoning_tokens, cost
+                             FROM session_member_stats WHERE member_id = ?1",
                         params![id],
                         |r| {
                             Ok((
@@ -1245,9 +1267,6 @@ impl Db {
                                 r.get::<_, Option<i64>>(6)?,
                                 r.get::<_, Option<i64>>(7)?,
                                 r.get::<_, Option<f64>>(8)?,
-                                r.get::<_, Option<String>>(9)?,
-                                r.get::<_, Option<String>>(10)?,
-                                r.get::<_, Option<String>>(11)?,
                             ))
                         },
                     )
@@ -1265,20 +1284,6 @@ impl Db {
                         (a, Some(b)) => Some(a.unwrap_or(0.0) + b),
                         (a, None) => a,
                     };
-                    // Root's own runtime facts win; members only fill gaps.
-                    let is_root = rel == "root";
-                    let take = |current: &mut Option<String>, next: Option<String>| {
-                        if next.is_some() && (current.is_none() || is_root) {
-                            if is_root {
-                                *current = next;
-                            } else {
-                                *current = current.take().or(next);
-                            }
-                        }
-                    };
-                    take(&mut agg.model, s.9);
-                    take(&mut agg.provider, s.10);
-                    take(&mut agg.effort, s.11);
                 }
             }
         }
@@ -2642,6 +2647,52 @@ pub fn upsert_member_cursor_conn(conn: &Connection, c: &SessionMemberCursor) -> 
     Ok(())
 }
 
+/// Provenance enrichment on a dedup hit (Provenance 方案 §11). The message has
+/// already been recognised as the same one (identity hash matches), so a
+/// newly read provenance that the stored row lacks fills the gap in place; a
+/// contradiction with an already-confirmed value keeps the stored one and
+/// logs a warning instead of overwriting — the conflict means adapter
+/// interpretation or source behavior drifted, and the first version
+/// deliberately adds no new diagnostic type.
+fn enrich_message_provenance_conn(
+    conn: &Connection,
+    member_id: &str,
+    hash: &str,
+    m: &ParsedSessionMessage,
+) -> Result<()> {
+    let Some((stored_provider, stored_model)): Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT provider, model FROM session_messages
+             WHERE member_id = ?1 AND source_identity_hash = ?2",
+            params![member_id, hash],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    for (field, stored, next) in [
+        ("provider", &stored_provider, &m.provider),
+        ("model", &stored_model, &m.model),
+    ] {
+        match (stored, next) {
+            (None, Some(v)) => {
+                conn.execute(
+                    &format!("UPDATE session_messages SET {field} = ?1 WHERE member_id = ?2 AND source_identity_hash = ?3"),
+                    params![v, member_id, hash],
+                )?;
+            }
+            (Some(a), Some(b)) if a != b => {
+                eprintln!(
+                    "[ingest] provenance conflict on message (member {member_id}): stored {field}={a:?}, source now says {b:?}; keeping stored value"
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Apply a stats update to one member's 1:1 snapshot row (§7.3). A DELTA adds
 /// its observed counts; a SNAPSHOT replaces the four observed counters. Never
 /// called with `None` from callers that had nothing to say — but treated as a
@@ -2779,9 +2830,9 @@ pub struct SessionAggregateStats {
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub cost: Option<f64>,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub effort: Option<String>,
+    // model / provider / effort removed (Provenance 方案 §9): aggregate
+    // "session model" was a guess; per-model counts derive from
+    // session_messages WHERE role = 'assistant' when the UI needs them.
 }
 
 pub fn insert_sync_run_conn(conn: &Connection, run: &SyncRun) -> Result<()> {
@@ -3244,6 +3295,8 @@ fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
             SessionMessageRole::User
         },
         content: r.get("content")?,
+        provider: r.get("provider")?,
+        model: r.get("model")?,
         raw_ref: r.get("raw_ref")?,
     })
 }
@@ -3260,11 +3313,8 @@ fn row_member_stats(r: &Row) -> rusqlite::Result<SessionMemberStats> {
         cached_tokens: r.get(7)?,
         reasoning_tokens: r.get(8)?,
         cost: r.get(9)?,
-        model: r.get(10)?,
-        provider: r.get(11)?,
-        effort: r.get(12)?,
-        updated_at: r.get(13)?,
-        extra: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
+        updated_at: r.get(10)?,
+        extra: serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default(),
     })
 }
 

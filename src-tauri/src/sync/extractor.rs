@@ -825,6 +825,8 @@ mod tests {
             ts: None,
             role: SessionMessageRole::User,
             content: "我们决定采用 SQLite，不再引入向量数据库，这个方案就这么定了。".into(),
+            provider: None,
+            model: None,
             raw_ref: "x#line:42".into(),
         };
         let inputs = collect_prompt_inputs(&db, "ws1").unwrap();
