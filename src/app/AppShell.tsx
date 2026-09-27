@@ -5,6 +5,7 @@ import { api } from "../api";
 import Sidebar from "../layout/Sidebar";
 import Router from "./Router";
 import CommandPalette from "../components/CommandPalette";
+import ErrorBoundary from "../components/ErrorBoundary";
 import ToastHost from "../components/Toast";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, type Route } from "./routes";
@@ -221,7 +222,11 @@ export default function AppShell() {
         }}
       />}
       <div className="app-content">
-        <Router route={route} navigate={navigate} goBack={goBack} actionSeq={actionSeq} />
+        {/* 兜底只包内容区：页面（含它自己的弹窗）渲染抛错时侧栏与标题栏还在，
+            用户能直接切走；resetKey 让路由一换就复位。 */}
+        <ErrorBoundary resetKey={JSON.stringify(withoutAction(route))}>
+          <Router route={route} navigate={navigate} goBack={goBack} actionSeq={actionSeq} />
+        </ErrorBoundary>
       </div>
       {paletteOpen && (
         <CommandPalette onClose={() => setPaletteOpen(false)} navigate={navigate} />

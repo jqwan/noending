@@ -385,7 +385,7 @@ function preview(over: Partial<LocalDeletePreview> = {}): LocalDeletePreview {
     root_source_status: "missing",
     message_count: 3,
     member_count: 1,
-    sync_run_count: 0,
+    session_context_count: 0,
     launch_intent_count: 0,
     context_revision_redaction_count: 0,
     ...over,
@@ -422,6 +422,13 @@ it("checks the root source before confirming and says the copy will be rebuilt",
 
   await screen.findByText(/Root 源会话仍然存在/);
   screen.getByText(/下一次同步会从它重新摄入/);
+  // 每一条「将删除」都渲染出数字：后端改名而前端漏改时，这里会当场炸掉，
+  // 而不是在生产里把整棵树渲染崩成黑屏。
+  screen.getByText("3 条会话消息");
+  screen.getByText("1 个执行成员");
+  screen.getByText("0 条 Context 摘要记录");
+  screen.getByText("0 条启动记录");
+  screen.getByText("上下文来源改写 0 条");
   screen.getByRole("button", { name: "删除" });
 });
 

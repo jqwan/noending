@@ -334,7 +334,8 @@ export interface LocalDeletePreview {
   root_source_status: SourceAvailability;
   message_count: number;
   member_count: number;
-  sync_run_count: number;
+  /** 本 Session 的 Context 摘要行及其历史版本行。 */
+  session_context_count: number;
   launch_intent_count: number;
   context_revision_redaction_count: number;
 }
