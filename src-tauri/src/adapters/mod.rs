@@ -22,9 +22,8 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::domain::{
-    Agent, MemberObservation, MemberStatsDelta, ParsedSessionMessage, SessionMember,
-    SessionMemberCursor, SessionMemberStatsSnapshot, SessionMessageRole, SourceAvailability,
-    StatsUpdate,
+    Agent, MemberObservation, ParsedSessionMessage, SessionMember, SessionMemberCursor,
+    SessionMessageRole, SourceAvailability, StatsDelta, StatsSnapshot, StatsUpdate,
 };
 use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
@@ -440,30 +439,42 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct StatsCapabilities {
     tool_calls: bool,
-    tool_errors: bool,
     compactions: bool,
     side_activity: bool,
+    /// Usage is a separate axis from the counts: an adapter may count calls
+    /// reliably and still have no usage record at all, and vice versa.
+    tokens: bool,
+    cost: bool,
 }
 
 impl StatsCapabilities {
-    pub const TOOL_AND_COMPACTION: Self = Self::new(true, false, true, false);
-    pub const COMPACTION: Self = Self::new(false, false, true, false);
-    pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, false, false, true);
-    pub const TOOL_COMPACTION_AND_SIDE_ACTIVITY: Self = Self::new(true, false, true, true);
-    pub const TOOL_CALLS_AND_ERRORS: Self = Self::new(true, true, false, false);
+    pub const TOOL_CALLS: Self = Self::new(true, false, false);
+    pub const TOOL_AND_COMPACTION: Self = Self::new(true, true, false);
+    pub const COMPACTION: Self = Self::new(false, true, false);
+    pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, false, true);
+    pub const TOOL_COMPACTION_AND_SIDE_ACTIVITY: Self = Self::new(true, true, true);
 
-    const fn new(
-        tool_calls: bool,
-        tool_errors: bool,
-        compactions: bool,
-        side_activity: bool,
-    ) -> Self {
+    const fn new(tool_calls: bool, compactions: bool, side_activity: bool) -> Self {
         Self {
             tool_calls,
-            tool_errors,
             compactions,
             side_activity,
+            tokens: false,
+            cost: false,
         }
+    }
+
+    /// The source carries per-turn usage records.
+    pub const fn with_tokens(self) -> Self {
+        Self {
+            tokens: true,
+            ..self
+        }
+    }
+
+    /// The source states a cost alongside the usage.
+    pub const fn with_cost(self) -> Self {
+        Self { cost: true, ..self }
     }
 }
 
@@ -475,37 +486,70 @@ pub fn stats_update_from(
     capabilities: StatsCapabilities,
 ) -> Option<StatsUpdate> {
     if source.start_byte_offset == 0 {
-        return Some(StatsUpdate::Snapshot(SessionMemberStatsSnapshot {
+        return Some(StatsUpdate::Snapshot(StatsSnapshot {
             tool_call_count: capabilities
                 .tool_calls
                 .then_some(observation.tool_calls as i64),
-            tool_error_count: capabilities
-                .tool_errors
-                .then_some(observation.tool_errors as i64),
+            user_message_count: Some(observation.user_messages as i64),
+            assistant_message_count: Some(observation.assistant_messages as i64),
             compaction_count: capabilities
                 .compactions
                 .then_some(observation.compactions as i64),
             side_activity_count: capabilities
                 .side_activity
                 .then_some(observation.side_activity as i64),
+            input_tokens: capabilities
+                .tokens
+                .then_some(observation.input_tokens as i64),
+            output_tokens: capabilities
+                .tokens
+                .then_some(observation.output_tokens as i64),
+            cached_tokens: capabilities
+                .tokens
+                .then_some(observation.cached_tokens as i64),
+            reasoning_tokens: capabilities
+                .tokens
+                .then_some(observation.reasoning_tokens as i64),
+            cost: capabilities
+                .cost
+                .then_some(observation.cost)
+                .filter(|c| c.is_finite()),
         }));
     }
     let empty = (!capabilities.tool_calls || observation.tool_calls == 0)
-        && (!capabilities.tool_errors || observation.tool_errors == 0)
+        && observation.user_messages == 0
+        && observation.assistant_messages == 0
         && (!capabilities.compactions || observation.compactions == 0)
-        && (!capabilities.side_activity || observation.side_activity == 0);
+        && (!capabilities.side_activity || observation.side_activity == 0)
+        && (!capabilities.tokens || observation.input_tokens == 0)
+        && (!capabilities.tokens || observation.output_tokens == 0)
+        && (!capabilities.tokens || observation.cached_tokens == 0)
+        && (!capabilities.tokens || observation.reasoning_tokens == 0)
+        && (!capabilities.cost || observation.cost == 0.0);
     if empty {
         None
     } else {
-        Some(StatsUpdate::Delta(MemberStatsDelta {
+        Some(StatsUpdate::Delta(StatsDelta {
             tool_call_count: (capabilities.tool_calls && observation.tool_calls > 0)
                 .then_some(observation.tool_calls as i64),
-            tool_error_count: (capabilities.tool_errors && observation.tool_errors > 0)
-                .then_some(observation.tool_errors as i64),
+            user_message_count: (observation.user_messages > 0)
+                .then_some(observation.user_messages as i64),
+            assistant_message_count: (observation.assistant_messages > 0)
+                .then_some(observation.assistant_messages as i64),
             compaction_count: (capabilities.compactions && observation.compactions > 0)
                 .then_some(observation.compactions as i64),
             side_activity_count: (capabilities.side_activity && observation.side_activity > 0)
                 .then_some(observation.side_activity as i64),
+            input_tokens: (capabilities.tokens && observation.input_tokens > 0)
+                .then_some(observation.input_tokens as i64),
+            output_tokens: (capabilities.tokens && observation.output_tokens > 0)
+                .then_some(observation.output_tokens as i64),
+            cached_tokens: (capabilities.tokens && observation.cached_tokens > 0)
+                .then_some(observation.cached_tokens as i64),
+            reasoning_tokens: (capabilities.tokens && observation.reasoning_tokens > 0)
+                .then_some(observation.reasoning_tokens as i64),
+            cost: (capabilities.cost && observation.cost > 0.0 && observation.cost.is_finite())
+                .then_some(observation.cost),
         }))
     }
 }
@@ -538,7 +582,34 @@ pub fn read_jsonl_delta(
         cursor,
         capabilities,
         &mut ProvenanceState::default(),
-        &mut |idx, v, _state| parse_line(idx, v),
+        &mut |idx, v, _prev, _state| parse_line(idx, v),
+    )
+}
+
+/// Prev-aware variant of [`read_jsonl_delta`]: the closure also sees the
+/// decoded value of the line immediately BEFORE the one it is handed — across
+/// an append boundary too, where that predecessor is the last line the previous
+/// read consumed. It exists for sources that write one logical record as
+/// several consecutive lines repeating a shared field: Claude Code writes an
+/// assistant message as one line per content block, every line carrying the
+/// SAME `message.id` and the SAME `usage`, so only a parse that can compare a
+/// line with its predecessor charges the usage exactly once.
+pub fn read_jsonl_delta_with_prev(
+    path: &Path,
+    cursor: &SessionMemberCursor,
+    capabilities: StatsCapabilities,
+    parse_line: &mut dyn FnMut(
+        usize,
+        &serde_json::Value,
+        Option<&serde_json::Value>,
+    ) -> Option<ParsedLine>,
+) -> Result<MemberReadDelta> {
+    read_jsonl_delta_stateful(
+        path,
+        cursor,
+        capabilities,
+        &mut ProvenanceState::default(),
+        &mut |idx, v, prev, _state| parse_line(idx, v, prev),
     )
 }
 
@@ -559,6 +630,7 @@ pub fn read_jsonl_delta_stateful(
     parse_line: &mut dyn FnMut(
         usize,
         &serde_json::Value,
+        Option<&serde_json::Value>,
         &mut ProvenanceState,
     ) -> Option<ParsedLine>,
 ) -> Result<MemberReadDelta> {
@@ -630,17 +702,26 @@ pub fn read_jsonl_delta_stateful(
     let mut offset = 0usize;
     let mut complete_snapshot = true;
     let mut complete_end = text.len();
+    // The predecessor line, for prev-aware parsers: the last value parsed in
+    // THIS read, or — for an append — the last line the previous read consumed,
+    // which the seek skipped and must be decoded here (once) to keep a record
+    // that repeats across the boundary honest.
+    let mut prev: Option<serde_json::Value> = None;
+    let mut prev_raw: Option<&str> = None;
     for (idx, frame) in text.split_inclusive('\n').enumerate() {
         let line_start = offset;
         offset += frame.len();
-        if line_start < start_offset {
-            continue;
-        }
         let line = frame
             .strip_suffix('\n')
             .unwrap_or(frame)
             .strip_suffix('\r')
             .unwrap_or_else(|| frame.strip_suffix('\n').unwrap_or(frame));
+        if line_start < start_offset {
+            if !line.trim().is_empty() {
+                prev_raw = Some(line);
+            }
+            continue;
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -662,7 +743,15 @@ pub fn read_jsonl_delta_stateful(
             Some(serde_json::Value::Number(n)) => n.as_i64().and_then(ms_epoch_to_rfc3339),
             _ => None,
         };
-        if let Some(p) = parse_line(idx, &v, state) {
+        let predecessor: Option<serde_json::Value> = prev.take().or_else(|| {
+            prev_raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        });
+        let parsed = parse_line(idx, &v, predecessor.as_ref(), state);
+        // Advance the predecessor for the next line BEFORE any message
+        // handling can skip it: the dedup a prev-aware parser does is about
+        // consecutive SOURCE lines, not about which ones became messages.
+        prev = Some(v);
+        if let Some(p) = parsed {
             observation.add(&p.observation);
             if let Some(mut m) = p.message {
                 if m.content.trim().is_empty() {
@@ -867,6 +956,14 @@ pub trait AgentAdapter: Send + Sync {
         _runtime_dir: &Path,
     ) -> Result<AgentCommand> {
         Err(other("该 Agent 不支持 Context 提取"))
+    }
+
+    /// The unit the Agent states its `cost` in, or `None` when it states no
+    /// cost at all. The number is always the source's OWN — USD for Pi, Qoder's
+    /// credits — and the UI must never show it under a unit the source never
+    /// used, so every cost-reporting adapter has to answer here.
+    fn cost_unit(&self) -> Option<&'static str> {
+        None
     }
 }
 
@@ -1367,5 +1464,29 @@ mod title_tests {
         ));
         assert!(is_injected_preamble("  <environment_context>"));
         assert!(!is_injected_preamble("看一下这个"));
+    }
+}
+
+#[cfg(test)]
+mod cost_unit_tests {
+    use super::{adapter_for, Agent};
+
+    /// The `cost` axis carries the Agent's own number, and the UI labels it
+    /// with this unit — so the two cost-reporting adapters must declare one, and
+    /// everyone else must stay `None` rather than inherit a currency.
+    #[test]
+    fn only_the_cost_reporting_agents_declare_a_unit() {
+        assert_eq!(adapter_for(Agent::Pi).cost_unit(), Some("USD"));
+        assert_eq!(adapter_for(Agent::Qoder).cost_unit(), Some("credits"));
+        for agent in [
+            Agent::Codex,
+            Agent::ClaudeCode,
+            Agent::WorkBuddy,
+            Agent::Dsh,
+            Agent::ZCode,
+            Agent::Antigravity,
+        ] {
+            assert_eq!(adapter_for(agent).cost_unit(), None, "{agent:?}");
+        }
     }
 }

@@ -329,10 +329,10 @@ fn appended_source_ingests_only_the_delta() {
     );
 }
 
-/// A trashed Session takes nothing: ingestion refuses it, and the cursor is
-/// left untouched so a Restore resumes from exactly where things stopped.
+/// Trash is a visibility filter, not an ingestion gate: a trashed Session keeps
+/// taking its source's facts.
 #[test]
-fn trashed_session_is_never_ingested() {
+fn trashed_session_still_ingests_its_source() {
     let dir = unique_dir("trash");
     let db = open_db("trash");
     let file = write_transcript(&dir, 2);
@@ -347,14 +347,13 @@ fn trashed_session_is_never_ingested() {
 
     assert_eq!(
         ingestion::ingest_session(&db, &s).unwrap(),
-        0,
-        "a trashed session is not ingested"
+        1,
+        "a trashed session keeps ingesting its source"
     );
-    assert_eq!(db.message_count(&s.id).unwrap(), 2, "facts stay frozen");
-    assert_eq!(
-        db.get_member_cursor(&member_id).unwrap().byte_offset,
-        cursor_before.byte_offset,
-        "the member cursor is not advanced for a trashed session"
+    assert_eq!(db.message_count(&s.id).unwrap(), 3);
+    assert!(
+        db.get_member_cursor(&member_id).unwrap().byte_offset > cursor_before.byte_offset,
+        "the member cursor advances exactly as it would for an active session"
     );
     assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 }

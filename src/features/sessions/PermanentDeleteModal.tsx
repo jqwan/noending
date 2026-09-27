@@ -3,28 +3,48 @@ import { api } from "../../api";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import { agentDisplayLabel, sessionDisplayTitle } from "./SessionTable";
-import type { LocalDeletePreview } from "../../types";
+import type { LocalDeletePreview, SourceAvailability } from "../../types";
 
 /**
- * Session 永久删除：无状态的本地清除。打开即读删除预览（新鲜结论 + 计数），确认后执行
- * `permanently_delete_session`。没有 job、没有取消、没有重试状态机：后端只在
- * （trashed + fresh root missing）时允许执行，且只删 NoEnding 本地数据——Agent 源会话不被触碰。
+ * 回收站里的「删除」确认弹窗：打开即读预览（新鲜结论 + 计数），确认后执行
+ * `permanently_delete_session`。动作名统一叫「删除」，源状态只决定确认前的那句结果说明——
+ * 源还在就说明会重新入库，源没了就说明无法找回。
  */
 
 /** 大数加千位分隔。 */
 const fmtCount = (n: number) => n.toLocaleString("en-US");
 
-/** can_permanently_delete = false 时的原因（只由 root_source_status 决定）。 */
-function unavailableWhy(status: LocalDeletePreview["root_source_status"]): string {
-  return status === "present"
-    ? "Root 源会话仍然存在。"
-    : "无法确认 Root 源会话的状态。";
+/** 源状态决定的说明：弹窗里的警示 + 结果段，以及删除后 toast 的收尾。 */
+function outcome(status: SourceAvailability): { warning: string | null; detail: string; toast: string } {
+  switch (status) {
+    case "present":
+      return {
+        warning: "Root 源会话仍然存在：删掉的是 NoEnding 这份副本。",
+        detail:
+          "源文件不会被删除。下一次同步会从它重新摄入——新的会话 id、没有所属任务、没有摘要，"
+          + "启动记录也不会恢复。想让它彻底消失，需要删除源会话文件。",
+        toast: "；源会话仍在，下次同步会作为新会话重新入库",
+      };
+    case "missing":
+      return {
+        warning: null,
+        detail: "Root 源会话已不存在——本地数据删除后无法找回。",
+        toast: "；源会话已不存在，无法找回",
+      };
+    default:
+      return {
+        warning: "无法确认 Root 源会话的状态。",
+        detail:
+          "源文件不会被删除；如果它其实还在，下一次同步会把这个会话作为新会话重新入库。",
+        toast: "",
+      };
+  }
 }
 
 export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: {
   sessionId: string;
   onClose: () => void;
-  /** 永久删除成功后调用（此时弹窗不再走 onClose）：父级负责收尾与刷新。 */
+  /** 删除成功后调用（此时弹窗不再走 onClose）：父级负责收尾与刷新。 */
   onDeleted?: () => void;
 }) {
   const [loading, setLoading] = useState(true);
@@ -47,23 +67,26 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
   }, [sessionId]);
   useEffect(() => { load(); }, [load]);
 
+  /** 预览没到之前不渲染，所以这里的兜底分支只服务类型。 */
+  const note = outcome(preview?.root_source_status ?? "unavailable");
+
   const execute = async () => {
-    if (busy || !preview?.can_permanently_delete) return;
+    if (busy || !preview) return;
     setBusy(true);
     setErrorText(null);
     try {
       const r = await api.permanentlyDeleteSession(sessionId);
-      showToast(
+      const redaction =
         r.redacted_revisions > 0
-          ? `已永久删除本地数据，并脱敏了 ${fmtCount(r.redacted_revisions)} 条 Context 来源`
-          : "已永久删除本地数据",
-      );
+          ? `，并脱敏了 ${fmtCount(r.redacted_revisions)} 条 Context 来源`
+          : "";
+      showToast(`已删除本地数据${redaction}${note.toast}`);
       onDeleted?.();
       onClose();
     } catch (e) {
       console.error(e);
       setBusy(false);
-      setErrorText(`永久删除失败：${String(e)}`);
+      setErrorText(`删除失败：${String(e)}`);
     }
   };
 
@@ -73,7 +96,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
   };
 
   return (
-    <Modal title="永久删除" onClose={requestClose}>
+    <Modal title="删除" onClose={requestClose}>
       {loading && (
         <div className="muted" style={{ padding: "12px 0" }}>
           正在读取删除预览…
@@ -95,7 +118,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
       {!loading && errorText === null && preview && (
         <>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            将永久删除 <b>{sessionDisplayTitle(preview.session_title)}</b>
+            将删除 <b>{sessionDisplayTitle(preview.session_title)}</b>
             <span className="muted">（{agentDisplayLabel(preview.agent)}）</span> 在 NoEnding 中的本地数据：
           </p>
 
@@ -112,33 +135,23 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             <li>上下文来源改写 {fmtCount(preview.context_revision_redaction_count)} 条</li>
           </ul>
 
-          {preview.can_permanently_delete ? (
-            <p className="muted small" style={{ margin: "10px 0 0", maxWidth: "72ch" }}>
-              Root 源会话已不存在——本地数据删除后无法找回。
-            </p>
-          ) : (
-            <div className="small" style={{ margin: "10px 0 0", maxWidth: "72ch" }}>
-              <div className="session-source-warning">
-                永久删除不可用：{unavailableWhy(preview.root_source_status)}
-              </div>
-              <p className="muted small" style={{ margin: "4px 0 0" }}>
-                会话仍保留在回收站，可以随时恢复。
-              </p>
-            </div>
-          )}
+          <div style={{ margin: "10px 0 0", maxWidth: "72ch" }}>
+            {note.warning && <div className="session-source-warning">{note.warning}</div>}
+            <p className="muted small" style={{ margin: "4px 0 0" }}>{note.detail}</p>
+          </div>
 
           <p className="muted small" style={{ margin: "10px 0 0", maxWidth: "72ch" }}>
-            任务及其 Context 内容不受影响；受影响 Context 的「来源」将显示为「来源会话已永久删除」。
+            任务及其 Context 内容不受影响；受影响 Context 的「来源」将显示为「来源会话已删除」。
           </p>
 
           <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
             <button className="btn" disabled={busy} onClick={onClose}>取消</button>
             <button
               className="btn danger"
-              disabled={busy || !preview.can_permanently_delete}
+              disabled={busy}
               onClick={execute}
             >
-              {busy ? "删除中…" : "永久删除"}
+              {busy ? "删除中…" : "删除"}
             </button>
           </div>
         </>

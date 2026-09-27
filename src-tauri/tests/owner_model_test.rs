@@ -1129,10 +1129,10 @@ fn the_match_claim_is_a_cas_that_only_fires_once() {
     );
 }
 
-/// Matching refuses a Session that is not the intent's to give an Owner to:
-/// another Agent's Session, or one that has been trashed.
+/// Matching refuses another Agent's Session, but accepts a trashed one: the
+/// Owner follows the source.
 #[test]
-fn matching_refuses_a_foreign_agent_or_a_trashed_session() {
+fn matching_refuses_a_foreign_agent_and_accepts_a_trashed_session() {
     use noending::domain::{launch_status, LaunchIntent};
     use noending::launcher::{apply_match, LaunchWorkspace};
 
@@ -1168,16 +1168,16 @@ fn matching_refuses_a_foreign_agent_or_a_trashed_session() {
     );
     assert!(owner_of(&db, &claude.id).is_none());
 
-    // A trashed Session.
+    // A trashed Session claims its Owner as any other Session would.
     let trashed = mk_intent();
     let s = session(&db, None);
     noending::lifecycle::trash_session(&db, &s.id).unwrap();
-    assert!(apply_match(&db, &trashed.id, &s, &LaunchWorkspace::default()).is_err());
+    apply_match(&db, &trashed.id, &s, &LaunchWorkspace::default()).unwrap();
     assert_eq!(
         db.get_launch_intent(&trashed.id).unwrap().unwrap().status,
-        launch_status::PENDING
+        launch_status::MATCHED
     );
-    assert!(owner_of(&db, &s.id).is_none());
+    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
 }
 
 // the discovery retry window for an unclaimed intent
@@ -1260,16 +1260,6 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
         "the waiting intent is untouched while nothing is claimable"
     );
 
-    // A trashed Session is never a candidate.
-    let trashed = session(&db, None);
-    noending::lifecycle::trash_session(&db, &trashed.id).unwrap();
-    finalize_newly_discovered_root(&db, &trashed, true, &LaunchWorkspace::default()).unwrap();
-    assert!(owner_of(&db, &trashed.id).is_none());
-    assert_eq!(
-        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
-        launch_status::PENDING
-    );
-
     // With no waiting intent, an ownerless Session is left as it is.
     let stray = session(&db, None);
     db.tx(|tx| {
@@ -1283,6 +1273,32 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     .unwrap();
     finalize_newly_discovered_root(&db, &stray, false, &LaunchWorkspace::default()).unwrap();
     assert!(owner_of(&db, &stray.id).is_none());
+
+    // A trashed Session is a candidate like any other: the recycle bin filters
+    // lists, it does not freeze ownership.
+    let second = LaunchIntent {
+        id: new_id(),
+        launch_type: "new".into(),
+        agent: Agent::Codex,
+        owner_workstream_id: Some(b.id.clone()),
+        cwd: None,
+        process_id: None,
+        launched_at: now(),
+        matched_session_id: None,
+        status: launch_status::PENDING.into(),
+        note: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_launch_intent(&second).unwrap();
+    let trashed = session(&db, None);
+    noending::lifecycle::trash_session(&db, &trashed.id).unwrap();
+    finalize_newly_discovered_root(&db, &trashed, true, &LaunchWorkspace::default()).unwrap();
+    assert_eq!(owner_of(&db, &trashed.id).as_deref(), Some(b.id.as_str()));
+    assert_eq!(
+        db.get_launch_intent(&second.id).unwrap().unwrap().status,
+        launch_status::MATCHED
+    );
 }
 
 // search projections follow the facts they copy

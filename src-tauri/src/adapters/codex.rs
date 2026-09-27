@@ -4,8 +4,12 @@
 //!
 //! Member mapping: normal root rollout → `Root`; `thread_source=subagent` →
 //! `Child` (a task thread Codex spawned); `thread_source=guardian_review` →
-//! `Side` (a review lane beside the main conversation); forked page →
-//! `ForkRoot` (its own Logical Session, the fork base being provenance only).
+//! `Side` (a review lane beside the main conversation);
+//! `thread_source=memory_consolidation` → `Child` (Codex's background memory
+//! pass, never a conversation); forked page → `ForkRoot` (its own Logical
+//! Session, the fork base being provenance only). `agent_created_thread` and
+//! `chatgpt_handoff` are NOT internal — verified as ordinary interactive
+//! threads — so they stay `Root`.
 //!
 //! Conversation is ONLY the root member's `response_item.message` turns with
 //! role user / assistant. Everything else — `agent_message` envelopes, tool
@@ -69,6 +73,12 @@ fn thread_id_from_filename(path: &Path) -> Option<String> {
 /// A forked page's name carries `_<own uuid>` after the id it forked from;
 /// this is Codex's own mark that the file continues another rollout rather than
 /// being it.
+///
+/// NOT to be confused with `session_meta.forked_from_id`, which means the
+/// thread inherited another thread's HISTORY, which every forked-history
+/// subagent has (over the local corpus all 13 occurrences equal the thread's own
+/// `parent_thread_id`). Treating it as this marker would promote those subagents
+/// from `Child` to `ForkRoot` — one phantom Logical Session each.
 fn is_forked_page_name(path: &Path) -> bool {
     path.file_stem()
         .and_then(|s| s.to_str())
@@ -77,7 +87,26 @@ fn is_forked_page_name(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Threads Codex runs for itself, whose "user" turns are prompts Codex wrote
+/// rather than anything a person typed: a spawned subagent, its review thread,
+/// and the background pass that updates its memories. They never name a session
+/// and are never conversation.
+fn is_internal_source(thread_source: Option<&str>) -> bool {
+    matches!(
+        thread_source,
+        Some("subagent") | Some("guardian_review") | Some("memory_consolidation")
+    )
+}
+
 /// Which side of the execution graph one rollout sits on.
+///
+/// Verified over the local corpus (75 rollouts): `subagent` (37) and
+/// `guardian_review` (4) each carry a `parent_thread_id` and are internal;
+/// `user` (32) is a normal root. `agent_created_thread` and `chatgpt_handoff`
+/// are NOT internal — the sampled ones are ordinary interactive threads (one
+/// waiting for the user's task, one a conversation handed over from ChatGPT) —
+/// so they stay Root. `memory_consolidation` is Codex updating its memories in
+/// the background, never a conversation, so it is internal too.
 fn member_kind_of(thread_source: Option<&str>, forked: bool) -> DiscoveredMemberKind {
     if forked {
         // A forked page is independently continuable — the fork wins over any
@@ -85,8 +114,8 @@ fn member_kind_of(thread_source: Option<&str>, forked: bool) -> DiscoveredMember
         return DiscoveredMemberKind::ForkRoot;
     }
     match thread_source {
-        Some("subagent") => DiscoveredMemberKind::Child,
         Some("guardian_review") => DiscoveredMemberKind::Side,
+        Some("subagent") | Some("memory_consolidation") => DiscoveredMemberKind::Child,
         _ => DiscoveredMemberKind::Root,
     }
 }
@@ -153,10 +182,7 @@ impl CodexAdapter {
                     // `<…>` environment_context wrappers and `#`-prefixed
                     // injections (AGENTS.md, attached-file headers) are not
                     // user text.
-                    let internal = matches!(
-                        thread_source.as_deref(),
-                        Some("subagent") | Some("guardian_review")
-                    );
+                    let internal = is_internal_source(thread_source.as_deref());
                     if role == "user"
                         && first_user_text.is_none()
                         && !internal
@@ -178,10 +204,7 @@ impl CodexAdapter {
             // and there is a user text to name the session after; a thread Codex
             // wrote itself has no user text, so it scans on to its own first
             // reply (or EOF, for a meta-only session).
-            let internal = matches!(
-                thread_source.as_deref(),
-                Some("subagent") | Some("guardian_review")
-            );
+            let internal = is_internal_source(thread_source.as_deref());
             if meta_seen && (first_user_text.is_some() || (internal && first_agent_text.is_some()))
             {
                 break;
@@ -327,6 +350,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         cursor: &SessionMemberCursor,
     ) -> Result<MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
+        let is_root = member.relation.as_str() == "root";
         // The shared reader classifies the scan (append vs full re-scan) and
         // derives the matching stats update. The provenance frontier is seeded
         // from the cursor for appends and reset by the reader on a re-scan.
@@ -337,9 +361,9 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         read_jsonl_delta_stateful(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY,
+            crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY.with_tokens(),
             &mut state,
-            &mut |idx, v, state| parse_line(idx, v, member.relation.as_str() == "root", state),
+            &mut |idx, v, _prev, state| parse_line(idx, v, is_root, state),
         )
     }
 
@@ -486,34 +510,37 @@ fn parse_line(
                     if text.trim().is_empty() {
                         return None;
                     }
-                    match (role, is_root) {
-                        // Conversation is the ROOT member's user/assistant
-                        // prose only. Injected context (`<…>` blocks,
-                        // `#`-pasted headers) is never conversation.
-                        ("user", true) if !crate::adapters::is_injected_preamble(&text) => {
-                            Some(ParsedLine::message_only(crate::adapters::parsed_message(
-                                source_message_id,
-                                SessionMessageRole::User,
-                                text,
-                            )))
+                    // Conversation is the ROOT member's user/assistant prose
+                    // only; every member's own turns are counted. Injected
+                    // context (`<…>` blocks, `#`-pasted headers) is neither.
+                    let role = match role {
+                        "user" if !crate::adapters::is_injected_preamble(&text) => {
+                            SessionMessageRole::User
                         }
-                        ("assistant", true) => {
-                            // The turn's provenance state is the only model
-                            // evidence the source offers; without a state
-                            // event the message stays NULL.
-                            Some(ParsedLine::message_only(
-                                crate::adapters::parsed_message(
-                                    source_message_id,
-                                    SessionMessageRole::Assistant,
-                                    text,
-                                )
-                                .with_provenance(state.provider.clone(), state.model.clone()),
-                            ))
-                        }
-                        // developer/system prompts, and every message role on a
-                        // child/side member: not conversation, nothing to count.
-                        _ => None,
+                        "assistant" => SessionMessageRole::Assistant,
+                        // developer/system prompts: not conversation, not counted.
+                        _ => return None,
+                    };
+                    let mut observation = MemberObservation::default();
+                    match role {
+                        SessionMessageRole::User => observation.user_messages = 1,
+                        SessionMessageRole::Assistant => observation.assistant_messages = 1,
                     }
+                    if !is_root {
+                        return Some(ParsedLine::observation_only(observation));
+                    }
+                    let mut message =
+                        crate::adapters::parsed_message(source_message_id, role, text);
+                    if role == SessionMessageRole::Assistant {
+                        // The turn's provenance state is the only model evidence
+                        // the source offers; without a state event it stays NULL.
+                        message =
+                            message.with_provenance(state.provider.clone(), state.model.clone());
+                    }
+                    Some(ParsedLine {
+                        message: Some(message),
+                        observation,
+                    })
                 }
                 // A message that crossed between two threads: execution
                 // observation — topology lives in discovery, the text
@@ -544,13 +571,32 @@ fn parse_line(
         "event_msg" => {
             let ptype = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
             if ptype == "compact" || ptype.contains("compact") {
-                Some(ParsedLine::observation_only(MemberObservation {
+                return Some(ParsedLine::observation_only(MemberObservation {
                     compactions: 1,
                     ..Default::default()
-                }))
-            } else {
-                None
+                }));
             }
+            if ptype == "token_count" {
+                // `info.total_token_usage` is cumulative for the thread, so it
+                // is NOT the additive number here; `last_token_usage` is this
+                // turn's own usage (both are always written together).
+                let last = payload
+                    .get("info")
+                    .and_then(|i| i.get("last_token_usage"))
+                    .unwrap_or(&Value::Null);
+                if last.is_null() {
+                    return None;
+                }
+                let n = |k: &str| last.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                return Some(ParsedLine::observation_only(MemberObservation {
+                    input_tokens: n("input_tokens"),
+                    output_tokens: n("output_tokens"),
+                    cached_tokens: n("cached_input_tokens"),
+                    reasoning_tokens: n("reasoning_output_tokens"),
+                    ..Default::default()
+                }));
+            }
+            None
         }
         _ => None, // session_meta and unrecognized payloads carry nothing
     }
@@ -767,6 +813,30 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `session_meta.forked_from_id` is NOT the forked-PAGE marker: it means the
+    /// thread inherited another thread's history, which is what every
+    /// forked-history subagent does. Read as a page marker it would turn each of
+    /// them into its own Logical Session.
+    #[test]
+    fn an_inherited_history_does_not_make_a_subagent_a_fork_root() {
+        const PARENT: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
+        let dir = temp_dir("forked-history-subagent");
+        let path = write_rollout(
+            &dir,
+            &format!("rollout-2026-09-24T10-00-00-{SESSION_ID}.jsonl"),
+            &[meta_line_with(serde_json::json!({
+                "session_id": PARENT, "id": SESSION_ID, "cwd": "/tmp/proj",
+                "thread_source": "subagent", "parent_thread_id": PARENT,
+                "forked_from_id": PARENT, "history_mode": "paginated"
+            }))],
+        );
+        let m = CodexAdapter::parse_member(&path).unwrap().unwrap();
+        assert_eq!(m.kind, DiscoveredMemberKind::Child);
+        assert_eq!(m.source_member_id, SESSION_ID, "the meta still owns it");
+        assert_eq!(m.parent_source_member_id.as_deref(), Some(PARENT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `thread_source=subagent` → Child, `guardian_review` → Side;
     /// both carry the parent as the topology hint and neither carries any
     /// title source.
@@ -803,6 +873,39 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Codex's background memory pass is internal too, and its machine-written
+    /// "user" turns must not name anything.
+    #[test]
+    fn a_memory_consolidation_thread_is_internal() {
+        let dir = temp_dir("memory-consolidation");
+        const MID: &str = "01b0bee7-6afb-7622-afcd-e26c61dd545e";
+        let path = write_rollout(
+            &dir,
+            &format!("rollout-2026-09-21T09-01-47-{MID}.jsonl"),
+            &[
+                meta_line_with(serde_json::json!({
+                    "session_id": MID, "id": MID, "cwd": "/tmp/proj",
+                    "thread_source": "memory_consolidation"
+                })),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "Summarize what to remember."}]
+                    }
+                })
+                .to_string(),
+            ],
+        );
+        let m = CodexAdapter::parse_member(&path).unwrap().unwrap();
+        assert_eq!(m.kind, DiscoveredMemberKind::Child);
+        assert_eq!(
+            m.first_user_text, None,
+            "its user turns are prompts Codex wrote"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A just-started session has a meta line but no user turn yet: parse
     /// still succeeds (scanning to EOF) and simply yields no user text.
     #[test]
@@ -834,6 +937,9 @@ mod rollout_tests {
                 reasoning_line(3),
                 tool_line(4),
                 message_line(5, "assistant", "问题在这里，已经修改完成。"),
+                // `total_token_usage` is cumulative for the thread and must NOT
+                // be the number counted; `last_token_usage` is this turn's own.
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":99999,"output_tokens":88888},"last_token_usage":{"input_tokens":1234,"cached_input_tokens":1000,"output_tokens":56,"reasoning_output_tokens":7}}}}"#.to_string(),
                 compact_line(6),
                 message_line(7, "developer", "<permissions>"),
             ],
@@ -861,7 +967,16 @@ mod rollout_tests {
                 assert_eq!(s.tool_call_count, Some(1));
                 assert_eq!(s.compaction_count, Some(1));
                 assert_eq!(s.side_activity_count, Some(0));
-                assert_eq!(s.tool_error_count, None);
+                assert_eq!(s.user_message_count, Some(1));
+                assert_eq!(s.assistant_message_count, Some(2));
+                assert_eq!(
+                    s.input_tokens,
+                    Some(1234),
+                    "last_token_usage, not the total"
+                );
+                assert_eq!(s.output_tokens, Some(56));
+                assert_eq!(s.cached_tokens, Some(1000), "cached_input_tokens");
+                assert_eq!(s.reasoning_tokens, Some(7));
             }
             other => panic!("expected a full-scan snapshot, got {other:?}"),
         }

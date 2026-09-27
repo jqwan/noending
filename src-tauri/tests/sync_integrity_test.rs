@@ -599,7 +599,7 @@ fn mutation_outside_the_owner_is_skipped_not_written() {
 }
 
 /// A trashed Session refuses an explicit summary update outright (the guard
-/// runs before any model call), and its facts stay frozen.
+/// runs before any model call), and nothing is written.
 #[test]
 fn trashed_session_refuses_explicit_update() {
     let db = open_db("trash-reject");

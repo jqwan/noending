@@ -49,7 +49,7 @@ export function contextUpdateErrorDetails(err: unknown): ContextUpdateErrorDetai
     return { code: "stale_snapshot", message: "内容已变化，请重新更新", operationId: null };
   }
   if (text.includes("AiUnavailable")) {
-    return { code: "ai_unavailable", message: "未配置 Assistant Agent（Settings → Agents）", operationId: null };
+    return { code: "ai_unavailable", message: "未配置 Agent（Settings → Agents）", operationId: null };
   }
   return { code: "update_failed", message: "更新失败，请重试", operationId: null };
 }

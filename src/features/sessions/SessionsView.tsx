@@ -53,7 +53,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [trashBusy, setTrashBusy] = useState(false);
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
   const [bulkPurgeBusy, setBulkPurgeBusy] = useState(false);
-  /** 永久删除 Modal 的目标 Session（回收站行 / 恢复冲突提示都可能打开它）。 */
+  /** 删除 Modal 的目标 Session（回收站行 / 恢复冲突提示都可能打开它）。 */
   const [purgeSessionId, setPurgeSessionId] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -189,36 +189,29 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     }
   };
 
-  /** 全部永久删除：无状态的本地清除。逐个读预览，只有 `can_permanently_delete`
-   *  （trashed + fresh root missing）的会话才执行；Root 源仍存在或无法确认的原地保留。 */
+  /** 全部删除：Trash 是唯一门槛，逐个执行；源仍存在的会话下次同步会重新入库。 */
   const bulkPurge = async () => {
     if (!trashMode || !sessions || sessions.length === 0 || bulkPurgeBusy) return;
     const targets = [...sessions];
     let purged = 0;
-    let skipped = 0;
     let failed = 0;
     setBulkPurgeBusy(true);
     for (const session of targets) {
       try {
-        const preview = await api.getSessionLocalDeletePreview(session.id);
-        if (!preview.can_permanently_delete) {
-          skipped += 1;
-          continue;
-        }
         await api.permanentlyDeleteSession(session.id);
         purged += 1;
       } catch (e) {
         failed += 1;
-        console.error(`永久删除会话失败：${session.id}`, e);
+        console.error(`删除会话失败：${session.id}`, e);
       }
     }
     setBulkPurgeBusy(false);
     setBulkPurgeOpen(false);
     refresh();
     showToast(
-      failed === 0 && skipped === 0
-        ? `已永久删除 ${purged} 个会话`
-        : `已清理 ${purged} 个会话${skipped > 0 ? `，${skipped} 个因 Root 源仍存在或无法确认而保留` : ""}${failed > 0 ? `，${failed} 个处理失败` : ""}`,
+      failed === 0
+        ? `已删除 ${purged} 个会话的本地数据；源仍存在的会在后续同步重新入库`
+        : `已删除 ${purged} 个会话，${failed} 个失败`,
     );
   };
 
@@ -395,8 +388,9 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       {trashMode && (
         <>
           <div className="muted small" style={{ margin: "4px 0 14px", maxWidth: "72ch" }}>
-            回收站里的会话不出现在会话列表、搜索与继续入口中。Agent 原始会话始终保留；
-            「永久删除」只清理 NoEnding 的本地数据，不会删除 Agent 数据。
+            回收站里的会话不出现在会话列表、搜索与继续入口中，上下文提取也已冻结。
+            Agent 原始会话始终保留；「删除」只清理 NoEnding 的本地数据，所以源仍存在的会话
+            会在后续同步中作为新会话重新入库。
           </div>
 
           {sessions === null && !loadFailed && <div className="muted">加载中…</div>}
@@ -404,7 +398,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
           {sessions !== null && sessions.length === 0 && !loadFailed && (
             <EmptyState
               title="回收站是空的。"
-              hint="「移入回收站」的会话会留在这里：可以随时恢复，也可以在这里永久删除。"
+              hint="「移入回收站」的会话会留在这里：可以随时恢复，也可以在这里删除本地数据。"
             />
           )}
           {sessions !== null && sessions.length > 0 && (
@@ -412,7 +406,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
               <div className="session-trash-actions">
                 <span className="muted small">共 {sessions.length} 个会话</span>
                 <button className="btn small danger" onClick={() => setBulkPurgeOpen(true)}>
-                  全部永久删除
+                  全部删除
                 </button>
               </div>
               <TrashSessionTable
@@ -448,23 +442,23 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
 
       {trashMode && bulkPurgeOpen && sessions && sessions.length > 0 && (
         <Modal
-          title="全部永久删除"
+          title="全部删除"
           onClose={() => { if (!bulkPurgeBusy) setBulkPurgeOpen(false); }}
         >
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            确定要永久删除回收站中的 <b>{sessions.length} 个会话</b> 吗？
+            确定要删除回收站中的 <b>{sessions.length} 个会话</b> 的本地数据吗？
           </p>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
             只删除 NoEnding 本地数据，不会删除 Agent 数据。
           </div>
           <p className="small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
-            每个会话会先读取删除预览：Root 源会话已不存在的才执行；
-            Root 源仍存在或无法确认的会话原地保留在回收站。
+            每个会话都会删除 NoEnding 的本地副本；源文件不会被删除，所以源仍存在的会话
+            会在后续同步中作为<b>新会话</b>重新入库（新 id、无所属任务、无摘要）。
           </p>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>
             <button className="btn danger" onClick={bulkPurge} disabled={bulkPurgeBusy}>
-              {bulkPurgeBusy ? "删除中…" : "全部永久删除"}
+              {bulkPurgeBusy ? "删除中…" : "全部删除"}
             </button>
           </div>
         </Modal>
@@ -488,7 +482,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   );
 }
 
-/** 回收站表格：行是 Agent、标题、工作目录、移入时间、恢复 / 永久删除五段。
+/** 回收站表格：行是 Agent、标题、工作目录、移入时间、恢复 / 删除五段。
  *  不做筛选与搜索（回收站规模小），点行仍可进详情页。 */
 function TrashSessionTable({ sessions, onOpen, onRestore, onPurge }: {
   sessions: Session[];
@@ -537,7 +531,7 @@ function TrashSessionTable({ sessions, onOpen, onRestore, onPurge }: {
               <td onClick={(e) => e.stopPropagation()}>
                 <div className="row" style={{ gap: 6 }}>
                   <button className="btn small" onClick={() => onRestore(s)}>恢复</button>
-                  <button className="btn small" onClick={() => onPurge(s)}>永久删除</button>
+                  <button className="btn small" onClick={() => onPurge(s)}>删除…</button>
                 </div>
               </td>
             </tr>

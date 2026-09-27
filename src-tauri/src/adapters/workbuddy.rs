@@ -13,10 +13,17 @@
 //! Provenance stays NULL: `providerData` records only the user's model
 //! *preference* ("auto"), not the identity of the model that answered.
 //!
-//! One transcript, one ROOT member. `ai-title` supplies the native title (last
-//! written wins); `function_call` / `function_call_result` are observations,
-//! not text. There is no CLI — the bundle's only executable is Electron — so
-//! this adapter ingests history only: `detect()` never succeeds.
+//! One root transcript, one ROOT member. `ai-title` supplies the native title
+//! (last written wins); `function_call` / `function_call_result` are
+//! observations, not text. There is no CLI — the bundle's only executable is
+//! Electron — so this adapter ingests history only: `detect()` never succeeds.
+//!
+//! Sub-agents are SEPARATE files under the session's own directory,
+//! `<slug>/<sessionId>/subagents/agent-<hex>.jsonl`, and become CHILD members
+//! of that session. The directory is the only parent link: the child file's
+//! `sessionId` is a fresh uuid and its `parentId` chain points at messages
+//! inside the same file, so neither identifies the session it belongs to.
+//! Children never contribute conversation — `parse_line` is root-gated.
 
 use std::path::{Path, PathBuf};
 
@@ -99,6 +106,53 @@ fn classify_user_turn(raw: &str) -> UserTurn {
 }
 
 impl WorkBuddyAdapter {
+    /// `<slug>/<sessionId>/subagents/agent-*.jsonl` → the parent session id
+    /// (the enclosing directory). The shape is the marker: a child file's head
+    /// is plain WorkBuddy-shaped, so no content test can decide this.
+    fn subagent_member(path: &Path) -> Option<String> {
+        let name = path.file_name()?.to_str()?;
+        if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
+            return None;
+        }
+        let subagents_dir = path.parent()?;
+        if subagents_dir.file_name()?.to_str()? != "subagents" {
+            return None;
+        }
+        Some(subagents_dir.parent()?.file_name()?.to_str()?.to_string())
+    }
+
+    /// A sub-agent transcript as its own CHILD member. Identity is derived
+    /// (`<parent>:subagent:<stem>`) because the file carries no stable link to
+    /// its session. No title sources — a child never names a Logical Session.
+    fn parse_subagent_member(path: &Path, parent_id: &str) -> Result<Option<DiscoveredMember>> {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            return Ok(None);
+        };
+        let meta = std::fs::metadata(path)?;
+        let last_activity = meta
+            .modified()
+            .ok()
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+        Ok(Some(DiscoveredMember {
+            agent: Agent::WorkBuddy,
+            source_member_id: format!("{parent_id}:subagent:{stem}"),
+            kind: DiscoveredMemberKind::Child,
+            parent_source_member_id: Some(parent_id.to_string()),
+            root_hint: Some(parent_id.to_string()),
+            source_kind: "workbuddy_subagent_transcript".into(),
+            source_path: path.to_path_buf(),
+            // A child's cwd / start time are execution fact only, and the
+            // child never names the session.
+            cwd: None,
+            started_at: None,
+            last_activity_at: last_activity,
+            native_title: None,
+            first_user_text: None,
+            first_agent_text: None,
+            metadata: serde_json::json!({ "parent_session": parent_id }),
+        }))
+    }
+
     fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
         let file_name = path
             .file_stem()
@@ -226,6 +280,14 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
                 if unchanged(&p) {
                     continue;
                 }
+                if let Some(parent_id) = Self::subagent_member(&p) {
+                    match Self::parse_subagent_member(&p, &parent_id) {
+                        Ok(Some(m)) => out.push(m),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
+                    }
+                    continue;
+                }
                 if detect_format(&p) != Some(Agent::WorkBuddy) {
                     continue;
                 }
@@ -245,11 +307,12 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         cursor: &SessionMemberCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
+        let is_root = member.relation.as_str() == "root";
         read_jsonl_delta(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::COMPACTION,
-            &|_idx, v| parse_line(v, member.relation.as_str() == "root"),
+            crate::adapters::StatsCapabilities::COMPACTION.with_tokens(),
+            &|_idx, v| parse_line(v, is_root),
         )
     }
 
@@ -288,23 +351,73 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
     }
 }
 
+/// `providerData.usage` of one model call, as counts. The source states each
+/// number directly (`inputTokens` excludes the cached ones; the details arrays
+/// name the cached / reasoning parts) — no derived sums.
+fn detail_sum(usage: &Value, key: &str, field: &str) -> u64 {
+    usage
+        .get(key)
+        .and_then(|d| d.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get(field))
+                .filter_map(|v| v.as_u64())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn usage_observation(v: &Value) -> MemberObservation {
+    let Some(usage) = v.get("providerData").and_then(|p| p.get("usage")) else {
+        return MemberObservation::default();
+    };
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    MemberObservation {
+        input_tokens: n("inputTokens"),
+        output_tokens: n("outputTokens"),
+        cached_tokens: detail_sum(usage, "inputTokensDetails", "cached_tokens"),
+        reasoning_tokens: detail_sum(usage, "outputTokensDetails", "reasoning_tokens"),
+        ..Default::default()
+    }
+}
+
 /// One line's contribution: message lines only, prose only, machine
-/// traffic counted.
+/// traffic counted. Usage is the exception to the type gate — WorkBuddy hangs
+/// it on whichever record made the call (a `function_call` for a tool turn,
+/// the final assistant message for a text turn), and the two never share one
+/// call, so every record that has usage is counted.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
-    if v.get("type").and_then(|t| t.as_str()) != Some("message") {
+    let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if vtype == "function_call" {
+        let usage = usage_observation(v);
+        return (!usage.is_empty()).then(|| ParsedLine::observation_only(usage));
+    }
+    if vtype != "message" {
         return None;
     }
     let source_message_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
     let raw = content_text(v.get("content").unwrap_or(&Value::Null));
+    let mut observation = usage_observation(v);
     if raw.trim().is_empty() {
-        return None;
+        return (!observation.is_empty()).then(|| ParsedLine::observation_only(observation));
     }
-    let observation = MemberObservation::default();
     match v.get("role").and_then(|r| r.as_str()).unwrap_or("") {
         "user" => match classify_user_turn(&raw) {
-            UserTurn::Prompt(p) if is_root => Some(ParsedLine::message_only(
-                crate::adapters::parsed_message(source_message_id, SessionMessageRole::User, p),
-            )),
+            UserTurn::Prompt(p) => {
+                observation.user_messages = 1;
+                if !is_root {
+                    return Some(ParsedLine::observation_only(observation));
+                }
+                Some(ParsedLine {
+                    message: Some(crate::adapters::parsed_message(
+                        source_message_id,
+                        SessionMessageRole::User,
+                        p,
+                    )),
+                    observation,
+                })
+            }
             // A compaction replay is a boundary count, never content.
             UserTurn::Compaction => Some(ParsedLine::observation_only(MemberObservation {
                 compactions: 1,
@@ -312,11 +425,20 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             })),
             _ => Some(ParsedLine::observation_only(observation)),
         },
-        "assistant" if is_root => Some(ParsedLine::message_only(crate::adapters::parsed_message(
-            source_message_id,
-            SessionMessageRole::Assistant,
-            raw,
-        ))),
+        "assistant" => {
+            observation.assistant_messages = 1;
+            if !is_root {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            Some(ParsedLine {
+                message: Some(crate::adapters::parsed_message(
+                    source_message_id,
+                    SessionMessageRole::Assistant,
+                    raw,
+                )),
+                observation,
+            })
+        }
         _ => Some(ParsedLine::observation_only(observation)),
     }
 }
@@ -360,8 +482,8 @@ mod tests {
             r#"{"timestamp":1783137451207,"type":"ai-title","aiTitle":"整理会议纪要","sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
             r#"{"id":"c1","timestamp":1783137453100,"type":"message","role":"user","content":[{"type":"input_text","text":"<cb_summary>Summary of the conversation so far: 很长的一段机器摘要</cb_summary>"}],"sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
             r#"{"id":"r1","parentId":"m1","timestamp":1783137455212,"type":"reasoning","content":[{"type":"reasoning_text","text":"想一下"}],"rawContent":[{"type":"reasoning_text","text":"想一下"}],"sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
-            r#"{"id":"m2","parentId":"r1","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"整理好了。"}],"providerData":{},"sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
-            r#"{"id":"m2","parentId":"r1","timestamp":1783137455225,"type":"function_call","callId":"call_1","name":"WebFetch","arguments":"{}","providerData":{},"sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
+            r#"{"id":"m2","parentId":"r1","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"整理好了。"}],"providerData":{"usage":{"requests":1,"inputTokens":300,"outputTokens":40,"totalTokens":340,"inputTokensDetails":[{"cached_tokens":120}],"outputTokensDetails":[{"reasoning_tokens":9}]}},"sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
+            r#"{"id":"m2","parentId":"r1","timestamp":1783137455225,"type":"function_call","callId":"call_1","name":"WebFetch","arguments":"{}","providerData":{"usage":{"requests":1,"inputTokens":100,"outputTokens":6,"totalTokens":106,"inputTokensDetails":[{"cached_tokens":20}],"outputTokensDetails":[{"reasoning_tokens":1}]}},"sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
             r#"{"id":"r2","parentId":"m2","timestamp":1783137455299,"type":"function_call_result","callId":"call_1","name":"WebFetch","status":"completed","output":{"type":"text","text":"page"},"sessionId":"s1","cwd":"/Users/jqk/Workbuddy/x"}"#,
         ]
         .join("\n")
@@ -394,6 +516,74 @@ mod tests {
             m.started_at.as_deref(),
             Some("2026-07-04T03:57:29.113+00:00")
         );
+    }
+
+    /// Sub-agent transcripts sit in the session's own directory and must land
+    /// as CHILD members of it — never as Logical Sessions of their own. The
+    /// directory is the only parent link: the fixture mirrors the real files,
+    /// where the child's own `sessionId` is a fresh uuid.
+    #[test]
+    fn a_subagent_transcript_becomes_a_child_member() {
+        let dir = unique_dir("subagents");
+        let parent_id = "b85e08f5-4c18-45b4-bfdd-302a1875912a";
+        std::fs::write(
+            dir.join(format!("{parent_id}.jsonl")),
+            session_lines().replace("\"s1\"", &format!("\"{parent_id}\"")),
+        )
+        .unwrap();
+        let sub_dir = dir.join(parent_id).join("subagents");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let child_path = sub_dir.join("agent-5bc5e8f586a241e2.jsonl");
+        std::fs::write(
+            &child_path,
+            session_lines().replace("\"s1\"", "\"01a0dd0a-ebff-7d30-80e0-e1a811c7192f\""),
+        )
+        .unwrap();
+
+        let mut found = WorkBuddyAdapter
+            .discover_members_in(&[dir], &|_| false)
+            .unwrap();
+        found.sort_by(|a, b| a.source_member_id.cmp(&b.source_member_id));
+        assert_eq!(found.len(), 2, "{found:#?}");
+
+        let child = found
+            .iter()
+            .find(|m| m.kind == DiscoveredMemberKind::Child)
+            .expect("the subagent file is a child member");
+        assert_eq!(
+            child.source_member_id,
+            format!("{parent_id}:subagent:agent-5bc5e8f586a241e2")
+        );
+        assert_eq!(child.parent_source_member_id.as_deref(), Some(parent_id));
+        assert_eq!(child.root_hint.as_deref(), Some(parent_id));
+        assert_eq!(
+            child.source_kind, "workbuddy_subagent_transcript",
+            "a child's source kind is its own"
+        );
+
+        // The parent link must land on the ROOT member's identity, or the
+        // child would dangle on a session nobody owns.
+        let root = found
+            .iter()
+            .find(|m| m.kind == DiscoveredMemberKind::Root)
+            .expect("the session file is the root member");
+        assert_eq!(root.source_member_id, parent_id);
+        assert_eq!(
+            child.parent_source_member_id.as_deref(),
+            Some(root.source_member_id.as_str())
+        );
+
+        // Execution only: the same transcript contributes no conversation.
+        let child_member = SessionMember {
+            source_member_id: child.source_member_id.clone(),
+            relation: SessionMemberRelation::Child,
+            source_path: child_path.to_string_lossy().to_string(),
+            ..root_member(&child_path)
+        };
+        let delta = WorkBuddyAdapter
+            .read_member_delta(&child_member, &SessionMemberCursor::default())
+            .unwrap();
+        assert!(delta.messages.is_empty(), "{:?}", delta.messages);
     }
 
     /// WorkBuddy rewrites its `ai-title` as the conversation moves on; the
@@ -456,8 +646,15 @@ mod tests {
             Some(StatsUpdate::Snapshot(s)) => {
                 assert_eq!(s.compaction_count, Some(1), "the cb_summary replay");
                 assert_eq!(s.tool_call_count, None);
-                assert_eq!(s.tool_error_count, None);
+                assert_eq!(s.user_message_count, Some(1));
+                assert_eq!(s.assistant_message_count, Some(1));
                 assert_eq!(s.side_activity_count, None);
+                // One model call each: the tool turn's usage rides on its
+                // function_call, the final text turn's on the message. Both add.
+                assert_eq!(s.input_tokens, Some(400));
+                assert_eq!(s.output_tokens, Some(46));
+                assert_eq!(s.cached_tokens, Some(140));
+                assert_eq!(s.reasoning_tokens, Some(10));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

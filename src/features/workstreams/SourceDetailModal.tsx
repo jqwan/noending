@@ -85,16 +85,16 @@ export default function SourceDetailModal({
             </div>
           )}
 
-          {/* 来源会话已永久删除（Session Lifecycle）：这不是
-              tombstone，只是「来源已不存在」的事实陈述。后端此时不再返回
-              Session / 消息 / 证据等字段，UI 也不该再尝试渲染它们。 */}
+          {/* 来源会话已删除（Session Lifecycle）：这不是 tombstone，只是「来源引用
+              已不可解析」的事实陈述。后端此时不再返回 Session / 消息 / 证据等字段，
+              UI 也不该再尝试渲染它们。 */}
           {detail.source_type === "deleted_session" ? (
             <div className="row-line">
               <div>
                 <div className="settings-row-label">来源会话</div>
                 <div className="settings-row-hint">产生该修订版本的原始会话</div>
               </div>
-              <span className="muted small">来源会话已被永久删除</span>
+              <span className="muted small">来源会话已删除</span>
             </div>
           ) : (
             <>

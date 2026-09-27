@@ -14,6 +14,12 @@
 //! CHILD member of that parent (otherwise ROOT); `origin` / `delegationDepth` ride
 //! along as metadata.
 //!
+//! Usage lives on the STEP: `assistant/message.data.usage` is
+//! `{inputTokens, outputTokens, cacheReadTokens?}`, one entry per generation step,
+//! so the steps add up. dsh states no cost. A step that produced no prose (tool
+//! calls only) still spent tokens, so usage is counted independently of whether
+//! the step becomes conversation.
+//!
 //! Only the ROOT's conversation is ingested: `user/message` (real user turns) and
 //! `assistant/message`. A `user/message` carrying `data.source.senderSessionId` was
 //! sent by another session — side activity, never conversation. `assistant/chunk`,
@@ -161,6 +167,23 @@ fn session_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// `data.usage` of one assistant step, in dsh's camelCase spelling. Every step
+/// carries its own usage, so they add up. dsh states no cost, and its own
+/// `totalTokens` is a derived sum: only the components are stored, so the UI
+/// never shows an invented number.
+fn usage_observation(v: &Value) -> MemberObservation {
+    let Some(usage) = v.pointer("/data/usage") else {
+        return MemberObservation::default();
+    };
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    MemberObservation {
+        input_tokens: n("inputTokens"),
+        output_tokens: n("outputTokens"),
+        cached_tokens: n("cacheReadTokens"),
+        ..Default::default()
+    }
+}
+
 /// One decoded record's contribution to the member read. Root members
 /// produce conversation; child members produce observations only.
 fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
@@ -187,22 +210,35 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                     ..Default::default()
                 }));
             }
+            let observation = MemberObservation {
+                user_messages: 1,
+                ..Default::default()
+            };
             if !is_root {
-                return Some(ParsedLine::observation_only(MemberObservation::default()));
+                return Some(ParsedLine::observation_only(observation));
             }
-            Some(ParsedLine::message_only(crate::adapters::parsed_message(
-                source_message_id,
-                SessionMessageRole::User,
-                text,
-            )))
+            Some(ParsedLine {
+                message: Some(crate::adapters::parsed_message(
+                    source_message_id,
+                    SessionMessageRole::User,
+                    text,
+                )),
+                observation,
+            })
         }
         "assistant/message" => {
+            // Usage belongs to the step, not to its prose: a step that only
+            // called tools spent tokens too, and a CHILD member's own steps are
+            // its own execution cost. So it is counted before either the
+            // empty-text or the non-root early return can drop it.
+            let mut usage = usage_observation(v);
             let text = text_blocks(v.pointer("/data/message/content"));
             if text.trim().is_empty() {
-                return None;
+                return Some(ParsedLine::observation_only(usage));
             }
+            usage.assistant_messages = 1;
             if !is_root {
-                return Some(ParsedLine::observation_only(MemberObservation::default()));
+                return Some(ParsedLine::observation_only(usage));
             }
             // The assistant record itself carries `data.message.source` — a
             // discriminated union gated on `kind == "model"` holding the actual
@@ -223,14 +259,16 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             } else {
                 (None, None)
             };
-            Some(ParsedLine::message_only(
-                crate::adapters::parsed_message(
-                    source_message_id,
-                    SessionMessageRole::Assistant,
-                    text,
-                )
-                .with_provenance(prov.0, prov.1),
-            ))
+            let message = crate::adapters::parsed_message(
+                source_message_id,
+                SessionMessageRole::Assistant,
+                text,
+            )
+            .with_provenance(prov.0, prov.1);
+            Some(ParsedLine {
+                message: Some(message),
+                observation: usage,
+            })
         }
         // Compaction is a boundary worth counting, but its payload is machine
         // bookkeeping: a marker, never the pruned content itself.
@@ -491,7 +529,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             stats: crate::adapters::stats_update_from(
                 &observation,
                 &source,
-                crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY,
+                crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY.with_tokens(),
             ),
             messages,
             source: Some(source),
@@ -958,6 +996,8 @@ mod tests {
                 ),
                 &user(1, "delegated task"),
                 &assistant(2, "done"),
+                // A child's own steps are its own execution cost.
+                r#"{"type":"assistant/message","seq":3,"time":3,"data":{"turn":1,"step":1,"usage":{"inputTokens":42,"outputTokens":7},"message":{"role":"assistant","content":[{"type":"text","text":"child"}]}}}"#,
             ],
         );
         let file = dir.join("session.v2.jsonl.zstd");
@@ -968,6 +1008,49 @@ mod tests {
             )
             .unwrap();
         assert!(delta.messages.is_empty());
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(42), "a child's own usage is counted");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Usage is per STEP and adds up across the session. A step that emitted no
+    /// prose (tool calls only) spent tokens too, so it is counted without
+    /// becoming conversation.
+    #[test]
+    fn usage_adds_up_per_step_including_a_prose_less_step() {
+        let id = "session-usage";
+        let dir = session_dir(
+            &unique_dir("usage"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, ""),
+                &user(3, "跑一下"),
+                r#"{"type":"assistant/message","seq":4,"time":1,"data":{"turn":1,"step":1,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110},"message":{"role":"assistant","content":[{"type":"tool_use","name":"read"}]}}}"#,
+                r#"{"type":"assistant/message","seq":5,"time":2,"data":{"turn":1,"step":2,"usage":{"inputTokens":8459,"outputTokens":64,"cacheReadTokens":7000,"totalTokens":8523},"message":{"role":"assistant","content":[{"type":"text","text":"好了。"}]}}}"#,
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(8559), "both steps, one prose-less");
+                assert_eq!(s.output_tokens, Some(74));
+                assert_eq!(s.cached_tokens, Some(7000), "cacheReadTokens");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        // The prose-less step produced no conversation, but the other did.
+        assert_eq!(delta.messages.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

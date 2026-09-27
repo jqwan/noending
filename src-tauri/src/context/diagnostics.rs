@@ -217,7 +217,7 @@ fn safe_error(error: &AppError, stage: &str) -> (&'static str, &'static str) {
         return match context {
             ContextUpdateError::AiUnavailable(_) => (
                 "ai_unavailable",
-                "未配置可用的 Context Agent，请检查 Assistant Agent 设置。",
+                "未配置可用的 Context Agent，请检查 Agent 设置。",
             ),
             ContextUpdateError::ModelCallFailed(_) => (
                 "model_call_failed",
@@ -262,7 +262,7 @@ pub fn cli_failure(
         ),
         K::UnsupportedAgent => (
             "agent_unsupported",
-            "Context 提取支持 Codex、Claude Code 和 Pi，请更改 Assistant Agent。",
+            "Context 提取支持 Codex、Claude Code 和 Pi，请更改 Agent。",
         ),
         K::CommandInvalid => (
             "runtime_dir_unavailable",

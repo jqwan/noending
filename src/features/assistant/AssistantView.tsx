@@ -1,6 +1,7 @@
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
+import PageHeader from "../../layout/PageHeader";
 import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
 import type { AssistantScope, Route } from "../../app/routes";
 import { AGENT_LABELS } from "../../types";
@@ -182,17 +183,15 @@ export default function AssistantView({ scope, navigate }: {
 
   return (
     <div className="main" style={{ display: "flex", flexDirection: "column" }}>
-      <div className="page-head">
-        <div>
-          <h1>Assistant</h1>
-          <p className="page-sub">
-            <span className="mono">{cfg ? `${CHOICE_LABELS[cfg.agent] ?? cfg.agent} · ${cfg.agent === "none" ? "仅检索" : runtimeSummary(runtime)}` : "…"}</span>
-          </p>
-        </div>
-        <div className="actions">
+      <PageHeader
+        title="助手"
+        sub={
+          <span className="mono">{cfg ? `${CHOICE_LABELS[cfg.agent] ?? cfg.agent} · ${cfg.agent === "none" ? "仅检索" : runtimeSummary(runtime)}` : "…"}</span>
+        }
+        actions={
           <button className="btn ghost icon-button" title="Agent 设置" aria-label="Agent 设置" onClick={() => setCfgOpen(true)}><Icon name="settings" /></button>
-        </div>
-      </div>
+        }
+      />
 
       <div className="scope-row">
         <span className="muted small">范围</span>
@@ -250,7 +249,7 @@ export default function AssistantView({ scope, navigate }: {
         {busy && <div className="chat-msg assistant"><div className="bubble">思考中…（经由 Agent CLI，可能需要数十秒）</div></div>}
       </div>
 
-      <div className="row" style={{ marginTop: 10 }}>
+      <div className="row chat-composer" style={{ marginTop: 10 }}>
         <input type="text" placeholder="问 NoEnding…（问上下文、启动会话、查摄入历史）" value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && send()} />
@@ -260,9 +259,9 @@ export default function AssistantView({ scope, navigate }: {
       {cfgOpen && cfg && (
         <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCfgOpen(false)}>
           <div className="modal">
-            <h2>Assistant 使用的 Agent</h2>
+            <h2>助手使用的 Agent</h2>
             <p className="muted small">
-              Assistant 经你已登录的 Agent CLI 无头运行，无需单独 API Key。模型 / Provider / Effort 属于
+              助手经你已登录的 Agent CLI 无头运行，无需单独 API Key。模型 / Provider / Effort 属于
               Runtime 配置，由「设置 → Agent」统一管理（与新建 Session、继续 Session、后台同步同一套 override）；
               这里只显示、不编辑。
             </p>
@@ -283,7 +282,7 @@ export default function AssistantView({ scope, navigate }: {
                 </div>
                 {!runtime.detected && (
                   <div className="badge warn" style={{ marginTop: 8 }}>
-                    未检测到 {CHOICE_LABELS[cfg.agent]} CLI —— Assistant 会退回仅检索。
+                    未检测到 {CHOICE_LABELS[cfg.agent]} CLI —— 助手会退回仅检索。
                   </div>
                 )}
               </>

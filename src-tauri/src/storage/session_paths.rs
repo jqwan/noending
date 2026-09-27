@@ -48,7 +48,7 @@ pub fn attach_session_workspace_path_conn(
         "UPDATE sessions
             SET workspace_path_id = ?2,
                 project_id = (SELECT project_id FROM workspace_paths WHERE id = ?2)
-          WHERE id = ?1 AND trashed_at IS NULL",
+          WHERE id = ?1",
         params![session_id, workspace_path_id],
     )? == 1)
 }

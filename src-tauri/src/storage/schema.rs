@@ -236,7 +236,10 @@ const CURRENT_SCHEMA: &str = r#"
       started_at TEXT,
       last_activity_at TEXT,
       last_conversation_at TEXT,
-      -- lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339).
+      -- lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339). Trash is a FILTER:
+      -- it hides the Session and freezes its Context extraction, nothing else —
+      -- ingestion, Owner and every other fact keep following the source. It is
+      -- also the only gate on the permanent local purge.
       trashed_at TEXT,
       UNIQUE(agent, root_agent_session_id)
     );
@@ -343,13 +346,16 @@ const CURRENT_SCHEMA: &str = r#"
       generation INTEGER NOT NULL DEFAULT 0,
       latest_message_seq INTEGER NOT NULL DEFAULT 0
     );
-    -- 1:1 execution snapshot per member: current observable source state,
-    -- not an append-only log. NULL = source does not provide the metric.
+    -- 1:1 execution snapshot per member: current observable source state, not
+    -- an append-only log. Every member — root, child and side — keeps its own
+    -- composition, so a Session's totals are the sum over its graph.
+    -- NULL = source does not provide the metric, 0 = observed zero.
     CREATE TABLE IF NOT EXISTS session_member_stats (
       member_id TEXT PRIMARY KEY
         REFERENCES session_members(id) ON DELETE CASCADE,
       tool_call_count INTEGER,
-      tool_error_count INTEGER,
+      user_message_count INTEGER,
+      assistant_message_count INTEGER,
       compaction_count INTEGER,
       side_activity_count INTEGER,
       input_tokens INTEGER,

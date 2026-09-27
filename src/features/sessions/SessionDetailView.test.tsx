@@ -6,6 +6,7 @@ import type {
   Session,
   SessionAggregateStats,
   SessionContextView,
+  LocalDeletePreview,
   SessionDetail,
   SessionMember,
   SessionMessage,
@@ -14,7 +15,7 @@ import type {
 } from "../../types";
 
 // 只覆盖重构后的详情页：执行信息（聚合统计 + 成员树）、源会话状态、fork 链接、
-// 回收站横幅的永久删除门槛、「所属任务」单 Owner 入口，以及 Context 面板。
+// 回收站横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
     getSessionDetail: vi.fn(),
@@ -38,6 +39,8 @@ vi.mock("../../api", () => ({
     trashSession: vi.fn(),
     restoreSession: vi.fn(),
     setSessionOwnerWorkstream: vi.fn(),
+    getSessionLocalDeletePreview: vi.fn(),
+    permanentlyDeleteSession: vi.fn(),
   },
 }));
 
@@ -84,7 +87,8 @@ function stats(over: Partial<SessionAggregateStats> = {}): SessionAggregateStats
     side_count: 0,
     max_depth: 0,
     tool_call_count: 0,
-    tool_error_count: 0,
+    user_message_count: 0,
+    assistant_message_count: 0,
     compaction_count: 0,
     side_activity_count: 0,
     input_tokens: null,
@@ -154,11 +158,11 @@ function detail(me: Session, over: Partial<SessionDetail> = {}): SessionDetail {
     workspace_path: null,
     members: [member(me.id, `${me.id}-root`, "root", null)],
     stats: stats(),
+    cost_unit: null,
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
     root_source_status: "present",
     can_resume: true,
-    can_permanently_delete: false,
     forked_from: null,
     ...over,
   };
@@ -178,10 +182,10 @@ it("shows aggregate execution stats and an expandable member tree", async () => 
   const me = session("me");
   await renderDetail(detail(me, {
     members: [
-      member(me.id, `${me.id}-root`, "root", null),
-      member(me.id, "child-src-1", "child", `${me.id}-root`, {
-        stats: { member_id: "c1", tool_call_count: 12, tool_error_count: 2, compaction_count: 1 } as SessionMemberStats,
+      member(me.id, `${me.id}-root`, "root", null, {
+        stats: { member_id: "root", tool_call_count: 12, user_message_count: 3, assistant_message_count: 5, compaction_count: 1 } as SessionMemberStats,
       }),
+      member(me.id, "child-src-1", "child", `${me.id}-root`),
       member(me.id, "side-src-1", "side", `${me.id}-root`),
     ],
     stats: stats({
@@ -190,15 +194,23 @@ it("shows aggregate execution stats and an expandable member tree", async () => 
       side_count: 1,
       max_depth: 1,
       tool_call_count: 12,
-      tool_error_count: 2,
+      user_message_count: 3,
+      assistant_message_count: 5,
       compaction_count: 1,
     }),
   }));
 
-  // 聚合统计常驻。
-  const body = document.body.textContent ?? "";
-  expect(body).toContain("成员 3 · 子 1 · 边 1 · 最大深度 1");
-  expect(body).toContain("工具调用 12 · 失败 2 · 压缩 1");
+  // 聚合统计常驻：每个数各占一格，不再串成一行。
+  screen.getByText("成员树");
+  screen.getByText("3 个成员");
+  screen.getByText("1 子");
+  screen.getByText("1 边");
+  screen.getByText("深度 1");
+  screen.getByText("消息构成");
+  screen.getByText("用户 3");
+  screen.getByText("助手 5");
+  screen.getByText("工具 12");
+  screen.getByText("压缩 1");
 
   // 成员默认收起，点开才出现。
   expect(screen.queryByText("child-src-1")).toBeNull();
@@ -206,41 +218,64 @@ it("shows aggregate execution stats and an expandable member tree", async () => 
 
   screen.getByText("child-src-1");
   screen.getByText("side-src-1");
-  // 关系标签：根 / 子 / 边执行。
+  // 关系标签：根 / 子 / 边。
   expect(screen.getAllByText("根")).toHaveLength(1);
   screen.getByText("子");
-  screen.getByText("边执行");
-  // 成员自己的计数只在有数据时出现。
-  expect(document.body.textContent).toContain("工具 12 · 失败 2 · 压缩 1");
+  screen.getByText("边");
+  // 每个成员各自的计数：root 这一行有，子/边成员 stats 为 null 则只有身份。
+  expect(document.body.textContent).toContain("用户 3 · 助手 5 · 工具 12 · 压缩 1");
 
   // 成员是执行信息，不是可进入的其他会话页面。
   expect(screen.queryByRole("button", { name: /child-src-1/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /side-src-1/ })).toBeNull();
 });
 
-it("shows tool / token / cost rows only when the data is present", async () => {
+it("shows message / token / cost rows only when the data is present", async () => {
   const me = session("me");
   await renderDetail(detail(me, { stats: stats() }));
 
-  let body = document.body.textContent ?? "";
-  expect(body).not.toContain("Tokens");
-  expect(body).not.toContain("成本");
-  expect(body).not.toContain("工具调用");
+  // 基础形状（成员树）永远在；消息构成 / Tokens / 成本这些组只在数据真的在场上时出现。
+  screen.getByText("成员树");
+  expect(screen.queryByText("消息构成")).toBeNull();
+  expect(screen.queryByText("Tokens")).toBeNull();
+  expect(screen.queryByText("成本")).toBeNull();
 
   cleanup();
   await renderDetail(detail(me, {
     stats: stats({
+      user_message_count: 2,
+      assistant_message_count: 3,
       tool_call_count: 4,
+      side_activity_count: 3,
       input_tokens: 1000,
       output_tokens: 200,
       cost: 0.5,
     }),
+    cost_unit: "USD",
   }));
 
-  body = document.body.textContent ?? "";
-  expect(body).toContain("工具调用 4");
-  expect(body).toContain("Tokens 输入 1,000 · 输出 200");
-  expect(body).toContain("成本 0.5");
+  screen.getByText("消息构成");
+  screen.getByText("用户 2");
+  screen.getByText("助手 3");
+  screen.getByText("工具 4");
+  screen.getByText("协同 3");
+  screen.getByText("Tokens");
+  screen.getByText("输入 1,000");
+  screen.getByText("输出 200");
+  screen.getByText("成本");
+  // 数字带着 Agent 自己的单位，不能被当成别的单位读。
+  screen.getByText("0.5 USD");
+});
+
+it("labels a non-currency cost with the Agent's own unit", async () => {
+  const me = session("me");
+  await renderDetail(detail(me, {
+    stats: stats({ cost: 749.353 }),
+    cost_unit: "credits",
+  }));
+
+  screen.getByText("成本");
+  screen.getByText("749.353 credits");
 });
 
 // 源会话
@@ -341,25 +376,65 @@ it("shows no fork field for a session that is not a fork", async () => {
 
 // 回收站横幅
 
-it("offers permanent delete in the trash banner only when allowed", async () => {
-  await renderDetail(detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
-    can_resume: false,
+function preview(over: Partial<LocalDeletePreview> = {}): LocalDeletePreview {
+  return {
+    session_id: "me",
+    session_title: "会话一",
+    agent: "codex",
+    root_agent_session_id: "me-agent",
     root_source_status: "missing",
-    can_permanently_delete: true,
-  }));
+    message_count: 3,
+    member_count: 1,
+    sync_run_count: 0,
+    launch_intent_count: 0,
+    context_revision_redaction_count: 0,
+    ...over,
+  };
+}
 
-  screen.getByRole("button", { name: "永久删除…" });
-  expect(screen.queryByText(/永久删除不可用/)).toBeNull();
+function trashedDetail(over: Partial<SessionDetail> = {}): SessionDetail {
+  return detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
+    can_resume: false,
+    ...over,
+  });
+}
+
+it("offers the same 删除 entry whatever the root source state", async () => {
+  // Trash is the only gate: the source verdict never renames or hides the entry.
+  for (const root_source_status of ["missing", "present"] as const) {
+    cleanup();
+    await renderDetail(trashedDetail({ root_source_status }));
+    screen.getByRole("button", { name: "删除…" });
+    expect(screen.queryByText(/重新入库…/)).toBeNull();
+    expect(screen.queryByText(/删除不可用/)).toBeNull();
+  }
 });
 
-it("explains why permanent delete is unavailable while trashed", async () => {
-  await renderDetail(detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
-    root_source_status: "present",
-    can_permanently_delete: false,
-  }));
+// 点删除之后：先查源状态，告知这次是彻底删除还是会被重新入库，用户再确认。
 
-  expect(screen.queryByRole("button", { name: "永久删除…" })).toBeNull();
-  screen.getByText(/永久删除不可用（Root 源仍存在或无法确认）/);
+it("checks the root source before confirming and says the copy will be rebuilt", async () => {
+  vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
+    preview({ root_source_status: "present" }),
+  );
+  await renderDetail(trashedDetail({ root_source_status: "present" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "删除…" }));
+
+  await screen.findByText(/Root 源会话仍然存在/);
+  screen.getByText(/下一次同步会从它重新摄入/);
+  screen.getByRole("button", { name: "删除" });
+});
+
+it("says the local data is unrecoverable when the root source is gone", async () => {
+  vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
+    preview({ root_source_status: "missing" }),
+  );
+  await renderDetail(trashedDetail({ root_source_status: "missing" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "删除…" }));
+
+  await screen.findByText(/本地数据删除后无法找回/);
+  expect(screen.queryByText(/Root 源会话仍然存在/)).toBeNull();
 });
 
 // 所属任务（单 Owner）

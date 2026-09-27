@@ -1180,7 +1180,7 @@ pub fn try_match_launch_intents_in(
 ///
 /// * the intent still waits (PENDING/AMBIGUOUS) and no Session has claimed it;
 /// * its Agent is the Session's Agent;
-/// * the Session still exists and is not trashed;
+/// * the Session still exists;
 /// * the final status write is a CAS whose affected rows must be 1.
 ///
 /// Together those make the intent a capability that can be spent once: two
@@ -1210,17 +1210,18 @@ pub fn apply_match(
             return Err(other("LaunchIntent 与 Session 的 Agent 不一致，拒绝匹配"));
         }
         // The Session row decides, not the caller's copy: it may have been
-        // trashed or removed since the match was computed.
-        let current: Option<(String, Option<String>)> = tx
+        // removed since the match was computed. Trash is not a refusal — a
+        // trashed Session still follows its source and still takes its Owner.
+        let current: Option<String> = tx
             .query_row(
-                "SELECT agent, trashed_at FROM sessions WHERE id = ?1",
+                "SELECT agent FROM sessions WHERE id = ?1",
                 rusqlite::params![session.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .optional()?;
         match current {
-            Some((agent, None)) if agent == intent.agent.as_str() => {}
-            _ => return Err(other("Session 不存在或已在回收站，无法匹配 LaunchIntent")),
+            Some(agent) if agent == intent.agent.as_str() => {}
+            _ => return Err(other("Session 不存在，无法匹配 LaunchIntent")),
         }
 
         // The matched Session inherits the intent's Owner Workstream verbatim

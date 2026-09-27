@@ -271,7 +271,8 @@ export interface SessionMessage {
 export interface SessionMemberStats {
   member_id: string;
   tool_call_count: number | null;
-  tool_error_count: number | null;
+  user_message_count: number | null;
+  assistant_message_count: number | null;
   compaction_count: number | null;
   side_activity_count: number | null;
   input_tokens: number | null;
@@ -283,14 +284,15 @@ export interface SessionMemberStats {
   updated_at: string;
 }
 
-/** 查询时聚合的执行图统计。 */
+/** 查询时聚合的执行图统计：每个成员各自的份额求和，即 session 级汇总。 */
 export interface SessionAggregateStats {
   member_count: number;
   child_count: number;
   side_count: number;
   max_depth: number;
   tool_call_count: number;
-  tool_error_count: number;
+  user_message_count: number;
+  assistant_message_count: number;
   compaction_count: number;
   side_activity_count: number;
   input_tokens: number | null;
@@ -321,14 +323,15 @@ export interface IngestionDiagnostic {
   details: Record<string, unknown>;
 }
 
-/** 无状态本地删除预览：永久删除只清 NoEnding 本地数据。 */
+/** 无状态本地删除预览：删除只清 NoEnding 本地数据，Agent 源文件不动。 */
 export interface LocalDeletePreview {
   session_id: string;
   session_title: string | null;
   agent: Agent;
   root_agent_session_id: string;
+  /** 删除预览时的 Root 源新鲜结论。这是**文案依据**而非门槛：present 的源会在下次
+   *  同步作为新会话重新入库，所以弹窗要如实说明，而不是禁用按钮。 */
   root_source_status: SourceAvailability;
-  can_permanently_delete: boolean;
   message_count: number;
   member_count: number;
   sync_run_count: number;
@@ -652,13 +655,14 @@ export interface SessionDetail {
   members: (SessionMember & { stats: SessionMemberStats | null })[];
   /** 查询时聚合的执行图统计。 */
   stats: SessionAggregateStats;
+  /** stats.cost 的单位，取 Agent 自己的单位（Pi: USD；Qoder: credits）。
+   *  null = 该 Agent 根本不报 cost，UI 不能给它安一个源没用的单位。 */
+  cost_unit: string | null;
   ingested_message_sequence: number;
   processed_message_sequence: number;
   /** 详情加载时对 Root 源的新鲜结论。 */
   root_source_status: SourceAvailability;
   can_resume: boolean;
-  /** trashed + fresh root missing 才为 true。 */
-  can_permanently_delete: boolean;
   /** fork 来源会话摘要（当本地仍存在时）。 */
   forked_from: Session | null;
 }

@@ -99,8 +99,7 @@ impl CliExtractor {
         if agent == "none" {
             return Ok(None);
         }
-        let agent =
-            Agent::parse(agent).ok_or_else(|| other(format!("未知的 Assistant Agent: {agent}")))?;
+        let agent = Agent::parse(agent).ok_or_else(|| other(format!("未知的 Agent: {agent}")))?;
         Ok(Some(CliExtractor::new(
             agent,
             crate::agent_runtime::runtime_exec_options(db, agent)?,

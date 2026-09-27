@@ -61,7 +61,8 @@ function detail(id: string): SessionDetail {
       side_count: 0,
       max_depth: 0,
       tool_call_count: 0,
-      tool_error_count: 0,
+      user_message_count: 0,
+      assistant_message_count: 0,
       compaction_count: 0,
       side_activity_count: 0,
       input_tokens: null,
@@ -70,11 +71,11 @@ function detail(id: string): SessionDetail {
       reasoning_tokens: null,
       cost: null,
     },
+    cost_unit: null,
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
     root_source_status: "present",
     can_resume: true,
-    can_permanently_delete: false,
     forked_from: null,
   };
 }

@@ -57,21 +57,18 @@ fn bump_owner_input_revision_conn(conn: &Connection, session_id: &str) -> Result
     Ok(())
 }
 
-/// Commit-time guard for every Session write path: the session must exist AND
-/// be Normal, otherwise work prepared against it (messages, stats, cursors,
-/// context mutations) must not be committed.
-pub fn session_is_writable_conn(conn: &Connection, session_id: &str) -> Result<bool> {
-    // The turbofish pins the column reader to `Option<String>` so
-    // `.optional()`'s outer Option means ROW PRESENCE: `Some(None)` is an
-    // existing, Normal session; `None` is a vanished row.
-    let trashed: Option<Option<String>> = conn
+/// Commit-time guard: the session must still exist, or the rows a caller
+/// prepared have nowhere to land. Trash is NOT part of it (see
+/// `sessions.trashed_at`); only a permanent purge removes the row.
+pub fn session_exists_conn(conn: &Connection, session_id: &str) -> Result<bool> {
+    let exists: Option<i64> = conn
         .query_row(
-            "SELECT trashed_at FROM sessions WHERE id = ?1",
+            "SELECT 1 FROM sessions WHERE id = ?1",
             params![session_id],
-            |r| r.get::<_, Option<String>>(0),
+            |r| r.get(0),
         )
         .optional()?;
-    Ok(matches!(trashed, Some(None)))
+    Ok(exists.is_some())
 }
 
 // FTS
@@ -314,11 +311,9 @@ pub fn redact_session_provenance_conn(tx: &Transaction, session_id: &str) -> Res
 // Permanent local purge
 
 /// The whole NoEnding LOCAL purge in ONE transaction, in the fixed order.
-/// Callers have already required Trash + a fresh `Missing` verdict on the ROOT
-/// source. Returns the number of redacted revisions. Never touches Workstreams,
-/// WorkstreamPaths, WorkspacePaths, Projects, surviving Context content, or
-/// anything on the Agent's side — a reappearing source is simply re-ingested as
-/// a new Session.
+/// Callers have already required Trash. Returns the number of redacted
+/// revisions. Never touches Workstreams, WorkstreamPaths, WorkspacePaths,
+/// Projects, surviving Context content, or the Agent's side.
 pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usize> {
     // 1+2. Redact Context provenance while the refs still resolve.
     let redacted = redact_session_provenance_conn(tx, session_id)?;

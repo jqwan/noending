@@ -108,15 +108,13 @@
 /* ---------- Recent sessions (Home) ---------- */
 .recent-sessions .list-row { padding: 10px 4px; }
 
-/* ---------- Workstream Detail: two-column ---------- */
-.ws-detail-grid {
+/* ---------- Workstream Detail: Context 段落 ---------- */
+/* Context 已并入主栏，单列堆叠：当前事实在上，冲突 / 变更在下。段间距由这里给，
+   避免各段落自己带 margin 时对上层的容器形状形成假设。 */
+.ws-context-stack {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 36px;
-  margin-top: 26px;
-}
-@media (max-width: 1100px) {
-  .ws-detail-grid { grid-template-columns: 1fr; }
+  grid-template-columns: minmax(0, 1fr);
+  gap: 30px;
 }
 
 .ws-detail-head-meta {
@@ -531,7 +529,7 @@
   gap: 12px;
   margin: 0 0 10px;
 }
-/* 永久删除预览里的「将永久删除 / 保留」清单。 */
+/* 删除预览里的「将删除」清单（会话与任务共用）。 */
 .purge-list { margin: 6px 0 0; padding-left: 18px; }
 .purge-list li { margin: 3px 0; font-size: 13px; overflow-wrap: anywhere; }
 
@@ -565,6 +563,12 @@
 
 .scope-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .scope-row select { width: auto; padding: 4px 10px; font-size: 12.5px; }
+
+/* 输入行：`input` 全局是 width:100%，在 flex 行里会把整行算成自己的基准宽度，
+   于是「发送」被反向压缩到内容宽度以下、两个字换行、按钮比输入框还高。
+   input 吃剩余宽度，按钮保持自身宽度。 */
+.chat-composer > input { flex: 1; min-width: 0; }
+.chat-composer > button { flex: none; }
 
 .details-feed { border-top: 1px solid var(--border-subtle); margin-top: 18px; }
 .details-feed summary {
@@ -917,6 +921,18 @@ button.icon-button { width: 28px; padding: 0; }
 .session-info-fields { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 12px; }
 .session-info-fields > *:nth-child(odd) { margin-top: 12px; }
 .session-info-fields > *:nth-child(odd):first-child { margin-top: 0; }
+/* 执行信息的数值块（同一个右栏，同样是 240–300px）：标签列 + 两列数字。
+   上面会话信息坚持单列，是因为它的值是路径与 Agent ID；这里的值是十来个短数字，
+   单列会白白拉出十来行，两列刚好放进 240px 而且永远不需要折行。 */
+.exec-metrics { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; margin-top: 12px; align-items: baseline; }
+.exec-metrics .exec-label { white-space: nowrap; }
+.exec-pairs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 10px; font-size: 12px; }
+/* 成员树：关系标签固定列宽（「根 / 子 / 边」都是单字，列宽固定才让身份列对齐），计数另起一行。 */
+.member-row { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+/* 2.6em 是按单字标签定的：1 个字 11px + 左右内边距 16px，窄一像素它就在徽章里折行。 */
+.member-row .member-rel { flex: none; width: 2.6em; text-align: center; white-space: nowrap; }
+.member-body { display: grid; gap: 1px; min-width: 0; }
+.member-id { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .search-result { display: block; width: 100%; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
 .search-result:hover { background: var(--bg-panel); }
 .project-detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 32px; }

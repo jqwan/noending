@@ -914,7 +914,7 @@ fn require_cli(
         operation.fail_with(
             "runtime_configuration",
             "agent_not_configured",
-            "未选择 Context Agent，请在 Assistant 设置中选择 Codex、Claude Code 或 Pi。",
+            "未选择 Context Agent，请在助手设置中选择 Codex、Claude Code 或 Pi。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
             "未选择 Context Agent".into(),
@@ -924,10 +924,10 @@ fn require_cli(
         operation.fail_with(
             "runtime_configuration",
             "agent_configuration_invalid",
-            "Assistant Agent 配置无效，请重新选择 Agent。",
+            "Agent 配置无效，请重新选择 Agent。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
-            "Assistant Agent 配置无效".into(),
+            "Agent 配置无效".into(),
         )));
     };
     let Some(opts) = launch.opts.as_ref() else {

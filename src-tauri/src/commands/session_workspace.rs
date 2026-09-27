@@ -59,6 +59,10 @@ pub struct SessionDetail {
     pub members: Vec<SessionMemberView>,
     /// Query-time aggregate over the whole graph (no cache to drift).
     pub stats: crate::storage::SessionAggregateStats,
+    /// What `stats.cost` is denominated in — the Agent's own unit (Pi: `USD`,
+    /// Qoder: `credits`). `None` when the Agent states no cost at all, so the
+    /// UI never labels a number with a unit the source never used.
+    pub cost_unit: Option<String>,
     /// The two frontiers the detail page shows: messages ingested, and how
     /// far Context processing has consumed them.
     pub ingested_message_sequence: i64,
@@ -69,8 +73,6 @@ pub struct SessionDetail {
     pub root_source_status: SourceAvailability,
     /// Resume eligibility: active session + a present root source.
     pub can_resume: bool,
-    /// Permanent-delete eligibility: trashed + fresh root `missing`.
-    pub can_permanently_delete: bool,
     /// when this session is a fork, its source Session summary.
     pub forked_from: Option<Session>,
 }
@@ -138,8 +140,6 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let root_source_status = crate::lifecycle::root_source_status(db, &session)?
             .unwrap_or(SourceAvailability::Unavailable);
         let can_resume = !session.is_trashed() && root_source_status == SourceAvailability::Present;
-        let can_permanently_delete =
-            session.is_trashed() && root_source_status == SourceAvailability::Missing;
         let workspace_path = match session.workspace_path_id.as_deref() {
             Some(id) => db.get_workspace_path(id)?.map(|wp| {
                 Ok::<_, crate::error::AppError>(SessionWorkspacePath {
@@ -161,6 +161,11 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             Some(id) => db.get_session(id)?,
             None => None,
         };
+        // A Logical Session is one Agent's graph, so one unit covers every
+        // member the aggregate summed.
+        let cost_unit = crate::adapters::adapter_for(session.agent)
+            .cost_unit()
+            .map(str::to_string);
         Ok(SessionDetail {
             session,
             messages,
@@ -168,11 +173,11 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             workspace_path: workspace_path.transpose()?,
             members: member_views,
             stats,
+            cost_unit,
             ingested_message_sequence,
             processed_message_sequence,
             root_source_status,
             can_resume,
-            can_permanently_delete,
             forked_from,
         })
     })

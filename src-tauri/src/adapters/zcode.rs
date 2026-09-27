@@ -11,6 +11,11 @@
 //! data, sequence)` whose `data.type` is `text` / `reasoning` / `tool` /
 //! `step-start` / `step-finish` / `timeline` / `compaction` / `file`.
 //!
+//! Usage is in none of those rows: it lives in `turn_usage`, ZCode's per-turn
+//! rollup, read separately and summed. (`model_usage` is the per-request table,
+//! which a retried request would repeat — the rollup cannot double-count an
+//! attempt.) The store states no cost.
+//!
 //! Member mapping: every live session row is a member; a row with a `parent_id`
 //! is a CHILD member of that parent. The source cannot express a genuine user
 //! fork, so no member is ever a ForkRoot — only an explicit fork marker would
@@ -177,6 +182,37 @@ fn conversation(conn: &Connection, session_id: &str) -> Result<Vec<(Value, Vec<V
     Ok(out)
 }
 
+/// The session's usage, summed from `turn_usage`. That table is ZCode's own
+/// per-turn rollup of `model_usage` (the per-request rows, which a retried
+/// request would repeat), so it is the authoritative total and cannot
+/// double-count an attempt. The store states no cost. `cache_read_input_tokens`
+/// is the cached axis here, matching how every other adapter maps it.
+fn usage_of(conn: &Connection, session_id: &str) -> Result<MemberObservation> {
+    let (input, output, reasoning, cached) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cache_read_input_tokens), 0)
+             FROM turn_usage WHERE session_id = ?1",
+            [session_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .map_err(|e| other(format!("查询 ZCode turn_usage 失败: {e}")))?;
+    Ok(MemberObservation {
+        input_tokens: input.max(0) as u64,
+        output_tokens: output.max(0) as u64,
+        reasoning_tokens: reasoning.max(0) as u64,
+        cached_tokens: cached.max(0) as u64,
+        ..Default::default()
+    })
+}
+
 /// The conversation message one row contributes (root members only), plus its
 /// observations. A reply is only read once generation finished: the row
 /// appears when streaming starts and is rewritten in place, so an early read
@@ -186,12 +222,9 @@ fn message_of(
     parts: &[Value],
     is_root: bool,
 ) -> (Option<ParsedSessionMessage>, MemberObservation) {
-    let observation = observation_of(parts);
+    let mut observation = observation_of(parts);
     let id = message.get("id").and_then(|i| i.as_str()).unwrap_or("");
     let data = message.get("data").unwrap_or(&Value::Null);
-    if !is_root {
-        return (None, observation);
-    }
     let kind = match message_kind(data) {
         Some("assistant_response") if !is_settled(data) => None,
         other => other,
@@ -202,6 +235,15 @@ fn message_of(
     let text = text_of(parts);
     if text.trim().is_empty() {
         return (None, observation);
+    }
+    let role = if kind == "user_prompt" {
+        SessionMessageRole::User
+    } else {
+        SessionMessageRole::Assistant
+    };
+    match role {
+        SessionMessageRole::User => observation.user_messages = 1,
+        SessionMessageRole::Assistant => observation.assistant_messages = 1,
     }
     // Every settled assistant response's own `data` carries the actual
     // generation identity at the top level: `modelID` / `providerID`, older
@@ -222,6 +264,9 @@ fn message_of(
     } else {
         (None, None)
     };
+    if !is_root {
+        return (None, observation);
+    }
     let message = ParsedSessionMessage {
         source_message_id: Some(id.to_string()),
         source_position: format!("msg:{id}"),
@@ -229,11 +274,7 @@ fn message_of(
             .pointer("/time/created")
             .and_then(|t| t.as_i64())
             .and_then(ms_epoch_to_rfc3339),
-        role: if kind == "user_prompt" {
-            SessionMessageRole::User
-        } else {
-            SessionMessageRole::Assistant
-        },
+        role,
         content: text,
         provider,
         model,
@@ -396,6 +437,10 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
                 messages.push(m);
             }
         }
+        // Usage is the store's own per-turn rollup, not derivable from the
+        // message rows, so it is read separately and summed onto the same
+        // snapshot.
+        observation.add(&usage_of(&conn, &member.source_member_id)?);
 
         // There is no file to seek into and no stable prefix to fingerprint:
         // identity is the framework's own message ids, so a re-read of the whole
@@ -408,7 +453,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             stats: crate::adapters::stats_update_from(
                 &observation,
                 &source,
-                crate::adapters::StatsCapabilities::TOOL_AND_COMPACTION,
+                crate::adapters::StatsCapabilities::TOOL_AND_COMPACTION.with_tokens(),
             ),
             messages,
             source: Some(source),
@@ -525,7 +570,30 @@ mod tests {
                 id text primary key,
                 message_id text not null references message(id) on delete cascade,
                 session_id text not null, time_created integer not null,
-                time_updated integer not null, data text not null, sequence integer);",
+                time_updated integer not null, data text not null, sequence integer);
+             CREATE TABLE turn_usage (
+                session_id text not null references session(id) on delete cascade,
+                turn_id text not null,
+                trace_id text, user_message_id text,
+                status text not null check(status in ('running', 'completed', 'error', 'cancelled')),
+                started_at integer not null,
+                first_model_start_at integer, first_token_at integer, completed_at integer,
+                duration_ms integer, time_to_first_token_ms integer,
+                model_request_count integer not null default 0,
+                model_retry_count integer not null default 0,
+                tool_call_count integer not null default 0,
+                tool_error_count integer not null default 0,
+                input_tokens integer not null default 0,
+                output_tokens integer not null default 0,
+                reasoning_tokens integer not null default 0,
+                cache_creation_input_tokens integer not null default 0,
+                cache_read_input_tokens integer not null default 0,
+                computed_total_tokens integer not null default 0,
+                retryable integer not null default 0 check(retryable in (0, 1)),
+                cancelled_by_user integer not null default 0 check(cancelled_by_user in (0, 1)),
+                context_exceeded integer not null default 0 check(context_exceeded in (0, 1)),
+                error_type text, error_code text,
+                primary key(session_id, turn_id));",
         )
         .unwrap();
         path
@@ -588,6 +656,26 @@ mod tests {
             "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data, sequence)
              VALUES (?1, ?2, ?3, 0, 0, ?4, ?5)",
             rusqlite::params![id, message, session, data.to_string(), seq],
+        )
+        .unwrap();
+    }
+
+    /// One settled turn's usage, as the store's own rollup writes it.
+    fn usage_row(
+        conn: &Connection,
+        session: &str,
+        turn: &str,
+        input: i64,
+        output: i64,
+        reasoning: i64,
+        cache_read: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO turn_usage
+               (session_id, turn_id, status, started_at, input_tokens, output_tokens,
+                reasoning_tokens, cache_read_input_tokens)
+             VALUES (?1, ?2, 'completed', 0, ?3, ?4, ?5, ?6)",
+            rusqlite::params![session, turn, input, output, reasoning, cache_read],
         )
         .unwrap();
     }
@@ -894,6 +982,35 @@ mod tests {
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
                 assert_eq!(s.compaction_count, Some(1));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    /// Usage comes from the store's own per-turn rollup and adds up across the
+    /// session's turns; the message rows never carry it.
+    #[test]
+    fn usage_sums_the_turn_rollup() {
+        let root = unique_dir("usage");
+        let db = store(&root);
+        let conn = open(&db);
+        session_row(&conn, "s", None, "/repo", 100);
+        usage_row(&conn, "s", "t1", 100, 10, 3, 40);
+        usage_row(&conn, "s", "t2", 8459, 64, 0, 7000);
+        drop(conn);
+
+        let delta = ZCodeAdapter
+            .read_member_delta(
+                &member_of(&db, "s", SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(8559));
+                assert_eq!(s.output_tokens, Some(74));
+                assert_eq!(s.reasoning_tokens, Some(3));
+                assert_eq!(s.cached_tokens, Some(7040), "cache_read_input_tokens");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

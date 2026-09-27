@@ -92,7 +92,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
         </button>
         <button className={`nav-item ${workspaceActive("assistant")}`}
           onClick={() => navigate({ view: "assistant" })}>
-          <Icon name="spark" />Assistant
+          <Icon name="spark" />助手
         </button>
 
         {[{ label: "固定", rows: recent.filter(w => pinned.includes(w.id)) },

@@ -154,7 +154,7 @@ export default function ProjectDetail({ projectId, navigate }: {
         title={<span style={{ overflowWrap: "anywhere" }}>{project.name}</span>}
         actions={
           <>
-            <button className="btn ghost icon-button" aria-label="询问 Assistant" title="询问 Assistant"
+            <button className="btn ghost icon-button" aria-label="询问助手" title="询问助手"
               onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
               <Icon name="chat" />
             </button>

@@ -8,14 +8,20 @@
 //! corpus:
 //! - 14 user turn: prompt at `payload.19.2` (fallback `19.3.1`), timestamp
 //!   `5.1`;
-//! - 15 agent turn: visible prose per `payload.20.3` part; a `20.7` part only
-//!   ANNOUNCES a tool call — not counted (132 is the execution record, same
-//!   call id, 827/828 ids in both; counting both would double-count);
-//! - 132 tool call → tool_call count; 17 API error → tool_error count;
-//!   23/101 metadata and inter-agent notices → ignored.
+//! - 15 agent turn: the turn's answer at `payload.20.1` per part, falling back
+//!   to the model's narration at `20.3` when a part has no answer (the two are
+//!   disjoint — see `agent_turn`); a `20.7` part only ANNOUNCES a tool call —
+//!   not counted (132 is the execution record, same call id, 827/828 ids in
+//!   both; counting both would double-count);
+//! - 132 tool call → tool_call count; 23/101 metadata and inter-agent notices
+//!   → ignored.
 //!
 //! Steps are appended once and never rewritten, so message identity is
 //! `step:<idx>` and the full replay dedups exactly.
+//!
+//! Token usage is NOT in `steps`: it is one `gen_metadata` row per generation
+//! call, whose blob's `1.4` subtree holds the counts (see `usage_of`). The rows
+//! are summed onto the same replay snapshot.
 //!
 //! The sibling `conversation_summaries.db` holds the title (empty → the
 //! `preview`, the first user input), `parent_conversation_id` and
@@ -194,6 +200,14 @@ fn user_text(payload: &[u8]) -> Option<String> {
 /// step-132 record with the same call id (verified: 827/828 ids appear in
 /// both, announcement immediately before execution) — counting both would
 /// double-count, and 132 alone covers the calls that have no 15 announcement.
+///
+/// Each `20` part carries two disjoint prose slots: `20.1` is what the turn
+/// ANSWERS with, `20.3` is the model's running narration. Reading only `20.3`
+/// kept the narration and dropped every final answer. Verified over one real
+/// conversation (3273 steps, 1630 of them step 15): `20.1` non-empty in 20
+/// records, `20.3` non-empty in 137, both in none — so the two never describe
+/// the same turn and `20.1` is preferred per part. `20.8` mirrors `20.1` byte
+/// for byte and must not be read too.
 fn agent_turn(payload: &[u8]) -> Vec<String> {
     let mut prose = Vec::new();
     for (fnum, val) in pb_fields(payload) {
@@ -201,7 +215,7 @@ fn agent_turn(payload: &[u8]) -> Vec<String> {
             continue;
         }
         let PbVal::Bytes(part) = val else { continue };
-        if let Some(text) = pb_text(part, 3) {
+        if let Some(text) = pb_text(part, 1).or_else(|| pb_text(part, 3)) {
             prose.push(text);
         }
     }
@@ -329,38 +343,70 @@ fn parse_member(
     }))
 }
 
+/// Token usage of ONE generation call, from the `gen_metadata` blob's `1.4`
+/// subtree: `.2` fresh input, `.3` output, `.5` cache read, `.9` thinking.
+/// Verified against real rows: when a call hits the cache `.2` shrinks and `.5`
+/// grows, so `.2` excludes the cache — the same convention Claude Code and Pi
+/// use. `.1` and `.6` are constants (1319 / 24) and are NOT token counts, and
+/// `1.9.10.1` is the PROMPT-SIZE ESTIMATE the client shows, not billed input.
+/// One `gen_metadata` row is one call, so the rows add up.
+fn usage_of(data: &[u8]) -> MemberObservation {
+    let Some(usage) = pb_sub(data, 1).and_then(|m| pb_sub(m, 4)) else {
+        return MemberObservation::default();
+    };
+    let n = |f: u32| pb_varint(usage, f).unwrap_or(0);
+    MemberObservation {
+        input_tokens: n(2),
+        output_tokens: n(3),
+        cached_tokens: n(5),
+        reasoning_tokens: n(9),
+        ..Default::default()
+    }
+}
+
 /// One step row's contribution: conversation text (root only), or execution
 /// observations. `idx` is the step's stable native id.
 fn parse_step(idx: i64, step_type: i64, payload: &[u8], is_root: bool) -> Option<ParsedLine> {
     match step_type {
-        14 if is_root => {
+        14 => {
             let text = user_text(payload)?;
-            Some(ParsedLine::message_only(parsed_message(
-                idx,
-                SessionMessageRole::User,
-                text,
-                payload,
-            )))
+            let observation = MemberObservation {
+                user_messages: 1,
+                ..Default::default()
+            };
+            if !is_root {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            Some(ParsedLine {
+                message: Some(parsed_message(idx, SessionMessageRole::User, text, payload)),
+                observation,
+            })
         }
-        15 if is_root => {
+        15 => {
             let prose = agent_turn(payload);
             let text = prose.join("\n\n").trim().to_string();
             if text.is_empty() {
                 return None;
             }
-            Some(ParsedLine::message_only(parsed_message(
-                idx,
-                SessionMessageRole::Assistant,
-                text,
-                payload,
-            )))
+            let observation = MemberObservation {
+                assistant_messages: 1,
+                ..Default::default()
+            };
+            if !is_root {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            Some(ParsedLine {
+                message: Some(parsed_message(
+                    idx,
+                    SessionMessageRole::Assistant,
+                    text,
+                    payload,
+                )),
+                observation,
+            })
         }
         132 => Some(ParsedLine::observation_only(MemberObservation {
             tool_calls: 1,
-            ..Default::default()
-        })),
-        17 => Some(ParsedLine::observation_only(MemberObservation {
-            tool_errors: 1,
             ..Default::default()
         })),
         _ => None,
@@ -474,6 +520,15 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             }
         }
         drop(stmt);
+
+        // Usage is not in `steps`: one `gen_metadata` row per generation call.
+        // Every read is a full replay, so the sum becomes a snapshot.
+        let mut gen_stmt = conn.prepare("SELECT data FROM gen_metadata")?;
+        let gen_rows = gen_stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        for row in gen_rows {
+            observation.add(&usage_of(&row?));
+        }
+        drop(gen_stmt);
         drop(conn);
 
         let source = crate::adapters::sqlite_replay_cursor_update(&path, cursor)?;
@@ -481,7 +536,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             stats: crate::adapters::stats_update_from(
                 &observation,
                 &source,
-                crate::adapters::StatsCapabilities::TOOL_CALLS_AND_ERRORS,
+                crate::adapters::StatsCapabilities::TOOL_CALLS.with_tokens(),
             ),
             messages,
             source: Some(source),
@@ -584,7 +639,8 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
             "CREATE TABLE trajectory_metadata_blob (id text, data blob, PRIMARY KEY (id));
-             CREATE TABLE steps (idx integer, step_type integer NOT NULL, status integer NOT NULL DEFAULT 0, metadata blob, step_payload blob, PRIMARY KEY (idx));",
+             CREATE TABLE steps (idx integer, step_type integer NOT NULL, status integer NOT NULL DEFAULT 0, metadata blob, step_payload blob, PRIMARY KEY (idx));
+             CREATE TABLE gen_metadata (idx integer, data blob, size integer NOT NULL DEFAULT 0, PRIMARY KEY (idx));",
         )
         .unwrap();
         let metadata = [
@@ -605,6 +661,31 @@ mod tests {
             .unwrap();
         }
         db
+    }
+
+    /// One `gen_metadata` row: the `1.4` usage subtree of a single generation
+    /// call, shaped as the real blob nests it (`1.4.{2,3,5,9}`).
+    fn gen_usage(db: &Path, idx: i64, input: u64, output: u64, cache_read: u64, thinking: u64) {
+        let payload = msg(
+            1,
+            &msg(
+                4,
+                &[
+                    int(1, 1319),
+                    int(2, input),
+                    int(3, output),
+                    int(5, cache_read),
+                    int(9, thinking),
+                ]
+                .concat(),
+            ),
+        );
+        let conn = Connection::open(db).unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (?1, ?2, ?3)",
+            rusqlite::params![idx, payload, payload.len() as i64],
+        )
+        .unwrap();
     }
 
     fn summaries(root: &Path, rows: &[(&str, &str, &str, &str)]) {
@@ -639,17 +720,16 @@ mod tests {
         }
     }
 
-    /// The two conversation shapes: the user turn (14) carries the typed
-    /// prompt at `19.2`; the agent turn (15) carries visible prose at `20.3`
-    /// and tool calls at `20.7`. Tool-call steps (132) and API errors (17)
-    /// are observations only.
+    /// User turn 14 → `19.2`; agent turn 15 → its prose (`20.1`, else `20.3`);
+    /// tool calls (132) and API errors (17) are observations only.
     #[test]
     fn ingests_the_conversation_and_counts_the_machine_traffic() {
         let root = temp_dir("parse");
         let user_turn = [timestamp(1_789_480_258), msg(19, &str(2, "把日报整理一下"))].concat();
         let agent_turn = [
             timestamp(1_789_480_261),
-            msg(20, &str(3, "日报已整理好。")),
+            msg(20, &str(3, "正在整理日报。")),
+            msg(20, &str(1, "日报已整理好。")),
             msg(20, &msg(7, &str(2, "list_dir"))),
         ]
         .concat();
@@ -693,7 +773,11 @@ mod tests {
             roles,
             vec![
                 (SessionMessageRole::User, "把日报整理一下"),
-                (SessionMessageRole::Assistant, "日报已整理好。"),
+                // 同一轮里的叙述与最终回答都进：20.1 是回答，20.3 是叙述。
+                (
+                    SessionMessageRole::Assistant,
+                    "正在整理日报。\n\n日报已整理好。"
+                ),
             ]
         );
         assert_eq!(
@@ -706,11 +790,77 @@ mod tests {
             Some(crate::domain::StatsUpdate::Snapshot(s)) => {
                 // 20.7 only announces the call; 132 is the execution record.
                 assert_eq!(s.tool_call_count, Some(1));
-                assert_eq!(s.tool_error_count, Some(1), "the 429 step");
+                assert_eq!(s.user_message_count, Some(1));
+                assert_eq!(s.assistant_message_count, Some(1));
                 assert_eq!(s.compaction_count, None, "no compaction source known");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+    }
+
+    /// Usage is one `gen_metadata` row per generation call — outside `steps` —
+    /// and the calls add up. `.2`/`.3`/`.5`/`.9` are input/output/cache/thinking;
+    /// the constant `.1` and the prompt-size ESTIMATE `1.9.10.1` are never read.
+    #[test]
+    fn usage_sums_the_generation_calls() {
+        let root = temp_dir("usage");
+        let db = store(&root, "336f551c-58e8-491b-a31f-13b362786c86", &[]);
+        gen_usage(&db, 0, 17718, 138, 0, 93);
+        gen_usage(&db, 1, 5962, 71, 12211, 23);
+
+        let delta = AntigravityAdapter
+            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
+            .unwrap();
+        match delta.stats {
+            Some(crate::domain::StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(23680));
+                assert_eq!(s.output_tokens, Some(209));
+                assert_eq!(s.cached_tokens, Some(12211), "1.4.5");
+                assert_eq!(s.reasoning_tokens, Some(116), "1.4.9");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    /// The corpus shape of a final answer: a step-15 record whose only prose is
+    /// `20.1`. Reading `20.3` alone dropped exactly these — the turn answered,
+    /// the transcript showed nothing.
+    #[test]
+    fn an_answer_only_turn_is_ingested_instead_of_dropped() {
+        let root = temp_dir("answer-only");
+        let id = "336f551c-58e8-491b-a31f-13b362786c85";
+        store(
+            &root,
+            id,
+            &[
+                (
+                    14,
+                    [timestamp(1_789_480_258), msg(19, &str(2, "把日报整理一下"))].concat(),
+                ),
+                (
+                    15,
+                    [timestamp(1_789_480_261), msg(20, &str(1, "日报已整理好。"))].concat(),
+                ),
+            ],
+        );
+        summaries(&root, &[(id, "", "把日报整理一下", "[\"file:///repo\"]")]);
+
+        let db = root.join("conversations").join(format!("{id}.db"));
+        let delta = AntigravityAdapter
+            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
+            .unwrap();
+        let roles: Vec<(SessionMessageRole, &str)> = delta
+            .messages
+            .iter()
+            .map(|m| (m.role, m.content.as_str()))
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                (SessionMessageRole::User, "把日报整理一下"),
+                (SessionMessageRole::Assistant, "日报已整理好。"),
+            ]
+        );
     }
 
     /// Discovery: only conversation DBs are claimed; title falls back to the

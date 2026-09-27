@@ -153,7 +153,7 @@ pub fn attach_sessions_to_registered_paths(db: &Db) -> Result<usize> {
         let mut stmt = conn.prepare(
             "SELECT s.id, wp.id
                FROM sessions s JOIN workspace_paths wp ON wp.canonical_path = s.cwd
-              WHERE s.workspace_path_id IS NULL AND s.trashed_at IS NULL",
+              WHERE s.workspace_path_id IS NULL",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?

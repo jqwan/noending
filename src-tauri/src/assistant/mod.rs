@@ -166,10 +166,10 @@ impl AssistantService {
                 // no LLM configured: fall back to pure retrieval answer
                 let hits = crate::search::search(db, user_text, 8)?;
                 let text = if hits.is_empty() {
-                    "尚未选择 Assistant 的 Agent，或该 Agent CLI 未安装，且检索没有命中。请在 Settings → Agents 配置。".to_string()
+                    "尚未选择助手的 Agent，或该 Agent CLI 未安装，且检索没有命中。请在 Settings → Agents 配置。".to_string()
                 } else {
                     format!(
-                        "尚未选择 Assistant 的 Agent（或该 Agent CLI 未安装），以下是通过检索找到的相关内容：\n{}",
+                        "尚未选择助手的 Agent（或该 Agent CLI 未安装），以下是通过检索找到的相关内容：\n{}",
                         hits.iter()
                             .map(|h| format!(
                                 "- [{}] {}",
@@ -254,7 +254,7 @@ impl AssistantService {
 #[allow(dead_code)]
 pub fn raw_prompt(db: &Db, prompt: &str) -> Result<String> {
     let cli = CliExtractor::try_from_settings(db)?
-        .ok_or_else(|| other("Assistant 未选择 Agent（Settings → Agents 配置 Runtime）"))?;
+        .ok_or_else(|| other("助手未选择 Agent（Settings → Agents 配置 Runtime）"))?;
     let install = crate::platform::exec_resolver::resolve(cli.agent)?;
     let adapter = crate::adapters::adapter_for(cli.agent);
     let cmd = adapter.build_exec_command(&install, &cli.opts, prompt)?;

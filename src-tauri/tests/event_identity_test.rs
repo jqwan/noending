@@ -13,8 +13,8 @@
 
 use noending::adapters::AgentAdapter;
 use noending::domain::{
-    Agent, MemberStatsDelta, ParsedSessionMessage, Session, SessionMemberRelation,
-    SessionMessageRole, SourceCursorUpdate, StatsUpdate,
+    Agent, ParsedSessionMessage, Session, SessionMemberRelation, SessionMessageRole,
+    SourceCursorUpdate, StatsDelta, StatsUpdate,
 };
 use noending::storage::{new_id, Db};
 use std::path::PathBuf;
@@ -647,7 +647,7 @@ fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
             &s.id,
             &member_id,
             &[],
-            Some(StatsUpdate::Delta(MemberStatsDelta {
+            Some(StatsUpdate::Delta(StatsDelta {
                 tool_call_count: Some(2),
                 ..Default::default()
             })),
@@ -745,7 +745,7 @@ fn child_member_messages_are_rejected_not_stored() {
         &s.id,
         &child_id,
         &[],
-        Some(StatsUpdate::Delta(MemberStatsDelta {
+        Some(StatsUpdate::Delta(StatsDelta {
             tool_call_count: Some(1),
             ..Default::default()
         })),
@@ -1053,11 +1053,10 @@ fn reingest_preserves_message_ids_and_dedups() {
     assert_eq!(db.get_messages(&s.id, None, 100).unwrap().len(), 3);
 }
 
-/// A commit racing a Trash stores NOTHING: the trashed session takes
-/// no messages, no stats and no cursor move, so a Restore resumes from the
-/// untouched cursor.
+/// A commit racing a Trash stores its whole batch: the recycle bin filters
+/// lists and freezes Context, not the facts a source keeps producing.
 #[test]
-fn trashed_session_commit_stores_nothing() {
+fn trashed_session_commit_stores_its_batch() {
     let db = open_db("trash-guard");
     let dir = unique_dir("trash-guard");
     let (s, member_id) =
@@ -1077,7 +1076,7 @@ fn trashed_session_commit_stores_nothing() {
 
     noending::lifecycle::trash_session(&db, &s.id).unwrap();
 
-    let rejected = db
+    let stored = db
         .commit_member_ingest(
             &s.id,
             &member_id,
@@ -1086,12 +1085,15 @@ fn trashed_session_commit_stores_nothing() {
             &append(0),
         )
         .unwrap();
-    assert!(rejected.is_empty(), "a trashed session takes nothing");
-    assert_eq!(db.message_count(&s.id).unwrap(), 1);
     assert_eq!(
-        db.get_member_cursor(&member_id).unwrap().byte_offset,
-        cursor_before.byte_offset,
-        "the cursor did not move"
+        stored.len(),
+        1,
+        "a trashed session takes its source's batch"
+    );
+    assert_eq!(db.message_count(&s.id).unwrap(), 2);
+    assert!(
+        db.get_member_cursor(&member_id).unwrap().byte_offset > cursor_before.byte_offset,
+        "the cursor moved with the commit"
     );
 }
 

@@ -1,21 +1,22 @@
 //! Session lifecycle — Trash / Restore / permanent LOCAL delete.
 //!
-//! Trash freezes a session: no member ingestion commits against it, it leaves
-//! search, cannot resume, and never touches the Agent source file (NoEnding never
-//! deletes an Agent-owned source). Restore keeps the same id, Owner, messages,
-//! cursors and Context frontier, then reindexes. Permanent delete is a
-//! NoEnding-LOCAL purge (no job, no filesystem step, no crash recovery), allowed
-//! only for a TRASHED session whose ROOT source the adapter freshly confirmed
-//! Missing; it removes exactly the session-owned rows, redacts Context provenance
-//! in place, and leaves no tombstone.
+//! Trash is a thin filter: it decides which lists a Session appears in and
+//! freezes its Context extraction. Everything else keeps following the source —
+//! member ingestion still commits, ownership still matches, and the Agent source
+//! file is never touched (NoEnding never deletes an Agent-owned source). Restore
+//! keeps the same id, Owner, messages, cursors and Context frontier, then
+//! reindexes. Permanent delete is a NoEnding-LOCAL purge (no job, no filesystem
+//! step, no crash recovery), allowed only for a TRASHED session whose ROOT source
+//! the adapter freshly confirmed Missing; it removes exactly the session-owned
+//! rows, redacts Context provenance in place, and leaves no tombstone.
 //!
 //! Adapter verdicts are driven with REAL files via `inspect_file_source`; only
 //! temp dirs are used, never the real ~/.codex, ~/.claude or ~/.pi.
 
 use noending::domain::diagnostic_kind;
 use noending::domain::{
-    Agent, LaunchIntent, MemberStatsDelta, SessionMemberRelation, SessionMessageRole,
-    SourceAvailability, StatsUpdate,
+    Agent, LaunchIntent, SessionMemberRelation, SessionMessageRole, SourceAvailability, StatsDelta,
+    StatsUpdate,
 };
 use noending::lifecycle;
 use noending::search;
@@ -225,7 +226,7 @@ fn context_item_pointing_at(
 // lifecycle trash / restore
 
 #[test]
-fn trash_freezes_the_session_and_keeps_every_fact() {
+fn trash_keeps_every_fact_and_never_touches_the_source() {
     let db = open_db("trash-freezes");
     let dir = TempDir::new("trash-freezes-src");
     let (s, member) = seeded_session(&db, &dir, SourceKind::File);
@@ -252,7 +253,8 @@ fn trash_freezes_the_session_and_keeps_every_fact() {
         "trash must never touch the Agent source"
     );
 
-    // NoEnding data untouched: messages, owner, cursor, frontier all survive.
+    // The flip itself rewrites nothing: messages, owner, cursor and frontier
+    // are all exactly as they were.
     assert_eq!(db.message_count(&s.id).unwrap(), 1);
     assert_eq!(
         db.get_session(&s.id).unwrap().unwrap().owner_workstream_id,
@@ -262,7 +264,7 @@ fn trash_freezes_the_session_and_keeps_every_fact() {
     let cursor_after = db.get_member_cursor(&member).unwrap();
     assert_eq!(
         cursor_before.byte_offset, cursor_after.byte_offset,
-        "cursor frozen"
+        "the trash flip itself does not move the cursor"
     );
     assert_eq!(
         cursor_before.identity_tail_hash,
@@ -314,11 +316,10 @@ fn trash_is_hidden_from_list_projections_and_cards() {
     assert!(latest_after.is_none());
 }
 
-///  — an in-flight member batch that tries to commit after a Trash
-/// stores NOTHING: no message, no stats, no cursor move. A Restore resumes
-/// from the untouched cursor and picks up what was suppressed.
+/// Trash does not stop a commit: an in-flight batch that lands after a Trash
+/// stores its messages, stats and cursor move like any other.
 #[test]
-fn inflight_ingest_cannot_commit_after_trash_and_resumes_after_restore() {
+fn inflight_ingest_commits_after_trash() {
     let db = open_db("inflight-guard");
     let dir = TempDir::new("inflight-src");
     let (s, member) = seeded_session(&db, &dir, SourceKind::File);
@@ -328,29 +329,19 @@ fn inflight_ingest_cannot_commit_after_trash_and_resumes_after_restore() {
     // T1: the user trashes while the next batch is in flight…
     lifecycle::trash_session(&db, &s.id).unwrap();
 
-    // …T2: the staged batch tries to commit and is rejected.
+    // …T2: the staged batch commits anyway — the source is the authority.
     let stored = commit_message(&db, &s.id, &member, "second round message", 200);
-    assert!(stored.is_empty(), "a trashed session takes no messages");
+    assert_eq!(stored.len(), 1, "a trashed session still takes its source");
 
-    assert_eq!(db.message_count(&s.id).unwrap(), 1);
+    assert_eq!(db.message_count(&s.id).unwrap(), 2);
     let cursor_after = db.get_member_cursor(&member).unwrap();
-    assert_eq!(
-        cursor_before.byte_offset, cursor_after.byte_offset,
-        "cursor frozen"
-    );
-    assert_eq!(
-        cursor_before.identity_tail_hash, cursor_after.identity_tail_hash,
-        "the identity chain tail is frozen too"
+    assert!(
+        cursor_before.byte_offset < cursor_after.byte_offset,
+        "the cursor advanced with the committed batch"
     );
 
-    // Restore → the next commit resumes from the untouched cursor.
+    // Restore keeps everything the trashed Session ingested meanwhile.
     lifecycle::restore_session(&db, &s.id).unwrap();
-    let stored = commit_message(&db, &s.id, &member, "second round message", 200);
-    assert_eq!(
-        stored.len(),
-        1,
-        "the suppressed batch commits after restore"
-    );
     assert_eq!(db.message_count(&s.id).unwrap(), 2);
 }
 
@@ -448,57 +439,47 @@ fn active_session_is_never_purgeable_even_when_root_is_missing() {
     assert!(db.get_session(&s.id).unwrap().is_some());
 }
 
-/// row 2 — Trash + Root Present refuses the purge.
+/// Trash alone decides: a present or unconfirmable root is purged exactly like
+/// a missing one. The source file is never touched and the identity is left
+/// free, so a readable source is simply rebuilt as a new Session. (The
+/// deterministic Unavailable fixture is a DIRECTORY at the source path —
+/// `inspect_file_source` answers Unavailable for a non-regular file.)
 #[test]
-fn trashed_with_root_present_refuses_the_purge() {
-    let db = open_db("present-refuses");
-    let dir = TempDir::new("present-src");
-    let (s, _member) = seeded_session(&db, &dir, SourceKind::File);
-    let source_file = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        PathBuf::from(&root.source_path)
-    };
-    lifecycle::trash_session(&db, &s.id).unwrap();
+fn trashed_session_is_purgeable_whatever_the_root_source_says() {
+    for (tag, kind, expected) in [
+        ("present", SourceKind::File, SourceAvailability::Present),
+        (
+            "unavailable",
+            SourceKind::Directory,
+            SourceAvailability::Unavailable,
+        ),
+    ] {
+        let db = open_db(&format!("purge-{tag}"));
+        let dir = TempDir::new(&format!("purge-{tag}-src"));
+        let (s, _member) = seeded_session(&db, &dir, kind);
+        let source_path = {
+            let root = db.root_member_for_session(&s.id).unwrap().unwrap();
+            PathBuf::from(&root.source_path)
+        };
+        lifecycle::trash_session(&db, &s.id).unwrap();
 
-    let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
-    assert_eq!(preview.root_source_status, SourceAvailability::Present);
-    assert!(
-        !preview.can_permanently_delete,
-        "a present source is living data — no purge offered"
-    );
-    let err = lifecycle::permanently_delete_session(&db, &s.id).unwrap_err();
-    assert!(err.to_string().contains("missing"), "unexpected: {err}");
+        let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
+        assert_eq!(preview.root_source_status, expected, "{tag}");
 
-    assert!(
-        db.get_session(&s.id).unwrap().is_some(),
-        "nothing was purged"
-    );
-    assert!(source_file.exists(), "the file was never touched");
-}
-
-/// row 3 — Trash + Root Unavailable refuses: any doubt ≠ missing.
-/// The deterministic Unavailable fixture is a DIRECTORY at the source path
-/// (`inspect_file_source`: non-regular file → Unavailable).
-#[test]
-fn trashed_with_root_unavailable_refuses_the_purge() {
-    let db = open_db("unavailable-refuses");
-    let dir = TempDir::new("unavailable-src");
-    let (s, _member) = seeded_session(&db, &dir, SourceKind::Directory);
-    let source_path = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        PathBuf::from(&root.source_path)
-    };
-    assert!(source_path.is_dir(), "fixture sanity");
-    lifecycle::trash_session(&db, &s.id).unwrap();
-
-    let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
-    assert_eq!(preview.root_source_status, SourceAvailability::Unavailable);
-    assert!(!preview.can_permanently_delete);
-
-    let err = lifecycle::permanently_delete_session(&db, &s.id).unwrap_err();
-    assert!(err.to_string().contains("missing"), "unexpected: {err}");
-    assert!(db.get_session(&s.id).unwrap().is_some());
-    assert!(source_path.is_dir(), "nothing on disk was touched");
+        let result = lifecycle::permanently_delete_session(&db, &s.id).unwrap();
+        assert!(result.purged, "{tag}");
+        assert!(db.get_session(&s.id).unwrap().is_none(), "{tag}");
+        assert!(
+            source_path.exists(),
+            "{tag}: the Agent source is never touched"
+        );
+        assert!(
+            db.find_session_by_root_agent_id(Agent::Codex, &s.root_agent_session_id)
+                .unwrap()
+                .is_none(),
+            "{tag}: the identity is free, so a rebuild produces a NEW session"
+        );
+    }
 }
 
 /// rows 4-5 — the full purge: Trash + fresh Missing, execute re-checks
@@ -539,7 +520,7 @@ fn permanent_delete_purges_local_rows_only() {
         &s.id,
         &member,
         &[],
-        Some(StatsUpdate::Delta(MemberStatsDelta {
+        Some(StatsUpdate::Delta(StatsDelta {
             tool_call_count: Some(3),
             ..Default::default()
         })),
@@ -572,7 +553,6 @@ fn permanent_delete_purges_local_rows_only() {
 
     let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
     assert_eq!(preview.root_source_status, SourceAvailability::Missing);
-    assert!(preview.can_permanently_delete);
     assert_eq!(preview.counts.message_count, 1);
     assert_eq!(preview.counts.member_count, 1);
     assert!(preview.counts.session_context_count >= 1);
@@ -731,10 +711,10 @@ fn permanent_delete_purges_local_rows_only() {
     assert!(db.get_workstream(&ws.id).unwrap().is_some());
 }
 
-/// row 5 — execute takes the source verdict FRESHLY: a file that
-/// reappeared between preview and execute aborts the purge.
+/// A source that reappeared between preview and execute does not block the
+/// purge: the verdict is copy for the dialog, not a gate.
 #[test]
-fn execute_rechecks_the_source_and_a_reappearing_file_blocks_the_purge() {
+fn a_reappearing_source_does_not_block_the_purge() {
     let db = open_db("fresh-recheck");
     let dir = TempDir::new("recheck-src");
     let (s, _member) = seeded_session(&db, &dir, SourceKind::File);
@@ -746,26 +726,22 @@ fn execute_rechecks_the_source_and_a_reappearing_file_blocks_the_purge() {
     lifecycle::trash_session(&db, &s.id).unwrap();
     std::fs::remove_file(&source_file).unwrap();
     let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
-    assert!(preview.can_permanently_delete, "preview saw Missing");
+    assert_eq!(preview.root_source_status, SourceAvailability::Missing);
 
     // The user restores the file from backup before confirming.
     std::fs::write(&source_file, "the source came back\n").unwrap();
 
-    let err = lifecycle::permanently_delete_session(&db, &s.id).unwrap_err();
-    assert!(err.to_string().contains("missing"), "unexpected: {err}");
-    assert!(
-        db.get_session(&s.id).unwrap().is_some(),
-        "nothing was purged"
-    );
+    let result = lifecycle::permanently_delete_session(&db, &s.id).unwrap();
+    assert!(result.purged);
+    assert!(db.get_session(&s.id).unwrap().is_none());
     assert!(
         source_file.exists(),
-        "the reappeared file is never deleted by a refusal"
+        "the reappeared file is never deleted by the purge"
     );
 }
 
-/// row 6 — only the ROOT source is the deletion authority: a child
-/// member's source may well still exist while the root is gone, and the purge
-/// proceeds — without ever touching that child file.
+/// The purge has no filesystem step: a child member's source file survives a
+/// purge just like the root's.
 #[test]
 fn child_source_may_survive_when_root_is_missing() {
     let db = open_db("child-source");
@@ -810,8 +786,8 @@ fn child_source_may_survive_when_root_is_missing() {
     );
 }
 
-/// no tombstone: after a purge the root identity is free, and a
-/// reappearing source may be re-ingested as a NEW session with no Owner.
+/// no tombstone: a purge frees the root identity, and a source that is still
+/// there (the usual case) is re-discovered as a NEW Session with no Owner.
 #[test]
 fn a_purged_root_may_be_reingested_as_a_new_session() {
     let db = open_db("no-tombstone");
@@ -827,9 +803,12 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     set_owner(&db, &s.id, &ws.id);
 
     lifecycle::trash_session(&db, &s.id).unwrap();
-    std::fs::remove_file(&source_file).unwrap();
     lifecycle::permanently_delete_session(&db, &s.id).unwrap();
 
+    assert!(
+        source_file.exists(),
+        "the source was there all along — the purge never touches it"
+    );
     assert!(
         db.find_session_by_root_agent_id(Agent::Codex, &root_id)
             .unwrap()
@@ -837,9 +816,8 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
         "the identity is free — nothing remembers the old session"
     );
 
-    // The source comes back (backup restore): discovery re-ingests it as a
-    // brand-new Logical Session.
-    std::fs::write(&source_file, "the source came back\n").unwrap();
+    // Discovery re-reads the same source: a brand-new Logical Session, no
+    // Owner, no Context, no launch history.
     let (s2, is_new) = db
         .upsert_logical_session_unchecked(
             Agent::Codex,

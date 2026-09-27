@@ -345,7 +345,8 @@ export default function WorkstreamDetailView({
         )}
       </PageHeader>
 
-      {/* Workstream 自身（Base Experience） */}
+      {/* Workstream 自身（Base Experience）：与另外两个详情页同形——主栏是内容本身
+          （概览、会话、Context），右栏是只读事实（状态、路径、项目）。 */}
       <div className="task-detail-layout">
         <div className="task-detail-main">
         <section className="rail-section">
@@ -366,6 +367,20 @@ export default function WorkstreamDetailView({
           navigate={navigate}
           onNewSession={archived ? undefined : () => setNewSessionOpen(true)}
           allowActions={!archived}
+        />
+
+        {/* Context：只读当前状态 + 显式更新 + 人工纠正 */}
+        <IntelligenceSections
+          ctx={ctx}
+          entry={entry}
+          workstreamId={workstreamId}
+          navigate={navigate}
+          onChanged={refresh}
+          ctxState={ctxState}
+          ctxUpdating={ctxUpdating}
+          ctxUpdateError={ctxUpdateError}
+          onCopyContext={copyContext}
+          onUpdateContext={updateContext}
         />
 
         </div>
@@ -421,22 +436,6 @@ export default function WorkstreamDetailView({
 
         </section>
         </aside>
-      </div>
-
-      {/* Context：只读当前状态 + 显式更新 + 人工纠正 */}
-      <div className="ws-detail-grid">
-        <IntelligenceSections
-          ctx={ctx}
-          entry={entry}
-          workstreamId={workstreamId}
-          navigate={navigate}
-          onChanged={refresh}
-          ctxState={ctxState}
-          ctxUpdating={ctxUpdating}
-          ctxUpdateError={ctxUpdateError}
-          onCopyContext={copyContext}
-          onUpdateContext={updateContext}
-        />
       </div>
 
       {newSessionOpen && (
@@ -630,6 +629,8 @@ function IntelligenceSections({
 
   return (
     <>
+      {/* Context 段落并入主栏后纵向堆叠：当前事实在上，冲突 / 变更在下。 */}
+      <div className="ws-context-stack">
       <div>
         {ctxState && (
           <div style={{ marginBottom: 18 }}>
@@ -703,6 +704,7 @@ function IntelligenceSections({
           }}
         />
         <RecentChangesTimeline changes={ctx.recent_changes ?? []} />
+      </div>
       </div>
 
       {reviewingConflict && (

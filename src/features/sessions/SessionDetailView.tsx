@@ -1,5 +1,5 @@
 import Icon from "../../components/Icon";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
@@ -54,7 +54,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const currentSessionId = useRef(sessionId);
   currentSessionId.current = sessionId;
   // 回收站动作（Session Lifecycle & Deletion）：确认弹窗、执行中的 busy、
-  // 以及从详情页直接发起的永久删除 Modal。
+  // 以及从详情页直接发起的删除 Modal。
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [trashBusy, setTrashBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
@@ -209,9 +209,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   /** Conversation：只有 root 的 user/assistant prose。 */
   const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
 
-  /** 按钮只在真的有内容可更新时出现：需要已读到 Context、有消息，且无摘要或有增量。 */
+  /** 按钮只在真的有内容可更新时出现：需要已读到 Context、有消息，且无摘要或有增量。
+      回收站中的会话在后端冻结了上下文提取，所以这里也不给入口。 */
   const canUpdateSummary =
-    sessionCtx !== null
+    !trashed
+    && sessionCtx !== null
     && messages.length > 0
     && (sessionCtx.fields === null || sessionCtx.pending);
 
@@ -236,7 +238,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       <PageHeader
         title={title}
         actions={trashed ? (
-          // 回收站中的会话：摄入已停止、后端拒绝 Resume——两个入口都如实呈现为不可用。
+          // 回收站中的会话：后端拒绝 Resume——如实呈现为不可用。
           <button className="btn ghost icon-button" disabled
             aria-label="继续" title="回收站中的会话不能继续；先在上面的横幅里恢复它。">
             <Icon name="play" />
@@ -254,29 +256,21 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         )}
       />
 
-      {/* 回收站横幅：恢复永远可用；「永久删除」只在
-          can_permanently_delete（trashed + fresh root missing）时出现。 */}
+      {/* 回收站横幅：Trash 是唯一门槛，恢复与删除都可用；删除的结果由弹窗读源状态后说明。 */}
       {trashed && (
         <div className="session-trash-banner">
           <div style={{ minWidth: 0 }}>
             <b>该会话在回收站中</b>
             <div className="small muted" style={{ marginTop: 2 }}>
-              移入回收站：{formatDateTime(session.trashed_at)}。NoEnding 已停止摄入这个会话；
-              Agent 原始会话不会被删除，随时可以恢复。
+              移入回收站：{formatDateTime(session.trashed_at)}。它已从常用列表中移除，
+              上下文提取在此冻结；Agent 原始会话不会被删除，随时可以恢复。
             </div>
-            {!detail.can_permanently_delete && (
-              <div className="muted small" style={{ marginTop: 4 }}>
-                永久删除不可用（Root 源仍存在或无法确认）。
-              </div>
-            )}
           </div>
           <div className="row" style={{ flex: "none", gap: 8 }}>
             <button className="btn small" disabled={trashBusy} onClick={doRestore}>恢复</button>
-            {detail.can_permanently_delete && (
-              <button className="btn small" disabled={trashBusy} onClick={() => setPurgeOpen(true)}>
-                永久删除…
-              </button>
-            )}
+            <button className="btn small" disabled={trashBusy} onClick={() => setPurgeOpen(true)}>
+              删除…
+            </button>
           </div>
         </div>
       )}
@@ -378,7 +372,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       {/* 详情只预览最近 10 条：整段会话在「查看全部会话」里按需向前翻页读。
           条数用 ingested_message_sequence（当前会话总数），而不是这里的条数。 */}
       <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
-        <div className="section-label" style={{ margin: 0 }}>消息</div>
+        <div className="section-label" style={{ margin: 0 }}>会话消息</div>
         {detail.ingested_message_sequence > 0 && (
           <button
             className="btn small ghost"
@@ -566,10 +560,10 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           它们是 Agent 内部的执行单元，不是另一个 Session 页面。 */}
       <section className="rail-section">
       <div className="section-label">执行信息</div>
-      <ExecutionStats stats={detail.stats} />
+      <ExecutionStats stats={detail.stats} costUnit={detail.cost_unit} />
       {detail.members.length > 0 && (
         <>
-          <div style={{ marginTop: 8 }}>
+          <div style={{ marginTop: 12 }}>
             <button
               className="btn small ghost"
               aria-expanded={membersOpen}
@@ -651,36 +645,64 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 const fmtCount = (n: number | null): string => (n === null ? "—" : n.toLocaleString("en-US"));
 
 /**
- * 聚合执行统计。基础形状（成员 / 子 / 边 / 深度）永远显示；
- * 工具、token、成本、模型这些行只在数据真的在场上时出现——有数据才显示，
- * 没有就不画一行「0」去冒称观测。
+ * 聚合执行统计：标签列 + 两列数值。基础形状（成员 / 子 / 边 / 深度）永远显示；
+ * 消息、token、成本只在数据真的在场上时出现——有数据才显示，没有就不画一行「0」去冒称观测。
+ * 组名叫「消息构成」：这一组描述整个执行图的**源消息**构成——用户、助手的对话轮次，
+ * 以及工具调用、压缩、协同（子代理转述）这些源记录。每个成员各自统计，这里是汇总；
+ * 单个成员自己的份额在「成员树」里该成员那一行。
+ * 成本带单位：数字各 Agent 有自己的单位（Pi 是 USD，Qoder 是 credits），不写单位就等于
+ * 替源安了一个它没用的单位。
+ *
+ * 不用「值 · 值 · 值」串烧：右栏只有 240–300px，十来个数字挤一行必然折行，
+ * 而折回来的第二行顶格起排、看起来像新的一条。两列网格让每个数各占一格，
+ * 折行和错位都不会发生，标签也把「工具 4」这类孤零零的数字放回了它的组里。
  */
-function ExecutionStats({ stats }: { stats: SessionDetail["stats"] }) {
-  const toolBits: string[] = [];
-  if (stats.tool_call_count > 0) toolBits.push(`工具调用 ${stats.tool_call_count}`);
-  if (stats.tool_error_count > 0) toolBits.push(`失败 ${stats.tool_error_count}`);
-  if (stats.compaction_count > 0) toolBits.push(`压缩 ${stats.compaction_count}`);
-  if (stats.side_activity_count > 0) toolBits.push(`边活动 ${stats.side_activity_count}`);
+function ExecutionStats({
+  stats,
+  costUnit,
+}: {
+  stats: SessionDetail["stats"];
+  costUnit: SessionDetail["cost_unit"];
+}) {
+  const messageCells: string[] = [];
+  if (stats.user_message_count > 0) messageCells.push(`用户 ${stats.user_message_count}`);
+  if (stats.assistant_message_count > 0)
+    messageCells.push(`助手 ${stats.assistant_message_count}`);
+  if (stats.tool_call_count > 0) messageCells.push(`工具 ${stats.tool_call_count}`);
+  if (stats.compaction_count > 0) messageCells.push(`压缩 ${stats.compaction_count}`);
+  if (stats.side_activity_count > 0) messageCells.push(`协同 ${stats.side_activity_count}`);
 
-  const tokenBits: string[] = [];
-  if (stats.input_tokens !== null) tokenBits.push(`输入 ${fmtCount(stats.input_tokens)}`);
-  if (stats.output_tokens !== null) tokenBits.push(`输出 ${fmtCount(stats.output_tokens)}`);
-  if (stats.cached_tokens !== null) tokenBits.push(`缓存 ${fmtCount(stats.cached_tokens)}`);
-  if (stats.reasoning_tokens !== null) tokenBits.push(`推理 ${fmtCount(stats.reasoning_tokens)}`);
+  const tokenCells: string[] = [];
+  if (stats.input_tokens !== null) tokenCells.push(`输入 ${fmtCount(stats.input_tokens)}`);
+  if (stats.output_tokens !== null) tokenCells.push(`输出 ${fmtCount(stats.output_tokens)}`);
+  if (stats.cached_tokens !== null) tokenCells.push(`缓存 ${fmtCount(stats.cached_tokens)}`);
+  if (stats.reasoning_tokens !== null) tokenCells.push(`推理 ${fmtCount(stats.reasoning_tokens)}`);
 
   // 不显示"Session 的 model/provider/effort"：一个 Logical Session 可能中途切模型，
   // 不存在天然的 Session model；消息级模型标签在消息上。
 
-  return (
-    <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
-      <div className="small">
-        成员 {stats.member_count} · 子 {stats.child_count} · 边 {stats.side_count} · 最大深度 {stats.max_depth}
+  const group = (label: string, cells: string[], key: string) => (
+    <Fragment key={key}>
+      <div className="muted small exec-label">{label}</div>
+      <div className="exec-pairs">
+        {cells.map((c) => <span key={c}>{c}</span>)}
       </div>
-      {toolBits.length > 0 && <div className="small muted">{toolBits.join(" · ")}</div>}
-      {tokenBits.length > 0 && <div className="small muted">Tokens {tokenBits.join(" · ")}</div>}
-      {stats.cost !== null && (
-        <div className="small muted">成本 {stats.cost.toLocaleString("en-US", { maximumFractionDigits: 4 })}</div>
-      )}
+    </Fragment>
+  );
+
+  return (
+    <div className="exec-metrics">
+      {group("成员树", [
+        `${stats.member_count} 个成员`,
+        `${stats.child_count} 子`,
+        `${stats.side_count} 边`,
+        `深度 ${stats.max_depth}`,
+      ], "tree")}
+      {messageCells.length > 0 && group("消息构成", messageCells, "messages")}
+      {tokenCells.length > 0 && group("Tokens", tokenCells, "tokens")}
+      {stats.cost !== null && group("成本", [
+        `${stats.cost.toLocaleString("en-US", { maximumFractionDigits: 4 })}${costUnit ? ` ${costUnit}` : ""}`,
+      ], "cost")}
     </div>
   );
 }
@@ -688,28 +710,40 @@ function ExecutionStats({ stats }: { stats: SessionDetail["stats"] }) {
 const RELATION_LABELS: Record<SessionMemberRelation, string> = {
   root: "根",
   child: "子",
-  side: "边执行",
+  side: "边",
 };
 
-/** 一行成员：关系标签 + 稳定身份（mono，截断，原值在 title 里）+ 自身计数。 */
+/**
+ * 一行成员：关系标签 + 稳定身份（mono，居中断尾，原值在 title 里），自身计数另起一行。
+ *
+ * 每个成员——根、子、边——都有自己的消息构成计数（用户 / 助手 / 工具 / 压缩 / 协同），
+ * 这一行显示的就是该成员自己的份额；右栏的「消息构成」组是这些份额的汇总。
+ *
+ * 计数不再和身份挤同一行：「根 / 子 / 边」三个标签宽度不同，身份列因此对不齐，
+ * 计数又常把这一行挤到换行——树里于是出现一行 46px、一行 19px 的锯齿。
+ * 关系标签固定列宽 + 计数独占第二行后，每行等高、身份列对齐。
+ */
 function MemberRow({ member, depth }: { member: DetailMember; depth: number }) {
   const s = member.stats;
   const bits: string[] = [];
-  if (s?.tool_call_count != null) bits.push(`工具 ${s.tool_call_count}`);
-  if (s?.tool_error_count != null && s.tool_error_count > 0) bits.push(`失败 ${s.tool_error_count}`);
-  if (s?.compaction_count != null && s.compaction_count > 0) bits.push(`压缩 ${s.compaction_count}`);
+  const counted = (label: string, value: number | null | undefined) => {
+    if (value != null && value > 0) bits.push(`${label} ${value}`);
+  };
+  counted("用户", s?.user_message_count);
+  counted("助手", s?.assistant_message_count);
+  counted("工具", s?.tool_call_count);
+  counted("压缩", s?.compaction_count);
+  counted("协同", s?.side_activity_count);
 
   return (
-    <div className="row" style={{ paddingLeft: depth * 18, gap: 8, minWidth: 0, alignItems: "baseline" }}>
-      <span className="badge" style={{ flex: "none" }}>{RELATION_LABELS[member.relation]}</span>
-      <span
-        className="mono small"
-        style={{ minWidth: 0, overflowWrap: "anywhere" }}
-        title={member.source_member_id}
-      >
-        {shrinkMiddle(member.source_member_id, MEMBER_ID_WIDTH)}
-      </span>
-      {bits.length > 0 && <span className="muted small" style={{ flex: "none" }}>{bits.join(" · ")}</span>}
+    <div className="member-row" style={{ paddingLeft: depth * 16 }}>
+      <span className="badge member-rel">{RELATION_LABELS[member.relation]}</span>
+      <div className="member-body">
+        <div className="mono small member-id" title={member.source_member_id}>
+          {shrinkMiddle(member.source_member_id, MEMBER_ID_WIDTH)}
+        </div>
+        {bits.length > 0 && <div className="muted small">{bits.join(" · ")}</div>}
+      </div>
     </div>
   );
 }
@@ -741,7 +775,7 @@ function MemberTree({ members }: { members: DetailMember[] }) {
   ];
 
   return (
-    <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+    <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
       {byParent.top.flatMap((m) => renderNode(m, 0))}
     </div>
   );

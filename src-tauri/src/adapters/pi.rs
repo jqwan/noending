@@ -202,11 +202,14 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         cursor: &SessionMemberCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
+        let is_root = member.relation.as_str() == "root";
         read_jsonl_delta(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::COMPACTION,
-            &|_idx, v| parse_line(v, member.relation.as_str() == "root"),
+            crate::adapters::StatsCapabilities::COMPACTION
+                .with_tokens()
+                .with_cost(),
+            &|_idx, v| parse_line(v, is_root),
         )
     }
 
@@ -214,6 +217,11 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         Ok(crate::adapters::inspect_file_source(Path::new(
             &member.source_path,
         )))
+    }
+
+    /// Pi's `cost.total` is real money in US dollars.
+    fn cost_unit(&self) -> Option<&'static str> {
+        Some("USD")
     }
 
     fn build_new_command(
@@ -282,6 +290,29 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 
 /// One line's contribution. `toolResult` messages and every other role are
 /// machine traffic; thinking blocks are filtered by `content_text`.
+/// `message.usage` of one assistant call, as counts. The source states each
+/// number directly — no derived sums: `input` excludes `cacheRead` / `cacheWrite`
+/// and folding them in would invent a total the source never reported. Cost is
+/// the same record's `cost.total` (USD).
+fn usage_observation(msg: &Value) -> MemberObservation {
+    let Some(usage) = msg.get("usage") else {
+        return MemberObservation::default();
+    };
+    let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    MemberObservation {
+        input_tokens: n("input"),
+        output_tokens: n("output"),
+        cached_tokens: n("cacheRead"),
+        reasoning_tokens: n("reasoning"),
+        cost: usage
+            .get("cost")
+            .and_then(|c| c.get("total"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        ..Default::default()
+    }
+}
+
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let source_message_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
@@ -291,40 +322,54 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             let msg = v.get("message").unwrap_or(&Value::Null);
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
             let text = content_text(msg.get("content").unwrap_or(&Value::Null));
+            // Usage rides on the assistant entry itself (verified: 63 usage
+            // records, all `message`/`assistant`). Counting it before the text
+            // gate keeps a usage-bearing entry from being dropped for having no
+            // prose.
+            let mut observation = usage_observation(msg);
             if text.trim().is_empty() {
-                return None;
+                return (!observation.is_empty())
+                    .then(|| ParsedLine::observation_only(observation));
             }
-            match (role, is_root) {
-                ("user", true) if !crate::adapters::is_injected_preamble(&text) => {
-                    Some(ParsedLine::message_only(crate::adapters::parsed_message(
-                        source_message_id,
-                        SessionMessageRole::User,
-                        text,
-                    )))
-                }
-                ("assistant", true) => {
-                    // The assistant entry itself carries `message.provider` /
-                    // `message.model`, the actual generation identity (present
-                    // on every assistant entry in the real corpus). Direct
-                    // evidence wins over the redundant `model_change` events.
-                    Some(ParsedLine::message_only(
-                        crate::adapters::parsed_message(
-                            source_message_id,
-                            SessionMessageRole::Assistant,
-                            text,
-                        )
-                        .with_provenance(
-                            msg.get("provider")
-                                .and_then(|p| p.as_str())
-                                .map(String::from),
-                            msg.get("model").and_then(|m| m.as_str()).map(String::from),
-                        ),
-                    ))
-                }
+            let role = match role {
+                "user" if !crate::adapters::is_injected_preamble(&text) => SessionMessageRole::User,
+                "assistant" => SessionMessageRole::Assistant,
                 // Tool output is a `toolResult` MESSAGE in pi; every other
-                // non-conversation role is runtime chatter.
-                _ => None,
+                // non-conversation role is runtime chatter. Usage, when the
+                // entry has any, is still counted.
+                _ => {
+                    return (!observation.is_empty())
+                        .then(|| ParsedLine::observation_only(observation))
+                }
+            };
+            match role {
+                SessionMessageRole::User => observation.user_messages = 1,
+                SessionMessageRole::Assistant => observation.assistant_messages = 1,
             }
+            if !is_root {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            // The assistant entry itself carries `message.provider` /
+            // `message.model`, the actual generation identity (present on every
+            // assistant entry in the real corpus). Direct evidence wins over the
+            // redundant `model_change` events.
+            let (provider, model) = if role == SessionMessageRole::Assistant {
+                (
+                    msg.get("provider")
+                        .and_then(|p| p.as_str())
+                        .map(String::from),
+                    msg.get("model").and_then(|m| m.as_str()).map(String::from),
+                )
+            } else {
+                (None, None)
+            };
+            Some(ParsedLine {
+                message: Some(
+                    crate::adapters::parsed_message(source_message_id, role, text)
+                        .with_provenance(provider, model),
+                ),
+                observation,
+            })
         }
         "compaction" | "compact" => Some(ParsedLine::observation_only(MemberObservation {
             compactions: 1,
@@ -367,7 +412,7 @@ mod tests {
         [
             r#"{"type":"session","id":"p1","cwd":"/repo","version":3,"timestamp":"2026-09-18T12:40:00.000Z"}"#,
             r#"{"type":"message","id":"m1","parentId":"p1","timestamp":"2026-09-18T12:40:03.000Z","message":{"role":"user","content":[{"type":"text","text":"帮我看看这个"}]}}"#,
-            r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-09-18T12:40:05.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"…"},{"type":"text","text":"看完了。"}]}}"#,
+            r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-09-18T12:40:05.000Z","message":{"role":"assistant","usage":{"input":1746,"output":210,"cacheRead":30,"reasoning":47,"totalTokens":1956,"cost":{"total":0.007515}},"content":[{"type":"thinking","thinking":"…"},{"type":"text","text":"看完了。"}]}}"#,
             r#"{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-09-18T12:40:06.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"file contents"}]}}"#,
             r#"{"type":"compaction","id":"c1","parentId":"m3","timestamp":"2026-09-18T12:40:07.000Z"}"#,
         ]
@@ -417,8 +462,15 @@ mod tests {
             Some(StatsUpdate::Snapshot(s)) => {
                 assert_eq!(s.compaction_count, Some(1));
                 assert_eq!(s.tool_call_count, None);
-                assert_eq!(s.tool_error_count, None);
+                assert_eq!(s.user_message_count, Some(1));
+                assert_eq!(s.assistant_message_count, Some(1));
                 assert_eq!(s.side_activity_count, None);
+                // Usage rides on the assistant entry, cost included.
+                assert_eq!(s.input_tokens, Some(1746));
+                assert_eq!(s.output_tokens, Some(210));
+                assert_eq!(s.cached_tokens, Some(30), "cacheRead");
+                assert_eq!(s.reasoning_tokens, Some(47));
+                assert_eq!(s.cost, Some(0.007515));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

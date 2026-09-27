@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind,
-    MemberObservation, ParsedLine, SessionMessageRole,
+    detect_format, read_jsonl_delta_with_prev, AgentCommand, DiscoveredMember,
+    DiscoveredMemberKind, MemberObservation, ParsedLine, SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::Result;
@@ -221,11 +221,15 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         cursor: &SessionMemberCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
-        read_jsonl_delta(
+        let is_root = member.relation.as_str() == "root";
+        // Prev-aware: Claude writes one assistant message as one line per
+        // content block, each repeating the SAME `usage`, so the parser needs
+        // its predecessor to charge a call exactly once.
+        read_jsonl_delta_with_prev(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY,
-            &|_idx, v| parse_line(v, member.relation.as_str() == "root"),
+            crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY.with_tokens(),
+            &mut |_idx, v, prev| parse_line(v, is_root, prev),
         )
     }
 
@@ -304,10 +308,52 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
     }
 }
 
+/// `message.usage` of one assistant call, as counts. Every number is a field
+/// the source states — no derived sums: `input_tokens` excludes the cache
+/// reads/writes, and folding them in would invent a total the source never
+/// reported (the UI labels each number after its source field).
+/// `output_tokens_details.thinking_tokens` is the reasoning output.
+///
+/// ONE call is written as SEVERAL lines: Claude emits an assistant message once
+/// per content block (thinking / text / tool_use), and every one of those lines
+/// repeats the message's `message.id` AND its complete `usage` (verified on
+/// disk). Charging each line would multiply the call by its block count, so a
+/// line is charged only when its `message.id` differs from the line before it.
+/// When the id is absent the source states no way to tell the lines apart and
+/// each is charged — the pre-existing behaviour, never silently merged.
+fn usage_observation(msg: &Value, prev: Option<&Value>) -> MemberObservation {
+    let Some(usage) = msg.get("usage") else {
+        return MemberObservation::default();
+    };
+    let prev_id = prev
+        .and_then(|p| p.get("message"))
+        .and_then(|m| m.get("id"))
+        .and_then(|i| i.as_str());
+    if let Some(id) = msg.get("id").and_then(|i| i.as_str()) {
+        if Some(id) == prev_id {
+            return MemberObservation::default();
+        }
+    }
+    let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    MemberObservation {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        cached_tokens: n("cache_read_input_tokens"),
+        reasoning_tokens: usage
+            .get("output_tokens_details")
+            .and_then(|d| d.get("thinking_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        ..Default::default()
+    }
+}
+
 /// One transcript line's contribution. `is_root` is false only for a
 /// hypothetical non-root Claude member (none exists today); the flag keeps the
 /// "child text is never conversation" rule explicit rather than implied.
-fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
+/// `prev` decides whether this line's usage was already charged — see
+/// [`usage_observation`].
+fn parse_line(v: &Value, is_root: bool, prev: Option<&Value>) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let sidechain = v
         .get("isSidechain")
@@ -322,21 +368,18 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
         "user" | "assistant" => {
             let msg = v.get("message").unwrap_or(&Value::Null);
             let (text, tool_calls) = content_parts(msg.get("content").unwrap_or(&Value::Null));
+            let mut observation = usage_observation(msg, prev);
+            observation.tool_calls = tool_calls;
             if sidechain {
                 // Sub-agent chatter in the same file: no stable identity → no
-                // member, no message — observed only.
-                return Some(ParsedLine::observation_only(MemberObservation {
-                    side_activity: 1,
-                    ..Default::default()
-                }));
+                // member, no message — observed only. Its usage still counts:
+                // those calls were billed like any other.
+                observation.side_activity = 1;
+                return Some(ParsedLine::observation_only(observation));
             }
-            let observation = MemberObservation {
-                tool_calls,
-                ..Default::default()
-            };
             // isMeta lines are runtime output (command results), not turns.
             let is_meta = v.get("isMeta").and_then(|s| s.as_bool()).unwrap_or(false);
-            if text.trim().is_empty() || is_meta || !is_root {
+            if text.trim().is_empty() || is_meta {
                 return Some(ParsedLine::observation_only(observation));
             }
             let role = if vtype == "user" {
@@ -346,6 +389,15 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             };
             // Injected context is never conversation.
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            match role {
+                SessionMessageRole::User => observation.user_messages = 1,
+                SessionMessageRole::Assistant => observation.assistant_messages = 1,
+            }
+            if !is_root {
+                // A sub-agent's turns are counted, but its prose is never this
+                // Session's Conversation.
                 return Some(ParsedLine::observation_only(observation));
             }
             // Every assistant row carries `message.model` — the actual
@@ -441,10 +493,10 @@ mod tests {
             &path,
             [
                 member_line(1, "user", "", "user", "改一下详情页"),
-                r#"{"type":"assistant","uuid":"u2","sessionId":"s1","cwd":"/repo","message":{"role":"assistant","content":[{"type":"text","text":"我先看现状。"},{"type":"tool_use","name":"Read","id":"t1"}]}}"#.to_string(),
+                r#"{"type":"assistant","uuid":"u2","sessionId":"s1","cwd":"/repo","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":40,"output_tokens_details":{"thinking_tokens":7}},"content":[{"type":"text","text":"我先看现状。"},{"type":"tool_use","name":"Read","id":"t1"}]}}"#.to_string(),
                 r#"{"type":"user","uuid":"u3","sessionId":"s1","cwd":"/repo","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"contents"}]}}"#.to_string(),
                 r#"{"type":"user","uuid":"u4","sessionId":"s1","isSidechain":true,"cwd":"/repo","message":{"role":"user","content":[{"type":"text","text":"子任务的问题"}]}}"#.to_string(),
-                r#"{"type":"assistant","uuid":"u5","sessionId":"s1","isSidechain":true,"cwd":"/repo","message":{"role":"assistant","content":[{"type":"text","text":"子任务的结论"}]}}"#.to_string(),
+                r#"{"type":"assistant","uuid":"u5","sessionId":"s1","isSidechain":true,"cwd":"/repo","message":{"role":"assistant","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"子任务的结论"}]}}"#.to_string(),
                 member_line(6, "assistant", "", "assistant", "问题在这里，已经修改完成。"),
                 r#"{"type":"summary","uuid":"u7","sessionId":"s1","summary":"compressed"}"#.to_string(),
             ]
@@ -475,9 +527,134 @@ mod tests {
                 assert_eq!(s.tool_call_count, Some(1));
                 assert_eq!(s.compaction_count, Some(1));
                 assert_eq!(s.side_activity_count, Some(2), "the two sidechain lines");
+                // Usage is additive across calls, and a sidechain call's usage
+                // counts like any other.
+                assert_eq!(s.input_tokens, Some(110));
+                assert_eq!(s.output_tokens, Some(25));
+                assert_eq!(s.cached_tokens, Some(40), "cache_read_input_tokens");
+                assert_eq!(s.reasoning_tokens, Some(7), "thinking_tokens");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Claude writes ONE assistant call as one line per content block
+    /// (thinking / text / tool_use), and EVERY line repeats the same
+    /// `message.id` and the whole `usage`. The call must be charged once, not
+    /// once per block.
+    #[test]
+    fn one_call_split_across_content_blocks_is_charged_once() {
+        let dir = unique_dir("blocks");
+        let path = dir.join("s1.jsonl");
+        let usage = r#""usage":{"input_tokens":12563,"output_tokens":113,"cache_read_input_tokens":12288,"output_tokens_details":{"thinking_tokens":0}}"#;
+        let block = |uuid: &str, content: &str| {
+            format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"s1","cwd":"/repo","message":{{"id":"msg_1","role":"assistant",{usage},"content":[{content}]}}}}"#
+            )
+        };
+        std::fs::write(
+            &path,
+            [
+                member_line(1, "user", "", "user", "解释一下"),
+                block("a1", r#"{"type":"thinking","thinking":"hmm"}"#),
+                block("a2", r#"{"type":"text","text":"答案。"}"#),
+                block("a3", r#"{"type":"tool_use","name":"Read","id":"t1"}"#),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let delta = ClaudeAdapter
+            .read_member_delta(&root_member(&path), &SessionMemberCursor::default())
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(12563), "charged once for the call");
+                assert_eq!(s.output_tokens, Some(113));
+                assert_eq!(s.cached_tokens, Some(12288));
+                assert_eq!(s.tool_call_count, Some(1));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        assert_eq!(
+            delta
+                .messages
+                .iter()
+                .filter(|m| m.role == SessionMessageRole::Assistant)
+                .count(),
+            1,
+            "only the prose block is conversation"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The blocks of one call land SECONDS apart, so a read can catch the file
+    /// mid-call. The next read starts on a line whose call was already charged:
+    /// the predecessor it can now see is what keeps the usage from doubling.
+    #[test]
+    fn a_read_starting_mid_message_does_not_recharge_it() {
+        let dir = unique_dir("split-append");
+        let path = dir.join("s1.jsonl");
+        let member = root_member(&path);
+        let usage = r#""usage":{"input_tokens":12563,"output_tokens":113}"#;
+        let block = |uuid: &str, content: &str| {
+            format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"s1","cwd":"/repo","timestamp":"2026-09-23T14:10:52.275Z","message":{{"id":"msg_1","role":"assistant",{usage},"content":[{content}]}}}}"#
+            )
+        };
+        // The thinking block lands alone and a read charges the call.
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                block("a1", r#"{"type":"thinking","thinking":"hmm"}"#)
+            ),
+        )
+        .unwrap();
+        let first = ClaudeAdapter
+            .read_member_delta(&member, &SessionMemberCursor::default())
+            .unwrap();
+        match &first.stats {
+            Some(StatsUpdate::Snapshot(s)) => assert_eq!(s.input_tokens, Some(12563)),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let cursor = SessionMemberCursor::from_update(&member.id, first.source.as_ref().unwrap());
+
+        // The remaining blocks arrive later, each repeating the SAME usage.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f, "{}", block("a2", r#"{"type":"text","text":"答案。"}"#)).unwrap();
+            writeln!(
+                f,
+                "{}",
+                block("a3", r#"{"type":"tool_use","name":"Read","id":"t1"}"#)
+            )
+            .unwrap();
+        }
+        let second = ClaudeAdapter.read_member_delta(&member, &cursor).unwrap();
+        match second.stats {
+            Some(StatsUpdate::Delta(d)) => {
+                assert_eq!(
+                    d.input_tokens, None,
+                    "the continued call is not charged twice"
+                );
+                assert_eq!(d.output_tokens, None);
+                assert_eq!(
+                    d.tool_call_count,
+                    Some(1),
+                    "the tool block is still counted"
+                );
+            }
+            other => panic!("expected an append delta, got {other:?}"),
+        }
+        assert_eq!(second.messages.len(), 1);
+        assert_eq!(second.messages[0].content, "答案。");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

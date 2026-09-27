@@ -499,17 +499,6 @@ impl Db {
         metadata: &serde_json::Value,
     ) -> Result<(String, bool)> {
         self.tx(|tx| {
-            if let Some((id, true)) = tx
-                .query_row(
-                    "SELECT id, trashed_at IS NOT NULL FROM sessions
-                     WHERE agent = ?1 AND root_agent_session_id = ?2",
-                    params![agent.as_str(), root_agent_session_id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
-                )
-                .optional()?
-            {
-                return Ok((id, false));
-            }
             // Topology guard: a stored child/side member must not be promoted
             // to a Logical Root — refuse before the session row is created, so
             // the refusal can never strand a session without its root member.
@@ -557,14 +546,13 @@ impl Db {
         })
     }
 
-    /// Sessions that may still owe a LaunchIntent match: only ownerless,
-    /// non-trashed Sessions. An owned Session has already matched.
+    /// Sessions that may still owe a LaunchIntent match: ownerless Sessions,
+    /// trashed ones included. An owned Session has already matched.
     pub fn reconcile_retry_sessions(&self, agent: Option<Agent>) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(
             "SELECT s.* FROM sessions s
-             WHERE s.trashed_at IS NULL
-               AND s.owner_workstream_id IS NULL
+             WHERE s.owner_workstream_id IS NULL
                AND (?1 IS NULL OR s.agent = ?1)
              ORDER BY COALESCE(s.last_conversation_at, s.last_activity_at, s.started_at) DESC",
         )?;
@@ -600,31 +588,6 @@ impl Db {
                 row_session,
             )
             .optional()?)
-    }
-
-    /// Sessions discovered but not yet seen by us. Used by LaunchIntent
-    /// matching: only genuinely new sessions may claim a pending intent. The SQL
-    /// has no created_at column, so the since-filter runs in Rust; trashed rows
-    /// fail it, which keeps them out of matching.
-    pub fn recently_created_sessions(&self, agent: Agent, since: &str) -> Result<Vec<Session>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT * FROM sessions WHERE agent = ?1 AND trashed_at IS NULL \
-             ORDER BY COALESCE(started_at, last_activity_at) DESC LIMIT 200",
-        )?;
-        let rows = st
-            .query_map(params![agent.as_str()], row_session)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows
-            .into_iter()
-            .filter(|s| {
-                s.started_at
-                    .as_deref()
-                    .or(s.last_activity_at.as_deref())
-                    .map(|t| t >= since)
-                    .unwrap_or(false)
-            })
-            .collect())
     }
 
     /// A `project_id` filter reads the **authoritative chain**
@@ -708,8 +671,8 @@ impl Db {
         )
     }
 
-    /// Attach an observed non-root member only while its Logical Session is
-    /// active. The lifecycle check and topology write share one transaction.
+    /// Attach an observed non-root member to its Logical Session. The
+    /// existence check and topology write share one transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_active_session_member(
         &self,
@@ -726,7 +689,7 @@ impl Db {
         metadata: &serde_json::Value,
     ) -> Result<Option<String>> {
         self.tx(|tx| {
-            if !session_lifecycle::session_is_writable_conn(tx, session_id)? {
+            if !session_lifecycle::session_exists_conn(tx, session_id)? {
                 return Ok(None);
             }
             Ok(Some(upsert_session_member_conn(
@@ -853,11 +816,11 @@ impl Db {
     /// The atomic member-ingest commit. Messages, stats, the member cursor and
     /// the activity stamps commit or not at all.
     ///
-    /// Guards, in order, inside the transaction: the Logical Session exists and
-    /// is not trashed; the member still belongs to it; and messages require
+    /// Guards, in order, inside the transaction: the Logical Session still
+    /// exists; the member still belongs to it; and messages require
     /// `member.relation == root` (an adapter handing child text to the
     /// conversation is a bug, never silently stored). A failed guard stores
-    /// NOTHING, so a Trash racing a parse cannot produce a half commit.
+    /// NOTHING, so a purge racing a parse cannot produce a half commit.
     ///
     /// The identity chain starts from genesis on a full re-scan (start offset 0)
     /// and otherwise continues from the cursor's `identity_tail_hash` — the tail
@@ -891,9 +854,8 @@ impl Db {
         next_active_model: Option<String>,
     ) -> Result<Vec<SessionMessage>> {
         self.tx(|tx| {
-            // Commit-time trash guard: a trashed (or vanished) session takes
-            // NOTHING — the next Restore resumes from the untouched cursor.
-            if !session_lifecycle::session_is_writable_conn(tx, session_id)? {
+            // A session purged mid-parse takes NOTHING.
+            if !session_lifecycle::session_exists_conn(tx, session_id)? {
                 return Ok(Vec::new());
             }
             // The member must still belong to THIS session: a topology
@@ -1320,7 +1282,8 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT member_id, tool_call_count, tool_error_count, compaction_count,
+                "SELECT member_id, tool_call_count, user_message_count,
+                        assistant_message_count, compaction_count,
                         side_activity_count, input_tokens, output_tokens, cached_tokens,
                         reasoning_tokens, cost, updated_at, extra
                  FROM session_member_stats WHERE member_id = ?1",
@@ -1338,27 +1301,23 @@ impl Db {
             member_count: members.len() as i64,
             ..Default::default()
         };
-        let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
         {
             let conn = self.read();
-            for id in &ids {
-                let rel: &str = members
-                    .iter()
-                    .find(|m| &m.id == id)
-                    .map(|m| m.relation.as_str())
-                    .unwrap_or("");
-                match rel {
+            // Every member keeps its own share; the Session totals the whole
+            // graph, so this sum is the session-level rollup.
+            for m in &members {
+                match m.relation.as_str() {
                     "child" => agg.child_count += 1,
                     "side" => agg.side_count += 1,
                     _ => {}
                 }
                 if let Some(s) = conn
                     .query_row(
-                        "SELECT tool_call_count, tool_error_count, compaction_count,
-                                    side_activity_count, input_tokens, output_tokens,
-                                    cached_tokens, reasoning_tokens, cost
-                             FROM session_member_stats WHERE member_id = ?1",
-                        params![id],
+                        "SELECT tool_call_count, user_message_count, assistant_message_count,
+                                compaction_count, side_activity_count, input_tokens,
+                                output_tokens, cached_tokens, reasoning_tokens, cost
+                         FROM session_member_stats WHERE member_id = ?1",
+                        params![m.id],
                         |r| {
                             Ok((
                                 r.get::<_, Option<i64>>(0)?,
@@ -1369,21 +1328,23 @@ impl Db {
                                 r.get::<_, Option<i64>>(5)?,
                                 r.get::<_, Option<i64>>(6)?,
                                 r.get::<_, Option<i64>>(7)?,
-                                r.get::<_, Option<f64>>(8)?,
+                                r.get::<_, Option<i64>>(8)?,
+                                r.get::<_, Option<f64>>(9)?,
                             ))
                         },
                     )
                     .optional()?
                 {
                     agg.tool_call_count += s.0.unwrap_or(0);
-                    agg.tool_error_count += s.1.unwrap_or(0);
-                    agg.compaction_count += s.2.unwrap_or(0);
-                    agg.side_activity_count += s.3.unwrap_or(0);
-                    agg.input_tokens = or_add(agg.input_tokens, s.4);
-                    agg.output_tokens = or_add(agg.output_tokens, s.5);
-                    agg.cached_tokens = or_add(agg.cached_tokens, s.6);
-                    agg.reasoning_tokens = or_add(agg.reasoning_tokens, s.7);
-                    agg.cost = match (agg.cost, s.8) {
+                    agg.user_message_count += s.1.unwrap_or(0);
+                    agg.assistant_message_count += s.2.unwrap_or(0);
+                    agg.compaction_count += s.3.unwrap_or(0);
+                    agg.side_activity_count += s.4.unwrap_or(0);
+                    agg.input_tokens = or_add(agg.input_tokens, s.5);
+                    agg.output_tokens = or_add(agg.output_tokens, s.6);
+                    agg.cached_tokens = or_add(agg.cached_tokens, s.7);
+                    agg.reasoning_tokens = or_add(agg.reasoning_tokens, s.8);
+                    agg.cost = match (agg.cost, s.9) {
                         (a, Some(b)) => Some(a.unwrap_or(0.0) + b),
                         (a, None) => a,
                     };
@@ -2790,8 +2751,8 @@ fn enrich_message_provenance_conn(
 }
 
 /// Apply a stats update to one member's 1:1 snapshot row: a DELTA adds its
-/// observed counts, a SNAPSHOT replaces the four observed counters. `None` is a
-/// no-op, so "no evidence" can never zero a column.
+/// observed counts, a SNAPSHOT replaces them. `None` is a no-op, so "no
+/// evidence" can never zero a column.
 pub fn apply_stats_conn(
     conn: &Connection,
     member_id: &str,
@@ -2811,9 +2772,14 @@ pub fn apply_stats_conn(
                     "tool_call_count = COALESCE(tool_call_count, 0) + {v}"
                 ));
             }
-            if let Some(v) = d.tool_error_count {
+            if let Some(v) = d.user_message_count {
                 sets.push(format!(
-                    "tool_error_count = COALESCE(tool_error_count, 0) + {v}"
+                    "user_message_count = COALESCE(user_message_count, 0) + {v}"
+                ));
+            }
+            if let Some(v) = d.assistant_message_count {
+                sets.push(format!(
+                    "assistant_message_count = COALESCE(assistant_message_count, 0) + {v}"
                 ));
             }
             if let Some(v) = d.compaction_count {
@@ -2826,13 +2792,33 @@ pub fn apply_stats_conn(
                     "side_activity_count = COALESCE(side_activity_count, 0) + {v}"
                 ));
             }
+            if let Some(v) = d.input_tokens {
+                sets.push(format!("input_tokens = COALESCE(input_tokens, 0) + {v}"));
+            }
+            if let Some(v) = d.output_tokens {
+                sets.push(format!("output_tokens = COALESCE(output_tokens, 0) + {v}"));
+            }
+            if let Some(v) = d.cached_tokens {
+                sets.push(format!("cached_tokens = COALESCE(cached_tokens, 0) + {v}"));
+            }
+            if let Some(v) = d.reasoning_tokens {
+                sets.push(format!(
+                    "reasoning_tokens = COALESCE(reasoning_tokens, 0) + {v}"
+                ));
+            }
+            if let Some(v) = d.cost.filter(|c| c.is_finite()) {
+                sets.push(format!("cost = COALESCE(cost, 0) + {v}"));
+            }
         }
         StatsUpdate::Snapshot(s) => {
             if let Some(v) = s.tool_call_count {
                 sets.push(format!("tool_call_count = {v}"));
             }
-            if let Some(v) = s.tool_error_count {
-                sets.push(format!("tool_error_count = {v}"));
+            if let Some(v) = s.user_message_count {
+                sets.push(format!("user_message_count = {v}"));
+            }
+            if let Some(v) = s.assistant_message_count {
+                sets.push(format!("assistant_message_count = {v}"));
             }
             if let Some(v) = s.compaction_count {
                 sets.push(format!("compaction_count = {v}"));
@@ -2840,15 +2826,28 @@ pub fn apply_stats_conn(
             if let Some(v) = s.side_activity_count {
                 sets.push(format!("side_activity_count = {v}"));
             }
+            if let Some(v) = s.input_tokens {
+                sets.push(format!("input_tokens = {v}"));
+            }
+            if let Some(v) = s.output_tokens {
+                sets.push(format!("output_tokens = {v}"));
+            }
+            if let Some(v) = s.cached_tokens {
+                sets.push(format!("cached_tokens = {v}"));
+            }
+            if let Some(v) = s.reasoning_tokens {
+                sets.push(format!("reasoning_tokens = {v}"));
+            }
+            if let Some(v) = s.cost.filter(|c| c.is_finite()) {
+                sets.push(format!("cost = {v}"));
+            }
         }
     }
     if sets.is_empty() {
         return Ok(false);
     }
     conn.execute(
-        "INSERT INTO session_member_stats
-         (member_id, tool_call_count, tool_error_count, compaction_count, side_activity_count, updated_at)
-         VALUES (?1, NULL, NULL, NULL, NULL, ?2)
+        "INSERT INTO session_member_stats (member_id, updated_at) VALUES (?1, ?2)
          ON CONFLICT(member_id) DO NOTHING",
         params![member_id, now()],
     )?;
@@ -2995,7 +2994,9 @@ fn or_add(current: Option<i64>, next: Option<i64>) -> Option<i64> {
     }
 }
 
-/// Query-time aggregate over a session's execution graph.
+/// Query-time aggregate over a session's execution graph — the session-level
+/// rollup: each member's own share, summed. No cache table: the member count is
+/// small and this can never drift.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SessionAggregateStats {
     pub member_count: i64,
@@ -3003,7 +3004,8 @@ pub struct SessionAggregateStats {
     pub side_count: i64,
     pub max_depth: i64,
     pub tool_call_count: i64,
-    pub tool_error_count: i64,
+    pub user_message_count: i64,
+    pub assistant_message_count: i64,
     pub compaction_count: i64,
     pub side_activity_count: i64,
     pub input_tokens: Option<i64>,
@@ -3460,16 +3462,17 @@ fn row_member_stats(r: &Row) -> rusqlite::Result<SessionMemberStats> {
     Ok(SessionMemberStats {
         member_id: r.get(0)?,
         tool_call_count: r.get(1)?,
-        tool_error_count: r.get(2)?,
-        compaction_count: r.get(3)?,
-        side_activity_count: r.get(4)?,
-        input_tokens: r.get(5)?,
-        output_tokens: r.get(6)?,
-        cached_tokens: r.get(7)?,
-        reasoning_tokens: r.get(8)?,
-        cost: r.get(9)?,
-        updated_at: r.get(10)?,
-        extra: serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default(),
+        user_message_count: r.get(2)?,
+        assistant_message_count: r.get(3)?,
+        compaction_count: r.get(4)?,
+        side_activity_count: r.get(5)?,
+        input_tokens: r.get(6)?,
+        output_tokens: r.get(7)?,
+        cached_tokens: r.get(8)?,
+        reasoning_tokens: r.get(9)?,
+        cost: r.get(10)?,
+        updated_at: r.get(11)?,
+        extra: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
     })
 }
 

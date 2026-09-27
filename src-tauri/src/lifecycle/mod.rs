@@ -12,12 +12,11 @@
 //!   NoEnding never deletes Agent-owned session sources.
 //!   ```
 //!
-//! Permanent delete is a NoEnding-LOCAL purge and nothing else. It is allowed
-//! only for a TRASHED session whose ROOT source the adapter freshly confirmed
-//! Missing — `Present` and `Unavailable` both refuse. There is no
-//! deletion job, no crash recovery and no filesystem step: the whole purge is
-//! one SQLite transaction. If the source reappears afterwards, it is simply
-//! re-ingested as a new Session (no tombstone).
+//! Permanent delete is a NoEnding-LOCAL purge and nothing else: Trash is the
+//! only gate, one SQLite transaction, no Agent file ever touched. The root
+//! source's verdict is COPY, not a gate — NoEnding never deletes an Agent
+//! source, so a source that is still there just gets re-ingested as a new
+//! Session (no tombstone).
 
 use crate::adapters::adapter_for;
 use crate::domain::SourceAvailability;
@@ -35,10 +34,9 @@ pub struct LocalDeletePreview {
     pub session_title: Option<String>,
     pub agent: Agent,
     pub root_agent_session_id: String,
-    /// Fresh verdict on the ROOT source at preview time. The confirmation
-    /// copy keys off this; execute re-checks it again.
+    /// Fresh verdict on the ROOT source at preview time. COPY, not a gate: a
+    /// `present` source will be re-ingested as a new Session.
     pub root_source_status: SourceAvailability,
-    pub can_permanently_delete: bool,
     #[serde(flatten)]
     pub counts: PermanentDeletionCounts,
 }
@@ -55,10 +53,6 @@ pub struct PermanentDeleteResult {
 /// The FTS unindex commits INSIDE the same transaction as the lifecycle flip:
 /// a crash can no longer leave a trashed session searchable —
 /// there is no post-commit window and no reliance on eventual self-heal.
-///
-/// Trash freezes the session: member cursors are not touched, so ingestion
-/// commits against it are refused by the commit-time guard and a Restore
-/// resumes from exactly where things stopped.
 pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
     let changed = db.tx(|tx| {
         let changed =
@@ -106,20 +100,22 @@ pub fn root_source_status(db: &Db, session: &Session) -> Result<Option<SourceAva
     ))
 }
 
-/// Stateless preview of the permanent LOCAL deletion. Only a TRASHED
-/// session may be previewed; the verdict on the ROOT source is taken fresh
-/// right here, and the counts are read while the store is still complete.
-pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<LocalDeletePreview> {
+/// The only gate on a local purge: the Session must exist and be trashed.
+fn require_trashed(db: &Db, session_id: &str) -> Result<Session> {
     let session = db
         .get_session(session_id)?
         .ok_or_else(|| other("Session 不存在"))?;
-    // of the old rule: only Trash may head toward a permanent
-    // deletion; an Active session is never purgeable, whatever its source.
     if !session.is_trashed() {
         return Err(other("只有回收站中的会话才能永久删除"));
     }
+    Ok(session)
+}
+
+/// Stateless preview of the local deletion: what would go, plus the fresh
+/// ROOT source verdict the dialog's copy is built from.
+pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<LocalDeletePreview> {
+    let session = require_trashed(db, session_id)?;
     let status = root_source_status(db, &session)?;
-    let can_delete = status == Some(SourceAvailability::Missing);
     let counts = PermanentDeletionCounts::collect(&db.read(), session_id)?;
     Ok(LocalDeletePreview {
         session_id: session.id,
@@ -127,44 +123,14 @@ pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<Loc
         agent: session.agent,
         root_agent_session_id: session.root_agent_session_id,
         root_source_status: status.unwrap_or(SourceAvailability::Unavailable),
-        can_permanently_delete: can_delete,
         counts,
     })
 }
 
-/// Execute the permanent LOCAL deletion. Guards, in order:
-///
-/// 1. the session exists;
-/// 2. it is TRASHED;
-/// 3. it still has a ROOT member;
-/// 4. the adapter's FRESH verdict on the root source is `Missing` — taken
-///    again right here, so a file that reappeared between preview and
-///    execute aborts the purge;
-///
-/// then ONE SQLite transaction redacts provenance and deletes every
-/// session-owned row ('s fixed order). Child sources are irrelevant by
-/// design: only the root is the deletion authority.
+/// Execute the permanent LOCAL deletion: ONE SQLite transaction that redacts
+/// provenance and deletes every session-owned row ('s fixed order).
 pub fn permanently_delete_session(db: &Db, session_id: &str) -> Result<PermanentDeleteResult> {
-    let session = db
-        .get_session(session_id)?
-        .ok_or_else(|| other("Session 不存在"))?;
-    if !session.is_trashed() {
-        return Err(other("只有回收站中的会话才能永久删除"));
-    }
-    let root = db
-        .root_member_for_session(&session.id)?
-        .ok_or_else(|| other("该会话尚未完成摄入（没有 root member），无法永久删除"))?;
-    // Fresh re-check at execute time — the preview's verdict is advice, this
-    // one is the gate. Only a confirmed-absent root may pass; Unavailable
-    // (permission denied, parse error, store unreadable) never equals missing.
-    let status = adapter_for(session.agent).inspect_member_source(&root)?;
-    if status != SourceAvailability::Missing {
-        return Err(other(format!(
-            "Root 源当前状态为 {}，只有确认不存在（missing）才允许永久删除",
-            status.as_str()
-        )));
-    }
-
+    let session = require_trashed(db, session_id)?;
     let redacted = db.tx(|tx| session_lifecycle::purge_session_data_conn(tx, &session.id))?;
     Ok(PermanentDeleteResult {
         purged: true,

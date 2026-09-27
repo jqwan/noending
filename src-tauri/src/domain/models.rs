@@ -326,8 +326,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// A trashed Session is inactive inside NoEnding: hidden from default
-    /// lists and search, not resumable, and not ingested or synced.
+    /// In the recycle bin — `sessions.trashed_at` states what that gates.
     pub fn is_trashed(&self) -> bool {
         self.trashed_at.is_some()
     }
@@ -450,13 +449,17 @@ pub struct SessionMessage {
 /// Per-member execution statistics, stored as a 1:1 snapshot. This is
 /// "current observable source state", not an append-only telemetry log.
 ///
+/// Every member — root, child and side — keeps its own composition, so a
+/// Session's totals are the sum over its graph.
+///
 /// `NULL` = the source does not provide / cannot reliably compute the metric;
 /// `0` = observed zero. Unknown is never folded into 0.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionMemberStats {
     pub member_id: Id,
     pub tool_call_count: Option<i64>,
-    pub tool_error_count: Option<i64>,
+    pub user_message_count: Option<i64>,
+    pub assistant_message_count: Option<i64>,
     pub compaction_count: Option<i64>,
     pub side_activity_count: Option<i64>,
     pub input_tokens: Option<i64>,
@@ -468,66 +471,127 @@ pub struct SessionMemberStats {
     pub extra: serde_json::Value,
 }
 
-/// Incremental stats for an append-only read: each field is the number
-/// of new observations since the last commit. `None` = nothing observed this
-/// batch (the column is left untouched, not zeroed).
+/// What one member read observed: its own composition counts plus its own
+/// usage, written to that member's 1:1 stats row.
+///
+/// Incremental form for an append-only read: each field is the number of new
+/// observations since the last commit. `None` = nothing observed this batch
+/// (the column is left untouched, not zeroed).
 #[derive(Debug, Clone, Copy, Default)]
-pub struct MemberStatsDelta {
+pub struct StatsDelta {
     pub tool_call_count: Option<i64>,
-    pub tool_error_count: Option<i64>,
+    pub user_message_count: Option<i64>,
+    pub assistant_message_count: Option<i64>,
     pub compaction_count: Option<i64>,
     pub side_activity_count: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost: Option<f64>,
 }
 
-impl MemberStatsDelta {
+impl StatsDelta {
     /// The delta of exactly one observation each — the spelling shared readers
     /// produce from a single parsed line.
     pub fn single(observation: MemberObservation) -> Self {
         Self {
             tool_call_count: (observation.tool_calls > 0).then_some(observation.tool_calls as i64),
-            tool_error_count: (observation.tool_errors > 0)
-                .then_some(observation.tool_errors as i64),
+            user_message_count: (observation.user_messages > 0)
+                .then_some(observation.user_messages as i64),
+            assistant_message_count: (observation.assistant_messages > 0)
+                .then_some(observation.assistant_messages as i64),
             compaction_count: (observation.compactions > 0)
                 .then_some(observation.compactions as i64),
             side_activity_count: (observation.side_activity > 0)
                 .then_some(observation.side_activity as i64),
+            input_tokens: (observation.input_tokens > 0).then_some(observation.input_tokens as i64),
+            output_tokens: (observation.output_tokens > 0)
+                .then_some(observation.output_tokens as i64),
+            cached_tokens: (observation.cached_tokens > 0)
+                .then_some(observation.cached_tokens as i64),
+            reasoning_tokens: (observation.reasoning_tokens > 0)
+                .then_some(observation.reasoning_tokens as i64),
+            cost: (observation.cost > 0.0).then_some(observation.cost),
         }
     }
 }
 
-/// Full-scan stats for a rescan. `Some(0)` is observed zero; `None` is
+/// Full-scan form of [`StatsDelta`]. `Some(0)` is observed zero; `None` is
 /// unsupported and leaves the stored counter unchanged.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SessionMemberStatsSnapshot {
+pub struct StatsSnapshot {
     pub tool_call_count: Option<i64>,
-    pub tool_error_count: Option<i64>,
+    pub user_message_count: Option<i64>,
+    pub assistant_message_count: Option<i64>,
     pub compaction_count: Option<i64>,
     pub side_activity_count: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost: Option<f64>,
 }
 
-/// How a read updates member stats.
+/// How a member read updates the stats rows.
 #[derive(Debug, Clone, Copy)]
 pub enum StatsUpdate {
-    Delta(MemberStatsDelta),
-    Snapshot(SessionMemberStatsSnapshot),
+    Delta(StatsDelta),
+    Snapshot(StatsSnapshot),
 }
 
 /// Counters one source portion contributes (shared-reader vocabulary). Plain
 /// counts, converted into a [`StatsUpdate`] by the adapter.
+///
+/// `user_messages` / `assistant_messages` count the member's own conversation
+/// records — for the root those are the same records that become the
+/// Conversation; a sub-agent counts its own turns the same way, while relay
+/// chatter between agents stays on `side_activity` instead.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemberObservation {
     pub tool_calls: u64,
-    pub tool_errors: u64,
+    pub user_messages: u64,
+    pub assistant_messages: u64,
     pub compactions: u64,
     pub side_activity: u64,
+    /// Usage the source reports for this observation. Sources report per call /
+    /// per turn, never cumulatively, so these are additive like the counts; a
+    /// cumulative counter would have to be reduced to its per-call delta first.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub reasoning_tokens: u64,
+    /// Cost in the source's own currency, additive like the tokens. A source
+    /// that states no cost leaves it 0 (`None` downstream, never a fake 0).
+    pub cost: f64,
 }
 
 impl MemberObservation {
     pub fn add(&mut self, other: &MemberObservation) {
         self.tool_calls += other.tool_calls;
-        self.tool_errors += other.tool_errors;
+        self.user_messages += other.user_messages;
+        self.assistant_messages += other.assistant_messages;
         self.compactions += other.compactions;
         self.side_activity += other.side_activity;
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cached_tokens += other.cached_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
+        self.cost += other.cost;
+    }
+
+    /// Nothing observed — shared readers skip an update that only restates 0s.
+    pub fn is_empty(&self) -> bool {
+        self.tool_calls == 0
+            && self.user_messages == 0
+            && self.assistant_messages == 0
+            && self.compactions == 0
+            && self.side_activity == 0
+            && self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cached_tokens == 0
+            && self.reasoning_tokens == 0
+            && self.cost == 0.0
     }
 }
 

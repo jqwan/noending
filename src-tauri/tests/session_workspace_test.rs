@@ -323,14 +323,14 @@ fn an_explicit_attach_recomputes_the_cached_project_from_the_path() {
 }
 
 #[test]
-fn workspace_path_move_does_not_mutate_a_trashed_session() {
-    let (_d, db) = temp_db("trash-freeze-move");
+fn workspace_path_move_follows_a_trashed_session() {
+    let (_d, db) = temp_db("trash-path-move");
     project(&db, "p1", "one");
     project(&db, "p2", "two");
     let (session_id, _) = db
         .upsert_logical_session_unchecked(
             Agent::Codex,
-            "trash-freeze-root",
+            "trash-path-move-root",
             Some("t"),
             Some("/repo/one"),
             None,
@@ -359,12 +359,14 @@ fn workspace_path_move_does_not_mutate_a_trashed_session() {
     })
     .unwrap();
 
-    assert!(!db
+    // The recycle bin filters lists; the Session's path still follows its
+    // source.
+    assert!(db
         .tx(|tx| move_session_to_path_conn(tx, &session_id, &second))
         .unwrap());
     assert_eq!(
         stored(&db, &session_id).workspace_path_id.as_deref(),
-        Some(first.as_str())
+        Some(second.as_str())
     );
 }
 
@@ -1224,12 +1226,13 @@ fn the_detail_ingredients_come_from_storage_queries() {
 }
 
 /// A stats delta so the commit above reads like the observation batch it is.
-fn stats_delta(tool_calls: i64, tool_errors: i64) -> noending::domain::StatsUpdate {
-    noending::domain::StatsUpdate::Delta(noending::domain::MemberStatsDelta {
+fn stats_delta(tool_calls: i64, user_messages: i64) -> noending::domain::StatsUpdate {
+    noending::domain::StatsUpdate::Delta(noending::domain::StatsDelta {
         tool_call_count: Some(tool_calls),
-        tool_error_count: Some(tool_errors),
+        user_message_count: Some(user_messages),
         compaction_count: None,
         side_activity_count: None,
+        ..Default::default()
     })
 }
 

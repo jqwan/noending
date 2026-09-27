@@ -21,6 +21,14 @@
 //! discovery reads the app's own `chat_sessions` for it — read-only, looked up
 //! by the session id the transcript reports, and silent when that store is
 //! absent. Nothing else is taken from there.
+//!
+//! **Billing is in `credits`, not tokens.** Each assistant row's `message.usage`
+//! carries the Claude-style token fields AND Qoder's own `credits`; over the
+//! whole local corpus every token field is 0 and every row has a non-zero
+//! `credits` (verified: 8081/8081). So credits map to the cost axis and the
+//! token axis is left unsupported. A subagent's own file is a member of its
+//! own, so its credits are counted there and roll up through the session
+//! aggregate like every other member's.
 
 use std::path::{Path, PathBuf};
 
@@ -370,11 +378,12 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         cursor: &SessionMemberCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
+        let is_root = member.relation.as_str() == "root";
         read_jsonl_delta(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY,
-            &|_idx, v| parse_line(v, member.relation.as_str() == "root"),
+            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY.with_cost(),
+            &|_idx, v| parse_line(v, is_root),
         )
     }
 
@@ -382,6 +391,11 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         Ok(crate::adapters::inspect_file_source(Path::new(
             &member.source_path,
         )))
+    }
+
+    /// Qoder's own unit: it bills in `credits`, not in currency.
+    fn cost_unit(&self) -> Option<&'static str> {
+        Some("credits")
     }
 
     fn build_new_command(
@@ -432,15 +446,27 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             let text = content_text(msg.get("content").unwrap_or(&Value::Null));
             // A user line with toolUseResult is a completed tool call.
             let tool_call = vtype == "user" && v.get("toolUseResult").is_some();
-            let observation = MemberObservation {
+            let mut observation = MemberObservation {
                 tool_calls: u64::from(tool_call),
                 side_activity: u64::from(sidechain),
                 ..Default::default()
             };
+            // Qoder bills in `credits`, not tokens: over 8081 usage rows every
+            // token field is 0 while every row carries a non-zero `credits` —
+            // the token slots are structural placeholders, so the token axis
+            // stays UNSUPPORTED rather than reporting a 0 the source never
+            // observed. One value per assistant call, additive like any usage.
+            if let Some(credits) = msg
+                .get("usage")
+                .and_then(|u| u.get("credits"))
+                .and_then(|c| c.as_f64())
+            {
+                observation.cost = credits;
+            }
             if sidechain {
                 return Some(ParsedLine::observation_only(observation));
             }
-            if text.trim().is_empty() || !is_root {
+            if text.trim().is_empty() {
                 return Some(ParsedLine::observation_only(observation));
             }
             let role = if vtype == "user" {
@@ -450,6 +476,15 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             };
             // Injected context is never conversation.
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
+                return Some(ParsedLine::observation_only(observation));
+            }
+            match role {
+                SessionMessageRole::User => observation.user_messages = 1,
+                SessionMessageRole::Assistant => observation.assistant_messages = 1,
+            }
+            if !is_root {
+                // A sub-agent's turns are counted, but its prose is never this
+                // Session's Conversation.
                 return Some(ParsedLine::observation_only(observation));
             }
             // The assistant row itself carries `message.model` — the actual
@@ -554,6 +589,43 @@ mod tests {
             Some(StatsUpdate::Snapshot(s)) => {
                 assert_eq!(s.tool_call_count, Some(1));
                 assert_eq!(s.side_activity_count, Some(1));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Qoder bills in `credits`: they land on the cost axis and add up, while
+    /// the token axis stays UNSUPPORTED (the source's token fields are always 0,
+    /// so reporting them would draw a "0" that was never a real observation).
+    #[test]
+    fn credits_land_on_the_cost_axis_and_tokens_stay_unsupported() {
+        let dir = unique_dir("credits");
+        let file = dir.join("s-main.jsonl");
+        std::fs::write(
+            &file,
+            [
+                r#"{"type":"user","uuid":"u1","timestamp":"2026-09-22T15:01:29.551Z","cwd":"/repo","sessionId":"s-main","message":{"role":"user","content":[{"type":"text","text":"跑一下"}]}}"#,
+                r#"{"type":"assistant","uuid":"u2","timestamp":"2026-09-22T15:01:31.000Z","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"credits":10.2176448},"content":[{"type":"text","text":"好了。"}]}}"#,
+                r#"{"type":"assistant","uuid":"u3","timestamp":"2026-09-22T15:01:41.000Z","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"credits":0.5},"content":[{"type":"text","text":"补充。"}]}}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let delta = QoderAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                let cost = s.cost.expect("credits become the cost");
+                assert!(
+                    (cost - 10.7176448).abs() < 1e-9,
+                    "both calls add up: {cost}"
+                );
+                assert_eq!(s.input_tokens, None, "tokens are not supported");
+                assert_eq!(s.output_tokens, None);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

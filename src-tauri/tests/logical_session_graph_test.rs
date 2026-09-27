@@ -380,7 +380,7 @@ fn child_activity_moves_last_activity_but_not_last_conversation() {
 }
 
 #[test]
-fn trash_freezes_discovery_until_restore() {
+fn trash_does_not_freeze_discovery() {
     let root_dir = temp_root("trash-freeze");
     let root_path = rollout_name(ROOT_ID);
     write_rollout(
@@ -397,7 +397,6 @@ fn trash_freezes_discovery_until_restore() {
     let session = db.list_sessions(Default::default()).unwrap()[0].clone();
     let root_member = db.root_member_for_session(&session.id).unwrap().unwrap();
     let before_cursor = db.get_member_cursor(&root_member.id).unwrap();
-    let before_members = db.members_for_session(&session.id).unwrap();
     noending::lifecycle::trash_session(&db, &session.id).unwrap();
 
     write_rollout(
@@ -418,25 +417,19 @@ fn trash_freezes_discovery_until_restore() {
     );
     reconcile(&db);
 
-    let frozen = db.get_session(&session.id).unwrap().unwrap();
-    assert_eq!(frozen.cwd, session.cwd);
-    assert_eq!(frozen.last_activity_at, session.last_activity_at);
-    assert_eq!(
-        db.members_for_session(&session.id)
-            .unwrap()
-            .iter()
-            .map(|m| m.id.clone())
-            .collect::<Vec<_>>(),
-        before_members
-            .iter()
-            .map(|m| m.id.clone())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        db.get_member_cursor(&root_member.id).unwrap().byte_offset,
-        before_cursor.byte_offset
-    );
+    // The recycle bin is a filter, not a freeze: the trashed Session keeps
+    // following its source while it sits there.
+    let current = db.get_session(&session.id).unwrap().unwrap();
+    assert!(current.is_trashed(), "discovery never Restores a Session");
+    assert_eq!(current.cwd.as_deref(), Some("/repo-after-restore"));
+    assert!(current.last_activity_at > session.last_activity_at);
+    assert!(db
+        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+        .unwrap()
+        .is_some());
+    assert!(db.get_member_cursor(&root_member.id).unwrap().byte_offset > before_cursor.byte_offset);
 
+    // Restore changes nothing about the facts, it only makes them visible again.
     noending::lifecycle::restore_session(&db, &session.id).unwrap();
     reconcile(&db);
     assert_eq!(
@@ -447,7 +440,6 @@ fn trash_freezes_discovery_until_restore() {
         .find_member_by_source_id(Agent::Codex, CHILD_ID)
         .unwrap()
         .is_some());
-    assert!(db.get_member_cursor(&root_member.id).unwrap().byte_offset > before_cursor.byte_offset);
 }
 
 // Fork
@@ -657,11 +649,10 @@ fn unchanged_root_retries_a_pending_launch_intent() {
 
 // ingestion atomicity
 
-/// A Trash racing a member commit: the whole delta is refused — no messages,
-/// no stats, no cursor move (trash racing ingestion commits either all
-/// of it or none of it).
+/// A Trash racing a member commit: the delta commits whole — messages, stats
+/// and the cursor move together.
 #[test]
-fn a_trash_racing_the_commit_takes_nothing() {
+fn a_trash_racing_the_commit_still_commits() {
     let db = open_db("trash-race");
     let (session, member_id, _) = seed_root(&db);
 
@@ -675,21 +666,29 @@ fn a_trash_racing_the_commit_takes_nothing() {
         content: "并发期间的提问".into(),
     }];
     noending::lifecycle::trash_session(&db, &session.id).unwrap();
-    // The racy delta would advance the cursor to 99 if it were accepted.
+    // An APPEND: the source grew after the seed, so the batch extends the
+    // current conversation instead of replacing it.
     let stored = db
-        .commit_member_ingest(&session.id, &member_id, &delta, None, &seed_update(1, 99))
+        .commit_member_ingest(
+            &session.id,
+            &member_id,
+            &delta,
+            None,
+            &noending::domain::SourceCursorUpdate {
+                file_identity: "test-identity-0".into(),
+                generation: 0,
+                byte_offset: 99,
+                last_seen_size: 99,
+                mtime: None,
+                start_byte_offset: 40,
+                prefix_hash: String::new(),
+            },
+        )
         .unwrap();
-    assert!(stored.is_empty(), "trashed session takes nothing");
-    assert_eq!(
-        db.message_count(&session.id).unwrap(),
-        1,
-        "the seed message stays; the racy delta added nothing"
-    );
+    assert_eq!(stored.len(), 1, "the whole delta commits");
+    assert_eq!(db.message_count(&session.id).unwrap(), 2);
     let cursor = db.get_member_cursor(&member_id).unwrap();
-    assert_eq!(
-        cursor.byte_offset, 40,
-        "the cursor stayed exactly where the seed left it"
-    );
+    assert_eq!(cursor.byte_offset, 99, "the cursor advanced with the batch");
 }
 
 /// A member that moved to another session while its delta was being prepared:
@@ -853,18 +852,23 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
         &member_id,
         &[],
         Some(noending::domain::StatsUpdate::Snapshot(
-            noending::domain::SessionMemberStatsSnapshot {
+            noending::domain::StatsSnapshot {
                 tool_call_count: Some(7),
-                tool_error_count: Some(0),
+                user_message_count: Some(5),
+                assistant_message_count: Some(6),
                 compaction_count: Some(1),
                 side_activity_count: Some(2),
+                ..Default::default()
             },
         )),
         &seed_update(1, 80),
     )
     .unwrap();
+    // The member's own row is replaced wholesale.
     let stats = db.get_member_stats(&member_id).unwrap().unwrap();
     assert_eq!(stats.tool_call_count, Some(7));
+    assert_eq!(stats.user_message_count, Some(5));
+    assert_eq!(stats.assistant_message_count, Some(6));
     assert_eq!(stats.compaction_count, Some(1));
     assert_eq!(stats.side_activity_count, Some(2));
 }
@@ -878,11 +882,13 @@ fn empty_full_scan_zeros_only_supported_stats() {
         &member_id,
         &[],
         Some(noending::domain::StatsUpdate::Snapshot(
-            noending::domain::SessionMemberStatsSnapshot {
+            noending::domain::StatsSnapshot {
                 tool_call_count: Some(7),
-                tool_error_count: Some(3),
+                user_message_count: Some(5),
+                assistant_message_count: Some(6),
                 compaction_count: Some(2),
                 side_activity_count: Some(4),
+                ..Default::default()
             },
         )),
         &seed_update(1, 40),
@@ -899,9 +905,75 @@ fn empty_full_scan_zeros_only_supported_stats() {
 
     let stats = db.get_member_stats(&member_id).unwrap().unwrap();
     assert_eq!(stats.tool_call_count, Some(0));
-    assert_eq!(stats.tool_error_count, Some(3));
+    assert_eq!(stats.user_message_count, Some(0));
+    assert_eq!(stats.assistant_message_count, Some(0));
     assert_eq!(stats.compaction_count, Some(0));
     assert_eq!(stats.side_activity_count, Some(4));
+}
+
+/// Usage follows the same NULL-vs-0 discipline as the counters: an append adds,
+/// a metric that was never observed stays NULL rather than becoming 0, and a
+/// full scan replaces the columns it speaks for.
+#[test]
+fn usage_accumulates_on_append_and_is_never_fabricated_as_zero() {
+    let db = open_db("usage-stats");
+    let (session, member_id, _) = seed_root(&db);
+    let delta = |input: i64, cost: f64| {
+        noending::domain::StatsUpdate::Delta(noending::domain::StatsDelta {
+            input_tokens: Some(input),
+            cost: Some(cost),
+            ..Default::default()
+        })
+    };
+
+    db.commit_member_ingest(
+        &session.id,
+        &member_id,
+        &[],
+        Some(delta(100, 0.5)),
+        &seed_update(1, 20),
+    )
+    .unwrap();
+    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
+    assert_eq!(stats.input_tokens, Some(100));
+    assert_eq!(stats.cost, Some(0.5));
+    assert_eq!(stats.output_tokens, None, "unobserved stays NULL");
+    assert_eq!(stats.reasoning_tokens, None);
+
+    db.commit_member_ingest(
+        &session.id,
+        &member_id,
+        &[],
+        Some(delta(50, 0.25)),
+        &seed_update(1, 40),
+    )
+    .unwrap();
+    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
+    assert_eq!(stats.input_tokens, Some(150), "an append adds");
+    assert_eq!(stats.cost, Some(0.75));
+    assert_eq!(stats.output_tokens, None, "still never observed");
+
+    db.commit_member_ingest(
+        &session.id,
+        &member_id,
+        &[],
+        Some(noending::domain::StatsUpdate::Snapshot(
+            noending::domain::StatsSnapshot {
+                input_tokens: Some(7),
+                cost: Some(0.1),
+                ..Default::default()
+            },
+        )),
+        &seed_update(2, 60),
+    )
+    .unwrap();
+    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
+    assert_eq!(stats.input_tokens, Some(7), "a full scan replaces");
+    assert_eq!(stats.cost, Some(0.1));
+    assert_eq!(
+        stats.output_tokens, None,
+        "a column the scan stays silent on is left alone"
+    );
 }
 
 #[test]
@@ -919,9 +991,11 @@ fn unsupported_stats_stay_null_on_a_full_scan() {
 
     let stats = db.get_member_stats(&member_id).unwrap().unwrap();
     assert_eq!(stats.tool_call_count, None);
-    assert_eq!(stats.tool_error_count, None);
     assert_eq!(stats.compaction_count, Some(0));
     assert_eq!(stats.side_activity_count, None);
+    // A root read always speaks for its own turns, even when they are zero.
+    assert_eq!(stats.user_message_count, Some(0));
+    assert_eq!(stats.assistant_message_count, Some(0));
 }
 
 #[test]

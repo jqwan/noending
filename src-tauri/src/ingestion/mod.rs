@@ -119,11 +119,6 @@ fn ensure_logical_session(
     d: &DiscoveredMember,
     attacher: &dyn crate::workspace::WorkspaceAttaching,
 ) -> Result<(Session, bool)> {
-    if let Some(existing) = db.find_session_by_root_agent_id(d.agent, &d.source_member_id)? {
-        if existing.is_trashed() {
-            return Ok((existing, false));
-        }
-    }
     let title = session_title(d);
     let raw_path = d.source_path.to_string_lossy().to_string();
     let observed_cwd = d.cwd.as_deref().map(str::trim).filter(|p| !p.is_empty());
@@ -145,12 +140,9 @@ fn ensure_logical_session(
         &d.metadata,
     )?;
 
-    let stored = db
+    let mut stored = db
         .get_session(&session_id)?
         .unwrap_or_else(|| unreachable!());
-    if stored.is_trashed() {
-        return Ok((stored, false));
-    }
 
     // A topology refresh may have moved the root's cwd: the attachment moves
     // in the one transaction below, so an interrupted pass can never leave the
@@ -161,13 +153,12 @@ fn ensure_logical_session(
                 db.tx(|tx| {
                     crate::workspace::session::move_session_to_path_conn(tx, &session_id, &new_path)
                 })?;
+                stored = db
+                    .get_session(&session_id)?
+                    .unwrap_or_else(|| unreachable!());
             }
         }
     }
-
-    let stored = db
-        .get_session(&session_id)?
-        .unwrap_or_else(|| unreachable!());
     Ok((stored, is_new))
 }
 
@@ -287,12 +278,11 @@ fn resolve_batch(
             }
         }
         match ensure_logical_session(db, d, attacher.as_ref()) {
-            Ok((s, is_new)) if !s.is_trashed() => {
+            Ok((s, is_new)) => {
                 resolve_diagnostic(db, d)?;
                 touched_session_ids.insert(s.id.clone());
                 roots_for_intent.push((s, is_new));
             }
-            Ok(_) => {}
             Err(e) => eprintln!("[ingest] root {} failed: {}", d.source_member_id, e),
         }
     }
@@ -311,14 +301,13 @@ fn resolve_batch(
         else {
             continue;
         };
-        if !fork_session.is_trashed()
-            && fork_session.forked_from_session_id.is_none()
+        if fork_session.forked_from_session_id.is_none()
             && parent_member.session_id != fork_session.id
         {
             let _ = db.tx(|tx| {
                 tx.execute(
                     "UPDATE sessions SET forked_from_session_id = ?2
-                     WHERE id = ?1 AND forked_from_session_id IS NULL AND trashed_at IS NULL",
+                     WHERE id = ?1 AND forked_from_session_id IS NULL",
                     rusqlite::params![fork_session.id, parent_member.session_id],
                 )?;
                 Ok(())
@@ -332,12 +321,6 @@ fn resolve_batch(
         }
         match resolve_logical_session(db, agent, &batch, d)? {
             Some(session_id) => {
-                let Some(session) = db.get_session(&session_id)? else {
-                    continue;
-                };
-                if session.is_trashed() {
-                    continue;
-                }
                 // Topology guard: a stored Root must not be re-homed as a
                 // child/side of another Logical Session.
                 if let Some(stored) = db.find_member_by_source_id(agent, &d.source_member_id)? {
@@ -385,15 +368,8 @@ fn resolve_batch(
 /// projection and the fact generation, and NOTHING else. No Context, no AI.
 /// Returns the number of newly stored messages.
 pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
-    // re-read the lifecycle state: the caller's struct may predate a
-    // concurrent Trash. The authoritative guard lives inside
-    // `commit_member_ingest` anyway; this just avoids reading files that
-    // cannot commit.
-    if !db
-        .get_session(&session.id)?
-        .map(|s| !s.is_trashed())
-        .unwrap_or(false)
-    {
+    // A purge that raced this pass leaves nothing to attach the facts to.
+    if db.get_session(&session.id)?.is_none() {
         return Ok(0);
     }
     let adapter = crate::adapters::adapter_for(session.agent);
@@ -466,14 +442,11 @@ pub fn finalize_newly_discovered_root(
     is_new: bool,
     workspace: &crate::launcher::LaunchWorkspace,
 ) -> Result<()> {
-    // The ROW decides, not the caller's copy: discovery hands over a struct
-    // that may already be behind a concurrent ownership change or trash.
+    // The ROW decides, not the caller's copy: it may be behind a concurrent
+    // ownership change.
     let Some(current) = db.get_session(&session.id)? else {
         return Ok(());
     };
-    if current.is_trashed() {
-        return Ok(());
-    }
     if !is_new && current.owner_workstream_id.is_some() {
         return Ok(());
     }
@@ -510,9 +483,6 @@ where
         let Some(session) = db.get_session(&id)? else {
             continue;
         };
-        if session.is_trashed() {
-            continue;
-        }
         processed.insert(id.clone());
         if reingest {
             db.reset_member_cursors(&id)?;
@@ -577,18 +547,12 @@ where
                 continue;
             }
         }
-        if candidate.is_trashed() {
-            continue;
-        }
         if candidate.owner_workstream_id.is_none() && retry_intents {
             finalize_newly_discovered_root(db, &candidate, false, workspace)?;
         }
         let Some(session) = db.get_session(&candidate.id)? else {
             continue;
         };
-        if session.is_trashed() {
-            continue;
-        }
         on_session(&session);
         match ingest_session(db, &session) {
             Ok(messages) => total_messages += messages,
@@ -800,42 +764,5 @@ pub fn refresh_session(db: &Db, session_id: &str) -> Result<i64> {
     let Some(session) = db.get_session(session_id)? else {
         return Ok(0);
     };
-    if session.is_trashed() {
-        return Ok(0);
-    }
     ingest_session(db, &session)
-}
-
-/// Sessions with pending (un-ingested) activity, used by "sync stale" flows.
-///
-/// Scoped to the Sessions that OWN this Workstream, so a Session can never be
-/// synced twice under this rule. "Stale" = any member's source was modified after
-/// the Session's last recorded activity, so a delta may exist that the cursors
-/// have not seen. Read-only; nothing is written here.
-pub fn stale_sessions(db: &Db, workstream_id: &str) -> Result<Vec<Session>> {
-    let mut out = Vec::new();
-    for s in db.sessions_for_workstream(workstream_id)? {
-        let members = db.members_for_session(&s.id)?;
-        let last_used = s
-            .last_activity_at
-            .as_deref()
-            .or(s.started_at.as_deref())
-            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .map(|t| t.with_timezone(&chrono::Utc))
-            .unwrap_or_else(chrono::Utc::now);
-        let stale = members.iter().any(|m| {
-            std::fs::metadata(&m.source_path)
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .map(|modified| {
-                    let m: chrono::DateTime<chrono::Utc> = modified.into();
-                    m > last_used
-                })
-                .unwrap_or(false)
-        });
-        if stale {
-            out.push(s);
-        }
-    }
-    Ok(out)
 }

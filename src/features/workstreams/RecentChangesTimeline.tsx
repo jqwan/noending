@@ -14,7 +14,7 @@ export default function RecentChangesTimeline({ changes }: Props) {
   const rows = changes ?? [];
 
   return (
-    <div className="rail-section" style={{ marginTop: 24 }}>
+    <div className="rail-section">
       <div className="rail-head">
         <div className="section-label" style={{ margin: 0 }}>Recent Changes</div>
       </div>
