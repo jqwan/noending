@@ -663,6 +663,28 @@ export interface SessionDetail {
   forked_from: Session | null;
 }
 
+/** 会话消息 + 它在当前会话里的投影序号。会话的顺序就是这个序号：读取方按它排序、
+ *  去重，渲染顺序就永远不会取决于分页请求的先后。 */
+export type SessionWindowMessage = SessionMessage & { ordinal: number };
+
+/** `get_session_user_message_marks` — 导航条上的一条：用户消息在会话里的位置。 */
+export interface SessionMessageMark {
+  ordinal: number;
+  /** 消息首行，做悬停提示。 */
+  preview: string;
+}
+
+/** `get_session_messages` — Conversation 的一页。`next_before_ordinal` 是上一页返回的
+ *  游标，再传回来取更早的一页；`null` = 已经到会话开头。 */
+export interface SessionMessageWindow {
+  messages: SessionWindowMessage[];
+  /** 这一页读到的事实代次：变化说明会话被改写，旧页不再属于同一个会话。 */
+  generation: number;
+  /** 当前会话一共有多少条消息。 */
+  total: number;
+  next_before_ordinal: number | null;
+}
+
 export interface SearchHit {
   kind: string;
   ref_id: string;

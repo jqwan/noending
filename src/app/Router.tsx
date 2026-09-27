@@ -3,6 +3,7 @@ import WorkstreamsView from "../features/workstreams/WorkstreamsView";
 import WorkstreamDetailView from "../features/workstreams/WorkstreamDetailView";
 import SessionsView from "../features/sessions/SessionsView";
 import SessionDetailView from "../features/sessions/SessionDetailView";
+import SessionConversationView from "../features/sessions/SessionConversationView";
 import AssistantView from "../features/assistant/AssistantView";
 import ProjectsView from "../features/projects/ProjectsView";
 import ProjectDetail from "../features/projects/ProjectDetail";
@@ -47,7 +48,11 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
         />
       );
     case "session":
-      return <SessionDetailView sessionId={route.sessionId} navigate={navigate} goBack={goBack} />;
+      return route.entry === "conversation" ? (
+        <SessionConversationView key={route.sessionId} sessionId={route.sessionId} goBack={goBack} />
+      ) : (
+        <SessionDetailView sessionId={route.sessionId} navigate={navigate} goBack={goBack} />
+      );
     case "assistant":
       return <AssistantView scope={route.scope} navigate={navigate} />;
     case "projects":

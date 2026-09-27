@@ -1206,6 +1206,83 @@ impl Db {
         self.get_messages(session_id, Some(processed_ordinal), limit)
     }
 
+    /// The newest `limit` messages of the CURRENT conversation, oldest first.
+    pub fn recent_messages(&self, session_id: &str, limit: i64) -> Result<Vec<SessionMessage>> {
+        let conn = self.read();
+        Ok(window_messages_conn(&conn, session_id, None, limit)?
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect())
+    }
+
+    /// One page of the CURRENT conversation read BACKWARD from the tail:
+    /// `before_ordinal` is the exclusive upper bound (`None` = the newest
+    /// messages). The page comes back oldest first and carries its own cursor,
+    /// so callers never handle projection ordinals themselves.
+    ///
+    /// `generation` travels with the page because an ingest that rewrites the
+    /// conversation replaces the projection and raises it: a caller paging
+    /// upward that sees it change knows its older pages no longer belong to
+    /// this conversation.
+    pub fn message_window(
+        &self,
+        session_id: &str,
+        before_ordinal: Option<i64>,
+        limit: i64,
+    ) -> Result<MessageWindow> {
+        let conn = self.read();
+        let state = get_ingest_state_conn(&conn, session_id)?;
+        Ok(message_window_from(
+            state,
+            window_messages_conn(&conn, session_id, before_ordinal, limit)?,
+        ))
+    }
+
+    /// One page read FORWARD from `after_ordinal` (exclusive): the next newer
+    /// messages, oldest first. This is what lets a reader that jumped into the
+    /// middle of a conversation keep reading toward the tail.
+    pub fn newer_window(
+        &self,
+        session_id: &str,
+        after_ordinal: i64,
+        limit: i64,
+    ) -> Result<MessageWindow> {
+        let conn = self.read();
+        let state = get_ingest_state_conn(&conn, session_id)?;
+        Ok(message_window_from(
+            state,
+            forward_messages_conn(&conn, session_id, after_ordinal, limit)?,
+        ))
+    }
+
+    /// Where the USER messages sit in the CURRENT conversation, in order: the
+    /// navigation rail's marks. Each carries its projection ordinal (for
+    /// position and jumping) and the first line of its text (for the tooltip).
+    pub fn user_message_marks(&self, session_id: &str) -> Result<Vec<MessageMark>> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT p.ordinal, m.content
+             FROM session_message_projection p
+             JOIN session_messages m ON m.id = p.session_message_id
+             WHERE p.session_id = ?1 AND m.role = 'user'
+             ORDER BY p.ordinal",
+        )?;
+        let rows = st
+            .query_map(params![session_id], |r| {
+                let ordinal: i64 = r.get(0)?;
+                let content: String = r.get(1)?;
+                Ok(MessageMark {
+                    ordinal,
+                    preview: crate::adapters::truncate_text(
+                        content.lines().next().unwrap_or("").trim(),
+                        MARK_PREVIEW_CHARS,
+                    ),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// How many messages the CURRENT conversation holds — a projection
     /// ordinal bound, never `session_messages.sequence`.
     pub fn ingested_message_sequence(&self, session_id: &str) -> Result<i64> {
@@ -2785,28 +2862,117 @@ pub fn apply_stats_conn(
 
 /// The CURRENT conversation, joined through the projection. `after_ordinal`
 /// is a projection ordinal; the rows come back in projection order.
+/// One page of the CURRENT conversation: its messages plus the cursor, total
+/// and fact generation they were read under.
+pub struct MessageWindow {
+    pub messages: Vec<WindowedMessage>,
+    pub generation: i64,
+    pub total: i64,
+    /// Exclusive upper bound for the next, older page. `None` means the
+    /// conversation's beginning was reached.
+    pub next_before_ordinal: Option<i64>,
+}
+
+/// A message of a window together with the projection ordinal that orders it:
+/// the conversation's order is the ordinal, and a reader that merges pages
+/// orders by it instead of trusting the order the pages arrived in.
+pub struct WindowedMessage {
+    pub ordinal: i64,
+    pub message: SessionMessage,
+}
+
+/// Where one USER message sits in the conversation — a mark on the reader's
+/// navigation rail.
+pub struct MessageMark {
+    pub ordinal: i64,
+    /// The first line of the message, for the mark's tooltip.
+    pub preview: String,
+}
+
+const MARK_PREVIEW_CHARS: usize = 80;
+
+/// The projection window ending at `before_ordinal` (inclusive), newest first
+/// in SQL and oldest first on return, paired with each row's ordinal.
+fn window_messages_conn(
+    conn: &Connection,
+    session_id: &str,
+    before_ordinal: Option<i64>,
+    limit: i64,
+) -> Result<Vec<(i64, SessionMessage)>> {
+    let mut st = conn.prepare(
+        "SELECT p.ordinal AS ordinal, m.*
+         FROM session_message_projection p
+         JOIN session_messages m ON m.id = p.session_message_id
+         WHERE p.session_id = ?1 AND p.ordinal <= ?2
+         ORDER BY p.ordinal DESC LIMIT ?3",
+    )?;
+    let upper = before_ordinal.unwrap_or(i64::MAX);
+    let mut rows = st
+        .query_map(params![session_id, upper, limit], |r| {
+            Ok((r.get::<_, i64>("ordinal")?, row_message(r)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// The projection window starting after `after_ordinal`, oldest first — the
+/// forward half of paging.
+fn forward_messages_conn(
+    conn: &Connection,
+    session_id: &str,
+    after_ordinal: i64,
+    limit: i64,
+) -> Result<Vec<(i64, SessionMessage)>> {
+    let mut st = conn.prepare(
+        "SELECT p.ordinal AS ordinal, m.*
+         FROM session_message_projection p
+         JOIN session_messages m ON m.id = p.session_message_id
+         WHERE p.session_id = ?1 AND p.ordinal > ?2
+         ORDER BY p.ordinal ASC LIMIT ?3",
+    )?;
+    let rows = st
+        .query_map(params![session_id, after_ordinal, limit], |r| {
+            Ok((r.get::<_, i64>("ordinal")?, row_message(r)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Assemble a page from rows read in either direction. Both directions carry
+/// the same backward cursor — one step before the page they came with — so a
+/// reader paging up never handles projection ordinals itself.
+fn message_window_from(
+    state: SessionIngestState,
+    rows: Vec<(i64, SessionMessage)>,
+) -> MessageWindow {
+    let next_before_ordinal = rows
+        .first()
+        .map(|(ordinal, _)| ordinal - 1)
+        .filter(|cursor| *cursor > 0);
+    MessageWindow {
+        messages: rows
+            .into_iter()
+            .map(|(ordinal, message)| WindowedMessage { ordinal, message })
+            .collect(),
+        generation: state.generation,
+        total: state.latest_message_seq,
+        next_before_ordinal,
+    }
+}
+
 pub fn get_messages_conn(
     conn: &Connection,
     session_id: &str,
     after_ordinal: Option<i64>,
     limit: i64,
 ) -> Result<Vec<SessionMessage>> {
-    let mut st = conn.prepare(
-        "SELECT m.id, m.session_id, m.member_id, m.sequence, m.source_message_id,
-                m.source_generation, m.source_position, m.source_identity_hash, m.ts,
-                m.role, m.content, m.provider, m.model, m.raw_ref
-         FROM session_message_projection p
-         JOIN session_messages m ON m.id = p.session_message_id
-         WHERE p.session_id = ?1 AND p.ordinal > ?2
-         ORDER BY p.ordinal LIMIT ?3",
-    )?;
-    let rows = st
-        .query_map(
-            params![session_id, after_ordinal.unwrap_or(0), limit],
-            row_message,
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
+    Ok(
+        forward_messages_conn(conn, session_id, after_ordinal.unwrap_or(0), limit)?
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect(),
+    )
 }
 
 /// The stable diagnostic identity of an unattachable member: one row

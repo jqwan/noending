@@ -24,12 +24,15 @@ export type WorkstreamScope = "active" | "trash";
 
 export type WorkstreamEntry = "review" | "conflicts";
 
+/** Session 的页内子入口：`conversation` 是整屏的消息阅读界面。 */
+export type SessionEntry = "conversation";
+
 export type Route =
   | { view: "home" }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
-  | { view: "session"; sessionId: string }
+  | { view: "session"; sessionId: string; entry?: SessionEntry }
   | { view: "assistant"; scope?: AssistantScope }
   | { view: "projects" }
   | { view: "project"; projectId: string }

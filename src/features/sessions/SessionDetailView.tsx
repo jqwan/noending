@@ -5,7 +5,7 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import SessionMessage, { type SessionMessageData } from "./SessionMessage";
+import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
 import ResumeSessionModal from "./ResumeSessionModal";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import {
@@ -207,15 +207,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   };
 
   /** Conversation：只有 root 的 user/assistant prose。 */
-  const messages: SessionMessageData[] = detail.messages.map((m) => ({
-    sequence: m.sequence,
-    role: m.role,
-    content: m.content,
-    ts: m.ts,
-    who: m.role === "user" ? "用户" : agentDisplayLabel(session.agent),
-    provider: m.role === "assistant" ? m.provider : null,
-    model: m.role === "assistant" ? m.model : null,
-  }));
+  const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
 
   /** 按钮只在真的有内容可更新时出现：需要已读到 Context、有消息，且无摘要或有增量。 */
   const canUpdateSummary =
@@ -383,8 +375,25 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         </div>
       )}
 
-      <div className="section-label" style={{ marginTop: 34 }}>消息</div>
+      {/* 详情只预览最近 10 条：整段会话在「查看全部会话」里按需向前翻页读。
+          条数用 ingested_message_sequence（当前会话总数），而不是这里的条数。 */}
+      <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
+        <div className="section-label" style={{ margin: 0 }}>消息</div>
+        {detail.ingested_message_sequence > 0 && (
+          <button
+            className="btn small ghost"
+            onClick={() => navigate({ view: "session", sessionId, entry: "conversation" })}
+          >
+            查看全部会话（共 {detail.ingested_message_sequence} 条）
+          </button>
+        )}
+      </div>
       {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
+      {detail.ingested_message_sequence > messages.length && (
+        <p className="muted small" style={{ marginTop: 10 }}>
+          以上是最近 {messages.length} 条。
+        </p>
+      )}
       {messages.length === 0 && (
         <div className="empty">
           还没有摄入消息。

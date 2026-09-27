@@ -8,6 +8,7 @@ import type {
   RecentWorkspacePath, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionContextView, SessionDetail,
+  SessionMessageMark, SessionMessageWindow,
   SessionUpdateOutcome, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamReviewState, WorkstreamReviewWindow, WorkstreamReviewSummary,
   WorkstreamUpdateOutcome,
@@ -150,6 +151,20 @@ export const api = {
   permanentlyDeleteSession: (sessionId: string) =>
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
+  /** Conversation 的一页：`beforeOrdinal` 取更早的一页，`afterOrdinal` 取更新的一页，
+   *  都不传就是最新一页。 */
+  getSessionMessages: (
+    sessionId: string,
+    page: { beforeOrdinal?: number | null; afterOrdinal?: number | null; limit?: number } = {},
+  ) => invoke<SessionMessageWindow>("get_session_messages", {
+    sessionId,
+    beforeOrdinal: page.beforeOrdinal ?? null,
+    afterOrdinal: page.afterOrdinal ?? null,
+    limit: page.limit ?? null,
+  }),
+  /** 导航条的用户消息位置：当前会话里所有 user 消息，按顺序。 */
+  getSessionUserMessageMarks: (sessionId: string) =>
+    invoke<SessionMessageMark[]>("get_session_user_message_marks", { sessionId }),
   /** 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */
   listIngestionDiagnostics: (minObservations?: number) =>
     invoke<IngestionDiagnostic[]>("list_ingestion_diagnostics", {

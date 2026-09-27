@@ -292,6 +292,27 @@ it("renders only the user/assistant conversation", async () => {
   screen.getByText("好的，我在看");
 });
 
+it("previews the newest messages and links to the whole conversation", async () => {
+  const me = session("me");
+  const { navigate } = await renderDetail(detail(me, {
+    messages: [message("me", 419, "user", "最近的一句话")],
+    ingested_message_sequence: 420,
+  }));
+
+  screen.getByText("最近的一句话");
+  // 预览只是最后 10 条：说清还剩多少没显示，入口用当前会话总数。
+  screen.getByText("以上是最近 1 条。");
+  fireEvent.click(screen.getByRole("button", { name: "查看全部会话（共 420 条）" }));
+  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "me", entry: "conversation" });
+});
+
+it("offers no conversation entry for a session that has no messages", async () => {
+  await renderDetail(detail(session("me")));
+
+  expect(screen.queryByRole("button", { name: /查看全部会话/ })).toBeNull();
+  screen.getByText(/还没有摄入消息/);
+});
+
 // Fork
 
 it("links to the session it forked from", async () => {

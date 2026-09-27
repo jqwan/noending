@@ -25,6 +25,14 @@ use super::{with_db, AppState};
 
 // ---------------- Sessions ----------------
 
+/// How many Conversation messages the detail page previews. The conversation
+/// itself is read through `get_session_messages`, never wholesale.
+const DETAIL_MESSAGE_PREVIEW: i64 = 10;
+
+/// Page size for the conversation reader: what one upward scroll asks for.
+const MESSAGE_PAGE_DEFAULT: i64 = 60;
+const MESSAGE_PAGE_MAX: i64 = 200;
+
 /// One member of the execution graph, as the detail page shows it: the
 /// member facts plus its own stats snapshot when one exists.
 #[derive(Serialize)]
@@ -104,7 +112,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        let messages = db.get_messages(&session_id, None, 500)?;
+        let messages = db.recent_messages(&session_id, DETAIL_MESSAGE_PREVIEW)?;
         let members = db.members_for_session(&session_id)?;
         let member_views = members
             .iter()
@@ -167,6 +175,91 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             can_permanently_delete,
             forked_from,
         })
+    })
+}
+
+/// One message of a window: the message plus the projection ordinal that puts
+/// it in the conversation. The reader orders by `ordinal`, so the rendered
+/// order never depends on the order pages were fetched or merged in.
+#[derive(Serialize)]
+pub struct SessionWindowMessage {
+    pub ordinal: i64,
+    #[serde(flatten)]
+    pub message: SessionMessage,
+}
+
+/// One page of a Session's Conversation, read backward from the newest message.
+#[derive(Serialize)]
+pub struct SessionMessageWindow {
+    pub messages: Vec<SessionWindowMessage>,
+    /// The fact generation the page was read from. A caller paging upward that
+    /// sees it change must reload from the tail: the conversation was rewritten.
+    pub generation: i64,
+    /// How many messages the CURRENT conversation holds.
+    pub total: i64,
+    /// Cursor for the next, older page; `None` means the beginning was reached.
+    pub next_before_ordinal: Option<i64>,
+}
+
+/// One mark on the conversation's navigation rail: a USER message's position.
+#[derive(Serialize)]
+pub struct SessionMessageMark {
+    pub ordinal: i64,
+    pub preview: String,
+}
+
+/// The Conversation as pages. `before_ordinal = None` is the newest page, and
+/// an older page is fetched by passing the previous page's cursor back.
+/// `after_ordinal` reads the other direction — the messages NEWER than it —
+/// which is how a reader that jumped into the middle keeps going forward.
+#[tauri::command]
+pub fn get_session_messages(
+    state: State<AppState>,
+    session_id: String,
+    before_ordinal: Option<i64>,
+    after_ordinal: Option<i64>,
+    limit: Option<i64>,
+) -> Result<SessionMessageWindow> {
+    let limit = limit
+        .unwrap_or(MESSAGE_PAGE_DEFAULT)
+        .clamp(1, MESSAGE_PAGE_MAX);
+    with_db(&state, |db| {
+        let window = match after_ordinal {
+            Some(after) => db.newer_window(&session_id, after, limit)?,
+            None => db.message_window(&session_id, before_ordinal, limit)?,
+        };
+        Ok(SessionMessageWindow {
+            messages: window
+                .messages
+                .into_iter()
+                .map(|row| SessionWindowMessage {
+                    ordinal: row.ordinal,
+                    message: row.message,
+                })
+                .collect(),
+            generation: window.generation,
+            total: window.total,
+            next_before_ordinal: window.next_before_ordinal,
+        })
+    })
+}
+
+/// Where the USER messages sit in the CURRENT conversation, in order: what the
+/// navigation rail draws and jumps to.
+#[tauri::command]
+pub fn get_session_user_message_marks(
+    state: State<AppState>,
+    session_id: String,
+) -> Result<Vec<SessionMessageMark>> {
+    with_db(&state, |db| {
+        Ok(db
+            .user_message_marks(&session_id)?
+            .into_iter()
+            .map(|mark| SessionMessageMark {
+                ordinal: mark.ordinal,
+                preview: mark.preview,
+            })
+            .collect())
     })
 }
 

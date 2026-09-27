@@ -377,3 +377,214 @@ fn refresh_session_ingests_incrementally_and_writes_no_context() {
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
     assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 }
+
+/// The Conversation reader: a preview is the TAIL of the conversation, and the
+/// reader pages BACKWARD through the cursor each page returns, without skipping
+/// or repeating a message.
+#[test]
+fn the_conversation_reads_backward_from_the_newest_message() {
+    let db = open_db("message-window");
+    let (session, _, _) = support::seed_conversation(
+        &db,
+        Agent::ClaudeCode,
+        "message-window",
+        &(1..=5)
+            .map(|i| {
+                support::parsed_message(
+                    format!("m{i}"),
+                    if i % 2 == 1 {
+                        SessionMessageRole::User
+                    } else {
+                        SessionMessageRole::Assistant
+                    },
+                    format!("message {i}"),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let recent: Vec<String> = db
+        .recent_messages(&session.id, 2)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(
+        recent,
+        vec!["message 4", "message 5"],
+        "the detail preview is the newest messages, oldest first"
+    );
+
+    let newest = db.message_window(&session.id, None, 2).unwrap();
+    assert_eq!(newest.total, 5);
+    assert_eq!(newest.messages.len(), 2);
+    assert_eq!(newest.messages[1].message.content, "message 5");
+    assert_eq!(
+        newest
+            .messages
+            .iter()
+            .map(|m| m.ordinal)
+            .collect::<Vec<_>>(),
+        vec![4, 5],
+        "each message carries the ordinal that orders the conversation"
+    );
+    assert_eq!(
+        newest.next_before_ordinal,
+        Some(3),
+        "the cursor sits just before the page it came with"
+    );
+
+    let older = db
+        .message_window(&session.id, newest.next_before_ordinal, 2)
+        .unwrap();
+    assert_eq!(
+        older
+            .messages
+            .iter()
+            .map(|m| m.message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["message 2", "message 3"]
+    );
+    assert_eq!(older.next_before_ordinal, Some(1));
+    assert_eq!(older.total, 5, "the total is the whole conversation");
+    assert_eq!(
+        older.generation, newest.generation,
+        "paging inside one conversation never changes the generation"
+    );
+
+    let oldest = db
+        .message_window(&session.id, older.next_before_ordinal, 2)
+        .unwrap();
+    assert_eq!(oldest.messages.len(), 1);
+    assert_eq!(oldest.messages[0].message.content, "message 1");
+    assert_eq!(oldest.messages[0].ordinal, 1);
+    assert_eq!(
+        oldest.next_before_ordinal, None,
+        "the beginning was reached"
+    );
+
+    let whole = db.message_window(&session.id, None, 50).unwrap();
+    assert_eq!(
+        whole.messages.len(),
+        5,
+        "a page past the tail is the whole conversation"
+    );
+    assert_eq!(whole.next_before_ordinal, None);
+}
+
+/// The navigation rail's marks are the USER messages in conversation order,
+/// each with its first line as the tooltip; forward paging continues exactly
+/// where a backward page stopped.
+#[test]
+fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
+    let db = open_db("message-marks");
+    let long_line = "很长的一行".repeat(40);
+    let bodies = [
+        long_line,
+        "回答一".to_string(),
+        "message 3".to_string(),
+        "回答二".to_string(),
+        "第一行\n第二行".to_string(),
+        "回答三".to_string(),
+    ];
+    let (session, _, _) = support::seed_conversation(
+        &db,
+        Agent::ClaudeCode,
+        "message-marks",
+        &bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                support::parsed_message(
+                    format!("m{}", i + 1),
+                    if i % 2 == 0 {
+                        SessionMessageRole::User
+                    } else {
+                        SessionMessageRole::Assistant
+                    },
+                    body.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let marks = db.user_message_marks(&session.id).unwrap();
+    assert_eq!(
+        marks.iter().map(|m| m.ordinal).collect::<Vec<_>>(),
+        vec![1, 3, 5],
+        "only USER messages, in order"
+    );
+    assert!(
+        marks[0].preview.ends_with('…'),
+        "a long first line is truncated for the tooltip"
+    );
+    assert_eq!(marks[1].preview, "message 3");
+    assert_eq!(marks[2].preview, "第一行", "the preview is the first line");
+
+    // 两向分页在同一条缝上对接：向后那页的第一条，正是向前那页的下一条。
+    let older = db.message_window(&session.id, Some(4), 2).unwrap();
+    assert_eq!(
+        older.messages.iter().map(|m| m.ordinal).collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    let newer = db.newer_window(&session.id, 4, 2).unwrap();
+    assert_eq!(
+        newer.messages.iter().map(|m| m.ordinal).collect::<Vec<_>>(),
+        vec![5, 6],
+        "forward paging resumes right after the backward page"
+    );
+    assert_eq!(newer.total, 6);
+    assert_eq!(
+        newer.messages.last().unwrap().ordinal,
+        newer.total,
+        "the forward page reached the tail"
+    );
+    assert_eq!(
+        newer.next_before_ordinal,
+        Some(4),
+        "a forward page still knows where to page back from"
+    );
+
+    let past_the_tail = db.newer_window(&session.id, 6, 2).unwrap();
+    assert!(
+        past_the_tail.messages.is_empty(),
+        "nothing newer than the tail"
+    );
+}
+
+/// A rewrite replaces the conversation and raises the generation the page
+/// carries — how a reader paging upward learns its older pages went stale.
+#[test]
+fn a_replaced_conversation_reports_a_new_generation_to_paging_readers() {
+    let db = open_db("message-window-rewrite");
+    let (session, member_id, _) = support::seed_conversation(
+        &db,
+        Agent::ClaudeCode,
+        "message-window-rewrite",
+        &(1..=3)
+            .map(|i| {
+                support::parsed_message(
+                    format!("m{i}"),
+                    SessionMessageRole::User,
+                    format!("message {i}"),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let before = db.message_window(&session.id, None, 2).unwrap();
+    assert_eq!(before.next_before_ordinal, Some(1));
+
+    db.commit_member_ingest(&session.id, &member_id, &[], None, &support::seed_source(1))
+        .unwrap();
+
+    let after = db
+        .message_window(&session.id, before.next_before_ordinal, 2)
+        .unwrap();
+    assert_eq!(after.total, 0, "the replacement conversation is empty");
+    assert!(after.messages.is_empty());
+    assert_eq!(after.next_before_ordinal, None);
+    assert_ne!(
+        after.generation, before.generation,
+        "a replaced conversation raises the generation"
+    );
+}

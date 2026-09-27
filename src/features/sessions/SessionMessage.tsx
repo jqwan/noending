@@ -4,7 +4,8 @@ import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Modal, copyToClipboard } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import { formatDateTime } from "./SessionTable";
+import { agentDisplayLabel, formatDateTime } from "./SessionTable";
+import type { Agent, SessionMessage } from "../../types";
 
 /** 一条会话消息：Conversation 只剩 user | assistant 两种 role 的 prose，
  *  `who` 由调用方给出（用户 / Codex / …）。 */
@@ -17,6 +18,19 @@ export interface SessionMessageData {
   /** 消息级生成溯源：仅 Assistant 有意义。 */
   provider?: string | null;
   model?: string | null;
+}
+
+/** 消息的展示形状：谁说的由角色决定，模型只挂在 Assistant 上。 */
+export function messageData(m: SessionMessage, agent: Agent | null): SessionMessageData {
+  return {
+    sequence: m.sequence,
+    role: m.role,
+    content: m.content,
+    ts: m.ts,
+    who: m.role === "user" ? "用户" : agent === null ? "Agent" : agentDisplayLabel(agent),
+    provider: m.role === "assistant" ? m.provider : null,
+    model: m.role === "assistant" ? m.model : null,
+  };
 }
 
 /** Assistant 消息头上的低干扰模型标签：provider+model → "model · provider"；
@@ -71,7 +85,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   // 键盘可达靠 role + tabIndex，焦点环由全局的 :focus-visible 给。
   return (
     <>
-      <div className={`event ${cls}`}>
+      <div className={`event ${cls}`} data-seq={msg.sequence}>
         <div className="head">
           <span className="who">{msg.who}</span>
           {prov && <span className="prov mono">{prov}</span>}

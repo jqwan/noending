@@ -203,6 +203,14 @@
    否则正文会顶到 y=0、压在红黄绿下面。有页头的页面由那条 band 占住这段。 */
 .main:not(:has(> .page-head)) { padding-top: var(--titlebar-height); }
 .main.narrow { max-width: 1120px; }
+/* 满高页面：正文自己管滚动，页面容器不滚。会话消息阅读界面用它把整屏交给消息列。 */
+.main.fill {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
 
 /* 标题行=应用标题栏那一条：吸在 .main 顶部，页面滚动时内容从它下面穿过。
    左右用负 margin 抵消 .main 的内边距，背景才能盖住滚过去的正文。

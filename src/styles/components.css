@@ -417,6 +417,101 @@
 .md-body .md-link { color: var(--accent); }
 .md-body .md-img { color: var(--text-muted); font-size: 12px; }
 
+/* ---------- Session conversation reader ---------- */
+/* 整屏阅读：页面容器不滚（.main.fill），滚动只发生在消息列上，所以打开时能锚到
+   最新、向上翻页时也能原地锚住。 */
+.conversation-body { position: relative; display: flex; flex: 1; min-height: 0; }
+.conversation-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 只纵向读：.event 的负外边距会溢出几个像素，不裁掉就会出现左右拖动。 */
+  overflow-x: hidden;
+  /* 位置只由代码里的锚点负责：引擎自己再补一次就会叠出一整页的位移。 */
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  padding: 4px 0 40px;
+}
+/* 顶部「还有 N 条更早消息」：向上滑会自动加载，也可以直接点这一条。 */
+.conversation-more { display: flex; justify-content: center; padding: 12px 0 20px; }
+/* 用户消息导航条：一条用户消息一根短横，按固定间距排成阶梯。位置只由它在用户消息
+   里的序号决定，不映射到消息在文档里的位置——它是「跳到第几条提问」的目录，不是
+   滚动条的替身。它落在 .main 的右内距里，不压正文，也不跟着内容滚。 */
+.conversation-nav {
+  position: absolute;
+  top: 50%;
+  right: calc(4px - var(--main-gutter));
+  width: 28px;
+  /* 阶梯高过上限就封顶，多出来的由轨道自己滚：刻度间距因此永不被压缩。 */
+  height: min(var(--nav-natural-height, 0px), calc(100% - 48px), 420px);
+  transform: translateY(-50%);
+  transition: height 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.nav-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  /* 滚到头不把滚动链传回消息列。 */
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.nav-scroll::-webkit-scrollbar { display: none; }
+.nav-scroll.fade-up { mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%); }
+.nav-scroll.fade-down { mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%); }
+.nav-scroll.fade-up.fade-down {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+}
+.nav-marks { position: relative; height: var(--nav-natural-height, 0px); }
+.nav-mark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 10px;
+  transform: translateY(-50%);
+  transition: top 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.nav-tick {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+.nav-tick::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  width: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border-subtle);
+  transform: translateY(-50%);
+  transition: width 140ms ease, background 140ms ease;
+}
+/* 还没读进来的用户消息：短一截、淡一点，点它是「先加载再跳过去」。 */
+.nav-tick.is-unloaded::before { width: 8px; opacity: 0.6; }
+.nav-tick:hover::before { width: 18px; background: var(--text-muted); }
+/* 正在为它翻页：脉冲表示「在加载」。 */
+.nav-tick.is-busy::before { animation: nav-tick-busy 1s ease-in-out infinite; }
+/* 正在读的那条：最长最深，一眼看出读到哪了。 */
+.nav-tick.is-active::before { width: 20px; background: var(--text-primary); }
+/* 键盘焦点压过所有静止状态：全局 :focus-visible 会给按钮描一圈，这里的短横也要变。 */
+.nav-tick:focus-visible::before { width: 20px; background: var(--accent); }
+@keyframes nav-tick-busy {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.conversation-jump {
+  position: absolute;
+  right: var(--main-gutter);
+  bottom: 20px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+
 /* ---------- Session trash / permanent delete (Session Lifecycle & Deletion) ---------- */
 .session-trash-banner {
   display: flex;
