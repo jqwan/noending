@@ -52,13 +52,14 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
     return (
       <div className="main narrow home">
         <div className="hero">
-          <SidebarLogo size={40} />
+          <SidebarLogo size={44} />
           <h1>开始新任务</h1>
+          <p className="page-sub">任务组织持续推进的工作，会话是一次具体的执行。</p>
           <div className="actions-row">
-            <button className="btn primary" onClick={() => setCreatingWs(true)}>+ 新建任务</button>
-          </div>
-          <div className="muted small" style={{ margin: "10px 0" }}>或</div>
-          <div className="actions-row">
+            <button className="btn primary" onClick={() => setCreatingWs(true)}>
+              <Icon name="plus" />
+              新建任务
+            </button>
             {/* 打开的是全局新建 Session 面板：Agent 未检测到时由面板给出提示与不可点的
                 启动按钮，这里不自己判断（避免在 Agent 还在解析时把按钮误标成「未检测」）。
                 也因此这里不挂 `!defaultAgent` 的「配置 Agent」链接——它会在解析期间闪一下。 */}
@@ -74,7 +75,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
             </button>
           </div>
           {everythingHidden && (
-            <p className="muted small" style={{ marginTop: 18 }}>
+            <p className="muted small hero-hint">
               {hiddenReason}{" "}
               <button className="link small"
                 onClick={() => navigate({ view: "workstreams" })}>
