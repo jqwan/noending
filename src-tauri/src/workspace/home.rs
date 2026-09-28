@@ -250,6 +250,15 @@ impl NoEndingHome {
     pub fn db_path_str(&self) -> String {
         self.db_path.to_string_lossy().to_string()
     }
+
+    /// The fixed working directory for the Workspace Assistant's headless exec
+    /// calls: a private corner of `runtime/` (ephemeral per-run artifacts), so
+    /// the agent never inherits a user repository as its cwd. May not exist —
+    /// `runtime/` can be cleaned between runs — so create it right before each
+    /// exec call.
+    pub fn assistant_exec_dir(&self) -> PathBuf {
+        self.runtime_dir.join("assistant")
+    }
 }
 
 /// Result of [`NoEndingHome::resolve_reported`].
@@ -1165,6 +1174,18 @@ mod tests {
         let tricky = home_at("/Users/me/.noending");
         assert_eq!(tricky.data_dir, PathBuf::from("/Users/me/.noending/data"));
         assert!(!tricky.db_path.to_string_lossy().contains(".."));
+    }
+
+    /// The assistant's headless exec cwd is a fixed corner of `runtime/` —
+    /// never the Home root (data/ and logs/ must stay out of the agent's
+    /// reach) and never a user repository.
+    #[test]
+    fn assistant_exec_dir_is_a_fixed_subpath_of_runtime() {
+        let home = home_at("/Users/me/.noending");
+        assert_eq!(
+            home.assistant_exec_dir(),
+            PathBuf::from("/Users/me/.noending/runtime/assistant")
+        );
     }
 
     /// The bootstrap pointer is the only file this module writes outside the

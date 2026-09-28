@@ -76,7 +76,7 @@ pub fn run() {
             // the ingestion worker resolves handle.state::<AppState>(), which
             // panics when the state has not been managed yet.
             app.manage(commands::AppState {
-                db,
+                db: std::sync::Arc::new(db),
                 ingestion: Default::default(),
                 workspace_refresh_in_progress: std::sync::atomic::AtomicBool::new(false),
                 prepared_launches: Mutex::new(std::collections::HashMap::new()),

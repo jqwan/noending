@@ -24,8 +24,10 @@ pub use workstream::workstream_cards;
 
 pub struct AppState {
     /// The store owns its own concurrency (one writer + a WAL reader), so the
-    /// UI's reads never queue behind a background reconcile's writes.
-    pub db: Db,
+    /// UI's reads never queue behind a background reconcile's writes. Arc'd
+    /// because `Db` is deliberately not `Clone`: async commands move a handle
+    /// onto the blocking worker (`run_on_blocking_worker`), which needs 'static.
+    pub db: std::sync::Arc<Db>,
     /// The one place background ingestion is queued. Never calls AI.
     pub ingestion: ingestion::IngestionCoordinator,
     /// Guards against concurrent workspace reconciles (global AND targeted —
@@ -57,6 +59,15 @@ fn launcher_for(app: &AppHandle) -> crate::launcher::SessionLauncher {
 fn noending_home(app: &AppHandle) -> Option<crate::workspace::home::NoEndingHome> {
     app.try_state::<crate::workspace::home::NoEndingHome>()
         .map(|h| h.inner().clone())
+}
+
+/// The Workspace Assistant's fixed headless exec cwd (`<Home>/runtime/assistant`).
+/// The temp-dir fallback mirrors [`launcher_for`]: a chat turn must not fail
+/// because Home state was never registered.
+fn assistant_exec_cwd(app: &AppHandle) -> std::path::PathBuf {
+    noending_home(app)
+        .map(|h| h.assistant_exec_dir())
+        .unwrap_or_else(|| std::env::temp_dir().join("noending-assistant"))
 }
 
 /// tier 3 — the non-database fact a launch needs.
@@ -152,30 +163,41 @@ pub fn get_workstream_context_state(
 /// ONE user action → AT MOST ONE model call → one new Session Context.
 /// Returns `updated` / `partial` / `no_change`; a stale snapshot is an `Err`
 /// carrying the `stale_snapshot` reason so the UI can ask for a re-click.
+///
+/// Async on purpose: the model call blocks for up to the configured CLI
+/// timeout, so the body goes through [`run_on_blocking_worker`] and the UI
+/// thread stays responsive (same seam as `refresh_agent_runtime_options`).
 #[tauri::command]
-pub fn update_session_context(
+pub async fn update_session_context(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     session_id: String,
 ) -> Result<crate::context::SessionUpdateOutcome> {
+    let db = state.inner().db.clone();
     let home = noending_home(&app);
-    with_db(&state, |db| {
-        crate::context::update_session(db, &session_id, home.as_ref())
-    })
+    run_on_blocking_worker(move || crate::context::update_session(&db, &session_id, home.as_ref()))
+        .await
+        .and_then(|outcome| outcome)
 }
 
 /// ONE user action → AT MOST ONE model call → every affected Session Context AND
 /// the Workstream Context mutations, committed atomically.
+///
+/// Async on purpose: same seam as [`update_session_context`] — the model call
+/// must never occupy the UI thread.
 #[tauri::command]
-pub fn update_workstream_context(
+pub async fn update_workstream_context(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     workstream_id: String,
 ) -> Result<crate::context::WorkstreamUpdateOutcome> {
+    let db = state.inner().db.clone();
     let home = noending_home(&app);
-    with_db(&state, |db| {
-        crate::context::update_workstream(db, &workstream_id, home.as_ref())
+    run_on_blocking_worker(move || {
+        crate::context::update_workstream(db.as_ref(), &workstream_id, home.as_ref())
     })
+    .await
+    .and_then(|outcome| outcome)
 }
 
 /// Open the active Home's Context extraction log folder in the system file
@@ -879,16 +901,23 @@ pub async fn refresh_agent_runtime_options(
 
 // ---------------- Assistant ----------------
 
+/// Async on purpose: the assistant's model call blocks for up to the CLI
+/// timeout, so the body goes through [`run_on_blocking_worker`] and the UI
+/// thread stays responsive (same seam as [`update_session_context`]).
 #[tauri::command]
-pub fn assistant_send(
+pub async fn assistant_send(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     session_id: Option<String>,
     text: String,
 ) -> Result<crate::assistant::AssistantReply> {
-    let reply = with_db(&state, |db| {
-        crate::assistant::AssistantService::chat(db, session_id.as_deref(), &text)
-    })?;
+    let db = state.inner().db.clone();
+    let exec_cwd = assistant_exec_cwd(&app);
+    let reply = run_on_blocking_worker(move || {
+        crate::assistant::AssistantService::chat(&db, session_id.as_deref(), &text, &exec_cwd)
+    })
+    .await
+    .and_then(|reply| reply)?;
     let _ = app.emit("assistant-reply", &reply);
     Ok(reply)
 }

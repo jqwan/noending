@@ -7,6 +7,7 @@
 //! the UI must confirm before execution (policy: 技术实现).
 
 use serde::Serialize;
+use std::path::Path;
 
 use crate::error::{other, Result};
 use crate::storage::{AssistantMessageRow, Db};
@@ -124,11 +125,27 @@ fn build_conversation_history(msgs: &[AssistantMessageRow]) -> String {
     out
 }
 
+/// `runtime/` is ephemeral and may have been cleaned since startup, so the
+/// exec cwd must exist before the child spawns into it.
+fn ensure_exec_cwd(cwd: &Path) -> Result<()> {
+    std::fs::create_dir_all(cwd)
+        .map_err(|e| other(format!("无法创建助手工作目录 {}: {}", cwd.display(), e)))
+}
+
 pub struct AssistantService;
 
 impl AssistantService {
     /// One interactive turn: retrieve → CLI headless call → parse action.
-    pub fn chat(db: &Db, session_id: Option<&str>, user_text: &str) -> Result<AssistantReply> {
+    ///
+    /// `exec_cwd` is the fixed working directory every headless call runs in
+    /// (the Home's `runtime/assistant`); adapters keep `cwd: None` because
+    /// their other headless caller, the Context extractor, must stay cwd-less.
+    pub fn chat(
+        db: &Db,
+        session_id: Option<&str>,
+        user_text: &str,
+        exec_cwd: &Path,
+    ) -> Result<AssistantReply> {
         let user_text = user_text.trim();
         if user_text.is_empty() {
             return Err(other("消息不能为空"));
@@ -148,9 +165,11 @@ impl AssistantService {
 
         let (content, runtime) = match CliExtractor::try_from_settings(db)? {
             Some(cli) if crate::adapters::adapter_for(cli.agent).detect().is_some() => {
+                ensure_exec_cwd(exec_cwd)?;
                 let install = crate::platform::exec_resolver::resolve(cli.agent)?;
                 let adapter = crate::adapters::adapter_for(cli.agent);
-                let cmd = adapter.build_exec_command(&install, &cli.opts, &prompt)?;
+                let mut cmd = adapter.build_exec_command(&install, &cli.opts, &prompt)?;
+                cmd.cwd = Some(exec_cwd.to_path_buf());
                 let out = crate::platform::exec_runner::run_headless(&cmd, 180)?;
                 let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
                 if text.is_empty() {
@@ -260,4 +279,33 @@ pub fn raw_prompt(db: &Db, prompt: &str) -> Result<String> {
     let cmd = adapter.build_exec_command(&install, &cli.opts, prompt)?;
     let out = crate::platform::exec_runner::run_headless(&cmd, 180)?;
     Ok(crate::platform::exec_runner::clean_exec_stdout(&out.stdout))
+}
+
+#[cfg(test)]
+mod exec_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_creates_a_missing_directory_including_parents() {
+        let root =
+            std::env::temp_dir().join(format!("noending-assistant-cwd-{}", std::process::id()));
+        let nested = root.join("assistant");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!nested.exists());
+        ensure_exec_cwd(&nested).unwrap();
+        assert!(nested.is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ensure_is_idempotent_when_the_directory_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "noending-assistant-cwd-exists-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        ensure_exec_cwd(&dir).unwrap();
+        assert!(dir.is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -327,6 +327,7 @@ fn real_codex_assistant_chat_roundtrip() {
         &db,
         None,
         "现在有哪些 Workstream？用一句话概括。",
+        &std::env::temp_dir().join("noending-assistant"),
     )
     .expect("assistant chat should succeed");
     println!("assistant: {} [runtime={}]", reply.content, reply.runtime);
