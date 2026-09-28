@@ -1,11 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { api } from "../../api";
 import SettingsView from "./SettingsView";
 
 vi.mock("../../api", () => ({
   api: {
-    openContextExtractionLogs: vi.fn().mockResolvedValue(undefined),
     getWorkspaceSettings: vi.fn().mockResolvedValue({
       noending_home: "/tmp/noending",
       default_workspace: "/tmp/noending/workspace",
@@ -32,10 +30,4 @@ it("applies and persists themes, then restores system appearance", () => {
   fireEvent.click(screen.getByRole("button", { name: "跟随系统" }));
   expect(document.documentElement.dataset.theme).toBeUndefined();
   expect(localStorage.getItem("noending.theme")).toBeNull();
-});
-
-it("opens the Context extraction log directory from Advanced settings", async () => {
-  render(<SettingsView section="advanced" navigate={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: "打开日志目录" }));
-  await waitFor(() => expect(api.openContextExtractionLogs).toHaveBeenCalledOnce());
 });

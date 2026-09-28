@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { Modal, timeAgo, useRefreshSignal } from "../../components/common";
+import { Modal, submitsOnEnter, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SourcesSettings from "./SourcesSettings";
 import AgentRuntimeRow from "./AgentRuntimeSettings";
@@ -92,8 +92,8 @@ function IngestionDiagnosticsSection() {
             </div>
             <div className="settings-row-hint" style={{ wordBreak: "break-word" }}>{d.reason}</div>
             {d.source_path && (
-              <div className="settings-row-hint mono" title={d.source_path} style={{ wordBreak: "break-all" }}>
-                {truncatePath(d.source_path, 72)}
+              <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
+                {d.source_path}
               </div>
             )}
             <div className="settings-row-hint">
@@ -104,12 +104,6 @@ function IngestionDiagnosticsSection() {
       ))}
     </section>
   );
-}
-
-/** 长路径取尾段省略：认路径靠的是末段，头部截断会把最有信息量的部分吃掉。 */
-function truncatePath(path: string, max: number): string {
-  if (path.length <= max) return path;
-  return `…${path.slice(-(max - 1))}`;
 }
 
 /** General：Default Agent 是最重要设置；Startup Page 第一版固定 Home。 */
@@ -544,7 +538,7 @@ function ChangeHomeModal({ current, onClose, onSaved }: {
           placeholder={current.noending_home}
           autoFocus
           onChange={(e) => { setPath(e.target.value); setError(""); }}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) void submit(); }}
+          onKeyDown={(e) => { if (submitsOnEnter(e)) void submit(); }}
           disabled={busy}
         />
       </label>

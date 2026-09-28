@@ -1,6 +1,7 @@
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
+import { submitsOnEnter } from "../../components/common";
 import PageHeader from "../../layout/PageHeader";
 import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
 import type { AssistantScope, Route } from "../../app/routes";
@@ -252,7 +253,7 @@ export default function AssistantView({ scope, navigate }: {
       <div className="row chat-composer" style={{ marginTop: 10 }}>
         <input type="text" placeholder="问 NoEnding…（问上下文、启动会话、查摄入历史）" value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && send()} />
+          onKeyDown={(e) => submitsOnEnter(e) && send()} />
         <button className="btn primary" onClick={() => send()} disabled={busy}>发送</button>
       </div>
 

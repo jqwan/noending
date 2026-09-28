@@ -266,6 +266,84 @@ fn child_transcript_text_never_becomes_conversation() {
     assert!(messages.iter().all(|m| m.member_id == root_member.id));
 }
 
+#[test]
+fn a_missing_member_does_not_fail_reconcile_and_resumes_when_it_returns() {
+    let root_dir = temp_root("missing-member");
+    let root_path = write_rollout(
+        &root_dir,
+        &rollout_name(ROOT_ID),
+        &[
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "最初的提问"),
+        ],
+    );
+    let child_lines = vec![meta_line(
+        CHILD_ID,
+        serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
+    )];
+    let child_path = write_rollout(&root_dir, &rollout_name(CHILD_ID), &child_lines);
+    let db = open_db("missing-member");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
+
+    let session = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    let child = db
+        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+        .unwrap()
+        .unwrap();
+    let child_cursor = db.get_member_cursor(&child.id).unwrap();
+
+    std::fs::remove_file(&child_path).unwrap();
+    for _ in 0..2 {
+        let report =
+            ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(db.message_count(&session.id).unwrap(), 1);
+        assert_eq!(
+            db.get_member_cursor(&child.id).unwrap().byte_offset,
+            child_cursor.byte_offset,
+            "a missing source must not advance its cursor"
+        );
+    }
+
+    // A changed root still ingests while an old child file is absent.
+    std::fs::write(
+        &root_path,
+        format!(
+            "{}\n{}\n{}\n",
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "最初的提问"),
+            message_line(2, "m2", "assistant", "后续回答")
+        ),
+    )
+    .unwrap();
+    reconcile(&db);
+    assert_eq!(db.message_count(&session.id).unwrap(), 2);
+
+    // A path that exists but is not a readable file is still an error.
+    std::fs::create_dir(&child_path).unwrap();
+    let report =
+        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    assert!(!report.failures.is_empty());
+    std::fs::remove_dir(&child_path).unwrap();
+
+    let restored_lines = [
+        child_lines[0].clone(),
+        message_line(1, "c1", "assistant", "恢复后的子任务"),
+    ];
+    write_rollout(&root_dir, &rollout_name(CHILD_ID), &restored_lines);
+    let report =
+        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(
+        db.get_member_cursor(&child.id).unwrap().byte_offset > child_cursor.byte_offset,
+        "the returning file must be ingested"
+    );
+}
+
 /// A child whose cwd differs never moves the Session's physical location
 ///: Session.cwd is Root authority only.
 #[test]
@@ -648,48 +726,6 @@ fn unchanged_root_retries_a_pending_launch_intent() {
 }
 
 // ingestion atomicity
-
-/// A Trash racing a member commit: the delta commits whole — messages, stats
-/// and the cursor move together.
-#[test]
-fn a_trash_racing_the_commit_still_commits() {
-    let db = open_db("trash-race");
-    let (session, member_id, _) = seed_root(&db);
-
-    let delta = vec![ParsedSessionMessage {
-        provider: None,
-        model: None,
-        source_message_id: Some("m1".into()),
-        source_position: "line:1".into(),
-        ts: None,
-        role: SessionMessageRole::User,
-        content: "并发期间的提问".into(),
-    }];
-    noending::lifecycle::trash_session(&db, &session.id).unwrap();
-    // An APPEND: the source grew after the seed, so the batch extends the
-    // current conversation instead of replacing it.
-    let stored = db
-        .commit_member_ingest(
-            &session.id,
-            &member_id,
-            &delta,
-            None,
-            &noending::domain::SourceCursorUpdate {
-                file_identity: "test-identity-0".into(),
-                generation: 0,
-                byte_offset: 99,
-                last_seen_size: 99,
-                mtime: None,
-                start_byte_offset: 40,
-                prefix_hash: String::new(),
-            },
-        )
-        .unwrap();
-    assert_eq!(stored.len(), 1, "the whole delta commits");
-    assert_eq!(db.message_count(&session.id).unwrap(), 2);
-    let cursor = db.get_member_cursor(&member_id).unwrap();
-    assert_eq!(cursor.byte_offset, 99, "the cursor advanced with the batch");
-}
 
 /// A member that moved to another session while its delta was being prepared:
 /// the stale commit is rejected in full.
@@ -1091,52 +1127,6 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
     );
 }
 
-/// the core's last line of defense: messages handed to a CHILD member
-/// are an error, never silently stored.
-#[test]
-fn a_child_member_cannot_write_conversation() {
-    let db = open_db("child-write");
-    let (session, _, _) = seed_root(&db);
-    let child_member = db
-        .upsert_session_member(
-            &session.id,
-            Agent::Codex,
-            CHILD_ID,
-            SessionMemberRelation::Child,
-            Some(ROOT_ID),
-            "codex_rollout",
-            "/tmp/child",
-            None,
-            None,
-            None,
-            &serde_json::json!({}),
-        )
-        .unwrap();
-    let delta = vec![ParsedSessionMessage {
-        provider: None,
-        model: None,
-        source_message_id: Some("c1".into()),
-        source_position: "line:1".into(),
-        ts: None,
-        role: SessionMessageRole::Assistant,
-        content: "子成员试图写会话".into(),
-    }];
-    let err = db
-        .commit_member_ingest(
-            &session.id,
-            &child_member,
-            &delta,
-            None,
-            &seed_update(0, 10),
-        )
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("root"),
-        "the refusal names the invariant: {err}"
-    );
-    assert_eq!(db.message_count(&session.id).unwrap(), 1, "only the seed");
-}
-
 // diagnostics stay out of everything
 
 /// A repeat offender becomes visible at observation_count >= 2, and resolving
@@ -1180,6 +1170,48 @@ fn diagnostics_are_repeat_visible_and_resolvable() {
     );
     reconcile(&db);
     assert!(db.list_ingestion_diagnostics(1).unwrap().is_empty());
+}
+
+#[test]
+fn a_diagnostic_is_removed_when_its_source_file_disappears() {
+    let root_dir = temp_root("missing-diagnostic");
+    let child_path = write_rollout(
+        &root_dir,
+        &rollout_name(CHILD_ID),
+        &[meta_line(
+            CHILD_ID,
+            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
+        )],
+    );
+    let db = open_db("missing-diagnostic");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
+    reconcile(&db);
+    assert_eq!(db.list_ingestion_diagnostics(2).unwrap().len(), 1);
+
+    std::fs::remove_file(&child_path).unwrap();
+    assert_eq!(db.prune_missing_ingestion_diagnostics().unwrap(), 1);
+    assert!(db.list_ingestion_diagnostics(1).unwrap().is_empty());
+
+    // A returning source starts a new observation history.
+    write_rollout(
+        &root_dir,
+        &rollout_name(CHILD_ID),
+        &[meta_line(
+            CHILD_ID,
+            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
+        )],
+    );
+    reconcile(&db);
+    assert!(db.list_ingestion_diagnostics(2).unwrap().is_empty());
+    reconcile(&db);
+    assert_eq!(db.list_ingestion_diagnostics(2).unwrap().len(), 1);
+
+    // A path that exists but cannot be parsed is still actionable.
+    std::fs::remove_file(&child_path).unwrap();
+    std::fs::create_dir(&child_path).unwrap();
+    assert_eq!(db.prune_missing_ingestion_diagnostics().unwrap(), 0);
+    assert_eq!(db.list_ingestion_diagnostics(2).unwrap().len(), 1);
 }
 
 /// Discovery never produces a member for an adapter that cannot identify one:

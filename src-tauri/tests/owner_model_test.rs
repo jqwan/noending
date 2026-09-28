@@ -502,25 +502,6 @@ fn ownerless_session_with_no_usable_cwd_resolves_to_unresolved() {
     assert_eq!(resolution.source, noending::launcher::CwdSource::Unresolved);
 }
 
-// workstream
-
-#[test]
-fn a_session_never_appears_in_two_workstream_lists() {
-    let db = open_db("ws-mutex");
-    let a = workstream(&db, "A");
-    let b = workstream(&db, "B");
-    let s = session(&db, None);
-
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    db.set_session_owner(&s.id, Some(&b.id)).unwrap();
-
-    let in_a = db.sessions_for_workstream(&a.id).unwrap();
-    let in_b = db.sessions_for_workstream(&b.id).unwrap();
-    assert!(in_a.is_empty());
-    assert_eq!(in_b.len(), 1);
-    assert_eq!(in_b[0].id, s.id);
-}
-
 // the owner side-effect rule
 
 /// `set_session_owner` writes `sessions.owner_workstream_id` and

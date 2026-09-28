@@ -652,8 +652,10 @@ export interface SessionDetail {
   /** 唯一的所属任务；`null` = 未归属任务。 */
   owner_workstream: Workstream | null;
   workspace_path: SessionWorkspacePath | null;
-  /** 执行图：root / children / sides，root 在前。 */
-  members: (SessionMember & { stats: SessionMemberStats | null })[];
+  /** 执行图：root / children / sides，root 在前。`source_status` 是加载详情时对
+   *  这个成员**自己的**源文件的新鲜结论：子 / 边的转写会各自消失，命名它的那一行
+   *  必须说得出它已经不在。 */
+  members: (SessionMember & { stats: SessionMemberStats | null; source_status: SourceAvailability })[];
   /** 查询时聚合的执行图统计。 */
   stats: SessionAggregateStats;
   /** stats.cost 的单位，取 Agent 自己的单位（Pi: USD；Qoder: credits）。

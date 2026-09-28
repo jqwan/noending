@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import { submitsOnEnter } from "./common";
 import type { PathProbe, RecentWorkspacePath } from "../types";
 
 /**
@@ -204,7 +205,7 @@ export default function WorkspacePathField({
           onChange={(e) => { onChange(e.target.value); setFormatHint(""); }}
           onBlur={() => setListOpen(false)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && onSubmit) {
+            if (submitsOnEnter(e) && onSubmit) {
               e.preventDefault();
               onSubmit();
             } else if (e.key === "Escape") {

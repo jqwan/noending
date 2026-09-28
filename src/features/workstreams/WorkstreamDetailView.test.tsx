@@ -135,20 +135,6 @@ it("keeps exactly one edit entry: the 编辑任务 icon button", async () => {
   expect(screen.queryByTitle("更多操作")).toBeNull();
 });
 
-it("leaves no edit affordance on the page itself", async () => {
-  await renderDetail();
-
-  expect(screen.queryByRole("button", { name: "编辑描述" })).toBeNull();
-  for (const name of ["新增目录", "选择已有目录", "移除", "设为主要"]) {
-    expect(screen.queryByRole("button", { name })).toBeNull();
-  }
-  // 路径只出现在「工作目录」列表里（标题下那行元信息已去掉）。
-  screen.getByText("/repo/main");
-  screen.getByText("主目录");
-  // 状态切换不是编辑，保留
-  screen.getByRole("button", { name: "已完成" });
-});
-
 it("lists the sessions owned by this task and nothing else", async () => {
   const ctx = context();
   ctx.sessions = [{

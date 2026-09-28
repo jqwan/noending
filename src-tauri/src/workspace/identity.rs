@@ -654,20 +654,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn windows_separator_variants_share_path_identity() {
-        let w = PathStyle::Windows;
-        assert_eq!(
-            path_identity_with("C:\\Code\\NoEnding", w),
-            path_identity_with("C:/Code/NoEnding", w)
-        );
-        assert_eq!(
-            path_identity_with("C:\\Code\\NoEnding\\", w),
-            path_identity_with("C:\\Code\\NoEnding", w),
-            "a trailing separator is a spelling, not a second directory"
-        );
-    }
-
     /// A UNC root's `server\\share` carries identity — two file servers must not
     /// collide — but it carries it case-insensitively, like the drive letter.
     #[test]

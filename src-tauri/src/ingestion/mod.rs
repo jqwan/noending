@@ -26,7 +26,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use crate::adapters::{AgentAdapter, DiscoveredMember, DiscoveredMemberKind};
-use crate::domain::{Agent, Session, SessionMember, SessionMemberRelation};
+use crate::domain::{Agent, Session, SessionMember, SessionMemberRelation, SourceAvailability};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
@@ -377,12 +377,29 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
     let mut stored_total = 0i64;
     let mut failures = Vec::new();
     for member in &members {
+        // A stored member may outlive its source file. Keep its facts and cursor
+        // intact so a later discovery can resume it if the file returns.
+        if matches!(
+            adapter.inspect_member_source(member),
+            Ok(SourceAvailability::Missing)
+        ) {
+            continue;
+        }
         // A member that raced a topology change mid-pass simply fails its
         // membership re-check inside the commit and stores nothing.
         let cursor = db.get_member_cursor(&member.id)?;
         let delta = match adapter.read_member_delta(member, &cursor) {
             Ok(d) => d,
             Err(e) => {
+                // The source can disappear between inspection and reading;
+                // adapters wrap read errors differently, so confirm the
+                // current source verdict instead of matching error text.
+                if matches!(
+                    adapter.inspect_member_source(member),
+                    Ok(SourceAvailability::Missing)
+                ) {
+                    continue;
+                }
                 eprintln!(
                     "[ingest] read member {} failed: {}",
                     member.source_member_id, e

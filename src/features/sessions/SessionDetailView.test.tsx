@@ -12,6 +12,7 @@ import type {
   SessionMember,
   SessionMessage,
   SessionMemberStats,
+  SourceAvailability,
   Workstream,
 } from "../../types";
 
@@ -109,9 +110,12 @@ function member(
   sourceMemberId: string,
   relation: SessionMember["relation"],
   parentSourceMemberId: string | null,
-  over: Partial<SessionMember> & { stats?: SessionMemberStats | null } = {},
-): SessionMember & { stats: SessionMemberStats | null } {
-  const { stats: memberStats = null, ...rest } = over;
+  over: Partial<SessionMember> & {
+    stats?: SessionMemberStats | null;
+    source_status?: SourceAvailability;
+  } = {},
+): SessionMember & { stats: SessionMemberStats | null; source_status: SourceAvailability } {
+  const { stats: memberStats = null, source_status = "present", ...rest } = over;
   return {
     id: `${sessionId}-${sourceMemberId}`,
     session_id: sessionId,
@@ -126,6 +130,7 @@ function member(
     last_activity_at: null,
     metadata: {},
     stats: memberStats,
+    source_status,
     ...rest,
   };
 }
@@ -373,18 +378,6 @@ it("treats a missing root member as unavailable even when the verdict says prese
 });
 
 // 消息
-
-it("renders only the user/assistant conversation", async () => {
-  await renderDetail(detail(session("me"), {
-    messages: [
-      message("me", 1, "user", "帮我看看这个报错"),
-      message("me", 2, "assistant", "好的，我在看"),
-    ],
-  }));
-
-  screen.getByText("帮我看看这个报错");
-  screen.getByText("好的，我在看");
-});
 
 it("previews the newest messages and links to the whole conversation", async () => {
   const me = session("me");

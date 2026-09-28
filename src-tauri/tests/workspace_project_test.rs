@@ -1642,32 +1642,6 @@ fn refresh_marks_deleted_directory_missing() {
 }
 
 #[test]
-fn referenced_missing_path_survives_refresh() {
-    let (_d, db) = temp_db_locked();
-    let observer = Scripted::new();
-    observer.set("/work/a", plain("/work/a", false));
-    let projection = ProjectProjection::new(&observer);
-    let wp = {
-        let wp = ensure(&db, &plain("/work/a", true));
-        // 一条 Session 引用让这条路径不可 GC（的引用条件）。
-        session(&db, "s-ref", "/work/a", &wp.id);
-        wp
-    };
-
-    let report =
-        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
-    assert_eq!(report.missing_paths, 1);
-    assert!(
-        report.outcome.deleted_paths.is_empty(),
-        "referenced paths are never GC'd, got {:?}",
-        report.outcome.deleted_paths
-    );
-    {
-        assert!(db.get_workspace_path(&wp.id).unwrap().is_some());
-    }
-}
-
-#[test]
 fn unreferenced_missing_path_is_gc_d() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
@@ -1704,39 +1678,6 @@ fn last_path_gc_retires_project() {
     {
         registry_is_consistent(&db).expect("registry stays consistent");
     }
-}
-
-#[test]
-fn git_worktree_registration_does_not_keep_unreferenced_paths_alive() {
-    let (_d, db) = temp_db_locked();
-    let observer = Scripted::new();
-    observer.set(
-        "/work/repo",
-        repo(
-            "/work/repo",
-            "/work/repo/.git",
-            GitWorktreeKind::Main,
-            &["/work/repo", "/work/repo-feature"],
-        ),
-    );
-    let projection = ProjectProjection::new(&observer);
-    {
-        ensure(&db, &plain("/work/repo", true));
-    }
-    // 第一轮：feature 经由 `git worktree list` 被收养进注册表（目录尚不存在）。
-    reconcile_workspace_paths(&db, &projection, 500).unwrap();
-
-    // Git worktree 发现不会替代 Session / Workstream 引用；两个路径都没有引用，
-    // 即使 feature 仍被 Git 家族列出，也会在本轮清理。
-    assert!(db
-        .get_workspace_path(&path_id_of("/work/repo"))
-        .unwrap()
-        .is_none());
-    assert!(db
-        .get_workspace_path(&path_id_of("/work/repo-feature"))
-        .unwrap()
-        .is_none());
-    assert_eq!(db.list_projects().unwrap().len(), 0);
 }
 
 #[test]

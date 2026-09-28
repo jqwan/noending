@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import { showToast } from "../../components/Toast";
-import { timeAgo, useRefreshSignal, Modal } from "../../components/common";
+import { submitsOnEnter, timeAgo, useRefreshSignal, Modal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import { sessionDisplayTitle, UNTITLED_SESSION, cwdDisplayLabel } from "../sessions/SessionTable";
@@ -293,7 +293,7 @@ export default function ProjectDetail({ projectId, navigate }: {
           <label className="field"><span>名称</span>
             <input type="text" value={nameInput} autoFocus
               onChange={(e) => { setNameInput(e.target.value); setRenameError(""); }}
-              onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && commitRename()} /></label>
+              onKeyDown={(e) => submitsOnEnter(e) && commitRename()} /></label>
           {renameError && (
             <div className="badge warn" style={{ marginBottom: 10, overflowWrap: "anywhere" }}>{renameError}</div>
           )}

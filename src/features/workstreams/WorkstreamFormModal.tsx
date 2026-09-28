@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { api } from "../../api";
-import { Modal } from "../../components/common";
+import { Modal, submitsOnEnter } from "../../components/common";
 import PathListEditor, { type PathEntryDraft } from "./PathListEditor";
 import type { CreateWorkstreamReport, Workstream, WorkstreamPathRow } from "../../types";
 
@@ -244,7 +244,7 @@ export default function WorkstreamFormModal({
       <label className="field"><span>标题</span>
         <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus
           placeholder="例如：接口设计 / 行程规划 / 预算整理"
-          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && submit()} /></label>
+          onKeyDown={(e) => submitsOnEnter(e) && submit()} /></label>
       <label className="field"><span>描述（可选）</span>
         <textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
       <div className="field"><span>工作目录（可选，可多条）</span>

@@ -150,20 +150,6 @@ describe("WorkspacePathField", () => {
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 
-  it("does not submit while an IME is composing", () => {
-    const onSubmit = vi.fn();
-    render(<WorkspacePathField value="/repo/foo" onChange={vi.fn()} onSubmit={onSubmit} />);
-    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", isComposing: true });
-    expect(onSubmit).not.toHaveBeenCalled();
-  });
-
-  it("does not submit for the IME Enter key code", () => {
-    const onSubmit = vi.fn();
-    render(<WorkspacePathField value="/repo/foo" onChange={vi.fn()} onSubmit={onSubmit} />);
-    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", keyCode: 229 });
-    expect(onSubmit).not.toHaveBeenCalled();
-  });
-
   it("keeps the absolute-path hint wording shared", () => {
     expect(absolutePathHint("x/y")).toContain("绝对路径");
     expect(absolutePathHint("/repo")).toBe("");

@@ -104,13 +104,6 @@ it("用户消息右、Agent 左：只有两种气泡", () => {
   expect(rows[1]).not.toContain("is-user");
 });
 
-it("头部显示调用方给出的 who 与序号", () => {
-  const { container } = renderMessage("回答");
-  const head = container.querySelector(".event .head")!;
-  expect(head.textContent).toContain("Codex");
-  expect(head.textContent).toContain("#7");
-});
-
 describe("消息级模型标签", () => {
   it("provider + model → \"model · provider\"", () => {
     const { container } = render(

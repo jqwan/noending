@@ -34,12 +34,15 @@ const MESSAGE_PAGE_DEFAULT: i64 = 60;
 const MESSAGE_PAGE_MAX: i64 = 200;
 
 /// One member of the execution graph, as the detail page shows it: the
-/// member facts plus its own stats snapshot when one exists.
+/// member facts, its own stats snapshot when one exists, and a fresh verdict
+/// on ITS source — a child or side transcript goes away on its own schedule,
+/// so the row that names it has to say when it is gone.
 #[derive(Serialize)]
 pub struct SessionMemberView {
     #[serde(flatten)]
     pub member: SessionMember,
     pub stats: Option<SessionMemberStats>,
+    pub source_status: SourceAvailability,
 }
 
 #[derive(Serialize)]
@@ -115,6 +118,9 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
         let messages = db.recent_messages(&session_id, DETAIL_MESSAGE_PREVIEW)?;
+        // A Logical Session is one Agent's graph, so one adapter covers every
+        // member — root, child and side alike.
+        let adapter = crate::adapters::adapter_for(session.agent);
         let members = db.members_for_session(&session_id)?;
         let member_views = members
             .iter()
@@ -122,6 +128,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
                 Ok(SessionMemberView {
                     member: m.clone(),
                     stats: db.get_member_stats(&m.id)?,
+                    source_status: adapter.inspect_member_source(m)?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -137,7 +144,12 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             Some(id) => db.get_workstream(id)?,
             None => None,
         };
-        let root_source_status = crate::lifecycle::root_source_status(db, &session)?
+        // The root's verdict is already in `member_views`; reading it there keeps
+        // the root from being inspected twice for the same page.
+        let root_source_status = member_views
+            .iter()
+            .find(|v| v.member.relation == SessionMemberRelation::Root)
+            .map(|v| v.source_status)
             .unwrap_or(SourceAvailability::Unavailable);
         let can_resume = !session.is_trashed() && root_source_status == SourceAvailability::Present;
         let workspace_path = match session.workspace_path_id.as_deref() {
@@ -163,9 +175,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         };
         // A Logical Session is one Agent's graph, so one unit covers every
         // member the aggregate summed.
-        let cost_unit = crate::adapters::adapter_for(session.agent)
-            .cost_unit()
-            .map(str::to_string);
+        let cost_unit = adapter.cost_unit().map(str::to_string);
         Ok(SessionDetail {
             session,
             messages,
@@ -304,6 +314,7 @@ pub fn list_ingestion_diagnostics(
     min_observations: Option<i64>,
 ) -> Result<Vec<IngestionDiagnostic>> {
     with_db(&state, |db| {
+        db.prune_missing_ingestion_diagnostics()?;
         db.list_ingestion_diagnostics(min_observations.unwrap_or(2))
     })
 }

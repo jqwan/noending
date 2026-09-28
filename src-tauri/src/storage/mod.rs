@@ -1452,6 +1452,51 @@ impl Db {
         Ok(())
     }
 
+    /// Drop diagnostics whose source path has been confirmed absent. Other
+    /// metadata errors are inconclusive, so keep those rows visible.
+    pub fn prune_missing_ingestion_diagnostics(&self) -> Result<usize> {
+        let candidates: Vec<(String, String)> = {
+            let conn = self.read();
+            let mut st = conn.prepare(
+                "SELECT id, source_path FROM ingestion_diagnostics
+                 WHERE source_path IS NOT NULL AND source_path != ''",
+            )?;
+            let rows = st
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        let missing: Vec<_> = candidates
+            .into_iter()
+            .filter(|(_, path)| {
+                matches!(
+                    std::fs::metadata(path),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                )
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(0);
+        }
+        self.tx(|tx| {
+            let mut removed = 0;
+            for (id, path) in &missing {
+                // Recheck in case the source returned while we acquired the
+                // writer; a different recorded path must also survive.
+                if matches!(
+                    std::fs::metadata(path),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                ) {
+                    removed += tx.execute(
+                        "DELETE FROM ingestion_diagnostics WHERE id = ?1 AND source_path = ?2",
+                        params![id, path],
+                    )?;
+                }
+            }
+            Ok(removed)
+        })
+    }
+
     /// The Settings page list: repeat offenders only by default.
     pub fn list_ingestion_diagnostics(
         &self,

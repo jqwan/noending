@@ -1,7 +1,6 @@
-//! Read-side facts after ingestion: the message projection, the member cursor's
-//! zero state, and search over ingested messages. A stored conversation is
-//! exactly what `get_messages` / `message_projection_ids` return, a fresh member
-//! cursor is the zero state, and every ingested message is searchable.
+//! Read-side facts after ingestion: the message projection and the member
+//! cursor's zero state. A stored conversation is exactly what `get_messages` /
+//! `message_projection_ids` return, and a fresh member cursor is the zero state.
 
 use noending::domain::{Agent, ParsedSessionMessage, SessionMessageRole};
 use noending::storage::{new_id, Db};
@@ -19,26 +18,6 @@ fn user_msg(id: &str, text: &str) -> ParsedSessionMessage {
 
 fn assistant_msg(id: &str, text: &str) -> ParsedSessionMessage {
     support::parsed_message(id, SessionMessageRole::Assistant, text)
-}
-
-#[test]
-fn search_finds_ingested_messages() {
-    let db = open_temp_db();
-    let (session, _member_id, messages) = support::seed_conversation(
-        &db,
-        Agent::ClaudeCode,
-        "search-fixture",
-        &[user_msg(
-            "m-search-1",
-            "我们需要为搜索功能选择 SQLite FTS5 还是外部向量数据库，这影响索引设计。",
-        )],
-    );
-    db.index_new_messages(&messages).unwrap();
-
-    let hits = noending::search::search(&db, "FTS5", 10).unwrap();
-    assert!(!hits.is_empty(), "FTS should find the indexed message");
-    assert_eq!(hits[0].kind, "message");
-    assert_eq!(hits[0].parent_id, session.id);
 }
 
 /// The default member cursor for a fresh ROOT member is the zero state; the

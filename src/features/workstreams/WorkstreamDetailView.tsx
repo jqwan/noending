@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import Icon from "../../components/Icon";
-import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, timeAgo } from "../../components/common";
+import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, submitsOnEnter, timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import NewSessionModal from "../sessions/NewSessionModal";
@@ -496,7 +496,7 @@ export default function WorkstreamDetailView({
             <input type="text" value={purgeConfirmText} autoFocus
               placeholder={workstream.title}
               onChange={(e) => setPurgeConfirmText(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && purgeConfirmText === workstream.title && purge()} /></label>
+              onKeyDown={(e) => submitsOnEnter(e) && purgeConfirmText === workstream.title && purge()} /></label>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setConfirmPurge(false)} disabled={busy}>取消</button>
             <button className="btn primary" onClick={purge}

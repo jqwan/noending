@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import AgentIcon from "../../components/AgentIcon";
+import { submitsOnEnter } from "../../components/common";
 import { AGENT_LABELS, type Agent, type AgentRuntimeOverrides, type AgentRuntimeSettings,
   type ModelSource, type RuntimeFieldCapability, type RuntimeModelOption } from "../../types";
 
@@ -181,7 +182,7 @@ export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
             placeholder={field === "model" ? "模型 ID" : "自定义值"}
             onChange={(e) => setCustomText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) commitCustom(field);
+              if (submitsOnEnter(e)) commitCustom(field);
               if (e.key === "Escape") setCustom(null);
             }}
             onBlur={() => commitCustom(field)}

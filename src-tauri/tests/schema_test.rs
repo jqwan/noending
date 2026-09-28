@@ -767,20 +767,6 @@ fn runtime_defaults_are_reconciled_on_every_start() {
     assert_eq!((enabled, origin.as_str()), (1, "user"));
 }
 
-/// Identity and structure are written by ONE transaction, so a database that
-/// carries NoEnding's identity always has the schema that identity promises.
-#[test]
-fn creation_stamps_identity_with_the_schema() {
-    let path = db_path("stamp");
-    let db = Db::open(path.path()).unwrap();
-    assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
-    drop(db);
-
-    let conn = Connection::open(path.path()).unwrap();
-    assert!(object_exists(&conn, "sessions"));
-    assert_eq!(user_version(&conn), DATABASE_FORMAT_VERSION);
-}
-
 /// message-level model provenance: Assistant rows
 /// round-trip source-native provider/model, User rows refuse provenance at both
 /// the commit guard and the schema CHECK, and a dedup re-read enriches

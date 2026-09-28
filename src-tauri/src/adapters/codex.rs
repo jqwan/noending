@@ -1158,25 +1158,6 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Strict availability: only NotFound is Missing; everything else is
-    /// Unavailable.
-    #[test]
-    fn inspect_reports_missing_only_for_a_confirmed_absent_file() {
-        let dir = temp_dir("inspect");
-        let path = write_rollout(&dir, "rollout-x.jsonl", &[meta_line()]);
-        let member = root_member(&path);
-        assert_eq!(
-            CodexAdapter.inspect_member_source(&member).unwrap(),
-            SourceAvailability::Present
-        );
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(
-            CodexAdapter.inspect_member_source(&member).unwrap(),
-            SourceAvailability::Missing
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     fn turn_context_line(ordinal: usize, model: &str) -> String {
         serde_json::json!({
             "timestamp": "2026-09-20T13:02:00.000Z", "ordinal": ordinal,

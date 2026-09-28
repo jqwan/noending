@@ -2,6 +2,21 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import Icon from "./Icon";
 
+/**
+ * Enter 是否该被当成提交。中日文输入法用 Enter 确认候选词，那一下不是提交；
+ * `isComposing` 是标准字段，`keyCode === 229` 是只报旧字段的输入法的兜底。
+ *
+ * 参数收窄成它真正读的两个字段（而不是整个 React 事件），这样这个判定不依赖
+ * 渲染环境就能直接验。输入框的回车提交都要过这一关，所以它只有这一处——
+ * 前一版在八个组件里各抄了一遍。
+ */
+export function submitsOnEnter(e: {
+  key: string;
+  nativeEvent: { isComposing: boolean; keyCode: number };
+}): boolean {
+  return e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229;
+}
+
 export function useRefreshSignal(cb: () => void) {
   useEffect(() => {
     const h = () => cb();

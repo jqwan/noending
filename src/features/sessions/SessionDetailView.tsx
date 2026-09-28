@@ -748,8 +748,8 @@ const RELATION_LABELS: Record<SessionMemberRelation, string> = {
 };
 
 /**
- * 一行成员：关系标签 + 稳定身份（mono，居中断尾，原值在 title 里），其后是源文件（可复制）；
- * `showStats` 打开时才补上这个成员自己的数字。
+ * 一行成员：关系标签 + 稳定身份（mono，居中断尾，原值在 title 里），其后是源文件
+ * （可复制，源不在了就在同一行说清楚）；`showStats` 打开时才补上这个成员自己的数字。
  *
  * 每个成员——根、子、边——都有自己的份额：消息构成、tokens、成本都是它自己的数，
  * 右栏上面的汇总只是把它们加起来。有数据才画那一行，没有就不拿 0 去冒称观测。
@@ -806,6 +806,12 @@ function MemberRow({ member, depth, costUnit, showStats }: {
               mono
               title={`${member.source_path} · 这个成员在 Agent 侧的源`}
             />
+            {/* 子 / 边的转写各自消失，一行只报路径会让人以为它还读得到。 */}
+            {member.source_status !== "present" && (
+              <div className="session-source-warning">
+                {member.source_status === "missing" ? "源文件已不存在" : "无法确认源文件状态"}
+              </div>
+            )}
           </div>
         )}
       </div>

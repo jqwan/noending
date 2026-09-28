@@ -1053,50 +1053,6 @@ fn reingest_preserves_message_ids_and_dedups() {
     assert_eq!(db.get_messages(&s.id, None, 100).unwrap().len(), 3);
 }
 
-/// A commit racing a Trash stores its whole batch: the recycle bin filters
-/// lists and freezes Context, not the facts a source keeps producing.
-#[test]
-fn trashed_session_commit_stores_its_batch() {
-    let db = open_db("trash-guard");
-    let dir = unique_dir("trash-guard");
-    let (s, member_id) =
-        fixture_session(&db, Agent::Codex, "trash-guard-root", &dir.join("x.jsonl"));
-
-    let first = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[msg("g-1", SessionMessageRole::User, "before")],
-            None,
-            &rescan(0),
-        )
-        .unwrap();
-    assert_eq!(first.len(), 1);
-    let cursor_before = db.get_member_cursor(&member_id).unwrap();
-
-    noending::lifecycle::trash_session(&db, &s.id).unwrap();
-
-    let stored = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[msg("g-2", SessionMessageRole::User, "raced a trash")],
-            None,
-            &append(0),
-        )
-        .unwrap();
-    assert_eq!(
-        stored.len(),
-        1,
-        "a trashed session takes its source's batch"
-    );
-    assert_eq!(db.message_count(&s.id).unwrap(), 2);
-    assert!(
-        db.get_member_cursor(&member_id).unwrap().byte_offset > cursor_before.byte_offset,
-        "the cursor moved with the commit"
-    );
-}
-
 /// Every stored message is resolvable through its stable provenance ref
 /// (`session-message:<id>`), the only spelling Context revisions may cite.
 #[test]

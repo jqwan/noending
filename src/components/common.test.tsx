@@ -1,7 +1,18 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { Modal } from "./common";
+import { Modal, submitsOnEnter } from "./common";
 afterEach(cleanup);
+
+it("takes Enter as submit only when no IME is mid-composition", () => {
+  const press = (key: string, isComposing: boolean, keyCode: number) =>
+    submitsOnEnter({ key, nativeEvent: { isComposing, keyCode } });
+
+  expect(press("Enter", false, 13)).toBe(true);
+  // 输入法用 Enter 确认候选词，那一下不是提交；两条线索各拦一种输入法。
+  expect(press("Enter", true, 13)).toBe(false);
+  expect(press("Enter", false, 229)).toBe(false);
+  expect(press("Escape", false, 27)).toBe(false);
+});
 it("keeps keyboard focus inside the dialog and restores the opener", () => {
   const opener = document.createElement("button");
   document.body.append(opener);

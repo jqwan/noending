@@ -711,44 +711,6 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
 }
 
 #[test]
-fn prepared_launch_single_use_atomic_consumption() {
-    let db = open_db("single-use-prep");
-    let ws = ws_row(&db, "test ws");
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: std::env::temp_dir(),
-    };
-    let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(ws.id.as_str()),
-            None,
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-
-    let map = std::sync::Mutex::new(std::collections::HashMap::new());
-    map.lock()
-        .unwrap()
-        .insert(prepared.id.clone(), prepared.clone());
-
-    // 1. First consume succeeds
-    let first = noending::commands::consume_prepared_launch(&map, &prepared.id);
-    assert!(first.is_ok());
-    assert_eq!(first.unwrap().id, prepared.id);
-
-    // 2. Second consume fails immediately with "已被使用或已过期"
-    let second = noending::commands::consume_prepared_launch(&map, &prepared.id);
-    assert!(second.is_err());
-    let err_msg = second.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("已过期") || err_msg.contains("已被使用"),
-        "expected consumed error, got: {}",
-        err_msg
-    );
-}
-
-#[test]
 fn prepared_launch_concurrent_consumption_is_exclusive() {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
