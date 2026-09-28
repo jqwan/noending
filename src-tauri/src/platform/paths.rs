@@ -96,6 +96,32 @@ pub fn open_directory(path: &std::path::Path) -> crate::error::Result<()> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let opener = directory_opener(path, DirectoryPlatform::Other);
 
+    run_file_manager(opener)
+}
+
+/// Reveal a source transcript in the file manager. Linux file managers do not
+/// share a portable select-file interface, so open its containing directory.
+pub fn reveal_file(path: &std::path::Path) -> crate::error::Result<()> {
+    let metadata = std::fs::metadata(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            crate::error::other("源会话文件已不存在")
+        } else {
+            e.into()
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(crate::error::other("源会话路径不是文件"));
+    }
+    #[cfg(target_os = "macos")]
+    let opener = file_revealer(path, DirectoryPlatform::MacOs);
+    #[cfg(target_os = "windows")]
+    let opener = file_revealer(path, DirectoryPlatform::Windows);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let opener = file_revealer(path, DirectoryPlatform::Other);
+    run_file_manager(opener)
+}
+
+fn run_file_manager(opener: DirectoryOpener) -> crate::error::Result<()> {
     let mut child = std::process::Command::new(opener.program)
         .args(&opener.args)
         .spawn()
@@ -118,7 +144,7 @@ pub fn open_directory(path: &std::path::Path) -> crate::error::Result<()> {
         };
         if !status.success() {
             return Err(crate::error::other(
-                "系统文件管理器无法打开目录，请检查目录是否可访问",
+                "系统文件管理器无法打开路径，请检查路径是否可访问",
             ));
         }
     }
@@ -148,6 +174,27 @@ fn directory_opener(path: &std::path::Path, platform: DirectoryPlatform) -> Dire
     DirectoryOpener {
         program,
         args: vec![path.as_os_str().to_owned()],
+        wait_for_exit,
+    }
+}
+
+fn file_revealer(path: &std::path::Path, platform: DirectoryPlatform) -> DirectoryOpener {
+    let (program, args, wait_for_exit) = match platform {
+        DirectoryPlatform::MacOs => ("open", vec!["-R".into(), path.as_os_str().to_owned()], true),
+        DirectoryPlatform::Windows => (
+            "explorer.exe",
+            vec!["/select,".into(), path.as_os_str().to_owned()],
+            false,
+        ),
+        DirectoryPlatform::Other => (
+            "xdg-open",
+            vec![path.parent().unwrap_or(path).as_os_str().to_owned()],
+            true,
+        ),
+    };
+    DirectoryOpener {
+        program,
+        args,
         wait_for_exit,
     }
 }
@@ -223,6 +270,43 @@ mod tests {
         assert_eq!(windows.program, "explorer.exe");
         assert_eq!(windows.args, vec![windows_path.as_os_str().to_owned()]);
         assert!(!windows.wait_for_exit);
+    }
+
+    #[test]
+    fn file_revealers_select_files_or_open_their_directory() {
+        let unix_path = PathBuf::from("/Users/Ada/No Ending/session.v2.jsonl.zstd");
+        let mac = file_revealer(&unix_path, DirectoryPlatform::MacOs);
+        assert_eq!(mac.program, "open");
+        assert_eq!(
+            mac.args,
+            vec!["-R".into(), unix_path.as_os_str().to_owned()]
+        );
+        assert!(mac.wait_for_exit);
+
+        let windows_path = PathBuf::from(r"C:\Users\Ada Lovelace\No Ending\session.v2.jsonl.zstd");
+        let windows = file_revealer(&windows_path, DirectoryPlatform::Windows);
+        assert_eq!(windows.program, "explorer.exe");
+        assert_eq!(
+            windows.args,
+            vec!["/select,".into(), windows_path.as_os_str().to_owned()]
+        );
+        assert!(!windows.wait_for_exit);
+
+        let linux = file_revealer(&unix_path, DirectoryPlatform::Other);
+        assert_eq!(linux.program, "xdg-open");
+        assert_eq!(
+            linux.args,
+            vec![unix_path.parent().unwrap().as_os_str().to_owned()]
+        );
+    }
+
+    #[test]
+    fn reveal_file_rejects_a_missing_source_before_launching_the_file_manager() {
+        let missing = std::env::temp_dir()
+            .join(format!("noending-missing-{}", crate::storage::new_id()))
+            .join("session.v2.jsonl.zstd");
+        let error = reveal_file(&missing).unwrap_err();
+        assert!(error.to_string().contains("源会话文件已不存在"));
     }
 
     /// 必须测试-adjacent: the expander merged here must keep every

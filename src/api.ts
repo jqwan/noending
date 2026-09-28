@@ -151,6 +151,7 @@ export const api = {
   permanentlyDeleteSession: (sessionId: string) =>
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
+  revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),
   /** Conversation 的一页：`beforeOrdinal` 取更早的一页，`afterOrdinal` 取更新的一页，
    *  都不传就是最新一页。 */
   getSessionMessages: (

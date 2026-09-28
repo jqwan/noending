@@ -183,6 +183,16 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
     })
 }
 
+/// Locate the current Root transcript from the stored Session identity.
+#[tauri::command]
+pub fn reveal_session_source(state: State<AppState>, session_id: String) -> Result<()> {
+    let root = state
+        .db
+        .root_member_for_session(&session_id)?
+        .ok_or_else(|| other("源会话路径不可用"))?;
+    crate::platform::paths::reveal_file(std::path::Path::new(&root.source_path))
+}
+
 /// One message of a window: the message plus the projection ordinal that puts
 /// it in the conversation. The reader orders by `ordinal`, so the rendered
 /// order never depends on the order pages were fetched or merged in.

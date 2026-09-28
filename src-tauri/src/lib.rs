@@ -183,6 +183,7 @@ pub fn run() {
             commands::resolve_conflict_with_edit,
             commands::session_workspace::list_sessions,
             commands::session_workspace::get_session_detail,
+            commands::session_workspace::reveal_session_source,
             commands::session_workspace::get_session_messages,
             commands::session_workspace::get_session_user_message_marks,
             commands::session_workspace::set_session_owner_workstream,

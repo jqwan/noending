@@ -939,11 +939,13 @@ button.icon-button { width: 28px; padding: 0; }
 .exec-metrics { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; margin-top: 12px; align-items: baseline; }
 .exec-metrics .exec-label { white-space: nowrap; }
 .exec-pairs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 10px; font-size: 12px; }
-/* 成员树：关系标签固定列宽（「根 / 子 / 边」都是单字，列宽固定才让身份列对齐），计数另起一行。 */
+/* 成员树：关系标签固定列宽（「根 / 子 / 边」都是单字，列宽固定才让身份列对齐），
+   其余各行各占一行：计数、tokens/成本、源——谁没有数据谁就不占行。 */
 .member-row { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
 /* 2.6em 是按单字标签定的：1 个字 11px + 左右内边距 16px，窄一像素它就在徽章里折行。 */
 .member-row .member-rel { flex: none; width: 2.6em; text-align: center; white-space: nowrap; }
-.member-body { display: grid; gap: 1px; min-width: 0; }
+/* 2px 而不是 1px：一行最多四段（身份 / 计数 / tokens / 源），挤在一起会读成一大块。 */
+.member-body { display: grid; gap: 2px; min-width: 0; }
 .member-id { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .search-result { display: block; width: 100%; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
 .search-result:hover { background: var(--bg-panel); }
