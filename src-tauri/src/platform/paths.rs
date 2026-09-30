@@ -74,6 +74,49 @@ pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
     resolve_home().map(|home| home.join(agent_default_dir(agent)))
 }
 
+/// Extra data roots (relative to the user home) that hold conversations of
+/// the SAME agent in a second official surface. Antigravity is the case: the
+/// `agy` CLI keeps its own store beside the IDE's —
+/// `~/.gemini/antigravity-cli`, identical conversation schema, its own
+/// sibling `conversation_summaries.db` — so both directories are default
+/// ingest sources and one enable covers both surfaces.
+fn agent_extra_ingest_dirs(agent: Agent) -> Vec<PathBuf> {
+    match agent {
+        Agent::Antigravity => vec![[".gemini", "antigravity-cli"].iter().collect()],
+        _ => vec![],
+    }
+}
+
+/// Every root an Agent's conversations are known to live under: the resolved
+/// data dir first, then any extra official surface. The default-ingest
+/// seeding (`reconcile_runtime_defaults`) runs over this list.
+pub fn agent_ingest_roots(agent: Agent) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = resolve_agent_data_dir(agent).into_iter().collect();
+    let home = resolve_home();
+    roots.extend(
+        agent_extra_ingest_dirs(agent)
+            .into_iter()
+            .filter_map(|rel| home.as_ref().map(|h| h.join(rel))),
+    );
+    roots
+}
+
+/// Is a macOS application bundle with this name present? Probes the two
+/// roots users actually install to. Other platforms return true — bundle
+/// presence is not probed there, and the deep-link dispatch itself surfaces
+/// an OS error when nothing is registered for the scheme.
+pub fn app_bundle_present(name: &str) -> bool {
+    if !cfg!(target_os = "macos") {
+        return true;
+    }
+    let Some(home) = resolve_home() else {
+        return false;
+    };
+    [PathBuf::from("/Applications"), home.join("Applications")]
+        .into_iter()
+        .any(|base| base.join(format!("{name}.app")).is_dir())
+}
+
 /// Expand a leading `~` / `~\` / `~/…` to the user's home directory (UI input is
 /// plain text; no shell is involved anywhere else).
 ///
@@ -354,5 +397,25 @@ mod tests {
                 "{dir:?} must not live inside {noending_home:?}"
             );
         }
+    }
+
+    /// Antigravity seeds BOTH official surfaces as default ingest sources:
+    /// the IDE store and the `agy` CLI store, siblings under the same home.
+    /// Agents without a second surface keep exactly one root.
+    #[test]
+    fn antigravity_ingest_roots_cover_the_ide_and_cli_stores() {
+        let roots = agent_ingest_roots(Agent::Antigravity);
+        assert_eq!(roots.len(), 2, "{roots:?}");
+        assert!(
+            roots.iter().any(|r| r.ends_with(".gemini/antigravity")),
+            "{roots:?}"
+        );
+        assert!(
+            roots.iter().any(|r| r.ends_with(".gemini/antigravity-cli")),
+            "{roots:?}"
+        );
+
+        let single = agent_ingest_roots(Agent::Qoder);
+        assert_eq!(single.len(), 1, "{single:?}");
     }
 }

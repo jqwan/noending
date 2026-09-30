@@ -10,8 +10,13 @@
 //! (`<conversation_history_summary>`, `<cb_summary>`) are also `user`-role but
 //! count as compaction; any other `<`-prefixed body is system noise and drops.
 //!
-//! Provenance stays NULL: `providerData` records only the user's model
-//! *preference* ("auto"), not the identity of the model that answered.
+//! Provenance: the row's `providerData.model` (mirrored by
+//! `requestModelId`/`requestModelName`) is the model that answered — a real
+//! registry id like `deepseek-v4.1-flash`, present on most rows (locally:
+//! 86.5%). A row written under the `auto` preference says `auto` in all
+//! three fields and the actual resolution is NOT recoverable from anywhere in
+//! the transcript, so `auto` attributes nothing (locally: 13.5%). No
+//! provider field exists → NULL.
 //!
 //! One root transcript, one ROOT member. `ai-title` supplies the native title
 //! (last written wins); `function_call` / `function_call_result` are
@@ -30,8 +35,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, ms_epoch_to_rfc3339, read_jsonl_delta, AgentCommand, DiscoveredMember,
-    DiscoveredMemberKind, ExecOptions, MemberObservation, ParsedLine, SessionMessageRole,
+    detect_format, ms_epoch_to_rfc3339, read_jsonl_delta, AgentCommand, DesktopResume,
+    DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberObservation, ParsedLine,
+    ResumeRoute, SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
@@ -349,6 +355,24 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
     ) -> Result<AgentCommand> {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
     }
+
+    /// WorkBuddy's own task notifications deep-link `workbuddy://chat/{id}`,
+    /// and the id is the transcript file's stem — this member's
+    /// source_member_id. The one app whose Continue can land ON the
+    /// conversation. App absent → refuse (there is no CLI to fall back to).
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        Some("WorkBuddy")
+    }
+
+    fn continue_route(&self, member: &SessionMember) -> ResumeRoute {
+        if !crate::platform::paths::app_bundle_present("WorkBuddy") {
+            return ResumeRoute::Refused("未找到 WorkBuddy 桌面应用，无法继续该会话".into());
+        }
+        ResumeRoute::Desktop(DesktopResume {
+            uri: format!("workbuddy://chat/{}", member.source_member_id),
+            note: "将在 WorkBuddy 中打开并定位到该会话".into(),
+        })
+    }
 }
 
 /// `providerData.usage` of one model call, as counts. The source states each
@@ -369,17 +393,47 @@ fn detail_sum(usage: &Value, key: &str, field: &str) -> u64 {
 }
 
 fn usage_observation(v: &Value) -> MemberObservation {
-    let Some(usage) = v.get("providerData").and_then(|p| p.get("usage")) else {
-        return MemberObservation::default();
-    };
-    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-    MemberObservation {
-        input_tokens: n("inputTokens"),
-        output_tokens: n("outputTokens"),
-        cached_tokens: detail_sum(usage, "inputTokensDetails", "cached_tokens"),
-        reasoning_tokens: detail_sum(usage, "outputTokensDetails", "reasoning_tokens"),
-        ..Default::default()
+    let provider = v.get("providerData");
+    if let Some(usage) = provider
+        .and_then(|p| p.get("usage"))
+        .filter(|u| u.is_object())
+    {
+        let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        return MemberObservation {
+            input_tokens: n("inputTokens"),
+            output_tokens: n("outputTokens"),
+            cached_tokens: detail_sum(usage, "inputTokensDetails", "cached_tokens"),
+            reasoning_tokens: detail_sum(usage, "outputTokensDetails", "reasoning_tokens"),
+            ..Default::default()
+        };
     }
+    // Some rows carry only `rawUsage`, the zhipu/OpenAI-style mirror of the
+    // same call (`prompt_tokens` == `inputTokens`; locally the two always
+    // ship together, but a build that writes only the raw shape must not
+    // bill zero). Same call, same components, snake_case spelling.
+    if let Some(raw) = provider
+        .and_then(|p| p.get("rawUsage"))
+        .filter(|u| u.is_object())
+    {
+        let n = |k: &str| raw.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let detail = |obj: &str, key: &str| {
+            raw.get(obj)
+                .and_then(|d| d.get(0).or_else(|| d.as_object().map(|_| d)))
+                .and_then(|d| d.get(key))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0)
+        };
+        return MemberObservation {
+            input_tokens: n("prompt_tokens"),
+            output_tokens: n("completion_tokens"),
+            cached_tokens: detail("prompt_tokens_details", "cached_tokens")
+                .max(n("prompt_cache_hit_tokens")),
+            reasoning_tokens: detail("completion_tokens_details", "reasoning_tokens")
+                .max(n("completion_thinking_tokens")),
+            ..Default::default()
+        };
+    }
+    MemberObservation::default()
 }
 
 /// One line's contribution: message lines only, prose only, machine
@@ -430,12 +484,24 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if !is_root {
                 return Some(ParsedLine::observation_only(observation));
             }
+            // The row's own `providerData.model` is the answering model's
+            // registry id (`deepseek-v4.1-flash`, …). The `auto` preference
+            // reuses the same slot and its resolution is not written anywhere
+            // in the transcript — an `auto` row attributes nothing. No
+            // provider field exists in the source → NULL.
+            let model = v
+                .get("providerData")
+                .and_then(|p| p.get("model"))
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty() && *m != "auto")
+                .map(String::from);
             Some(ParsedLine {
                 message: Some(crate::adapters::parsed_message(
                     source_message_id,
                     SessionMessageRole::Assistant,
                     raw,
-                )),
+                ))
+                .map(|m| m.with_provenance(None, model)),
                 observation,
             })
         }
@@ -712,8 +778,9 @@ mod tests {
         assert!(found.is_empty(), "{found:#?}");
     }
 
-    /// `providerData.model = "auto"` is the user's request preference, not the
-    /// generating model: nothing is attributed.
+    /// `providerData.model = "auto"` is the user's request preference, and the
+    /// transcript records no resolution of it: nothing is attributed. A row
+    /// written under an explicit model carries that registry id instead.
     #[test]
     fn the_auto_preference_is_not_provenance() {
         let dir = unique_dir("prov");
@@ -741,5 +808,96 @@ mod tests {
             "a preference is not a generation fact"
         );
         assert_eq!(assistant.provider, None);
+    }
+
+    /// A missing model identity never suppresses the spend: the `auto` row's
+    /// usage is real consumption and bills into the session stats whether or
+    /// not the row attributes to a model.
+    #[test]
+    fn an_auto_row_still_bills_its_usage() {
+        let dir = unique_dir("prov-auto-usage");
+        let file = dir.join("s1.jsonl");
+        std::fs::write(
+            &file,
+            [
+                r#"{"id":"m1","timestamp":1783137449113,"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>问</user_query>"}],"sessionId":"s1","cwd":"/repo"}"#,
+                r#"{"id":"m2","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"答"}],"providerData":{"agent":"x","model":"auto","requestModelId":"auto","requestModelName":"Auto","traceId":"t","usage":{"requests":1,"inputTokens":900,"outputTokens":70,"totalTokens":970,"inputTokensDetails":[{"cached_tokens":300}],"outputTokensDetails":[{"reasoning_tokens":12}]}},"sessionId":"s1","cwd":"/repo"}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let delta = WorkBuddyAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(900), "unattributed spend still bills");
+                assert_eq!(s.output_tokens, Some(70));
+                assert_eq!(s.cached_tokens, Some(300));
+                assert_eq!(s.reasoning_tokens, Some(12));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let assistant = delta
+            .messages
+            .iter()
+            .find(|m| m.role == SessionMessageRole::Assistant)
+            .unwrap();
+        assert_eq!(assistant.model, None, "attribution stays unset");
+    }
+
+    /// A row carrying only `rawUsage` (the zhipu/OpenAI-style mirror of the
+    /// same call) bills through the fallback: same components, snake_case.
+    #[test]
+    fn a_raw_usage_only_row_bills_through_the_fallback() {
+        let dir = unique_dir("raw-usage");
+        let file = dir.join("s1.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"id":"m2","timestamp":1783137455216,"type":"function_call","callId":"call_1","name":"WebFetch","arguments":"{}","providerData":{"model":"deepseek-v4.1-flash","rawUsage":{"prompt_tokens":13044,"completion_tokens":132,"total_tokens":13176,"completion_tokens_details":{"reasoning_tokens":49,"cached_tokens":0},"prompt_tokens_details":{"reasoning_tokens":0,"cached_tokens":6208},"prompt_cache_hit_tokens":6208}},"sessionId":"s1","cwd":"/repo"}"#,
+        )
+        .unwrap();
+
+        let delta = WorkBuddyAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(13044));
+                assert_eq!(s.output_tokens, Some(132));
+                assert_eq!(s.cached_tokens, Some(6208));
+                assert_eq!(s.reasoning_tokens, Some(49));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    /// An explicit-model row carries its registry id as provenance — the
+    /// locally dominant shape (`deepseek-v4.1-flash` on 86.5% of rows).
+    #[test]
+    fn an_explicit_model_row_attributes_the_registry_id() {
+        let dir = unique_dir("prov-real");
+        let file = dir.join("s1.jsonl");
+        std::fs::write(
+            &file,
+            [
+                r#"{"id":"m1","timestamp":1783137449113,"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>问</user_query>"}],"sessionId":"s1","cwd":"/repo"}"#,
+                r#"{"id":"m2","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"答"}],"providerData":{"agent":"x","model":"deepseek-v4.1-flash","requestModelId":"deepseek-v4.1-flash","requestModelName":"Deepseek-V4.1-Flash","traceId":"t"},"sessionId":"s1","cwd":"/repo"}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let delta = WorkBuddyAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        let assistant = delta
+            .messages
+            .iter()
+            .find(|m| m.role == SessionMessageRole::Assistant)
+            .unwrap();
+        assert_eq!(assistant.model.as_deref(), Some("deepseek-v4.1-flash"));
+        assert_eq!(assistant.provider, None, "no provider field in the source");
     }
 }

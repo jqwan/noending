@@ -34,8 +34,8 @@ use serde_json::Value;
 
 use crate::adapters::{
     detect_format, json_str_field, read_jsonl_delta_stateful, truncate_text, AgentCommand,
-    DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta,
-    ParsedLine, ProvenanceState, SessionMessageRole,
+    DesktopResume, DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberObservation,
+    MemberReadDelta, ParsedLine, ProvenanceState, ResumeRoute, SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::Result;
@@ -349,6 +349,16 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         member: &SessionMember,
         cursor: &SessionMemberCursor,
     ) -> Result<MemberReadDelta> {
+        // No registry in scope: every event bills (direct/test callers).
+        self.read_member_delta_claimed(member, cursor, &|_| true)
+    }
+
+    fn read_member_delta_claimed(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+        claims: &dyn Fn(&str) -> bool,
+    ) -> Result<MemberReadDelta> {
         let path = PathBuf::from(&member.source_path);
         let is_root = member.relation.as_str() == "root";
         // The shared reader classifies the scan (append vs full re-scan) and
@@ -363,7 +373,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             cursor,
             crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY.with_tokens(),
             &mut state,
-            &mut |idx, v, _prev, state| parse_line(idx, v, is_root, state),
+            &mut |idx, v, _prev, state| parse_line(idx, v, is_root, state, claims),
         )
     }
 
@@ -448,15 +458,38 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             cwd: Some(runtime_dir.to_path_buf()),
         })
     }
+
+    /// Codex 的桌面端是 ChatGPT（com.openai.codex），与 CLI 共用 `~/.codex`
+    /// 的会话存储——终端恢复对桌面端创建的 thread 同样有效，所以 continue
+    /// 仍走终端；这里只是让设置页把 ChatGPT 列为 Codex 的桌面端。
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        Some("ChatGPT")
+    }
+
+    /// 桌面端打开方式：注册的深链 `codex://threads/{id}` 按 thread id 定位，
+    /// 与终端恢复指向同一个存储。应用缺席 → 拒绝；终端始终是 Codex 的默认
+    /// 打开方式，这条路只在保存的偏好要求桌面端时被换入。
+    fn desktop_resume_route(&self, member: &SessionMember) -> ResumeRoute {
+        if !crate::platform::paths::app_bundle_present("ChatGPT") {
+            return ResumeRoute::Refused(
+                "未找到 ChatGPT（Codex 桌面端），无法在桌面端打开该会话".into(),
+            );
+        }
+        ResumeRoute::Desktop(DesktopResume {
+            uri: format!("codex://threads/{}", member.source_member_id),
+            note: "将在 ChatGPT（Codex 桌面端）中打开该会话".into(),
+        })
+    }
 }
 
 /// One rollout line's contribution to the member read. State events
 /// advance the provenance frontier; assistant messages carry it.
 fn parse_line(
-    _idx: usize,
+    idx: usize,
     v: &Value,
     is_root: bool,
     state: &mut ProvenanceState,
+    claims: &dyn Fn(&str) -> bool,
 ) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let payload = v.get("payload").cloned().unwrap_or(Value::Null);
@@ -580,14 +613,44 @@ fn parse_line(
                 // `info.total_token_usage` is cumulative for the thread, so it
                 // is NOT the additive number here; `last_token_usage` is this
                 // turn's own usage (both are always written together).
-                let last = payload
-                    .get("info")
-                    .and_then(|i| i.get("last_token_usage"))
-                    .unwrap_or(&Value::Null);
+                let info = payload.get("info").unwrap_or(&Value::Null);
+                let last = info.get("last_token_usage").unwrap_or(&Value::Null);
                 if last.is_null() {
                     return None;
                 }
                 let n = |k: &str| last.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                // The cumulative totals are a token_count event's stable
+                // identity: a continuation rollout re-emits the thread's whole
+                // token_count history into each fresh file, and without the
+                // claim gate that history bills once per file (verified: 149
+                // total-tuples shared across real rollouts). The gate claims
+                // the identity for this member on first sight; rows without
+                // totals fall back to their own deltas plus the row index.
+                let key = match info.get("total_token_usage") {
+                    Some(t) => {
+                        let n = |k: &str| t.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                        format!(
+                            "codex.tc.{}/{}/{}/{}",
+                            n("input_tokens"),
+                            n("output_tokens"),
+                            n("cached_input_tokens"),
+                            n("reasoning_output_tokens")
+                        )
+                    }
+                    None => format!(
+                        "codex.tc.legacy.{}/{}/{}/{}/{}",
+                        idx,
+                        n("input_tokens"),
+                        n("output_tokens"),
+                        n("cached_input_tokens"),
+                        n("reasoning_output_tokens")
+                    ),
+                };
+                if !claims(&key) {
+                    // Another member already billed this event: the replay
+                    // contributes nothing here.
+                    return None;
+                }
                 return Some(ParsedLine::observation_only(MemberObservation {
                     input_tokens: n("input_tokens"),
                     output_tokens: n("output_tokens"),
@@ -656,7 +719,7 @@ impl ThreadNames {
 #[cfg(test)]
 mod rollout_tests {
     use super::*;
-    use crate::adapters::{AgentAdapter, DiscoveredMemberKind, MemberReadDelta};
+    use crate::adapters::{AgentAdapter, DiscoveredMemberKind, MemberReadDelta, StatsUpdate};
     use crate::domain::ParsedSessionMessage;
 
     const SESSION_ID: &str = "01a0bee7-6afb-7622-afcd-e26c61dd545d";
@@ -755,6 +818,28 @@ mod rollout_tests {
             started_at: None,
             last_activity_at: None,
             metadata: serde_json::json!({}),
+        }
+    }
+
+    /// ChatGPT（Codex 桌面端）是 codex 格式的第二种打开方式：应用在场时按
+    /// thread 深链定位（与终端恢复同一存储），缺席时拒绝——终端默认不受影响。
+    #[test]
+    fn the_desktop_route_deep_links_the_thread_when_chatgpt_is_present() {
+        let member = root_member(Path::new("/tmp/rollout.jsonl"));
+        match CodexAdapter.desktop_resume_route(&member) {
+            ResumeRoute::Desktop(open) => {
+                assert!(
+                    open.uri.starts_with("codex://threads/01a0bee7"),
+                    "the deep link must carry the thread id: {open:?}"
+                );
+            }
+            ResumeRoute::Refused(reason) => {
+                assert!(
+                    !crate::platform::paths::app_bundle_present("ChatGPT"),
+                    "ChatGPT is installed, so the route must not refuse: {reason}"
+                );
+            }
+            other => panic!("unexpected route: {other:?}"),
         }
     }
 
@@ -1311,5 +1396,101 @@ mod rollout_tests {
             .unwrap();
         assert_eq!(a.model, None);
         assert_eq!(a.provider, None);
+    }
+
+    /// A continuation rollout re-emits the thread's token_count history into a
+    /// fresh file: the replayed rows bill once — the first reader claims the
+    /// cumulative identity — and the continuation's own rows bill normally.
+    #[test]
+    fn replayed_token_counts_bill_once_across_files() {
+        use crate::storage::Db;
+
+        fn token_count_line(totals: (u64, u64, u64, u64), last: (u64, u64, u64, u64)) -> String {
+            let t = format!(
+                r#"{{"input_tokens":{},"output_tokens":{},"cached_input_tokens":{},"reasoning_output_tokens":{}}}"#,
+                totals.0, totals.1, totals.2, totals.3
+            );
+            let l = format!(
+                r#"{{"input_tokens":{},"output_tokens":{},"cached_input_tokens":{},"reasoning_output_tokens":{}}}"#,
+                last.0, last.1, last.2, last.3
+            );
+            format!(
+                r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{},"last_token_usage":{}}}}}}}"#,
+                t, l
+            )
+        }
+        let input_of = |delta: &MemberReadDelta| match &delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => s.input_tokens,
+            other => panic!("expected a snapshot, got {other:?}"),
+        };
+
+        let dir = temp_dir("tc-dedup");
+        let file_a = write_rollout(
+            &dir,
+            "rollout-a.jsonl",
+            &[
+                meta_line(),
+                token_count_line((1000, 100, 900, 10), (1000, 100, 900, 10)),
+                token_count_line((2000, 300, 1800, 20), (1000, 200, 900, 10)),
+            ],
+        );
+        // The continuation replays the thread's history (same cumulative
+        // totals) and adds one turn of its own.
+        let file_b = write_rollout(
+            &dir,
+            "rollout-b.jsonl",
+            &[
+                meta_line(),
+                token_count_line((1000, 100, 900, 10), (1000, 100, 900, 10)),
+                token_count_line((2500, 350, 1800, 25), (500, 50, 0, 5)),
+            ],
+        );
+        let db = Db::open(&dir.join("noending.db")).unwrap();
+
+        fn claims_for<'a>(db: &'a Db, member_id: &'a str) -> impl Fn(&str) -> bool + 'a {
+            move |key: &str| -> bool {
+                match db.usage_claim_owner(key).unwrap() {
+                    Some(owner) => owner == member_id,
+                    None => {
+                        db.claim_usage(key, member_id).unwrap();
+                        true
+                    }
+                }
+            }
+        }
+
+        let delta_a = CodexAdapter
+            .read_member_delta_claimed(
+                &root_member(&file_a),
+                &SessionMemberCursor::default(),
+                &claims_for(&db, "mem-a"),
+            )
+            .unwrap();
+        assert_eq!(input_of(&delta_a), Some(2000), "A bills both its turns");
+
+        // B's replayed row was already claimed by A; only its own turn bills.
+        let delta_b = CodexAdapter
+            .read_member_delta_claimed(
+                &root_member(&file_b),
+                &SessionMemberCursor::default(),
+                &claims_for(&db, "mem-b"),
+            )
+            .unwrap();
+        assert_eq!(
+            input_of(&delta_b),
+            Some(500),
+            "the replayed turn is not billed again"
+        );
+
+        // The owner's own re-read keeps billing (snapshot semantics depend on
+        // it): A's rows are claimed by A, so nothing is skipped.
+        let delta_a2 = CodexAdapter
+            .read_member_delta_claimed(
+                &root_member(&file_a),
+                &SessionMemberCursor::default(),
+                &claims_for(&db, "mem-a"),
+            )
+            .unwrap();
+        assert_eq!(input_of(&delta_a2), Some(2000));
     }
 }

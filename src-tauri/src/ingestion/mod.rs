@@ -388,7 +388,19 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
         // A member that raced a topology change mid-pass simply fails its
         // membership re-check inside the commit and stores nothing.
         let cursor = db.get_member_cursor(&member.id)?;
-        let delta = match adapter.read_member_delta(member, &cursor) {
+        // Cross-file usage claims: a continuation rollout re-emits the thread's
+        // usage history, and the replay bills once — the first reader claims
+        // the identity, later files skip it. Registry errors degrade to
+        // billing (never lose real spend).
+        let member_id = member.id.clone();
+        let claims = |key: &str| -> bool {
+            match db.usage_claim_owner(key) {
+                Ok(Some(owner)) => owner == member_id,
+                Ok(None) => db.claim_usage(key, &member_id).is_ok(),
+                Err(_) => true,
+            }
+        };
+        let delta = match adapter.read_member_delta_claimed(member, &cursor, &claims) {
             Ok(d) => d,
             Err(e) => {
                 // The source can disappear between inspection and reading;

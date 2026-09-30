@@ -52,8 +52,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, AgentCommand, DiscoveredMember, DiscoveredMemberKind, ExecOptions,
-    MemberObservation, MemberReadDelta,
+    ms_epoch_to_rfc3339, AgentCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
+    ExecOptions, MemberObservation, MemberReadDelta, ResumeRoute,
 };
 use crate::domain::{
     Agent, ParsedSessionMessage, SessionMember, SessionMemberCursor, SessionMessageRole,
@@ -442,13 +442,30 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         // snapshot.
         observation.add(&usage_of(&conn, &member.source_member_id)?);
 
-        // There is no file to seek into and no stable prefix to fingerprint:
-        // identity is the framework's own message ids, so a re-read of the whole
-        // session stores nothing, and a replaced database is the only shape
-        // change worth a generation bump. Every replay is a full scan → stats
-        // SNAPSHOT. The cursor is WAL-aware (main db + `-wal`), so a checkpoint
-        // cannot hide WAL-only writes and freeze `last_activity_at`.
-        let source = crate::adapters::sqlite_replay_cursor_update(&path, cursor)?;
+        // Per-member facts, never container stats: every thread in the store
+        // shares one `db.sqlite` (+wal), so the file's size and mtime move
+        // whenever ANY session writes — keyed on them, one session's update
+        // would churn every member's cursor and stamp a shared mtime onto all
+        // their `last_activity_at`. The thread's own message count is its
+        // content position; the store's own `time_updated` is its real
+        // activity time. Every replay is a full scan → stats SNAPSHOT, and
+        // message identity absorbs the re-read.
+        let (count, time_updated): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM message WHERE session_id = ?1),
+                        (SELECT time_updated FROM session WHERE id = ?1)",
+                [&member.source_member_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| other(format!("查询 ZCode 会话事实失败: {e}")))?;
+        let source = crate::adapters::sqlite_replay_cursor_update(
+            &path,
+            cursor,
+            crate::adapters::SqliteMemberFacts {
+                position: count,
+                activity_epoch_secs: time_updated.map(|ms| ms as f64 / 1000.0),
+            },
+        )?;
         Ok(MemberReadDelta {
             stats: crate::adapters::stats_update_from(
                 &observation,
@@ -518,6 +535,25 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         _prompt: &str,
     ) -> Result<AgentCommand> {
         Err(other("ZCode 是桌面应用，没有可启动的 CLI"))
+    }
+
+    /// The registered scheme only offers `oauth/callback` and
+    /// `workspace/open?path=` — no session route — so Continue can only
+    /// activate the app. (The bundle's embedded `zcode.cjs` runs `--help`
+    /// but is not usable standalone: it expects the desktop host.)
+    /// App absent → refuse.
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        Some("ZCode")
+    }
+
+    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+        if !crate::platform::paths::app_bundle_present("ZCode") {
+            return ResumeRoute::Refused("未找到 ZCode 桌面应用，无法继续该会话".into());
+        }
+        ResumeRoute::Desktop(DesktopResume {
+            uri: "zcode://".into(),
+            note: "将打开 ZCode 桌面应用（应用内不定位到该会话）".into(),
+        })
     }
 }
 
@@ -893,11 +929,9 @@ mod tests {
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
-        // The cursor stays in the store's own coordinates: nothing was seeked.
-        assert_eq!(
-            delta.source.unwrap().byte_offset,
-            std::fs::metadata(&db).unwrap().len()
-        );
+        // The cursor stays in the member's own coordinates — the thread's
+        // message count — never the container file's size.
+        assert_eq!(delta.source.unwrap().byte_offset, 4);
     }
 
     #[test]
@@ -1109,6 +1143,120 @@ mod tests {
                 (Some("bigmodel-api"), Some("GLM-5.3-Flash")),
                 (None, None),
             ]
+        );
+    }
+
+    /// The store holds every thread in ONE db file: another thread's write
+    /// moves the container's stats but must not move THIS thread's cursor or
+    /// advance its `last_activity_at` — one session's update must never churn
+    /// the whole agent's sessions.
+    #[test]
+    fn another_threads_write_does_not_churn_this_thread() {
+        use crate::storage::Db;
+
+        let root = unique_dir("shared-store");
+        let db_path = store(&root);
+        let conn = open(&db_path);
+        session_row(&conn, "a", None, "/repo-a", 100);
+        session_row(&conn, "b", None, "/repo-b", 200);
+        message_row(&conn, "b1", "b", 0, prompt());
+        part_row(&conn, "bp1", "b1", "b", 0, text_part("B 的提问"));
+        drop(conn);
+
+        let db = Db::open(&root.join("noending.db")).unwrap();
+        let (session_id, _) = db
+            .upsert_logical_session_unchecked(
+                Agent::ZCode,
+                "b",
+                Some("B"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let member_id = db
+            .upsert_session_member(
+                &session_id,
+                Agent::ZCode,
+                "b",
+                SessionMemberRelation::Root,
+                None,
+                "zcode_store_record",
+                &db_path.to_string_lossy(),
+                None,
+                None,
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let member_b = member_of(&db_path, "b", SessionMemberRelation::Root);
+
+        // Pass 1: thread B ingested; its activity is its own time_updated.
+        let delta = ZCodeAdapter
+            .read_member_delta(&member_b, &SessionMemberCursor::default())
+            .unwrap();
+        db.commit_member_ingest_with_provenance_state(
+            &session_id,
+            &member_id,
+            &delta.messages,
+            delta.stats,
+            delta.source.as_ref().unwrap(),
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let activity_before = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at;
+
+        // Thread A writes: a new message plus a bumped time_updated. The
+        // container file's stats move; thread B's facts do not.
+        let conn = open(&db_path);
+        message_row(&conn, "a1", "a", 0, prompt());
+        conn.execute(
+            "UPDATE session SET time_updated = ?1 WHERE id = 'a'",
+            rusqlite::params![5_100],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Pass 2: B's re-read sees an unchanged source, and the commit must
+        // not touch its activity.
+        let cursor = db.get_member_cursor(&member_id).unwrap();
+        let delta = ZCodeAdapter.read_member_delta(&member_b, &cursor).unwrap();
+        let source = delta.source.unwrap();
+        assert_eq!(
+            source.byte_offset, cursor.byte_offset,
+            "B's content position is untouched by A's write"
+        );
+        assert_eq!(
+            source.mtime, cursor.mtime,
+            "B's activity time is its own, not the container's"
+        );
+        db.commit_member_ingest_with_provenance_state(
+            &session_id,
+            &member_id,
+            &delta.messages,
+            delta.stats,
+            &source,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let activity_after = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at;
+        assert_eq!(
+            activity_after, activity_before,
+            "another thread's write must not churn this session's activity"
         );
     }
 }

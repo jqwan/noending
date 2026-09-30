@@ -67,14 +67,15 @@ pub fn open_or_create(conn: &Connection) -> Result<()> {
 }
 
 /// Fill in the defaults that depend on the *current* environment. Runs on every
-/// start, so a newly supported Agent or a relocated `CODEX_HOME` needs no format
-/// change to be picked up.
+/// start, so a newly supported Agent, a relocated `CODEX_HOME`, or a second
+/// official surface gaining its own store (Antigravity's `agy` CLI) needs no
+/// format change to be picked up.
 ///
 /// Reconciliation, not migration: it inserts missing rows only, creates no
 /// schema, and never overwrites a user's decision (defaults start DISABLED).
 pub fn reconcile_runtime_defaults(conn: &Connection) -> Result<()> {
     for agent in crate::domain::Agent::all() {
-        if let Some(root) = crate::platform::paths::resolve_agent_data_dir(*agent) {
+        for root in crate::platform::paths::agent_ingest_roots(*agent) {
             conn.execute(
                 "INSERT OR IGNORE INTO ingest_sources (id, agent, path, enabled, origin, created_at)
                  VALUES (?1, ?2, ?3, 0, 'default', ?4)",
@@ -286,6 +287,18 @@ const CURRENT_SCHEMA: &str = r#"
       -- cover so the bytes frontier and the provenance state cannot drift.
       active_provider TEXT,
       active_model TEXT
+    );
+    -- Cross-file usage identities. A session store can RE-EMIT a thread's
+    -- usage history into a fresh rollout file (codex continuation chains
+    -- replay the whole token_count stream); without a claim registry that
+    -- history bills once per file. The first reader to claim an identity
+    -- bills it; later claimants skip. member_id records who claimed it so
+    -- the owner's own re-reads keep billing. Claims linger after their
+    -- member is deleted: the spend was billed historically, and a later
+    -- replay must not resurrect it.
+    CREATE TABLE IF NOT EXISTS ingest_usage_claims (
+      key TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL
     );
     -- The ONLY conversation store: user/assistant turns of the ROOT
     -- member. Identity dedup is (member_id, source_identity_hash); sequence is
@@ -671,6 +684,40 @@ mod tests {
                 "required_objects() missed {kind} {name}"
             );
         }
-        assert_eq!(found.len(), 45, "required_objects() found an object twice");
+        assert_eq!(found.len(), 46, "required_objects() found an object twice");
+    }
+
+    /// Default ingest sources cover every surface an Agent's conversations
+    /// live on. Antigravity has two (IDE store + `agy` CLI store); the rows
+    /// start disabled, the `UNIQUE(agent, path)` guard keeps re-runs
+    /// idempotent, and a collision of the two would surface here as 1 ≠ 2.
+    #[test]
+    fn reconcile_seeds_both_antigravity_stores() {
+        let conn = Connection::open_in_memory().unwrap();
+        create(&conn).unwrap();
+        reconcile_runtime_defaults(&conn).unwrap();
+
+        let count = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM ingest_sources WHERE agent = 'antigravity'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(&conn), 2, "IDE and agy CLI stores must both seed");
+
+        let (enabled, origin): (i64, String) = conn
+            .query_row(
+                "SELECT enabled, origin FROM ingest_sources WHERE agent = 'antigravity'
+                 AND path LIKE '%antigravity-cli'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((enabled, origin.as_str()), (0, "default"));
+
+        reconcile_runtime_defaults(&conn).unwrap();
+        assert_eq!(count(&conn), 2, "re-run must not duplicate");
     }
 }

@@ -22,10 +22,15 @@
 //!
 //! Only the ROOT's conversation is ingested: `user/message` (real user turns) and
 //! `assistant/message`. A `user/message` carrying `data.source.senderSessionId` was
-//! sent by another session — side activity, never conversation. `assistant/chunk`,
-//! `tool/*`, `todo/write`, `request/*`, `session/title*` and turn/step bookkeeping
-//! are dropped or counted. `seq` is writer-assigned and monotonic within a
-//! generation, so it is the native message id.
+//! sent by another session — side activity, never conversation. `assistant/attempt`
+//! (a retried request — real spend, no prose) and `compaction/summary` (the
+//! shadowed range really goes to the model) count USAGE without becoming
+//! conversation; `assistant/chunk`, `tool/*`, `todo/write`, `request/*`,
+//! `session/title*` and turn/step bookkeeping are dropped or counted. `seq` is
+//! writer-assigned and monotonic within a generation, so it is the native
+//! message id — and the fork boundary: a header `seedLength` marks how many
+//! leading events a fork copied verbatim from its parent, and rows below it are
+//! never billed here again.
 //!
 //! Two shapes need real work:
 //! - **The user turn is not always the user's words.** dsh injects its own
@@ -38,8 +43,9 @@
 //!   reconcile pre-filter still works. Every replay is a full scan → stats
 //!   SNAPSHOT.
 //!
-//! There is no launchable CLI: `dsh --profile <name>` needs a profile name that is
-//! the user's own setup, and guessing one would boot the wrong tree.
+//! The desktop app (DeepSeek Harness) is the only launch surface; the `dsh`
+//! CLI needs a profile name that is the user's own setup, and guessing one
+//! would boot the wrong tree.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -47,8 +53,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, replay_cursor_update, AgentCommand, DiscoveredMember,
-    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta, ParsedLine,
+    ms_epoch_to_rfc3339, replay_cursor_update, AgentCommand, DesktopResume, DiscoveredMember,
+    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta, ParsedLine, ResumeRoute,
     SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
@@ -60,15 +66,24 @@ pub struct DshAdapter;
 /// Generations dsh publishes beside each other, newest last (v0 has no version
 /// infix; a migration publishes a NEW file and never touches the old one). A
 /// session directory can hold several after an upgrade, all describing the same
-/// session id, so discovery claims exactly one: the highest generation present.
+/// session id, so discovery claims exactly one: the highest generation
+/// present — the `.zstd` spelling wins a tie so the claim is deterministic
+/// when a directory holds both spellings of one generation. The same
+/// generations exist UNCOMPRESSED: a backend configured with
+/// `compression: none` writes plain `session*.jsonl` beside the zstd
+/// spellings, and the rows are identical.
 fn generation_of(file_name: &str) -> Option<u8> {
     match file_name {
-        "session.v2.jsonl.zstd" => Some(2),
-        "session.v1.jsonl.zstd" => Some(1),
-        "session.jsonl.zstd" => Some(0),
+        "session.v2.jsonl.zstd" | "session.v2.jsonl" => Some(2),
+        "session.v1.jsonl.zstd" | "session.v1.jsonl" => Some(1),
+        "session.jsonl.zstd" | "session.jsonl" => Some(0),
         _ => None,
     }
 }
+
+/// Zstandard frame magic (RFC 8478 §3.1.1): how a transcript's bytes say
+/// whether they are framed or plain.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 /// Does this decoded record open a dsh transcript? The header is a `session`
 /// record with a `createdAt`; requiring it is what keeps a pi header (same
@@ -115,7 +130,29 @@ fn is_task_envelope(text: &str) -> bool {
 /// A torn final frame ends the walk instead of erroring — the complete prefix
 /// is exactly what a mid-write file has to offer, and the next read sees the
 /// finished frame.
+///
+/// Dispatch is on the zstd frame magic, not the file name: a
+/// `compression: none` backend writes the identical rows without frames, and
+/// those walk as plain lines (a trailing byte run without a newline is the
+/// unfinished write, same verdict as a torn frame).
 fn scan_lines(raw: &[u8], mut keep_going: impl FnMut(&str) -> bool) -> bool {
+    if !raw.starts_with(&ZSTD_MAGIC) {
+        let mut lines = raw.split(|b| *b == b'\n').peekable();
+        while let Some(line) = lines.next() {
+            let is_last = lines.peek().is_none();
+            if is_last && line.is_empty() {
+                continue; // the final newline's terminator, not a partial line
+            }
+            let text = String::from_utf8_lossy(line);
+            if !keep_going(&text) {
+                return false;
+            }
+            if is_last {
+                return false;
+            }
+        }
+        return true;
+    }
     let Ok(mut decoder) = zstd::stream::read::Decoder::new(raw) else {
         return false;
     };
@@ -186,9 +223,17 @@ fn usage_observation(v: &Value) -> MemberObservation {
 
 /// One decoded record's contribution to the member read. Root members
 /// produce conversation; child members produce observations only.
-fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
+fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str())?;
-    let source_message_id = v.get("seq").and_then(|s| s.as_i64()).map(|s| s.to_string());
+    let seq = v.get("seq").and_then(|s| s.as_i64());
+    let source_message_id = seq.map(|s| s.to_string());
+    // A fork's header records how many events were inherited verbatim from the
+    // parent (`seedLength`, `SessionStore::fork`): rows below that boundary are
+    // the parent's work — billing them again would charge the parent's calls
+    // to this session. The guard covers every spending row type; it is
+    // dormant on installs whose headers carry no `seedLength` (observed on
+    // 0.2.x: none do).
+    let inherited = seq.is_some_and(|seq| seq < seed_length);
     // A `user/message` is not necessarily the user: dsh labels the writer in
     // `data.source`, and the kinds bringing a `senderSessionId` are the messages
     // another session sent.
@@ -231,7 +276,11 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             // called tools spent tokens too, and a CHILD member's own steps are
             // its own execution cost. So it is counted before either the
             // empty-text or the non-root early return can drop it.
-            let mut usage = usage_observation(v);
+            let mut usage = if inherited {
+                MemberObservation::default()
+            } else {
+                usage_observation(v)
+            };
             let text = text_blocks(v.pointer("/data/message/content"));
             if text.trim().is_empty() {
                 return Some(ParsedLine::observation_only(usage));
@@ -270,9 +319,32 @@ fn parsed_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 observation: usage,
             })
         }
-        // Compaction is a boundary worth counting, but its payload is machine
-        // bookkeeping: a marker, never the pruned content itself.
+        // A retried request attempt bills like the settled reply even when it
+        // never produced prose; it is execution cost, never conversation.
+        "assistant/attempt" => {
+            if inherited {
+                return None;
+            }
+            Some(ParsedLine::observation_only(usage_observation(v)))
+        }
+        // The compaction summary is a real provider call — the shadowed range
+        // goes to the model — and its spend is counted in addition to the
+        // boundary it writes. (tokscale #1152: falling through to "other"
+        // billed these calls at zero.)
+        "compaction/summary" => {
+            if inherited {
+                return None;
+            }
+            let mut observation = usage_observation(v);
+            observation.compactions = 1;
+            Some(ParsedLine::observation_only(observation))
+        }
+        // Other compaction rows are boundaries worth counting, but their
+        // payload is machine bookkeeping: a marker, never the pruned content.
         t if t.starts_with("compaction/") => {
+            if inherited {
+                return None;
+            }
             Some(ParsedLine::observation_only(MemberObservation {
                 compactions: 1,
                 ..Default::default()
@@ -418,6 +490,10 @@ impl DshAdapter {
             metadata: serde_json::json!({
                 "origin": header.get("origin").and_then(|o| o.as_str()),
                 "delegation_depth": header.get("delegationDepth").and_then(|d| d.as_i64()),
+                // How many leading events a fork copied verbatim from its
+                // parent: rows below this `seq` are the parent's work and are
+                // never billed here. Absent on 0.2.x installs.
+                "seed_length": header.get("seedLength").and_then(|s| s.as_i64()),
             }),
         }))
     }
@@ -461,11 +537,18 @@ impl crate::adapters::AgentAdapter for DshAdapter {
                 let Some(generation) = generation_of(name) else {
                     continue;
                 };
-                if newest
-                    .as_ref()
-                    .map(|(g, _)| generation > *g)
-                    .unwrap_or(true)
-                {
+                // Equal generation in both spellings: the `.zstd` claim wins,
+                // so what a directory with a mixed pair reports is stable.
+                let wins = match &newest {
+                    None => true,
+                    Some((g, _)) if generation > *g => true,
+                    Some((g, stored)) => {
+                        generation == *g
+                            && name.ends_with(".zstd")
+                            && !stored.to_string_lossy().ends_with(".zstd")
+                    }
+                };
+                if wins {
                     newest = Some((generation, p));
                 }
             }
@@ -496,13 +579,18 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         // body and leans on message identity: each record carries the writer's
         // own `seq`, so a replay stores nothing it already has.
         let is_root = member.relation.as_str() == "root";
+        let seed_length = member
+            .metadata
+            .get("seed_length")
+            .and_then(|s| s.as_i64())
+            .unwrap_or(0);
         let mut messages = Vec::new();
         let mut observation = MemberObservation::default();
         let complete_snapshot = scan_lines(&raw, |line| {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 return true;
             };
-            let Some(p) = parsed_line(&v, is_root) else {
+            let Some(p) = parsed_line(&v, is_root, seed_length) else {
                 return true;
             };
             observation.add(&p.observation);
@@ -543,6 +631,25 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         Ok(crate::adapters::inspect_file_source(Path::new(
             &member.source_path,
         )))
+    }
+
+    /// The desktop app is dsh's only launch surface: the `dsh` CLI needs a
+    /// profile name only the user knows, so NoEnding never launches it in a
+    /// terminal.
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        Some("DeepSeek Harness")
+    }
+
+    /// The registered scheme `dsh://` has no known session route, so Continue
+    /// can only activate the app. App absent → refuse.
+    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+        if !crate::platform::paths::app_bundle_present("DeepSeek Harness") {
+            return ResumeRoute::Refused("未找到 dsh 桌面应用，无法继续该会话".into());
+        }
+        ResumeRoute::Desktop(DesktopResume {
+            uri: "dsh://".into(),
+            note: "将打开 dsh 桌面应用（应用内不定位到该会话）".into(),
+        })
     }
 
     fn build_new_command(
@@ -1097,5 +1204,211 @@ mod tests {
                 (None, None),
             ]
         );
+    }
+
+    /// dsh 只有桌面端这一个启动面。回归守卫：它曾被误标为 TUI/CLI。
+    #[test]
+    fn dsh_is_desktop_only() {
+        assert!(!DshAdapter.has_terminal_cli());
+        assert_eq!(DshAdapter.desktop_app_name(), Some("DeepSeek Harness"));
+    }
+
+    /// 应用在场时 Continue 打开桌面应用，缺席时明确拒绝。
+    #[test]
+    fn continue_route_opens_the_desktop_app_or_refuses() {
+        let member = member_at(Path::new("/tmp/dsh-session"), SessionMemberRelation::Root);
+        let route = DshAdapter.continue_route(&member);
+        if crate::platform::paths::app_bundle_present("DeepSeek Harness") {
+            match route {
+                ResumeRoute::Desktop(d) => assert_eq!(d.uri, "dsh://"),
+                other => panic!("expected a desktop open, got {other:?}"),
+            }
+        } else {
+            assert!(matches!(route, ResumeRoute::Refused(_)));
+        }
+    }
+
+    /// A `compression: none` backend writes the same rows without zstd frames:
+    /// discovery claims the plain spelling and the read decodes it by magic.
+    #[test]
+    fn a_plain_uncompressed_transcript_is_ingested() {
+        let root = unique_dir("plain");
+        let id = "session-plain";
+        let dir = root.join("proj").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session.v2.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                header(id, ""),
+                user(3, "plain question"),
+                assistant(4, "plain answer")
+            ),
+        )
+        .unwrap();
+
+        let found = DshAdapter
+            .discover_members_in(&[root.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].source_path.ends_with("session.v2.jsonl"));
+
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&found[0].source_path, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        let texts: Vec<&str> = delta.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(texts, vec!["plain question", "plain answer"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both spellings of one generation in one directory: the `.zstd` claim
+    /// wins, deterministically.
+    #[test]
+    fn the_zstd_spelling_wins_a_generation_tie() {
+        let root = unique_dir("tie");
+        let id = "session-tie";
+        let dir = root.join("proj").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("session.jsonl"), format!("{}\n", header(id, ""))).unwrap();
+        std::fs::write(
+            dir.join("session.jsonl.zstd"),
+            frame(&format!("{}\n", header(id, ""))),
+        )
+        .unwrap();
+
+        let found = DshAdapter.discover_members_in(&[root], &|_| false).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].source_path.ends_with("session.jsonl.zstd"));
+    }
+
+    /// The compaction summary is a real provider call: its usage is counted in
+    /// addition to the boundary, and it never becomes conversation.
+    #[test]
+    fn a_compaction_summary_bills_its_call() {
+        let id = "session-summary";
+        let dir = session_dir(
+            &unique_dir("summary"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, ""),
+                &user(1, "长对话"),
+                r#"{"type":"compaction/summary","seq":2,"time":2,"data":{"usage":{"inputTokens":5000,"outputTokens":800,"cacheReadTokens":12000}}}"#,
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        assert!(
+            delta
+                .messages
+                .iter()
+                .all(|m| m.role == SessionMessageRole::User),
+            "the summary never becomes conversation"
+        );
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(5000));
+                assert_eq!(s.output_tokens, Some(800));
+                assert_eq!(s.cached_tokens, Some(12000));
+                assert_eq!(s.compaction_count, Some(1));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A retried attempt bills its own call but never becomes conversation —
+    /// only the settled reply counts as an assistant message.
+    #[test]
+    fn an_assistant_attempt_bills_without_becoming_conversation() {
+        let id = "session-attempt";
+        let dir = session_dir(
+            &unique_dir("attempt"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, ""),
+                &user(1, "问题"),
+                r#"{"type":"assistant/attempt","seq":2,"time":2,"data":{"usage":{"inputTokens":700,"outputTokens":0}}}"#,
+                &assistant(3, "最终回答"),
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        assert_eq!(delta.messages.len(), 2, "the attempt is not conversation");
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(700));
+                assert_eq!(s.assistant_message_count, Some(1), "only the settled reply");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fork's `seedLength` marks the inherited prefix: rows below the
+    /// boundary are the parent's work and are never billed here, while the
+    /// inherited history stays part of the transcript.
+    #[test]
+    fn a_seeded_fork_does_not_bill_its_inherited_prefix() {
+        let id = "session-seed";
+        let dir = session_dir(
+            &unique_dir("seed"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, r#","seedLength":3"#),
+                &user(1, "inherited question"),
+                r#"{"type":"assistant/message","seq":2,"time":2,"data":{"usage":{"inputTokens":900,"outputTokens":60},"message":{"role":"assistant","content":[{"type":"text","text":"inherited answer"}]}}}"#,
+                r#"{"type":"assistant/message","seq":4,"time":4,"data":{"usage":{"inputTokens":120,"outputTokens":9},"message":{"role":"assistant","content":[{"type":"text","text":"own answer"}]}}}"#,
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+
+        let found = DshAdapter
+            .discover_members_in(&[dir.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].metadata["seed_length"], 3,
+            "discovery carries the boundary"
+        );
+
+        let mut member = member_at(&file, SessionMemberRelation::Root);
+        member.metadata = serde_json::json!({ "seed_length": 3 });
+        let delta = DshAdapter
+            .read_member_delta(&member, &SessionMemberCursor::default())
+            .unwrap();
+        let texts: Vec<&str> = delta.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["inherited question", "inherited answer", "own answer"],
+            "the inherited history stays part of the transcript"
+        );
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(
+                    s.input_tokens,
+                    Some(120),
+                    "only the fork's own work is billed"
+                );
+                assert_eq!(s.output_tokens, Some(9));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

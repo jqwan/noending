@@ -22,13 +22,27 @@
 //! by the session id the transcript reports, and silent when that store is
 //! absent. Nothing else is taken from there.
 //!
-//! **Billing is in `credits`, not tokens.** Each assistant row's `message.usage`
-//! carries the Claude-style token fields AND Qoder's own `credits`; over the
-//! whole local corpus every token field is 0 and every row has a non-zero
-//! `credits` (verified: 8081/8081). So credits map to the cost axis and the
-//! token axis is left unsupported. A subagent's own file is a member of its
-//! own, so its credits are counted there and roll up through the session
-//! aggregate like every other member's.
+//! **Billing is in `credits`, and the model field is a CODE, not a name.**
+//! Each assistant row's `message.usage` carries the Claude-style token fields
+//! AND Qoder's own `credits`; on plan-billed accounts every token field is 0
+//! and every row has a non-zero `credits` (verified: 8081/8081) — credits map
+//! to the cost axis. BYOK/custom-model rows DO carry measured token counts,
+//! and their `input_tokens` INCLUDES the cached subset (differs from the
+//! Anthropic envelope), so the uncached input is what gets stored, with the
+//! cached subset on its own axis. A subagent's own file is a member of its
+//! own, so its usage rolls up through the session aggregate like every other
+//! member's.
+//!
+//! `message.model` holds an internal model CODE (`qfmodel`, `dfmodel`, …),
+//! not a name. The authoritative display names ship INSIDE the app as
+//! `Resources/dynamic-text/qoder-cn.json` (`en.model.<code>.label`), a file
+//! that updates with the app — the same code can even name a different model
+//! across releases (`gmodel`: GLM-5 → GLM-5.3). That file is read once per
+//! process and preferred; a built-in table (extracted from the 2026-09
+//! build) backs the platforms/shapes where it cannot be read, and unmapped
+//! codes pass through raw rather than being dropped. Locally synthesized
+//! rows (`<synthetic>` error notices) are not generations and stay NULL. No
+//! provider field exists → NULL.
 
 use std::path::{Path, PathBuf};
 
@@ -36,8 +50,9 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind,
-    ExecOptions, MemberObservation, ParsedLine, SessionMessageRole,
+    detect_format, read_jsonl_delta, AgentCommand, DesktopResume, DiscoveredMember,
+    DiscoveredMemberKind, ExecOptions, MemberObservation, ParsedLine, ResumeRoute,
+    SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
@@ -309,6 +324,143 @@ impl QoderAdapter {
     }
 }
 
+/// The authoritative display names live in the app's SERVER-PUSHED dynamic
+/// text: `~/.qoder-cn/.auth/dynamic-texts.json` (override with
+/// `QODERCN_CONFIG_DIR`), flat keys `locales.<locale>.modelSelector.item.<code>`
+/// with a `{label, description, …}` node. The copy shipped inside the bundle
+/// (`Resources/dynamic-text/qoder-cn.json`) is a stale snapshot and is
+/// deliberately NOT read — it disagreed with the live UI (it said
+/// DeepSeek-V4-Flash while the app showed V4.1). Read once per process.
+///
+/// When the label carries no version at all (`dfmodel` → "DeepSeek-Flash"),
+/// the concrete identity is recovered from the description's parenthesized
+/// name (`（DeepSeek-V4.1-Flash）`) — versions must not silently disappear
+/// from the stats.
+fn dynamic_model_names() -> Option<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<Option<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let base = std::env::var("QODERCN_CONFIG_DIR").unwrap_or_else(|_| {
+                crate::platform::paths::resolve_home()
+                    .map(|home| home.join(".qoder-cn").to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "~/.qoder-cn".to_string())
+            });
+            let raw = std::fs::read_to_string(
+                std::path::PathBuf::from(base).join(".auth/dynamic-texts.json"),
+            )
+            .ok()?;
+            let parsed: Value = serde_json::from_str(&raw).ok()?;
+            let entries = parsed.get("locales")?.get("en")?.as_object()?;
+            let out: std::collections::HashMap<String, String> = entries
+                .iter()
+                .filter_map(|(key, node)| {
+                    let code = key.strip_prefix("modelSelector.item.")?;
+                    let node = node.as_object()?;
+                    let label = node.get("label")?.as_str()?.trim();
+                    if label.is_empty() {
+                        return None;
+                    }
+                    let name = match versioned_from_description(node) {
+                        Some(versioned) if !label.chars().any(|c| c.is_ascii_digit()) => versioned,
+                        _ => label.to_string(),
+                    };
+                    Some((code.to_string(), name))
+                })
+                .collect();
+            (!out.is_empty()).then_some(out)
+        })
+        .as_ref()
+        .cloned()
+}
+
+/// The concrete model name inside the description's parentheses —
+/// `深度求索正式版模型（DeepSeek-V4.1-Flash）…` → `DeepSeek-V4.1-Flash`.
+/// The first parenthesized group that carries a version digit wins.
+fn versioned_from_description(node: &serde_json::Map<String, Value>) -> Option<String> {
+    let description = node
+        .get("description")
+        .or_else(|| node.get("markdownDescription"))
+        .or_else(|| node.get("detail"))?
+        .as_str()?;
+    // Either ASCII or fullwidth parens; `start` is the byte offset just past
+    // the opening character, so the closing slice excludes it entirely.
+    let open = ['(', '（'];
+    let close = [')', '）'];
+    let mut start: Option<usize> = None;
+    for (byte_pos, ch) in description.char_indices() {
+        if open.contains(&ch) && start.is_none() {
+            start = Some(byte_pos + ch.len_utf8());
+        } else if close.contains(&ch) && start.is_some() {
+            let candidate = &description[start.unwrap()..byte_pos];
+            if candidate.chars().any(|c| c.is_ascii_digit()) {
+                return Some(candidate.trim().to_string());
+            }
+            start = None;
+        }
+    }
+    None
+}
+
+/// The built-in fallback: the model display names of the 2026-09 server
+/// push (`dynamic-texts.json`), used when that file cannot be read. Codes
+/// shift meaning across releases (`gmodel`: GLM-5 → GLM-5.3; `dfmodel`:
+/// DeepSeek-V4-Flash → the V4.1 release) — the dynamic file is the
+/// authority, this table is only the safety net, so it tracks the CURRENT
+/// meanings and keeps retired codes (`qmodel_preview`) that historical rows
+/// can still name.
+fn built_in_model_name(code: &str) -> Option<&'static str> {
+    let name = match code {
+        "auto" | "experts-auto" | "quest-auto" => "Auto",
+        "cmodel" => "Cantus",
+        "dashscope_qmodel" => "Qwen3.7-Plus",
+        "dashscope_qwen3_coder" => "Qwen3-Coder-Plus",
+        "dashscope_qwen_max_latest" => "Qwen3-Max",
+        "dfmodel" => "DeepSeek-V4.1-Flash",
+        "dmodel" => "DeepSeek-V4-Pro",
+        "efficient" => "Efficient",
+        "gfmodel" => "GLM-5.3-Flash",
+        "gmodel" => "GLM-5.3",
+        "gm51model" => "GLM-5.2",
+        "kmodel" => "Kimi-K2.8-Preview",
+        "kmodel_latest" => "Kimi-K3",
+        "lite" => "Lite",
+        "mmodel" => "MiniMax-M2.7",
+        "performance" => "Performance",
+        "q35model" => "Qwen3.5-Plus",
+        "q35model_preview" => "Qwen3.7-Max-DogFooding",
+        "q36fmodel" => "Qwen3.6-Flash",
+        "q37fmodel" => "Qwen3.7-Flash",
+        "qfmodel" => "Qwen3.8-Flash",
+        "qmodel" => "Qwen3.7-Plus",
+        "qmodel_38max" => "Qwen3.8-Max",
+        "qmodel_latest" => "Qwen3.7-Max",
+        "qmodel_preview" => "Qwen3.8-Max-Preview", // retired code, same preview model
+        "ultimate" | "experts-ultimate" | "quest-ultimate" => "Ultimate",
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// The assistant row's `message.model` is an internal CODE, not a name;
+/// resolve it to the app's display name when known. Routing tiers (`auto`,
+/// `ultimate`, …) are the user's selection, mapped like any code; locally
+/// synthesized error notices (`<synthetic>`) are no generation at all and
+/// stay NULL.
+fn model_display_name(code: &str) -> Option<String> {
+    if code == "<synthetic>" {
+        return None;
+    }
+    if let Some(map) = dynamic_model_names() {
+        if let Some(name) = map.get(code) {
+            return Some(name.clone());
+        }
+    }
+    built_in_model_name(code)
+        .map(str::to_string)
+        .or_else(|| Some(code.to_string()))
+}
+
 impl crate::adapters::AgentAdapter for QoderAdapter {
     fn agent(&self) -> Agent {
         Agent::Qoder
@@ -382,7 +534,9 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         read_jsonl_delta(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY.with_cost(),
+            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY
+                .with_tokens()
+                .with_cost(),
             &|_idx, v| parse_line(v, is_root),
         )
     }
@@ -425,6 +579,23 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
     ) -> Result<AgentCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法一次性执行"))
     }
+
+    /// The registered scheme `qoder-cn://` carries no session route (its
+    /// deep links only cover reference/issue, settings, invite), so Continue
+    /// can only activate the app. App absent → refuse (there is no CLI).
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        Some("Qoder CN")
+    }
+
+    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+        if !crate::platform::paths::app_bundle_present("Qoder CN") {
+            return ResumeRoute::Refused("未找到 Qoder 桌面应用，无法继续该会话".into());
+        }
+        ResumeRoute::Desktop(DesktopResume {
+            uri: "qoder-cn://".into(),
+            note: "将打开 Qoder 桌面应用（应用内不定位到该会话）".into(),
+        })
+    }
 }
 
 /// One transcript line's contribution. Root members produce
@@ -453,15 +624,32 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             };
             // Qoder bills in `credits`, not tokens: over 8081 usage rows every
             // token field is 0 while every row carries a non-zero `credits` —
-            // the token slots are structural placeholders, so the token axis
-            // stays UNSUPPORTED rather than reporting a 0 the source never
-            // observed. One value per assistant call, additive like any usage.
+            // the token slots are structural placeholders on plan-billed
+            // accounts. One value per assistant call, additive like any usage.
             if let Some(credits) = msg
                 .get("usage")
                 .and_then(|u| u.get("credits"))
                 .and_then(|c| c.as_f64())
             {
                 observation.cost = credits;
+            }
+            // BYOK/custom-model rows carry MEASURED token counts (plan rows
+            // are structural zeros, so a zero never reaches the stats). Their
+            // `input_tokens` INCLUDES the cached subset — store the uncached
+            // input and keep the cached subset on its own axis, matching the
+            // fresh-input convention of the other adapters.
+            if let Some(usage) = msg.get("usage").and_then(|u| u.as_object()) {
+                let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                let (input, output, cache_read) = (
+                    n("input_tokens"),
+                    n("output_tokens"),
+                    n("cache_read_input_tokens"),
+                );
+                if input + output + cache_read > 0 {
+                    observation.input_tokens = input.saturating_sub(cache_read);
+                    observation.output_tokens = output;
+                    observation.cached_tokens = cache_read;
+                }
             }
             if sidechain {
                 return Some(ParsedLine::observation_only(observation));
@@ -487,16 +675,14 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 // Session's Conversation.
                 return Some(ParsedLine::observation_only(observation));
             }
-            // The assistant row itself carries `message.model` — the actual
-            // response model, source-native opaque ids ("dfmodel", "qfmodel", …).
-            // This is NOT the `runtime-config.model` broadcast.
-            // Locally synthesized rows ("<synthetic>" error notices) are not
-            // real generations and stay NULL; no provider field exists → NULL.
+            // The assistant row itself carries `message.model` — an internal
+            // model CODE, resolved to the official display name when the code
+            // is known (see `model_display_name`). This is NOT the
+            // `runtime-config.model` broadcast.
             let model = if role == SessionMessageRole::Assistant {
                 msg.get("model")
                     .and_then(|m| m.as_str())
-                    .filter(|m| *m != "<synthetic>")
-                    .map(|s| s.to_string())
+                    .and_then(model_display_name)
             } else {
                 None
             };
@@ -599,7 +785,7 @@ mod tests {
     /// the token axis stays UNSUPPORTED (the source's token fields are always 0,
     /// so reporting them would draw a "0" that was never a real observation).
     #[test]
-    fn credits_land_on_the_cost_axis_and_tokens_stay_unsupported() {
+    fn credits_land_on_the_cost_axis_and_plan_rows_read_zero_tokens() {
         let dir = unique_dir("credits");
         let file = dir.join("s-main.jsonl");
         std::fs::write(
@@ -624,11 +810,53 @@ mod tests {
                     (cost - 10.7176448).abs() < 1e-9,
                     "both calls add up: {cost}"
                 );
-                assert_eq!(s.input_tokens, None, "tokens are not supported");
-                assert_eq!(s.output_tokens, None);
+                assert_eq!(
+                    s.input_tokens,
+                    Some(0),
+                    "plan rows are structural zeros — the axis exists, the source says 0"
+                );
+                assert_eq!(s.output_tokens, Some(0));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BYOK/custom-model rows carry MEASURED token counts, and their
+    /// `input_tokens` INCLUDES the cached subset: the uncached input is what
+    /// gets stored, with the cached subset on its own axis. The model code
+    /// resolves to the app's display name (`dmodel` → DeepSeek-V4-Pro).
+    #[test]
+    fn a_byok_row_bills_measured_tokens_with_uncached_input() {
+        let dir = unique_dir("byok");
+        let file = dir.join("s.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"type":"assistant","uuid":"u1","timestamp":"2026-09-22T15:01:31.000Z","cwd":"/repo","sessionId":"s","message":{"role":"assistant","model":"dmodel","usage":{"input_tokens":1500,"output_tokens":210,"cache_read_input_tokens":1200},"content":[{"type":"text","text":"答"}]}}"#,
+        )
+        .unwrap();
+
+        let delta = QoderAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                assert_eq!(
+                    s.input_tokens,
+                    Some(300),
+                    "1500 raw input minus 1200 cached"
+                );
+                assert_eq!(s.output_tokens, Some(210));
+                assert_eq!(s.cached_tokens, Some(1200));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let assistant = delta
+            .messages
+            .iter()
+            .find(|m| m.role == SessionMessageRole::Assistant)
+            .unwrap();
+        assert_eq!(assistant.model.as_deref(), Some("DeepSeek-V4-Pro"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -772,7 +1000,11 @@ mod tests {
             .filter(|m| m.role == SessionMessageRole::Assistant)
             .collect();
         assert_eq!(assistant.len(), 2);
-        assert_eq!(assistant[0].model.as_deref(), Some("dfmodel"));
+        // The internal code resolves to the app's display name (server-pushed
+        // dynamic text when present, the built-in table otherwise — both say
+        // `dfmodel` → DeepSeek-V4.1-Flash; the fresh label drops the version
+        // and it is recovered from the description).
+        assert_eq!(assistant[0].model.as_deref(), Some("DeepSeek-V4.1-Flash"));
         assert_eq!(assistant[0].provider, None, "no provider in the source");
         assert_eq!(
             assistant[1].model, None,

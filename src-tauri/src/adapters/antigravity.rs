@@ -1,7 +1,16 @@
 //! Antigravity Adapter (Google's agentic IDE). The conversation store is one
 //! live WAL SQLite database per conversation,
 //! `~/.gemini/antigravity/conversations/<conversation-id>.db`; raw data is
-//! read-only, always. No headless CLI → history ingestion only.
+//! read-only, always. IDE conversations are history-ingestion only.
+//!
+//! The official `agy` CLI launches too (New / Resume), but its conversations
+//! live in a SEPARATE store, `~/.gemini/antigravity-cli/conversations/`, with
+//! the same schema and its own sibling `conversation_summaries.db`. The CLI
+//! cannot see IDE conversations (`agy --conversation <id>` on an IDE id fails
+//! with "trajectory not found"), so a resume only works for sessions that were
+//! discovered from the CLI store. Both stores are default ingest sources
+//! (`agent_ingest_roots`), so covering agy-created sessions end to end —
+//! LaunchIntent discovery included — is one enable in Settings.
 //!
 //! The `steps` table is the event log, ordered by `idx`; payloads are
 //! protobuf with no published schema. Field paths verified against the real
@@ -34,20 +43,27 @@
 //! `unchanged` is deliberately not consulted: WAL writes keep the main `.db`
 //! size/mtime identical, and the title/parent facts live in the second store
 //! the skipset never sees. Discovery re-reads every conversation; the replay
-//! dedup absorbs it. The read cursor is WAL-aware too (`sqlite_replay_cursor_update`):
-//! main + `-wal` size, max of both mtimes, so WAL-only writes still advance
-//! `last_activity_at`.
+//! dedup absorbs it. The read cursor (`sqlite_replay_cursor_update`) is in the
+//! conversation's OWN coordinates — MAX(step idx) as position, the newest
+//! step's time as activity — because the container's stats are noise: any
+//! connection touching the conversation creates/touches a 0-byte `-wal`, and
+//! keyed on that mtime, an open would read as activity. A WAL-only step append
+//! still moves both facts, so `last_activity_at` keeps advancing.
 //!
-//! Provenance: no per-message model/provider exists in the source (the model
-//! name appears only in runtime feature-flag blobs) — provenance stays NULL.
+//! Provenance: each `gen_metadata` row names the model it served (`1.19`,
+//! e.g. `gemini-3.8-flash` / `claude-opus-4-6-thinking`) and the step-input
+//! boundary it ran against (`1.20`'s `last_step_index`), so assistant steps
+//! carry the serving model (see `read_member_delta`). No provider field
+//! exists in the source — provider stays NULL.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, AgentCommand, DiscoveredMember, DiscoveredMemberKind, ExecOptions,
-    MemberObservation, MemberReadDelta, ParsedLine, SessionMessageRole,
+    ms_epoch_to_rfc3339, AgentCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
+    ExecOptions, MemberObservation, MemberReadDelta, ParsedLine, ResumeRoute, SessionMessageRole,
 };
 use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
 use crate::error::{other, Result};
@@ -177,13 +193,41 @@ fn pb_text(buf: &[u8], fnum: u32) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// The model a generation served (`1.19`) and the step-input boundary it ran
+/// against (`1.20`'s repeated metadata map entry `last_step_index` — repeated,
+/// so a single-field lookup cannot reach it). A row without either attributes
+/// nothing.
+fn generation_model_and_boundary(data: &[u8]) -> Option<(i64, String)> {
+    let chat = pb_sub(data, 1)?;
+    let model = pb_str(chat, 19).filter(|m| !m.trim().is_empty())?;
+    let boundary = pb_fields(chat)
+        .into_iter()
+        .filter_map(|(f, v)| match v {
+            PbVal::Bytes(b) if f == 20 => Some(b),
+            _ => None,
+        })
+        .find_map(|entry| {
+            if pb_str(entry, 1).as_deref() == Some("last_step_index") {
+                pb_str(entry, 2).and_then(|v| v.parse::<i64>().ok())
+            } else {
+                None
+            }
+        })?;
+    Some((boundary, model))
+}
+
 /// `{seconds, nanos}` protobuf timestamp → RFC3339. Step envelopes keep it at
 /// `payload.5.1`.
 fn step_timestamp(payload: &[u8]) -> Option<String> {
+    ms_epoch_to_rfc3339((step_epoch_secs(payload)? * 1000.0) as i64)
+}
+
+/// Step time in UNIX seconds from the payload's `5.1` (secs) + `5.2` (nanos).
+fn step_epoch_secs(payload: &[u8]) -> Option<f64> {
     let envelope = pb_sub(payload, 5)?;
     let ts = pb_sub(envelope, 1)?;
-    let secs = pb_varint(ts, 1)? as i64;
-    ms_epoch_to_rfc3339(secs * 1000)
+    let secs = pb_varint(ts, 1)? as f64;
+    Some(secs + pb_varint(ts, 2).unwrap_or(0) as f64 / 1e9)
 }
 
 /// The typed user prompt of a step-14 payload.
@@ -235,6 +279,7 @@ fn agent_turn(payload: &[u8]) -> Vec<String> {
 fn parse_member(
     db_path: &Path,
     summaries: Option<&Connection>,
+    source_kind: &str,
 ) -> Result<Option<DiscoveredMember>> {
     let Some(conversation_id) = db_path.file_stem().and_then(|s| s.to_str()) else {
         return Ok(None);
@@ -331,7 +376,7 @@ fn parse_member(
         },
         parent_source_member_id: parent,
         root_hint: None,
-        source_kind: "antigravity_conversation".into(),
+        source_kind: source_kind.to_string(),
         source_path: db_path.to_path_buf(),
         cwd,
         started_at,
@@ -344,29 +389,49 @@ fn parse_member(
 }
 
 /// Token usage of ONE generation call, from the `gen_metadata` blob's `1.4`
-/// subtree: `.2` fresh input, `.3` output, `.5` cache read, `.9` thinking.
-/// Verified against real rows: when a call hits the cache `.2` shrinks and `.5`
-/// grows, so `.2` excludes the cache — the same convention Claude Code and Pi
-/// use. `.1` and `.6` are constants (1319 / 24) and are NOT token counts, and
-/// `1.9.10.1` is the PROMPT-SIZE ESTIMATE the client shows, not billed input.
-/// One `gen_metadata` row is one call, so the rows add up.
+/// subtree. Cross-validated field-by-field against a real store and tokscale's
+/// independent reverse-engineering (2026-09-30): `.1` is the fixed
+/// system-prompt token count (1026–1319 across observed installs) and IS
+/// billable input; `.2` is newly-processed (non-cached) input — a cache hit
+/// moves `.2` down while `.5` (cache read) moves up; `.9` is output (text)
+/// tokens; `.10` is thinking. The earlier mapping read output from `.3` and
+/// thinking from `.9`: on real rows `.3` mirrors `.10` exactly while `.9` is
+/// absent, and once `.9`-bearing rows are included `.3` matches no plausible
+/// quantity — it stays unread. (`1.9.10.1` is the PROMPT-SIZE ESTIMATE the
+/// client shows, not billed input.) One `gen_metadata` row is one call, so
+/// the rows add up.
 fn usage_of(data: &[u8]) -> MemberObservation {
     let Some(usage) = pb_sub(data, 1).and_then(|m| pb_sub(m, 4)) else {
         return MemberObservation::default();
     };
     let n = |f: u32| pb_varint(usage, f).unwrap_or(0);
     MemberObservation {
-        input_tokens: n(2),
-        output_tokens: n(3),
+        input_tokens: n(1).saturating_add(n(2)),
+        output_tokens: n(9),
         cached_tokens: n(5),
-        reasoning_tokens: n(9),
+        reasoning_tokens: n(10),
         ..Default::default()
     }
 }
 
+/// The responseId (`1.4.11`) identifying one generation call. Unique across
+/// every observed store (3/3, 26/26, 1575/1575 distinct), so the dedup at the
+/// call site is purely defensive against a future duplicate-writing version.
+fn gen_response_id(data: &[u8]) -> Option<String> {
+    pb_sub(data, 1)
+        .and_then(|m| pb_sub(m, 4))
+        .and_then(|u| pb_str(u, 11))
+}
+
 /// One step row's contribution: conversation text (root only), or execution
 /// observations. `idx` is the step's stable native id.
-fn parse_step(idx: i64, step_type: i64, payload: &[u8], is_root: bool) -> Option<ParsedLine> {
+fn parse_step(
+    idx: i64,
+    step_type: i64,
+    payload: &[u8],
+    is_root: bool,
+    model: Option<&str>,
+) -> Option<ParsedLine> {
     match step_type {
         14 => {
             let text = user_text(payload)?;
@@ -396,12 +461,10 @@ fn parse_step(idx: i64, step_type: i64, payload: &[u8], is_root: bool) -> Option
                 return Some(ParsedLine::observation_only(observation));
             }
             Some(ParsedLine {
-                message: Some(parsed_message(
-                    idx,
-                    SessionMessageRole::Assistant,
-                    text,
-                    payload,
-                )),
+                message: Some(
+                    parsed_message(idx, SessionMessageRole::Assistant, text, payload)
+                        .with_provenance(None, model.map(|m| m.to_string())),
+                ),
                 observation,
             })
         }
@@ -430,7 +493,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
     }
 
     fn detect(&self) -> Option<crate::platform::exec_resolver::AgentInstallation> {
-        None
+        crate::platform::exec_resolver::resolve_quiet(Agent::Antigravity)
     }
 
     fn discover_members_in(
@@ -464,6 +527,16 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
             };
+            // The two source formats carry distinct kinds: the IDE store and
+            // the `agy` CLI store are schema-identical, but Continue routes
+            // them differently (terminal for the CLI store, desktop app for
+            // the IDE store). Which store a root IS is decided by the root
+            // itself, not re-guessed per file.
+            let source_kind = if dir.to_string_lossy().contains("antigravity-cli") {
+                "antigravity_cli_conversation"
+            } else {
+                "antigravity_ide_conversation"
+            };
             let mut paths: Vec<PathBuf> = rd
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
@@ -476,7 +549,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 // only in `<id>.db-wal` while size and mtime stay identical,
                 // and the conversation's title/parent live in a SECOND store
                 // (`conversation_summaries.db`) the skipset never sees.
-                match parse_member(&path, summaries.as_ref()) {
+                match parse_member(&path, summaries.as_ref(), source_kind) {
                     Ok(Some(m)) => out.push(m),
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", path.display(), e),
@@ -505,11 +578,54 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             ))
         })?;
 
+        // Per-generation model identity: each `gen_metadata` row names the
+        // model it served (`1.19`) and the input boundary it ran against
+        // (`1.20`'s `last_step_index`). A step belongs to the nearest boundary
+        // strictly BELOW its idx — the boundary is the last step the
+        // generation saw as input — so a turn nobody generated (the user turn
+        // at the first boundary) stays unattributed. Equal boundaries keep the
+        // later row: it is the later write.
+        let mut gen_rows = conn
+            .prepare("SELECT data FROM gen_metadata ORDER BY idx")?
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+            .filter_map(|row| generation_model_and_boundary(&row.ok()?))
+            .collect::<Vec<(i64, String)>>();
+        gen_rows.sort_by_key(|(boundary, _)| *boundary);
+        let mut gens: Vec<(i64, String)> = Vec::new();
+        for pair in gen_rows {
+            if gens.last().map(|(b, _)| *b) == Some(pair.0) {
+                gens.pop();
+            }
+            gens.push(pair);
+        }
+        let mut gen_cursor = 0usize;
+
         let mut messages = Vec::new();
         let mut observation = MemberObservation::default();
+        // Per-member content facts: the newest step's own time is this
+        // conversation's real activity, and MAX(idx) is its position. The
+        // container's stats say nothing — a mere open of the conversation
+        // creates/touches a 0-byte `-wal`, and keyed on that mtime, other
+        // sessions' activity would churn this one's `last_activity_at`.
+        let mut max_idx: i64 = 0;
+        let mut max_step_secs: Option<f64> = None;
         for row in rows {
             let (idx, step_type, payload) = row?;
-            if let Some(parsed) = parse_step(idx, step_type, &payload, is_root) {
+            max_idx = max_idx.max(idx);
+            if let Some(secs) = step_epoch_secs(&payload) {
+                max_step_secs = Some(match max_step_secs {
+                    Some(m) => m.max(secs),
+                    None => secs,
+                });
+            }
+            while gen_cursor + 1 < gens.len() && gens[gen_cursor + 1].0 < idx {
+                gen_cursor += 1;
+            }
+            let model = gens
+                .get(gen_cursor)
+                .filter(|(boundary, _)| *boundary < idx)
+                .map(|(_, model)| model.as_str());
+            if let Some(parsed) = parse_step(idx, step_type, &payload, is_root, model) {
                 observation.add(&parsed.observation);
                 if let Some(m) = parsed.message {
                     if m.content.trim().is_empty() {
@@ -525,13 +641,27 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         // Every read is a full replay, so the sum becomes a snapshot.
         let mut gen_stmt = conn.prepare("SELECT data FROM gen_metadata")?;
         let gen_rows = gen_stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut seen_response_ids: HashSet<String> = HashSet::new();
         for row in gen_rows {
-            observation.add(&usage_of(&row?));
+            let data = row?;
+            if let Some(id) = gen_response_id(&data) {
+                if !seen_response_ids.insert(id) {
+                    continue;
+                }
+            }
+            observation.add(&usage_of(&data));
         }
         drop(gen_stmt);
         drop(conn);
 
-        let source = crate::adapters::sqlite_replay_cursor_update(&path, cursor)?;
+        let source = crate::adapters::sqlite_replay_cursor_update(
+            &path,
+            cursor,
+            crate::adapters::SqliteMemberFacts {
+                position: max_idx,
+                activity_epoch_secs: max_step_secs,
+            },
+        )?;
         Ok(MemberReadDelta {
             stats: crate::adapters::stats_update_from(
                 &observation,
@@ -554,23 +684,36 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
 
     fn build_new_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
-        _opts: &ExecOptions,
-        _cwd: Option<&Path>,
+        install: &crate::platform::exec_resolver::AgentInstallation,
+        opts: &ExecOptions,
+        cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        Err(other(
-            "Antigravity 没有可启动的 CLI，NoEnding 只读取它的历史会话",
-        ))
+        // Bare `agy` opens the interactive TUI in `cwd`; the conversation is
+        // created on the first turn and lands in the CLI store.
+        Ok(AgentCommand {
+            program: install.executable_path.clone(),
+            args: runtime_args(opts),
+            cwd: cwd.map(|p| p.to_path_buf()),
+        })
     }
 
     fn build_resume_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
-        _opts: &ExecOptions,
-        _agent_session_id: &str,
-        _cwd: Option<&Path>,
+        install: &crate::platform::exec_resolver::AgentInstallation,
+        opts: &ExecOptions,
+        agent_session_id: &str,
+        cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        Err(other("Antigravity 没有可恢复的 CLI，无法恢复会话"))
+        // `--conversation <id>` resumes by id — but only for conversations in
+        // the CLI's own store; the IDE store is invisible to the CLI (see the
+        // module header). The launch still starts in `cwd` when it is given.
+        let mut args = vec!["--conversation".into(), agent_session_id.to_string()];
+        args.extend(runtime_args(opts));
+        Ok(AgentCommand {
+            program: install.executable_path.clone(),
+            args,
+            cwd: cwd.map(|p| p.to_path_buf()),
+        })
     }
 
     fn build_exec_command(
@@ -579,8 +722,61 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         _opts: &ExecOptions,
         _prompt: &str,
     ) -> Result<AgentCommand> {
-        Err(other("Antigravity 没有可执行的 CLI，无法一次性执行"))
+        Err(other("Antigravity 尚未接入一次性执行（headless）"))
     }
+
+    /// The open-method configuration for this Agent's TWO source formats,
+    /// keyed on the member's `source_kind` (not on the Agent): a CLI-store
+    /// conversation resumes through `agy --conversation` (the terminal
+    /// route), but an IDE-store conversation has NO binding in the CLI's
+    /// registry — resuming one opens a blank session that fails at the first
+    /// message — so Continue activates the desktop app; with the app absent
+    /// there is no viable route at all. `antigravity_conversation` is the
+    /// pre-split kind (legacy rows): their store is re-derived from the path.
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        Some("Antigravity")
+    }
+
+    fn continue_route(&self, member: &SessionMember) -> ResumeRoute {
+        match member.source_kind.as_str() {
+            "antigravity_cli_conversation" => ResumeRoute::Terminal,
+            "antigravity_ide_conversation" | "antigravity_conversation" => {
+                if member.source_kind == "antigravity_conversation"
+                    && member.source_path.contains("antigravity-cli")
+                {
+                    return ResumeRoute::Terminal;
+                }
+                if !crate::platform::paths::app_bundle_present("Antigravity") {
+                    return ResumeRoute::Refused(
+                        "该会话来自 Antigravity 桌面端：agy CLI 无法读取桌面端会话（存储相互独立），且未找到 Antigravity 桌面应用，无法继续该会话"
+                            .into(),
+                    );
+                }
+                ResumeRoute::Desktop(DesktopResume {
+                    uri: "antigravity://".into(),
+                    note: "将打开 Antigravity 桌面应用（应用内不定位到该会话）".into(),
+                })
+            }
+            other => ResumeRoute::Refused(format!("未识别的 Antigravity 会话源格式：{other}")),
+        }
+    }
+}
+
+/// `agy` flags for NoEnding's runtime-override intent. `--effort` accepts
+/// low|medium|high|max and `--model` a model name; there is no provider
+/// switch, and capabilities.rs keeps provider Unsupported so a value can
+/// never reach this point.
+fn runtime_args(opts: &ExecOptions) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(model) = &opts.model {
+        args.push("--model".into());
+        args.push(model.clone());
+    }
+    if let Some(effort) = &opts.effort {
+        args.push("--effort".into());
+        args.push(effort.clone());
+    }
+    args
 }
 
 #[cfg(test)]
@@ -588,6 +784,70 @@ mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
     use crate::domain::SessionMemberRelation;
+
+    /// New runs the bare TUI; resume pins the conversation id after
+    /// `--conversation` and both carry the frozen runtime intent as flags.
+    #[test]
+    fn launch_commands_target_the_agy_cli() {
+        let install = crate::platform::exec_resolver::AgentInstallation {
+            agent: Agent::Antigravity,
+            executable_path: "/Users/x/.local/bin/agy".into(),
+            version: None,
+            source: "test".into(),
+            last_verified_at: "test".into(),
+        };
+        let adapter = AntigravityAdapter;
+        let opts = ExecOptions {
+            model: Some("gemini-3-pro".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+
+        let new_cmd = adapter
+            .build_new_command(&install, &opts, Some(Path::new("/repo")))
+            .unwrap();
+        assert_eq!(new_cmd.program, "/Users/x/.local/bin/agy");
+        assert_eq!(
+            new_cmd.args,
+            vec![
+                "--model".to_string(),
+                "gemini-3-pro".to_string(),
+                "--effort".to_string(),
+                "high".to_string()
+            ]
+        );
+        assert_eq!(new_cmd.cwd.as_deref(), Some(Path::new("/repo")));
+
+        let resume_cmd = adapter
+            .build_resume_command(
+                &install,
+                &opts,
+                "5bbd1246-5106-49e4-b399-d23faa2ede93",
+                None,
+            )
+            .unwrap();
+        assert_eq!(resume_cmd.program, "/Users/x/.local/bin/agy");
+        assert_eq!(
+            resume_cmd.args,
+            vec![
+                "--conversation".to_string(),
+                "5bbd1246-5106-49e4-b399-d23faa2ede93".to_string(),
+                "--model".to_string(),
+                "gemini-3-pro".to_string(),
+                "--effort".to_string(),
+                "high".to_string(),
+            ]
+        );
+        assert_eq!(resume_cmd.cwd, None);
+
+        // Default overrides must produce NO flags: the Agent's own
+        // configuration stays untouched and unguessed.
+        let bare = adapter
+            .build_new_command(&install, &ExecOptions::default(), None)
+            .unwrap();
+        assert!(bare.args.is_empty());
+        assert_eq!(bare.cwd, None);
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -663,23 +923,44 @@ mod tests {
         db
     }
 
-    /// One `gen_metadata` row: the `1.4` usage subtree of a single generation
-    /// call, shaped as the real blob nests it (`1.4.{2,3,5,9}`).
-    fn gen_usage(db: &Path, idx: i64, input: u64, output: u64, cache_read: u64, thinking: u64) {
-        let payload = msg(
-            1,
-            &msg(
-                4,
-                &[
-                    int(1, 1319),
-                    int(2, input),
-                    int(3, output),
-                    int(5, cache_read),
-                    int(9, thinking),
-                ]
-                .concat(),
-            ),
-        );
+    /// One `gen_metadata` row, shaped as the real blob nests it
+    /// (`1.{4:{1,2,3,5,9,10,11}, 19:model, 20:{last_step_index}}`); the usage
+    /// field values are real rows from an IDE-store conversation (idx 0: no
+    /// cache hit; idx 1: cache hit). `.3` is the one quantity no reading has
+    /// been established for — it is written so a future reader cannot
+    /// silently "claim" it.
+    #[allow(clippy::too_many_arguments)]
+    fn gen_usage(
+        db: &Path,
+        idx: i64,
+        fresh_input: u64,
+        unknown_3: u64,
+        cache_read: u64,
+        output: u64,
+        thinking: u64,
+        response_id: &str,
+        model: &str,
+        boundary: i64,
+    ) {
+        let mut usage = [
+            int(1, 1319),
+            int(2, fresh_input),
+            int(3, unknown_3),
+            int(5, cache_read),
+            int(9, output),
+            int(10, thinking),
+        ]
+        .concat();
+        if !response_id.is_empty() {
+            usage.extend(str(11, response_id));
+        }
+        let mut chat = vec![msg(4, &usage), str(19, model)];
+        chat.push(msg(
+            20,
+            &[str(1, "last_step_index"), str(2, &boundary.to_string())].concat(),
+        ));
+        // blob.1 = the chat node: usage subtree at `.4`, model at `.19`.
+        let payload = msg(1, &chat.concat());
         let conn = Connection::open(db).unwrap();
         conn.execute(
             "INSERT INTO gen_metadata (idx, data, size) VALUES (?1, ?2, ?3)",
@@ -711,7 +992,7 @@ mod tests {
             source_member_id: db.file_stem().unwrap().to_str().unwrap().into(),
             relation: SessionMemberRelation::Root,
             parent_source_member_id: None,
-            source_kind: "antigravity_conversation".into(),
+            source_kind: "antigravity_ide_conversation".into(),
             source_path: db.to_string_lossy().to_string(),
             cwd: None,
             started_at: None,
@@ -799,24 +1080,119 @@ mod tests {
     }
 
     /// Usage is one `gen_metadata` row per generation call — outside `steps` —
-    /// and the calls add up. `.2`/`.3`/`.5`/`.9` are input/output/cache/thinking;
-    /// the constant `.1` and the prompt-size ESTIMATE `1.9.10.1` are never read.
+    /// and the calls add up. Verified mapping: input = fixed system prompt
+    /// `.1` + fresh `.2`, cache = `.5`, output = `.9`, thinking = `.10`.
     #[test]
     fn usage_sums_the_generation_calls() {
         let root = temp_dir("usage");
         let db = store(&root, "336f551c-58e8-491b-a31f-13b362786c86", &[]);
-        gen_usage(&db, 0, 17718, 138, 0, 93);
-        gen_usage(&db, 1, 5962, 71, 12211, 23);
+        // Boundary 999 sits above every step: no attribution, usage only.
+        gen_usage(&db, 0, 17718, 138, 0, 93, 45, "", "gemini-3.8-flash", 999);
+        gen_usage(&db, 1, 5962, 71, 12211, 23, 48, "", "gemini-3.8-flash", 999);
 
         let delta = AntigravityAdapter
             .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
             .unwrap();
         match delta.stats {
             Some(crate::domain::StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(23680));
-                assert_eq!(s.output_tokens, Some(209));
+                assert_eq!(s.input_tokens, Some(26318), "(1319+17718)+(1319+5962)");
+                assert_eq!(s.output_tokens, Some(116), "1.4.9");
                 assert_eq!(s.cached_tokens, Some(12211), "1.4.5");
-                assert_eq!(s.reasoning_tokens, Some(116), "1.4.9");
+                assert_eq!(s.reasoning_tokens, Some(93), "1.4.10");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    /// Each generation names the model it served (`1.19`) and the input
+    /// boundary it ran against (`1.20`'s `last_step_index`): an assistant
+    /// step carries the model of the nearest boundary strictly below its idx,
+    /// and the user turn — which no generation produced — carries none.
+    #[test]
+    fn assistant_steps_carry_the_serving_model_from_gen_metadata() {
+        let root = temp_dir("provenance");
+        let id = "336f551c-58e8-491b-a31f-13b362786c88";
+        store(
+            &root,
+            id,
+            &[
+                (
+                    14,
+                    [timestamp(1_789_480_258), msg(19, &str(2, "问"))].concat(),
+                ),
+                (
+                    15,
+                    [timestamp(1_789_480_260), msg(20, &str(1, "答一"))].concat(),
+                ),
+                (132, vec![]),
+                (
+                    15,
+                    [timestamp(1_789_480_264), msg(20, &str(1, "答二"))].concat(),
+                ),
+            ],
+        );
+        let db = root.join("conversations").join(format!("{id}.db"));
+        gen_usage(&db, 0, 500, 9, 0, 30, 12, "", "gemini-3.8-flash", 0);
+        gen_usage(&db, 1, 700, 9, 400, 25, 14, "", "claude-opus-4-6", 2);
+
+        let delta = AntigravityAdapter
+            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
+            .unwrap();
+        let got: Vec<(SessionMessageRole, Option<&str>)> = delta
+            .messages
+            .iter()
+            .map(|m| (m.role, m.model.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (SessionMessageRole::User, None),
+                (SessionMessageRole::Assistant, Some("gemini-3.8-flash")),
+                (SessionMessageRole::Assistant, Some("claude-opus-4-6")),
+            ]
+        );
+    }
+
+    /// A repeated responseId (a future version re-writing a row) is counted
+    /// once; a row without a responseId is never deduped away.
+    #[test]
+    fn a_repeated_response_id_is_counted_once() {
+        let root = temp_dir("usage-dedup");
+        let db = store(&root, "336f551c-58e8-491b-a31f-13b362786c87", &[]);
+        gen_usage(
+            &db,
+            0,
+            17718,
+            138,
+            0,
+            93,
+            45,
+            "req-1",
+            "gemini-3.8-flash",
+            999,
+        );
+        gen_usage(
+            &db,
+            1,
+            5962,
+            71,
+            12211,
+            23,
+            48,
+            "req-1",
+            "gemini-3.8-flash",
+            999,
+        );
+        gen_usage(&db, 2, 100, 5, 0, 10, 4, "", "gemini-3.8-flash", 999);
+
+        let delta = AntigravityAdapter
+            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
+            .unwrap();
+        match delta.stats {
+            Some(crate::domain::StatsUpdate::Snapshot(s)) => {
+                assert_eq!(s.input_tokens, Some(20456), "(1319+17718)+(1319+100)");
+                assert_eq!(s.output_tokens, Some(103));
+                assert_eq!(s.reasoning_tokens, Some(49));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -1096,7 +1472,7 @@ mod tests {
                 root_id,
                 SessionMemberRelation::Root,
                 None,
-                "antigravity_conversation",
+                "antigravity_ide_conversation",
                 &root_db.to_string_lossy(),
                 None,
                 None,
@@ -1111,7 +1487,7 @@ mod tests {
                 child_id,
                 SessionMemberRelation::Child,
                 Some(root_id),
-                "antigravity_conversation",
+                "antigravity_ide_conversation",
                 &child_db.to_string_lossy(),
                 None,
                 None,
@@ -1127,7 +1503,7 @@ mod tests {
             source_member_id: source_path.file_stem().unwrap().to_str().unwrap().into(),
             relation,
             parent_source_member_id: None,
-            source_kind: "antigravity_conversation".into(),
+            source_kind: "antigravity_ide_conversation".into(),
             source_path: source_path.to_string_lossy().to_string(),
             cwd: None,
             started_at: None,
@@ -1219,6 +1595,124 @@ mod tests {
         assert!(
             parse(&activity_after) > parse(&activity_before),
             "a WAL-only tool execution must advance session activity: {activity_before:?} → {activity_after:?}"
+        );
+    }
+
+    /// A `-wal` that is merely created or touched (any connection opening the
+    /// conversation does this, at zero bytes) moves the container's mtime but
+    /// NOT the conversation's content: the per-member cursor must stay put and
+    /// `last_activity_at` must not churn.
+    #[test]
+    fn a_touched_wal_without_new_steps_does_not_advance_activity() {
+        use crate::storage::Db;
+
+        let root = temp_dir("wal-noise");
+        let root_id = "11111111-2222-4333-8444-555555555555";
+        let user_turn = [timestamp(1_789_480_258), msg(19, &str(2, "问"))].concat();
+        let db_path = store(&root, root_id, &[(14, user_turn)]);
+
+        let db = Db::open(&root.join("noending.db")).unwrap();
+        let (session_id, _) = db
+            .upsert_logical_session_unchecked(
+                Agent::Antigravity,
+                root_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let member_id = db
+            .upsert_session_member(
+                &session_id,
+                Agent::Antigravity,
+                root_id,
+                SessionMemberRelation::Root,
+                None,
+                "antigravity_ide_conversation",
+                &db_path.to_string_lossy(),
+                None,
+                None,
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let member = SessionMember {
+            id: member_id.clone(),
+            session_id: session_id.clone(),
+            agent: Agent::Antigravity,
+            source_member_id: root_id.to_string(),
+            relation: SessionMemberRelation::Root,
+            parent_source_member_id: None,
+            source_kind: "antigravity_ide_conversation".into(),
+            source_path: db_path.to_string_lossy().to_string(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            metadata: serde_json::json!({}),
+        };
+
+        // Pass 1: ingested; activity is the step's own time.
+        let delta = AntigravityAdapter
+            .read_member_delta(&member, &SessionMemberCursor::default())
+            .unwrap();
+        db.commit_member_ingest_with_provenance_state(
+            &session_id,
+            &member_id,
+            &delta.messages,
+            delta.stats,
+            delta.source.as_ref().unwrap(),
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let activity_before = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at;
+
+        // A 0-byte `-wal` appears (an open creates one); no step is added.
+        let wal = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+        std::fs::write(&wal, b"").unwrap();
+
+        // Pass 2: the per-member cursor is unmoved by container noise, and
+        // the commit leaves the session's activity alone.
+        let cursor = db.get_member_cursor(&member_id).unwrap();
+        let delta = AntigravityAdapter
+            .read_member_delta(&member, &cursor)
+            .unwrap();
+        let source = delta.source.unwrap();
+        assert_eq!(
+            source.byte_offset, cursor.byte_offset,
+            "no new steps, no movement"
+        );
+        assert_eq!(
+            source.mtime, cursor.mtime,
+            "the activity time is the step's own, not the touched wal's"
+        );
+        db.commit_member_ingest_with_provenance_state(
+            &session_id,
+            &member_id,
+            &delta.messages,
+            delta.stats,
+            &source,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let activity_after = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at;
+        assert_eq!(
+            activity_after, activity_before,
+            "container noise must not churn the session's activity"
         );
     }
 }

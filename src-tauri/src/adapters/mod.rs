@@ -825,51 +825,72 @@ pub fn replay_cursor_update(
     })
 }
 
-/// Source observation for a live SQLite store whose newest writes may sit ONLY
-/// in the `-wal` file: logical size = main + `-wal`, mtime = the LATER of the
-/// two. A WAL-only append therefore always moves this cursor, so
-/// `last_activity_at` keeps tracking the execution graph even when the main
-/// database file is untouched. A checkpoint may shrink the total — that reads
-/// as a new generation and the full replay dedup absorbs it.
-///
-/// `prefix_hash` is a logical fingerprint (identity + sizes), not a byte hash:
-/// replay readers never walk an append path.
+/// Per-member content facts for a member of a live SQLite store. A store may
+/// hold MANY members in ONE file (ZCode's `db.sqlite`), and a member's real
+/// writes may sit in a `-wal` that any connection touches — even creates at
+/// zero bytes — without this member changing. The container's size and mtime
+/// therefore say nothing about THIS member: keyed on them, one session's
+/// update moves every member's cursor and a mere open reads as activity. The
+/// adapter reports each member's own facts instead.
+pub struct SqliteMemberFacts {
+    /// Monotonic per-member content position (max step idx, message count,
+    /// …). A shrink means this member's content was replaced.
+    pub position: i64,
+    /// When this member's content last moved, in UNIX seconds — the store's
+    /// own per-thread stamp or the newest step's time. `None` falls back to
+    /// the container's later-of main/`-wal` mtime (members whose content
+    /// carries no time at all).
+    pub activity_epoch_secs: Option<f64>,
+}
+
+/// Source observation for a member of a live SQLite store, in the MEMBER's
+/// own coordinates: `byte_offset`/`last_seen_size` carry the member's content
+/// position and `mtime` its activity time, so "this member changed" is
+/// decided per member — never by a shared file's stats or WAL noise (the
+/// activity stamp in the commit path uses the same mtime). `file_identity`
+/// still keys on the container: a replaced database, like a content shrink,
+/// is a shape change worth a generation bump. Every replay is a full scan →
+/// stats SNAPSHOT; message-identity dedup absorbs the re-read.
 pub fn sqlite_replay_cursor_update(
     path: &Path,
     cursor: &SessionMemberCursor,
+    member: SqliteMemberFacts,
 ) -> Result<crate::domain::SourceCursorUpdate> {
     let meta = std::fs::metadata(path)?;
     let identity = file_identity(path);
-    let mut size = meta.len();
-    let mut mtime = mtime_secs(&meta);
-    let wal_path = PathBuf::from(format!("{}-wal", path.display()));
-    if let Ok(wal_meta) = std::fs::metadata(&wal_path) {
-        size += wal_meta.len();
-        if let Some(w) = mtime_secs(&wal_meta) {
-            mtime = match mtime {
-                Some(m) => Some(m.max(w)),
-                None => Some(w),
-            };
+    let mtime = match member.activity_epoch_secs {
+        Some(secs) => Some(secs),
+        None => {
+            let mut mtime = mtime_secs(&meta);
+            let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+            if let Ok(wal_meta) = std::fs::metadata(&wal_path) {
+                if let Some(w) = mtime_secs(&wal_meta) {
+                    mtime = match mtime {
+                        Some(m) => Some(m.max(w)),
+                        None => Some(w),
+                    };
+                }
+            }
+            mtime
         }
-    }
+    };
+    let position = member.position.max(0) as u64;
     let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
     let generation = if first_ever {
         0
-    } else if identity != cursor.source_file_identity
-        || (size as i64) < (cursor.last_seen_size as i64)
-    {
+    } else if identity != cursor.source_file_identity || position < cursor.last_seen_size {
         cursor.generation + 1
     } else {
         cursor.generation
     };
     Ok(crate::domain::SourceCursorUpdate {
         prefix_hash: sha256_hex(
-            format!("{}:{}:{}", identity, size, mtime.unwrap_or(0.0)).as_bytes(),
+            format!("{}:{}:{}", identity, position, mtime.unwrap_or(0.0)).as_bytes(),
         ),
         file_identity: identity,
         generation,
-        byte_offset: size,
-        last_seen_size: size,
+        byte_offset: position,
+        last_seen_size: position,
         mtime,
         start_byte_offset: 0,
     })
@@ -878,6 +899,31 @@ pub fn sqlite_replay_cursor_update(
 /// Extract a string field from an object if present.
 pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|s| s.as_str())
+}
+
+/// The Continue route the launcher takes for a session's ROOT member.
+/// Adapters decide per member: one Agent can be CLI-resumable for one store
+/// and app-only (or unsupported) for another (Antigravity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeRoute {
+    /// Build and run the terminal CLI command (`build_resume_command`).
+    Terminal,
+    /// Open the Agent's desktop app on this deep link instead.
+    Desktop(DesktopResume),
+    /// No viable Continue: refuse with this user-facing reason.
+    Refused(String),
+}
+
+/// Opening a session in the Agent's own desktop app: the Continue route for
+/// sessions whose CLI cannot resume them. `note` is user-facing Chinese,
+/// rendered verbatim in the resume preview — an app activation that does NOT
+/// land on the conversation must say so.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DesktopResume {
+    /// The deep link / scheme URL dispatched via the platform's open-uri.
+    pub uri: String,
+    /// What the user should expect to see, stated in the preview.
+    pub note: String,
 }
 
 pub trait AgentAdapter: Send + Sync {
@@ -910,6 +956,22 @@ pub trait AgentAdapter: Send + Sync {
         cursor: &SessionMemberCursor,
     ) -> Result<MemberReadDelta>;
 
+    /// Read with a cross-file usage-claim registry in scope. Adapters whose
+    /// usage can be REPLAYED across files (codex continuation chains re-emit
+    /// a thread's whole token_count history into each fresh rollout) override
+    /// this to skip an event another member already billed. `claims(key)`
+    /// answers whether THIS member may bill the event — the registry claims
+    /// it as a side effect. The default ignores the registry: every event
+    /// bills.
+    fn read_member_delta_claimed(
+        &self,
+        member: &SessionMember,
+        cursor: &SessionMemberCursor,
+        _claims: &dyn Fn(&str) -> bool,
+    ) -> Result<MemberReadDelta> {
+        self.read_member_delta(member, cursor)
+    }
+
     /// Strict availability verdict for the member's source. For a
     /// ROOT member this is the permanent-delete and Resume authority: only a
     /// fresh `Missing` may ever enable a local purge.
@@ -935,6 +997,36 @@ pub trait AgentAdapter: Send + Sync {
         agent_session_id: &str,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand>;
+
+    /// The macOS application-bundle name of this Agent's desktop app, for
+    /// presence probing before a desktop-mode Continue. `None` = the Agent
+    /// has no desktop surface at all.
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether the Agent ships a TUI/CLI surface. Static product fact —
+    /// the default derives from `cli_names`.
+    fn has_terminal_cli(&self) -> bool {
+        !crate::platform::exec_resolver::cli_names(self.agent()).is_empty()
+    }
+
+    /// How Continue surfaces for THIS member's session. `Terminal` keeps the
+    /// CLI path; `Desktop` opens the Agent's own app (only when the app is
+    /// actually present on this machine — a missing app must refuse, never
+    /// dispatch a deep link into nothing); `Refused` states the reason.
+    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+        ResumeRoute::Terminal
+    }
+
+    /// The desktop half of Continue for THIS member's session — the route a
+    /// stored "open in the desktop app" preference may swap in. Only formats
+    /// whose store the desktop app can actually open implement it; the
+    /// default refusal is what makes a format single-method. App absent →
+    /// Refused (the caller falls back to [`Self::continue_route`]).
+    fn desktop_resume_route(&self, _member: &SessionMember) -> ResumeRoute {
+        ResumeRoute::Refused("该会话来源格式不支持在桌面端打开".into())
+    }
 
     /// Non-interactive one-shot run (codex exec / claude -p / pi -p).
     /// The returned command is executed by platform::exec_runner.

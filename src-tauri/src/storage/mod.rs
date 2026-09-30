@@ -766,6 +766,29 @@ impl Db {
 
     // Member Cursors
 
+    /// Who claimed a cross-file usage identity, if anyone.
+    pub fn usage_claim_owner(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT member_id FROM ingest_usage_claims WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Claim a cross-file usage identity for `member_id`. First claimant wins:
+    /// an existing claim (any member) is left untouched.
+    pub fn claim_usage(&self, key: &str, member_id: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "INSERT OR IGNORE INTO ingest_usage_claims (key, member_id) VALUES (?1, ?2)",
+            params![key, member_id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_member_cursor(&self, member_id: &str) -> Result<SessionMemberCursor> {
         let conn = self.read();
         Ok(conn
