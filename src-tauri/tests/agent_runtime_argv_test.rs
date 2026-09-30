@@ -19,6 +19,13 @@ fn launchable() -> Vec<Agent> {
         .collect()
 }
 
+/// Agents with a wired headless exec (`build_exec_command`). Antigravity
+/// launches interactively but has no one-shot integration yet, so its exec
+/// builder still refuses.
+fn headless_exec() -> Vec<Agent> {
+    vec![Agent::Codex, Agent::ClaudeCode, Agent::Pi]
+}
+
 fn install(agent: Agent) -> AgentInstallation {
     AgentInstallation {
         agent,
@@ -75,6 +82,7 @@ fn resume_keeps_its_session_selector() {
         (Agent::Codex, "resume"),
         (Agent::ClaudeCode, "--resume"),
         (Agent::Pi, "--session"),
+        (Agent::Antigravity, "--conversation"),
     ] {
         let args = resume_args(agent, &ExecOptions::default());
         let at = args.iter().position(|a| a == selector).expect(selector);
@@ -90,7 +98,7 @@ fn resume_keeps_its_session_selector() {
 fn every_consumer_renders_the_same_override_the_same_way() {
     // One runtime semantics: the flags an interactive session gets are the
     // flags the headless run gets — New / Resume / exec cannot diverge.
-    for agent in launchable() {
+    for agent in headless_exec() {
         let opts = ExecOptions {
             model: Some("some-model".into()),
             provider: Some("some-provider".into()),
@@ -126,7 +134,7 @@ const RUNTIME_FLAGS: &[&str] = &[
 
 #[test]
 fn no_override_leaves_the_cli_to_its_own_defaults() {
-    for agent in launchable() {
+    for agent in headless_exec() {
         let args = exec_args(agent, &ExecOptions::default());
         for flag in RUNTIME_FLAGS {
             assert!(

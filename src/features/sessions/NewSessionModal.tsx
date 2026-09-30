@@ -6,7 +6,6 @@ import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import {
   AgentRow,
   CwdRow,
-  RuntimeRow,
 } from "../launcher/LaunchPreviewRows";
 import type { Agent, PreparedLaunch, WorkstreamCardData } from "../../types";
 
@@ -139,9 +138,6 @@ export default function NewSessionModal({
         </div>
       )}
       <CwdRow cwd={prepared?.cwd} pending={preparing} resolution={prepared?.cwd_resolution} />
-      {prepared && (
-        <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
-      )}
 
       {error && (
         <div

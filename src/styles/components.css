@@ -650,7 +650,6 @@
 .settings-pane section { margin-bottom: 16px; padding: 20px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
 .settings-pane section > h3:first-child { margin-top: 0; }
 .settings-pane .settings-row-hint { overflow-wrap: anywhere; }
-.settings-pane .runtime-footer { flex-wrap: wrap; }
 .settings-pane .settings-agent-runtime { padding: 16px 0; }
 .theme-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .theme-options > button { padding: 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-app); color: var(--text-secondary); font: inherit; cursor: pointer; }
@@ -695,21 +694,9 @@
 .settings-agent-row.selected { border-color: var(--text-primary); font-weight: 550; }
 .settings-agent-row .grow { flex: 1; }
 
-/* ---------- Agents: runtime overrides ---------- */
+/* ---------- Agents ---------- */
 .settings-agent-runtime { padding: 11px 0; border-top: 1px solid var(--bg-panel); }
 .settings-pane .settings-agent-runtime .row-line { padding: 0 0 8px; border-top: 0; }
-.settings-agent-runtime .runtime-fields {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px;
-}
-.settings-agent-runtime .runtime-fields label.field { margin-bottom: 6px; }
-.settings-agent-runtime .runtime-fields label.field span { margin-bottom: 0; }
-.settings-agent-runtime .runtime-fields label.field > span:first-child { margin-bottom: 4px; }
-.runtime-override-tag {
-  font-style: normal; font-size: 10.5px; color: var(--accent);
-  background: var(--accent-wash); border-radius: 3px; padding: 0 5px; margin-left: 6px;
-}
-.settings-agent-runtime .runtime-footer { display: flex; align-items: center; gap: 10px; }
-.runtime-note { margin: 4px 0 0; }
 
 /* ---------- Projects ---------- */
 .project-stat { color: var(--text-muted); font-size: 12px; }

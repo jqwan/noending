@@ -1,50 +1,17 @@
 import type { ReactNode } from "react";
 import AgentIcon from "../../components/AgentIcon";
-import { FIELD_LABELS } from "../settings/AgentRuntimeSettings";
 import {
   AGENT_LABELS,
   type Agent,
-  type AgentRuntimeOverrides,
   type CwdResolution,
   type CwdSource,
 } from "../../types";
 
 /**
- * 启动预览的公共行：Agent、Runtime、工作目录。数据一律来自 PreparedLaunch 里
+ * 启动预览的公共行：Agent、工作目录、打开方式。数据一律来自 PreparedLaunch 里
  * 冻结的意图，不在 UI 侧重算或重读 Settings——否则预览显示的不是 Agent 真正收到
- * 的东西（Preview-Launch Identity）。Runtime 未设置 override 时统一说「Agent 默认值」。
+ * 的东西（Preview-Launch Identity）。
  */
-
-type Field = keyof AgentRuntimeOverrides;
-
-/** 该 Agent 真正被 override 的字段（unsupported 字段永远为 null）。 */
-function overriddenFields(agent: Agent, runtime: AgentRuntimeOverrides): Field[] {
-  // `!= null`, not `!== null`: a backend-omitted field means "Agent default",
-  // not "overridden with undefined" — this keeps the preview from rendering
-  // `Provider undefined`.
-  return (Object.keys(FIELD_LABELS[agent]) as Field[]).filter((f) => runtime[f] != null);
-}
-
-/** 「Agent 默认值」，或 override 的显式意图。 */
-export function runtimeIntentText(
-  agent: Agent,
-  runtime: AgentRuntimeOverrides
-): string {
-  const overridden = overriddenFields(agent, runtime);
-  if (overridden.length === 0) return "Agent 默认值";
-  return overridden
-    .map((f) => `${FIELD_LABELS[agent][f]} ${runtime[f]}`)
-    .join(" · ");
-}
-
-export function runtimeIntentHint(
-  agent: Agent,
-  runtime: AgentRuntimeOverrides
-): string {
-  return overriddenFields(agent, runtime).length === 0
-    ? "未设置 override，由 Agent 自己决定"
-    : "来自设置中的 override，已随本次预览冻结";
-}
 
 export function PreviewRow({
   label,
@@ -145,17 +112,14 @@ export function CwdRow({
   );
 }
 
-/** Runtime：显示 PreparedLaunch 冻结的 override 意图。 */
-export function RuntimeRow({
-  agent,
-  runtime,
-}: {
-  agent: Agent;
-  runtime: AgentRuntimeOverrides;
-}) {
+/**
+ * 桌面打开：`desktop_open` 非 null 时，"继续"不是开终端，而是在 Agent 的
+ * 桌面应用里打开。`note` 由后端按源格式写成中文（能否定位到会话必须说出来）。
+ */
+export function DesktopOpenRow({ desktopOpen }: { desktopOpen: { uri: string; note: string } }) {
   return (
-    <PreviewRow label="Runtime" hint={runtimeIntentHint(agent, runtime)}>
-      <span className="badge">{runtimeIntentText(agent, runtime)}</span>
+    <PreviewRow label="打开方式" hint="由该会话的源格式决定，已随本次预览冻结">
+      <span className="badge accent">{desktopOpen.note}</span>
     </PreviewRow>
   );
 }

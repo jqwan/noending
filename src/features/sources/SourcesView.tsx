@@ -1,23 +1,59 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
+import AgentIcon from "../../components/AgentIcon";
 import WorkspacePathField from "../../components/WorkspacePathField";
 import { copyToClipboard, Modal, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import { AGENT_LABELS, type Agent, type IngestSource, type IngestTaskStatus } from "../../types";
+import {
+  type Agent, type AgentStatusEntry, type IngestSource, type IngestTaskStatus,
+} from "../../types";
 
 /**
- * 高级维护：Session 来源管理 + 摄入入口。
+ * 高级维护：Session 来源管理 + 摄入入口，按会话格式分组。
  *
  * 普通主流程不出现这些按钮——摄入只在应用启动、前台回落与这里排队。每个来源可单独
  * 「重新扫描」（增量）或「重新入库」（从头重扫）；顶部按钮覆盖全部已启用来源。
  * 摄入在后台单线程执行，完成事件是 `ingestion-completed`，最近一次结果来自
  * `get_ingestion_status`（纯读取）。
  */
+type OpenMethod = "terminal" | "desktop";
+
+type SessionFormat = {
+  id: string;
+  label: string;
+  agent: Agent;
+  defaultPath?: string;
+  /** 该格式「继续」可用的打开方式。真正的裁决在后端路由
+   *  （continue_route / desktop_resume_route），这里只展示与选择。 */
+  methods: OpenMethod[];
+};
+
+/** 会话格式：来源按它分组，也是添加来源的单位。Antigravity 的两个存储是两种格式（9 种的由来）。 */
+const SESSION_FORMATS: SessionFormat[] = [
+  { id: "codex", label: "Codex", agent: "codex", methods: ["terminal", "desktop"] },
+  { id: "claude_code", label: "Claude Code", agent: "claude_code", methods: ["terminal"] },
+  { id: "pi", label: "Pi", agent: "pi", methods: ["terminal"] },
+  { id: "dsh", label: "dsh", agent: "dsh", methods: ["desktop"] },
+  { id: "qoder", label: "Qoder", agent: "qoder", methods: ["desktop"] },
+  { id: "workbuddy", label: "WorkBuddy", agent: "workbuddy", methods: ["desktop"] },
+  { id: "zcode", label: "ZCode", agent: "zcode", methods: ["desktop"] },
+  { id: "antigravity_desktop", label: "Antigravity", agent: "antigravity", defaultPath: "~/.gemini/antigravity", methods: ["desktop"] },
+  { id: "antigravity_cli", label: "Antigravity CLI", agent: "antigravity", defaultPath: "~/.gemini/antigravity-cli", methods: ["terminal"] },
+];
+
+/** 一条来源属于哪个格式：antigravity 靠路径区分两个存储，其余格式即 agent。 */
+function formatOf(src: IngestSource): string {
+  if (src.agent !== "antigravity") return src.agent;
+  return src.path.includes("antigravity-cli") ? "antigravity_cli" : "antigravity_desktop";
+}
+
 export default function SourcesView() {
   const [sources, setSources] = useState<IngestSource[]>([]);
-  const [agent, setAgent] = useState<Agent>("codex");
-  const [path, setPath] = useState("");
+  const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
+  /** 每个分组自己的待添加路径；打开输入行时预填该格式的标准存储。 */
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [addOpenFor, setAddOpenFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** 已排队但还没收到完成事件：这期间不允许再排队同样的动作。 */
   const [queued, setQueued] = useState(false);
@@ -42,6 +78,7 @@ export default function SourcesView() {
   useEffect(() => {
     reload();
     reloadStatus();
+    api.getAgentStatus().then(setAgentStatus).catch(console.error);
   }, [reload, reloadStatus]);
 
   // 后台摄入完成：刷新来源列表与「最近一次摄入」。运行结果（含失败）由那一行常驻
@@ -71,13 +108,15 @@ export default function SourcesView() {
     }
   };
 
-  const add = async () => {
-    if (!path.trim() || busy) return;
+  const addFor = async (fmt: SessionFormat) => {
+    const p = (drafts[fmt.id] ?? "").trim();
+    if (!p || busy) return;
     clearMessages();
     setBusy(true);
     try {
-      await api.addIngestSource(agent, path.trim());
-      setPath("");
+      await api.addIngestSource(fmt.agent, p);
+      setDrafts((d) => ({ ...d, [fmt.id]: "" }));
+      setAddOpenFor(null);
       setNotice("已添加并启用。点这一行的「重新扫描」开始摄入。");
       reload();
     } catch (e) {
@@ -127,6 +166,21 @@ export default function SourcesView() {
     }
   };
 
+  const setMethod = async (fmt: SessionFormat, method: OpenMethod) => {
+    clearMessages();
+    try {
+      await api.setResumeOpenMethod(fmt.agent, method);
+      setAgentStatus(await api.getAgentStatus());
+      setNotice(
+        method === "desktop"
+          ? "已改为桌面端打开：继续该格式的会话时打开对应应用。"
+          : "已改为终端打开。"
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const enabledCount = sources.filter((s) => s.enabled).length;
 
   return (
@@ -149,100 +203,105 @@ export default function SourcesView() {
 
       <IngestionStatus status={status} sources={sources} />
 
-      {/* 两行式：每行左标签右控件，与设置页其余条目同一套 row-line 语汇。
-          原来挤在一行、按底部对齐，标签长短不一就错位，输入框也被压到占位文字被切断。 */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="section-label" style={{ marginTop: 0 }}>添加来源</div>
-
-        <div className="row-line" style={{ flexWrap: "wrap" }}>
-          <div>
-            <div className="settings-row-label">Agent</div>
-            <div className="settings-row-hint">决定按哪种会话格式解析这个目录</div>
-          </div>
-          <select value={agent} onChange={(e) => setAgent(e.target.value as Agent)} style={{ width: 170 }}>
-            {Object.entries(AGENT_LABELS).map(([k, v]) => (
-              <option key={k} value={k}>{v}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="row-line" style={{ flexWrap: "wrap" }}>
-          <div>
-            <div className="settings-row-label">目录路径</div>
-            <div className="settings-row-hint">支持 ~；递归扫描 .jsonl 会话文件</div>
-          </div>
-          <div style={{ flex: 1, minWidth: 160, maxWidth: 380 }}>
-            <WorkspacePathField
-              value={path}
-              onChange={setPath}
-              onSubmit={add}
-              enableProbe={false}
-              enableRecent={false}
-              placeholder="~/somewhere/sessions"
-            />
-          </div>
-        </div>
-
-        <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-          {busy && <span className="badge accent">添加中…</span>}
-          <button className="btn primary" disabled={busy || !path.trim()} onClick={add}>
-            添加来源
-          </button>
-        </div>
-      </div>
-
       {notice && <div className="badge accent" style={{ marginBottom: 10 }}>{notice}</div>}
       {error && <div className="badge warn" style={{ marginBottom: 10 }}>{error}</div>}
 
-      {/* 每行两段：上面是身份与状态、动作靠右，下面整行留给路径。
-          挤在一行时路径（flex + 隐藏溢出）会被压成 0 宽，最该看的那个事实先消失。 */}
-      <div className="card">
-        {sources.length === 0 && <div className="muted small">暂无会话来源。</div>}
-        {sources.map((src) => (
-          <div key={src.id} style={{ padding: "10px 4px", borderBottom: "1px solid var(--border-subtle)" }}>
+      {/* 每个会话格式一个分组：组内加来源路径，组头选择 resume 打开方式。
+          两行式行布局与设置页其余条目同一套 row-line 语汇。 */}
+      {SESSION_FORMATS.map((fmt) => {
+        const rows = sources.filter((s) => formatOf(s) === fmt.id);
+        const entry = agentStatus?.[fmt.agent];
+        return (
+          <div className="card" key={fmt.id} style={{ marginBottom: 16 }}>
             <div className="row between" style={{ gap: 10, alignItems: "center" }}>
-              <div className="row" style={{ gap: 8, alignItems: "center", minWidth: 0 }}>
-                <input
-                  type="checkbox"
-                  style={{ width: "auto" }}
-                  checked={src.enabled}
-                  disabled={queued}
-                  title={src.enabled ? "停用这个来源" : "启用这个来源"}
-                  onChange={(e) => toggle(src, e.target.checked)}
-                />
-                <span className="badge">{AGENT_LABELS[src.agent]}</span>
-                {src.origin === "default" && <span className="badge" title="按本机装了什么 Agent 自动登记">默认</span>}
-                {!src.exists && <span className="badge warn" title="该目录当前不存在">目录不存在</span>}
-                {/* 徽标说的是这一行的配置状态，不是"此刻正在摄入"——进行中由顶部 queued 表达。 */}
-                {src.enabled ? (
-                  <span className="badge accent">已启用</span>
-                ) : (
-                  <span className="muted small">未启用</span>
-                )}
+              <div className="settings-row-label row" style={{ gap: 7 }}>
+                <AgentIcon agent={fmt.agent} />
+                {fmt.label}
               </div>
-              <div className="row" style={{ gap: 8, flex: "none" }}>
-                <button className="btn small" disabled={queued} onClick={() => queue(src, "scan")}
-                  title="只读取新增内容：从每个会话上次停下的位置继续">
-                  重新扫描
-                </button>
-                <button className="btn small ghost" disabled={queued} onClick={() => setReingestTarget(src)}
-                  title="从头重扫这个来源的全部文件；已摄入的事件及其引用保持不变">
-                  重新入库
-                </button>
-                {src.origin === "user" && (
-                  <button className="btn small ghost" disabled={queued} onClick={() => remove(src)}>
-                    移除
-                  </button>
-                )}
+              <OpenMethodControl fmt={fmt} entry={entry} onChoose={(m) => void setMethod(fmt, m)} />
+            </div>
+
+            {rows.length === 0 && (
+              <div className="muted small" style={{ padding: "8px 0 2px" }}>未添加来源。</div>
+            )}
+            {rows.map((src) => (
+              <div key={src.id} style={{ padding: "10px 0", borderBottom: "1px solid var(--border-subtle)" }}>
+                <div className="row between" style={{ gap: 10, alignItems: "center" }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center", minWidth: 0 }}>
+                    <input
+                      type="checkbox"
+                      style={{ width: "auto" }}
+                      checked={src.enabled}
+                      disabled={queued}
+                      title={src.enabled ? "停用这个来源" : "启用这个来源"}
+                      onChange={(e) => toggle(src, e.target.checked)}
+                    />
+                    {src.origin === "default" && <span className="badge" title="按本机装了什么 Agent 自动登记">默认</span>}
+                    {!src.exists && <span className="badge warn" title="该目录当前不存在">目录不存在</span>}
+                    {/* 徽标说的是这一行的配置状态，不是"此刻正在摄入"——进行中由顶部 queued 表达。 */}
+                    {src.enabled ? (
+                      <span className="badge accent">已启用</span>
+                    ) : (
+                      <span className="muted small">未启用</span>
+                    )}
+                  </div>
+                  <div className="row" style={{ gap: 8, flex: "none" }}>
+                    <button className="btn small" disabled={queued} onClick={() => queue(src, "scan")}
+                      title="只读取新增内容：从每个会话上次停下的位置继续">
+                      重新扫描
+                    </button>
+                    <button className="btn small ghost" disabled={queued} onClick={() => setReingestTarget(src)}
+                      title="从头重扫这个来源的全部文件；已摄入的事件及其引用保持不变">
+                      重新入库
+                    </button>
+                    {src.origin === "user" && (
+                      <button className="btn small ghost" disabled={queued} onClick={() => remove(src)}>
+                        移除
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="row" style={{ gap: 8, alignItems: "baseline", marginTop: 4 }}>
+                  <span className="mono small" style={{ minWidth: 0, overflowWrap: "anywhere", userSelect: "all" }}>{src.path}</span>
+                  <button className="link" style={{ flex: "none" }} onClick={() => copyPath(src.path)}>复制</button>
+                </div>
               </div>
-            </div>
-            <div className="row" style={{ gap: 8, alignItems: "baseline", marginTop: 4 }}>
-              <span className="mono small" style={{ minWidth: 0, overflowWrap: "anywhere", userSelect: "all" }}>{src.path}</span>
-              <button className="link" style={{ flex: "none" }} onClick={() => copyPath(src.path)}>复制</button>
-            </div>
+            ))}
+
+            {addOpenFor === fmt.id ? (
+              <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                <div style={{ flex: 1, minWidth: 160 }}>
+                  <WorkspacePathField
+                    value={drafts[fmt.id] ?? ""}
+                    onChange={(v) => setDrafts((d) => ({ ...d, [fmt.id]: v }))}
+                    onSubmit={() => void addFor(fmt)}
+                    enableProbe={false}
+                    enableRecent={false}
+                    placeholder="~/somewhere/sessions"
+                  />
+                </div>
+                <button className="btn small primary" disabled={busy || !(drafts[fmt.id] ?? "").trim()}
+                  onClick={() => void addFor(fmt)}>
+                  添加
+                </button>
+                <button className="btn small ghost" onClick={() => { setAddOpenFor(null); setDrafts((d) => ({ ...d, [fmt.id]: "" })); }}>
+                  取消
+                </button>
+              </div>
+            ) : (
+              <button className="btn small ghost" style={{ marginTop: 10 }}
+                onClick={() => {
+                  setAddOpenFor(fmt.id);
+                  // 标准存储先填上（antigravity 的两个默认目录）：用户改一下就能加。
+                  setDrafts((d) => ({ ...d, [fmt.id]: d[fmt.id] ?? fmt.defaultPath ?? "" }));
+                }}>
+                + 添加路径
+              </button>
+            )}
+            {busy && addOpenFor === fmt.id && <span className="badge accent" style={{ marginTop: 8 }}>添加中…</span>}
           </div>
-        ))}
-      </div>
+        );
+      })}
 
       {reingestTarget && (
         <Modal title="重新入库" onClose={() => setReingestTarget(null)}>
@@ -257,6 +316,46 @@ export default function SourcesView() {
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/** 组头的打开方式控件。两种方式（目前只有 codex）是可选项，桌面端选项在应用
+ *  未安装时禁用——找不到的桌面应用不支持；只有一种方式的格式展示为固定事实。 */
+function OpenMethodControl({ fmt, entry, onChoose }: {
+  fmt: SessionFormat;
+  entry?: AgentStatusEntry;
+  onChoose: (m: OpenMethod) => void;
+}) {
+  const current = entry?.resume_open_method ?? "terminal";
+  const label = (m: OpenMethod) =>
+    m === "terminal" ? "TUI / CLI" : entry?.desktop_app ? `桌面端（${entry.desktop_app}）` : "桌面端";
+  // 在场未知（状态没回来）时不当作缺席。
+  const desktopAbsent = entry != null && !entry.desktop_app_present;
+
+  if (fmt.methods.length === 1) {
+    const m = fmt.methods[0];
+    return (
+      <span className="badge" title="该会话格式只有这一种打开方式">
+        {label(m)}
+        {m === "desktop" && desktopAbsent ? " · 未安装" : ""}
+      </span>
+    );
+  }
+  return (
+    <div className="settings-seg" role="group" aria-label="resume 打开方式">
+      {fmt.methods.map((m) => {
+        const absent = m === "desktop" && desktopAbsent;
+        return (
+          <button key={m}
+            className={current === m ? "on" : ""}
+            disabled={absent}
+            title={absent ? `未找到 ${entry?.desktop_app}，桌面端打开不可用` : undefined}
+            onClick={() => onChoose(m)}>
+            {label(m)}
+          </button>
+        );
+      })}
     </div>
   );
 }

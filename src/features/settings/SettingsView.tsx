@@ -7,7 +7,7 @@ import { Modal, submitsOnEnter, timeAgo, useRefreshSignal } from "../../componen
 import { showToast } from "../../components/Toast";
 import SourcesSettings from "./SourcesSettings";
 import AgentRuntimeRow from "./AgentRuntimeSettings";
-import { AGENT_LABELS, type Agent, type IngestionDiagnostic, type WorkspaceSettings } from "../../types";
+import { AGENT_LABELS, type Agent, type AgentStatusEntry, type IngestionDiagnostic, type WorkspaceSettings } from "../../types";
 import type { Route, SettingsSection } from "../../app/routes";
 
 const SECTIONS: { key: SettingsSection; label: string; icon: "settings" | "spark" | "folder" | "palette" | "database" }[] = [
@@ -109,7 +109,7 @@ function IngestionDiagnosticsSection() {
 /** General：Default Agent 是最重要设置；Startup Page 第一版固定 Home。 */
 function GeneralSettings() {
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
-  const [agents, setAgents] = useState<Record<string, { detected: boolean }>>({});
+  const [agents, setAgents] = useState<Record<string, AgentStatusEntry>>({});
 
   useEffect(() => {
     api.getDefaultAgent().then(setDefaultAgent).catch(console.error);
@@ -123,16 +123,22 @@ function GeneralSettings() {
 
   const selectedUndetected =
     defaultAgent !== null && agents[defaultAgent]?.detected === false;
+  // 新建会话由终端 CLI 承载：只有 TUI/CLI Agent 可以当默认。桌面端 Agent
+  // 没有可启动的命令行，不在选择之列。
+  const tuiAgents = (Object.keys(AGENT_LABELS) as Agent[]).filter(
+    (a) => agents[a]?.terminal_cli
+  );
 
   return (
     <>
       <section>
         <h3 style={{ marginTop: 0 }}>默认 Agent</h3>
         <p className="muted small" style={{ marginTop: 0 }}>
-          用于新建会话；继续会话使用原来的 Agent。
+          用于新建会话；继续会话使用原来的 Agent。桌面端 Agent 无法新建会话，不在此列。
         </p>
         <div className="settings-agents">
-          {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
+          {tuiAgents.length === 0 && <div className="muted small">读取中…</div>}
+          {tuiAgents.map((a) => (
             <button key={a}
               className={`settings-agent-row ${defaultAgent === a ? "selected" : ""}`}
               onClick={() => choose(a)}>
@@ -177,18 +183,77 @@ function GeneralSettings() {
   );
 }
 
-/** Agents：安装状态 + Runtime Override。NoEnding 不解析 Agent 默认配置。 */
+/** Agents：按启动面分组——分组是 Agent 的静态能力，不是本机状态；本机状态由
+ *  每行的检测 / 安装徽标表达。TUI/CLI 一组看 CLI 检测；桌面端一组看应用在场
+ *  （桌面会话的「继续」是打开对应应用，路由按会话来源格式决定）。 */
 function AgentsSettings() {
+  const [status, setStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
+
+  useEffect(() => {
+    api.getAgentStatus()
+      .then(setStatus)
+      .catch((e) => { console.error(e); setStatus({}); });
+  }, []);
+
+  if (status === null) {
+    return (
+      <section>
+        <h3 style={{ marginTop: 0 }}>Agent</h3>
+        <div className="muted small">读取中…</div>
+      </section>
+    );
+  }
+
+  const agents = Object.keys(AGENT_LABELS) as Agent[];
+  const tui = agents.filter((a) => status[a]?.terminal_cli);
+  const desktop = agents.filter((a) => !!status[a]?.desktop_app);
+
   return (
     <section>
-      <h3 style={{ marginTop: 0 }}>Agent</h3>
+      <h3 style={{ marginTop: 0 }}>TUI / CLI</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
-        管理本机 Agent 和启动参数，未修改的选项沿用 Agent 默认值。
+        NoEnding 在终端里启动与继续这些 Agent。
       </p>
-      {(Object.keys(AGENT_LABELS) as Agent[]).map((a) => (
+      {tui.map((a) => (
         <AgentRuntimeRow key={a} agent={a} />
       ))}
+
+      <h3 style={{ marginTop: 26 }}>桌面端</h3>
+      <p className="muted small">
+        这些 Agent 的会话在桌面应用里，「继续」会打开对应应用；未安装的不支持。
+      </p>
+      {desktop.map((a) => (
+        <DesktopAppRow key={a} agent={a} entry={status[a]} />
+      ))}
     </section>
+  );
+}
+
+/** 桌面端一行：接入的桌面应用与本机安装状态。没有设置项——应用名来自适配器
+ *  （如 Codex 的桌面端是 ChatGPT），怎么打开会话由来源格式决定。 */
+function DesktopAppRow({ agent, entry }: { agent: Agent; entry?: AgentStatusEntry }) {
+  const app = entry?.desktop_app ?? AGENT_LABELS[agent];
+  return (
+    <div className="settings-agent-runtime">
+      <div className="row-line">
+        <div>
+          <div className="settings-row-label row" style={{ gap: 7 }}>
+            <AgentIcon agent={agent} />
+            {app}
+            {app !== AGENT_LABELS[agent] && (
+              <span className="muted small">{AGENT_LABELS[agent]}</span>
+            )}
+          </div>
+        </div>
+        {entry ? (
+          <span className={`badge ${entry.desktop_app_present ? "success" : ""}`}>
+            {entry.desktop_app_present ? "已安装" : "未安装"}
+          </span>
+        ) : (
+          <span className="badge">—</span>
+        )}
+      </div>
+    </div>
   );
 }
 

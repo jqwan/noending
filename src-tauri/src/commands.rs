@@ -131,6 +131,10 @@ pub fn record_installation_probe(
 #[tauri::command]
 pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
+    // 新建会话由终端 CLI 承载；桌面端 Agent 没有可启动的命令行，不能当默认。
+    if !crate::adapters::adapter_for(agent).has_terminal_cli() {
+        return Err(other("该 Agent 只有桌面端，不能用于新建会话"));
+    }
     with_db(&state, |db| {
         db.set_setting(DEFAULT_AGENT_KEY, agent.as_str())
     })
@@ -777,11 +781,36 @@ pub fn search(
     })
 }
 
+/// Presence-aware surface label for Settings: what this Agent's Continue can
+/// target on THIS machine. A desktop surface counts only while the app is
+/// installed — an uninstalled app must not be advertised.
+pub fn surface_of(agent: Agent) -> &'static str {
+    let adapter = crate::adapters::adapter_for(agent);
+    let desktop = adapter
+        .desktop_app_name()
+        .map(crate::platform::paths::app_bundle_present)
+        .unwrap_or(false);
+    match (adapter.has_terminal_cli(), desktop) {
+        (true, true) => "both",
+        (true, false) => "tui_cli",
+        (false, true) => "desktop",
+        (false, false) => "none",
+    }
+}
+
 #[tauri::command]
 pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
     let mut out = serde_json::Map::new();
     for agent in Agent::all() {
         let install = with_db(&state, |db| db.get_installation(*agent))?;
+        let surface = surface_of(*agent);
+        // 设置页按启动面分组：能力是适配器的静态事实，在场是本机状态——
+        // 两者分开给，未安装的桌面应用也要列出来（标「未安装」）。
+        let adapter = crate::adapters::adapter_for(*agent);
+        let desktop_app = adapter.desktop_app_name();
+        let open_method = with_db(&state, |db| {
+            crate::launcher::stored_resume_method(db, *agent)
+        })?;
         out.insert(
             agent.as_str().to_string(),
             serde_json::json!({
@@ -789,6 +818,13 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
                 "detected": install.is_some(),
                 "executable": install.as_ref().map(|i| i.executable_path.clone()),
                 "version": install.as_ref().and_then(|i| i.version.clone()),
+                "surface": surface,
+                "terminal_cli": adapter.has_terminal_cli(),
+                "desktop_app": desktop_app,
+                "desktop_app_present": desktop_app
+                    .map(crate::platform::paths::app_bundle_present)
+                    .unwrap_or(false),
+                "resume_open_method": open_method,
             }),
         );
     }
@@ -809,6 +845,8 @@ pub struct AgentRuntimeSettings {
     pub detected: bool,
     pub executable: Option<String>,
     pub version: Option<String>,
+    /// 桌面端 / TUI·CLI / 两者：本机在场感知的 surface 标签。
+    pub surface: &'static str,
     pub overrides: crate::agent_runtime::AgentRuntimeOverrides,
     pub capabilities: crate::agent_runtime::AgentRuntimeCapabilities,
     pub models: Vec<crate::agent_runtime::ModelOption>,
@@ -828,6 +866,7 @@ fn runtime_settings(db: &Db, agent: Agent) -> Result<AgentRuntimeSettings> {
         detected: install.is_some(),
         executable: install.as_ref().map(|i| i.executable_path.clone()),
         version: install.as_ref().and_then(|i| i.version.clone()),
+        surface: surface_of(agent),
         overrides: crate::agent_runtime::get_runtime_overrides(db, agent)?,
         capabilities: crate::agent_runtime::capabilities_of(agent),
         models: vec![],
@@ -857,6 +896,16 @@ pub fn set_agent_runtime_overrides(
         // Validates, then persists; an unsupported field never reaches storage.
         crate::agent_runtime::set_runtime_overrides(db, agent, &overrides)?;
         runtime_settings(db, agent)
+    })
+}
+
+/// 选择某 Agent 会话格式的 resume 打开方式（设置 → 会话来源）。目前只有
+/// codex 同时支持终端与桌面端；其余格式只有一种，设置页展示为固定项。
+#[tauri::command]
+pub fn set_resume_open_method(state: State<AppState>, agent: String, method: String) -> Result<()> {
+    let agent = agent_of(&agent)?;
+    with_db(&state, |db| {
+        crate::launcher::write_resume_method(db, agent, &method)
     })
 }
 
@@ -940,12 +989,16 @@ pub fn assistant_config_get(
 }
 
 /// The Assistant's only runtime choice is *which* Agent answers; model /
-/// provider / effort come from Settings → Agents like every other consumer.
+/// effort 一律沿用 Agent 默认值。
 #[tauri::command]
 pub fn assistant_config_set(state: State<AppState>, agent: String) -> Result<()> {
     with_db(&state, |db| {
         if agent != "none" {
-            let _ = agent_of(&agent)?;
+            let parsed = agent_of(&agent)?;
+            // 助手经由 Agent CLI 执行；桌面端 Agent 没有命令行可跑。
+            if !crate::adapters::adapter_for(parsed).has_terminal_cli() {
+                return Err(other("该 Agent 只有桌面端，助手无法调用"));
+            }
         }
         crate::sync::extractor::AssistantConfig { agent }.save(db)
     })

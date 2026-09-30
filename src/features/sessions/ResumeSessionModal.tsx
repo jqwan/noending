@@ -7,7 +7,7 @@ import {
   AgentRow,
   CwdRow,
   PreviewRow,
-  RuntimeRow,
+  DesktopOpenRow,
 } from "../launcher/LaunchPreviewRows";
 import type { PreparedLaunch, SessionDetail } from "../../types";
 
@@ -128,8 +128,8 @@ export default function ResumeSessionModal({
         </span>
       </PreviewRow>
 
-      {prepared && (
-        <RuntimeRow agent={prepared.agent} runtime={prepared.runtime} />
+      {prepared?.desktop_open && (
+        <DesktopOpenRow desktopOpen={prepared.desktop_open} />
       )}
 
       {error && (

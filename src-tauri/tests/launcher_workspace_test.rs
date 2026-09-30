@@ -140,6 +140,10 @@ fn count(db: &Db, sql: &str) -> i64 {
 /// Echoes the directory it was asked to start in, so a test can prove *which*
 /// cwd reached the OS. A `fn` pointer cannot capture, and a shared counter
 /// would race across this binary's parallel test threads.
+fn fake_open(_uri: &str) -> Result<()> {
+    Ok(())
+}
+
 fn fake_spawn(cmd: &AgentCommand) -> Result<LaunchOutcome> {
     Ok(LaunchOutcome {
         launched_via: "test-spawn".into(),
@@ -238,7 +242,13 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
         .unwrap();
     assert_eq!(fresh.cwd.as_deref(), Some(second.as_str()));
     let launched = launcher
-        .launch_prepared_with_in(&db, &fresh, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &fresh,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("a preview made after the reorder is launchable");
     assert!(
         launched.command_line.ends_with(&second),
@@ -348,7 +358,13 @@ fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     assert!(is_stale(&err.to_string()), "got: {err}");
 
     let same = launcher
-        .launch_prepared_with_in(&db, &prepared, &workspace(Some(&before)), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace(Some(&before)),
+            fake_spawn,
+            fake_open,
+        )
         .expect("the unchanged Home still satisfies the preview");
     assert!(same.command_line.ends_with(&before));
 }
@@ -376,7 +392,13 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
     assert!(prepared.cwd_resolution.note.is_none());
 
     let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("a resume with its own directory launches");
     assert!(
         result.command_line.ends_with(&home_dir),
@@ -425,7 +447,13 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
         .unwrap();
     assert_eq!(fresh.cwd.as_deref(), Some(moved.as_str()));
     let result = launcher
-        .launch_prepared_with_in(&db, &fresh, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &fresh,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("re-previewed under the new cwd the launch proceeds");
     assert!(result.command_line.ends_with(&moved));
 }
@@ -465,7 +493,13 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
 
     // And the Agent really starts there — `prepared.cwd`, not a re-read value.
     let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("a fallback is a legitimate launch");
     assert!(result.command_line.ends_with(&primary));
 }
@@ -492,7 +526,13 @@ fn a_resume_falls_back_to_the_default_workspace_and_says_so() {
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(default_ws.as_str()));
     let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &workspace(Some(&default_ws)), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace(Some(&default_ws)),
+            fake_spawn,
+            fake_open,
+        )
         .expect("a default-workspace resume launches");
     assert!(result.command_line.ends_with(&default_ws));
 }
@@ -565,7 +605,13 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     );
 
     let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("the launch proceeds");
     assert_eq!(result.launched_via, "test-spawn");
 
@@ -947,7 +993,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
         assert_eq!(prepared.cwd, prepared.cwd_resolution.cwd);
         assert_eq!(prepared.owner_workstream_id, owner);
         let result = launcher
-            .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn)
+            .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn, fake_open)
             .unwrap_or_else(|e| panic!("{source:?} preview must launch: {e}"));
         match prepared.cwd.as_deref() {
             Some(dir) => assert!(

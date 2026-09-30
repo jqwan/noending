@@ -24,11 +24,44 @@ use std::path::PathBuf;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::AgentCommand;
+use crate::adapters::{AgentCommand, DesktopResume};
 use crate::agent_runtime::AgentRuntimeOverrides;
 use crate::domain::{launch_status, Agent, LaunchIntent, Session};
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
+
+/// Stored per-format preference for how Continue opens a session that BOTH the
+/// terminal CLI and the desktop app can resume (today: codex). `terminal` is
+/// the default and is stored by absence — only a desktop choice writes a row,
+/// so no row means the format default.
+pub const RESUME_METHOD_KEY_PREFIX: &str = "resume.open_method.";
+
+/// The stored open method for `agent`: `"terminal"` (default) or `"desktop"`.
+pub fn stored_resume_method(db: &Db, agent: Agent) -> Result<&'static str> {
+    let key = format!("{}{}", RESUME_METHOD_KEY_PREFIX, agent.as_str());
+    Ok(match db.get_setting(&key)?.as_deref() {
+        Some("desktop") => "desktop",
+        _ => "terminal",
+    })
+}
+
+/// Persist the open method chosen in 设置 → 会话来源. Only a format with BOTH
+/// surfaces may choose `desktop`; `terminal` clears the row back to default.
+pub fn write_resume_method(db: &Db, agent: Agent, method: &str) -> Result<()> {
+    let key = format!("{}{}", RESUME_METHOD_KEY_PREFIX, agent.as_str());
+    match method {
+        "terminal" => db.delete_setting(&key)?,
+        "desktop" => {
+            let adapter = crate::adapters::adapter_for(agent);
+            if !adapter.has_terminal_cli() || adapter.desktop_app_name().is_none() {
+                return Err(other("该会话格式只有一种打开方式"));
+            }
+            db.set_setting(&key, "desktop")?;
+        }
+        _ => return Err(other(format!("未知打开方式: {}", method))),
+    }
+    Ok(())
+}
 
 /// LaunchIntent matching window: a discovered session may only claim an
 /// intent launched within this range before the session started.
@@ -192,6 +225,13 @@ pub struct PreparedLaunch {
     /// Preview and Launch invalidates the preview instead of silently
     /// launching with parameters the user never saw.
     pub runtime: AgentRuntimeOverrides,
+    /// Set when Continue for this session means opening the Agent's desktop
+    /// app instead of the terminal. The route is decided per ROOT member's
+    /// SOURCE FORMAT at prepare time (`AgentAdapter::continue_route`) — the
+    /// same format facts the fingerprint already covers — and frozen at
+    /// Preview like every other launch fact. `None` = the terminal CLI path.
+    #[serde(default)]
+    pub desktop_open: Option<DesktopResume>,
     pub state_fingerprint: String,
     pub prepared_at: String,
 }
@@ -258,6 +298,7 @@ impl SessionLauncher {
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
+            desktop_open: None,
             state_fingerprint: fingerprint,
             prepared_at: now(),
         })
@@ -328,6 +369,35 @@ impl SessionLauncher {
 
         let owner = session.owner_workstream_id.clone();
         let resolution = resolve_resume_cwd(db, session_id, owner.as_deref(), workspace)?;
+        // The Continue route rides on the ROOT member: its SOURCE FORMAT
+        // tells whether the Agent's CLI can resume at all and how
+        // (`AgentAdapter::continue_route`). A refusal is stated HERE, at
+        // preview time — a launch that cannot resume must never look
+        // preparable.
+        let desktop_open = match db.root_member_for_session(session_id)? {
+            Some(root) => {
+                let adapter = crate::adapters::adapter_for(session.agent);
+                // A stored desktop preference only swaps in when the ROOT
+                // member's format really has a desktop route; anything else
+                // falls back to the format default, so Continue keeps working
+                // (e.g. the desktop app was uninstalled after choosing it).
+                let route = match stored_resume_method(db, session.agent)? {
+                    "desktop" => match adapter.desktop_resume_route(&root) {
+                        crate::adapters::ResumeRoute::Desktop(open) => {
+                            crate::adapters::ResumeRoute::Desktop(open)
+                        }
+                        _ => adapter.continue_route(&root),
+                    },
+                    _ => adapter.continue_route(&root),
+                };
+                match route {
+                    crate::adapters::ResumeRoute::Terminal => None,
+                    crate::adapters::ResumeRoute::Desktop(open) => Some(open),
+                    crate::adapters::ResumeRoute::Refused(reason) => return Err(other(reason)),
+                }
+            }
+            None => None,
+        };
         let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, session.agent)?;
         let fingerprint = compute_state_fingerprint_in(
             db,
@@ -348,6 +418,7 @@ impl SessionLauncher {
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
+            desktop_open,
             state_fingerprint: fingerprint,
             prepared_at: now(),
         })
@@ -375,25 +446,33 @@ impl SessionLauncher {
         prepared: &PreparedLaunch,
         workspace: &LaunchWorkspace,
     ) -> Result<LaunchResult> {
-        self.launch_prepared_with_in(db, prepared, workspace, crate::platform::launcher::launch)
+        self.launch_prepared_with_in(
+            db,
+            prepared,
+            workspace,
+            crate::platform::launcher::launch,
+            crate::platform::launcher::open_uri,
+        )
     }
 
-    /// `launch_prepared` with the *process spawn* step injected.
+    /// `launch_prepared` with the *process spawn* steps injected.
     ///
-    /// The injected function replaces ONLY the OS call that opens a terminal
-    /// and runs the Agent CLI. Every integrity gate stays on the same path in
-    /// the same order: state fingerprint (Preview-Launch Identity) and the
-    /// single-use capability consumed by the command layer.
+    /// The injected functions replace ONLY the OS calls: `spawn` opens a
+    /// terminal and runs the Agent CLI, `open` dispatches a desktop-open URI
+    /// (deep link / app activation). Every integrity gate stays on the same
+    /// path in the same order: state fingerprint (Preview-Launch Identity)
+    /// and the single-use capability consumed by the command layer.
     ///
     /// Exists so integration tests can drive the whole
-    /// prepare → launch_prepared chain without opening a real Terminal window
-    /// on the developer's machine.
+    /// prepare → launch_prepared chain without opening a real Terminal
+    /// window or activating a real desktop app on the developer's machine.
     pub fn launch_prepared_with_in(
         &self,
         db: &Db,
         prepared: &PreparedLaunch,
         workspace: &LaunchWorkspace,
         spawn: fn(&AgentCommand) -> Result<crate::platform::launcher::LaunchOutcome>,
+        open: fn(&str) -> Result<()>,
     ) -> Result<LaunchResult> {
         // re-resolve the launch directory from the state that
         // exists NOW (ordered Workstream paths, the Session's own cwd, the Home
@@ -496,11 +575,27 @@ impl SessionLauncher {
                 ));
             }
 
+            // A desktop-open Continue never reaches the terminal: the frozen
+            // URI is dispatched via the platform's open-uri, and the CLI-
+            // specific steps below (installation resolution, argv building,
+            // terminal spawn) do not apply. No LaunchIntent: the session
+            // already exists and was not launched anew.
+            if let Some(desktop) = &prepared.desktop_open {
+                open(&desktop.uri)?;
+                return Ok(LaunchResult {
+                    launched_via: "desktop app".into(),
+                    command_line: desktop.uri.clone(),
+                    note: desktop.note.clone(),
+                    launch_intent_id: None,
+                });
+            }
+
             let install = resolve_install(db, session.agent)?;
             let adapter = crate::adapters::adapter_for(session.agent);
             // resume starts in the directory the Preview showed, not
             // in whatever `sessions.cwd` says right now.
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
+
             // the resume identity is the ROOT's, never a member's
             // arbitrary external id.
             let cmd = adapter.build_resume_command(

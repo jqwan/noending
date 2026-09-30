@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { submitsOnEnter } from "../../components/common";
 import PageHeader from "../../layout/PageHeader";
-import { RuntimeIntentBadges } from "../settings/AgentRuntimeSettings";
 import type { AssistantScope, Route } from "../../app/routes";
 import { AGENT_LABELS } from "../../types";
 import type {
@@ -22,7 +21,7 @@ interface AssistantMessage {
 
 interface AssistantConfig {
   /** Which Agent answers — the Assistant's only runtime choice. Model /
-   *  provider / effort come from 设置 → Agent like every consumer. */
+   *  effort 一律沿用 Agent 默认值，NoEnding 不做 override。 */
   agent: string;
 }
 
@@ -35,22 +34,10 @@ interface ActionProposal {
   session_id?: string;
 }
 
-const AGENT_CHOICES: string[] = [...(Object.keys(AGENT_LABELS) as Agent[]), "none"];
-
 const CHOICE_LABELS: Record<string, string> = {
   ...AGENT_LABELS,
   none: "仅检索（不调用模型）",
 };
-
-/** override 摘要：`Runtime: Agent default` 表示 NoEnding 一个参数都不传。 */
-function runtimeSummary(st: AgentRuntimeSettings | null): string {
-  if (!st) return "…";
-  const o = st.overrides;
-  const passed = (["model", "provider", "effort"] as const)
-    .filter((f) => o[f] !== null)
-    .map((f) => `${f}=${o[f]}`);
-  return passed.length ? `Runtime：${passed.join(" · ")}` : "Runtime：Agent 默认值";
-}
 
 const SUGGESTIONS = [
   "最近 NoEnding 项目主要解决了什么？",
@@ -84,6 +71,8 @@ export default function AssistantView({ scope, navigate }: {
   const [busy, setBusy] = useState(false);
   const [cfg, setCfg] = useState<AssistantConfig | null>(null);
   const [runtime, setRuntime] = useState<AgentRuntimeSettings | null>(null);
+  // 助手经由 Agent CLI 无头运行：只有 TUI/CLI Agent 可以被调用。
+  const [tuiAgents, setTuiAgents] = useState<Agent[]>([]);
   const [cfgOpen, setCfgOpen] = useState(false);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -100,8 +89,11 @@ export default function AssistantView({ scope, navigate }: {
     api.assistantConfigGet().then(setCfg).catch(console.error);
     api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "active" && c.visibility === "normal"))).catch(console.error);
     api.listProjects().then(setProjects).catch(console.error);
+    api.getAgentStatus()
+      .then((s) => setTuiAgents((Object.keys(AGENT_LABELS) as Agent[]).filter((a) => s[a]?.terminal_cli)))
+      .catch(console.error);
   }, []);
-  // Runtime 是只读视图：真正编辑在「设置 → Agent」，这里只显示所选 Agent 当前的 override。
+  // Runtime 只读检测状态：模型 / 思考强度没有 override，这里没有可展示的参数。
   const loadRuntime = useCallback((agent: string) => {
     if (agent === "none") {
       setRuntime(null);
@@ -187,7 +179,7 @@ export default function AssistantView({ scope, navigate }: {
       <PageHeader
         title="助手"
         sub={
-          <span className="mono">{cfg ? `${CHOICE_LABELS[cfg.agent] ?? cfg.agent} · ${cfg.agent === "none" ? "仅检索" : runtimeSummary(runtime)}` : "…"}</span>
+          <span className="mono">{cfg ? (CHOICE_LABELS[cfg.agent] ?? cfg.agent) : "…"}</span>
         }
         actions={
           <button className="btn ghost icon-button" title="Agent 设置" aria-label="Agent 设置" onClick={() => setCfgOpen(true)}><Icon name="settings" /></button>
@@ -241,9 +233,6 @@ export default function AssistantView({ scope, navigate }: {
                   <ActionCard json={m.action_json} onExecute={() => executeAction(m.action_json!, m.id)} navigate={navigate} />
                 </div>
               )}
-              {m.runtime && m.role === "assistant" && (
-                <div className="muted small" style={{ marginTop: 6 }}>Runtime：{m.runtime}</div>
-              )}
             </div>
           </div>
         ))}
@@ -262,11 +251,10 @@ export default function AssistantView({ scope, navigate }: {
           <div className="modal">
             <h2>助手使用的 Agent</h2>
             <p className="muted small">
-              助手经你已登录的 Agent CLI 无头运行，无需单独 API Key。模型 / Provider / Effort 属于
-              Runtime 配置，由「设置 → Agent」统一管理（与新建 Session、继续 Session、后台同步同一套 override）；
-              这里只显示、不编辑。
+              助手经你已登录的 Agent CLI 无头运行，无需单独 API Key。只有 TUI/CLI Agent
+              能被助手调用（桌面端 Agent 没有命令行）；模型 / 思考强度一律沿用 Agent 默认值。
             </p>
-            {AGENT_CHOICES.map((k) => (
+            {[...tuiAgents, "none"].map((k) => (
               <label key={k} className="small" style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
                 <input type="radio" name="agent" style={{ width: "auto" }} checked={cfg.agent === k} onChange={() => chooseAgent(k)} />
                 {CHOICE_LABELS[k]}
@@ -276,19 +264,13 @@ export default function AssistantView({ scope, navigate }: {
             {cfg.agent === "none" ? (
               <p className="muted small">当前不调用模型，仅返回检索结果。</p>
             ) : runtime ? (
-              <>
-                <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-                  <span className="muted small">Runtime（{CHOICE_LABELS[cfg.agent]}）</span>
-                  <RuntimeIntentBadges agent={cfg.agent as Agent} runtime={runtime.overrides} />
+              !runtime.detected && (
+                <div className="badge warn" style={{ marginTop: 8 }}>
+                  未检测到 {CHOICE_LABELS[cfg.agent]} CLI —— 助手会退回仅检索。
                 </div>
-                {!runtime.detected && (
-                  <div className="badge warn" style={{ marginTop: 8 }}>
-                    未检测到 {CHOICE_LABELS[cfg.agent]} CLI —— 助手会退回仅检索。
-                  </div>
-                )}
-              </>
+              )
             ) : (
-              <p className="muted small">Runtime 配置读取中…</p>
+              <p className="muted small">Agent 配置读取中…</p>
             )}
             <div className="row" style={{ justifyContent: "space-between", marginTop: 14 }}>
               <button className="btn" onClick={() => { setCfgOpen(false); navigate({ view: "settings", section: "agents" }); }}>

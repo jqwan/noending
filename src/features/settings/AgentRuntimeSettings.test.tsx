@@ -1,26 +1,20 @@
-// Agent Settings 的 discovery 行为契约：
-//   1. mount 只读已保存设置，绝不 spawn Agent CLI（进入页面 ≠ 刷新模型）；
-//   2. 「刷新模型」按钮是唯一 discovery 入口；
-//   3. 已保存 override 在没有任何 model catalog 时照常显示；
-//   4. discovery 失败只降级 catalog，绝不覆盖已保存的 override。
-// api 模块整体被 mock：测试不依赖 Tauri，只断言调用模式。
+// Agent 设置行的契约：只读安装状态（可执行文件 / 版本 / 检测徽标），一次读取、
+// 不做任何 discovery 或写入。模型与思考强度的 override 已移除——行内不该再出现
+// 它们的痕迹。api 模块整体被 mock：测试不依赖 Tauri，只断言调用模式。
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AgentRuntimeRow from "./AgentRuntimeSettings";
 import { api } from "../../api";
-import type { Agent, AgentRuntimeDiscovery, AgentRuntimeSettings } from "../../types";
+import type { Agent, AgentRuntimeSettings } from "../../types";
 
 vi.mock("../../api", () => ({
   api: {
     getAgentRuntimeSettings: vi.fn(),
-    refreshAgentRuntimeOptions: vi.fn(),
-    setAgentRuntimeOverrides: vi.fn(),
   },
 }));
 
 vi.mocked(api.getAgentRuntimeSettings);
-vi.mocked(api.refreshAgentRuntimeOptions);
 
 function settings(over: Partial<AgentRuntimeSettings> = {}): AgentRuntimeSettings {
   return {
@@ -38,83 +32,31 @@ function settings(over: Partial<AgentRuntimeSettings> = {}): AgentRuntimeSetting
   };
 }
 
-function discovery(over: Partial<AgentRuntimeDiscovery> = {}): AgentRuntimeDiscovery {
-  return {
-    capabilities: { provider: "unsupported", model: "discoverable", effort: "discoverable" },
-    models: [],
-    model_source: "dynamic",
-    effort_levels: ["low", "medium", "high"],
-    warnings: [],
-    ...over,
-  };
-}
-
 beforeEach(() => {
   vi.mocked(api.getAgentRuntimeSettings).mockReset();
-  vi.mocked(api.refreshAgentRuntimeOptions).mockReset();
 });
 
 afterEach(cleanup);
 
-describe("AgentRuntimeRow model discovery", () => {
-  it("agent_settings_mount_does_not_refresh_models", async () => {
+describe("AgentRuntimeRow install state", () => {
+  it("renders_detection_from_a_single_settings_read", async () => {
     vi.mocked(api.getAgentRuntimeSettings).mockResolvedValue(settings());
-    vi.mocked(api.refreshAgentRuntimeOptions).mockResolvedValue(discovery());
 
     render(<AgentRuntimeRow agent="codex" />);
-    await screen.findByText("刷新模型"); // 设置已加载，行已完整渲染
-    // 再让若干个宏任务跑完：即便实现里藏着自动 refresh，这里也必然已触发
+    expect(await screen.findByText("/usr/local/bin/codex")).toBeTruthy();
+    expect(screen.getByText("已检测")).toBeTruthy();
+    // 挂载只读一次；没有任何 discovery 入口。
     await new Promise((r) => setTimeout(r, 0));
-
     expect(api.getAgentRuntimeSettings).toHaveBeenCalledTimes(1);
-    expect(api.refreshAgentRuntimeOptions).not.toHaveBeenCalled();
   });
 
-  it("manual_refresh_calls_model_discovery", async () => {
-    vi.mocked(api.getAgentRuntimeSettings).mockResolvedValue(settings());
-    vi.mocked(api.refreshAgentRuntimeOptions).mockResolvedValue(
-      discovery({
-        models: [{ id: "gpt-5.6-sol", display_name: null, provider: null, supported_efforts: [] }],
-      }),
-    );
-
-    render(<AgentRuntimeRow agent="codex" />);
-    fireEvent.click(await screen.findByText("刷新模型"));
-
-    await waitFor(() => {
-      expect(api.refreshAgentRuntimeOptions).toHaveBeenCalledTimes(1);
-    });
-    // catalog 到位后 footer 显示动态来源计数
-    await screen.findByText("1 个模型来自 Codex CLI");
-  });
-
-  it("saved_override_renders_without_model_catalog", async () => {
+  it("an_undetected_agent_says_so", async () => {
     vi.mocked(api.getAgentRuntimeSettings).mockResolvedValue(
-      settings({ overrides: { model: "gpt-5.6-sol", provider: null, effort: null } }),
+      settings({ detected: false, executable: null, version: null }),
     );
 
     render(<AgentRuntimeRow agent="codex" />);
-    // models=[] 且从未刷新：自定义值仍原样显示，且不触发任何 discovery
-    expect(await screen.findByDisplayValue("gpt-5.6-sol")).toBeTruthy();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(api.refreshAgentRuntimeOptions).not.toHaveBeenCalled();
-  });
-
-  it("discovery_failure_preserves_saved_override", async () => {
-    vi.mocked(api.getAgentRuntimeSettings).mockResolvedValue(
-      settings({
-        overrides: { model: "gpt-5.6-sol", provider: null, effort: "high" },
-      }),
-    );
-    vi.mocked(api.refreshAgentRuntimeOptions).mockRejectedValue("codex CLI probe 失败");
-
-    render(<AgentRuntimeRow agent="codex" />);
-    fireEvent.click(await screen.findByText("刷新模型"));
-
-    // 失败提示出现（unavailable 说明 + warning），但 override 纹丝不动
-    await screen.findByText(/无法从 Agent 获取模型列表/);
-    expect(screen.getByDisplayValue("gpt-5.6-sol")).toBeTruthy();
-    expect(screen.getByDisplayValue("high")).toBeTruthy();
-    expect(api.setAgentRuntimeOverrides).not.toHaveBeenCalled();
+    expect(await screen.findByText("未找到可执行文件")).toBeTruthy();
+    expect(screen.getByText("未检测")).toBeTruthy();
   });
 });

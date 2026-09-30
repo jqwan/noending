@@ -742,6 +742,8 @@ export interface PreparedLaunch {
   cwd_resolution: CwdResolution;
   /** NoEnding 的 override 意图（null = Agent default），与 Launch 完全一致。 */
   runtime: AgentRuntimeOverrides;
+  /** 非 null：继续 = 打开 Agent 桌面应用（CLI 无法恢复该会话的源格式）。 */
+  desktop_open?: { uri: string; note: string } | null;
   state_fingerprint: string;
   prepared_at: string;
 }
@@ -812,6 +814,21 @@ export interface AgentRuntimeSettings {
 /** refresh_agent_runtime_options 的结果：不含安装状态，只含建议信息。 */
 export type AgentRuntimeDiscovery = Omit<AgentRuntimeSettings,
   "agent" | "detected" | "executable" | "version" | "overrides">;
+
+/** get_agent_status 的一行：CLI 安装状态 + 两个启动面（终端 / 桌面应用）的能力与在场。 */
+export interface AgentStatusEntry {
+  name: string;
+  detected: boolean;
+  executable: string | null;
+  version: string | null;
+  /** 有无可由 NoEnding 启动的终端 CLI。 */
+  terminal_cli: boolean;
+  /** 接入的桌面应用名；null = 该 Agent 没有接入桌面端。 */
+  desktop_app: string | null;
+  desktop_app_present: boolean;
+  /** 会话格式的 resume 打开方式；只有同时支持两种的格式（codex）可改。 */
+  resume_open_method: "terminal" | "desktop";
+}
 
 export const KIND_LABELS: Record<string, string> = {
   goal: "Goal",

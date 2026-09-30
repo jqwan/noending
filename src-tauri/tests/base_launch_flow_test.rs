@@ -9,7 +9,8 @@
 use rusqlite::Connection;
 mod support;
 
-use noending::adapters::AgentCommand;
+use noending::adapters::adapter_for;
+use noending::adapters::{AgentCommand, DesktopResume, ResumeRoute};
 use noending::domain::{Agent, LaunchIntent};
 use noending::error::Result;
 use noending::launcher::{CwdSource, LaunchWorkspace, PreparedLaunch, SessionLauncher};
@@ -77,6 +78,10 @@ fn seed_installation(db: &Db, agent: Agent) {
 /// the spawn step was reached *and* that no real Terminal was opened
 /// (`crate::platform::launcher::launch` would report "Terminal"/"PowerShell").
 /// A shared counter would race across the parallel test threads.
+fn fake_open(_uri: &str) -> Result<()> {
+    Ok(())
+}
+
 fn fake_spawn(_cmd: &AgentCommand) -> Result<LaunchOutcome> {
     Ok(LaunchOutcome {
         launched_via: FAKE_SPAWN_TAG.into(),
@@ -127,7 +132,13 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     );
 
     let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("standalone prepared launch must succeed");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
     assert!(result.launch_intent_id.is_some());
@@ -160,7 +171,13 @@ fn bookkeeping_failure_after_spawn_keeps_the_successful_launch_result() {
         .unwrap();
 
     let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("a successful OS spawn remains a successful launch");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
     assert!(result.launch_intent_id.is_some());
@@ -187,7 +204,13 @@ fn prepared_launch_capability_is_single_use() {
 
     let held = consume_once(&map, &id).expect("first consume");
     let held_launch = launcher
-        .launch_prepared_with_in(&db, &held, &LaunchWorkspace::default(), fake_spawn)
+        .launch_prepared_with_in(
+            &db,
+            &held,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+        )
         .expect("launch with the consumed token");
     assert_eq!(held_launch.launched_via, FAKE_SPAWN_TAG);
 
@@ -276,4 +299,236 @@ fn standalone_prepared_launch_reports_the_default_workspace() {
             .unwrap_or(false),
         "the default workspace is created rather than handed over missing"
     );
+}
+
+/// The Continue route follows the ROOT member's SOURCE FORMAT, not the
+/// agent: a desktop-only agent routes to its app (with the app present) and
+/// refuses loudly when the app is absent, while a CLI agent keeps the
+/// terminal route with `desktop_open` unset.
+#[test]
+fn the_continue_route_follows_the_source_format() {
+    let db = open_db("continue-route-format");
+    let launcher = launcher_in("continue-route-format");
+    let workspace = LaunchWorkspace::default();
+
+    // WorkBuddy: desktop-only. The root member's source file must exist —
+    // source presence is the resume gate ahead of the route decision.
+    let raw = std::env::temp_dir().join(format!("noending-wb-{}.jsonl", new_id()));
+    std::fs::write(&raw, "").unwrap();
+    let ts = now();
+    let (wb_id, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::WorkBuddy,
+            "wb-root-1",
+            Some("WB"),
+            None,
+            None,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_root_member(
+        &db,
+        &wb_id,
+        Agent::WorkBuddy,
+        "wb-root-1",
+        &raw.to_string_lossy(),
+    );
+
+    match launcher.prepare_resume_in(&db, &wb_id, &workspace) {
+        Ok(prepared) => {
+            // App present on this machine: the desktop route is prepared.
+            assert!(
+                prepared.desktop_open.is_some(),
+                "expected the desktop route"
+            );
+            assert!(
+                prepared
+                    .desktop_open
+                    .as_ref()
+                    .unwrap()
+                    .uri
+                    .starts_with("workbuddy://chat/"),
+                "workbuddy continue must deep-link the conversation"
+            );
+        }
+        Err(e) => {
+            // App absent (CI): the refusal must say so — never a silent
+            // fall-through to a CLI that does not exist.
+            assert!(e.to_string().contains("未找到 WorkBuddy"), "{e}");
+        }
+    }
+
+    // Codex: CLI route — `desktop_open` stays unset whatever the machine.
+    let raw = std::env::temp_dir().join(format!("noending-cx-{}.jsonl", new_id()));
+    std::fs::write(&raw, "").unwrap();
+    let (cx_id, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "cx-root-1",
+            Some("CX"),
+            None,
+            None,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_root_member(
+        &db,
+        &cx_id,
+        Agent::Codex,
+        "cx-root-1",
+        &raw.to_string_lossy(),
+    );
+    let prepared = launcher
+        .prepare_resume_in(&db, &cx_id, &workspace)
+        .expect("codex resume prepares through the terminal route");
+    assert!(
+        prepared.desktop_open.is_none(),
+        "codex continues in the terminal"
+    );
+}
+
+/// A stored "desktop" preference (设置 → 会话来源) swaps in the ChatGPT route
+/// when the app can actually open the thread, and falls back to the terminal —
+/// never a refusal — when it cannot. Default (no row) is always terminal.
+#[test]
+fn a_stored_desktop_preference_swaps_in_chatgpt_when_it_can_open_the_thread() {
+    let db = open_db("resume-method-codex");
+    let launcher = launcher_in("resume-method-codex");
+    let workspace = LaunchWorkspace::default();
+
+    let raw = std::env::temp_dir().join(format!("noending-rm-{}.jsonl", new_id()));
+    std::fs::write(&raw, "").unwrap();
+    let ts = now();
+    let (sid, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "cx-pref-1",
+            Some("CX"),
+            None,
+            None,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_root_member(&db, &sid, Agent::Codex, "cx-pref-1", &raw.to_string_lossy());
+
+    let prepared = launcher
+        .prepare_resume_in(&db, &sid, &workspace)
+        .expect("default preference is terminal");
+    assert!(prepared.desktop_open.is_none(), "no row means terminal");
+
+    db.set_setting("resume.open_method.codex", "desktop")
+        .unwrap();
+    let prepared = launcher.prepare_resume_in(&db, &sid, &workspace).expect(
+        "a desktop route that cannot run must fall back to the format default, not fail prepare",
+    );
+    if noending::platform::paths::app_bundle_present("ChatGPT") {
+        let open = prepared
+            .desktop_open
+            .expect("ChatGPT present: the stored preference takes effect");
+        assert_eq!(open.uri, "codex://threads/cx-pref-1");
+    } else {
+        assert!(
+            prepared.desktop_open.is_none(),
+            "ChatGPT absent: Continue falls back to the terminal"
+        );
+    }
+}
+
+/// Launch honors the frozen desktop route: the URI goes through the
+/// injected open, the terminal spawn never runs, no CLI installation is
+/// required, and no LaunchIntent is committed (nothing new was launched).
+#[test]
+fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
+    let db = open_db("desktop-open-resume");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("desktop-open-resume");
+    let workspace = LaunchWorkspace::default();
+
+    let raw = std::env::temp_dir().join(format!("noending-dx-{}.jsonl", new_id()));
+    std::fs::write(&raw, "").unwrap();
+    let ts = now();
+    let (sid, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "dx-root-1",
+            Some("DX"),
+            None,
+            None,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_root_member(&db, &sid, Agent::Codex, "dx-root-1", &raw.to_string_lossy());
+
+    let mut prepared = launcher
+        .prepare_resume_in(&db, &sid, &workspace)
+        .expect("prepare");
+    assert!(prepared.desktop_open.is_none());
+    prepared.desktop_open = Some(DesktopResume {
+        uri: "workbuddy://chat/test-session".into(),
+        note: "test note".into(),
+    });
+
+    let result = launcher
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open)
+        .expect("desktop-open launch");
+    assert_eq!(result.launched_via, "desktop app");
+    assert_eq!(result.command_line, "workbuddy://chat/test-session");
+    assert_eq!(result.note, "test note");
+    assert!(
+        result.launch_intent_id.is_none(),
+        "a desktop open resumes an existing session; it launches nothing new"
+    );
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM launch_intents"),
+        0,
+        "no LaunchIntent without a terminal launch"
+    );
+}
+
+/// The antigravity adapter keys its route on the SOURCE FORMAT: the CLI
+/// store is terminal-resumable via `agy --conversation`; the IDE store is
+/// app-only (and refuses when the app is not installed).
+#[test]
+fn antigravity_routes_by_source_format() {
+    let member = |kind: &str, path: &str| noending::domain::SessionMember {
+        id: "m".into(),
+        session_id: "s".into(),
+        agent: Agent::Antigravity,
+        source_member_id: "conv-1".into(),
+        relation: noending::domain::SessionMemberRelation::Root,
+        parent_source_member_id: None,
+        source_kind: kind.into(),
+        source_path: path.into(),
+        cwd: None,
+        started_at: None,
+        last_activity_at: None,
+        metadata: serde_json::json!({}),
+    };
+    let adapter = adapter_for(Agent::Antigravity);
+
+    assert!(matches!(
+        adapter.continue_route(&member(
+            "antigravity_cli_conversation",
+            "/home/x/.gemini/antigravity-cli/conversations/a.db"
+        )),
+        ResumeRoute::Terminal
+    ));
+
+    let ide = adapter.continue_route(&member(
+        "antigravity_ide_conversation",
+        "/home/x/.gemini/antigravity/conversations/a.db",
+    ));
+    if noending::platform::paths::app_bundle_present("Antigravity") {
+        assert!(matches!(ide, ResumeRoute::Desktop(_)));
+    } else {
+        assert!(matches!(ide, ResumeRoute::Refused(_)));
+    }
 }

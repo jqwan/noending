@@ -216,6 +216,7 @@ pub fn run() {
             commands::get_agent_runtime_settings,
             commands::set_agent_runtime_overrides,
             commands::refresh_agent_runtime_options,
+            commands::set_resume_open_method,
             commands::assistant_send,
             commands::assistant_messages,
             commands::assistant_config_get,

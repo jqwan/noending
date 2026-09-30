@@ -185,8 +185,9 @@ fn is_executable_file(p: &Path) -> bool {
 }
 
 /// Executable names to probe for an Agent, in order. **Empty means the Agent
-/// has no headless CLI at all** (Qoder is IDE-hosted): its adapter still
-/// reads history, but it can never be launched or resumed.
+/// has no headless CLI at all** (Qoder and WorkBuddy are IDE/GUI hosted, dsh
+/// needs a user-owned profile name): its adapter still reads history, but it
+/// can never be launched or resumed.
 pub fn cli_names(agent: Agent) -> Vec<&'static str> {
     match agent {
         Agent::Codex => vec!["codex"],
@@ -202,11 +203,12 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         // so launching waits until a profile can be chosen deliberately
         //.
         Agent::Dsh => vec![],
-        // Desktop app: `~/.zcode/cli` is its own data directory, not a command
-        // the user can run.
+        // Desktop app: its runtime lives inside the bundle (`zcode.cjs`) and
+        // is not usable standalone — the app hosts it.
         Agent::ZCode => vec![],
-        // Desktop IDE with no headless CLI.
-        Agent::Antigravity => vec![],
+        // The official Antigravity CLI (`agy`, install script at
+        // antigravity.google/cli/install.sh), a native binary on PATH.
+        Agent::Antigravity => vec!["agy"],
     }
 }
 

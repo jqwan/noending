@@ -231,7 +231,9 @@ export const api = {
 
   search: (query: string, limit?: number) => invoke<SearchHit[]>("search", { query, limit: limit ?? 30 }),
   getAgentStatus: () =>
-    invoke<Record<string, { name: string; detected: boolean; executable: string | null; version: string | null }>>("get_agent_status"),
+    invoke<Record<string, import("./types").AgentStatusEntry>>("get_agent_status"),
+  setResumeOpenMethod: (agent: Agent, method: "terminal" | "desktop") =>
+    invoke<void>("set_resume_open_method", { agent, method }),
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
   setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),

@@ -85,8 +85,11 @@ pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
         Agent::Codex => codex::discover(),
         Agent::ClaudeCode => claude::discover(),
         Agent::Pi => pi::discover(),
-        // No CLI to ask. `Unavailable` is the honest answer and the UI already
-        // renders it as "无法获取模型列表" rather than as a broken install.
+        // No wired catalog discovery: Qoder/WorkBuddy/dsh have no CLI, ZCode
+        // has no models command, and `agy models` is not parsed yet (the
+        // FreeForm model capability already covers the UI). `Unavailable` is
+        // the honest answer and the UI renders it as "无法获取模型列表"
+        // rather than as a broken install.
         Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode | Agent::Antigravity => {
             (ModelCatalog::Unavailable, vec![])
         }
@@ -121,7 +124,9 @@ pub fn effort_levels_for(agent: Agent) -> Vec<String> {
         Agent::Codex => codex::EFFORT_LEVELS,
         Agent::ClaudeCode => claude::EFFORT_LEVELS,
         Agent::Pi => pi::EFFORT_LEVELS,
-        Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode | Agent::Antigravity => &[],
+        // `agy --effort low|medium|high|max` (from the CLI's own help).
+        Agent::Antigravity => &["low", "medium", "high", "max"],
+        Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode => &[],
     };
     levels.iter().map(|s| s.to_string()).collect()
 }
