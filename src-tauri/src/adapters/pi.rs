@@ -1,5 +1,6 @@
 //! Pi Adapter: `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`.
-//! `PI_HOME` overrides the root. Pi sessions are plain JSONL trees, read-only
+//! `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` override the sessions
+//! root (see `platform::paths`). Pi sessions are plain JSONL trees, read-only
 //! always — NoEnding never deletes an Agent-owned source.
 //!
 //! Member mapping: today's sources are single-root — one transcript, one ROOT
@@ -46,6 +47,10 @@ impl PiAdapter {
         let mut started_at: Option<String> = None;
         let mut first_user_text: Option<String> = None;
         let mut first_agent_text: Option<String> = None;
+        // `session_info` is pi's own session name (`/name`, `--name`); renames
+        // APPEND a new entry, so the last one wins. It can land anywhere in the
+        // file, which is why discovery scans past the first user turn.
+        let mut native_title: Option<String> = None;
 
         for (_, line) in &lines {
             let v: Value = match serde_json::from_str(line) {
@@ -61,17 +66,24 @@ impl PiAdapter {
                         .and_then(|t| t.as_str())
                         .map(|t| t.to_string());
                 }
+                Some("session_info") => {
+                    if let Some(t) = v
+                        .get("name")
+                        .and_then(|t| t.as_str())
+                        .filter(|t| !t.trim().is_empty())
+                    {
+                        native_title = Some(t.to_string());
+                    }
+                }
                 Some("message") => {
                     if let Some(msg) = v.get("message") {
                         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
                         let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                        // `<…>` environment blocks and `#`-prefixed injections
-                        // (AGENTS.md, attached-file headers) are not user text.
-                        if first_user_text.is_none()
-                            && role == "user"
-                            && !text.is_empty()
-                            && !crate::adapters::is_injected_preamble(&text)
-                        {
+                        // pi has no injection concept — the format's UserMessage is
+                        // just {role, content}, and the agent never wraps machine
+                        // context into user turns. A `#`-headed question is the
+                        // user's own Markdown; nothing is filtered here.
+                        if first_user_text.is_none() && role == "user" && !text.is_empty() {
                             first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                         }
                         // Last resort for a title.
@@ -81,9 +93,6 @@ impl PiAdapter {
                     }
                 }
                 _ => {}
-            }
-            if session_id.is_some() && first_user_text.is_some() {
-                break;
             }
         }
 
@@ -117,8 +126,7 @@ impl PiAdapter {
             cwd,
             started_at,
             last_activity_at: last_activity,
-            // pi writes no session title.
-            native_title: None,
+            native_title,
             first_user_text,
             first_agent_text,
             metadata: serde_json::json!({}),
@@ -206,9 +214,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         read_jsonl_delta(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::COMPACTION
-                .with_tokens()
-                .with_cost(),
+            crate::adapters::StatsCapabilities::TOOL_CALLS,
             &|_idx, v| parse_line(v, is_root),
         )
     }
@@ -217,11 +223,6 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         Ok(crate::adapters::inspect_file_source(Path::new(
             &member.source_path,
         )))
-    }
-
-    /// Pi's `cost.total` is real money in US dollars.
-    fn cost_unit(&self) -> Option<&'static str> {
-        Some("USD")
     }
 
     fn build_new_command(
@@ -292,8 +293,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 /// machine traffic; thinking blocks are filtered by `content_text`.
 /// `message.usage` of one assistant call, as counts. The source states each
 /// number directly — no derived sums: `input` excludes `cacheRead` / `cacheWrite`
-/// and folding them in would invent a total the source never reported. Cost is
-/// the same record's `cost.total` (USD).
+/// and folding them in would change the source's individual axes.
 fn usage_observation(msg: &Value) -> MemberObservation {
     let Some(usage) = msg.get("usage") else {
         return MemberObservation::default();
@@ -304,11 +304,7 @@ fn usage_observation(msg: &Value) -> MemberObservation {
         output_tokens: n("output"),
         cached_tokens: n("cacheRead"),
         reasoning_tokens: n("reasoning"),
-        cost: usage
-            .get("cost")
-            .and_then(|c| c.get("total"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
+        request_count: 1,
         ..Default::default()
     }
 }
@@ -327,19 +323,58 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             // gate keeps a usage-bearing entry from being dropped for having no
             // prose.
             let mut observation = usage_observation(msg);
+            // Tool calls are initiated by assistant `toolCall` blocks — counted
+            // (the call), never folded into the text.
+            observation.tool_calls = msg
+                .get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("toolCall"))
+                        .count() as u64
+                })
+                .unwrap_or(0);
+            // The generation identity travels on assistant entries; the
+            // ledger anchors need it on the no-message paths too.
+            let model = if role == "assistant" {
+                msg.get("model").and_then(|m| m.as_str()).map(String::from)
+            } else {
+                None
+            };
+            let provider = if role == "assistant" {
+                msg.get("provider")
+                    .and_then(|p| p.as_str())
+                    .map(String::from)
+            } else {
+                None
+            };
             if text.trim().is_empty() {
-                return (!observation.is_empty())
-                    .then(|| ParsedLine::observation_only(observation));
+                return (!observation.is_empty()).then(|| {
+                    ParsedLine::billed_without_message(
+                        model,
+                        crate::adapters::UsageCategory::Conversation,
+                        observation,
+                    )
+                    .with_usage_provider(provider.clone())
+                });
             }
             let role = match role {
-                "user" if !crate::adapters::is_injected_preamble(&text) => SessionMessageRole::User,
+                // pi has no injection concept — its UserMessage is plain
+                // {role, content}, so nothing is filtered on the user arm.
+                "user" => SessionMessageRole::User,
                 "assistant" => SessionMessageRole::Assistant,
                 // Tool output is a `toolResult` MESSAGE in pi; every other
                 // non-conversation role is runtime chatter. Usage, when the
                 // entry has any, is still counted.
                 _ => {
-                    return (!observation.is_empty())
-                        .then(|| ParsedLine::observation_only(observation))
+                    return (!observation.is_empty()).then(|| {
+                        ParsedLine::billed_without_message(
+                            model,
+                            crate::adapters::UsageCategory::Conversation,
+                            observation,
+                        )
+                        .with_usage_provider(provider.clone())
+                    })
                 }
             };
             match role {
@@ -347,7 +382,14 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 SessionMessageRole::Assistant => observation.assistant_messages = 1,
             }
             if !is_root {
-                return Some(ParsedLine::observation_only(observation));
+                return Some(
+                    ParsedLine::billed_without_message(
+                        model,
+                        crate::adapters::UsageCategory::Conversation,
+                        observation,
+                    )
+                    .with_usage_provider(provider.clone()),
+                );
             }
             // The assistant entry itself carries `message.provider` /
             // `message.model`, the actual generation identity (present on every
@@ -369,12 +411,27 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                         .with_provenance(provider, model),
                 ),
                 observation,
+                usage_note: None,
             })
         }
-        "compaction" | "compact" => Some(ParsedLine::observation_only(MemberObservation {
-            compactions: 1,
-            ..Default::default()
-        })),
+        // A compaction is a billed model call: the entry carries its usage at
+        // the top level, its own id is the stable ledger identity. The source
+        // states no model/provider on it, so the event stays unattributed —
+        // that is the source's truth, not a gap to invent values into.
+        "compaction" | "compact" => {
+            let observation = usage_observation(v);
+            (!observation.is_empty()).then(|| {
+                ParsedLine::billed_observation(
+                    observation,
+                    crate::adapters::UsageNote {
+                        category: crate::adapters::UsageCategory::Compaction,
+                        model: None,
+                        provider: None,
+                        key: source_message_id,
+                    },
+                )
+            })
+        }
         _ => None, // session headers and bookkeeping carry nothing
     }
 }
@@ -412,9 +469,9 @@ mod tests {
         [
             r#"{"type":"session","id":"p1","cwd":"/repo","version":3,"timestamp":"2026-09-18T12:40:00.000Z"}"#,
             r#"{"type":"message","id":"m1","parentId":"p1","timestamp":"2026-09-18T12:40:03.000Z","message":{"role":"user","content":[{"type":"text","text":"帮我看看这个"}]}}"#,
-            r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-09-18T12:40:05.000Z","message":{"role":"assistant","usage":{"input":1746,"output":210,"cacheRead":30,"reasoning":47,"totalTokens":1956,"cost":{"total":0.007515}},"content":[{"type":"thinking","thinking":"…"},{"type":"text","text":"看完了。"}]}}"#,
+            r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-09-18T12:40:05.000Z","message":{"role":"assistant","usage":{"input":1746,"output":210,"cacheRead":30,"reasoning":47,"totalTokens":1956,"cost":{"total":0.007515}},"content":[{"type":"thinking","thinking":"…"},{"type":"toolCall","toolCallId":"t1"},{"type":"text","text":"看完了。"}]}}"#,
             r#"{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-09-18T12:40:06.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"file contents"}]}}"#,
-            r#"{"type":"compaction","id":"c1","parentId":"m3","timestamp":"2026-09-18T12:40:07.000Z"}"#,
+            r#"{"type":"compaction","id":"c1","parentId":"m3","timestamp":"2026-09-18T12:40:07.000Z","usage":{"input":1000,"output":50,"cacheRead":0,"reasoning":10}}"#,
         ]
         .join("\n")
             + "\n"
@@ -458,22 +515,28 @@ mod tests {
             "the toolResult message stays out of the conversation"
         );
         assert_eq!(delta.messages[0].source_message_id.as_deref(), Some("m1"));
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.compaction_count, Some(1));
-                assert_eq!(s.tool_call_count, None);
+                assert_eq!(s.tool_call_count, Some(1), "the assistant toolCall block");
                 assert_eq!(s.user_message_count, Some(1));
                 assert_eq!(s.assistant_message_count, Some(1));
                 assert_eq!(s.side_activity_count, None);
-                // Usage rides on the assistant entry, cost included.
-                assert_eq!(s.input_tokens, Some(1746));
-                assert_eq!(s.output_tokens, Some(210));
-                assert_eq!(s.cached_tokens, Some(30), "cacheRead");
-                assert_eq!(s.reasoning_tokens, Some(47));
-                assert_eq!(s.cost, Some(0.007515));
+                // Usage rides on the assistant entry; source cost is ignored.
+                // The compaction call bills in the same ledger.
+                assert_eq!(usage[0], 1746 + 1000);
+                assert_eq!(usage[1], 210 + 50);
+                assert_eq!(usage[2], 30, "cacheRead");
+                assert_eq!(usage[3], 47 + 10);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+        assert_eq!(delta.usage_events.len(), 2);
+        assert_eq!(
+            delta.usage_events[1].category,
+            crate::adapters::UsageCategory::Compaction
+        );
+        assert_eq!(delta.usage_events[1].key.as_deref(), Some("c1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -533,5 +596,32 @@ mod tests {
         assert_eq!(delta.messages[0].model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(delta.messages[1].provider, None);
         assert_eq!(delta.messages[1].model, None, "missing fields stay NULL");
+    }
+    #[test]
+    fn billed_generations_keep_their_channels_without_conversation_messages() {
+        for is_root in [true, false] {
+            for (provider, content) in [
+                (
+                    "openai",
+                    serde_json::json!([{"type":"text","text":"answer"}]),
+                ),
+                (
+                    "302ai",
+                    serde_json::json!([{"type":"toolCall","name":"read"}]),
+                ),
+            ] {
+                let source = serde_json::json!({"type":"message", "message":{
+                    "role":"assistant", "provider":provider, "model":"gpt-test", "content":content,
+                    "usage":{"input":100,"output":10}
+                }});
+                let parsed = parse_line(&source, is_root).unwrap();
+                let event = crate::adapters::UsageEvent::from_parsed_line(&parsed, None).unwrap();
+                assert_eq!(event.provider.as_deref(), Some(provider));
+                assert_eq!(event.model.as_deref(), Some("gpt-test"));
+                if !is_root || provider == "302ai" {
+                    assert!(parsed.message.is_none());
+                }
+            }
+        }
     }
 }

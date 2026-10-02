@@ -7,7 +7,7 @@
 //! generation, or an incomplete current-format database — is refused instead of
 //! migrated or repaired.
 //!
-//! Format v1 keys `sessions` by the root member's Resume identity, with execution
+//! The current format keys `sessions` by the root member's Resume identity, with execution
 //! in `session_members`, the RAW conversation in `session_messages` (root only,
 //! append-only for provenance), the CURRENT conversation in
 //! `session_message_projection`, reading in `session_member_cursors`,
@@ -133,6 +133,14 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
     for (table, column) in [
+        ("session_member_stats", "compaction_count"),
+        ("session_member_stats", "cost"),
+        ("usage_events", "cost"),
+        ("usage_events", "cache_write_tokens"),
+        ("session_member_stats", "input_tokens"),
+        ("session_member_stats", "output_tokens"),
+        ("session_member_stats", "cached_tokens"),
+        ("session_member_stats", "reasoning_tokens"),
         ("sessions", "agent_session_id"),
         ("sessions", "raw_path"),
         ("sessions", "parent_agent_session_id"),
@@ -590,6 +598,11 @@ fn incomplete_current_format_database_is_refused_without_repair() {
         ),
         // A same-named view is not the table the format declares: the check
         // matches on `sqlite_master.type` too.
+        (
+            "missing-usage-view",
+            vec!["DROP VIEW session_member_usage"],
+            "session_member_usage",
+        ),
         (
             "view-impersonator",
             vec![

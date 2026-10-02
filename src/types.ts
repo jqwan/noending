@@ -257,6 +257,8 @@ export interface SessionMessage {
   role: SessionMessageRole;
   content: string;
   ts: string | null;
+  /** 仅 Assistant 有意义：是否该轮的最终回复（下一条投影消息不再是代理回复）。 */
+  turn_final: boolean;
   /** 消息级生成溯源：仅 Assistant 有意义，来源可证实才非 null。 */
   provider: string | null;
   model: string | null;
@@ -268,18 +270,18 @@ export interface SessionMessage {
 }
 
 /** 成员的执行统计快照：NULL = 源不提供，0 = 观测为零。 */
+/** Activity counts are stored; token fields are queried from usage_events. */
 export interface SessionMemberStats {
   member_id: string;
   tool_call_count: number | null;
   user_message_count: number | null;
   assistant_message_count: number | null;
-  compaction_count: number | null;
+
   side_activity_count: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cached_tokens: number | null;
   reasoning_tokens: number | null;
-  cost: number | null;
   // 消息级溯源在 SessionMessage 上，Member 级的"当前模型"语义不清，故不在此。
   updated_at: string;
 }
@@ -293,14 +295,149 @@ export interface SessionAggregateStats {
   tool_call_count: number;
   user_message_count: number;
   assistant_message_count: number;
-  compaction_count: number;
+
   side_activity_count: number;
   input_tokens: number | null;
   output_tokens: number | null;
   cached_tokens: number | null;
   reasoning_tokens: number | null;
-  cost: number | null;
-  // 需要按模型统计时，直接从 session_messages WHERE role='assistant' 派生。
+  /** 全成员图的计费模型请求数（来自用量账本；0 = 无事件）。 */
+  requests: number;
+}
+
+// ---------------- 用量面板（全库汇总） ----------------
+// 两个来源、口径分开：计费轴来自成员快照（重建前就有）；每模型 token、
+// 模型请求、时间序列、调用类别来自用量账本（从头重扫/删库重建后补全）。
+
+/** 与数量总览一致；模型的活动次数缺少归因时为 null。 */
+export interface UsageCounts {
+  /** 账本记录的模型请求数，含没有模型归因的调用；未报告请求数时按每事件一次计。 */
+  requests: number;
+  members: number;
+  root_members: number;
+  user_messages: number | null;
+  agent_replies: number | null;
+  tool_calls: number | null;
+  side_activities: number | null;
+}
+
+export interface UsageAgentSlice extends UsageCounts {
+  /** 账本 Token 加权的缓存命中比例（0–1），没有输入用量时为 null。 */
+  cache_hit_rate: number | null;
+  agent: Agent;
+  sessions: number;
+  members: number;
+  assistant_messages: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+}
+
+export interface UsageRelationSlice extends UsageCounts {
+  /** 账本 Token 加权的缓存命中比例（0–1），没有输入用量时为 null。 */
+  cache_hit_rate: number | null;
+  relation: "root" | "child" | "side";
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+}
+
+/** 一个有名有姓的花费归属者：Project 或 Owner Workstream。 */
+export interface UsageNamedSlice extends UsageCounts {
+  /** 账本 Token 加权的缓存命中比例（0–1），没有输入用量时为 null。 */
+  cache_hit_rate: number | null;
+  id: string;
+  name: string;
+  sessions: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+}
+
+/** 一个规范模型（小写 key）。display 是来源里最高频的原样写法。 */
+export interface UsageModelSlice extends UsageCounts {
+  /** 账本 Token 加权的缓存命中比例（0–1），没有输入用量时为 null。 */
+  cache_hit_rate: number | null;
+  model: string;
+  display: string;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  reasoning_tokens: number;
+  agents: Agent[];
+}
+
+export interface UsageCategorySlice {
+  category: "conversation" | "compaction" | "side";
+  events: number;
+  requests: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+}
+
+/** 一天一条（降序），day 是来源时间戳自己的 UTC 日期。 */
+export interface UsageDaySlice {
+  day: string;
+  events: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+}
+
+export interface UsageSessionSlice extends UsageCounts {
+  /** 账本 Token 加权的缓存命中比例（0–1），没有输入用量时为 null。 */
+  cache_hit_rate: number | null;
+  session_id: string;
+  title: string | null;
+  agent: Agent;
+  last_activity_at: string | null;
+  assistant_messages: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+}
+
+export interface UsageOverview {
+  /** 账本 Token 加权的缓存命中比例（0–1），没有输入用量时为 null。 */
+  cache_hit_rate: number | null;
+  /** 账本记录的模型请求数，含没有模型归因的调用；未报告请求数时按每事件一次计。 */
+  requests: number;
+  sessions: number;
+  /** 总会话数：根、子、辅全部计入。 */
+  members: number;
+  /** 根会话数。 */
+  root_members: number;
+  user_messages: number;
+  /** 代理回复数。 */
+  agent_replies: number;
+  tool_calls: number;
+  /** 代理协同数（辅会话的边活动）。 */
+  side_activities: number;
+  assistant_messages: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+  by_agent: UsageAgentSlice[];
+  by_relation: UsageRelationSlice[];
+  by_project: UsageNamedSlice[];
+  by_workstream: UsageNamedSlice[];
+  top_sessions: UsageSessionSlice[];
+  // ---- 账本部分（重建/从头重扫前为空） ----
+  ledger_events: number;
+  attributed_events: number;
+  unattributed_events: number;
+  by_model: UsageModelSlice[];
+  by_category: UsageCategorySlice[];
+  series: UsageDaySlice[];
 }
 
 /** Adapter 对成员源可用性的严格结论：任何异常都不等于 missing。 */
@@ -653,14 +790,11 @@ export interface SessionDetail {
   owner_workstream: Workstream | null;
   workspace_path: SessionWorkspacePath | null;
   /** 执行图：root / children / sides，root 在前。`source_status` 是加载详情时对
-   *  这个成员**自己的**源文件的新鲜结论：子 / 边的转写会各自消失，命名它的那一行
+   *  这个成员**自己的**源文件的新鲜结论：子 / 辅的转写会各自消失，命名它的那一行
    *  必须说得出它已经不在。 */
   members: (SessionMember & { stats: SessionMemberStats | null; source_status: SourceAvailability })[];
   /** 查询时聚合的执行图统计。 */
   stats: SessionAggregateStats;
-  /** stats.cost 的单位，取 Agent 自己的单位（Pi: USD；Qoder: credits）。
-   *  null = 该 Agent 根本不报 cost，UI 不能给它安一个源没用的单位。 */
-  cost_unit: string | null;
   ingested_message_sequence: number;
   processed_message_sequence: number;
   /** 详情加载时对 Root 源的新鲜结论。 */

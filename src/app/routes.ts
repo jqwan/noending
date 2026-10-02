@@ -34,6 +34,7 @@ export type Route =
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
   | { view: "session"; sessionId: string; entry?: SessionEntry }
   | { view: "assistant"; scope?: AssistantScope }
+  | { view: "usage" }
   | { view: "projects" }
   | { view: "project"; projectId: string }
   | { view: "settings"; section?: SettingsSection }

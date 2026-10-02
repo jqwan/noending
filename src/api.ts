@@ -9,7 +9,8 @@ import type {
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionContextView, SessionDetail,
   SessionMessageMark, SessionMessageWindow,
-  SessionUpdateOutcome, Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
+  SessionUpdateOutcome, UsageOverview,
+  Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamReviewState, WorkstreamReviewWindow, WorkstreamReviewSummary,
   WorkstreamUpdateOutcome,
 } from "./types";
@@ -152,6 +153,9 @@ export const api = {
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),
+  /** 执行成员（子/辅）自己的源文件定位：后端按 (session, member) 双键解析。 */
+  revealSessionMemberSource: (sessionId: string, memberId: string) =>
+    invoke<void>("reveal_session_member_source", { sessionId, memberId }),
   /** Conversation 的一页：`beforeOrdinal` 取更早的一页，`afterOrdinal` 取更新的一页，
    *  都不传就是最新一页。 */
   getSessionMessages: (
@@ -171,6 +175,8 @@ export const api = {
     invoke<IngestionDiagnostic[]>("list_ingestion_diagnostics", {
       minObservations: minObservations ?? null,
     }),
+  /** 用量面板的一次读：成员快照和模型用量账本。 */
+  getUsageOverview: () => invoke<UsageOverview>("get_usage_overview"),
   /**
    * 设置 / 清空 Session 唯一的所属任务。`workstreamId === null` 即「未归属任务」。
    * 只写 `sessions.owner_workstream_id`，不碰 WorkstreamPath、cwd 或 Project。
@@ -226,6 +232,8 @@ export const api = {
     invoke<import("./types").IngestSource>("add_ingest_source", { agent, path }),
   setIngestSourceEnabled: (sourceId: string, enabled: boolean) =>
     invoke<void>("set_ingest_source_enabled", { sourceId, enabled }),
+  setAllIngestSourcesEnabled: (enabled: boolean) =>
+    invoke<number>("set_all_ingest_sources_enabled", { enabled }),
   removeIngestSource: (sourceId: string) =>
     invoke<void>("remove_ingest_source", { sourceId }),
 

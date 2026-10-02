@@ -857,7 +857,15 @@ impl Db {
         source: &SourceCursorUpdate,
     ) -> Result<Vec<SessionMessage>> {
         self.commit_member_ingest_with_provenance_state(
-            session_id, member_id, messages, stats, source, true, None, None,
+            session_id,
+            member_id,
+            messages,
+            stats,
+            source,
+            true,
+            None,
+            None,
+            &[],
         )
     }
 
@@ -865,6 +873,7 @@ impl Db {
     /// frontier and the provenance state frontier are written together, so
     /// they can never drift. Adapters with direct per-message evidence pass
     /// `None`/`None` — their provenance travels on the messages themselves.
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_member_ingest_with_provenance_state(
         &self,
         session_id: &str,
@@ -875,6 +884,7 @@ impl Db {
         complete_snapshot: bool,
         next_active_provider: Option<String>,
         next_active_model: Option<String>,
+        usage_events: &[crate::adapters::UsageEvent],
     ) -> Result<Vec<SessionMessage>> {
         self.tx(|tx| {
             // A session purged mid-parse takes NOTHING.
@@ -883,14 +893,14 @@ impl Db {
             }
             // The member must still belong to THIS session: a topology
             // correction that moved it mid-parse invalidates the whole batch.
-            let relation: Option<String> = tx
+            let member_row: Option<(String, String)> = tx
                 .query_row(
-                    "SELECT relation FROM session_members WHERE id = ?1 AND session_id = ?2",
+                    "SELECT relation, agent FROM session_members WHERE id = ?1 AND session_id = ?2",
                     params![member_id, session_id],
-                    |r| r.get(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                 )
                 .optional()?;
-            let Some(relation) = relation else {
+            let Some((relation, agent)) = member_row else {
                 return Ok(Vec::new());
             };
             let is_root = relation == SessionMemberRelation::Root.as_str();
@@ -1025,6 +1035,8 @@ impl Db {
                             role: m.role,
                             content: m.content.clone(),
                             ts: m.ts.clone(),
+                            // Derived from the projection after it moves.
+                            turn_final: false,
                             provider: m.provider.clone(),
                             model: m.model.clone(),
                             source_message_id: m.source_message_id.clone(),
@@ -1084,6 +1096,17 @@ impl Db {
             }
 
             apply_stats_conn(tx, member_id, stats)?;
+            // The ledger replaces when THIS read started at genesis (a full
+            // re-scan re-emits every call) — NOT on `complete_snapshot`,
+            // which an ordinary append also carries.
+            write_usage_events_conn(
+                tx,
+                session_id,
+                member_id,
+                agent.as_str(),
+                source.start_byte_offset == 0,
+                usage_events,
+            )?;
             let new_tail = if messages.is_empty() {
                 stored_tail.unwrap_or_default()
             } else {
@@ -1301,15 +1324,562 @@ impl Db {
 
     // Member Stats
 
+    /// Workspace-wide counts from activity snapshots and tokens from usage_events.
+    /// Usage is aggregated per member before joining activity counts, so multiple
+    /// requests cannot multiply the counters. Trashed sessions still participate.
+    /// No usage events in a slice means its token totals are unknown (None).
+    pub fn usage_overview(&self) -> Result<UsageOverview> {
+        let conn = self.read();
+        let mut out = UsageOverview::default();
+
+        let mut stmt = conn.prepare(
+            "SELECT s.agent,
+                    COUNT(DISTINCT s.id), COUNT(DISTINCT m.id),
+                    COALESCE(SUM(st.assistant_message_count), 0),
+                    SUM(u.input_tokens), SUM(u.output_tokens),
+                    SUM(u.cached_tokens), SUM(u.reasoning_tokens),
+                    COUNT(DISTINCT m.id),
+                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(st.user_message_count), 0),
+                    COALESCE(SUM(st.assistant_message_count), 0),
+                    COALESCE(SUM(st.tool_call_count), 0),
+                    COALESCE(SUM(st.side_activity_count), 0)
+             FROM sessions s
+             JOIN session_members m ON m.session_id = s.id
+             LEFT JOIN session_member_stats st ON st.member_id = m.id
+             LEFT JOIN session_member_usage u ON u.member_id = m.id
+             GROUP BY s.agent
+             ORDER BY (COALESCE(SUM(u.input_tokens), 0)
+                     + COALESCE(SUM(u.cached_tokens), 0)
+                     + COALESCE(SUM(u.output_tokens), 0)) DESC,
+                      s.agent",
+        )?;
+        let slices = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                usage_slice_counts(r, 8)?,
+            ))
+        })?;
+        for slice in slices {
+            let (agent, sessions, members, assistant, input, output, cached, reasoning, counts) =
+                slice?;
+            out.sessions += sessions;
+            out.members += members;
+            out.assistant_messages += assistant;
+            out.input_tokens = or_add(out.input_tokens, input);
+            out.output_tokens = or_add(out.output_tokens, output);
+            out.cached_tokens = or_add(out.cached_tokens, cached);
+            out.reasoning_tokens = or_add(out.reasoning_tokens, reasoning);
+            out.by_agent.push(UsageAgentSlice {
+                cache_hit_rate: None,
+                requests: 0,
+                root_members: counts[1],
+                user_messages: counts[2],
+                agent_replies: counts[3],
+                tool_calls: counts[4],
+                side_activities: counts[5],
+                agent,
+                sessions,
+                members,
+                assistant_messages: assistant,
+                input_tokens: input,
+                output_tokens: output,
+                cached_tokens: cached,
+                reasoning_tokens: reasoning,
+            });
+        }
+        drop(stmt);
+
+        // The member/activity counts behind the panel's stats strip: total
+        // members (the user's 会话 vocabulary — root/child/side all count),
+        // how many are roots, and the four activity counters from the
+        // snapshots (counts are observed-zero based, unlike the token axes).
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(st.user_message_count), 0),
+                    COALESCE(SUM(st.assistant_message_count), 0),
+                    COALESCE(SUM(st.tool_call_count), 0),
+                    COALESCE(SUM(st.side_activity_count), 0)
+             FROM sessions s
+             JOIN session_members m ON m.session_id = s.id
+             LEFT JOIN session_member_stats st ON st.member_id = m.id
+             LEFT JOIN session_member_usage u ON u.member_id = m.id",
+        )?;
+        let (members, root_members, user_messages, agent_replies, tool_calls, side_activities): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = stmt.query_row([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?;
+        drop(stmt);
+        out.members = members;
+        out.root_members = root_members;
+        out.user_messages = user_messages;
+        out.agent_replies = agent_replies;
+        out.tool_calls = tool_calls;
+        out.side_activities = side_activities;
+
+        // Billed tokens by member class: the root conversation vs the
+        // sub-agents it spawned vs side coordination.
+        let mut stmt = conn.prepare(
+            "SELECT m.relation,
+                    SUM(u.input_tokens), SUM(u.output_tokens),
+                    SUM(u.cached_tokens), SUM(u.reasoning_tokens),
+                    COUNT(DISTINCT m.id),
+                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(st.user_message_count), 0),
+                    COALESCE(SUM(st.assistant_message_count), 0),
+                    COALESCE(SUM(st.tool_call_count), 0),
+                    COALESCE(SUM(st.side_activity_count), 0)
+             FROM sessions s
+             JOIN session_members m ON m.session_id = s.id
+             LEFT JOIN session_member_stats st ON st.member_id = m.id
+             LEFT JOIN session_member_usage u ON u.member_id = m.id
+             GROUP BY m.relation
+             ORDER BY CASE m.relation WHEN 'root' THEN 0 WHEN 'child' THEN 1 ELSE 2 END",
+        )?;
+        let slices = stmt.query_map([], |r| {
+            let counts = usage_slice_counts(r, 5)?;
+            Ok(UsageRelationSlice {
+                cache_hit_rate: None,
+                requests: 0,
+                members: counts[0],
+                root_members: counts[1],
+                user_messages: counts[2],
+                agent_replies: counts[3],
+                tool_calls: counts[4],
+                side_activities: counts[5],
+                relation: r.get(0)?,
+                input_tokens: r.get(1)?,
+                output_tokens: r.get(2)?,
+                cached_tokens: r.get(3)?,
+                reasoning_tokens: r.get(4)?,
+            })
+        })?;
+        for slice in slices {
+            out.by_relation.push(slice?);
+        }
+        drop(stmt);
+
+        for (table, column, workstream) in
+            [("projects", "name", false), ("workstreams", "title", true)]
+        {
+            let sql = format!(
+                "SELECT t.id, t.{column}, COUNT(DISTINCT s.id),
+                        SUM(u.input_tokens), SUM(u.output_tokens),
+                        SUM(u.cached_tokens), SUM(u.reasoning_tokens),
+                        COUNT(DISTINCT m.id),
+                        COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(st.user_message_count), 0),
+                        COALESCE(SUM(st.assistant_message_count), 0),
+                        COALESCE(SUM(st.tool_call_count), 0),
+                        COALESCE(SUM(st.side_activity_count), 0)
+                 FROM sessions s
+                 JOIN {table} t ON t.id = s.{}",
+                if workstream {
+                    "owner_workstream_id"
+                } else {
+                    "project_id"
+                }
+            ) + "
+                 JOIN session_members m ON m.session_id = s.id
+                 LEFT JOIN session_member_stats st ON st.member_id = m.id
+             LEFT JOIN session_member_usage u ON u.member_id = m.id
+                 GROUP BY t.id, t."
+                + column
+                + "
+                 ORDER BY (COALESCE(SUM(u.input_tokens), 0)
+                         + COALESCE(SUM(u.cached_tokens), 0)
+                         + COALESCE(SUM(u.output_tokens), 0)) DESC";
+            let mut stmt = conn.prepare(&sql)?;
+            let slices = stmt.query_map([], |r| {
+                let counts = usage_slice_counts(r, 7)?;
+                Ok(UsageNamedSlice {
+                    cache_hit_rate: None,
+                    requests: 0,
+                    members: counts[0],
+                    root_members: counts[1],
+                    user_messages: counts[2],
+                    agent_replies: counts[3],
+                    tool_calls: counts[4],
+                    side_activities: counts[5],
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    sessions: r.get(2)?,
+                    input_tokens: r.get(3)?,
+                    output_tokens: r.get(4)?,
+                    cached_tokens: r.get(5)?,
+                    reasoning_tokens: r.get(6)?,
+                })
+            })?;
+            for slice in slices {
+                let slice = slice?;
+                if workstream {
+                    out.by_workstream.push(slice);
+                } else {
+                    out.by_project.push(slice);
+                }
+            }
+            drop(stmt);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.title, s.agent, s.last_activity_at,
+                    SUM(u.input_tokens), SUM(u.output_tokens),
+                    SUM(u.cached_tokens), SUM(u.reasoning_tokens),
+                    COALESCE(SUM(st.assistant_message_count), 0),
+                    COUNT(DISTINCT m.id),
+                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(st.user_message_count), 0),
+                    COALESCE(SUM(st.assistant_message_count), 0),
+                    COALESCE(SUM(st.tool_call_count), 0),
+                    COALESCE(SUM(st.side_activity_count), 0)
+             FROM sessions s
+             JOIN session_members m ON m.session_id = s.id
+             LEFT JOIN session_member_stats st ON st.member_id = m.id
+             LEFT JOIN session_member_usage u ON u.member_id = m.id
+             GROUP BY s.id
+             ORDER BY (COALESCE(SUM(u.input_tokens), 0)
+                     + COALESCE(SUM(u.cached_tokens), 0)
+                         + COALESCE(SUM(u.output_tokens), 0)) DESC,
+                      s.last_activity_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let counts = usage_slice_counts(r, 9)?;
+            Ok(UsageSessionSlice {
+                cache_hit_rate: None,
+                requests: 0,
+                members: counts[0],
+                root_members: counts[1],
+                user_messages: counts[2],
+                agent_replies: counts[3],
+                tool_calls: counts[4],
+                side_activities: counts[5],
+                session_id: r.get(0)?,
+                title: r.get(1)?,
+                agent: r.get(2)?,
+                last_activity_at: r.get(3)?,
+                input_tokens: r.get(4)?,
+                output_tokens: r.get(5)?,
+                cached_tokens: r.get(6)?,
+                reasoning_tokens: r.get(7)?,
+                assistant_messages: r.get(8)?,
+            })
+        })?;
+        for row in rows {
+            out.top_sessions.push(row?);
+        }
+        drop(stmt);
+
+        // ---- the ledger: per-model tokens, series, categories ----
+        let mut models: std::collections::BTreeMap<String, ModelFold> = Default::default();
+        let mut stmt = conn.prepare(
+            "SELECT ev.model, ev.model, ev.agent, COUNT(*),
+                    SUM(ev.input_tokens), SUM(ev.output_tokens),
+                    SUM(ev.cached_tokens), SUM(ev.reasoning_tokens),
+                    SUM(ev.requests)
+             FROM usage_events ev
+             JOIN sessions s ON s.id = ev.session_id
+             WHERE ev.model IS NOT NULL
+             GROUP BY LOWER(ev.model), ev.model, ev.agent",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+            ))
+        })?;
+        for row in rows {
+            let (key, spelling, agent, n, input, output, cached, reasoning, requests) = row?;
+            // The canonical key merges gateway prefixes and mode/tier
+            // suffixes; the verbatim spelling is kept for the display choice.
+            let fold = models.entry(canonical_model(&key)).or_default();
+            fold.total += n;
+            fold.requests += requests;
+            fold.input_tokens += input;
+            fold.output_tokens += output;
+            fold.cached_tokens += cached;
+            fold.reasoning_tokens += reasoning;
+            *fold.spellings.entry(spelling).or_default() += n;
+            fold.agents.insert(agent);
+        }
+        drop(stmt);
+        out.attributed_events = models.values().map(|f| f.total).sum();
+        out.by_model = models
+            .into_iter()
+            .map(|(model, fold)| {
+                let display = display_model(
+                    &fold
+                        .spellings
+                        .iter()
+                        .max_by_key(|(name, n)| (**n, std::cmp::Reverse((*name).clone())))
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| model.clone()),
+                );
+                UsageModelSlice {
+                    cache_hit_rate: cache_hit_rate(fold.input_tokens, fold.cached_tokens),
+                    model,
+                    display,
+                    events: fold.total,
+                    requests: fold.requests,
+                    input_tokens: fold.input_tokens,
+                    output_tokens: fold.output_tokens,
+                    cached_tokens: fold.cached_tokens,
+                    reasoning_tokens: fold.reasoning_tokens,
+                    agents: fold.agents.into_iter().collect(),
+                    members: 0,
+                    root_members: 0,
+                    user_messages: None,
+                    agent_replies: None,
+                    tool_calls: None,
+                    side_activities: None,
+                }
+            })
+            .collect();
+        out.by_model.sort_by(|a, b| {
+            let a_axis = a.input_tokens + a.cached_tokens + a.output_tokens;
+            let b_axis = b.input_tokens + b.cached_tokens + b.output_tokens;
+            b_axis.cmp(&a_axis).then_with(|| a.model.cmp(&b.model))
+        });
+
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*)
+             FROM usage_events ev
+             JOIN sessions s ON s.id = ev.session_id
+             WHERE ev.model IS NULL",
+        )?;
+        out.unattributed_events = stmt.query_row([], |r| r.get(0))?;
+        drop(stmt);
+
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*)
+             FROM usage_events ev
+             JOIN sessions s ON s.id = ev.session_id
+             ",
+        )?;
+        out.ledger_events = stmt.query_row([], |r| r.get(0))?;
+        drop(stmt);
+
+        let mut stmt = conn.prepare(
+            "SELECT ev.category, COUNT(*),
+                    SUM(ev.input_tokens), SUM(ev.output_tokens),
+                    SUM(ev.cached_tokens), SUM(ev.reasoning_tokens),
+                    SUM(ev.requests)
+             FROM usage_events ev
+             JOIN sessions s ON s.id = ev.session_id
+             GROUP BY ev.category",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(UsageCategorySlice {
+                category: r.get(0)?,
+                events: r.get(1)?,
+                requests: r.get(6)?,
+                input_tokens: r.get(2)?,
+                output_tokens: r.get(3)?,
+                cached_tokens: r.get(4)?,
+                reasoning_tokens: r.get(5)?,
+            })
+        })?;
+        for row in rows {
+            out.by_category.push(row?);
+        }
+        drop(stmt);
+
+        // Daily series, newest first. The day is the source timestamp's own
+        // date (UTC spelling in every format that writes RFC3339).
+        let mut stmt = conn.prepare(
+            "SELECT substr(ev.ts, 1, 10) AS day, COUNT(*),
+                    SUM(ev.input_tokens), SUM(ev.output_tokens),
+                    SUM(ev.cached_tokens), SUM(ev.reasoning_tokens)
+             FROM usage_events ev
+             JOIN sessions s ON s.id = ev.session_id
+              AND ev.ts IS NOT NULL
+             GROUP BY day
+             ORDER BY day DESC
+             LIMIT 90",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(UsageDaySlice {
+                day: r.get(0)?,
+                events: r.get(1)?,
+                input_tokens: r.get(2)?,
+                output_tokens: r.get(3)?,
+                cached_tokens: r.get(4)?,
+                reasoning_tokens: r.get(5)?,
+            })
+        })?;
+        for row in rows {
+            out.series.push(row?);
+        }
+        drop(stmt);
+
+        let mut stmt = conn.prepare(
+            "SELECT ev.model, s.id, s.agent, s.project_id, s.owner_workstream_id,
+                    m.id, m.relation, SUM(ev.requests),
+                    SUM(ev.input_tokens), SUM(ev.cached_tokens)
+             FROM usage_events ev
+             JOIN sessions s ON s.id = ev.session_id
+             JOIN session_members m ON m.id = ev.member_id AND m.session_id = s.id
+             GROUP BY ev.model, s.id, m.id",
+        )?;
+        let mut participants: std::collections::BTreeMap<
+            String,
+            (
+                std::collections::BTreeSet<String>,
+                std::collections::BTreeSet<String>,
+            ),
+        > = Default::default();
+        // Compute rates entirely from ledger tokens so missing history cannot
+        // mix different input populations.
+        let mut cache_totals: std::collections::BTreeMap<(&str, String), [i64; 2]> =
+            Default::default();
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
+            ))
+        })?;
+        for row in rows {
+            let (
+                model,
+                session,
+                agent,
+                project,
+                workstream,
+                member,
+                relation,
+                requests,
+                input,
+                cached,
+            ) = row?;
+            for (kind, id) in [
+                ("total", Some("")),
+                ("agent", Some(agent.as_str())),
+                ("relation", Some(relation.as_str())),
+                ("session", Some(session.as_str())),
+                ("project", project.as_deref()),
+                ("workstream", workstream.as_deref()),
+            ] {
+                if let Some(id) = id {
+                    let totals = cache_totals.entry((kind, id.to_string())).or_default();
+                    totals[0] += input.max(0);
+                    totals[1] += cached.max(0);
+                }
+            }
+            out.requests += requests;
+            if let Some(model) = model {
+                let (members, roots) = participants.entry(canonical_model(&model)).or_default();
+                members.insert(member.clone());
+                if relation == "root" {
+                    roots.insert(member);
+                }
+            }
+            if let Some(slice) = out.by_agent.iter_mut().find(|s| s.agent == agent) {
+                slice.requests += requests;
+            }
+            if let Some(slice) = out.by_relation.iter_mut().find(|s| s.relation == relation) {
+                slice.requests += requests;
+            }
+            if let Some(slice) = out
+                .by_project
+                .iter_mut()
+                .find(|s| Some(&s.id) == project.as_ref())
+            {
+                slice.requests += requests;
+            }
+            if let Some(slice) = out
+                .by_workstream
+                .iter_mut()
+                .find(|s| Some(&s.id) == workstream.as_ref())
+            {
+                slice.requests += requests;
+            }
+            if let Some(slice) = out
+                .top_sessions
+                .iter_mut()
+                .find(|s| s.session_id == session)
+            {
+                slice.requests += requests;
+            }
+        }
+        for slice in &mut out.by_model {
+            if let Some((members, roots)) = participants.get(&slice.model) {
+                slice.members = members.len() as i64;
+                slice.root_members = roots.len() as i64;
+            }
+        }
+        drop(stmt);
+
+        let rate_for = |kind, id: &str| {
+            cache_totals
+                .get(&(kind, id.to_string()))
+                .and_then(|[input, cached]| cache_hit_rate(*input, *cached))
+        };
+        out.cache_hit_rate = rate_for("total", "");
+        for slice in &mut out.by_agent {
+            slice.cache_hit_rate = rate_for("agent", &slice.agent);
+        }
+        for slice in &mut out.by_relation {
+            slice.cache_hit_rate = rate_for("relation", &slice.relation);
+        }
+        for slice in &mut out.by_project {
+            slice.cache_hit_rate = rate_for("project", &slice.id);
+        }
+        for slice in &mut out.by_workstream {
+            slice.cache_hit_rate = rate_for("workstream", &slice.id);
+        }
+        for slice in &mut out.top_sessions {
+            slice.cache_hit_rate = rate_for("session", &slice.session_id);
+        }
+        Ok(out)
+    }
+
     pub fn get_member_stats(&self, member_id: &str) -> Result<Option<SessionMemberStats>> {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT member_id, tool_call_count, user_message_count,
-                        assistant_message_count, compaction_count,
-                        side_activity_count, input_tokens, output_tokens, cached_tokens,
-                        reasoning_tokens, cost, updated_at, extra
-                 FROM session_member_stats WHERE member_id = ?1",
+                "SELECT m.id, st.tool_call_count, st.user_message_count,
+                    st.assistant_message_count, st.side_activity_count,
+                    u.input_tokens, u.output_tokens, u.cached_tokens, u.reasoning_tokens,
+                    COALESCE(st.updated_at, u.updated_at, ''), COALESCE(st.extra, '{}')
+             FROM session_members m
+             LEFT JOIN session_member_stats st ON st.member_id = m.id
+             LEFT JOIN session_member_usage u ON u.member_id = m.id
+             WHERE m.id = ?1 AND (st.member_id IS NOT NULL OR u.member_id IS NOT NULL)",
                 params![member_id],
                 row_member_stats,
             )
@@ -1324,55 +1894,53 @@ impl Db {
             member_count: members.len() as i64,
             ..Default::default()
         };
+        for m in &members {
+            match m.relation.as_str() {
+                "child" => agg.child_count += 1,
+                "side" => agg.side_count += 1,
+                _ => {}
+            }
+        }
         {
             let conn = self.read();
-            // Every member keeps its own share; the Session totals the whole
-            // graph, so this sum is the session-level rollup.
-            for m in &members {
-                match m.relation.as_str() {
-                    "child" => agg.child_count += 1,
-                    "side" => agg.side_count += 1,
-                    _ => {}
-                }
-                if let Some(s) = conn
-                    .query_row(
-                        "SELECT tool_call_count, user_message_count, assistant_message_count,
-                                compaction_count, side_activity_count, input_tokens,
-                                output_tokens, cached_tokens, reasoning_tokens, cost
-                         FROM session_member_stats WHERE member_id = ?1",
-                        params![m.id],
-                        |r| {
-                            Ok((
-                                r.get::<_, Option<i64>>(0)?,
-                                r.get::<_, Option<i64>>(1)?,
-                                r.get::<_, Option<i64>>(2)?,
-                                r.get::<_, Option<i64>>(3)?,
-                                r.get::<_, Option<i64>>(4)?,
-                                r.get::<_, Option<i64>>(5)?,
-                                r.get::<_, Option<i64>>(6)?,
-                                r.get::<_, Option<i64>>(7)?,
-                                r.get::<_, Option<i64>>(8)?,
-                                r.get::<_, Option<f64>>(9)?,
-                            ))
-                        },
-                    )
-                    .optional()?
-                {
-                    agg.tool_call_count += s.0.unwrap_or(0);
-                    agg.user_message_count += s.1.unwrap_or(0);
-                    agg.assistant_message_count += s.2.unwrap_or(0);
-                    agg.compaction_count += s.3.unwrap_or(0);
-                    agg.side_activity_count += s.4.unwrap_or(0);
-                    agg.input_tokens = or_add(agg.input_tokens, s.5);
-                    agg.output_tokens = or_add(agg.output_tokens, s.6);
-                    agg.cached_tokens = or_add(agg.cached_tokens, s.7);
-                    agg.reasoning_tokens = or_add(agg.reasoning_tokens, s.8);
-                    agg.cost = match (agg.cost, s.9) {
-                        (a, Some(b)) => Some(a.unwrap_or(0.0) + b),
-                        (a, None) => a,
-                    };
-                }
-            }
+            let totals = conn.query_row(
+                "SELECT COALESCE(SUM(st.tool_call_count), 0),
+                        COALESCE(SUM(st.user_message_count), 0),
+                        COALESCE(SUM(st.assistant_message_count), 0),
+                        COALESCE(SUM(st.side_activity_count), 0),
+                        SUM(u.input_tokens), SUM(u.output_tokens),
+                        SUM(u.cached_tokens), SUM(u.reasoning_tokens),
+                        COALESCE(SUM(u.requests), 0)
+                 FROM session_members m
+                 LEFT JOIN session_member_stats st ON st.member_id = m.id
+                 LEFT JOIN session_member_usage u ON u.member_id = m.id
+                 WHERE m.session_id = ?1",
+                params![session_id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                        r.get::<_, Option<i64>>(5)?,
+                        r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<i64>>(7)?,
+                        r.get::<_, i64>(8)?,
+                    ))
+                },
+            )?;
+            agg.tool_call_count = totals.0;
+            agg.user_message_count = totals.1;
+            agg.assistant_message_count = totals.2;
+            agg.side_activity_count = totals.3;
+            agg.input_tokens = totals.4;
+            agg.output_tokens = totals.5;
+            agg.cached_tokens = totals.6;
+            agg.reasoning_tokens = totals.7;
+            // 模型请求 comes off the same view join: the ledger's per-member
+            // totals live in one definition (session_member_usage).
+            agg.requests = totals.8;
         }
         // Depth over the parent chain (root = 0): member counts are tiny, so
         // a plain walk beats a recursive SQL CTE.
@@ -2027,6 +2595,19 @@ impl Db {
             params![id, enabled as i64],
         )?;
         Ok(())
+    }
+
+    /// Enable / disable EVERY source at once — the 全选 toggle behind the
+    /// sources page's checkbox. One statement, one write lock; the returned
+    /// count is how many rows changed, so the UI can skip its reload when the
+    /// state already matched.
+    pub fn set_all_ingest_sources_enabled(&self, enabled: bool) -> Result<usize> {
+        let conn = self.write();
+        let changed = conn.execute(
+            "UPDATE ingest_sources SET enabled = ?1 WHERE enabled != ?1",
+            params![enabled as i64],
+        )?;
+        Ok(changed)
     }
 
     /// Only user-added sources may be removed; defaults are toggled instead.
@@ -2818,9 +3399,63 @@ fn enrich_message_provenance_conn(
     Ok(())
 }
 
-/// Apply a stats update to one member's 1:1 snapshot row: a DELTA adds its
-/// observed counts, a SNAPSHOT replaces them. `None` is a no-op, so "no
-/// evidence" can never zero a column.
+/// The existing model reference supports provider/model paths. Keep an event's
+/// source-confirmed channel in that reference; its original billing key stays
+/// unchanged, and the canonical model identity still strips all prefixes.
+fn qualified_usage_model(model: Option<&str>, provider: Option<&str>) -> Option<String> {
+    model.map(|model| match provider.filter(|p| !p.trim().is_empty()) {
+        Some(provider) => format!("{}/{}", provider.trim(), model),
+        None => model.to_string(),
+    })
+}
+
+/// The sole persisted token source, written in the same ingest transaction as
+/// activity counts. A full scan replaces this member's rows; an append adds
+/// new calls. Repeated event keys bill once, with the first row winning.
+fn write_usage_events_conn(
+    tx: &Transaction,
+    session_id: &str,
+    member_id: &str,
+    agent: &str,
+    started_at_genesis: bool,
+    events: &[crate::adapters::UsageEvent],
+) -> Result<()> {
+    if started_at_genesis {
+        tx.execute(
+            "DELETE FROM usage_events WHERE member_id = ?1",
+            params![member_id],
+        )?;
+    }
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare(
+        "INSERT OR IGNORE INTO usage_events
+           (id, member_id, session_id, agent, category, model, ts,
+            input_tokens, output_tokens, cached_tokens, reasoning_tokens,
+            requests, event_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )?;
+    for ev in events {
+        stmt.execute(params![
+            new_id(),
+            member_id,
+            session_id,
+            agent,
+            ev.category.as_str(),
+            qualified_usage_model(ev.model.as_deref(), ev.provider.as_deref()),
+            ev.ts,
+            ev.input_tokens as i64,
+            ev.output_tokens as i64,
+            ev.cached_tokens as i64,
+            ev.reasoning_tokens as i64,
+            (ev.request_count as i64).max(1),
+            ev.key,
+        ])?;
+    }
+    Ok(())
+}
+
 pub fn apply_stats_conn(
     conn: &Connection,
     member_id: &str,
@@ -2850,32 +3485,10 @@ pub fn apply_stats_conn(
                     "assistant_message_count = COALESCE(assistant_message_count, 0) + {v}"
                 ));
             }
-            if let Some(v) = d.compaction_count {
-                sets.push(format!(
-                    "compaction_count = COALESCE(compaction_count, 0) + {v}"
-                ));
-            }
             if let Some(v) = d.side_activity_count {
                 sets.push(format!(
                     "side_activity_count = COALESCE(side_activity_count, 0) + {v}"
                 ));
-            }
-            if let Some(v) = d.input_tokens {
-                sets.push(format!("input_tokens = COALESCE(input_tokens, 0) + {v}"));
-            }
-            if let Some(v) = d.output_tokens {
-                sets.push(format!("output_tokens = COALESCE(output_tokens, 0) + {v}"));
-            }
-            if let Some(v) = d.cached_tokens {
-                sets.push(format!("cached_tokens = COALESCE(cached_tokens, 0) + {v}"));
-            }
-            if let Some(v) = d.reasoning_tokens {
-                sets.push(format!(
-                    "reasoning_tokens = COALESCE(reasoning_tokens, 0) + {v}"
-                ));
-            }
-            if let Some(v) = d.cost.filter(|c| c.is_finite()) {
-                sets.push(format!("cost = COALESCE(cost, 0) + {v}"));
             }
         }
         StatsUpdate::Snapshot(s) => {
@@ -2888,26 +3501,8 @@ pub fn apply_stats_conn(
             if let Some(v) = s.assistant_message_count {
                 sets.push(format!("assistant_message_count = {v}"));
             }
-            if let Some(v) = s.compaction_count {
-                sets.push(format!("compaction_count = {v}"));
-            }
             if let Some(v) = s.side_activity_count {
                 sets.push(format!("side_activity_count = {v}"));
-            }
-            if let Some(v) = s.input_tokens {
-                sets.push(format!("input_tokens = {v}"));
-            }
-            if let Some(v) = s.output_tokens {
-                sets.push(format!("output_tokens = {v}"));
-            }
-            if let Some(v) = s.cached_tokens {
-                sets.push(format!("cached_tokens = {v}"));
-            }
-            if let Some(v) = s.reasoning_tokens {
-                sets.push(format!("reasoning_tokens = {v}"));
-            }
-            if let Some(v) = s.cost.filter(|c| c.is_finite()) {
-                sets.push(format!("cost = {v}"));
             }
         }
     }
@@ -3062,6 +3657,248 @@ fn or_add(current: Option<i64>, next: Option<i64>) -> Option<i64> {
     }
 }
 
+/// Shared snapshot count column order used by the panel's dimensional queries.
+fn usage_slice_counts(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<[i64; 6]> {
+    Ok([
+        row.get(offset)?,
+        row.get(offset + 1)?,
+        row.get(offset + 2)?,
+        row.get(offset + 3)?,
+        row.get(offset + 4)?,
+        row.get(offset + 5)?,
+    ])
+}
+
+/// One agent slice of the workspace usage rollup: the billed axes summed
+/// over the agent's sessions, including trashed sessions.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageAgentSlice {
+    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
+    pub cache_hit_rate: Option<f64>,
+    /// Recorded model requests from the usage ledger, including unattributed calls.
+    pub requests: i64,
+    pub agent: String,
+    pub sessions: i64,
+    pub members: i64,
+    pub assistant_messages: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub root_members: i64,
+    pub user_messages: i64,
+    pub agent_replies: i64,
+    pub tool_calls: i64,
+    pub side_activities: i64,
+}
+
+/// Billed tokens by member class: the root conversation vs the sub-agents
+/// vs side coordination.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageRelationSlice {
+    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
+    pub cache_hit_rate: Option<f64>,
+    /// Recorded model requests from the usage ledger, including unattributed calls.
+    pub requests: i64,
+    pub relation: String,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub members: i64,
+    pub root_members: i64,
+    pub user_messages: i64,
+    pub agent_replies: i64,
+    pub tool_calls: i64,
+    pub side_activities: i64,
+}
+
+/// One named owner of billed work — a Project or an owner Workstream.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageNamedSlice {
+    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
+    pub cache_hit_rate: Option<f64>,
+    /// Recorded model requests from the usage ledger, including unattributed calls.
+    pub requests: i64,
+    pub id: String,
+    pub name: String,
+    pub sessions: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub members: i64,
+    pub root_members: i64,
+    pub user_messages: i64,
+    pub agent_replies: i64,
+    pub tool_calls: i64,
+    pub side_activities: i64,
+}
+
+/// One canonical model from the ledger (`LOWER(model)` key). `display` is
+/// the most frequent verbatim spelling; tokens come from deduplicated events.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageModelSlice {
+    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
+    pub cache_hit_rate: Option<f64>,
+    pub model: String,
+    pub display: String,
+    pub events: i64,
+    /// Underlying model requests the events cover (zcode reports real counts;
+    /// the other formats assume one request per event).
+    pub requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub agents: Vec<String>,
+    /// Distinct participating members; a member using multiple models counts in each.
+    pub members: i64,
+    pub root_members: i64,
+    /// The ledger has no message/tool provenance for these axes.
+    pub user_messages: Option<i64>,
+    pub agent_replies: Option<i64>,
+    pub tool_calls: Option<i64>,
+    pub side_activities: Option<i64>,
+}
+
+/// One call class from the ledger: conversation vs compaction vs side.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageCategorySlice {
+    pub category: String,
+    pub events: i64,
+    pub requests: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+}
+
+/// One day of the ledger series (newest first), day = the source timestamp's
+/// own UTC date.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageDaySlice {
+    pub day: String,
+    pub events: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+}
+
+/// One row of the top-sessions table: the session's billed totals.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageSessionSlice {
+    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
+    pub cache_hit_rate: Option<f64>,
+    /// Recorded model requests from the usage ledger, including unattributed calls.
+    pub requests: i64,
+    pub session_id: String,
+    pub title: Option<String>,
+    pub agent: String,
+    pub last_activity_at: Option<String>,
+    pub assistant_messages: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub members: i64,
+    pub root_members: i64,
+    pub user_messages: i64,
+    pub agent_replies: i64,
+    pub tool_calls: i64,
+    pub side_activities: i64,
+}
+
+/// The stats panel's single read: activity counters from member snapshots,
+/// all token totals, model requests and usage slices from deduplicated events.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageOverview {
+    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
+    pub cache_hit_rate: Option<f64>,
+    /// Recorded model requests from the usage ledger, including unattributed calls.
+    pub requests: i64,
+    pub sessions: i64,
+    /// Every member of every session — the user's 会话 vocabulary: roots,
+    /// children and sides all count.
+    pub members: i64,
+    /// The root members among them (根会话).
+    pub root_members: i64,
+    pub user_messages: i64,
+    /// Assistant generations (代理回复), from the snapshots.
+    pub agent_replies: i64,
+    pub tool_calls: i64,
+    /// Side-activity observations (代理协同 / 辅会话).
+    pub side_activities: i64,
+    pub assistant_messages: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub by_agent: Vec<UsageAgentSlice>,
+    pub by_relation: Vec<UsageRelationSlice>,
+    pub by_project: Vec<UsageNamedSlice>,
+    pub by_workstream: Vec<UsageNamedSlice>,
+    pub top_sessions: Vec<UsageSessionSlice>,
+    // ---- ledger sections (empty until a rebuild / from-scratch rescan) ----
+    pub ledger_events: i64,
+    pub attributed_events: i64,
+    pub unattributed_events: i64,
+    pub by_model: Vec<UsageModelSlice>,
+    pub by_category: Vec<UsageCategorySlice>,
+    pub series: Vec<UsageDaySlice>,
+}
+
+/// All usage slices use the same ledger population and token-weighted rate.
+fn cache_hit_rate(input: i64, cached: i64) -> Option<f64> {
+    let cached = cached.max(0) as f64;
+    let total = input.max(0) as f64 + cached;
+    (total > 0.0).then(|| cached / total)
+}
+
+/// The panel's canonical model key: lowercase, gateway/provider prefix
+/// stripped (`qwen/qwen3.8-27b` → `qwen3.8-27b`), routing/mode suffixes
+/// merged into the base model (`-tiered`, `-thinking`). Applied at aggregation;
+/// `usage_events.model` keeps the source's spelling, qualified with the confirmed
+/// channel when available.
+fn canonical_model(model: &str) -> String {
+    let lower = model.trim().to_lowercase();
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+    for suffix in ["-tiered", "-thinking"] {
+        if let Some(stripped) = base.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    base.to_string()
+}
+
+/// The display spelling for a canonical group: the group's most frequent
+/// verbatim spelling, put through the same prefix/suffix strip — casing is
+/// kept (`GLM-5.3-Flash` stays cased), the noise is not.
+fn display_model(spelling: &str) -> String {
+    let base = spelling.rsplit('/').next().unwrap_or(spelling);
+    let lower = base.to_lowercase();
+    for suffix in ["-tiered", "-thinking"] {
+        if lower.ends_with(suffix) {
+            return base[..base.len() - suffix.len()].to_string();
+        }
+    }
+    base.to_string()
+}
+
+/// Fold state for one canonical model key while the ledger rows walk in.
+#[derive(Default)]
+struct ModelFold {
+    total: i64,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_tokens: i64,
+    reasoning_tokens: i64,
+    spellings: std::collections::BTreeMap<String, i64>,
+    agents: std::collections::BTreeSet<String>,
+}
+
 /// Query-time aggregate over a session's execution graph — the session-level
 /// rollup: each member's own share, summed. No cache table: the member count is
 /// small and this can never drift.
@@ -3074,13 +3911,15 @@ pub struct SessionAggregateStats {
     pub tool_call_count: i64,
     pub user_message_count: i64,
     pub assistant_message_count: i64,
-    pub compaction_count: i64,
+
     pub side_activity_count: i64,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
-    pub cost: Option<f64>,
+    /// Billed model requests of the whole member graph, straight off the
+    /// ledger — the panel's 模型请求 cell, at session scope. 0 = no events.
+    pub requests: i64,
 }
 
 pub fn insert_item_conn(
@@ -3520,6 +4359,7 @@ fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
             SessionMessageRole::User
         },
         content: r.get("content")?,
+        turn_final: r.get::<_, i64>("turn_final")? != 0,
         provider: r.get("provider")?,
         model: r.get("model")?,
         raw_ref: r.get("raw_ref")?,
@@ -3532,15 +4372,13 @@ fn row_member_stats(r: &Row) -> rusqlite::Result<SessionMemberStats> {
         tool_call_count: r.get(1)?,
         user_message_count: r.get(2)?,
         assistant_message_count: r.get(3)?,
-        compaction_count: r.get(4)?,
-        side_activity_count: r.get(5)?,
-        input_tokens: r.get(6)?,
-        output_tokens: r.get(7)?,
-        cached_tokens: r.get(8)?,
-        reasoning_tokens: r.get(9)?,
-        cost: r.get(10)?,
-        updated_at: r.get(11)?,
-        extra: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+        side_activity_count: r.get(4)?,
+        input_tokens: r.get(5)?,
+        output_tokens: r.get(6)?,
+        cached_tokens: r.get(7)?,
+        reasoning_tokens: r.get(8)?,
+        updated_at: r.get(9)?,
+        extra: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
     })
 }
 
@@ -3639,7 +4477,7 @@ fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
         status: r.get(8)?,
         note: r.get(9)?,
         created_at: r.get(10)?,
-        updated_at: r.get(11)?,
+        updated_at: r.get(10)?,
     })
 }
 

@@ -177,9 +177,177 @@ impl ExecOptions {
 pub struct ParsedLine {
     /// The conversation message this line contributes, if any.
     pub message: Option<ParsedSessionMessage>,
-    /// Execution observations (tool calls, compactions, side activity) this
+    /// Execution observations (tool calls, side activity) this
     /// line contributes — counted even on lines that carry no message.
     pub observation: MemberObservation,
+    /// Ledger note for usage this line bills WITHOUT a conversation message
+    /// (a compaction summary, an assistant attempt, a codex token_count
+    /// event): which bucket, which model, what stable identity. `None` means
+    /// the event (if the observation bills usage at all) derives from
+    /// `message`; an observation-only line without a note keeps its usage out
+    /// of the ledger because no event identity or provenance was supplied.
+    pub usage_note: Option<UsageNote>,
+}
+
+/// The ledger anchor of a usage-carrying line that is not a conversation
+/// message.
+#[derive(Debug, Clone, Default)]
+pub struct UsageNote {
+    pub category: UsageCategory,
+    pub model: Option<String>,
+    /// Source-confirmed channel, never inferred from agent branding/configuration.
+    pub provider: Option<String>,
+    /// Source-stable identity across re-reads (codex token_count cumulative
+    /// totals). Scoped to the member by the storage layer.
+    pub key: Option<String>,
+}
+
+/// Which kind of model call a usage event represents. The ledger retains
+/// this category for the panel's per-category usage summaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageCategory {
+    /// A conversation turn's generation call (the common case).
+    #[default]
+    Conversation,
+    /// A context-compaction call (dsh's summary, pi's compact).
+    Compaction,
+    /// Side activity between agents (relay chatter, sub-agent coordination).
+    SideActivity,
+}
+
+impl UsageCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UsageCategory::Conversation => "conversation",
+            UsageCategory::Compaction => "compaction",
+            UsageCategory::SideActivity => "side",
+        }
+    }
+}
+
+/// One billed call, as the source records it — the ledger row vocabulary. A
+/// events are the sole source of token totals; activity stats carry counts only.
+#[derive(Debug, Clone, Default)]
+pub struct UsageEvent {
+    pub key: Option<String>,
+    pub category: UsageCategory,
+    pub model: Option<String>,
+    /// Source-confirmed channel, never inferred from agent branding/configuration.
+    pub provider: Option<String>,
+    pub ts: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub reasoning_tokens: u64,
+
+    /// Real model requests this event covers; 0 = assume one. Only sources
+    /// that count their own requests (zcode's `model_request_count`) carry a
+    /// bigger number — codex's per-turn token_count cannot see its per-request
+    /// splits, so its events stay at the one-request default (an undercount).
+    pub request_count: u64,
+}
+
+impl UsageEvent {
+    /// The event one parsed line contributes: the note wins when present
+    /// (compaction, attempt, token_count), otherwise a message line's own
+    /// model and ts speak. A line that bills no usage produces no event; an
+    /// observation-only line without a note produces none either — its usage
+    /// has no ledger anchor.
+    pub fn from_parsed_line(line: &ParsedLine, line_ts: Option<&str>) -> Option<UsageEvent> {
+        let obs = &line.observation;
+        if obs.input_tokens == 0
+            && obs.output_tokens == 0
+            && obs.cached_tokens == 0
+            && obs.reasoning_tokens == 0
+            && obs.request_count == 0
+        {
+            return None;
+        }
+        let (category, model, provider, ts, key) = match &line.usage_note {
+            Some(note) => (
+                note.category,
+                note.model.clone(),
+                note.provider.clone(),
+                line_ts.map(str::to_string),
+                note.key.clone(),
+            ),
+            None => {
+                let m = line.message.as_ref()?;
+                (
+                    UsageCategory::Conversation,
+                    m.model.clone(),
+                    m.provider.clone(),
+                    m.ts.clone().or_else(|| line_ts.map(str::to_string)),
+                    None,
+                )
+            }
+        };
+        Some(UsageEvent {
+            key,
+            category,
+            model,
+            provider,
+            ts,
+            input_tokens: obs.input_tokens,
+            output_tokens: obs.output_tokens,
+            cached_tokens: obs.cached_tokens,
+            reasoning_tokens: obs.reasoning_tokens,
+
+            request_count: obs.request_count,
+        })
+    }
+}
+
+/// Raw event totals for adapter regression tests; persisted queries also apply
+/// the database's per-member event-key deduplication.
+#[cfg(test)]
+pub(crate) fn test_usage_tokens(events: &[UsageEvent]) -> [i64; 4] {
+    events.iter().fold([0; 4], |mut total, event| {
+        for (i, value) in [
+            event.input_tokens,
+            event.output_tokens,
+            event.cached_tokens,
+            event.reasoning_tokens,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            total[i] += value as i64;
+        }
+        total
+    })
+}
+
+#[cfg(test)]
+mod usage_event_tests {
+    use super::{ParsedLine, UsageCategory, UsageEvent};
+    use crate::domain::MemberObservation;
+
+    #[test]
+    fn request_only_records_survive_without_cost_or_tokens() {
+        let line = ParsedLine::billed_without_message(
+            Some("model".into()),
+            UsageCategory::Conversation,
+            MemberObservation {
+                request_count: 2,
+                ..Default::default()
+            },
+        );
+        let event = UsageEvent::from_parsed_line(&line, Some("2026-10-01T00:00:00Z")).unwrap();
+        assert_eq!(event.request_count, 2);
+        assert_eq!(event.input_tokens, 0);
+        assert_eq!(event.model.as_deref(), Some("model"));
+    }
+
+    #[test]
+    fn empty_observations_do_not_invent_calls() {
+        let empty = ParsedLine::billed_without_message(
+            Some("model".into()),
+            UsageCategory::Conversation,
+            MemberObservation::default(),
+        );
+        assert!(UsageEvent::from_parsed_line(&empty, None).is_none());
+    }
 }
 
 impl ParsedLine {
@@ -189,7 +357,49 @@ impl ParsedLine {
         Self {
             message: None,
             observation,
+            usage_note: None,
         }
+    }
+
+    /// An observation-only line that also bills usage under a known anchor
+    /// (compaction summary, assistant attempt, token_count event).
+    pub fn billed_observation(observation: MemberObservation, note: UsageNote) -> Self {
+        Self {
+            message: None,
+            observation,
+            usage_note: Some(note),
+        }
+    }
+
+    /// A usage-carrying line that stays out of the conversation: a
+    /// tool-call-only model response, a sidechain / sub-agent turn, a
+    /// non-root member's row. The ledger note anchors the billed call —
+    /// without it the shared readers would drop exactly the calls that
+    /// produced no prose (most of an agent loop). `category` matches how the
+    /// stats row classifies the line; the event's time comes from the line's
+    /// own timestamp.
+    pub fn billed_without_message(
+        model: Option<String>,
+        category: UsageCategory,
+        observation: MemberObservation,
+    ) -> Self {
+        Self::billed_observation(
+            observation,
+            UsageNote {
+                category,
+                model,
+                provider: None,
+                key: None,
+            },
+        )
+    }
+
+    /// Preserve a no-prose generation's own channel in its ledger anchor.
+    pub fn with_usage_provider(mut self, provider: Option<String>) -> Self {
+        if let Some(note) = &mut self.usage_note {
+            note.provider = provider;
+        }
+        self
     }
 
     /// A line that carries one conversation message and no counters.
@@ -197,6 +407,7 @@ impl ParsedLine {
         Self {
             message: Some(message),
             observation: MemberObservation::default(),
+            usage_note: None,
         }
     }
 }
@@ -221,6 +432,10 @@ pub struct MemberReadDelta {
     pub complete_snapshot: bool,
     pub next_active_provider: Option<String>,
     pub next_active_model: Option<String>,
+    /// The billed calls this read observed — the sole source of token totals.
+    /// On a full re-scan the storage layer replaces
+    /// the member's rows wholesale; on an append these are only the new calls.
+    pub usage_events: Vec<UsageEvent>,
 }
 
 impl MemberReadDelta {
@@ -352,33 +567,43 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
     }
     // Qoder BEFORE Claude, and deliberately so: its transcript is
     // Claude-shaped, so every Qoder message line would satisfy the Claude
-    // branch below. These five line types are Qoder's own bookkeeping and are
+    // branch below. These four structural line types are Qoder's own and are
     // re-emitted throughout the file (workspace-directories alone repeats
-    // dozens of times), so the head always carries one.
+    // dozens of times), so the head always carries one. `last-prompt` is
+    // deliberately NOT decisive: Claude Code 2.1.x writes a `last-prompt`
+    // line too ({lastPrompt, leafUuid}), and a bookkeeping line must never
+    // steal another agent's file.
     if matches!(
         v.get("type").and_then(|t| t.as_str()),
         Some("workspace-directories")
             | Some("runtime-config")
             | Some("worktree-state")
             | Some("active-leaf")
-            | Some("last-prompt")
     ) {
         return Some(Agent::Qoder);
     }
     // Claude event chain: sessionId plus the parentUuid/uuid pair.
-    // Housekeeping lines (queue-operation etc.) carry sessionId alone and
-    // are deliberately not decisive.
+    // Housekeeping lines (mode, permission-mode, atis-latch — a 2.1.x
+    // transcript HEAD is exactly those) carry sessionId alone and are
+    // deliberately not decisive.
     if v.get("sessionId").is_some() && (v.get("parentUuid").is_some() || v.get("uuid").is_some()) {
         return Some(Agent::ClaudeCode);
     }
     // WorkBuddy: no session header, and unlike pi the message payload is NOT
     // nested — `role` / `content` sit at the top level next to `type`. Its
-    // `ai-title` / `file-history-snapshot` bookkeeping lines are unique to it,
-    // and they always appear within the first few lines.
+    // `ai-title` / `file-history-snapshot` bookkeeping lines are stamped with
+    // an epoch-milli `timestamp`; Claude Code 2.1.x writes the same two line
+    // types BARE (no timestamp at all — verified against its real head), so
+    // the stamp decides who owns the line and the types alone can never
+    // steal a Claude file.
     if matches!(
         v.get("type").and_then(|t| t.as_str()),
         Some("ai-title") | Some("file-history-snapshot")
-    ) {
+    ) && v
+        .get("timestamp")
+        .map(serde_json::Value::is_number)
+        .unwrap_or(false)
+    {
         return Some(Agent::WorkBuddy);
     }
     if v.get("type").and_then(|t| t.as_str()) == Some("message")
@@ -439,42 +664,19 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct StatsCapabilities {
     tool_calls: bool,
-    compactions: bool,
     side_activity: bool,
-    /// Usage is a separate axis from the counts: an adapter may count calls
-    /// reliably and still have no usage record at all, and vice versa.
-    tokens: bool,
-    cost: bool,
 }
 
 impl StatsCapabilities {
-    pub const TOOL_CALLS: Self = Self::new(true, false, false);
-    pub const TOOL_AND_COMPACTION: Self = Self::new(true, true, false);
-    pub const COMPACTION: Self = Self::new(false, true, false);
-    pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, false, true);
-    pub const TOOL_COMPACTION_AND_SIDE_ACTIVITY: Self = Self::new(true, true, true);
+    pub const MESSAGE_COUNTS: Self = Self::new(false, false);
+    pub const TOOL_CALLS: Self = Self::new(true, false);
+    pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, true);
 
-    const fn new(tool_calls: bool, compactions: bool, side_activity: bool) -> Self {
+    const fn new(tool_calls: bool, side_activity: bool) -> Self {
         Self {
             tool_calls,
-            compactions,
             side_activity,
-            tokens: false,
-            cost: false,
         }
-    }
-
-    /// The source carries per-turn usage records.
-    pub const fn with_tokens(self) -> Self {
-        Self {
-            tokens: true,
-            ..self
-        }
-    }
-
-    /// The source states a cost alongside the usage.
-    pub const fn with_cost(self) -> Self {
-        Self { cost: true, ..self }
     }
 }
 
@@ -492,40 +694,15 @@ pub fn stats_update_from(
                 .then_some(observation.tool_calls as i64),
             user_message_count: Some(observation.user_messages as i64),
             assistant_message_count: Some(observation.assistant_messages as i64),
-            compaction_count: capabilities
-                .compactions
-                .then_some(observation.compactions as i64),
             side_activity_count: capabilities
                 .side_activity
                 .then_some(observation.side_activity as i64),
-            input_tokens: capabilities
-                .tokens
-                .then_some(observation.input_tokens as i64),
-            output_tokens: capabilities
-                .tokens
-                .then_some(observation.output_tokens as i64),
-            cached_tokens: capabilities
-                .tokens
-                .then_some(observation.cached_tokens as i64),
-            reasoning_tokens: capabilities
-                .tokens
-                .then_some(observation.reasoning_tokens as i64),
-            cost: capabilities
-                .cost
-                .then_some(observation.cost)
-                .filter(|c| c.is_finite()),
         }));
     }
     let empty = (!capabilities.tool_calls || observation.tool_calls == 0)
         && observation.user_messages == 0
         && observation.assistant_messages == 0
-        && (!capabilities.compactions || observation.compactions == 0)
-        && (!capabilities.side_activity || observation.side_activity == 0)
-        && (!capabilities.tokens || observation.input_tokens == 0)
-        && (!capabilities.tokens || observation.output_tokens == 0)
-        && (!capabilities.tokens || observation.cached_tokens == 0)
-        && (!capabilities.tokens || observation.reasoning_tokens == 0)
-        && (!capabilities.cost || observation.cost == 0.0);
+        && (!capabilities.side_activity || observation.side_activity == 0);
     if empty {
         None
     } else {
@@ -536,20 +713,8 @@ pub fn stats_update_from(
                 .then_some(observation.user_messages as i64),
             assistant_message_count: (observation.assistant_messages > 0)
                 .then_some(observation.assistant_messages as i64),
-            compaction_count: (capabilities.compactions && observation.compactions > 0)
-                .then_some(observation.compactions as i64),
             side_activity_count: (capabilities.side_activity && observation.side_activity > 0)
                 .then_some(observation.side_activity as i64),
-            input_tokens: (capabilities.tokens && observation.input_tokens > 0)
-                .then_some(observation.input_tokens as i64),
-            output_tokens: (capabilities.tokens && observation.output_tokens > 0)
-                .then_some(observation.output_tokens as i64),
-            cached_tokens: (capabilities.tokens && observation.cached_tokens > 0)
-                .then_some(observation.cached_tokens as i64),
-            reasoning_tokens: (capabilities.tokens && observation.reasoning_tokens > 0)
-                .then_some(observation.reasoning_tokens as i64),
-            cost: (capabilities.cost && observation.cost > 0.0 && observation.cost.is_finite())
-                .then_some(observation.cost),
         }))
     }
 }
@@ -673,6 +838,7 @@ pub fn read_jsonl_delta_stateful(
                 complete_snapshot: true,
                 next_active_provider: state.provider.clone(),
                 next_active_model: state.model.clone(),
+                usage_events: Vec::new(),
             });
         }
         (cursor.generation + 1, 0) // same-size rewrite / touch
@@ -698,6 +864,7 @@ pub fn read_jsonl_delta_stateful(
 
     let mut messages: Vec<ParsedSessionMessage> = Vec::new();
     let mut observation = MemberObservation::default();
+    let mut usage_events: Vec<UsageEvent> = Vec::new();
     let start_offset = start_offset as usize;
     let mut offset = 0usize;
     let mut complete_snapshot = true;
@@ -752,7 +919,10 @@ pub fn read_jsonl_delta_stateful(
         // consecutive SOURCE lines, not about which ones became messages.
         prev = Some(v);
         if let Some(p) = parsed {
-            observation.add(&p.observation);
+            observation.add_activity(&p.observation);
+            if let Some(event) = UsageEvent::from_parsed_line(&p, ts.as_deref()) {
+                usage_events.push(event);
+            }
             if let Some(mut m) = p.message {
                 if m.content.trim().is_empty() {
                     continue;
@@ -784,6 +954,7 @@ pub fn read_jsonl_delta_stateful(
         complete_snapshot,
         next_active_provider: state.provider.clone(),
         next_active_model: state.model.clone(),
+        usage_events,
     })
 }
 
@@ -1049,14 +1220,6 @@ pub trait AgentAdapter: Send + Sync {
     ) -> Result<AgentCommand> {
         Err(other("该 Agent 不支持 Context 提取"))
     }
-
-    /// The unit the Agent states its `cost` in, or `None` when it states no
-    /// cost at all. The number is always the source's OWN — USD for Pi, Qoder's
-    /// credits — and the UI must never show it under a unit the source never
-    /// used, so every cost-reporting adapter has to answer here.
-    fn cost_unit(&self) -> Option<&'static str> {
-        None
-    }
 }
 
 pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
@@ -1123,17 +1286,60 @@ pub fn truncate_text(s: &str, max: usize) -> String {
     }
 }
 
-/// An injected preamble rather than the user's own words: `<…>` environment
-/// blocks and `#`-prefixed injections (AGENTS.md, attached-file headers).
-/// Adapters call this when picking their first human turn AND when deciding
-/// what is Conversation (injected context never becomes a SessionMessage).
+/// An injected preamble rather than the user's own words. Adapters call this
+/// when picking their first human turn AND when deciding what is Conversation
+/// (injected context never becomes a SessionMessage).
+///
+/// `<…>` tag blocks stay blanket-injected: every agent's machine context is
+/// tag-shaped, and a human turn does not open with a tag. `#` headers are NOT
+/// blanket-injected any more — a Markdown heading is a normal way to start a
+/// real question, and the blanket rule silently ate 21% of codex's real user
+/// turns. Only the known generated headers are injected, and codex's envelope
+/// that wraps the actual question under `## My request:` is peeled so the
+/// wrapped words survive — see [`user_request_text`].
 ///
 /// The test is on trimmed text because the runtime does not always put the
 /// marker first: Codex writes the pasted-file block as
 /// `"\n# Files pasted by the user: …"`.
 pub fn is_injected_preamble(text: &str) -> bool {
+    user_request_text(text).is_none()
+}
+
+/// `#`-headed machine blocks NoEnding has actually seen (generated constants,
+/// matched verbatim). Anything else starting with `#` is the user's own
+/// Markdown.
+const HASH_INJECTION_HEADERS: &[&str] = &[
+    "# AGENTS.md instructions",
+    "# Files mentioned by the user:",
+    "# Files pasted by the user:",
+];
+
+/// The words under a `## My request` header, if the text carries one — codex
+/// wraps the user's actual question in that section (bare, or under a
+/// mentioned/pasted-files header).
+fn peeled_request_text(t: &str) -> Option<String> {
+    let idx = t.find("## My request")?;
+    let rest = t[idx..]
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or("")
+        .trim();
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
+/// The user's own words out of a turn that may carry an injection envelope.
+/// `None` = injected context only, never conversation; `Some` = the text to
+/// treat as the human turn (peeled to the request when the turn was an
+/// envelope). Adapters that only need the verdict use [`is_injected_preamble`].
+pub fn user_request_text(text: &str) -> Option<String> {
     let t = text.trim_start();
-    t.starts_with('<') || t.starts_with('#')
+    if t.starts_with('<') {
+        return None;
+    }
+    if t.starts_with("## My request") || HASH_INJECTION_HEADERS.iter().any(|h| t.starts_with(h)) {
+        return peeled_request_text(t);
+    }
+    Some(text.to_string())
 }
 
 /// Session display title from one text candidate. `None` when there is
@@ -1197,7 +1403,7 @@ mod jsonl_integrity_tests {
         let delta = read_jsonl_delta(
             &path,
             &SessionMemberCursor::default(),
-            StatsCapabilities::COMPACTION,
+            StatsCapabilities::MESSAGE_COUNTS,
             &|_, _| None,
         )
         .unwrap();
@@ -1215,7 +1421,7 @@ mod jsonl_integrity_tests {
         let delta = read_jsonl_delta(
             &path,
             &SessionMemberCursor::default(),
-            StatsCapabilities::COMPACTION,
+            StatsCapabilities::MESSAGE_COUNTS,
             &|_, _| None,
         )
         .unwrap();
@@ -1384,11 +1590,15 @@ mod fingerprint_tests {
             "type": "workspace-directories", "sessionId": "s", "directories": ["/repo"]
         });
         assert_eq!(fingerprint_line(&qoder), Some(Agent::Qoder));
+        // `last-prompt` is written by BOTH qoder and Claude Code 2.1.x, so it
+        // decides nothing — a bare one claims nobody.
         let last_prompt = serde_json::json!({"type": "last-prompt", "sessionId": "s"});
-        assert_eq!(fingerprint_line(&last_prompt), Some(Agent::Qoder));
+        assert_eq!(fingerprint_line(&last_prompt), None);
 
         // A Qoder message line is indistinguishable from Claude's on its own —
-        // which is exactly why the bookkeeping line has to be in the head.
+        // which is exactly why a structural bookkeeping line has to be in the
+        // head. (Verified on the real corpus: every qoder transcript head
+        // carries one of the four structural types.)
         let claude_shaped = serde_json::json!({
             "type": "user", "sessionId": "s", "uuid": "u", "parentUuid": null,
             "message": {"role": "user", "content": []}
@@ -1434,6 +1644,21 @@ mod fingerprint_tests {
         });
         assert_eq!(fingerprint_line(&snapshot), Some(Agent::WorkBuddy));
 
+        // Claude Code 2.1.x writes the SAME two line types, but bare — no
+        // timestamp at all (its real head is exactly these shapes). The
+        // missing stamp leaves the line to nobody; the next message line
+        // claims the file for Claude.
+        let claude_title = serde_json::json!({
+            "type": "ai-title", "aiTitle": "multi-agent-context-workspace",
+            "sessionId": "f6dcd71f"
+        });
+        assert_eq!(fingerprint_line(&claude_title), None);
+        let claude_snapshot = serde_json::json!({
+            "type": "file-history-snapshot", "messageId": "m", "isSnapshotUpdate": false,
+            "snapshot": {"trackedFileBackups": {}}
+        });
+        assert_eq!(fingerprint_line(&claude_snapshot), None);
+
         // pi's nested message line must stay pi — the top-level `role` is the
         // only thing separating the two shapes.
         let pi_event = serde_json::json!({
@@ -1460,6 +1685,42 @@ mod fingerprint_tests {
         let path2 = dir.join("foreign.jsonl");
         std::fs::write(&path2, "{\"hello\":\"world\"}\n{\"more\":\"data\"}\n").unwrap();
         assert_eq!(detect_format(&path2), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Claude Code 2.1.x transcript HEAD is four bookkeeping lines (mode →
+    /// permission-mode → atis-latch → file-history-snapshot) before the first
+    /// message line. Every one of them used to be stealable — the snapshot
+    /// landed on WorkBuddy, a head that instead opened with `ai-title` would
+    /// too, and `last-prompt` landed on Qoder — which made the newest, heaviest
+    /// transcripts invisible to discovery. None of the four may decide
+    /// anything now; the first message line claims the file.
+    #[test]
+    fn a_new_format_claude_head_resolves_to_claude() {
+        let dir =
+            std::env::temp_dir().join(format!("noending-fp-claude-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let head = [
+            r#"{"type":"mode","mode":"default","sessionId":"f6dcd71f"}"#,
+            r#"{"type":"permission-mode","permissionMode":"auto","sessionId":"f6dcd71f"}"#,
+            r#"{"type":"atis-latch","atis":true,"sessionId":"f6dcd71f"}"#,
+            r#"{"type":"file-history-snapshot","messageId":"28976ebe","isSnapshotUpdate":false,"snapshot":{}}"#,
+            r#"{"type":"ai-title","aiTitle":"multi-agent-context-workspace","sessionId":"f6dcd71f"}"#,
+            r#"{"type":"last-prompt","lastPrompt":"这是个什么工程","leafUuid":"b4ca0ea0","sessionId":"f6dcd71f"}"#,
+        ];
+        let first_turn = r#"{"type":"user","sessionId":"f6dcd71f","uuid":"2df3541a","parentUuid":null,"timestamp":"2026-10-01T13:00:00.000Z","cwd":"/repo","message":{"role":"user","content":[{"type":"text","text":"开工"}]}}"#;
+        let path = dir.join("f6dcd71f.jsonl");
+        std::fs::write(
+            &path,
+            head.iter()
+                .copied()
+                .chain([first_turn])
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        assert_eq!(detect_format(&path), Some(Agent::ClaudeCode));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1512,7 +1773,7 @@ mod fingerprint_tests {
 
 #[cfg(test)]
 mod title_tests {
-    use super::{is_injected_preamble, title_from_text};
+    use super::{is_injected_preamble, title_from_text, user_request_text};
 
     #[test]
     fn a_title_is_one_line_and_short() {
@@ -1557,28 +1818,34 @@ mod title_tests {
         assert!(is_injected_preamble("  <environment_context>"));
         assert!(!is_injected_preamble("看一下这个"));
     }
-}
 
-#[cfg(test)]
-mod cost_unit_tests {
-    use super::{adapter_for, Agent};
-
-    /// The `cost` axis carries the Agent's own number, and the UI labels it
-    /// with this unit — so the two cost-reporting adapters must declare one, and
-    /// everyone else must stay `None` rather than inherit a currency.
+    /// The blanket `#` rule used to eat real questions: a Markdown heading is
+    /// a normal way to start a turn. Only the known machine headers stay
+    /// injected, and the request wrapped under `## My request:` survives.
     #[test]
-    fn only_the_cost_reporting_agents_declare_a_unit() {
-        assert_eq!(adapter_for(Agent::Pi).cost_unit(), Some("USD"));
-        assert_eq!(adapter_for(Agent::Qoder).cost_unit(), Some("credits"));
-        for agent in [
-            Agent::Codex,
-            Agent::ClaudeCode,
-            Agent::WorkBuddy,
-            Agent::Dsh,
-            Agent::ZCode,
-            Agent::Antigravity,
-        ] {
-            assert_eq!(adapter_for(agent).cost_unit(), None, "{agent:?}");
-        }
+    fn hash_user_turns_are_kept_and_request_envelopes_are_peeled() {
+        // A `#` heading is the user's own words now.
+        assert_eq!(
+            user_request_text("# 帮我改这个函数").as_deref(),
+            Some("# 帮我改这个函数")
+        );
+        assert!(!is_injected_preamble("## 背景\n问题如下"));
+
+        // The codex envelope: attachments above, the real question under
+        // `## My request:` — peel to the words.
+        assert_eq!(
+            user_request_text(
+                "# Files mentioned by the user:\n- a.rs\n\n## My request:\n修复这个报错"
+            )
+            .as_deref(),
+            Some("修复这个报错")
+        );
+        assert_eq!(
+            user_request_text("## My request for Codex:\n跑一下测试").as_deref(),
+            Some("跑一下测试")
+        );
+        // A machine header with nothing under it is still injected.
+        assert!(is_injected_preamble("## My request:"));
+        assert!(is_injected_preamble("# AGENTS.md instructions\nbe helpful"));
     }
 }

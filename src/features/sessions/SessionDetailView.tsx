@@ -121,7 +121,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     );
   }
   const { session, owner_workstream } = detail;
-  /** 没有子/边成员时整节不出现：那时清单就是一行 root，汇总里的「规模」已经把话说完了。 */
+  /** 没有子/辅成员时整节不出现：那时清单就是一行 root，汇总里的「规模」已经把话说完了。 */
   const hasSubMembers = detail.members.some((m) => m.relation !== "root");
 
   /** 一次点击 → 最多一次模型调用 → 一份新的四字段摘要。失败按后端原因给可行动文案。 */
@@ -230,6 +230,8 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const rootMember = detail.members.find((m) => m.relation === "root") ?? null;
   const sourceMissing = rootMember !== null && detail.root_source_status === "missing";
   const sourceUnavailable = rootMember === null || detail.root_source_status === "unavailable";
+  /** 源在，路径本身才是入口；源不在就只是可复制的文本，点了也只会报错。 */
+  const canRevealSource = rootMember !== null && !sourceMissing && !sourceUnavailable;
 
   const revealSource = async () => {
     try {
@@ -424,11 +426,13 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         <AgentIcon agent={session.agent} />
         <span>{agentDisplayLabel(session.agent)}</span>
       </div>
-      <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
-        {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
-        {trashed && <span className="badge warn">回收站</span>}
-        <span className="small muted">{messages.length > 0 ? `${messages.length} 条消息` : "尚无消息"}</span>
-      </div>
+      {/* 消息条数在下面的统计里有，这里只留状态徽标；两个都没有就不摆空行。 */}
+      {(untitled || trashed) && (
+        <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+          {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
+          {trashed && <span className="badge warn">回收站</span>}
+        </div>
+      )}
 
       {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
       <div className="session-info-fields">
@@ -511,23 +515,17 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           )}
         </Field>
         {/* 源会话：Root 成员的源文件，不再是 session.raw_path。
-            状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。 */}
+            状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。
+            路径本身就是「在文件管理器中显示」的入口，不再另配一行链接。 */}
         <Field label="源会话">
           {rootMember ? (
             <>
               <CopyValue
                 value={rootMember.source_path}
                 mono
-                title={`${rootMember.source_path} · Agent 保存的 Root 源会话`}
+                title={`${rootMember.source_path} · Agent 保存的 Root 源会话${canRevealSource ? " · 点击在文件管理器中显示" : ""}`}
+                onOpen={canRevealSource ? () => void revealSource() : undefined}
               />
-              <button
-                className="link"
-                onClick={revealSource}
-                disabled={sourceMissing || sourceUnavailable}
-                title={sourceMissing ? "源会话文件已不存在" : sourceUnavailable ? "无法确认源会话文件状态" : "在文件管理器中显示源会话文件"}
-              >
-                在文件管理器中显示
-              </button>
               {sourceMissing && (
                 <div className="session-source-warning">源会话已不存在</div>
               )}
@@ -578,10 +576,10 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       </div>
       </section>
 
-      {/* 执行成员：这次执行由哪些成员组成——根 / 子 / 边、各自的身份与来源。
+      {/* 执行成员：这次执行由哪些成员组成——根 / 子 / 辅、各自的身份与来源。
           成员不是链接：它们是 Agent 内部的执行单元，不是另一个 Session 页面。
           root 的源不在这里重复画（它在「会话信息 · 源会话」里，带着删除流程要用的结论）；
-          成员各自的数字默认不画，开关归这一节；没有子/边成员时整节不出现。 */}
+          成员各自的数字默认不画，开关归这一节；没有子/辅成员时整节不出现。 */}
       {hasSubMembers && (
         <section className="rail-section">
         <div className="row between" style={{ alignItems: "center" }}>
@@ -589,20 +587,20 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           <button
             className="btn small ghost"
             aria-expanded={showMemberStats}
-            title="显示每个成员自己的数字（计数、tokens、成本）"
+            title="显示每个成员自己的数字（计数、tokens）"
             onClick={() => setShowMemberStats((on) => !on)}
           >
             {showMemberStats ? "隐藏统计" : "显示统计"}
           </button>
         </div>
-        <MemberTree members={detail.members} costUnit={detail.cost_unit} showStats={showMemberStats} />
+        <MemberTree members={detail.members} showStats={showMemberStats} />
         </section>
       )}
 
       {/* 执行统计：会话级汇总——各成员自己份额的和。 */}
       <section className="rail-section">
       <div className="section-label">执行统计</div>
-      <ExecutionStats stats={detail.stats} costUnit={detail.cost_unit} />
+      <ExecutionStats stats={detail.stats} />
       </section>
       </aside>
       </div>
@@ -669,74 +667,75 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 /** 数值 → 千位分隔；null = 源不提供，显示「—」。 */
 const fmtCount = (n: number | null): string => (n === null ? "—" : n.toLocaleString("en-US"));
+import {
+  CACHE_HIT_HINT, cacheHitRate, fmtCacheHit, fmtTokens, sumTokens,
+} from "../usage/usageFormat";
 
 /**
- * 成本带单位：各 Agent 有各自的单位（Pi 是 USD、Qoder 是 credits），
- * 不写单位就等于替源安了一个它没用的单位。
- */
-function formatCost(cost: number, unit: string | null): string {
-  return `${cost.toLocaleString("en-US", { maximumFractionDigits: 4 })}${unit ? ` ${unit}` : ""}`;
-}
-
-/**
- * 会话级执行统计：标签列 + 两列数值。执行图的规模永远显示；
- * 消息、token、成本只在数据真的在场上时出现——有数据才显示，没有就不画一行「0」去冒称观测。
- * 组名叫「消息构成」：这一组描述整个执行图的**源消息**构成——用户、助手的对话轮次，
- * 以及工具调用、压缩、协同（子代理转述）这些源记录。每个成员各自统计，这里是汇总；
- * 单个成员自己的份额在「执行成员」里该成员那一行。
- * 成本带单位：数字各 Agent 有自己的单位（Pi 是 USD，Qoder 是 credits），不写单位就等于
- * 替源安了一个它没用的单位。
+ * 与统计面板（/usage）同一套口径：Tokens 组在前（总量 / 输入（含缓存读取）/
+ * 输出 / 缓存命中），活动计数居中（面板统计项的会话级版本），执行图的规模
+ * （成员数 / 子会话 / 辅会话 / 深度——面板没有的树事实）殿后。数字缩写、合并规则与
+ * 命中率公式来自 features/usage/usageFormat，两处只有一份。
+ *
+ * 有数据才显示：某个轴没人记录就不画「0」去冒称观测；活动计数 >0 才出现。
+ * 会话级不再显示推理——它是输出内的注记轴，面板已按用户决定移除。
  *
  * 不用「值 · 值 · 值」串烧：右栏只有 240–300px，十来个数字挤一行必然折行，
- * 而折回来的第二行顶格起排、看起来像新的一条。两列网格让每个数各占一格，
- * 折行和错位都不会发生，标签也把「工具 4」这类孤零零的数字放回了它的组里。
+ * 两列网格让每个数各占一格，标签把「工具调用 4」这类孤零零的数字放回组里。
  */
 function ExecutionStats({
   stats,
-  costUnit,
 }: {
   stats: SessionDetail["stats"];
-  costUnit: SessionDetail["cost_unit"];
 }) {
-  const messageCells: string[] = [];
-  if (stats.user_message_count > 0) messageCells.push(`用户 ${stats.user_message_count}`);
+  const activityCells: string[] = [];
+  if (stats.user_message_count > 0) activityCells.push(`用户消息 ${stats.user_message_count}`);
   if (stats.assistant_message_count > 0)
-    messageCells.push(`助手 ${stats.assistant_message_count}`);
-  if (stats.tool_call_count > 0) messageCells.push(`工具 ${stats.tool_call_count}`);
-  if (stats.compaction_count > 0) messageCells.push(`压缩 ${stats.compaction_count}`);
-  if (stats.side_activity_count > 0) messageCells.push(`协同 ${stats.side_activity_count}`);
+    activityCells.push(`代理回复 ${stats.assistant_message_count}`);
+  if (stats.tool_call_count > 0) activityCells.push(`工具调用 ${stats.tool_call_count}`);
+  if (stats.side_activity_count > 0) activityCells.push(`代理协同 ${stats.side_activity_count}`);
+  if (stats.requests > 0) activityCells.push(`模型请求 ${fmtCount(stats.requests)}`);
 
-  const tokenCells: string[] = [];
-  if (stats.input_tokens !== null) tokenCells.push(`输入 ${fmtCount(stats.input_tokens)}`);
-  if (stats.output_tokens !== null) tokenCells.push(`输出 ${fmtCount(stats.output_tokens)}`);
-  if (stats.cached_tokens !== null) tokenCells.push(`缓存 ${fmtCount(stats.cached_tokens)}`);
-  if (stats.reasoning_tokens !== null) tokenCells.push(`推理 ${fmtCount(stats.reasoning_tokens)}`);
+  const hasTokens =
+    stats.input_tokens !== null ||
+    stats.output_tokens !== null ||
+    stats.cached_tokens !== null;
+  const inputTotal = sumTokens(stats.input_tokens, stats.cached_tokens);
+  const total = sumTokens(stats.input_tokens, stats.cached_tokens, stats.output_tokens);
+  const rate = cacheHitRate(stats.input_tokens, stats.cached_tokens);
+  const inputHint =
+    stats.input_tokens === null && stats.cached_tokens === null
+      ? undefined
+      : `含缓存读取；非缓存 ${fmtCount(stats.input_tokens ?? 0)} · 缓存读取 ${fmtCount(stats.cached_tokens ?? 0)}`;
 
-  // 不显示"Session 的 model/provider/effort"：一个 Logical Session 可能中途切模型，
-  // 不存在天然的 Session model；消息级模型标签在消息上。
-
-  const group = (label: string, cells: string[], key: string) => (
+  const group = (
+    label: string,
+    cells: { text: string; title?: string }[],
+    key: string,
+  ) => (
     <Fragment key={key}>
       <div className="muted small exec-label">{label}</div>
       <div className="exec-pairs">
-        {cells.map((c) => <span key={c}>{c}</span>)}
+        {cells.map((c) => <span key={c.text} title={c.title}>{c.text}</span>)}
       </div>
     </Fragment>
   );
 
   return (
     <div className="exec-metrics">
+      {hasTokens && group("Tokens", [
+        { text: `总量 ${fmtTokens(total)}` },
+        { text: `输入 ${fmtTokens(inputTotal)}`, title: inputHint },
+        { text: `输出 ${fmtTokens(stats.output_tokens)}` },
+        { text: `缓存命中 ${fmtCacheHit(rate)}`, title: CACHE_HIT_HINT },
+      ], "tokens")}
+      {activityCells.length > 0 && group("活动", activityCells.map((text) => ({ text })), "activity")}
       {group("规模", [
-        `${stats.member_count} 个成员`,
-        `${stats.child_count} 子`,
-        `${stats.side_count} 边`,
-        `深度 ${stats.max_depth}`,
+        { text: `会话成员 ${stats.member_count}` },
+        { text: `子会话 ${stats.child_count}` },
+        { text: `辅会话 ${stats.side_count}` },
+        { text: `深度 ${stats.max_depth}` },
       ], "tree")}
-      {messageCells.length > 0 && group("消息构成", messageCells, "messages")}
-      {tokenCells.length > 0 && group("Tokens", tokenCells, "tokens")}
-      {stats.cost !== null && group("成本", [
-        formatCost(stats.cost, costUnit),
-      ], "cost")}
     </div>
   );
 }
@@ -744,47 +743,54 @@ function ExecutionStats({
 const RELATION_LABELS: Record<SessionMemberRelation, string> = {
   root: "根",
   child: "子",
-  side: "边",
+  side: "辅",
 };
 
 /**
  * 一行成员：关系标签 + 稳定身份（mono，居中断尾，原值在 title 里），其后是源文件
  * （可复制，源不在了就在同一行说清楚）；`showStats` 打开时才补上这个成员自己的数字。
  *
- * 每个成员——根、子、边——都有自己的份额：消息构成、tokens、成本都是它自己的数，
+ * 每个成员——根、子、辅——都有自己的份额：消息构成、tokens 都是它自己的数，
  * 右栏上面的汇总只是把它们加起来。有数据才画那一行，没有就不拿 0 去冒称观测。
  *
- * 计数不再和身份挤同一行：「根 / 子 / 边」三个标签宽度不同，身份列因此对不齐，
+ * 计数不再和身份挤同一行：「根 / 子 / 辅」三个标签宽度不同，身份列因此对不齐，
  * 计数又常把这一行挤到换行——树里于是出现一行 46px、一行 19px 的锯齿。
  * 关系标签固定列宽 + 其余各行各占一行后，每行等高、身份列对齐。
  */
-function MemberRow({ member, depth, costUnit, showStats }: {
+function MemberRow({ member, depth, showStats }: {
   member: DetailMember;
   depth: number;
-  costUnit: string | null;
   showStats: boolean;
 }) {
   const s = member.stats;
+  // 词汇与口径跟执行统计/统计面板一致：输入含缓存读取（原始拆分就不在行上重复了），
+  // 缓存只出命中率；推理是输出内的注记轴，这里不再显示。
   const bits: string[] = [];
+
+  /** 子/辅成员的源定位：命令按 (session, member) 双键查库，只认这一行的源。 */
+  const revealMemberSource = async () => {
+    try {
+      await api.revealSessionMemberSource(member.session_id, member.id);
+    } catch (e) {
+      showToast(`定位源会话失败：${String(e)}`);
+    }
+  };
+
   const counted = (label: string, value: number | null | undefined) => {
     if (value != null && value > 0) bits.push(`${label} ${value}`);
   };
-  counted("用户", s?.user_message_count);
-  counted("助手", s?.assistant_message_count);
-  counted("工具", s?.tool_call_count);
-  counted("压缩", s?.compaction_count);
-  counted("协同", s?.side_activity_count);
+  counted("用户消息", s?.user_message_count);
+  counted("代理回复", s?.assistant_message_count);
+  counted("工具调用", s?.tool_call_count);
+  counted("代理协同", s?.side_activity_count);
 
-  // null = 源不提供这一项，与计数同一个判据；成本同样带单位。
+  // null = 源不提供这一项，与计数同一个判据。
   const usage: string[] = [];
-  const provided = (label: string, value: number | null | undefined) => {
-    if (value != null) usage.push(`${label} ${fmtCount(value)}`);
-  };
-  provided("输入", s?.input_tokens);
-  provided("输出", s?.output_tokens);
-  provided("缓存", s?.cached_tokens);
-  provided("推理", s?.reasoning_tokens);
-  if (s?.cost != null) usage.push(`成本 ${formatCost(s.cost, costUnit)}`);
+  const inputTotal = sumTokens(s?.input_tokens ?? null, s?.cached_tokens ?? null);
+  if (inputTotal !== null) usage.push(`输入 ${fmtTokens(inputTotal)}`);
+  if (s?.output_tokens != null) usage.push(`输出 ${fmtTokens(s.output_tokens)}`);
+  const rate = cacheHitRate(s?.input_tokens ?? null, s?.cached_tokens ?? null);
+  if (rate !== null) usage.push(`缓存命中 ${fmtCacheHit(rate)}`);
 
   return (
     <div className="member-row" style={{ paddingLeft: depth * 16 }}>
@@ -795,7 +801,8 @@ function MemberRow({ member, depth, costUnit, showStats }: {
         </div>
         {showStats && bits.length > 0 && <MemberValues values={bits} />}
         {showStats && usage.length > 0 && <MemberValues values={usage} />}
-        {/* root 的源在「会话信息 · 源会话」里（那里还带新鲜结论），不重复画。 */}
+        {/* root 的源在「会话信息 · 源会话」里（那里还带新鲜结论），不重复画。
+            子/辅的源路径同样可点定位；源不在了就退回纯文本，警告在下面说。 */}
         {member.relation !== "root" && (
           <div className="small">
             <CopyValue
@@ -804,9 +811,10 @@ function MemberRow({ member, depth, costUnit, showStats }: {
               display={cwdDisplayLabel(member.source_path, MEMBER_PATH_WIDTH)}
               truncate
               mono
-              title={`${member.source_path} · 这个成员在 Agent 侧的源`}
+              title={`${member.source_path} · 这个成员在 Agent 侧的源${member.source_status === "present" ? " · 点击在文件管理器中显示" : ""}`}
+              onOpen={member.source_status === "present" ? () => void revealMemberSource() : undefined}
             />
-            {/* 子 / 边的转写各自消失，一行只报路径会让人以为它还读得到。 */}
+            {/* 子 / 辅的转写各自消失，一行只报路径会让人以为它还读得到。 */}
             {member.source_status !== "present" && (
               <div className="session-source-warning">
                 {member.source_status === "missing" ? "源文件已不存在" : "无法确认源文件状态"}
@@ -836,9 +844,8 @@ function MemberValues({ values }: { values: string[] }) {
  * parent 记录缺席（未摄入或被清理）的成员不能消失——按顶层孤儿如实列出。
  * 常显，不再有展开/收起：这是详情页的一等事实，不是折叠起来的附录。
  */
-function MemberTree({ members, costUnit, showStats }: {
+function MemberTree({ members, showStats }: {
   members: DetailMember[];
-  costUnit: string | null;
   showStats: boolean;
 }) {
   const byParent = useMemo(() => {
@@ -858,7 +865,7 @@ function MemberTree({ members, costUnit, showStats }: {
   }, [members]);
 
   const renderNode = (m: DetailMember, depth: number): React.ReactNode[] => [
-    <MemberRow key={m.id} member={m} depth={depth} costUnit={costUnit} showStats={showStats} />,
+    <MemberRow key={m.id} member={m} depth={depth} showStats={showStats} />,
     ...(byParent.map.get(m.source_member_id) ?? []).flatMap((c) => renderNode(c, depth + 1)),
   ];
 
@@ -873,14 +880,16 @@ function MemberTree({ members, costUnit, showStats }: {
  * 值 + 复制：报障时用户要能原样给出 Session ID 与工作目录。
  * `display` 只改显示（路径按中段省略，尾段最有信息量），复制与 `title` 仍是原值；
  * 传了 `display` 就配 `truncate`：已经省略过的东西再折行只会把尾段折断。
+ * `onOpen` 给了就把值本身变成可点（如在文件管理器中显示）；没有就只是可复制的文本。
  */
-function CopyValue({ label, value, display, truncate, mono, title }: {
+function CopyValue({ label, value, display, truncate, mono, title, onOpen }: {
   label?: string;
   value: string;
   display?: string;
   truncate?: boolean;
   mono?: boolean;
   title?: string;
+  onOpen?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -894,15 +903,28 @@ function CopyValue({ label, value, display, truncate, mono, title }: {
   return (
     <span className="row" style={{ gap: 8 }}>
       {label && <span className="muted small" style={{ flex: "none" }}>{label}</span>}
-      <span
-        className={mono ? "mono" : undefined}
-        title={title ?? value}
-        style={truncate
-          ? { minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", userSelect: "all" }
-          : { minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
-      >
-        {display ?? value}
-      </span>
+      {onOpen ? (
+        <button
+          className={mono ? "link mono" : "link"}
+          title={title ?? value}
+          style={truncate
+            ? { minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+            : { minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
+          onClick={onOpen}
+        >
+          {display ?? value}
+        </button>
+      ) : (
+        <span
+          className={mono ? "mono" : undefined}
+          title={title ?? value}
+          style={truncate
+            ? { minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", userSelect: "all" }
+            : { minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
+        >
+          {display ?? value}
+        </span>
+      )}
       <button className="link" style={{ flex: "none" }} onClick={copy}>
         {copied ? "已复制" : "复制"}
       </button>

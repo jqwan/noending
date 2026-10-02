@@ -44,7 +44,7 @@
 //! them reports a different family. Evidence is per-path, so swallowing paths
 //! that produced none would invent membership.
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::domain::{
@@ -290,7 +290,17 @@ pub fn ensure_workspace_path_conn(
                             .id
                     }
                 },
-                None => create_project_row(conn, &canonical, None, policy, &mut effect)?.id,
+                None => {
+                    // A chat scratch directory joins its Agent's ONE bucket;
+                    // everything else becomes its own path-backed Project.
+                    match crate::platform::paths::app_chat_bucket_of(&canonical) {
+                        Some(label) => {
+                            app_chat_bucket_project(conn, label, &canonical, policy, &mut effect)?
+                                .id
+                        }
+                        None => create_project_row(conn, &canonical, None, policy, &mut effect)?.id,
+                    }
+                }
             };
             insert_workspace_path_conn(conn, &canonical, &project_id)?;
         }
@@ -605,6 +615,37 @@ fn create_project_row(
     upsert_project_conn(conn, &project)?;
     effect.touch(&project.id);
     Ok(project)
+}
+
+/// The ONE Git-less Project an Agent's chat directories share (see
+/// [`crate::platform::paths::app_chat_bucket_of`]). Found by its automatic
+/// name — never a customized one: once the user renames a bucket it is their
+/// project, and a fresh, correctly named bucket is created beside it. Created
+/// on first sight and named after the Agent, not after whichever chat
+/// directory happened to land there first.
+fn app_chat_bucket_project(
+    conn: &Connection,
+    label: &str,
+    seed_path: &str,
+    policy: &dyn WorkspacePolicy,
+    effect: &mut ProjectionEffect,
+) -> Result<Project> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM projects
+             WHERE name = ?1 AND git_id IS NULL AND name_customized = 0
+             ORDER BY created_at LIMIT 1",
+            params![label],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return get_project_conn(conn, &id)?
+            .ok_or_else(|| other(format!("chat bucket project {id} 在匹配后消失")));
+    }
+    let fresh = create_project_row(conn, seed_path, None, policy, effect)?;
+    set_project_name_conn(conn, &fresh.id, label, false)?;
+    Ok(fresh)
 }
 
 /// A Git family's worktree list becomes WorkspacePaths, and only that.

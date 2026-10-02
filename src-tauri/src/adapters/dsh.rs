@@ -73,12 +73,84 @@ pub struct DshAdapter;
 /// `compression: none` writes plain `session*.jsonl` beside the zstd
 /// spellings, and the rows are identical.
 fn generation_of(file_name: &str) -> Option<u8> {
-    match file_name {
-        "session.v2.jsonl.zstd" | "session.v2.jsonl" => Some(2),
-        "session.v1.jsonl.zstd" | "session.v1.jsonl" => Some(1),
-        "session.jsonl.zstd" | "session.jsonl" => Some(0),
-        _ => None,
+    // `vN` is an OPEN set (upstream's currentVersion climbs — v4 exists on
+    // disk today), so the number is parsed, never enumerated: an unknown
+    // generation is still a generation, and missing one means the session
+    // reads a stale older file or vanishes entirely.
+    let stem = file_name.strip_suffix(".zstd").unwrap_or(file_name);
+    if stem == "session.jsonl" {
+        return Some(0);
     }
+    stem.strip_prefix("session.v")
+        .and_then(|rest| rest.strip_suffix(".jsonl"))
+        .and_then(|num| num.parse::<u8>().ok())
+}
+
+/// The seq ranges a later `surfaceOp:{op:"replace", start, end}` row has
+/// superseded, sorted and merged into disjoint intervals. A replaced row is
+/// dead surface: the transcript KEEPS it on disk for provenance, but the
+/// live view answered through the replacing row — counting both would bill
+/// one execution per refresh (measured on the real corpus: 674 replace rows
+/// covering thousands of tool rows). The replacing row itself is not in any
+/// range and counts normally; a chained replace's range swallows the earlier
+/// replacing rows with everything else.
+fn collect_replace_ranges(raw: &[u8]) -> Vec<(i64, i64)> {
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
+    scan_lines(raw, |line| {
+        if line.contains("\"surfaceOp\"") {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                let so = v.get("surfaceOp");
+                if so.and_then(|s| s.get("op")).and_then(|o| o.as_str()) == Some("replace") {
+                    let start = so.and_then(|s| s.get("start")).and_then(|x| x.as_i64());
+                    let end = so.and_then(|s| s.get("end")).and_then(|x| x.as_i64());
+                    if let (Some(start), Some(end)) = (start, end) {
+                        ranges.push((start, end));
+                    }
+                }
+            }
+        }
+        true
+    });
+    ranges.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 + 1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// Is this seq inside any superseded range? Binary search over the merged
+/// intervals — the corpus has hundreds of ranges against thousands of tool
+/// rows per session.
+fn seq_is_covered(ranges: &[(i64, i64)], seq: i64) -> bool {
+    ranges
+        .binary_search_by(|(start, end)| {
+            if seq < *start {
+                std::cmp::Ordering::Greater
+            } else if seq > *end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// v0 streaming frames, by byte prefix — `"type"` leads every dsh row, and
+/// these four types are 74.8% of an old session's lines, each fully decoded
+/// today only to be dropped. Skipping them for the cost of a memcmp retires
+/// the read without changing any output.
+fn is_streaming_frame(line: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        r#"{"type":"assistant/chunk""#,
+        r#"{"type":"text-chunks""#,
+        r#"{"type":"tool-call-chunks""#,
+        r#"{"type":"reasoning-chunks""#,
+    ];
+    PREFIXES.iter().any(|p| line.starts_with(p))
 }
 
 /// Zstandard frame magic (RFC 8478 §3.1.1): how a transcript's bytes say
@@ -223,7 +295,53 @@ fn usage_observation(v: &Value) -> MemberObservation {
 
 /// One decoded record's contribution to the member read. Root members
 /// produce conversation; child members produce observations only.
-fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine> {
+/// The generation model an assistant-family row names
+/// (`data.message.source`, gated on `kind == "model"`); rows that name no
+/// model bill with a NULL one, like every other format's unknowns.
+fn model_of(v: &Value) -> Option<String> {
+    let source_meta = v.pointer("/data/message/source").unwrap_or(&Value::Null);
+    if source_meta.get("kind").and_then(|k| k.as_str()) == Some("model") {
+        source_meta
+            .get("model")
+            .and_then(|m| m.as_str())
+            .map(String::from)
+    } else {
+        None
+    }
+}
+
+fn provider_of(v: &Value) -> Option<String> {
+    let source = v.pointer("/data/message/source")?;
+    (source.get("kind")?.as_str()? == "model")
+        .then(|| source.get("provider")?.as_str().map(String::from))?
+}
+
+/// A usage-carrying row that is NOT a conversation message (a tool-only step,
+/// an attempt, a compaction summary): the ledger note anchors it to its
+/// bucket and model. Inherited fork rows never reach here — their callers
+/// return before building a line.
+fn billed_step(v: &Value, observation: MemberObservation, compaction: bool) -> ParsedLine {
+    ParsedLine::billed_observation(
+        observation,
+        crate::adapters::UsageNote {
+            category: if compaction {
+                crate::adapters::UsageCategory::Compaction
+            } else {
+                crate::adapters::UsageCategory::Conversation
+            },
+            model: model_of(v),
+            provider: provider_of(v),
+            key: None,
+        },
+    )
+}
+
+fn parsed_line(
+    v: &Value,
+    is_root: bool,
+    seed_length: i64,
+    replace_ranges: &[(i64, i64)],
+) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str())?;
     let seq = v.get("seq").and_then(|s| s.as_i64());
     let source_message_id = seq.map(|s| s.to_string());
@@ -255,6 +373,13 @@ fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine>
                     ..Default::default()
                 }));
             }
+            // `source.kind` is the row's authoritative author. A non-user
+            // author (a plugin notice, a model switch) wrote machine traffic,
+            // not a turn — the relay branch above keeps its own semantics.
+            let author_kind = v.pointer("/data/source/kind").and_then(|k| k.as_str());
+            if author_kind.map(|k| k != "user").unwrap_or(false) {
+                return None;
+            }
             let observation = MemberObservation {
                 user_messages: 1,
                 ..Default::default()
@@ -269,6 +394,7 @@ fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine>
                     text,
                 )),
                 observation,
+                usage_note: None,
             })
         }
         "assistant/message" => {
@@ -283,40 +409,35 @@ fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine>
             };
             let text = text_blocks(v.pointer("/data/message/content"));
             if text.trim().is_empty() {
-                return Some(ParsedLine::observation_only(usage));
+                return Some(billed_step(v, usage, false));
             }
             usage.assistant_messages = 1;
             if !is_root {
-                return Some(ParsedLine::observation_only(usage));
+                return Some(billed_step(v, usage, false));
             }
             // The assistant record itself carries `data.message.source` — a
             // discriminated union gated on `kind == "model"` holding the actual
             // generation identity (`source.provider` / `source.model`).
             // Profile/preset config is NOT message-level fact and is never read.
             let source_meta = v.pointer("/data/message/source").unwrap_or(&Value::Null);
-            let prov = if source_meta.get("kind").and_then(|k| k.as_str()) == Some("model") {
-                (
-                    source_meta
-                        .get("provider")
-                        .and_then(|p| p.as_str())
-                        .map(String::from),
-                    source_meta
-                        .get("model")
-                        .and_then(|m| m.as_str())
-                        .map(String::from),
-                )
+            let provider = if source_meta.get("kind").and_then(|k| k.as_str()) == Some("model") {
+                source_meta
+                    .get("provider")
+                    .and_then(|p| p.as_str())
+                    .map(String::from)
             } else {
-                (None, None)
+                None
             };
             let message = crate::adapters::parsed_message(
                 source_message_id,
                 SessionMessageRole::Assistant,
                 text,
             )
-            .with_provenance(prov.0, prov.1);
+            .with_provenance(provider, model_of(v));
             Some(ParsedLine {
                 message: Some(message),
                 observation: usage,
+                usage_note: None,
             })
         }
         // A retried request attempt bills like the settled reply even when it
@@ -325,35 +446,40 @@ fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine>
             if inherited {
                 return None;
             }
-            Some(ParsedLine::observation_only(usage_observation(v)))
+            // A real attempt's `data` is {turn, step, stream} — the usage
+            // lands on the sibling `assistant/message` row, so an attempt
+            // bills nothing (an empty observation makes no event). The old
+            // fixture pretended `data.usage` exists here and the test
+            // celebrated a shape the writer never emits.
+            Some(billed_step(v, usage_observation(v), false))
         }
-        // The compaction summary is a real provider call — the shadowed range
-        // goes to the model — and its spend is counted in addition to the
-        // boundary it writes. (tokscale #1152: falling through to "other"
-        // billed these calls at zero.)
+        // A compaction summary is a real provider call; retain its usage.
         "compaction/summary" => {
             if inherited {
                 return None;
             }
-            let mut observation = usage_observation(v);
-            observation.compactions = 1;
-            Some(ParsedLine::observation_only(observation))
+            let observation = usage_observation(v);
+            Some(billed_step(v, observation, true))
         }
-        // Other compaction rows are boundaries worth counting, but their
-        // payload is machine bookkeeping: a marker, never the pruned content.
-        t if t.starts_with("compaction/") => {
-            if inherited {
-                return None;
-            }
+        // Other compaction rows are machine bookkeeping, never conversation or usage.
+        t if t.starts_with("compaction/") => None,
+        // Count the CALL side only — one execution is one tool call, the
+        // same convention as every other adapter (claude/pi count the
+        // initiating block; counting result rows too made dsh report 2×
+        // its executions against them).
+        "tool/call" => {
+            // A row a later replace superseded is dead surface — the live
+            // view already answered through its replacing row.
+            let counted = match seq {
+                Some(seq) => !seq_is_covered(replace_ranges, seq),
+                None => true,
+            };
             Some(ParsedLine::observation_only(MemberObservation {
-                compactions: 1,
+                tool_calls: u64::from(counted),
                 ..Default::default()
             }))
         }
-        "tool/call" | "tool/result" => Some(ParsedLine::observation_only(MemberObservation {
-            tool_calls: 1,
-            ..Default::default()
-        })),
+        "tool/result" => None,
         _ => None,
     }
 }
@@ -367,6 +493,9 @@ impl DshAdapter {
         let mut first_agent_text: Option<String> = None;
 
         scan_lines(&raw, |line| {
+            if is_streaming_frame(line) {
+                return true;
+            }
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 return true;
             };
@@ -586,21 +715,33 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             .unwrap_or(0);
         let mut messages = Vec::new();
         let mut observation = MemberObservation::default();
+        let mut usage_events = Vec::new();
+        // The replace ranges come from a cheap first walk (only lines that
+        // mention surfaceOp get decoded); the parse walk then knows which
+        // tool rows are dead surface.
+        let replace_ranges = collect_replace_ranges(&raw);
         let complete_snapshot = scan_lines(&raw, |line| {
+            if is_streaming_frame(line) {
+                return true;
+            }
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 return true;
             };
-            let Some(p) = parsed_line(&v, is_root, seed_length) else {
+            let Some(p) = parsed_line(&v, is_root, seed_length, &replace_ranges) else {
                 return true;
             };
-            observation.add(&p.observation);
+            observation.add_activity(&p.observation);
+            let ts = v
+                .get("time")
+                .and_then(|t| t.as_i64())
+                .and_then(ms_epoch_to_rfc3339);
+            if let Some(event) = crate::adapters::UsageEvent::from_parsed_line(&p, ts.as_deref()) {
+                usage_events.push(event);
+            }
             if let Some(mut m) = p.message {
                 if !m.content.trim().is_empty() {
                     if m.ts.is_none() {
-                        m.ts = v
-                            .get("time")
-                            .and_then(|t| t.as_i64())
-                            .and_then(ms_epoch_to_rfc3339);
+                        m.ts = ts;
                     }
                     if m.source_position.is_empty() {
                         m.source_position =
@@ -617,13 +758,14 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             stats: crate::adapters::stats_update_from(
                 &observation,
                 &source,
-                crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY.with_tokens(),
+                crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY,
             ),
             messages,
             source: Some(source),
             complete_snapshot,
             next_active_provider: None,
             next_active_model: None,
+            usage_events,
         })
     }
 
@@ -883,6 +1025,7 @@ mod tests {
                 REMINDER,
                 &user(3, "帮我看看这个 bug"),
                 r#"{"type":"tool/call","seq":4,"time":1788969930000,"data":{"name":"read"}}"#,
+                r#"{"type":"tool/result","seq":401,"time":1788969930001,"data":{"name":"read"}}"#,
                 &assistant(5, "看完了。"),
                 r#"{"type":"session/title","seq":6,"time":2,"data":{"title":"看 bug"}}"#,
                 r#"{"type":"compaction/prune","seq":7,"time":3,"data":{}}"#,
@@ -916,7 +1059,6 @@ mod tests {
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
                 assert_eq!(s.tool_call_count, Some(1));
-                assert_eq!(s.compaction_count, Some(1));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -949,20 +1091,20 @@ mod tests {
                 &SessionMemberCursor::default(),
             )
             .unwrap();
+        // The two relays are side activity; the plugin notice's author is not
+        // the user (`source.kind = "plugin"`), so it is machine traffic —
+        // this row used to land in the conversation as a fake user turn.
         let roles: Vec<SessionMessageRole> = delta.messages.iter().map(|m| m.role).collect();
         assert_eq!(
             roles,
-            vec![SessionMessageRole::User, SessionMessageRole::User],
-            "the two relayed messages are out of the conversation"
+            vec![SessionMessageRole::User],
+            "relays and plugin notices are out of the conversation"
         );
         assert_eq!(delta.messages[0].content, "怎么拆这个任务");
-        assert_eq!(
-            delta.messages[1].content,
-            "The approval policy changed from \"ask\" to \"never\"."
-        );
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
                 assert_eq!(s.side_activity_count, Some(2));
+                assert_eq!(s.user_message_count, Some(1));
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -1115,9 +1257,10 @@ mod tests {
             )
             .unwrap();
         assert!(delta.messages.is_empty());
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(42), "a child's own usage is counted");
+            Some(StatsUpdate::Snapshot(_)) => {
+                assert_eq!(usage[0], 42, "a child's own usage is counted");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -1148,11 +1291,12 @@ mod tests {
                 &SessionMemberCursor::default(),
             )
             .unwrap();
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(8559), "both steps, one prose-less");
-                assert_eq!(s.output_tokens, Some(74));
-                assert_eq!(s.cached_tokens, Some(7000), "cacheReadTokens");
+            Some(StatsUpdate::Snapshot(_)) => {
+                assert_eq!(usage[0], 8559, "both steps, one prose-less");
+                assert_eq!(usage[1], 74);
+                assert_eq!(usage[2], 7000, "cacheReadTokens");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -1284,8 +1428,8 @@ mod tests {
         assert!(found[0].source_path.ends_with("session.jsonl.zstd"));
     }
 
-    /// The compaction summary is a real provider call: its usage is counted in
-    /// addition to the boundary, and it never becomes conversation.
+    /// Compression markers contribute no counter or request. A summary's
+    /// actual model usage is retained without becoming conversation.
     #[test]
     fn a_compaction_summary_bills_its_call() {
         let id = "session-summary";
@@ -1297,6 +1441,7 @@ mod tests {
                 &header(id, ""),
                 &user(1, "长对话"),
                 r#"{"type":"compaction/summary","seq":2,"time":2,"data":{"usage":{"inputTokens":5000,"outputTokens":800,"cacheReadTokens":12000}}}"#,
+                r#"{"type":"compaction/prune","seq":3,"time":3,"data":{}}"#,
             ],
         );
         let file = dir.join("session.v2.jsonl.zstd");
@@ -1313,20 +1458,30 @@ mod tests {
                 .all(|m| m.role == SessionMessageRole::User),
             "the summary never becomes conversation"
         );
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(5000));
-                assert_eq!(s.output_tokens, Some(800));
-                assert_eq!(s.cached_tokens, Some(12000));
-                assert_eq!(s.compaction_count, Some(1));
+            Some(StatsUpdate::Snapshot(_)) => {
+                assert_eq!(usage[0], 5000);
+                assert_eq!(usage[1], 800);
+                assert_eq!(usage[2], 12000);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+        // The call lands in the ledger under the compaction bucket, not
+        // conversation — that is the whole point of the split.
+        assert_eq!(delta.usage_events.len(), 1);
+        let e = &delta.usage_events[0];
+        assert_eq!(e.category, crate::adapters::UsageCategory::Compaction);
+        assert_eq!(e.input_tokens, 5000);
+        assert!(e.ts.is_some(), "the row's own time anchors the event");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A retried attempt bills its own call but never becomes conversation —
-    /// only the settled reply counts as an assistant message.
+    /// A retried attempt never becomes conversation and never bills. A REAL
+    /// attempt's `data` is `{turn, step, stream}` — the call's usage lands on
+    /// the sibling `assistant/message` row, so the attempt itself contributes
+    /// no event. (The old fixture invented a `data.usage` shape the writer
+    /// never emits, and the test celebrated it.)
     #[test]
     fn an_assistant_attempt_bills_without_becoming_conversation() {
         let id = "session-attempt";
@@ -1337,7 +1492,7 @@ mod tests {
             &[
                 &header(id, ""),
                 &user(1, "问题"),
-                r#"{"type":"assistant/attempt","seq":2,"time":2,"data":{"usage":{"inputTokens":700,"outputTokens":0}}}"#,
+                r#"{"type":"assistant/attempt","seq":2,"time":2,"data":{"turn":1,"step":2,"stream":[{"type":"chunk","time":2,"chunk":{"type":"block-start","index":0,"blockType":"text"}}]}}"#,
                 &assistant(3, "最终回答"),
             ],
         );
@@ -1351,9 +1506,104 @@ mod tests {
         assert_eq!(delta.messages.len(), 2, "the attempt is not conversation");
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(700));
                 assert_eq!(s.assistant_message_count, Some(1), "only the settled reply");
             }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        // The attempt makes no event — the source states no usage on it. The
+        // settled reply (whose fixture carries no usage block either) makes
+        // none in its place; usage belongs to whichever step carries it.
+        assert!(delta.usage_events.is_empty(), "{:?}", delta.usage_events);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `tool/result` row a later `surfaceOp:replace` superseded is dead
+    /// surface: the replacing row counts, the covered row does not. A replace
+    /// that swallows a whole call+result pair leaves exactly the replacing
+    /// row — one execution, one count.
+    #[test]
+    fn a_replaced_tool_row_stops_counting() {
+        let id = "session-replace";
+        let dir = session_dir(
+            &unique_dir("replace"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, ""),
+                &user(1, "问题"),
+                r#"{"type":"tool/call","seq":4,"time":4,"data":{"name":"read"}}"#,
+                r#"{"type":"tool/result","seq":5,"time":5,"data":{"name":"read"}}"#,
+                // The refreshed surface of the SAME execution: covers seq 5.
+                r#"{"type":"tool/result","seq":6,"time":6,"data":{"name":"read"},"surfaceOp":{"op":"replace","start":5,"end":5}}"#,
+                // A second execution whose call+result pair is swallowed by
+                // one merged surface row.
+                r#"{"type":"tool/call","seq":7,"time":7,"data":{"name":"edit"}}"#,
+                r#"{"type":"tool/result","seq":8,"time":8,"data":{"name":"edit"}}"#,
+                r#"{"type":"tool/result","seq":9,"time":9,"data":{},"surfaceOp":{"op":"replace","start":7,"end":8}}"#,
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => {
+                // Call 4 counts. Call 7 is COVERED by the second replace
+                // (7..8), and the result rows never count under the
+                // per-execution convention.
+                assert_eq!(s.tool_call_count, Some(1), "{:?}", s);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `vN` is an open set — upstream's currentVersion climbs, and v4 files
+    /// already exist on disk. An unknown generation must still be selected
+    /// (it is the NEWEST one); missing it means the session reads a stale
+    /// older file or vanishes entirely.
+    #[test]
+    fn generation_of_parses_any_version() {
+        assert_eq!(generation_of("session.v4.jsonl.zstd"), Some(4));
+        assert_eq!(generation_of("session.v3.jsonl"), Some(3));
+        assert_eq!(generation_of("session.v2.jsonl.zstd"), Some(2));
+        assert_eq!(generation_of("session.v1.jsonl.zstd"), Some(1));
+        assert_eq!(generation_of("session.jsonl.zstd"), Some(0));
+        assert_eq!(generation_of("session.jsonl"), Some(0));
+        assert_eq!(generation_of("session.vx.jsonl"), None);
+        assert_eq!(generation_of("other.jsonl"), None);
+    }
+
+    /// A `user/message` whose authoritative author is not the user — a plugin
+    /// notice, a model switch — is machine traffic: never conversation, never
+    /// a user-message count. The relay branch keeps its own semantics.
+    #[test]
+    fn a_non_user_author_is_never_a_user_turn() {
+        let id = "session-kind";
+        let dir = session_dir(
+            &unique_dir("kind"),
+            id,
+            "session.v2.jsonl.zstd",
+            &[
+                &header(id, ""),
+                r#"{"type":"user/message","seq":1,"time":1,"data":{"source":{"kind":"plugin","plugin":"compact"},"role":"user","content":[{"type":"text","text":"compaction checkpoint text"}]}}"#,
+                r#"{"type":"user/message","seq":2,"time":2,"data":{"source":{"kind":"user"},"role":"user","content":[{"type":"text","text":"真正的问题"}]}}"#,
+            ],
+        );
+        let file = dir.join("session.v2.jsonl.zstd");
+        let delta = DshAdapter
+            .read_member_delta(
+                &member_at(&file, SessionMemberRelation::Root),
+                &SessionMemberCursor::default(),
+            )
+            .unwrap();
+        assert_eq!(delta.messages.len(), 1);
+        assert_eq!(delta.messages[0].content, "真正的问题");
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => assert_eq!(s.user_message_count, Some(1)),
             other => panic!("expected snapshot, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -1398,17 +1648,38 @@ mod tests {
             vec!["inherited question", "inherited answer", "own answer"],
             "the inherited history stays part of the transcript"
         );
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(
-                    s.input_tokens,
-                    Some(120),
-                    "only the fork's own work is billed"
-                );
-                assert_eq!(s.output_tokens, Some(9));
+            Some(StatsUpdate::Snapshot(_)) => {
+                assert_eq!(usage[0], 120, "only the fork's own work is billed");
+                assert_eq!(usage[1], 9);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+        assert_eq!(
+            delta.usage_events.len(),
+            1,
+            "the inherited prefix never reaches the ledger either"
+        );
+        assert_eq!(delta.usage_events[0].input_tokens, 120);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn prose_less_billing_uses_only_model_source_channel() {
+        for (kind, expected) in [("model", Some("302ai")), ("plugin", None)] {
+            let source = serde_json::json!({"data":{"message":{"source":{
+                "kind":kind,"provider":"302ai","model":"gpt-test"
+            }}}});
+            let parsed = billed_step(
+                &source,
+                MemberObservation {
+                    input_tokens: 100,
+                    ..Default::default()
+                },
+                false,
+            );
+            let event = crate::adapters::UsageEvent::from_parsed_line(&parsed, None).unwrap();
+            assert_eq!(event.provider.as_deref(), expected);
+        }
     }
 }

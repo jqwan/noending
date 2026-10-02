@@ -62,10 +62,6 @@ pub struct SessionDetail {
     pub members: Vec<SessionMemberView>,
     /// Query-time aggregate over the whole graph (no cache to drift).
     pub stats: crate::storage::SessionAggregateStats,
-    /// What `stats.cost` is denominated in — the Agent's own unit (Pi: `USD`,
-    /// Qoder: `credits`). `None` when the Agent states no cost at all, so the
-    /// UI never labels a number with a unit the source never used.
-    pub cost_unit: Option<String>,
     /// The two frontiers the detail page shows: messages ingested, and how
     /// far Context processing has consumed them.
     pub ingested_message_sequence: i64,
@@ -173,9 +169,6 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             Some(id) => db.get_session(id)?,
             None => None,
         };
-        // A Logical Session is one Agent's graph, so one unit covers every
-        // member the aggregate summed.
-        let cost_unit = adapter.cost_unit().map(str::to_string);
         Ok(SessionDetail {
             session,
             messages,
@@ -183,7 +176,6 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             workspace_path: workspace_path.transpose()?,
             members: member_views,
             stats,
-            cost_unit,
             ingested_message_sequence,
             processed_message_sequence,
             root_source_status,
@@ -201,6 +193,24 @@ pub fn reveal_session_source(state: State<AppState>, session_id: String) -> Resu
         .root_member_for_session(&session_id)?
         .ok_or_else(|| other("源会话路径不可用"))?;
     crate::platform::paths::reveal_file(std::path::Path::new(&root.source_path))
+}
+
+/// Locate ONE member's transcript: the child/side rows in the execution graph
+/// reveal their own source. The member is resolved against the session the
+/// page is already showing, so the webview never gets a free-form path reveal.
+#[tauri::command]
+pub fn reveal_session_member_source(
+    state: State<AppState>,
+    session_id: String,
+    member_id: String,
+) -> Result<()> {
+    let member = state
+        .db
+        .members_for_session(&session_id)?
+        .into_iter()
+        .find(|m| m.id == member_id)
+        .ok_or_else(|| other("会话成员不存在"))?;
+    crate::platform::paths::reveal_file(std::path::Path::new(&member.source_path))
 }
 
 /// One message of a window: the message plus the projection ordinal that puts
@@ -317,4 +327,13 @@ pub fn list_ingestion_diagnostics(
         db.prune_missing_ingestion_diagnostics()?;
         db.list_ingestion_diagnostics(min_observations.unwrap_or(2))
     })
+}
+
+// ---------------- Usage panel ----------------
+
+/// 全库用量汇总：成员快照提供累计计数和 Token；用量账本提供模型归因、
+/// 请求数、时间序列和调用类别。纯本地读取。
+#[tauri::command]
+pub fn get_usage_overview(state: State<AppState>) -> Result<crate::storage::UsageOverview> {
+    with_db(&state, |db| db.usage_overview())
 }

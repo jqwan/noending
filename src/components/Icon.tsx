@@ -14,6 +14,7 @@ const paths = {
   folder: "M2 5V3h5l2 2h7v10H2Z",
   chat: "M3 3h12v9H8l-5 3Z",
   spark: "M9 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2Z",
+  chart: "M3.5 15V9M9 15V4M14.5 15V8",
   settings: "M3 5h12M3 13h12M6 3v4M12 11v4",
   play: "M6.5 4.5l7.5 4.5-7.5 4.5Z",
   more: "M4.5 9h.01M9 9h.01M13.5 9h.01",

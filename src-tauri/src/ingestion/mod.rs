@@ -390,13 +390,18 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
         let cursor = db.get_member_cursor(&member.id)?;
         // Cross-file usage claims: a continuation rollout re-emits the thread's
         // usage history, and the replay bills once — the first reader claims
-        // the identity, later files skip it. Registry errors degrade to
-        // billing (never lose real spend).
+        // the identity, later files skip it. The registry is scoped PER LOGICAL
+        // SESSION: replays inside one session's own files dedup, but two
+        // sessions sharing message ids (a fork, a resumed copy of a transcript)
+        // are separate conversation records and each bills its own ledger.
+        // Registry errors degrade to billing (never lose real spend).
+        let scope = format!("{}|", session.id);
         let member_id = member.id.clone();
         let claims = |key: &str| -> bool {
-            match db.usage_claim_owner(key) {
+            let scoped = format!("{}{}", scope, key);
+            match db.usage_claim_owner(&scoped) {
                 Ok(Some(owner)) => owner == member_id,
-                Ok(None) => db.claim_usage(key, &member_id).is_ok(),
+                Ok(None) => db.claim_usage(&scoped, &member_id).is_ok(),
                 Err(_) => true,
             }
         };
@@ -444,6 +449,7 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
             delta.complete_snapshot,
             delta.next_active_provider,
             delta.next_active_model,
+            &delta.usage_events,
         )?;
         if !stored.is_empty() {
             stored_total += stored.len() as i64;

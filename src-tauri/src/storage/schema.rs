@@ -33,6 +33,15 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// `(ingest_generation, processed_through_seq)` over the current-message
 /// projection; the Workstream side keeps its own `context_revision` /
 /// `input_revision` plus per-Session consumption frontier.
+/// Token totals come exclusively from usage_events; activity stats do not
+/// persist tokens, monetary values or compression counts.
+///
+/// 2026-09-29 usage-claim scoping: claim keys are per logical session
+/// (`{session_id}|{adapter identity}`). A pre-change database must be
+/// deleted and rebuilt (a 重新入库 under the new scoping would double-bill
+/// rows that already carry events under the old unscoped keys) — the
+/// version stays 1 by the dev-stage ruling; the rebuild is communicated,
+/// not enforced.
 pub const DATABASE_FORMAT_VERSION: i64 = 1;
 
 /// Open an existing current-format database, or create one.
@@ -170,6 +179,7 @@ fn required_objects() -> Vec<RequiredObject> {
         ("CREATE VIRTUAL TABLE IF NOT EXISTS ", "table"),
         ("CREATE UNIQUE INDEX IF NOT EXISTS ", "index"),
         ("CREATE INDEX IF NOT EXISTS ", "index"),
+        ("CREATE VIEW IF NOT EXISTS ", "view"),
     ] {
         for tail in CURRENT_SCHEMA.split(marker).skip(1) {
             if let Some(name) = tail.split(|c: char| c.is_whitespace() || c == '(').next() {
@@ -319,6 +329,11 @@ const CURRENT_SCHEMA: &str = r#"
       ts TEXT,
       role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
       content TEXT NOT NULL,
+      -- Assistant rows only: 1 = this is the turn's FINAL reply in the
+      -- current conversation (the next projected message is not another
+      -- assistant message). Derived from the projection at commit time, never
+      -- ingested; an append that continues a turn demotes the old final.
+      turn_final INTEGER NOT NULL DEFAULT 0,
       -- Message-level generation provenance:
       -- source-confirmed only, meaningful for Assistant rows alone. NULL =
       -- the source cannot prove it; never inferred from configuration.
@@ -369,16 +384,51 @@ const CURRENT_SCHEMA: &str = r#"
       tool_call_count INTEGER,
       user_message_count INTEGER,
       assistant_message_count INTEGER,
-      compaction_count INTEGER,
       side_activity_count INTEGER,
-      input_tokens INTEGER,
-      output_tokens INTEGER,
-      cached_tokens INTEGER,
-      reasoning_tokens INTEGER,
-      cost REAL,
       updated_at TEXT NOT NULL,
       extra TEXT NOT NULL DEFAULT '{}'
     );
+    -- The usage LEDGER: one row per billed call, written in the same
+    -- transaction as the member ingest that observed it. This is the sole
+    -- source of token totals; a full re-scan replaces the member's events. It is
+    -- the per-call record that gives the panel per-model tokens, the time
+    -- series and the call-category split. `event_key` is the source-stable
+    -- identity (codex token_count cumulative totals), unique PER MEMBER —
+    -- cross-member replay dedup stays with ingest_usage_claims. A full
+    -- re-scan replaces the member's rows; deleting the member cascades.
+    CREATE TABLE IF NOT EXISTS usage_events (
+      id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL
+        REFERENCES session_members(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL
+        REFERENCES sessions(id) ON DELETE CASCADE,
+      agent TEXT NOT NULL,
+      category TEXT NOT NULL
+        CHECK (category IN ('conversation', 'compaction', 'side')),
+      model TEXT,
+      ts TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cached_tokens INTEGER NOT NULL DEFAULT 0,
+      reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+      -- Real underlying model requests this call covers. Most formats write
+      -- one usage record per request (so 1 is exact); zcode's store counts
+      -- them per turn (`model_request_count`); codex reports per turn and
+      -- cannot see its own per-request splits (1 here UNDERCOUNTS).
+      requests INTEGER NOT NULL DEFAULT 1,
+      event_key TEXT,
+      UNIQUE(member_id, event_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts);
+    CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model);
+    CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id);
+    -- Query-time usage rollup. No token totals are persisted outside the events.
+    CREATE VIEW IF NOT EXISTS session_member_usage AS
+      SELECT member_id, SUM(input_tokens) AS input_tokens,
+             SUM(output_tokens) AS output_tokens, SUM(cached_tokens) AS cached_tokens,
+             SUM(reasoning_tokens) AS reasoning_tokens, SUM(requests) AS requests,
+             MAX(ts) AS updated_at
+      FROM usage_events GROUP BY member_id;
     -- Ingestion problems that are deliberately NOT Sessions: unattachable
     -- child/side sources and the like. Never Search / Context / Owner /
     -- lifecycle; deleted when the source resolves.
@@ -642,6 +692,7 @@ mod tests {
             ("table", "session_message_projection"),
             ("table", "session_ingest_state"),
             ("table", "session_member_stats"),
+            ("view", "session_member_usage"),
             ("table", "ingestion_diagnostics"),
             ("table", "context_items"),
             ("table", "context_item_revisions"),
@@ -684,7 +735,14 @@ mod tests {
                 "required_objects() missed {kind} {name}"
             );
         }
-        assert_eq!(found.len(), 46, "required_objects() found an object twice");
+        assert_eq!(
+            found.len(),
+            found
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "required_objects() found an object twice"
+        );
     }
 
     /// Default ingest sources cover every surface an Agent's conversations

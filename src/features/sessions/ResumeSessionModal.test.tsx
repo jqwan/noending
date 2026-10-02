@@ -63,15 +63,16 @@ function detail(id: string): SessionDetail {
       tool_call_count: 0,
       user_message_count: 0,
       assistant_message_count: 0,
-      compaction_count: 0,
+
       side_activity_count: 0,
       input_tokens: null,
       output_tokens: null,
       cached_tokens: null,
       reasoning_tokens: null,
-      cost: null,
+      requests: 0,
+
     },
-    cost_unit: null,
+
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
     root_source_status: "present",

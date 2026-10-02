@@ -1230,7 +1230,7 @@ fn stats_delta(tool_calls: i64, user_messages: i64) -> noending::domain::StatsUp
     noending::domain::StatsUpdate::Delta(noending::domain::StatsDelta {
         tool_call_count: Some(tool_calls),
         user_message_count: Some(user_messages),
-        compaction_count: None,
+
         side_activity_count: None,
         ..Default::default()
     })

@@ -18,6 +18,8 @@ export interface SessionMessageData {
   /** 消息级生成溯源：仅 Assistant 有意义。 */
   provider?: string | null;
   model?: string | null;
+  /** 仅 Assistant 有意义：是否该轮的最终回复。 */
+  turnFinal: boolean;
 }
 
 /** 消息的展示形状：谁说的由角色决定，模型只挂在 Assistant 上。 */
@@ -30,6 +32,7 @@ export function messageData(m: SessionMessage, agent: Agent | null): SessionMess
     who: m.role === "user" ? "用户" : agent === null ? "Agent" : agentDisplayLabel(agent),
     provider: m.role === "assistant" ? m.provider : null,
     model: m.role === "assistant" ? m.model : null,
+    turnFinal: m.role === "assistant" ? m.turn_final : true,
   };
 }
 
@@ -88,6 +91,11 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
       <div className={`event ${cls}`} data-seq={msg.sequence}>
         <div className="head">
           <span className="who">{msg.who}</span>
+          {msg.role === "assistant" && !msg.turnFinal && (
+            <span className="mid-turn" title="同一轮里代理的中间输出，该轮的最终回复在后面">
+              中间回复
+            </span>
+          )}
           {prov && <span className="prov mono">{prov}</span>}
           <span className="when mono">{stamp}</span>
         </div>

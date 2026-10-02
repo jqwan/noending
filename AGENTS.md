@@ -7,7 +7,10 @@ NoEnding is a local multi-Agent workspace built with:
 * Tauri 2
 * Rust + SQLite
 * React + TypeScript
-* Codex / Claude Code / Pi adapters
+* Agent adapters — the roster is `Agent` in `domain/models.rs` plus
+  `all_adapters()` in `adapters/mod.rs`, and it changes; not every Agent has a
+  CLI (some adapters are history-ingestion only, so `detect()` never succeeds
+  by design, not by bug)
 
 Core concepts include `Workstream`, `Session`, `Project`, and `WorkspacePath`.
 
@@ -18,10 +21,15 @@ Backend code lives under `src-tauri/src/`.
 Key areas:
 
 * `adapters/` — Agent integrations
+* `domain/` — platform-independent domain model (Session / SessionMember / SessionMessage / …)
 * `platform/` — OS-specific behavior
 * `workspace/` — workspace and project logic
 * `ingestion/` — session discovery and ingestion
 * `sync/` — synchronization and extraction
+* `context/` — explicit Context update service and read projections
+* `agent_runtime/` — Agent runtime configuration (Agent owns defaults, NoEnding owns overrides)
+* `assistant/` — Workspace Assistant (Interactive Mode, driven through the user's own Agent CLI)
+* `search/` — FTS5 search
 * `launcher/` — New / Resume launch flows
 * `lifecycle/` — session lifecycle
 * `storage/` — SQLite and persistence
@@ -31,9 +39,11 @@ Frontend code lives under `src/`.
 
 Key areas:
 
+* `app/` — app shell, router and routes
 * `features/` — product features
 * `components/` — shared UI
 * `layout/` — application shell and navigation
+* `hooks/` — shared React hooks
 * `api.ts` — frontend/backend API
 * `types.ts` — frontend API types
 

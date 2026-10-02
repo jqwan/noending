@@ -31,3 +31,11 @@ it("applies and persists themes, then restores system appearance", () => {
   expect(document.documentElement.dataset.theme).toBeUndefined();
   expect(localStorage.getItem("noending.theme")).toBeNull();
 });
+
+it("shows local data settings without pricing controls", async () => {
+  render(<SettingsView section="advanced" navigate={vi.fn()} />);
+  expect(await screen.findByText("/tmp/noending/data/noending.db")).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "用量价格表" })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "自定义价格 JSON" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "立即刷新" })).toBeNull();
+});

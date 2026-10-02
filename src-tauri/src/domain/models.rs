@@ -432,6 +432,11 @@ pub struct SessionMessage {
     pub role: SessionMessageRole,
     pub content: String,
     pub ts: Option<String>,
+    /// Assistant rows only: is this the turn's FINAL reply in the current
+    /// conversation? Derived from the projection (an assistant message whose
+    /// next projected message is not another assistant message), never
+    /// ingested; meaningless (false) on user rows.
+    pub turn_final: bool,
     /// Message-level generation provenance. Only
     /// meaningful for Assistant messages; source-confirmed only — never
     /// inferred from configuration, branding or runtime preference. Unknown
@@ -455,24 +460,25 @@ pub struct SessionMessage {
 /// `NULL` = the source does not provide / cannot reliably compute the metric;
 /// `0` = observed zero. Unknown is never folded into 0.
 #[derive(Debug, Clone, Serialize)]
+/// API view: persisted activity counts plus tokens summed from usage_events.
 pub struct SessionMemberStats {
     pub member_id: Id,
     pub tool_call_count: Option<i64>,
     pub user_message_count: Option<i64>,
     pub assistant_message_count: Option<i64>,
-    pub compaction_count: Option<i64>,
+
     pub side_activity_count: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cached_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
-    pub cost: Option<f64>,
+
     pub updated_at: String,
     pub extra: serde_json::Value,
 }
 
-/// What one member read observed: its own composition counts plus its own
-/// usage, written to that member's 1:1 stats row.
+/// Activity counts one member read observed, written to its 1:1 stats row.
+/// Token usage is stored exclusively in usage_events.
 ///
 /// Incremental form for an append-only read: each field is the number of new
 /// observations since the last commit. `None` = nothing observed this batch
@@ -482,13 +488,8 @@ pub struct StatsDelta {
     pub tool_call_count: Option<i64>,
     pub user_message_count: Option<i64>,
     pub assistant_message_count: Option<i64>,
-    pub compaction_count: Option<i64>,
+
     pub side_activity_count: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    pub cost: Option<f64>,
 }
 
 impl StatsDelta {
@@ -501,18 +502,9 @@ impl StatsDelta {
                 .then_some(observation.user_messages as i64),
             assistant_message_count: (observation.assistant_messages > 0)
                 .then_some(observation.assistant_messages as i64),
-            compaction_count: (observation.compactions > 0)
-                .then_some(observation.compactions as i64),
+
             side_activity_count: (observation.side_activity > 0)
                 .then_some(observation.side_activity as i64),
-            input_tokens: (observation.input_tokens > 0).then_some(observation.input_tokens as i64),
-            output_tokens: (observation.output_tokens > 0)
-                .then_some(observation.output_tokens as i64),
-            cached_tokens: (observation.cached_tokens > 0)
-                .then_some(observation.cached_tokens as i64),
-            reasoning_tokens: (observation.reasoning_tokens > 0)
-                .then_some(observation.reasoning_tokens as i64),
-            cost: (observation.cost > 0.0).then_some(observation.cost),
         }
     }
 }
@@ -524,13 +516,8 @@ pub struct StatsSnapshot {
     pub tool_call_count: Option<i64>,
     pub user_message_count: Option<i64>,
     pub assistant_message_count: Option<i64>,
-    pub compaction_count: Option<i64>,
+
     pub side_activity_count: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    pub cost: Option<f64>,
 }
 
 /// How a member read updates the stats rows.
@@ -552,7 +539,7 @@ pub struct MemberObservation {
     pub tool_calls: u64,
     pub user_messages: u64,
     pub assistant_messages: u64,
-    pub compactions: u64,
+
     pub side_activity: u64,
     /// Usage the source reports for this observation. Sources report per call /
     /// per turn, never cumulatively, so these are additive like the counts; a
@@ -561,23 +548,17 @@ pub struct MemberObservation {
     pub output_tokens: u64,
     pub cached_tokens: u64,
     pub reasoning_tokens: u64,
-    /// Cost in the source's own currency, additive like the tokens. A source
-    /// that states no cost leaves it 0 (`None` downstream, never a fake 0).
-    pub cost: f64,
+    /// Source-confirmed requests; zero means this observation reports no count.
+    pub request_count: u64,
 }
 
 impl MemberObservation {
-    pub fn add(&mut self, other: &MemberObservation) {
+    /// Sum activity counters only. Usage is retained on individual events.
+    pub fn add_activity(&mut self, other: &MemberObservation) {
         self.tool_calls += other.tool_calls;
         self.user_messages += other.user_messages;
         self.assistant_messages += other.assistant_messages;
-        self.compactions += other.compactions;
         self.side_activity += other.side_activity;
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
-        self.cached_tokens += other.cached_tokens;
-        self.reasoning_tokens += other.reasoning_tokens;
-        self.cost += other.cost;
     }
 
     /// Nothing observed — shared readers skip an update that only restates 0s.
@@ -585,13 +566,12 @@ impl MemberObservation {
         self.tool_calls == 0
             && self.user_messages == 0
             && self.assistant_messages == 0
-            && self.compactions == 0
             && self.side_activity == 0
             && self.input_tokens == 0
             && self.output_tokens == 0
             && self.cached_tokens == 0
             && self.reasoning_tokens == 0
-            && self.cost == 0.0
+            && self.request_count == 0
     }
 }
 
@@ -905,9 +885,10 @@ pub struct SourceCursorUpdate {
 }
 
 /// A directory whose Agent sessions may be ingested. The standard agent
-/// data roots (~/.codex, ~/.claude, ~/.pi, honoring env overrides) are
-/// seeded as DISABLED defaults; whether any source is ingested is always
-/// the user's decision. Users may add arbitrary custom roots.
+/// data roots (~/.codex, ~/.claude, ~/.pi/agent/sessions, honoring env
+/// overrides) are seeded as DISABLED defaults; whether any source is
+/// ingested is always the user's decision. Users may add arbitrary custom
+/// roots.
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestSource {
     pub id: Id,

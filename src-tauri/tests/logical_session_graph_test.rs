@@ -807,6 +807,65 @@ fn a_stale_commit_after_topology_correction_is_rejected() {
     );
 }
 
+/// The turn-final flag: an assistant message is its turn's FINAL reply when
+/// the next projected message is not another assistant message. An append
+/// that continues the same turn demotes the formerly-final reply.
+#[test]
+fn turn_final_flags_track_the_projection() {
+    let db = open_db("turn-final");
+    let (session, member_id, _) = seed_root(&db);
+    let msg = |id: &str, role: SessionMessageRole, text: &str| ParsedSessionMessage {
+        provider: None,
+        model: None,
+        source_message_id: Some(id.into()),
+        source_position: String::new(),
+        ts: None,
+        role,
+        content: text.into(),
+    };
+    let flags_of = |db: &Db, id: &str| -> bool {
+        db.read()
+            .query_row(
+                "SELECT turn_final FROM session_messages WHERE source_message_id = ?1",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap()
+    };
+
+    let turn = vec![
+        msg("u1", SessionMessageRole::User, "问题"),
+        msg("a1", SessionMessageRole::Assistant, "中间输出"),
+        msg("a2", SessionMessageRole::Assistant, "最终回答"),
+        msg("u2", SessionMessageRole::User, "追问"),
+        msg("a3", SessionMessageRole::Assistant, "第二轮回答"),
+    ];
+    db.commit_member_ingest(&session.id, &member_id, &turn, None, &seed_update(1, 500))
+        .unwrap();
+    assert!(!flags_of(&db, "u1"));
+    assert!(!flags_of(&db, "a1"), "the turn continues after it");
+    assert!(
+        flags_of(&db, "a2"),
+        "the user spoke again → a2 was the final"
+    );
+    assert!(!flags_of(&db, "u2"));
+    assert!(flags_of(&db, "a3"), "the conversation ends → a3 is final");
+
+    // The turn continues: the appended reply takes the final flag and a3 is
+    // demoted.
+    db.commit_member_ingest(
+        &session.id,
+        &member_id,
+        &[msg("a4", SessionMessageRole::Assistant, "补充")],
+        None,
+        &seed_update(2, 700),
+    )
+    .unwrap();
+    assert!(!flags_of(&db, "a3"), "the continuation demoted it");
+    assert!(flags_of(&db, "a4"));
+}
+
 /// Append duplicate: the same messages committed again store nothing new
 /// (identity dedup,).
 #[test]
@@ -892,7 +951,7 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
                 tool_call_count: Some(7),
                 user_message_count: Some(5),
                 assistant_message_count: Some(6),
-                compaction_count: Some(1),
+
                 side_activity_count: Some(2),
                 ..Default::default()
             },
@@ -905,8 +964,13 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
     assert_eq!(stats.tool_call_count, Some(7));
     assert_eq!(stats.user_message_count, Some(5));
     assert_eq!(stats.assistant_message_count, Some(6));
-    assert_eq!(stats.compaction_count, Some(1));
+
     assert_eq!(stats.side_activity_count, Some(2));
+    let member_json = serde_json::to_value(&stats).unwrap();
+    let session_json =
+        serde_json::to_value(db.aggregate_session_stats(&session.id).unwrap()).unwrap();
+    assert!(member_json.get("compaction_count").is_none());
+    assert!(session_json.get("compaction_count").is_none());
 }
 
 #[test]
@@ -922,7 +986,7 @@ fn empty_full_scan_zeros_only_supported_stats() {
                 tool_call_count: Some(7),
                 user_message_count: Some(5),
                 assistant_message_count: Some(6),
-                compaction_count: Some(2),
+
                 side_activity_count: Some(4),
                 ..Default::default()
             },
@@ -934,7 +998,7 @@ fn empty_full_scan_zeros_only_supported_stats() {
     let stats = noending::adapters::stats_update_from(
         &noending::domain::MemberObservation::default(),
         &source,
-        noending::adapters::StatsCapabilities::TOOL_AND_COMPACTION,
+        noending::adapters::StatsCapabilities::TOOL_CALLS,
     );
     db.commit_member_ingest(&session.id, &member_id, &[], stats, &source)
         .unwrap();
@@ -943,73 +1007,83 @@ fn empty_full_scan_zeros_only_supported_stats() {
     assert_eq!(stats.tool_call_count, Some(0));
     assert_eq!(stats.user_message_count, Some(0));
     assert_eq!(stats.assistant_message_count, Some(0));
-    assert_eq!(stats.compaction_count, Some(0));
+
     assert_eq!(stats.side_activity_count, Some(4));
 }
 
-/// Usage follows the same NULL-vs-0 discipline as the counters: an append adds,
-/// a metric that was never observed stays NULL rather than becoming 0, and a
-/// full scan replaces the columns it speaks for.
+/// Tokens are queried from deduplicated events, independent of activity stats.
 #[test]
-fn usage_accumulates_on_append_and_is_never_fabricated_as_zero() {
-    let db = open_db("usage-stats");
+fn usage_events_supply_member_and_session_totals_on_append_and_rescan() {
+    use noending::adapters::UsageEvent;
+    let db = open_db("usage-events");
     let (session, member_id, _) = seed_root(&db);
-    let delta = |input: i64, cost: f64| {
-        noending::domain::StatsUpdate::Delta(noending::domain::StatsDelta {
-            input_tokens: Some(input),
-            cost: Some(cost),
-            ..Default::default()
-        })
+    let event = |key: &str, input| UsageEvent {
+        key: Some(key.into()),
+        input_tokens: input,
+        ..Default::default()
     };
-
-    db.commit_member_ingest(
-        &session.id,
-        &member_id,
-        &[],
-        Some(delta(100, 0.5)),
+    let commit = |source: &noending::domain::SourceCursorUpdate, events: &[UsageEvent]| {
+        db.commit_member_ingest_with_provenance_state(
+            &session.id,
+            &member_id,
+            &[],
+            None,
+            source,
+            true,
+            None,
+            None,
+            events,
+        )
+        .unwrap();
+    };
+    commit(
         &seed_update(1, 20),
-    )
-    .unwrap();
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(stats.input_tokens, Some(100));
-    assert_eq!(stats.cost, Some(0.5));
-    assert_eq!(stats.output_tokens, None, "unobserved stays NULL");
-    assert_eq!(stats.reasoning_tokens, None);
-
-    db.commit_member_ingest(
-        &session.id,
-        &member_id,
-        &[],
-        Some(delta(50, 0.25)),
-        &seed_update(1, 40),
-    )
-    .unwrap();
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(stats.input_tokens, Some(150), "an append adds");
-    assert_eq!(stats.cost, Some(0.75));
-    assert_eq!(stats.output_tokens, None, "still never observed");
-
-    db.commit_member_ingest(
-        &session.id,
-        &member_id,
-        &[],
-        Some(noending::domain::StatsUpdate::Snapshot(
-            noending::domain::StatsSnapshot {
-                input_tokens: Some(7),
-                cost: Some(0.1),
-                ..Default::default()
-            },
-        )),
-        &seed_update(2, 60),
-    )
-    .unwrap();
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(stats.input_tokens, Some(7), "a full scan replaces");
-    assert_eq!(stats.cost, Some(0.1));
-    assert_eq!(
-        stats.output_tokens, None,
-        "a column the scan stays silent on is left alone"
+        &[event("first", 100), event("first", 100)],
     );
+    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
+    assert_eq!(
+        stats.input_tokens,
+        Some(100),
+        "duplicate event keys bill once"
+    );
+    assert_eq!(
+        stats.output_tokens,
+        Some(0),
+        "a recorded event states zero output"
+    );
+    let mut append = seed_update(1, 40);
+    append.start_byte_offset = 20;
+    commit(&append, &[event("first", 100), event("second", 50)]);
+    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
+    assert_eq!(stats.input_tokens, Some(150));
+    let aggregate = db.aggregate_session_stats(&session.id).unwrap();
+    let overview = db.usage_overview().unwrap();
+    assert_eq!(aggregate.input_tokens, stats.input_tokens);
+    assert_eq!(overview.input_tokens, stats.input_tokens);
+    assert_eq!(overview.by_agent[0].input_tokens, stats.input_tokens);
+    assert_eq!(overview.top_sessions[0].input_tokens, stats.input_tokens);
+    assert_eq!(overview.requests, 2);
+    // Session-scope 模型请求 rides on the same view join as the token axes:
+    // two events × 1-request default (the fixture events carry request_count 0).
+    assert_eq!(aggregate.requests, 2);
+
+    commit(&seed_update(2, 60), &[event("replacement", 7)]);
+    assert_eq!(
+        db.get_member_stats(&member_id)
+            .unwrap()
+            .unwrap()
+            .input_tokens,
+        Some(7)
+    );
+    // An empty replacement removes usage rather than preserving a stale total.
+    commit(&seed_update(3, 80), &[]);
+    assert_eq!(
+        db.aggregate_session_stats(&session.id)
+            .unwrap()
+            .input_tokens,
+        None
+    );
+    assert_eq!(db.usage_overview().unwrap().input_tokens, None);
 }
 
 #[test]
@@ -1020,14 +1094,14 @@ fn unsupported_stats_stay_null_on_a_full_scan() {
     let stats = noending::adapters::stats_update_from(
         &noending::domain::MemberObservation::default(),
         &source,
-        noending::adapters::StatsCapabilities::COMPACTION,
+        noending::adapters::StatsCapabilities::MESSAGE_COUNTS,
     );
     db.commit_member_ingest(&session.id, &member_id, &[], stats, &source)
         .unwrap();
 
     let stats = db.get_member_stats(&member_id).unwrap().unwrap();
     assert_eq!(stats.tool_call_count, None);
-    assert_eq!(stats.compaction_count, Some(0));
+
     assert_eq!(stats.side_activity_count, None);
     // A root read always speaks for its own turns, even when they are zero.
     assert_eq!(stats.user_message_count, Some(0));

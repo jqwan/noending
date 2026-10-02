@@ -20,8 +20,11 @@
 //!
 //! One root transcript, one ROOT member. `ai-title` supplies the native title
 //! (last written wins); `function_call` / `function_call_result` are
-//! observations, not text. There is no CLI — the bundle's only executable is
-//! Electron — so this adapter ingests history only: `detect()` never succeeds.
+//! observations, not text. The bundle DOES embed a Node CLI
+//! (`@genie/agent-cli`, `codebuddy`), but its dist exposes no
+//! `--resume` / `--continue` / `--session-id`, so there is nothing to
+//! resume with: `detect()` never succeeds and this adapter ingests
+//! history only.
 //!
 //! Sub-agents are SEPARATE files under the session's own directory,
 //! `<slug>/<sessionId>/subagents/agent-<hex>.jsonl`, and become CHILD members
@@ -96,10 +99,31 @@ enum UserTurn {
     Envelope,
 }
 
-fn classify_user_turn(raw: &str) -> UserTurn {
+/// The row's own compaction declaration. `providerData` marks replayed
+/// summary turns authoritatively (`isCompactInternal` / `isCompacted` /
+/// `isSummary` / `compactType`); the text prefix stays as the fallback for
+/// rows written without the marker.
+fn is_compaction_row(v: &Value) -> bool {
+    let pd = v.get("providerData");
+    let flag = |k: &str| {
+        pd.and_then(|d| d.get(k))
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false)
+    };
+    flag("isCompactInternal")
+        || flag("isCompacted")
+        || flag("isSummary")
+        || pd
+            .and_then(|d| d.get("compactType"))
+            .and_then(|c| c.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+}
+
+fn classify_user_turn(raw: &str, provider_marked_compaction: bool) -> UserTurn {
     // Compaction first: a replay can quote the user's words (and even a
     // `<user_query>` tag) inside its own block, and it is still not a turn.
-    if is_compaction_block(raw) {
+    if provider_marked_compaction || is_compaction_block(raw) {
         return UserTurn::Compaction;
     }
     if let Some(prompt) = extract_user_query(raw) {
@@ -109,6 +133,15 @@ fn classify_user_turn(raw: &str) -> UserTurn {
         return UserTurn::Envelope;
     }
     UserTurn::Prompt(raw.to_string())
+}
+
+/// A UUIDv7's first 48 bits are the creation instant in unix milliseconds.
+fn uuidv7_ms(id: &str) -> Option<i64> {
+    let hex: String = id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() < 12 {
+        return None;
+    }
+    i64::from_str_radix(&hex[..12], 16).ok()
 }
 
 impl WorkBuddyAdapter {
@@ -130,10 +163,36 @@ impl WorkBuddyAdapter {
     /// A sub-agent transcript as its own CHILD member. Identity is derived
     /// (`<parent>:subagent:<stem>`) because the file carries no stable link to
     /// its session. No title sources — a child never names a Logical Session.
+    /// The child's own `sessionId` is a UUIDv7, so its first 48 bits ARE the
+    /// creation wall clock — the one start time a fresh child id carries.
     fn parse_subagent_member(path: &Path, parent_id: &str) -> Result<Option<DiscoveredMember>> {
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             return Ok(None);
         };
+        let mut started_at = None;
+        let mut cwd: Option<String> = None;
+        for (_, line) in &crate::adapters::read_jsonl_lines(path)? {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if started_at.is_none() {
+                started_at = v
+                    .get("sessionId")
+                    .and_then(|s| s.as_str())
+                    .and_then(uuidv7_ms)
+                    .and_then(crate::adapters::ms_epoch_to_rfc3339);
+            }
+            if cwd.is_none() {
+                cwd = v
+                    .get("cwd")
+                    .and_then(|c| c.as_str())
+                    .filter(|c| !c.is_empty())
+                    .map(String::from);
+            }
+            if started_at.is_some() && cwd.is_some() {
+                break;
+            }
+        }
         let meta = std::fs::metadata(path)?;
         let last_activity = meta
             .modified()
@@ -149,8 +208,8 @@ impl WorkBuddyAdapter {
             source_path: path.to_path_buf(),
             // A child's cwd / start time are execution fact only, and the
             // child never names the session.
-            cwd: None,
-            started_at: None,
+            cwd,
+            started_at,
             last_activity_at: last_activity,
             native_title: None,
             first_user_text: None,
@@ -213,7 +272,8 @@ impl WorkBuddyAdapter {
                 let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
                 if first_user_text.is_none() && role == "user" {
                     let raw = content_text(v.get("content").unwrap_or(&Value::Null));
-                    if let UserTurn::Prompt(text) = classify_user_turn(&raw) {
+                    if let UserTurn::Prompt(text) = classify_user_turn(&raw, is_compaction_row(&v))
+                    {
                         first_user_text = Some(crate::adapters::truncate_text(&text, 400));
                     }
                 }
@@ -277,6 +337,25 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
             for entry in rd.filter_map(|e| e.ok()) {
                 let p = entry.path();
                 if p.is_dir() {
+                    // Audit/trace/snapshot trees are not transcripts; the
+                    // fingerprint would refuse their files anyway, so this is
+                    // scan cost and misjudgment surface, not data.
+                    if p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| {
+                            matches!(
+                                n,
+                                "audit-log"
+                                    | "traces"
+                                    | "shell-snapshots"
+                                    | "local_storage"
+                                    | "logs"
+                            )
+                        })
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     stack.push(p);
                     continue;
                 }
@@ -292,6 +371,15 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
                         Ok(None) => {}
                         Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                     }
+                    continue;
+                }
+                // Anything else living in a `subagents/` directory is not a
+                // session: it must never fall through to a ROOT member.
+                if p.parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some("subagents")
+                {
                     continue;
                 }
                 if detect_format(&p) != Some(Agent::WorkBuddy) {
@@ -317,7 +405,7 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         read_jsonl_delta(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::COMPACTION.with_tokens(),
+            crate::adapters::StatsCapabilities::MESSAGE_COUNTS,
             &|_idx, v| parse_line(v, is_root),
         )
     }
@@ -399,11 +487,16 @@ fn usage_observation(v: &Value) -> MemberObservation {
         .filter(|u| u.is_object())
     {
         let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // `inputTokens` is the full prompt INCLUDING the cached subset (the
+        // details block is a detail OF it) — store the fresh part only, like
+        // every other adapter's 输入 axis.
+        let cached = detail_sum(usage, "inputTokensDetails", "cached_tokens");
         return MemberObservation {
-            input_tokens: n("inputTokens"),
+            input_tokens: n("inputTokens").saturating_sub(cached),
             output_tokens: n("outputTokens"),
-            cached_tokens: detail_sum(usage, "inputTokensDetails", "cached_tokens"),
+            cached_tokens: cached,
             reasoning_tokens: detail_sum(usage, "outputTokensDetails", "reasoning_tokens"),
+            request_count: n("requests").max(1),
             ..Default::default()
         };
     }
@@ -423,13 +516,17 @@ fn usage_observation(v: &Value) -> MemberObservation {
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0)
         };
+        // `prompt_tokens` = cache hits + misses (zhipu's two-way split) —
+        // inclusive, so the stored input is the miss (fresh) part.
+        let cached =
+            detail("prompt_tokens_details", "cached_tokens").max(n("prompt_cache_hit_tokens"));
         return MemberObservation {
-            input_tokens: n("prompt_tokens"),
+            input_tokens: n("prompt_tokens").saturating_sub(cached),
             output_tokens: n("completion_tokens"),
-            cached_tokens: detail("prompt_tokens_details", "cached_tokens")
-                .max(n("prompt_cache_hit_tokens")),
+            cached_tokens: cached,
             reasoning_tokens: detail("completion_tokens_details", "reasoning_tokens")
                 .max(n("completion_thinking_tokens")),
+            request_count: 1,
             ..Default::default()
         };
     }
@@ -445,7 +542,14 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     if vtype == "function_call" {
         let usage = usage_observation(v);
-        return (!usage.is_empty()).then(|| ParsedLine::observation_only(usage));
+        let model = workbuddy_model(v);
+        return (!usage.is_empty()).then(|| {
+            ParsedLine::billed_without_message(
+                model,
+                crate::adapters::UsageCategory::Conversation,
+                usage,
+            )
+        });
     }
     if vtype != "message" {
         return None;
@@ -454,47 +558,58 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let raw = content_text(v.get("content").unwrap_or(&Value::Null));
     let mut observation = usage_observation(v);
     if raw.trim().is_empty() {
-        return (!observation.is_empty()).then(|| ParsedLine::observation_only(observation));
+        let model = workbuddy_model(v);
+        return (!observation.is_empty()).then(|| {
+            ParsedLine::billed_without_message(
+                model,
+                crate::adapters::UsageCategory::Conversation,
+                observation,
+            )
+        });
     }
     match v.get("role").and_then(|r| r.as_str()).unwrap_or("") {
-        "user" => match classify_user_turn(&raw) {
+        "user" => match classify_user_turn(&raw, is_compaction_row(&v)) {
             UserTurn::Prompt(p) => {
                 observation.user_messages = 1;
                 if !is_root {
-                    return Some(ParsedLine::observation_only(observation));
+                    return Some(ParsedLine::billed_without_message(
+                        workbuddy_model(v),
+                        crate::adapters::UsageCategory::Conversation,
+                        observation,
+                    ));
                 }
                 Some(ParsedLine {
                     message: Some(crate::adapters::parsed_message(
                         source_message_id,
                         SessionMessageRole::User,
                         p,
-                    )),
+                    ))
+                    .map(|m| m.with_provenance(None, workbuddy_model(v))),
                     observation,
+                    usage_note: None,
                 })
             }
-            // A compaction replay is a boundary count, never content.
-            UserTurn::Compaction => Some(ParsedLine::observation_only(MemberObservation {
-                compactions: 1,
-                ..Default::default()
-            })),
-            _ => Some(ParsedLine::observation_only(observation)),
+            UserTurn::Compaction => Some(ParsedLine::billed_without_message(
+                workbuddy_model(v),
+                crate::adapters::UsageCategory::Compaction,
+                observation,
+            )),
+            _ => Some(ParsedLine::billed_without_message(
+                workbuddy_model(v),
+                crate::adapters::UsageCategory::Conversation,
+                observation,
+            )),
         },
         "assistant" => {
             observation.assistant_messages = 1;
             if !is_root {
-                return Some(ParsedLine::observation_only(observation));
+                return Some(ParsedLine::billed_without_message(
+                    workbuddy_model(v),
+                    crate::adapters::UsageCategory::Conversation,
+                    observation,
+                ));
             }
-            // The row's own `providerData.model` is the answering model's
-            // registry id (`deepseek-v4.1-flash`, …). The `auto` preference
-            // reuses the same slot and its resolution is not written anywhere
-            // in the transcript — an `auto` row attributes nothing. No
-            // provider field exists in the source → NULL.
-            let model = v
-                .get("providerData")
-                .and_then(|p| p.get("model"))
-                .and_then(|m| m.as_str())
-                .filter(|m| !m.is_empty() && *m != "auto")
-                .map(String::from);
+            let model = workbuddy_model(v);
             Some(ParsedLine {
                 message: Some(crate::adapters::parsed_message(
                     source_message_id,
@@ -503,10 +618,30 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 ))
                 .map(|m| m.with_provenance(None, model)),
                 observation,
+                usage_note: None,
             })
         }
-        _ => Some(ParsedLine::observation_only(observation)),
+        _ => {
+            let model = workbuddy_model(v);
+            Some(ParsedLine::billed_without_message(
+                model,
+                crate::adapters::UsageCategory::Conversation,
+                observation,
+            ))
+        }
     }
+}
+
+/// The row's own `providerData.model` is the answering model's registry id
+/// (`deepseek-v4.1-flash`, …). The `auto` preference reuses the same slot and
+/// its resolution is not written anywhere in the transcript — an `auto` row
+/// attributes nothing. No provider field exists in the source → NULL.
+fn workbuddy_model(v: &Value) -> Option<String> {
+    v.get("providerData")
+        .and_then(|p| p.get("model"))
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.is_empty() && *m != "auto")
+        .map(String::from)
 }
 
 #[cfg(test)]
@@ -514,6 +649,50 @@ mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
     use crate::domain::{SessionMemberRelation, StatsUpdate};
+
+    #[test]
+    fn non_conversation_usage_is_ledgered_for_roots_and_children() {
+        let rows = [
+            (
+                "user",
+                "<system-reminder>injected context</system-reminder>",
+            ),
+            ("user", "a real prompt"),
+            ("assistant", "a real reply"),
+            ("assistant", ""),
+        ];
+        for is_root in [true, false] {
+            let mut events = Vec::new();
+            for (i, (role, text)) in rows.iter().enumerate() {
+                let source = serde_json::json!({
+                    "type": "message", "id": format!("m{i}"), "role": role,
+                    "content": [{"type": "input_text", "text": text}],
+                    "providerData": {"model": "deepseek-test", "usage": {
+                        "requests": 2, "inputTokens": 100, "outputTokens": 10,
+                        "inputTokensDetails": [{"cached_tokens": 60}],
+                        "outputTokensDetails": [{"reasoning_tokens": 3}]
+                    }}
+                });
+                let parsed = parse_line(&source, is_root).unwrap();
+                if !is_root || i == 0 || i == 3 {
+                    assert!(parsed.message.is_none());
+                }
+                let event = crate::adapters::UsageEvent::from_parsed_line(
+                    &parsed,
+                    Some("2026-10-01T00:00:00Z"),
+                )
+                .unwrap();
+                assert_eq!(event.model.as_deref(), Some("deepseek-test"));
+                assert_eq!(event.ts.as_deref(), Some("2026-10-01T00:00:00Z"));
+                assert_eq!(event.request_count, 2);
+                events.push(event);
+            }
+            assert_eq!(
+                crate::adapters::test_usage_tokens(&events),
+                [160, 40, 240, 12]
+            );
+        }
+    }
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir =
@@ -708,19 +887,22 @@ mod tests {
             delta.messages[0].ts.as_deref(),
             Some("2026-07-04T03:57:29.113+00:00")
         );
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
             Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.compaction_count, Some(1), "the cb_summary replay");
                 assert_eq!(s.tool_call_count, None);
                 assert_eq!(s.user_message_count, Some(1));
                 assert_eq!(s.assistant_message_count, Some(1));
                 assert_eq!(s.side_activity_count, None);
                 // One model call each: the tool turn's usage rides on its
                 // function_call, the final text turn's on the message. Both add.
-                assert_eq!(s.input_tokens, Some(400));
-                assert_eq!(s.output_tokens, Some(46));
-                assert_eq!(s.cached_tokens, Some(140));
-                assert_eq!(s.reasoning_tokens, Some(10));
+                assert_eq!(
+                    usage[0], 260,
+                    "400 prompt − 140 cached across the two calls"
+                );
+                assert_eq!(usage[1], 46);
+                assert_eq!(usage[2], 140);
+                assert_eq!(usage[3], 10);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -731,29 +913,43 @@ mod tests {
     fn the_envelope_is_not_the_user_turn() {
         let enveloped = "<system-reminder data-role=\"user-context\">\n<user_info>\nOS Version: darwin\n</user_info>\n</system-reminder>\n<user_query>看一下这只股票</user_query>";
         assert!(matches!(
-            classify_user_turn(enveloped),
+            classify_user_turn(enveloped, false),
             UserTurn::Prompt(p) if p == "看一下这只股票"
         ));
         // A `user`-role compaction replay is machine context, not a turn.
         assert!(matches!(
-            classify_user_turn("<cb_summary>Summary of the conversation so far: …</cb_summary>"),
+            classify_user_turn(
+                "<cb_summary>Summary of the conversation so far: …</cb_summary>",
+                false
+            ),
             UserTurn::Compaction
         ));
         assert!(matches!(
-            classify_user_turn("<conversation_history_summary>x</conversation_history_summary>"),
+            classify_user_turn(
+                "<conversation_history_summary>x</conversation_history_summary>",
+                false
+            ),
             UserTurn::Compaction
         ));
         // A bare envelope with no prompt inside carries nothing to ingest.
         assert!(matches!(
             classify_user_turn(
-                "<system-reminder data-role=\"user-context\">only context</system-reminder>"
+                "<system-reminder data-role=\"user-context\">only context</system-reminder>",
+                false,
             ),
             UserTurn::Envelope
         ));
         // Plain prose is a prompt, and so is a continuation nudge.
         assert!(matches!(
-            classify_user_turn("帮我看看这个"),
+            classify_user_turn("帮我看看这个", false),
             UserTurn::Prompt(p) if p == "帮我看看这个"
+        ));
+        // The providerData markers are the authoritative compaction verdict —
+        // a replay that quotes the user without a `<cb_summary>` prefix is
+        // still machine context.
+        assert!(matches!(
+            classify_user_turn("被压缩的那段对话原文", true),
+            UserTurn::Compaction
         ));
     }
 
@@ -830,12 +1026,16 @@ mod tests {
         let delta = WorkBuddyAdapter
             .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
             .unwrap();
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(900), "unattributed spend still bills");
-                assert_eq!(s.output_tokens, Some(70));
-                assert_eq!(s.cached_tokens, Some(300));
-                assert_eq!(s.reasoning_tokens, Some(12));
+            Some(StatsUpdate::Snapshot(_)) => {
+                assert_eq!(
+                    usage[0], 600,
+                    "unattributed spend still bills (900 prompt − 300 cached)"
+                );
+                assert_eq!(usage[1], 70);
+                assert_eq!(usage[2], 300);
+                assert_eq!(usage[3], 12);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -862,12 +1062,16 @@ mod tests {
         let delta = WorkBuddyAdapter
             .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
             .unwrap();
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(13044));
-                assert_eq!(s.output_tokens, Some(132));
-                assert_eq!(s.cached_tokens, Some(6208));
-                assert_eq!(s.reasoning_tokens, Some(49));
+            Some(StatsUpdate::Snapshot(_)) => {
+                assert_eq!(
+                    usage[0], 6836,
+                    "13044 prompt − 6208 cached: fresh input only"
+                );
+                assert_eq!(usage[1], 132);
+                assert_eq!(usage[2], 6208);
+                assert_eq!(usage[3], 49);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

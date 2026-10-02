@@ -4,15 +4,10 @@
 > 对话会结束，上下文不会。
 
 NoEnding 是一个以 **Workstream Context** 为核心的本地多 Agent 工作空间（Local Agent Workspace）。
-它不管理聊天记录，而是把不同 Agent（Codex / Claude Code / Pi）的 Session 组织进持续演进的
+它不管理聊天记录，而是把不同 Agent 的 Session 组织进持续演进的
 Workstream 语义层：Session 会结束，Agent 会切换，Context 持续存在。
 
-设计文档见 `docs/`：
-
-- `Local Agent Workspace 产品与领域设计方案 v0.2.md` — 领域模型与产品定义
-- `Local Agent Workspace 技术实现方案 v0.2.md` — 技术架构
-- `Local Agent Workspace 技术实现方案 v0.3 增补 - Platform Abstraction.md` — Windows/macOS 平台抽象层
-- `NoEnding 品牌设计规范 v1.0.md` — 品牌与视觉
+当前接入见下方[支持的 Agent](#支持的-agent)。
 
 ## 领域模型
 
@@ -56,8 +51,8 @@ Tauri 2 + React + TypeScript + Rust + SQLite (FTS5)
 
 | 能力 | 说明 |
 |---|---|
-| Agent Adapter | Codex / Claude Code / Qoder / DSH / ZCode / Pi / AutoClaw / WorkBuddy 的 member discovery、增量解析、raw_ref 溯源；Root 之外的执行（child/side）只进拓扑与统计 |
-| Platform Abstraction | PlatformPaths（`CODEX_HOME`/`CLAUDE_CONFIG_DIR`/`PI_HOME`/`DSH_HOME` 覆盖）、ExecutableResolver、PlatformLauncher（macOS Terminal / Windows Terminal / PowerShell） |
+| Agent Adapter | 8 个 Agent（见[支持的 Agent](#支持的-agent)）的 member discovery、增量解析、raw_ref 溯源；Root 之外的执行（child/side）只进拓扑与统计 |
+| Platform Abstraction | PlatformPaths（`CODEX_HOME`/`CLAUDE_CONFIG_DIR`/`PI_CODING_AGENT_DIR`/`DSH_HOME` 覆盖）、ExecutableResolver、PlatformLauncher（macOS Terminal / Windows Terminal / PowerShell） |
 | Session Ingestion | Member 图解析（Root/ForkRoot 建会话，child/side 沿父链归属，悬空源进摄入诊断）+ Member 级增量游标；原始 Agent 数据永不修改；原始消息行只追加保留作溯源，当前有效对话由消息投影（`session_message_projection` + 事实世代）维护，源文件压缩/截断/重排会切换世代并原子替换投影。消息/统计/游标单事务原子提交，摄入永不调用 AI |
 | Workstream | CRUD / archive；一个 Session 最多只有一个 Owner Workstream（所属任务）；LaunchIntent 匹配只认 Root，fork 不继承 Owner |
 | Context (L1/L2) | CoreContextResolver 投影 Goal/Current State/Constraints/Decisions/Open Questions；ContextItem + Revision 历史；Supersede 演进链 |
@@ -66,6 +61,26 @@ Tauri 2 + React + TypeScript + Rust + SQLite (FTS5)
 | Lifecycle | Trash / Restore；永久删除 = 仅清除 NoEnding 本地数据，且只对「已入回收站 + Root 源确认不存在」的会话开放 |
 | Search | SQLite FTS5（token 内子串查询由 LIKE 兜底），只索引会话文档与 Root 会话消息 |
 | Workspace Assistant | Interactive Mode v0（基于 Domain API 检索 + 经用户确认的动作块）；显式 Context 更新直接复用同一 Runtime/CLI 选择 |
+
+## 支持的 Agent
+
+「启动」列为空表示该适配器**只摄入历史**：没有可用的 headless CLI，`detect()` 恒不成功，
+只能读它的会话数据，不能从 NoEnding 新建或恢复会话。
+
+| Agent | 数据源 | 启动 | 说明 |
+|---|---|---|---|
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `codex` | 唯一需要游标前沿（stateful）解析 provenance 的适配器；区分 Root / ForkRoot / Child / Side |
+| Claude Code | `~/.claude/projects/<encoded-cwd>/<session>.jsonl` | `claude` | `isSidechain=true` 的行不构成独立成员，只计为 side 活动 |
+| Pi | `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl` | `pi` | 单根转录 |
+| Antigravity | `~/.gemini/antigravity/conversations/<id>.db`（SQLite WAL） | `agy`（仅 CLI 库会话） | IDE 库只摄入；`agy` 自己的会话在旁库 `~/.gemini/antigravity-cli/`，两个库都是默认可摄入源，但 IDE 库的会话无法 Resume |
+| Qoder | `~/.qoder-cn/projects/<encoded-cwd>/<session>.jsonl` | — | 转录是 Claude 格式加 Qoder 专有行（指纹判定必须先于 Claude）；标题另取自 app 的 `chat_sessions` |
+| WorkBuddy | `~/.workbuddy/projects/<slug>/<sessionId>.jsonl` | — | Electron 应用；用户轮次包在 `<system-reminder data-role="user-context">` 信封里 |
+| dsh | `$DSH_HOME/sessions/<encoded-cwd>/<id>/session.v2.jsonl.zstd` | — | 唯一非 JSONL 源：按追加式 zstd 帧增长 |
+| ZCode | `~/.zcode/cli/db/db.sqlite`（SQLite WAL） | — | 唯一没有转录文件的源，全走 SQLite |
+
+数据根可用环境变量覆盖：Codex `CODEX_HOME`、Claude Code `CLAUDE_CONFIG_DIR`、Pi `PI_CODING_AGENT_DIR`
+（或更具体的 `PI_CODING_AGENT_SESSION_DIR`，直接指定 sessions 目录）、dsh `DSH_HOME`。
+其余 Agent 没有官方覆盖变量，按上表路径。
 
 ## 运行
 
@@ -123,7 +138,7 @@ src/                      React UI
   features/launcher       New / Resume Session 启动器
 src-tauri/
   domain/                 平台无关领域模型（Session / SessionMember / SessionMessage / …）
-  adapters/               codex / claude / qoder / dsh / zcode / pi / autoclaw / workbuddy Adapter（member 契约 + 注册表）
+  adapters/               codex / claude / pi / antigravity / qoder / workbuddy / dsh / zcode Adapter（member 契约 + 注册表）
   platform/               PlatformPaths / ExecutableResolver / PlatformLauncher
   ingestion/              Member 发现 → 逻辑图解析 → 成员原子提交（纯事实，不调用 AI）
   sync/                   显式 Context 更新：严格 Extractor + 确定性 MergeEngine + AuthorityPolicy

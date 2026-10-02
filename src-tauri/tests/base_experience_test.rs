@@ -265,6 +265,51 @@ fn ingestion_writes_facts_and_zero_context() {
     );
 }
 
+/// Two logical sessions whose transcripts share the same message ids — a fork
+/// or a resumed copy of a conversation — each bill their own ledger: the claim
+/// registry is scoped per logical session, so the second session's replay is
+/// NOT suppressed by the first. (Real-world shape: session ead8405f shared
+/// both message ids with the big session it was forked from and showed zero
+/// tokens.) Within one session, member files replaying the same identity
+/// still bill once — that gate is pinned by the codex registry test.
+#[test]
+fn sessions_sharing_message_ids_bill_independently() {
+    let dir = unique_dir("claim-scope");
+    let db = open_db("claim-scope");
+
+    // One usage-bearing assistant row, identical message id, two transcripts.
+    let usage_row = |uuid: &str| {
+        format!(
+            r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"2026-09-19T10:00:00Z","message":{{"id":"msg_shared","role":"assistant","model":"claude-sonnet","usage":{{"input_tokens":2000,"output_tokens":465}},"content":[{{"type":"text","text":"同一个回答"}}]}}}}"#
+        )
+    };
+    let file_a = dir.join("a.jsonl");
+    let file_b = dir.join("b.jsonl");
+    std::fs::write(&file_a, format!("{}\n", usage_row("u-a"))).unwrap();
+    std::fs::write(&file_b, format!("{}\n", usage_row("u-b"))).unwrap();
+
+    let s_a = session_row(&db, &file_a);
+    let s_b = session_row(&db, &file_b);
+
+    ingestion::ingest_session(&db, &s_a).unwrap();
+    ingestion::ingest_session(&db, &s_b).unwrap();
+
+    let billed = |s: &Session| -> (Option<i64>, Option<i64>) {
+        let agg = db.aggregate_session_stats(&s.id).unwrap();
+        (agg.input_tokens, agg.output_tokens)
+    };
+    assert_eq!(
+        billed(&s_a),
+        (Some(2000), Some(465)),
+        "the first reader bills its record"
+    );
+    assert_eq!(
+        billed(&s_b),
+        (Some(2000), Some(465)),
+        "the fork bills its own record — the shared message id is not stolen"
+    );
+}
+
 /// Re-scanning an unchanged source adds nothing: the member cursor already
 /// covers the file, so the same content is never stored twice.
 #[test]

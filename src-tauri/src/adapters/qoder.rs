@@ -22,11 +22,9 @@
 //! by the session id the transcript reports, and silent when that store is
 //! absent. Nothing else is taken from there.
 //!
-//! **Billing is in `credits`, and the model field is a CODE, not a name.**
-//! Each assistant row's `message.usage` carries the Claude-style token fields
-//! AND Qoder's own `credits`; on plan-billed accounts every token field is 0
-//! and every row has a non-zero `credits` (verified: 8081/8081) — credits map
-//! to the cost axis. BYOK/custom-model rows DO carry measured token counts,
+//! **The model field is a CODE, not a name.**
+//! Each assistant row's `message.usage` identifies a model request. Plan-billed
+//! accounts have structural zero token fields; BYOK/custom-model rows carry measured tokens,
 //! and their `input_tokens` INCLUDES the cached subset (differs from the
 //! Anthropic envelope), so the uncached input is what gets stored, with the
 //! cached subset on its own axis. A subagent's own file is a member of its
@@ -534,9 +532,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         read_jsonl_delta(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY
-                .with_tokens()
-                .with_cost(),
+            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY,
             &|_idx, v| parse_line(v, is_root),
         )
     }
@@ -545,11 +541,6 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         Ok(crate::adapters::inspect_file_source(Path::new(
             &member.source_path,
         )))
-    }
-
-    /// Qoder's own unit: it bills in `credits`, not in currency.
-    fn cost_unit(&self) -> Option<&'static str> {
-        Some("credits")
     }
 
     fn build_new_command(
@@ -613,6 +604,15 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
 
     match vtype {
         "user" | "assistant" => {
+            // The compact-boundary summary row is the pruned context itself
+            // (the source marks it `isCompactSummary`), never a turn.
+            let compact_summary = v
+                .get("isCompactSummary")
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
+            if compact_summary {
+                return None;
+            }
             let msg = v.get("message").unwrap_or(&Value::Null);
             let text = content_text(msg.get("content").unwrap_or(&Value::Null));
             // A user line with toolUseResult is a completed tool call.
@@ -622,23 +622,15 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 side_activity: u64::from(sidechain),
                 ..Default::default()
             };
-            // Qoder bills in `credits`, not tokens: over 8081 usage rows every
-            // token field is 0 while every row carries a non-zero `credits` —
-            // the token slots are structural placeholders on plan-billed
-            // accounts. One value per assistant call, additive like any usage.
-            if let Some(credits) = msg
-                .get("usage")
-                .and_then(|u| u.get("credits"))
-                .and_then(|c| c.as_f64())
-            {
-                observation.cost = credits;
-            }
             // BYOK/custom-model rows carry MEASURED token counts (plan rows
             // are structural zeros, so a zero never reaches the stats). Their
             // `input_tokens` INCLUDES the cached subset — store the uncached
             // input and keep the cached subset on its own axis, matching the
             // fresh-input convention of the other adapters.
             if let Some(usage) = msg.get("usage").and_then(|u| u.as_object()) {
+                if vtype == "assistant" {
+                    observation.request_count = 1;
+                }
                 let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
                 let (input, output, cache_read) = (
                     n("input_tokens"),
@@ -651,11 +643,29 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                     observation.cached_tokens = cache_read;
                 }
             }
+            // The row's model code, resolved the same way the assistant arm
+            // resolves it — the ledger anchors on the no-message paths need
+            // the same attribution.
+            let model = if vtype == "assistant" {
+                msg.get("model")
+                    .and_then(|m| m.as_str())
+                    .and_then(model_display_name)
+            } else {
+                None
+            };
             if sidechain {
-                return Some(ParsedLine::observation_only(observation));
+                return Some(ParsedLine::billed_without_message(
+                    model,
+                    crate::adapters::UsageCategory::SideActivity,
+                    observation,
+                ));
             }
             if text.trim().is_empty() {
-                return Some(ParsedLine::observation_only(observation));
+                return Some(ParsedLine::billed_without_message(
+                    model,
+                    crate::adapters::UsageCategory::Conversation,
+                    observation,
+                ));
             }
             let role = if vtype == "user" {
                 SessionMessageRole::User
@@ -664,7 +674,11 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             };
             // Injected context is never conversation.
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
-                return Some(ParsedLine::observation_only(observation));
+                return Some(ParsedLine::billed_without_message(
+                    model,
+                    crate::adapters::UsageCategory::Conversation,
+                    observation,
+                ));
             }
             match role {
                 SessionMessageRole::User => observation.user_messages = 1,
@@ -673,25 +687,19 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             if !is_root {
                 // A sub-agent's turns are counted, but its prose is never this
                 // Session's Conversation.
-                return Some(ParsedLine::observation_only(observation));
+                return Some(ParsedLine::billed_without_message(
+                    model,
+                    crate::adapters::UsageCategory::Conversation,
+                    observation,
+                ));
             }
-            // The assistant row itself carries `message.model` — an internal
-            // model CODE, resolved to the official display name when the code
-            // is known (see `model_display_name`). This is NOT the
-            // `runtime-config.model` broadcast.
-            let model = if role == SessionMessageRole::Assistant {
-                msg.get("model")
-                    .and_then(|m| m.as_str())
-                    .and_then(model_display_name)
-            } else {
-                None
-            };
             Some(ParsedLine {
                 message: Some(
                     crate::adapters::parsed_message(source_message_id, role, text)
                         .with_provenance(None, model),
                 ),
                 observation,
+                usage_note: None,
             })
         }
         // `attachment` lines are injected context (skill listings, system
@@ -728,6 +736,33 @@ mod tests {
         ]
         .join("\n")
             + "\n"
+    }
+
+    /// The compact-boundary summary row (`isCompactSummary`) is the pruned
+    /// context itself — it must not surface as the user's voice.
+    #[test]
+    fn the_compact_summary_row_is_never_a_user_turn() {
+        let dir = unique_dir("compact");
+        let file = dir.join("s-main.jsonl");
+        std::fs::write(
+            &file,
+            [
+                r#"{"type":"user","uuid":"c1","timestamp":"2026-09-22T15:05:00.000Z","cwd":"/repo","sessionId":"s-main","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation…"}}"#,
+                r#"{"type":"user","uuid":"u9","timestamp":"2026-09-22T15:06:00.000Z","cwd":"/repo","sessionId":"s-main","message":{"role":"user","content":[{"type":"text","text":"继续"}]}}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let delta: MemberReadDelta = QoderAdapter
+            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .unwrap();
+        assert_eq!(delta.messages.len(), 1);
+        assert_eq!(delta.messages[0].content, "继续");
+        match delta.stats {
+            Some(StatsUpdate::Snapshot(s)) => assert_eq!(s.user_message_count, Some(1)),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
     }
 
     fn root_member(path: &Path) -> SessionMember {
@@ -781,11 +816,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Qoder bills in `credits`: they land on the cost axis and add up, while
-    /// the token axis stays UNSUPPORTED (the source's token fields are always 0,
-    /// so reporting them would draw a "0" that was never a real observation).
+    /// Source credits do not enter local statistics. Usage-bearing assistant
+    /// calls still contribute requests even when all reported token axes are zero.
     #[test]
-    fn credits_land_on_the_cost_axis_and_plan_rows_read_zero_tokens() {
+    fn source_credits_are_ignored_and_zero_token_requests_are_preserved() {
         let dir = unique_dir("credits");
         let file = dir.join("s-main.jsonl");
         std::fs::write(
@@ -803,22 +837,26 @@ mod tests {
         let delta = QoderAdapter
             .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
             .unwrap();
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                let cost = s.cost.expect("credits become the cost");
-                assert!(
-                    (cost - 10.7176448).abs() < 1e-9,
-                    "both calls add up: {cost}"
-                );
+            Some(StatsUpdate::Snapshot(_)) => {
                 assert_eq!(
-                    s.input_tokens,
-                    Some(0),
+                    usage[0], 0,
                     "plan rows are structural zeros — the axis exists, the source says 0"
                 );
-                assert_eq!(s.output_tokens, Some(0));
+                assert_eq!(usage[1], 0);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+        assert_eq!(delta.usage_events.len(), 2);
+        assert_eq!(
+            delta
+                .usage_events
+                .iter()
+                .map(|event| event.request_count)
+                .sum::<u64>(),
+            2
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -839,15 +877,12 @@ mod tests {
         let delta = QoderAdapter
             .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
             .unwrap();
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(
-                    s.input_tokens,
-                    Some(300),
-                    "1500 raw input minus 1200 cached"
-                );
-                assert_eq!(s.output_tokens, Some(210));
-                assert_eq!(s.cached_tokens, Some(1200));
+            Some(StatsUpdate::Snapshot(_)) => {
+                assert_eq!(usage[0], 300, "1500 raw input minus 1200 cached");
+                assert_eq!(usage[1], 210);
+                assert_eq!(usage[2], 1200);
             }
             other => panic!("expected snapshot, got {other:?}"),
         }

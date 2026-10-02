@@ -32,7 +32,9 @@ pub fn agent_env_override(agent: Agent) -> &'static str {
     match agent {
         Agent::Codex => "CODEX_HOME",
         Agent::ClaudeCode => "CLAUDE_CONFIG_DIR",
-        Agent::Pi => "PI_HOME",
+        // Pi composes two documented variables around its sessions folder;
+        // this names the primary one (see `resolve_pi_sessions_dir`).
+        Agent::Pi => "PI_CODING_AGENT_DIR",
         Agent::Qoder => "",
         // Electron app; no documented override.
         Agent::WorkBuddy => "",
@@ -51,7 +53,10 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
     match agent {
         Agent::Codex => [".codex"].iter().collect(),
         Agent::ClaudeCode => [".claude"].iter().collect(),
-        Agent::Pi => [".pi"].iter().collect(),
+        // Sessions live under `agent/`; `~/.pi` itself also holds package
+        // caches (278 MB on the reference machine), so discovery must never
+        // start there.
+        Agent::Pi => [".pi", "agent", "sessions"].iter().collect(),
         Agent::Qoder => [".qoder-cn"].iter().collect(),
         Agent::WorkBuddy => [".workbuddy"].iter().collect(),
         Agent::Dsh => [".dsh"].iter().collect(),
@@ -60,16 +65,82 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
     }
 }
 
+/// Working directories that app-initiated chats get allocated INSIDE an
+/// Agent's own area — one throwaway directory per conversation
+/// (`~/Documents/Codex/<date>/<slug>`, `~/Documents/Qoder/<date>/<hash>`,
+/// `~/Workbuddy/<timestamp>` on the reference machine). A chat never opens
+/// its directory again, so these must not become Projects of their own: every
+/// Git-evidence-free path under a root here joins the ONE bucket Project
+/// named after the Agent.
+///
+/// The roots are listed explicitly instead of grepping for an agent name in
+/// the path — a real repository called `codex` is a project, not a bucket.
+/// Git evidence still beats the bucket: a path under one of these roots that
+/// reports a Git family follows the normal family rules.
+pub fn app_chat_bucket_of(canonical: &str) -> Option<&'static str> {
+    const ROOTS: [(&str, &str); 3] = [
+        ("Documents/Codex", "Codex"),
+        ("Documents/Qoder", "Qoder"),
+        ("Workbuddy", "WorkBuddy"),
+    ];
+    let path = std::path::Path::new(canonical);
+    let home = resolve_home()?;
+    for (rel, label) in ROOTS {
+        // Component-wise prefix: `Documents/CodexBackup` is NOT under
+        // `Documents/Codex`, on any platform's separator.
+        if path.starts_with(home.join(rel)) {
+            return Some(label);
+        }
+    }
+    None
+}
+
+/// The set, non-empty value of `name` as a path — the override rule every
+/// agent variable shares (an empty variable means "not overridden").
+fn non_empty_env(name: &str) -> Option<PathBuf> {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Pure core of Pi's resolution, split out so tests never touch the process
+/// environment: the specific `PI_CODING_AGENT_SESSION_DIR` (the sessions
+/// folder itself) wins over `PI_CODING_AGENT_DIR` (the agent folder that
+/// contains it), which wins over the `~/.pi/agent/sessions` default. Pi's
+/// `--session-dir` flag can override again at runtime; an offline reader
+/// cannot observe that.
+fn pi_sessions_dir(
+    session_dir: Option<PathBuf>,
+    agent_dir: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    session_dir
+        .or_else(|| agent_dir.map(|d| d.join("sessions")))
+        .or_else(|| home.map(|h| h.join(agent_default_dir(Agent::Pi))))
+}
+
+fn resolve_pi_sessions_dir() -> Option<PathBuf> {
+    pi_sessions_dir(
+        non_empty_env("PI_CODING_AGENT_SESSION_DIR"),
+        non_empty_env("PI_CODING_AGENT_DIR"),
+        resolve_home(),
+    )
+}
+
 /// Resolve an agent's data root:
 ///   `$CODEX_HOME`            ?? `~/.codex`
 ///   `%CODEX_HOME%`           ?? `%USERPROFILE%\.codex`
-/// (same pattern for CLAUDE_CONFIG_DIR / PI_HOME).
+/// (same pattern for CLAUDE_CONFIG_DIR / DSH_HOME). Pi is the one exception:
+/// it composes two documented variables around its sessions folder, so it
+/// delegates to `resolve_pi_sessions_dir` rather than the single-variable
+/// pattern, and never resolves to the whole `~/.pi`.
 pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
-    if let Ok(v) = std::env::var(agent_env_override(agent)) {
-        let p = PathBuf::from(v);
-        if !p.as_os_str().is_empty() {
-            return Some(p);
-        }
+    if matches!(agent, Agent::Pi) {
+        return resolve_pi_sessions_dir();
+    }
+    if let Some(p) = non_empty_env(agent_env_override(agent)) {
+        return Some(p);
     }
     resolve_home().map(|home| home.join(agent_default_dir(agent)))
 }
@@ -293,10 +364,70 @@ pub fn resolve_external_app_support(bundle_id: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Bucket membership is component-wise under the KNOWN roots only: the
+    /// root itself counts, sibling names (`CodexBackup`) do not, and a real
+    /// repository that merely shares an agent's name is never a bucket.
+    #[test]
+    fn app_chat_buckets_match_known_roots_component_wise() {
+        let home = resolve_home().expect("tests run with a home directory");
+        let join = |rel: &str| home.join(rel).to_string_lossy().to_string();
+
+        assert_eq!(app_chat_bucket_of(&join("Documents/Codex")), Some("Codex"));
+        assert_eq!(
+            app_chat_bucket_of(&join(
+                "Documents/Codex/2026-09-26/referenced-chatgpt-conversation"
+            )),
+            Some("Codex")
+        );
+        assert_eq!(
+            app_chat_bucket_of(&join("Documents/Qoder/2026-09-19/b8a25663")),
+            Some("Qoder")
+        );
+        assert_eq!(
+            app_chat_bucket_of(&join("Workbuddy/2026-07-04-12-00-30")),
+            Some("WorkBuddy")
+        );
+
+        assert_eq!(app_chat_bucket_of(&join("Documents/CodexBackup/x")), None);
+        assert_eq!(app_chat_bucket_of(&join("projects/codex")), None);
+        assert_eq!(app_chat_bucket_of(&join("Documents/Workbuddy-notes")), None);
+        assert_eq!(app_chat_bucket_of(&join(".codex")), None);
+    }
+
     #[test]
     fn agent_override_env() {
         assert_eq!(agent_env_override(Agent::Codex), "CODEX_HOME");
         assert_eq!(agent_env_override(Agent::ClaudeCode), "CLAUDE_CONFIG_DIR");
+        assert_eq!(agent_env_override(Agent::Pi), "PI_CODING_AGENT_DIR");
+    }
+
+    /// Pi resolves to its sessions folder — never the whole `~/.pi`, which
+    /// also holds package caches. The specific override variable wins, and a
+    /// relocated agent folder keeps `sessions/` underneath it.
+    #[test]
+    fn pi_sessions_dir_prefers_the_specific_override() {
+        let home = PathBuf::from("/home/ada");
+        let default = home.join(agent_default_dir(Agent::Pi));
+        assert!(
+            agent_default_dir(Agent::Pi).ends_with(".pi/agent/sessions"),
+            "default must narrow to the sessions folder"
+        );
+        assert_eq!(
+            pi_sessions_dir(None, None, Some(home.clone())),
+            Some(default)
+        );
+        assert_eq!(
+            pi_sessions_dir(None, Some(PathBuf::from("/portable/agent")), None),
+            Some(PathBuf::from("/portable/agent").join("sessions"))
+        );
+        assert_eq!(
+            pi_sessions_dir(
+                Some(PathBuf::from("/elsewhere/sessions")),
+                Some(PathBuf::from("/portable/agent")),
+                None
+            ),
+            Some(PathBuf::from("/elsewhere/sessions"))
+        );
     }
 
     #[test]

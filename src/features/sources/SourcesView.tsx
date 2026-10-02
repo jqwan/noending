@@ -108,6 +108,27 @@ export default function SourcesView() {
     }
   };
 
+  /** 全选 / 全不选。改完统一 reload；没有行变化时（状态已一致）给一句静默说明，
+   *  不当成功操作渲染红/绿条。 */
+  const toggleAll = async (enabled: boolean) => {
+    clearMessages();
+    try {
+      const changed = await api.setAllIngestSourcesEnabled(enabled);
+      reload();
+      setNotice(
+        changed === 0
+          ? enabled
+            ? "全部来源本来就已启用。"
+            : "全部来源本来就已停用。"
+          : enabled
+            ? `已启用 ${changed} 个来源。点各行的「重新扫描」开始摄入。`
+            : `已停用 ${changed} 个来源。`
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const addFor = async (fmt: SessionFormat) => {
     const p = (drafts[fmt.id] ?? "").trim();
     if (!p || busy) return;
@@ -190,6 +211,22 @@ export default function SourcesView() {
       </p>
 
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}>
+        {/* 三态：全启用 → 勾着；全停用 → 空；混合 → indeterminate，点它 = 全选。
+            操作期间禁用，与单行 checkbox 的 queued 禁用同一规则。 */}
+        <label className="row" style={{ gap: 6, alignItems: "center", cursor: "pointer" }}>
+          <input
+            ref={(el) => {
+              if (el) el.indeterminate = enabledCount > 0 && enabledCount < sources.length;
+            }}
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={sources.length > 0 && enabledCount === sources.length}
+            disabled={queued || sources.length === 0}
+            title={enabledCount === sources.length ? "取消选中全部来源" : "选中全部来源"}
+            onChange={(e) => void toggleAll(e.target.checked)}
+          />
+          <span className="small">全选</span>
+        </label>
         {/* 按钮名不随排队状态改：名字是动作，状态由旁边的徽标说。 */}
         <button className="btn primary" disabled={queued} onClick={scanAll}
           title="只读取新增内容：从每个会话上次停下的位置继续">

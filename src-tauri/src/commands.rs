@@ -764,6 +764,11 @@ pub fn set_ingest_source_enabled(
 }
 
 #[tauri::command]
+pub fn set_all_ingest_sources_enabled(state: State<AppState>, enabled: bool) -> Result<usize> {
+    with_db(&state, |db| db.set_all_ingest_sources_enabled(enabled))
+}
+
+#[tauri::command]
 pub fn remove_ingest_source(state: State<AppState>, source_id: String) -> Result<()> {
     with_db(&state, |db| db.remove_ingest_source(&source_id))
 }

@@ -90,6 +90,39 @@ fn set_ingest_state_conn(
     Ok(())
 }
 
+/// Recompute the turn-final flag over the CURRENT conversation: an assistant
+/// message is its turn's final reply exactly when the next projected message
+/// is not another assistant message (nothing follows, or the user spoke
+/// again). An append that continues a turn demotes the formerly-final reply,
+/// so the flag is re-derived over the whole session whenever the projection
+/// moves — cheap (one indexed pass) and it cannot drift from the projection.
+///
+/// Projection ordinals are consecutive by construction (appends extend the
+/// sequence; a replacement restarts it), so "next" is ordinal + 1.
+fn recompute_turn_finals_conn(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE session_messages SET turn_final = 0
+         WHERE session_id = ?1 AND turn_final != 0",
+        params![session_id],
+    )?;
+    conn.execute(
+        "UPDATE session_messages SET turn_final = 1
+         WHERE id IN (
+           SELECT m.id
+           FROM session_message_projection p
+           JOIN session_messages m ON m.id = p.session_message_id
+           LEFT JOIN session_message_projection n
+             ON n.session_id = p.session_id AND n.ordinal = p.ordinal + 1
+           LEFT JOIN session_messages nm ON nm.id = n.session_message_id
+           WHERE p.session_id = ?1
+             AND m.role = 'assistant'
+             AND (n.session_message_id IS NULL OR nm.role != 'assistant')
+         )",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
 fn append_projection_conn(
     conn: &Connection,
     session_id: &str,
@@ -147,6 +180,7 @@ pub fn apply_projection_conn(
         }
         let end = append_projection_conn(conn, session_id, &fresh, state.latest_message_seq)?;
         set_ingest_state_conn(conn, session_id, state.generation, end)?;
+        recompute_turn_finals_conn(conn, session_id)?;
         return Ok(ProjectionOutcome::Appended);
     }
 
@@ -163,6 +197,7 @@ pub fn apply_projection_conn(
         let fresh: Vec<String> = current_ids[existing.len()..].to_vec();
         let end = append_projection_conn(conn, session_id, &fresh, state.latest_message_seq)?;
         set_ingest_state_conn(conn, session_id, state.generation, end)?;
+        recompute_turn_finals_conn(conn, session_id)?;
         return Ok(ProjectionOutcome::Appended);
     }
 
@@ -176,6 +211,7 @@ pub fn apply_projection_conn(
     let generation = state.generation + 1;
     let end = append_projection_conn(conn, session_id, current_ids, 0)?;
     set_ingest_state_conn(conn, session_id, generation, end)?;
+    recompute_turn_finals_conn(conn, session_id)?;
     Ok(ProjectionOutcome::NewGeneration)
 }
 

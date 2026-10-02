@@ -94,6 +94,10 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
           onClick={() => navigate({ view: "assistant" })}>
           <Icon name="spark" />助手
         </button>
+        <button className={`nav-item ${route.view === "usage" ? "active" : ""}`}
+          onClick={() => navigate({ view: "usage" })}>
+          <Icon name="chart" />统计
+        </button>
 
         {[{ label: "固定", rows: recent.filter(w => pinned.includes(w.id)) },
           { label: "最近", rows: recent.filter(w => !pinned.includes(w.id)).slice(0, 6) }].map(group => (

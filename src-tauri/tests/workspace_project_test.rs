@@ -65,6 +65,71 @@ fn path_id_of(raw: &str) -> String {
     path_identity(&canon(raw))
 }
 
+/// Home-anchored helper: the chat-bucket roots are defined relative to the
+/// user home, so tests build their fixtures the same way and stay
+/// home-independent.
+fn home_path(rel: &str) -> String {
+    noending::platform::paths::resolve_home()
+        .expect("tests run with a home directory")
+        .join(rel)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Chat scratch directories under an Agent app's own root share ONE bucket
+/// Project named after the Agent; lookalikes outside the roots keep their own
+/// projects, and a different app means a different bucket.
+#[test]
+fn chat_directories_under_an_app_root_share_one_bucket_project() {
+    let (_dir, db) = temp_db();
+    let ensure =
+        |raw: &str| ensure_workspace_path(&db, &plain(raw, true), &UnrestrictedWorkspace).unwrap();
+
+    let a = ensure(&home_path("Documents/Qoder/2026-09-19/b8a25663"));
+    let b = ensure(&home_path("Documents/Qoder/2026-09-19/2b6ac118"));
+    assert_eq!(
+        a.project_id, b.project_id,
+        "one chat, one project — but all chats of the app share the bucket"
+    );
+    let (name, git_id, customized): (String, Option<String>, i64) = db
+        .read()
+        .query_row(
+            "SELECT name, git_id, name_customized FROM projects WHERE id = ?1",
+            [&a.project_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        name, "Qoder",
+        "the bucket is named after the Agent, not the first chat dir"
+    );
+    assert_eq!(git_id, None);
+    assert_eq!(
+        customized, 0,
+        "still an automatic name the user may take over"
+    );
+
+    // A different app is a different bucket.
+    let wb = ensure(&home_path("Workbuddy/2026-07-04-12-00-30"));
+    assert_ne!(wb.project_id, a.project_id);
+    let wb_name: String = db
+        .read()
+        .query_row(
+            "SELECT name FROM projects WHERE id = ?1",
+            [&wb.project_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(wb_name, "WorkBuddy");
+
+    // Lookalikes are NOT the bucket: component-wise matching.
+    let lookalike = ensure(&home_path("Documents/QoderBackup/x"));
+    assert_ne!(lookalike.project_id, a.project_id);
+    // A repository literally named codex is a project, not a bucket.
+    let real = ensure(&home_path("projects/codex"));
+    assert_ne!(real.project_id, a.project_id);
+}
+
 /// A directory with no Git evidence at all.
 fn plain(raw: &str, exists: bool) -> WorkspaceObservation {
     let canonical = canon(raw);

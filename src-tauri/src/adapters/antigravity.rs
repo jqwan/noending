@@ -53,8 +53,8 @@
 //! Provenance: each `gen_metadata` row names the model it served (`1.19`,
 //! e.g. `gemini-3.8-flash` / `claude-opus-4-6-thinking`) and the step-input
 //! boundary it ran against (`1.20`'s `last_step_index`), so assistant steps
-//! carry the serving model (see `read_member_delta`). No provider field
-//! exists in the source — provider stays NULL.
+//! carry the serving model (see `read_member_delta`); the usage row's
+//! `api_provider` enum (field 6) is the channel.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -392,26 +392,41 @@ fn parse_member(
 /// subtree. Cross-validated field-by-field against a real store and tokscale's
 /// independent reverse-engineering (2026-09-30): `.1` is the fixed
 /// system-prompt token count (1026–1319 across observed installs) and IS
-/// billable input; `.2` is newly-processed (non-cached) input — a cache hit
-/// moves `.2` down while `.5` (cache read) moves up; `.9` is output (text)
-/// tokens; `.10` is thinking. The earlier mapping read output from `.3` and
-/// thinking from `.9`: on real rows `.3` mirrors `.10` exactly while `.9` is
-/// absent, and once `.9`-bearing rows are included `.3` matches no plausible
-/// quantity — it stays unread. (`1.9.10.1` is the PROMPT-SIZE ESTIMATE the
-/// client shows, not billed input.) One `gen_metadata` row is one call, so
-/// the rows add up.
+/// `ModelUsageStats` of one `gen_metadata` row. The field numbers are the
+/// agy binary's own embedded struct tags (`thinking_output_tokens` = 9,
+/// `response_output_tokens` = 10, `input_tokens` = 2, `cache_read_tokens` =
+/// 5, `api_provider` = 6) — an earlier mapping had 9/10 swapped and added
+/// field 1, which is the MODEL ENUM, into the input (measured inflation on
+/// the real corpus: +2.19 M input tokens).
+///
+/// `.2` is non-cached input; `.9`+`.10` is the billed generation (Google
+/// bills both at the output rate), so「输出」means billed generation here —
+/// the same thing it means for the subset-shape sources. Reasoning is the
+/// thinking axis (`.9`). One `gen_metadata` row is one call, so rows add up.
 fn usage_of(data: &[u8]) -> MemberObservation {
     let Some(usage) = pb_sub(data, 1).and_then(|m| pb_sub(m, 4)) else {
         return MemberObservation::default();
     };
     let n = |f: u32| pb_varint(usage, f).unwrap_or(0);
     MemberObservation {
-        input_tokens: n(1).saturating_add(n(2)),
-        output_tokens: n(9),
+        input_tokens: n(2),
+        output_tokens: n(9).saturating_add(n(10)),
         cached_tokens: n(5),
-        reasoning_tokens: n(10),
+        reasoning_tokens: n(9),
         ..Default::default()
     }
+}
+
+/// `api_provider` (field 6) as a channel name. The two enum values the
+/// corpus names are mapped; an unknown one stays its raw number as a string
+/// rather than being guessed into a vendor.
+fn gen_provider(data: &[u8]) -> Option<String> {
+    let usage = pb_sub(data, 1).and_then(|m| pb_sub(m, 4))?;
+    Some(match pb_varint(usage, 6)? {
+        24 => "Google".to_string(),
+        26 => "Anthropic".to_string(),
+        other => other.to_string(),
+    })
 }
 
 /// The responseId (`1.4.11`) identifying one generation call. Unique across
@@ -445,6 +460,7 @@ fn parse_step(
             Some(ParsedLine {
                 message: Some(parsed_message(idx, SessionMessageRole::User, text, payload)),
                 observation,
+                usage_note: None,
             })
         }
         15 => {
@@ -466,6 +482,7 @@ fn parse_step(
                         .with_provenance(None, model.map(|m| m.to_string())),
                 ),
                 observation,
+                usage_note: None,
             })
         }
         132 => Some(ParsedLine::observation_only(MemberObservation {
@@ -609,6 +626,9 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         // sessions' activity would churn this one's `last_activity_at`.
         let mut max_idx: i64 = 0;
         let mut max_step_secs: Option<f64> = None;
+        // Step times, in idx order — a generation's ledger event is dated by
+        // the first step it served.
+        let mut step_secs: Vec<(i64, f64)> = Vec::new();
         for row in rows {
             let (idx, step_type, payload) = row?;
             max_idx = max_idx.max(idx);
@@ -617,6 +637,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                     Some(m) => m.max(secs),
                     None => secs,
                 });
+                step_secs.push((idx, secs));
             }
             while gen_cursor + 1 < gens.len() && gens[gen_cursor + 1].0 < idx {
                 gen_cursor += 1;
@@ -626,7 +647,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 .filter(|(boundary, _)| *boundary < idx)
                 .map(|(_, model)| model.as_str());
             if let Some(parsed) = parse_step(idx, step_type, &payload, is_root, model) {
-                observation.add(&parsed.observation);
+                observation.add_activity(&parsed.observation);
                 if let Some(m) = parsed.message {
                     if m.content.trim().is_empty() {
                         continue;
@@ -638,18 +659,45 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         drop(stmt);
 
         // Usage is not in `steps`: one `gen_metadata` row per generation call.
-        // Every read is a full replay, so the sum becomes a snapshot.
+        // Every read is a full replay, so storage replaces the ledger rows and
+        // every call becomes a ledger event carrying the row's own served
+        // model (`1.19`), its response id as the stable key, and the first
+        // step it generated as its time.
         let mut gen_stmt = conn.prepare("SELECT data FROM gen_metadata")?;
         let gen_rows = gen_stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         let mut seen_response_ids: HashSet<String> = HashSet::new();
+        let mut usage_events = Vec::new();
         for row in gen_rows {
             let data = row?;
-            if let Some(id) = gen_response_id(&data) {
-                if !seen_response_ids.insert(id) {
+            let response_id = gen_response_id(&data);
+            if let Some(id) = &response_id {
+                if !seen_response_ids.insert(id.clone()) {
                     continue;
                 }
             }
-            observation.add(&usage_of(&data));
+            let usage = usage_of(&data);
+            let provider = gen_provider(&data);
+            let (boundary, model) = match generation_model_and_boundary(&data) {
+                Some((b, m)) => (b, Some(m)),
+                None => (i64::MIN, None),
+            };
+            let ts = step_secs
+                .iter()
+                .find(|(idx, _)| *idx > boundary)
+                .and_then(|(_, secs)| ms_epoch_to_rfc3339((*secs * 1000.0) as i64));
+            usage_events.push(crate::adapters::UsageEvent {
+                key: response_id,
+                category: crate::adapters::UsageCategory::Conversation,
+                model,
+                provider,
+                ts,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cached_tokens: usage.cached_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+
+                request_count: 0,
+            });
         }
         drop(gen_stmt);
         drop(conn);
@@ -666,13 +714,14 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             stats: crate::adapters::stats_update_from(
                 &observation,
                 &source,
-                crate::adapters::StatsCapabilities::TOOL_CALLS.with_tokens(),
+                crate::adapters::StatsCapabilities::TOOL_CALLS,
             ),
             messages,
             source: Some(source),
             complete_snapshot: true,
             next_active_provider: None,
             next_active_model: None,
+            usage_events,
         })
     }
 
@@ -942,13 +991,15 @@ mod tests {
         model: &str,
         boundary: i64,
     ) {
+        // Field 1 is the MODEL ENUM (1319 is a plausible enum id, and it must
+        // never be counted as input); 9 = thinking_output, 10 = response_output.
         let mut usage = [
             int(1, 1319),
             int(2, fresh_input),
             int(3, unknown_3),
             int(5, cache_read),
-            int(9, output),
-            int(10, thinking),
+            int(9, thinking),
+            int(10, output),
         ]
         .concat();
         if !response_id.is_empty() {
@@ -1073,15 +1124,15 @@ mod tests {
                 assert_eq!(s.tool_call_count, Some(1));
                 assert_eq!(s.user_message_count, Some(1));
                 assert_eq!(s.assistant_message_count, Some(1));
-                assert_eq!(s.compaction_count, None, "no compaction source known");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
     }
 
     /// Usage is one `gen_metadata` row per generation call — outside `steps` —
-    /// and the calls add up. Verified mapping: input = fixed system prompt
-    /// `.1` + fresh `.2`, cache = `.5`, output = `.9`, thinking = `.10`.
+    /// and the calls add up. Mapping per the agy binary's struct tags:
+    /// input = `.2` (fresh, non-cached), cache = `.5`, output = `.9`+`.10`
+    /// (billed generation), reasoning = `.9` (thinking).
     #[test]
     fn usage_sums_the_generation_calls() {
         let root = temp_dir("usage");
@@ -1093,15 +1144,89 @@ mod tests {
         let delta = AntigravityAdapter
             .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
             .unwrap();
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(crate::domain::StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(26318), "(1319+17718)+(1319+5962)");
-                assert_eq!(s.output_tokens, Some(116), "1.4.9");
-                assert_eq!(s.cached_tokens, Some(12211), "1.4.5");
-                assert_eq!(s.reasoning_tokens, Some(93), "1.4.10");
+            Some(crate::domain::StatsUpdate::Snapshot(_)) => {
+                assert_eq!(
+                    usage[0], 23680,
+                    "input = 1.4.2 only (17718+5962); the model enum in 1.4.1 is NOT tokens"
+                );
+                assert_eq!(
+                    usage[1], 209,
+                    "billed generation = 1.4.9 thinking (45+23) + 1.4.10 response (93+48) — the sum is swap-invariant"
+                );
+                assert_eq!(usage[2], 12211, "1.4.5");
+                assert_eq!(usage[3], 93, "reasoning = 1.4.9 thinking (45+48)");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
+        // One ledger event per generation, carrying the row's own model; the
+        // boundary sits above every step, so no event is time-anchored here.
+        assert_eq!(delta.usage_events.len(), 2);
+        assert!(delta
+            .usage_events
+            .iter()
+            .all(|e| e.model.as_deref() == Some("gemini-3.8-flash")));
+        assert_eq!(
+            delta
+                .usage_events
+                .iter()
+                .map(|e| e.input_tokens)
+                .sum::<u64>(),
+            23680,
+            "fresh input only — the model enum is no longer billed as tokens"
+        );
+        assert!(delta.usage_events.iter().all(|e| e.ts.is_none()));
+    }
+
+    /// A generation that actually served steps is dated by its first step and
+    /// keyed on its response id.
+    #[test]
+    fn generation_events_carry_the_serving_models_and_step_times() {
+        let root = temp_dir("usage-events");
+        let id = "336f551c-58e8-491b-a31f-13b362786c89";
+        store(
+            &root,
+            id,
+            &[
+                (
+                    14,
+                    [timestamp(1_789_480_258), msg(19, &str(2, "问"))].concat(),
+                ),
+                (
+                    15,
+                    [timestamp(1_789_480_260), msg(20, &str(1, "答"))].concat(),
+                ),
+                (132, vec![]),
+                (
+                    16,
+                    [timestamp(1_789_480_270), msg(20, &str(1, "答二"))].concat(),
+                ),
+            ],
+        );
+        let db = root.join("conversations").join(format!("{id}.db"));
+        gen_usage(&db, 0, 500, 9, 0, 30, 12, "resp-1", "gemini-3.8-flash", 0);
+        gen_usage(&db, 1, 700, 9, 400, 25, 14, "resp-2", "claude-opus-4-6", 2);
+
+        let delta = AntigravityAdapter
+            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
+            .unwrap();
+        let got: Vec<(Option<&str>, Option<&str>)> = delta
+            .usage_events
+            .iter()
+            .map(|e| (e.key.as_deref(), e.model.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (Some("resp-1"), Some("gemini-3.8-flash")),
+                (Some("resp-2"), Some("claude-opus-4-6")),
+            ]
+        );
+        // The time anchor is the first step each boundary served.
+        let times: Vec<Option<&str>> = delta.usage_events.iter().map(|e| e.ts.as_deref()).collect();
+        assert!(times[0].is_some_and(|t| t.contains("2026")));
+        assert!(times.iter().all(|t| t.is_some()));
     }
 
     /// Each generation names the model it served (`1.19`) and the input
@@ -1188,11 +1313,18 @@ mod tests {
         let delta = AntigravityAdapter
             .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
             .unwrap();
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
-            Some(crate::domain::StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.input_tokens, Some(20456), "(1319+17718)+(1319+100)");
-                assert_eq!(s.output_tokens, Some(103));
-                assert_eq!(s.reasoning_tokens, Some(49));
+            Some(crate::domain::StatsUpdate::Snapshot(_)) => {
+                assert_eq!(
+                    usage[0], 17818,
+                    "input = 1.4.2 only (17718+100); the duplicated req-1 row is deduped first"
+                );
+                assert_eq!(
+                    usage[1], 152,
+                    "billed generation = thinking 1.4.9 (45+4) + response 1.4.10 (93+10)"
+                );
+                assert_eq!(usage[3], 49, "reasoning = 1.4.9 (45+4)");
             }
             other => panic!("expected snapshot, got {other:?}"),
         }
@@ -1530,6 +1662,7 @@ mod tests {
                 true,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         }
@@ -1581,6 +1714,7 @@ mod tests {
             true,
             None,
             None,
+            &[],
         )
         .unwrap();
 
@@ -1667,6 +1801,7 @@ mod tests {
             true,
             None,
             None,
+            &[],
         )
         .unwrap();
         let activity_before = db
@@ -1703,6 +1838,7 @@ mod tests {
             true,
             None,
             None,
+            &[],
         )
         .unwrap();
         let activity_after = db

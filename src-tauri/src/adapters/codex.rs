@@ -145,35 +145,45 @@ impl CodexAdapter {
             };
             let vtype = v.get("type").and_then(|t| t.as_str());
             if vtype == Some("session_meta") {
-                let p = v.get("payload").unwrap_or(&v);
-                meta_seen = true;
-                meta_id = p.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
-                // Legacy last resort only: `session_id` is the conversation the
-                // writer was joined to, not this thread, so it never decides
-                // identity while a real thread id is available.
-                legacy_session_id = p
-                    .get("session_id")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                cwd = p.get("cwd").and_then(|c| c.as_str()).map(|c| c.to_string());
-                started_at = p
-                    .get("timestamp")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.to_string());
-                parent = p
-                    .get("parent_thread_id")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.to_string());
-                thread_source = p
-                    .get("thread_source")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.to_string());
-                // A forked page records where the prefix it inherited lives.
-                fork_base = p
-                    .get("history_base")
-                    .and_then(|h| h.get("thread_id"))
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.to_string());
+                // The FIRST meta is this rollout's OWN declaration (codex
+                // writes it at file creation). A continuation file embeds the
+                // RESUMED thread's meta inside its replayed history — letting
+                // a later meta override identity re-keys the file to a session
+                // whose usage lives in a different rollout, and two rollouts
+                // then fight over one member: source_path flips per discovery
+                // pass and the stats snapshot is replaced with each flip (a
+                // real store showed generation 21). First meta wins, always.
+                if !meta_seen {
+                    meta_seen = true;
+                    let p = v.get("payload").unwrap_or(&v);
+                    meta_id = p.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
+                    // Legacy last resort only: `session_id` is the conversation
+                    // the writer was joined to, not this thread, so it never
+                    // decides identity while a real thread id is available.
+                    legacy_session_id = p
+                        .get("session_id")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                    cwd = p.get("cwd").and_then(|c| c.as_str()).map(|c| c.to_string());
+                    started_at = p
+                        .get("timestamp")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.to_string());
+                    parent = p
+                        .get("parent_thread_id")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.to_string());
+                    thread_source = p
+                        .get("thread_source")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.to_string());
+                    // A forked page records where the prefix it inherited lives.
+                    fork_base = p
+                        .get("history_base")
+                        .and_then(|h| h.get("thread_id"))
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.to_string());
+                }
             } else if vtype == Some("response_item") {
                 let p = v.get("payload").unwrap_or(&v);
                 if p.get("type").and_then(|t| t.as_str()) == Some("message") {
@@ -181,15 +191,14 @@ impl CodexAdapter {
                     let text = extract_text(p.get("content").unwrap_or(&Value::Null));
                     // `<…>` environment_context wrappers and `#`-prefixed
                     // injections (AGENTS.md, attached-file headers) are not
-                    // user text.
+                    // user text; an envelope that wraps the real request
+                    // under `## My request:` contributes the wrapped words.
                     let internal = is_internal_source(thread_source.as_deref());
-                    if role == "user"
-                        && first_user_text.is_none()
-                        && !internal
-                        && !text.is_empty()
-                        && !crate::adapters::is_injected_preamble(&text)
+                    if role == "user" && first_user_text.is_none() && !internal && !text.is_empty()
                     {
-                        first_user_text = Some(truncate_text(&text, 400));
+                        if let Some(user_text) = crate::adapters::user_request_text(&text) {
+                            first_user_text = Some(truncate_text(&user_text, 400));
+                        }
                     }
                     // The last resort for a title: what the thread itself said
                     // first. Only consulted when there is no user text, so it
@@ -371,7 +380,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         read_jsonl_delta_stateful(
             &path,
             cursor,
-            crate::adapters::StatsCapabilities::TOOL_COMPACTION_AND_SIDE_ACTIVITY.with_tokens(),
+            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY,
             &mut state,
             &mut |idx, v, _prev, state| parse_line(idx, v, is_root, state, claims),
         )
@@ -539,17 +548,23 @@ fn parse_line(
             match ptype {
                 "message" => {
                     let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                    let text = extract_text(payload.get("content").unwrap_or(&Value::Null));
+                    let mut text = extract_text(payload.get("content").unwrap_or(&Value::Null));
                     if text.trim().is_empty() {
                         return None;
                     }
                     // Conversation is the ROOT member's user/assistant prose
                     // only; every member's own turns are counted. Injected
-                    // context (`<…>` blocks, `#`-pasted headers) is neither.
+                    // context (`<…>` blocks, machine `#` headers) is neither;
+                    // an envelope wrapping the real request contributes the
+                    // wrapped words.
                     let role = match role {
-                        "user" if !crate::adapters::is_injected_preamble(&text) => {
-                            SessionMessageRole::User
-                        }
+                        "user" => match crate::adapters::user_request_text(&text) {
+                            Some(user_text) => {
+                                text = user_text;
+                                SessionMessageRole::User
+                            }
+                            None => return None,
+                        },
                         "assistant" => SessionMessageRole::Assistant,
                         // developer/system prompts: not conversation, not counted.
                         _ => return None,
@@ -573,6 +588,7 @@ fn parse_line(
                     Some(ParsedLine {
                         message: Some(message),
                         observation,
+                        usage_note: None,
                     })
                 }
                 // A message that crossed between two threads: execution
@@ -604,10 +620,7 @@ fn parse_line(
         "event_msg" => {
             let ptype = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
             if ptype == "compact" || ptype.contains("compact") {
-                return Some(ParsedLine::observation_only(MemberObservation {
-                    compactions: 1,
-                    ..Default::default()
-                }));
+                return None;
             }
             if ptype == "token_count" {
                 // `info.total_token_usage` is cumulative for the thread, so it
@@ -651,13 +664,27 @@ fn parse_line(
                     // contributes nothing here.
                     return None;
                 }
-                return Some(ParsedLine::observation_only(MemberObservation {
-                    input_tokens: n("input_tokens"),
-                    output_tokens: n("output_tokens"),
-                    cached_tokens: n("cached_input_tokens"),
-                    reasoning_tokens: n("reasoning_output_tokens"),
-                    ..Default::default()
-                }));
+                return Some(ParsedLine::billed_observation(
+                    MemberObservation {
+                        // OpenAI-style usage: `input_tokens` INCLUDES the
+                        // cached subset (tokscale clamps cached ≤ input for
+                        // the same reason). Store the fresh part only — the
+                        // panel's 输入 axis means non-cache input everywhere.
+                        input_tokens: n("input_tokens").saturating_sub(n("cached_input_tokens")),
+                        output_tokens: n("output_tokens"),
+                        cached_tokens: n("cached_input_tokens"),
+                        reasoning_tokens: n("reasoning_output_tokens"),
+                        ..Default::default()
+                    },
+                    crate::adapters::UsageNote {
+                        category: crate::adapters::UsageCategory::Conversation,
+                        // The turn's provenance frontier is the model evidence
+                        // this event has — the same state the messages carry.
+                        model: state.model.clone(),
+                        provider: state.provider.clone(),
+                        key: Some(key),
+                    },
+                ));
             }
             None
         }
@@ -719,7 +746,7 @@ impl ThreadNames {
 #[cfg(test)]
 mod rollout_tests {
     use super::*;
-    use crate::adapters::{AgentAdapter, DiscoveredMemberKind, MemberReadDelta, StatsUpdate};
+    use crate::adapters::{AgentAdapter, DiscoveredMemberKind, MemberReadDelta};
     use crate::domain::ParsedSessionMessage;
 
     const SESSION_ID: &str = "01a0bee7-6afb-7622-afcd-e26c61dd545d";
@@ -1006,9 +1033,9 @@ mod rollout_tests {
 
     // Root conversation vs execution observations
 
-    /// Only root user/assistant prose becomes messages; thinking, tool traffic
-    /// and compaction markers become stats observations; and two visible
-    /// assistant prose segments around a tool call are BOTH kept.
+    /// Only root user/assistant prose becomes messages; tool traffic contributes
+    /// activity counts, while thinking and compression markers are filtered.
+    /// Two visible assistant prose segments around a tool call are BOTH kept.
     #[test]
     fn the_root_read_keeps_prose_and_counts_the_machine_traffic() {
         let dir = temp_dir("root-read");
@@ -1047,21 +1074,21 @@ mod rollout_tests {
         );
         assert_eq!(msgs[0].source_message_id.as_deref(), Some("m1"));
         // reasoning → nothing, tool call → tool_call_count, compact → count.
+        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
         match delta.stats {
             Some(crate::domain::StatsUpdate::Snapshot(s)) => {
                 assert_eq!(s.tool_call_count, Some(1));
-                assert_eq!(s.compaction_count, Some(1));
+
                 assert_eq!(s.side_activity_count, Some(0));
                 assert_eq!(s.user_message_count, Some(1));
                 assert_eq!(s.assistant_message_count, Some(2));
                 assert_eq!(
-                    s.input_tokens,
-                    Some(1234),
-                    "last_token_usage, not the total"
+                    usage[0], 234,
+                    "last_token_usage, minus the cached subset: fresh input only"
                 );
-                assert_eq!(s.output_tokens, Some(56));
-                assert_eq!(s.cached_tokens, Some(1000), "cached_input_tokens");
-                assert_eq!(s.reasoning_tokens, Some(7));
+                assert_eq!(usage[1], 56);
+                assert_eq!(usage[2], 1000, "cached_input_tokens");
+                assert_eq!(usage[3], 7);
             }
             other => panic!("expected a full-scan snapshot, got {other:?}"),
         }
@@ -1198,6 +1225,91 @@ mod rollout_tests {
             found[0].native_title.as_deref(),
             Some("移除新建任务按钮加号")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A continuation rollout embeds the RESUMED thread's meta in its replayed
+    /// history. Identity must come from the rollout's OWN (first) meta, and
+    /// the replayed meta must not re-key the file to the old session — two
+    /// rollouts resolving to one identity fight over the member and the stats
+    /// snapshot flips on every discovery pass (observed: generation 21, the
+    /// panel's input total oscillating between reads).
+    #[test]
+    fn a_continuation_file_keeps_its_own_identity() {
+        let dir = temp_dir("continuation-identity");
+        const OLD: &str = "01a0aa00-0000-0000-0000-000000000001";
+        const NEW: &str = "01a0bb00-0000-0000-0000-000000000002";
+
+        // The resumed thread's own rollout: carries its usage.
+        write_rollout(
+            &dir,
+            &format!("rollout-2026-09-26T20-57-43-{OLD}.jsonl"),
+            &[
+                serde_json::json!({
+                    "timestamp": "2026-09-26T20:57:43.000Z", "ordinal": 0,
+                    "type": "session_meta",
+                    "payload": {"session_id": OLD, "id": OLD, "cwd": "/repo"}
+                })
+                .to_string(),
+                serde_json::json!({
+                    "timestamp": "2026-09-26T20:58:00.000Z", "ordinal": 1,
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 1000, "output_tokens": 100, "cached_input_tokens": 900, "reasoning_output_tokens": 10},
+                        "last_token_usage": {"input_tokens": 1000, "output_tokens": 100, "cached_input_tokens": 900, "reasoning_output_tokens": 10}
+                    }}
+                })
+                .to_string(),
+            ],
+        );
+        // The continuation: first meta names ITSELF (NEW, resuming OLD), the
+        // replayed history re-declares OLD. Last-meta-wins would key this file
+        // to OLD and both rollouts would fight over one member.
+        write_rollout(
+            &dir,
+            &format!("rollout-2026-09-26T21-39-40-{NEW}.jsonl"),
+            &[
+                serde_json::json!({
+                    "timestamp": "2026-09-26T21:39:40.000Z", "ordinal": 0,
+                    "type": "session_meta",
+                    "payload": {"session_id": OLD, "id": NEW, "cwd": "/repo"}
+                })
+                .to_string(),
+                serde_json::json!({
+                    "timestamp": "2026-09-26T21:39:40.000Z", "ordinal": 1,
+                    "type": "session_meta",
+                    "payload": {"session_id": OLD, "id": OLD, "cwd": "/repo"}
+                })
+                .to_string(),
+                message_line(2, "user", "继续这个任务"),
+            ],
+        );
+
+        let found = CodexAdapter
+            .discover_members_in(&[dir.clone()], &|_| false)
+            .unwrap();
+        let mut ids: Vec<&str> = found
+            .iter()
+            .map(|m| m.source_member_id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![OLD, NEW],
+            "each rollout keys to its OWN first meta: {found:?}"
+        );
+
+        // And the resolved identity is stable across repeated discovery —
+        // the old bug re-keyed the continuation file to OLD on some passes.
+        let again = CodexAdapter
+            .discover_members_in(&[dir.clone()], &|_| false)
+            .unwrap();
+        let mut ids_again: Vec<&str> = again
+            .iter()
+            .map(|m| m.source_member_id.as_str())
+            .collect::<Vec<_>>();
+        ids_again.sort();
+        assert_eq!(ids, ids_again);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1419,9 +1531,8 @@ mod rollout_tests {
                 t, l
             )
         }
-        let input_of = |delta: &MemberReadDelta| match &delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => s.input_tokens,
-            other => panic!("expected a snapshot, got {other:?}"),
+        let input_of = |delta: &MemberReadDelta| {
+            Some(crate::adapters::test_usage_tokens(&delta.usage_events)[0])
         };
 
         let dir = temp_dir("tc-dedup");
@@ -1447,12 +1558,20 @@ mod rollout_tests {
         );
         let db = Db::open(&dir.join("noending.db")).unwrap();
 
-        fn claims_for<'a>(db: &'a Db, member_id: &'a str) -> impl Fn(&str) -> bool + 'a {
+        // 与 ingest_session 的 claims 闭包同形：注册表键带逻辑会话作用域，
+        // 会话内的重放只计一次，不同会话的同身份互不干扰。
+        fn claims_for<'a>(
+            db: &'a Db,
+            scope: &str,
+            member_id: &'a str,
+        ) -> impl Fn(&str) -> bool + 'a {
+            let scope = format!("{}|", scope);
             move |key: &str| -> bool {
-                match db.usage_claim_owner(key).unwrap() {
+                let scoped = format!("{}{}", scope, key);
+                match db.usage_claim_owner(&scoped).unwrap() {
                     Some(owner) => owner == member_id,
                     None => {
-                        db.claim_usage(key, member_id).unwrap();
+                        db.claim_usage(&scoped, member_id).unwrap();
                         true
                     }
                 }
@@ -1463,17 +1582,37 @@ mod rollout_tests {
             .read_member_delta_claimed(
                 &root_member(&file_a),
                 &SessionMemberCursor::default(),
-                &claims_for(&db, "mem-a"),
+                &claims_for(&db, "sess-1", "mem-a"),
             )
             .unwrap();
-        assert_eq!(input_of(&delta_a), Some(2000), "A bills both its turns");
+        assert_eq!(
+            input_of(&delta_a),
+            Some(200),
+            "A bills both its turns (2000 raw − 900+900 cached)"
+        );
+        // The ledger rides along: one event per billed turn, keyed on the
+        // cumulative totals that also gate the claims.
+        assert_eq!(delta_a.usage_events.len(), 2);
+        assert_eq!(
+            delta_a
+                .usage_events
+                .iter()
+                .map(|e| e.input_tokens)
+                .sum::<u64>(),
+            200,
+            "events sum to the stats the read produced (fresh input)"
+        );
+        assert!(delta_a
+            .usage_events
+            .iter()
+            .all(|e| e.key.as_deref().is_some_and(|k| k.starts_with("codex.tc."))));
 
         // B's replayed row was already claimed by A; only its own turn bills.
         let delta_b = CodexAdapter
             .read_member_delta_claimed(
                 &root_member(&file_b),
                 &SessionMemberCursor::default(),
-                &claims_for(&db, "mem-b"),
+                &claims_for(&db, "sess-1", "mem-b"),
             )
             .unwrap();
         assert_eq!(
@@ -1481,6 +1620,12 @@ mod rollout_tests {
             Some(500),
             "the replayed turn is not billed again"
         );
+        assert_eq!(
+            delta_b.usage_events.len(),
+            1,
+            "the skipped replay leaves no ledger event either"
+        );
+        assert_eq!(delta_b.usage_events[0].input_tokens, 500);
 
         // The owner's own re-read keeps billing (snapshot semantics depend on
         // it): A's rows are claimed by A, so nothing is skipped.
@@ -1488,9 +1633,65 @@ mod rollout_tests {
             .read_member_delta_claimed(
                 &root_member(&file_a),
                 &SessionMemberCursor::default(),
-                &claims_for(&db, "mem-a"),
+                &claims_for(&db, "sess-1", "mem-a"),
             )
             .unwrap();
-        assert_eq!(input_of(&delta_a2), Some(2000));
+        assert_eq!(input_of(&delta_a2), Some(200));
+
+        // A DIFFERENT logical session replaying the same identities bills its
+        // own record: a fork shares message history, not its predecessor's
+        // ledger. Both of B's token_count events bill again under the fresh
+        // scope (100 fresh input from the replayed turn + 500 of its own).
+        let delta_c = CodexAdapter
+            .read_member_delta_claimed(
+                &root_member(&file_b),
+                &SessionMemberCursor::default(),
+                &claims_for(&db, "sess-2", "mem-c"),
+            )
+            .unwrap();
+        assert_eq!(
+            input_of(&delta_c),
+            Some(600),
+            "the replayed history bills once per logical session"
+        );
+        assert_eq!(delta_c.usage_events.len(), 2);
+    }
+    #[test]
+    fn usage_events_keep_each_confirmed_channel_after_a_switch() {
+        let dir = temp_dir("usage-channel");
+        let token = |total| {
+            serde_json::json!({"type":"event_msg","payload":{
+                "type":"token_count","info":{
+                    "total_token_usage":{"input_tokens":total,"output_tokens":total},
+                    "last_token_usage":{"input_tokens":100,"output_tokens":10}
+                }
+            }})
+            .to_string()
+        };
+        let path = write_rollout(
+            &dir,
+            "rollout-channel.jsonl",
+            &[
+                meta_line(),
+                token(100),
+                thread_settings_line(1, "openai", "gpt-test"),
+                token(200),
+                thread_settings_line(2, "302ai", "gpt-test"),
+                token(300),
+            ],
+        );
+        let mut member = root_member(&path);
+        member.relation = crate::domain::SessionMemberRelation::Child;
+        let delta = CodexAdapter
+            .read_member_delta(&member, &SessionMemberCursor::default())
+            .unwrap();
+        assert!(delta.messages.is_empty());
+        let channels: Vec<_> = delta
+            .usage_events
+            .iter()
+            .map(|e| e.provider.as_deref())
+            .collect();
+        assert_eq!(channels, vec![None, Some("openai"), Some("302ai")]);
+        assert_eq!(delta.usage_events[1].model, delta.usage_events[2].model);
     }
 }

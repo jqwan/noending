@@ -18,12 +18,25 @@ function msg(content: string, role: SessionMessageData["role"] = "assistant"): S
     content,
     ts: null,
     who: role === "user" ? "用户" : "Codex",
+    turnFinal: true,
   };
 }
 
 function renderMessage(content: string, role: SessionMessageData["role"] = "assistant") {
   return render(<SessionMessage msg={msg(content, role)} />);
 }
+
+/// 同一轮里代理的中间输出带「中间回复」标记；该轮最终回复与用户消息不带。
+it("marks a non-final assistant reply as mid-turn", () => {
+  const mid = render(<SessionMessage msg={{ ...msg("先看一眼"), turnFinal: false }} />);
+  expect(mid.container.textContent).toContain("中间回复");
+
+  const final = render(<SessionMessage msg={msg("这是结论")} />);
+  expect(final.container.textContent).not.toContain("中间回复");
+
+  const user = render(<SessionMessage msg={msg("问题", "user")} />);
+  expect(user.container.textContent).not.toContain("中间回复");
+});
 
 it("列表里截断，点开弹窗才给全文", () => {
   const { container } = renderMessage(LONG);
