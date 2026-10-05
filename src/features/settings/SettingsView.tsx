@@ -3,11 +3,11 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { Modal, submitsOnEnter, timeAgo, useRefreshSignal } from "../../components/common";
+import { Modal, submitsOnEnter } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SourcesSettings from "./SourcesSettings";
 import AgentRuntimeRow from "./AgentRuntimeSettings";
-import { AGENT_LABELS, type Agent, type AgentStatusEntry, type IngestionDiagnostic, type WorkspaceSettings } from "../../types";
+import { AGENT_LABELS, type Agent, type AgentStatusEntry, type WorkspaceSettings } from "../../types";
 import type { Route, SettingsSection } from "../../app/routes";
 
 const SECTIONS: { key: SettingsSection; label: string; icon: "settings" | "spark" | "folder" | "palette" | "database" }[] = [
@@ -43,66 +43,12 @@ export default function SettingsView({ section, navigate }: {
         <div className="settings-pane">
           {current === "general" && <GeneralSettings />}
           {current === "agents" && <AgentsSettings />}
-          {current === "sources" && (
-            <>
-              <SourcesSettings />
-              <IngestionDiagnosticsSection />
-            </>
-          )}
+          {current === "sources" && <SourcesSettings />}
           {current === "appearance" && <AppearanceSettings />}
           {current === "advanced" && <AdvancedSettings />}
         </div>
       </div>
     </div>
-  );
-}
-
-/** 摄入诊断：无法归属到任何会话的内部执行源（child / side 等）。只展示、无动作——
- *  它们不是会话，不参与搜索、上下文与归属。默认只看反复出现的（minObservations 2）。 */
-function IngestionDiagnosticsSection() {
-  const [rows, setRows] = useState<IngestionDiagnostic[] | null>(null);
-
-  const load = useCallback(() => {
-    api.listIngestionDiagnostics()
-      .then(setRows)
-      .catch((e) => { console.error(e); setRows([]); });
-  }, []);
-  useEffect(load, [load]);
-  // 后台摄入随时可能新观测到问题，刷新信号到了就重读。
-  useRefreshSignal(load);
-
-  return (
-    <section className="rail-section" style={{ marginTop: 26 }}>
-      <div className="section-label">摄入诊断</div>
-      <div className="muted small" style={{ marginTop: 6 }}>
-        这些是无法归属到任何会话的内部执行源；它们不是会话，不参与搜索、上下文与归属。
-      </div>
-
-      {rows === null && <div className="muted small" style={{ marginTop: 10 }}>读取中…</div>}
-      {rows !== null && rows.length === 0 && (
-        <div className="muted small" style={{ marginTop: 10 }}>没有反复出现的摄入问题。</div>
-      )}
-
-      {rows !== null && rows.map((d) => (
-        <div className="row-line" key={d.id}>
-          <div style={{ minWidth: 0 }}>
-            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span className="small">{AGENT_LABELS[d.agent]} · {d.kind}</span>
-              <span className="badge">出现 {d.observation_count} 次</span>
-            </div>
-            <div className="settings-row-hint" style={{ wordBreak: "break-word" }}>{d.reason}</div>
-            {d.source_path && (
-              <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
-                {d.source_path}
-              </div>
-            )}
-            <div className="settings-row-hint">
-              首次出现 {timeAgo(d.first_seen_at)} · 最近出现 {timeAgo(d.last_seen_at)}
-            </div>
-          </div>
-        </div>
-      ))}
-    </section>
   );
 }
 
