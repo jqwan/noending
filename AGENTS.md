@@ -63,18 +63,28 @@ Documents under `docs/` may include current design, implementation plans, or his
 
 ## Verify
 
-Before finishing a change, run:
+Match verification to the change; do not run full tests for every turn or commit.
 
-```bash
-cd src-tauri
-cargo fmt --check
-cargo check --all-targets
-cargo test --all-targets
+* Docs: `git diff --check` only.
+* Copy/style/layout: inspect the affected UI; type-check TS/TSX changes.
+* Frontend behavior: `pnpm exec tsc --noEmit` + relevant test files.
+* Rust: in `src-tauri`, `cargo fmt --check`, `cargo check` + relevant tests.
+* Schema/storage/ingestion/statistics: add regression tests and check affected
+  consumers. API contract changes require checks on both sides.
+* Build/import/asset/config changes: run the affected build. Dependency changes:
+  reinstall and run the affected-side full tests and build.
 
-cd ..
-pnpm install --frozen-lockfile
-pnpm test
-pnpm build
-```
+Run full verification for major refactors, broad changes, stage acceptance,
+release preparation, or explicit requests:
 
-For platform-sensitive changes, verify macOS and Windows CI at the final HEAD.
+* Backend (`src-tauri`): `cargo fmt --check`, `cargo check --all-targets`,
+  `cargo test --all-targets`.
+* Frontend: `pnpm test`, `pnpm build`.
+
+Run `pnpm install --frozen-lockfile` only when dependencies/lockfile change or
+are missing. Reuse passing checks while covered code is unchanged; broaden
+checks when impact is uncertain. Confirm filtered tests run and report actual
+results and gaps.
+
+For platform-sensitive changes, check macOS and Windows; use remote CI only
+when authorized, and report any unverified platform.
