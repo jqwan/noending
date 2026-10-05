@@ -444,7 +444,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
         "the detail preview is the newest messages, oldest first"
     );
 
-    let newest = db.message_window(&session.id, None, 2, false).unwrap();
+    let newest = db.message_window(&session.id, None, 2).unwrap();
     assert_eq!(newest.total, 5);
     assert_eq!(newest.messages.len(), 2);
     assert_eq!(newest.messages[1].message.content, "message 5");
@@ -464,7 +464,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
     );
 
     let older = db
-        .message_window(&session.id, newest.next_before_ordinal, 2, false)
+        .message_window(&session.id, newest.next_before_ordinal, 2)
         .unwrap();
     assert_eq!(
         older
@@ -482,7 +482,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
     );
 
     let oldest = db
-        .message_window(&session.id, older.next_before_ordinal, 2, false)
+        .message_window(&session.id, older.next_before_ordinal, 2)
         .unwrap();
     assert_eq!(oldest.messages.len(), 1);
     assert_eq!(oldest.messages[0].message.content, "message 1");
@@ -492,13 +492,87 @@ fn the_conversation_reads_backward_from_the_newest_message() {
         "the beginning was reached"
     );
 
-    let whole = db.message_window(&session.id, None, 50, false).unwrap();
+    let whole = db.message_window(&session.id, None, 50).unwrap();
     assert_eq!(
         whole.messages.len(),
         5,
         "a page past the tail is the whole conversation"
     );
     assert_eq!(whole.next_before_ordinal, None);
+}
+
+/// The reader pages over the skeleton; each final reply carries its turn's
+/// collapsible intermediates, and the range fetch returns exactly those.
+#[test]
+fn a_final_reply_carries_its_turn_and_the_range_fetch_returns_its_intermediates() {
+    let db = open_db("turn-blocks");
+    let mut first_ask = support::parsed_message("m1", SessionMessageRole::User, "第一问");
+    first_ask.ts = Some("2026-10-05T10:00:00+08:00".into());
+    let (session, _) = support::seed_conversation(
+        &db,
+        Agent::ClaudeCode,
+        "turn-blocks",
+        &[
+            first_ask,
+            support::parsed_message("m2", SessionMessageRole::Assistant, "中间一"),
+            support::parsed_message("m3", SessionMessageRole::Assistant, "中间二"),
+            support::parsed_message("m4", SessionMessageRole::Assistant, "最终回答"),
+            support::parsed_message("m5", SessionMessageRole::User, "第二问"),
+            support::parsed_message("m6", SessionMessageRole::Assistant, "直接的回答"),
+        ],
+    );
+
+    let window = db.message_window(&session.id, None, 50).unwrap();
+    let by_ordinal = |ordinal: i64| {
+        window
+            .messages
+            .iter()
+            .find(|m| m.ordinal == ordinal)
+            .unwrap_or_else(|| panic!("ordinal {ordinal} not in the page"))
+    };
+    // 骨架页：两条用户消息 + 两条最终回复；中间回复不占页，total 仍是全部消息。
+    assert_eq!(
+        window
+            .messages
+            .iter()
+            .map(|m| m.ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 4, 5, 6]
+    );
+    assert_eq!(window.total, 6);
+    // ordinal 4 的最终回复带着它那轮：起点是 ordinal 1 的提问，中间两条。
+    let turn = by_ordinal(4).turn.as_ref().unwrap();
+    assert_eq!(turn.boundary_ordinal, 1);
+    assert_eq!(
+        turn.boundary_ts.as_deref(),
+        Some("2026-10-05T10:00:00+08:00")
+    );
+    assert_eq!(turn.count, 2);
+    // ordinal 6 那轮没有中间回复：没有块。用户消息也不带块。
+    assert!(by_ordinal(6).turn.is_none());
+    assert!(by_ordinal(1).turn.is_none());
+
+    // 展开取数：正好是起点与最终回复之间的那两条，旧→新；截断如实上报。
+    let (intermediates, truncated) = db
+        .turn_intermediates(&session.id, turn.boundary_ordinal, 4, 50)
+        .unwrap();
+    assert_eq!(
+        intermediates
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["中间一", "中间二"]
+    );
+    assert!(!truncated);
+    let (capped, truncated) = db.turn_intermediates(&session.id, 1, 4, 1).unwrap();
+    assert_eq!(
+        capped
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["中间一"]
+    );
+    assert!(truncated);
 }
 
 /// The navigation rail's marks are the USER messages in conversation order,
@@ -551,12 +625,12 @@ fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
     assert_eq!(marks[2].preview, "第一行", "the preview is the first line");
 
     // 两向分页在同一条缝上对接：向后那页的第一条，正是向前那页的下一条。
-    let older = db.message_window(&session.id, Some(4), 2, false).unwrap();
+    let older = db.message_window(&session.id, Some(4), 2).unwrap();
     assert_eq!(
         older.messages.iter().map(|m| m.ordinal).collect::<Vec<_>>(),
         vec![3, 4]
     );
-    let newer = db.newer_window(&session.id, 4, 2, false).unwrap();
+    let newer = db.newer_window(&session.id, 4, 2).unwrap();
     assert_eq!(
         newer.messages.iter().map(|m| m.ordinal).collect::<Vec<_>>(),
         vec![5, 6],
@@ -574,7 +648,7 @@ fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
         "a forward page still knows where to page back from"
     );
 
-    let past_the_tail = db.newer_window(&session.id, 6, 2, false).unwrap();
+    let past_the_tail = db.newer_window(&session.id, 6, 2).unwrap();
     assert!(
         past_the_tail.messages.is_empty(),
         "nothing newer than the tail"
@@ -600,14 +674,14 @@ fn a_replaced_conversation_reports_a_new_generation_to_paging_readers() {
             })
             .collect::<Vec<_>>(),
     );
-    let before = db.message_window(&session.id, None, 2, false).unwrap();
+    let before = db.message_window(&session.id, None, 2).unwrap();
     assert_eq!(before.next_before_ordinal, Some(1));
 
     db.commit_ingest(&session.id, &[], &support::seed_source(1))
         .unwrap();
 
     let after = db
-        .message_window(&session.id, before.next_before_ordinal, 2, false)
+        .message_window(&session.id, before.next_before_ordinal, 2)
         .unwrap();
     assert_eq!(after.total, 0, "the replacement conversation is empty");
     assert!(after.messages.is_empty());

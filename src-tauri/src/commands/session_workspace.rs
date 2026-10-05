@@ -32,6 +32,8 @@ const DETAIL_MESSAGE_PREVIEW: i64 = 5;
 /// Page size for the conversation reader: what one upward scroll asks for.
 const MESSAGE_PAGE_DEFAULT: i64 = 60;
 const MESSAGE_PAGE_MAX: i64 = 200;
+/// 一轮中间回复的展开上限：单轮通常几十条，超过就截断并如实告知。
+const TURN_INTERMEDIATES_MAX: i64 = 400;
 
 #[derive(Serialize)]
 pub struct SessionDetail {
@@ -165,6 +167,22 @@ pub struct SessionWindowMessage {
     pub ordinal: i64,
     #[serde(flatten)]
     pub message: SessionMessage,
+    /// Final replies only: the turn's collapsible intermediate block. Absent
+    /// when there is nothing to collapse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<SessionTurnSummary>,
+}
+
+/// The turn a final reply closes, as its reader-facing summary.
+#[derive(Serialize)]
+pub struct SessionTurnSummary {
+    /// The turn's user message — the exclusive lower bound of the expand
+    /// range. `0` means the turn opens at the conversation's beginning.
+    pub boundary_ordinal: i64,
+    /// That user message's ts; the block header derives a duration from it.
+    pub boundary_ts: Option<String>,
+    /// How many intermediate messages the range holds.
+    pub count: i64,
 }
 
 /// One page of a Session's Conversation, read backward from the newest message.
@@ -174,15 +192,24 @@ pub struct SessionMessageWindow {
     /// The fact generation the page was read from. A caller paging upward that
     /// sees it change must reload from the tail: the conversation was rewritten.
     pub generation: i64,
-    /// How many messages the CURRENT mode counts (turns mode: 骨架消息数)。
+    /// How many messages the conversation holds in total（含中间回复）——头部
+    /// 的「共 N 条」拿它计数；分页本身按骨架走。
     pub total: i64,
-    /// The max projection ordinal of the conversation（模式无关）："是否已在尾部"
-    /// 拿它比，不拿 total 比——turns 模式下 total 只数骨架消息。
+    /// The max projection ordinal of the conversation："是否已在尾部"
+    /// 拿它比，不拿 total 比。
     pub tail_ordinal: i64,
-    /// 当前模式上方还有多少条没加载（「加载更早」的计数）。
+    /// 上方还有多少条骨架消息没加载（「加载更早」的计数）。
     pub remaining: i64,
     /// Cursor for the next, older page; `None` means the beginning was reached.
     pub next_before_ordinal: Option<i64>,
+}
+
+/// One turn's expanded intermediates.
+#[derive(Serialize)]
+pub struct TurnIntermediates {
+    pub messages: Vec<SessionMessage>,
+    /// The range exceeded the cap and was cut short.
+    pub truncated: bool,
 }
 
 /// One mark on the conversation's navigation rail: a USER message's position.
@@ -196,8 +223,8 @@ pub struct SessionMessageMark {
 /// an older page is fetched by passing the previous page's cursor back.
 /// `after_ordinal` reads the other direction — the messages NEWER than it —
 /// which is how a reader that jumped into the middle keeps going forward.
-/// `turns_only = true`（会话消息页默认）：一页按「用户消息 + 每轮最终回复」计
-/// 数，代理的中间输出不占加载配额；`false`（显示中间回复模式）按全量消息计页。
+/// 一页按「用户消息 + 每轮最终回复」计（骨架），代理的中间输出不占加载配额，
+/// 由每条最终回复的 `turn` 摘要标注成可展开的块。
 #[tauri::command]
 pub fn get_session_messages(
     state: State<AppState>,
@@ -205,16 +232,14 @@ pub fn get_session_messages(
     before_ordinal: Option<i64>,
     after_ordinal: Option<i64>,
     limit: Option<i64>,
-    turns_only: Option<bool>,
 ) -> Result<SessionMessageWindow> {
     let limit = limit
         .unwrap_or(MESSAGE_PAGE_DEFAULT)
         .clamp(1, MESSAGE_PAGE_MAX);
-    let turns_only = turns_only.unwrap_or(false);
     with_db(&state, |db| {
         let window = match after_ordinal {
-            Some(after) => db.newer_window(&session_id, after, limit, turns_only)?,
-            None => db.message_window(&session_id, before_ordinal, limit, turns_only)?,
+            Some(after) => db.newer_window(&session_id, after, limit)?,
+            None => db.message_window(&session_id, before_ordinal, limit)?,
         };
         Ok(SessionMessageWindow {
             messages: window
@@ -223,6 +248,11 @@ pub fn get_session_messages(
                 .map(|row| SessionWindowMessage {
                     ordinal: row.ordinal,
                     message: row.message,
+                    turn: row.turn.map(|turn| SessionTurnSummary {
+                        boundary_ordinal: turn.boundary_ordinal,
+                        boundary_ts: turn.boundary_ts,
+                        count: turn.count,
+                    }),
                 })
                 .collect(),
             generation: window.generation,
@@ -230,6 +260,29 @@ pub fn get_session_messages(
             tail_ordinal: window.tail_ordinal,
             remaining: window.remaining,
             next_before_ordinal: window.next_before_ordinal,
+        })
+    })
+}
+
+/// 一轮展开后的中间回复：用户消息（`after_ordinal`）与最终回复（`before_ordinal`）
+/// 之间的全部消息，旧→新。中间回复块展开时取。
+#[tauri::command]
+pub fn get_turn_intermediates(
+    state: State<AppState>,
+    session_id: String,
+    after_ordinal: i64,
+    before_ordinal: i64,
+) -> Result<TurnIntermediates> {
+    with_db(&state, |db| {
+        let (messages, truncated) = db.turn_intermediates(
+            &session_id,
+            after_ordinal,
+            before_ordinal,
+            TURN_INTERMEDIATES_MAX,
+        )?;
+        Ok(TurnIntermediates {
+            messages,
+            truncated,
         })
     })
 }

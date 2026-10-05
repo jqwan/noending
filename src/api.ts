@@ -8,7 +8,7 @@ import type {
   RecentWorkspacePath, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionContextView, SessionDetail,
-  SessionMessageMark, SessionMessageWindow,
+  SessionMessageMark, SessionMessageWindow, TurnIntermediates,
   SessionUpdateOutcome,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamReviewState, WorkstreamReviewWindow, WorkstreamReviewSummary,
@@ -153,19 +153,21 @@ export const api = {
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),
-  /** Conversation 的一页：`beforeOrdinal` 取更早的一页，`afterOrdinal` 取更新的一页，
-   *  都不传就是最新一页。`turnsOnly = true`（会话消息页默认）按「用户消息 + 每轮
-   *  最终回复」计页，代理的中间输出不占加载配额。 */
+  /** Conversation 的一页（骨架：用户消息 + 每轮最终回复）：`beforeOrdinal` 取更早
+   *  的一页，`afterOrdinal` 取更新的一页，都不传就是最新一页。中间回复不占页，
+   *  挂在各条最终回复的 `turn` 摘要上，展开时走 getSessionTurnIntermediates。 */
   getSessionMessages: (
     sessionId: string,
-    page: { beforeOrdinal?: number | null; afterOrdinal?: number | null; limit?: number; turnsOnly?: boolean } = {},
+    page: { beforeOrdinal?: number | null; afterOrdinal?: number | null; limit?: number } = {},
   ) => invoke<SessionMessageWindow>("get_session_messages", {
     sessionId,
     beforeOrdinal: page.beforeOrdinal ?? null,
     afterOrdinal: page.afterOrdinal ?? null,
     limit: page.limit ?? null,
-    turnsOnly: page.turnsOnly ?? null,
   }),
+  /** 一轮展开后的中间回复：起点用户消息与最终回复之间的全部消息（旧→新）。 */
+  getSessionTurnIntermediates: (sessionId: string, afterOrdinal: number, beforeOrdinal: number) =>
+    invoke<TurnIntermediates>("get_turn_intermediates", { sessionId, afterOrdinal, beforeOrdinal }),
   /** 导航条的用户消息位置：当前会话里所有 user 消息，按顺序。 */
   getSessionUserMessageMarks: (sessionId: string) =>
     invoke<SessionMessageMark[]>("get_session_user_message_marks", { sessionId }),

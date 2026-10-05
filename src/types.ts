@@ -601,7 +601,25 @@ export interface SessionDetail {
 
 /** 会话消息 + 它在当前会话里的投影序号。会话的顺序就是这个序号：读取方按它排序、
  *  去重，渲染顺序就永远不会取决于分页请求的先后。 */
-export type SessionWindowMessage = SessionMessage & { ordinal: number };
+export type SessionWindowMessage = SessionMessage & { ordinal: number; turn?: SessionTurnSummary };
+
+/** 一轮的可展开中间回复块：起点用户消息与最终回复之间的全部中间消息。
+ *  只在有内容可收起时出现（条数为 0 的轮不带块）。 */
+export interface SessionTurnSummary {
+  /** 这轮起点用户消息的投影序号：展开取数的开区间下界；`0` = 从会话最开头。 */
+  boundary_ordinal: number;
+  /** 起点用户消息的时间戳（可缺），块头的时长由它和最终回复的时间算。 */
+  boundary_ts: string | null;
+  /** 中间回复条数。 */
+  count: number;
+}
+
+/** `get_turn_intermediates` — 一轮展开后的中间回复，旧→新。 */
+export interface TurnIntermediates {
+  messages: SessionWindowMessage[];
+  /** 超出单轮上限被截断了。 */
+  truncated: boolean;
+}
 
 /** `get_session_user_message_marks` — 导航条上的一条：用户消息在会话里的位置。 */
 export interface SessionMessageMark {
@@ -610,17 +628,18 @@ export interface SessionMessageMark {
   preview: string;
 }
 
-/** `get_session_messages` — Conversation 的一页。`next_before_ordinal` 是上一页返回的
- *  游标，再传回来取更早的一页；`null` = 已经到会话开头。 */
+/** `get_session_messages` — Conversation 的一页（骨架：用户消息 + 每轮最终回复）。
+ *  `next_before_ordinal` 是上一页返回的游标，再传回来取更早的一页；`null` = 已经
+ *  到会话开头。中间回复不占页，挂在各自最终回复的 `turn` 摘要上，展开时取。 */
 export interface SessionMessageWindow {
   messages: SessionWindowMessage[];
   /** 这一页读到的事实代次：变化说明会话被改写，旧页不再属于同一个会话。 */
   generation: number;
-  /** 当前模式计的消息数：turns 模式 = 骨架消息（用户 + 最终回复），全量模式 = 全部。 */
+  /** 会话的全部消息数（含中间回复），头部的「共 N 条」拿它计数。 */
   total: number;
-  /** 会话的最大投影序号（模式无关）：「是否已读到尾部」拿它比，不拿 total 比。 */
+  /** 会话的最大投影序号：「是否已读到尾部」拿它比，不拿 total 比。 */
   tail_ordinal: number;
-  /** 当前模式上方还有多少条没加载（「加载更早」的计数）。 */
+  /** 上方还有多少条骨架消息没加载（「加载更早」的计数）。 */
   remaining: number;
   next_before_ordinal: number | null;
 }

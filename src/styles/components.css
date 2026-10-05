@@ -439,6 +439,30 @@
 }
 /* 顶部「还有 N 条更早消息」：向上滑会自动加载，也可以直接点这一条。 */
 .conversation-more { display: flex; justify-content: center; padding: 12px 0 20px; }
+/* 中间回复块：默认收起，一行摘要当门（工作了多久、多少条）；展开后把这轮的
+   中间消息缩进排在用户消息与最终回复之间。 */
+.turn-block { margin: 4px 0; }
+.turn-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 3px 8px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.turn-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.turn-toggle .ui-icon { width: 12px; height: 12px; transition: transform 160ms ease; }
+.turn-toggle.open .ui-icon { transform: rotate(90deg); }
+.turn-body {
+  margin: 2px 0 6px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-subtle);
+}
+.turn-truncated { padding: 4px 8px; }
 /* 用户消息导航条：一条用户消息一根短横，按固定间距排成阶梯。位置只由它在用户消息
    里的序号决定，不映射到消息在文档里的位置——它是「跳到第几条提问」的目录，不是
    滚动条的替身。它落在 .main 的右内距里，不压正文，也不跟着内容滚。 */

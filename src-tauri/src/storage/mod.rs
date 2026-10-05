@@ -1,16 +1,15 @@
 //! SQLite storage: current schema and repository helpers. Owns domain data, the
-//! Logical Session graph (members / messages / cursors / stats / context
-//! frontier / diagnostics), context items and FTS search.
+//! Logical Session graph (one row per session: identity, source, read cursor
+//! and fact frontier), context items and FTS search.
 //!
-//! History integrity: `session_messages` is the ONLY conversation store (root
-//! members only), append-only and idempotent by
-//! `(member_id, source_identity_hash)` — rows are never replaced. Member cursors
-//! track the *read* position per member, while
-//! `session_contexts.processed_through_seq` is the separate *processed* position
-//! of Context consumption. One member ingest writes messages + stats + cursor +
-//! activity in ONE transaction (`commit_member_ingest`), re-checking trash and
-//! membership inside it.
+//! History integrity: `session_messages` is the ONLY conversation store,
+//! append-only and idempotent by `(session_id, source_identity_hash)` — rows
+//! are never replaced. The session row carries the *read* cursor, while
+//! `session_contexts.processed_through_seq` is the separate *processed*
+//! position of Context consumption. One ingest writes messages + projection +
+//! cursor + fact frontier in ONE transaction (`commit_ingest`).
 
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -973,6 +972,10 @@ impl Db {
     /// messages). The page comes back oldest first and carries its own cursor,
     /// so callers never handle projection ordinals themselves.
     ///
+    /// A page is the conversation's SKELETON — user messages and each turn's
+    /// final reply; the assistant's intermediate outputs ride in per turn via
+    /// [`WindowedMessage::turn`] and [`Self::turn_intermediates`].
+    ///
     /// `generation` travels with the page because an ingest that rewrites the
     /// conversation replaces the projection and raises it: a caller paging
     /// upward that sees it change knows its older pages no longer belong to
@@ -982,15 +985,11 @@ impl Db {
         session_id: &str,
         before_ordinal: Option<i64>,
         limit: i64,
-        turns_only: bool,
     ) -> Result<MessageWindow> {
         let conn = self.read();
         let state = get_ingest_state_conn(&conn, session_id)?;
-        let rows =
-            window_messages_filtered_conn(&conn, session_id, before_ordinal, limit, turns_only)?;
-        Ok(message_window_from(
-            state, turns_only, &conn, session_id, rows,
-        )?)
+        let rows = window_messages_filtered_conn(&conn, session_id, before_ordinal, limit, true)?;
+        Ok(message_window_from(state, &conn, session_id, rows)?)
     }
 
     /// One page read FORWARD from `after_ordinal` (exclusive): the next newer
@@ -1001,15 +1000,42 @@ impl Db {
         session_id: &str,
         after_ordinal: i64,
         limit: i64,
-        turns_only: bool,
     ) -> Result<MessageWindow> {
         let conn = self.read();
         let state = get_ingest_state_conn(&conn, session_id)?;
-        let rows =
-            forward_messages_filtered_conn(&conn, session_id, after_ordinal, limit, turns_only)?;
-        Ok(message_window_from(
-            state, turns_only, &conn, session_id, rows,
-        )?)
+        let rows = forward_messages_filtered_conn(&conn, session_id, after_ordinal, limit, true)?;
+        Ok(message_window_from(state, &conn, session_id, rows)?)
+    }
+
+    /// One turn's intermediate messages — everything strictly between the
+    /// turn's user message (`after_ordinal`) and its final reply
+    /// (`before_ordinal`), oldest first. `truncated` says the cap cut the
+    /// range short. This is the expand action behind a turn's collapsed
+    /// intermediate block.
+    pub fn turn_intermediates(
+        &self,
+        session_id: &str,
+        after_ordinal: i64,
+        before_ordinal: i64,
+        limit: i64,
+    ) -> Result<(Vec<SessionMessage>, bool)> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT m.*
+             FROM session_message_projection p
+             JOIN session_messages m ON m.id = p.session_message_id
+             WHERE p.session_id = ?1 AND p.ordinal > ?2 AND p.ordinal < ?3
+             ORDER BY p.ordinal ASC LIMIT ?4",
+        )?;
+        let mut rows = st
+            .query_map(
+                params![session_id, after_ordinal, before_ordinal, limit + 1],
+                row_message,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let truncated = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        Ok((rows, truncated))
     }
 
     /// Where the USER messages sit in the CURRENT conversation, in order: the
@@ -2219,14 +2245,15 @@ pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Resu
 pub struct MessageWindow {
     pub messages: Vec<WindowedMessage>,
     pub generation: i64,
-    /// How many messages the CURRENT mode counts: the conversation skeleton
-    /// (user + final replies) in turns mode, every message in full mode.
+    /// How many messages the conversation holds in total — every projected
+    /// message, intermediates included. The reader's header counts with this;
+    /// paging itself runs over the skeleton.
     pub total: i64,
-    /// The max projection ordinal of the conversation (mode-independent):
-    /// "am I holding the tail" compares against this, never against `total`.
+    /// The max projection ordinal of the conversation: "am I holding the tail"
+    /// compares against this, never against `total`.
     pub tail_ordinal: i64,
-    /// How many mode-matching messages sit above the loaded range (the
-    /// 「加载更早」 label): exact in every mode, jumps included.
+    /// How many skeleton rows sit above the loaded range (the 「加载更早」
+    /// label): exact, jumps included.
     pub remaining: i64,
     /// Exclusive upper bound for the next, older page. `None` means the
     /// conversation's beginning was reached.
@@ -2239,6 +2266,23 @@ pub struct MessageWindow {
 pub struct WindowedMessage {
     pub ordinal: i64,
     pub message: SessionMessage,
+    /// Final replies only: the turn's collapsible intermediate block —
+    /// everything between this reply and the user message that started the
+    /// turn. `None` when there is nothing to collapse.
+    pub turn: Option<TurnSummary>,
+}
+
+/// One turn's collapsible intermediates.
+#[derive(Clone)]
+pub struct TurnSummary {
+    /// The turn's user message — the exclusive lower bound of the range. `0`
+    /// means the turn opens at the conversation's very beginning.
+    pub boundary_ordinal: i64,
+    /// That user message's ts; the block header derives a duration from it.
+    pub boundary_ts: Option<String>,
+    /// How many messages sit in the range. Never zero: zero-count turns get
+    /// no block at all.
+    pub count: i64,
 }
 
 /// Where one USER message sits in the conversation — a mark on the reader's
@@ -2335,27 +2379,15 @@ fn forward_messages_filtered_conn(
 /// Assemble a page from rows read in either direction. Both directions carry
 /// the same backward cursor — one step before the page they came with — so a
 /// reader paging up never handles projection ordinals itself.
+///
+/// The page is the conversation's SKELETON; the assistant's intermediate
+/// outputs ride along as each final reply's [`TurnSummary`].
 fn message_window_from(
     state: (i64, i64),
-    turns_only: bool,
     conn: &Connection,
     session_id: &str,
     rows: Vec<(i64, SessionMessage)>,
 ) -> Result<MessageWindow> {
-    // `total` counts what the current mode pages over: the conversation
-    // skeleton (user + final replies) in turns mode, every message in full
-    // mode. `tail_ordinal` is mode-independent — a reader checks "am I holding
-    // the tail" against it, never against `total`.
-    let total = if turns_only {
-        let mut st = conn.prepare(
-            "SELECT COUNT(*) FROM session_message_projection p
-             JOIN session_messages m ON m.id = p.session_message_id
-             WHERE p.session_id = ?1 AND (m.role = 'user' OR m.turn_final = 1)",
-        )?;
-        st.query_row(params![session_id], |r| r.get::<_, i64>(0))?
-    } else {
-        state.1
-    };
     let next_before_ordinal = rows
         .first()
         .map(|(ordinal, _)| ordinal - 1)
@@ -2363,30 +2395,85 @@ fn message_window_from(
     let remaining = match next_before_ordinal {
         None => 0,
         Some(before) => {
-            let turn_filter = if turns_only {
-                " AND (m.role = 'user' OR m.turn_final = 1)"
-            } else {
-                ""
-            };
-            let mut st = conn.prepare(&format!(
+            let mut st = conn.prepare(
                 "SELECT COUNT(*) FROM session_message_projection p
                  JOIN session_messages m ON m.id = p.session_message_id
-                 WHERE p.session_id = ?1 AND p.ordinal < ?2{turn_filter}",
-            ))?;
+                 WHERE p.session_id = ?1 AND p.ordinal < ?2
+                   AND (m.role = 'user' OR m.turn_final = 1)",
+            )?;
             st.query_row(params![session_id, before], |r| r.get::<_, i64>(0))?
         }
     };
+    let turns = turn_summaries_conn(conn, session_id, &rows)?;
     Ok(MessageWindow {
         messages: rows
             .into_iter()
-            .map(|(ordinal, message)| WindowedMessage { ordinal, message })
+            .map(|(ordinal, message)| {
+                let turn = if message.turn_final {
+                    turns.get(&ordinal).cloned()
+                } else {
+                    None
+                };
+                WindowedMessage {
+                    ordinal,
+                    message,
+                    turn,
+                }
+            })
             .collect(),
         generation: state.0,
-        total,
+        total: state.1,
         tail_ordinal: state.1,
         remaining,
         next_before_ordinal,
     })
+}
+
+/// Per final reply in the page: the turn it closes. The turn's user message is
+/// the last user row below the reply — a final's predecessor skeleton row is
+/// always a user, because a final is derived as an assistant whose next
+/// projected row is not an assistant, so two finals never touch.
+fn turn_summaries_conn(
+    conn: &Connection,
+    session_id: &str,
+    rows: &[(i64, SessionMessage)],
+) -> Result<HashMap<i64, TurnSummary>> {
+    let mut boundary_st = conn.prepare(
+        "SELECT p.ordinal, m.ts
+         FROM session_message_projection p
+         JOIN session_messages m ON m.id = p.session_message_id
+         WHERE p.session_id = ?1 AND p.ordinal < ?2 AND m.role = 'user'
+         ORDER BY p.ordinal DESC LIMIT 1",
+    )?;
+    let mut count_st = conn.prepare(
+        "SELECT COUNT(*) FROM session_message_projection p
+         WHERE p.session_id = ?1 AND p.ordinal > ?2 AND p.ordinal < ?3",
+    )?;
+    let mut turns = HashMap::new();
+    for &(ordinal, ref message) in rows {
+        if !message.turn_final {
+            continue;
+        }
+        let (boundary_ordinal, boundary_ts) = boundary_st
+            .query_row(params![session_id, ordinal], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .optional()?
+            .unwrap_or((0, None));
+        let count: i64 =
+            count_st.query_row(params![session_id, boundary_ordinal, ordinal], |r| r.get(0))?;
+        if count > 0 {
+            turns.insert(
+                ordinal,
+                TurnSummary {
+                    boundary_ordinal,
+                    boundary_ts,
+                    count,
+                },
+            );
+        }
+    }
+    Ok(turns)
 }
 
 pub fn get_messages_conn(

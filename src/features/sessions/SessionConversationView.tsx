@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Icon from "../../components/Icon";
 import PageHeader from "../../layout/PageHeader";
 import { api } from "../../api";
@@ -6,9 +14,11 @@ import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData } from "./SessionMessage";
 import { agentDisplayLabel, sessionDisplayTitle, UNTITLED_SESSION } from "./SessionTable";
 import type {
+  Agent,
   Session,
   SessionMessageMark,
   SessionMessageWindow,
+  SessionTurnSummary,
   SessionWindowMessage,
 } from "../../types";
 import type { Route } from "../../app/routes";
@@ -44,6 +54,37 @@ function mergeMessages(
   for (const m of current) byOrdinal.set(m.ordinal, m);
   for (const m of incoming) byOrdinal.set(m.ordinal, m);
   return [...byOrdinal.values()].sort((a, b) => a.ordinal - b.ordinal);
+}
+
+/** 一轮中间回复块的展开状态：现取中 / 已取回。收起即丢弃，再展开再取。 */
+type TurnExpansion =
+  | { status: "loading" }
+  | { status: "loaded"; messages: SessionWindowMessage[]; truncated: boolean };
+
+/** 轮时长（秒）：起点用户消息到最终回复；两端时间戳缺一个都算不出。 */
+function turnDurationSeconds(startTs: string | null, endTs: string | null): number | null {
+  if (startTs === null || endTs === null) return null;
+  const start = Date.parse(startTs);
+  const end = Date.parse(endTs);
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return null;
+  return Math.round((end - start) / 1000);
+}
+
+/** 「3 分 4 秒」式时长；小时往上只留时与分。 */
+function formatDuration(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  if (h > 0) return `${h} 时 ${m} 分`;
+  if (m > 0) return `${m} 分 ${s} 秒`;
+  return `${s} 秒`;
+}
+
+/** 块头摘要：有时长给「已工作 X」，没有就只给条数。 */
+function turnLabel(turn: SessionTurnSummary, finalTs: string | null): string {
+  const seconds = turnDurationSeconds(turn.boundary_ts, finalTs);
+  const count = `${turn.count} 条中间回复`;
+  return seconds === null ? count : `已工作 ${formatDuration(seconds)} · ${count}`;
 }
 
 /** 行相对滚动区的顶边——与视口在页面上的绝对位置无关，插入前后可直接相减。 */
@@ -90,9 +131,11 @@ function captureAnchor(scroller: HTMLElement | null): PagingAnchor | null {
 /**
  * 会话消息阅读界面：把整屏交给消息列，从最新一条往前读。
  *
- * 不设条数上限——先只读一页，向上滑按游标往前翻、向下滑向后接上，并锚住读者停住的那一
- * 行；会话被改写时（事实代次变化）旧页不再属于同一个会话，直接回到最新。右侧的导航条
- * 给出一条到用户消息的快速通路。
+ * 页面走会话的骨架——用户消息 + 每轮最终回复；每轮的中间回复收成一个可展开的
+ * 块（一行摘要，点了把这轮的中间消息就地插在提问与最终回复之间）。不设条数上限
+ * ——先只读一页，向上滑按游标往前翻、向下滑向后接上，并锚住读者停住的那一行；
+ * 会话被改写时（事实代次变化）旧页不再属于同一个会话，直接回到最新。右侧的导航
+ * 条给出一条到用户消息的快速通路。
  */
 export default function SessionConversationView({ sessionId, goBack }: {
   sessionId: string;
@@ -106,15 +149,12 @@ export default function SessionConversationView({ sessionId, goBack }: {
   const [failed, setFailed] = useState(false);
   const [working, setWorking] = useState(false);
   const [atLatest, setAtLatest] = useState(true);
-  /** 中间回复（同一轮里代理的非最终输出）默认隐藏；按钮切换为全量模式——
-   *  模式切换会按新模式的计页口径重新取页（骨架模式一页 60 条骨架消息）。 */
-  const [showIntermediates, setShowIntermediates] = useState(false);
-  /** 初始加载 effect 的只读镜像：模式切换不得重触发首屏加载。 */
-  const showIntermediatesRef = useRef(showIntermediates);
-  showIntermediatesRef.current = showIntermediates;
-  /** 当前模式会话尾部的投影序号（模式无关）：「是否已读到尾部」拿它比。 */
+  /** 每轮的中间回复块：键是那轮最终回复的投影序号。默认收起，展开现取一轮的
+   *  范围（本地库，代价小），收起即丢弃。 */
+  const [expansions, setExpansions] = useState<Map<number, TurnExpansion>>(new Map());
+  /** 会话尾部的投影序号：「是否已读到尾部」拿它比。 */
   const [tailOrdinal, setTailOrdinal] = useState(0);
-  /** 当前模式上方还有多少条没加载（后端按同口径精确计数，跳转后也准确）。 */
+  /** 上方还有多少条骨架消息没加载（后端精确计数，跳转后也准确）。 */
   const [remaining, setRemaining] = useState(0);
   /** 每次读到最新一页就自增：滚到底的时机挂在它上面，而不是每次 messages 变化。 */
   const [tailToken, setTailToken] = useState(0);
@@ -136,16 +176,22 @@ export default function SessionConversationView({ sessionId, goBack }: {
   /** 滚动停稳的定时器：向上翻页要等它响，见 scheduleOlder。 */
   const settleRef = useRef<number | null>(null);
 
-  /** 已加载的范围一直读到了最后一条（拿模式无关的尾部序号比，不拿 total 比）。 */
+  /** 已加载的范围一直读到了最后一条（拿尾部序号比，不拿 total 比——total 是
+   *  全部消息数，remaining/分页才是骨架口径）。 */
   const reachesTail = messages.length > 0 && messages[messages.length - 1].ordinal >= tailOrdinal;
 
-  /** 序号 → 投影序号：导航条靠它把「正在读的那一行」对到用户消息刻度上。 */
-  const ordinalBySeq = useMemo(
-    () => new Map(messages.map((m) => [m.sequence, m.ordinal])),
-    [messages],
-  );
+  /** 序号 → 投影序号：导航条靠它把「正在读的那一行」对到用户消息刻度上。
+   *  已展开的中间回复也进这张表：读者读到中间回复上时，高亮的仍是那一轮的提问。 */
+  const ordinalBySeq = useMemo(() => {
+    const map = new Map(messages.map((m) => [m.sequence, m.ordinal] as const));
+    for (const expansion of expansions.values()) {
+      if (expansion.status !== "loaded") continue;
+      for (const m of expansion.messages) map.set(m.sequence, m.ordinal);
+    }
+    return map;
+  }, [messages, expansions]);
 
-  /** 页面内容整体替换（不触发「滚到底」）——模式切换用它保住阅读位置。 */
+  /** 页面内容整体替换（不触发「滚到底」）。 */
   const applyPage = useCallback((page: SessionMessageWindow) => {
     generationRef.current = page.generation;
     cursorRef.current = page.next_before_ordinal;
@@ -161,74 +207,55 @@ export default function SessionConversationView({ sessionId, goBack }: {
     setTailToken((token) => token + 1);
   }, [applyPage]);
 
-  /** 回到最新一页：首次打开与「跳到最新」都走这条路（按当前模式的计页口径）。 */
+  /** 回到最新一页：首次打开与「跳到最新」都走这条路。 */
   const loadTail = useCallback(async () => {
     anchorRef.current = null;
-    applyTail(await api.getSessionMessages(sessionId, { limit: PAGE_SIZE, turnsOnly: !showIntermediates }));
-  }, [sessionId, applyTail, showIntermediates]);
+    applyTail(await api.getSessionMessages(sessionId, { limit: PAGE_SIZE }));
+  }, [sessionId, applyTail]);
 
-  /** 骨架模式 ⇄ 全量模式切换：两种模式的页内容与计数口径都不同，整体重取。 */
-  /** 模式切换：按新模式重取一页，并回到切换前正在读的那次提问——位置用导航
-   *  条的语言记：视口顶行之前最近的一条用户消息（刻度）。新模式页面以锚点前方
-   *  留 JUMP_LEAD 条缓冲的窗口取，保证那次提问落在页内；落地复用跳转机制把它
-   *  滚到视口上方。像素级恢复抗不住重渲染后的行高漂移，刻度是稳定的位置坐标。 */
-  const switchMode = useCallback((show: boolean) => {
-    if (show === showIntermediates) return;
-    setShowIntermediates(show);
+  /** 展开或收起一轮的中间回复块：展开现取这一轮的范围，收起即丢。
+   *  插入发生在读者正点着的那行下方，视口不动。 */
+  const toggleTurn = useCallback((msg: SessionWindowMessage) => {
+    const turn = msg.turn;
+    if (!turn) return;
+    if (expansions.has(msg.ordinal)) {
+      setExpansions((current) => {
+        const next = new Map(current);
+        next.delete(msg.ordinal);
+        return next;
+      });
+      return;
+    }
+    setExpansions((current) => new Map(current).set(msg.ordinal, { status: "loading" }));
     void (async () => {
       try {
-        const anchorRow = captureAnchor(scrollRef.current);
-        const anchorOrdinal = anchorRow === null
-          ? null
-          : messages.find((m) => m.sequence === anchorRow.sequence)?.ordinal ?? null;
-        // 先取 marks 再取页：锚点换算要用目标模式的用户消息刻度（markList 与
-        // 切换前的 marks 内容一致，同批取回避免用旧值）。
-        const markList = await api.getSessionUserMessageMarks(sessionId);
-        // 视口顶行之前最近的一次提问；顶行之前没有（还在第一问上方）就用第一问。
-        const targetOrdinal = anchorOrdinal === null
-          ? null
-          : [...markList].reverse().find((mark) => mark.ordinal <= anchorOrdinal)?.ordinal
-            ?? markList[0]?.ordinal ?? null;
-        const page = await (anchorOrdinal === null
-          ? api.getSessionMessages(sessionId, { limit: PAGE_SIZE, turnsOnly: !show })
-          : api.getSessionMessages(sessionId, {
-              beforeOrdinal: anchorOrdinal + JUMP_LEAD + 1,
-              limit: JUMP_PAGE,
-              turnsOnly: !show,
-            }));
-        if (page.generation !== generationRef.current) {
-          // 会话在切换途中被改写：旧位置已无意义，回最新。
-          showToast("这个会话已被改写，已回到最新");
-          applyTail(page);
-          setMarks(markList);
-          return;
-        }
-        anchorRef.current = null;
-        applyPage(page);
-        setMarks(markList);
-        if (targetOrdinal === null) {
-          // 没有可锚的提问（空会话、导航条无刻度）：停在新页当前位置，不跳底。
-          return;
-        }
-        if (!page.messages.some((m) => m.ordinal === targetOrdinal)) {
-          // 理论上窗口保证那次提问在页内；万一不在，停在页顶而不是回尾。
-          return;
-        }
-        // 落地由 pendingJump 的 effect 统一滚到那次提问。
-        setPendingJump(targetOrdinal);
+        const page = await api.getSessionTurnIntermediates(sessionId, turn.boundary_ordinal, msg.ordinal);
+        setExpansions((current) => {
+          // 收起跑在取数前面时不再落位：读者已经改了主意。
+          if (current.get(msg.ordinal)?.status !== "loading") return current;
+          const next = new Map(current);
+          next.set(msg.ordinal, { status: "loaded", messages: page.messages, truncated: page.truncated });
+          return next;
+        });
       } catch (error) {
         console.error(error);
         showToast(String(error));
+        setExpansions((current) => {
+          if (current.get(msg.ordinal)?.status !== "loading") return current;
+          const next = new Map(current);
+          next.delete(msg.ordinal);
+          return next;
+        });
       }
     })();
-  }, [sessionId, showIntermediates, messages, marks, applyPage, applyTail]);
+  }, [sessionId, expansions]);
 
   useEffect(() => {
     let live = true;
     setFailed(false);
     void Promise.all([
       api.getSessionDetail(sessionId),
-      api.getSessionMessages(sessionId, { limit: PAGE_SIZE, turnsOnly: !showIntermediatesRef.current }),
+      api.getSessionMessages(sessionId, { limit: PAGE_SIZE }),
       api.getSessionUserMessageMarks(sessionId),
     ])
       .then(([detail, page, markList]) => {
@@ -242,7 +269,6 @@ export default function SessionConversationView({ sessionId, goBack }: {
         if (live) setFailed(true);
       });
     return () => { live = false; };
-    // 模式切换不得重触发首屏加载（否则 applyTail 会把读者甩回底部）；模式经 ref 读。
   }, [sessionId, applyTail]);
 
   /** 打开、重新读取、以及跳回最新，都停在最新一条上。 */
@@ -332,7 +358,7 @@ export default function SessionConversationView({ sessionId, goBack }: {
     busyRef.current = true;
     setWorking(true);
     try {
-      const page = await api.getSessionMessages(sessionId, { beforeOrdinal: before, limit: PAGE_SIZE, turnsOnly: !showIntermediates });
+      const page = await api.getSessionMessages(sessionId, { beforeOrdinal: before, limit: PAGE_SIZE });
       if (page.generation !== generationRef.current) {
         showToast("这个会话已被改写，已回到最新");
         await loadTail();
@@ -362,7 +388,7 @@ export default function SessionConversationView({ sessionId, goBack }: {
     busyRef.current = true;
     setWorking(true);
     try {
-      const page = await api.getSessionMessages(sessionId, { afterOrdinal: last.ordinal, limit: PAGE_SIZE, turnsOnly: !showIntermediates });
+      const page = await api.getSessionMessages(sessionId, { afterOrdinal: last.ordinal, limit: PAGE_SIZE });
       if (page.generation !== generationRef.current) {
         showToast("这个会话已被改写，已回到最新");
         await loadTail();
@@ -395,7 +421,6 @@ export default function SessionConversationView({ sessionId, goBack }: {
       const page = await api.getSessionMessages(sessionId, {
         beforeOrdinal: ordinal + JUMP_LEAD + 1,
         limit: JUMP_PAGE,
-        turnsOnly: !showIntermediates,
       });
       if (page.generation !== generationRef.current) {
         showToast("这个会话已被改写，已回到最新");
@@ -420,12 +445,28 @@ export default function SessionConversationView({ sessionId, goBack }: {
     }
   };
 
+  /** 「在最新处」的判定：贴着底，且已加载范围读到了尾部。 */
+  const atLatestNow = useCallback(() => {
+    const node = scrollRef.current;
+    if (node === null) return false;
+    const toBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+    return toBottom <= AT_LATEST_SLACK && reachesTail;
+  }, [reachesTail]);
+
+  /** 展开/收起会就地改变内容高度：跟一次「在最新处」的判定，否则展开最尾的
+   *  一轮后，跳到最新按钮的出现与否要等下一次滚动才对。首屏数据未到时跳过
+   *  （空列表判定必为假，会把按钮闪出来）。 */
+  useLayoutEffect(() => {
+    if (messages.length === 0) return;
+    setAtLatest(atLatestNow());
+  }, [expansions, atLatestNow, messages.length]);
+
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) return;
-    const toBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
-    setAtLatest(toBottom <= AT_LATEST_SLACK && reachesTail);
+    setAtLatest(atLatestNow());
     // 向下续读是往下方追加，不会挪动读者正看的内容，立刻取没有风险。
+    const toBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
     if (toBottom <= LOAD_MORE_AT && !reachesTail) void loadNewer();
     if (node.scrollTop <= LOAD_MORE_AT) scheduleOlder();
   };
@@ -468,17 +509,6 @@ export default function SessionConversationView({ sessionId, goBack }: {
         actions={(
           <span className="row" style={{ gap: 8 }}>
             <button
-              className={`btn ghost icon-button${!showIntermediates ? " on" : ""}`}
-              aria-label={showIntermediates ? "隐藏中间回复" : "显示中间回复"}
-              aria-pressed={!showIntermediates}
-              title={!showIntermediates
-                ? "当前只看用户消息和每轮的最终回复；点这里显示代理的中间输出"
-                : "当前显示全部消息；点这里隐藏代理的中间输出"}
-              onClick={() => switchMode(!showIntermediates)}
-            >
-              <Icon name="filter" />
-            </button>
-            <button
               className="btn ghost icon-button"
               aria-label="重新读取"
               title="回到最新一条"
@@ -513,7 +543,20 @@ export default function SessionConversationView({ sessionId, goBack }: {
               </div>
             </div>
           ) : (
-            messages.map((m) => <SessionMessage key={m.sequence} msg={messageData(m, session?.agent ?? null)} />)
+            messages.map((m) => (
+              <Fragment key={m.sequence}>
+                {m.turn && (
+                  <TurnBlock
+                    turn={m.turn}
+                    finalTs={m.ts}
+                    expansion={expansions.get(m.ordinal)}
+                    agent={session?.agent ?? null}
+                    onToggle={() => toggleTurn(m)}
+                  />
+                )}
+                <SessionMessage msg={messageData(m, session?.agent ?? null)} />
+              </Fragment>
+            ))
           )}
         </div>
         {marks.length > 0 && (
@@ -539,6 +582,48 @@ function scrollToSeq(node: HTMLDivElement | null, seq: number, margin: number) {
   const row = node?.querySelector<HTMLElement>(`[data-seq="${seq}"]`);
   if (!node || !row) return;
   node.scrollTop += flowTop(row, node) - margin;
+}
+
+/**
+ * 一轮的中间回复块：默认收起，一行摘要当门（工作了多久、多少条）；展开后把这
+ * 轮的全部中间消息缩进插在提问与最终回复之间。展开状态由父级的 expansions
+ * 掌管——导航条的高亮、翻页锚定都只认 [data-seq] 行，中间消息也就是普通行。
+ */
+function TurnBlock({ turn, finalTs, expansion, agent, onToggle }: {
+  turn: SessionTurnSummary;
+  /** 那轮最终回复的时间戳：块头的时长算到它为止。 */
+  finalTs: string | null;
+  expansion: TurnExpansion | undefined;
+  agent: Agent | null;
+  onToggle: () => void;
+}) {
+  const open = expansion !== undefined;
+  return (
+    <div className="turn-block">
+      <button
+        type="button"
+        className={`turn-toggle${open ? " open" : ""}`}
+        aria-expanded={open}
+        title={open ? "收起这一轮的中间回复" : "展开这一轮的中间回复"}
+        onClick={onToggle}
+      >
+        <Icon name="chevronRight" />
+        <span>{turnLabel(turn, finalTs)}</span>
+      </button>
+      {expansion?.status === "loaded" && (
+        <div className="turn-body">
+          {expansion.messages.map((m) => (
+            <SessionMessage key={m.sequence} msg={messageData(m, agent)} />
+          ))}
+          {expansion.truncated && (
+            <div className="turn-truncated muted small">
+              这一轮的中间回复太多，只显示了前 {expansion.messages.length} 条。
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

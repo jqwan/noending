@@ -185,6 +185,7 @@ pub fn run() {
             commands::session_workspace::get_session_detail,
             commands::session_workspace::reveal_session_source,
             commands::session_workspace::get_session_messages,
+            commands::session_workspace::get_turn_intermediates,
             commands::session_workspace::get_session_user_message_marks,
             commands::session_workspace::set_session_owner_workstream,
             // Session Lifecycle: Trash / Restore and the

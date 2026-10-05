@@ -12,11 +12,13 @@ import type {
 } from "../../types";
 
 // 只覆盖阅读界面自己的规则：从最新一页打开、按 ordinal 拼页不重不乱、会话被改写时
-// 回到最新、导航条跳转（含未加载的目标）、跳转后向下续读、读失败不当成空会话。
+// 回到最新、导航条跳转（含未加载的目标）、跳转后向下续读、读失败不当成空会话、
+// 中间回复块的展开与收起。
 vi.mock("../../api", () => ({
   api: {
     getSessionDetail: vi.fn(),
     getSessionMessages: vi.fn(),
+    getSessionTurnIntermediates: vi.fn(),
     getSessionUserMessageMarks: vi.fn(),
   },
 }));
@@ -72,7 +74,12 @@ function detail(me: Session): SessionDetail {
   };
 }
 
-function message(ordinal: number, role: SessionMessage["role"], content: string): SessionWindowMessage {
+function message(
+  ordinal: number,
+  role: SessionMessage["role"],
+  content: string,
+  over: Partial<SessionWindowMessage> = {},
+): SessionWindowMessage {
   return {
     id: `m${ordinal}`,
     session_id: "me",
@@ -87,6 +94,7 @@ function message(ordinal: number, role: SessionMessage["role"], content: string)
     source_position: "",
     source_identity_hash: "",
     raw_ref: "",
+    ...over,
   };
 }
 
@@ -155,45 +163,96 @@ it("opens on the newest page and counts the older messages left above it", async
 
   await screen.findByText("第四句");
   screen.getByText("第五句");
-  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { limit: expect.any(Number), turnsOnly: true });
+  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { limit: expect.any(Number) });
   screen.getByRole("button", { name: "加载更早的消息（还有 2 条）" });
   screen.getByText(/共 4 条消息/);
   // 导航条按用户消息给出 tick，悬停文案是消息首行。
   const ticks = document.querySelectorAll(".conversation-nav .nav-tick");
   expect(ticks).toHaveLength(2);
   expect(ticks[0].getAttribute("title")).toBe("第一次提问");
+  // 没带轮摘要的页不渲染任何中间回复块。
+  expect(document.querySelectorAll(".turn-toggle")).toHaveLength(0);
 });
 
-it("hides intermediate replies by default and the button reveals them", async () => {
-  // 后端按模式计页：骨架模式只回「用户 + 最终回复」，全量模式连中间输出一起回。
-  const mid = message(5, "assistant", "中间的先看一眼");
-  mid.turn_final = false;
-  vi.mocked(api.getSessionMessages).mockImplementation((_sessionId, params) => {
-    const turnsOnly = !!(params as { turnsOnly?: boolean } | undefined)?.turnsOnly;
-    return Promise.resolve(turnsOnly
-      ? page({
-          messages: [message(4, "user", "第四句"), message(6, "assistant", "最终回答")],
-          total: 2, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
-        })
-      : page({
-          messages: [message(4, "user", "第四句"), mid, message(6, "assistant", "最终回答")],
-          total: 3, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
-        }));
+it("collapses each turn's intermediates into a block that expands and collapses in place", async () => {
+  // 一轮带 2 条中间回复（10:00:00 提问 → 10:03:04 最终回复 = 3 分 4 秒），
+  // 另一轮没有中间回复：默认收起，展开就地插入提问与最终回复之间，收起即丢。
+  vi.mocked(api.getSessionMessages).mockResolvedValue(page({
+    messages: [
+      message(4, "user", "第四问", { ts: "2026-10-05T10:00:00+08:00" }),
+      message(7, "assistant", "最终回答", {
+        ts: "2026-10-05T10:03:04+08:00",
+        turn: { boundary_ordinal: 4, boundary_ts: "2026-10-05T10:00:00+08:00", count: 2 },
+      }),
+      message(8, "user", "第五问"),
+      message(9, "assistant", "直接的回答"),
+    ],
+    total: 7,
+    tail_ordinal: 9,
+    remaining: 0,
+    next_before_ordinal: null,
+  }));
+  vi.mocked(api.getSessionTurnIntermediates).mockResolvedValue({
+    messages: [
+      message(5, "assistant", "中间一", { turn_final: false }),
+      message(6, "assistant", "中间二", { turn_final: false }),
+    ],
+    truncated: false,
   });
 
   await renderConversation();
 
-  // 默认骨架模式：中间回复不出现，用户消息与最终回复照常。
-  await screen.findByText("第四句");
-  screen.getByText("最终回答");
-  expect(screen.queryByText("中间的先看一眼")).toBeNull();
+  // 默认收起：只有摘要一行，中间回复不出现；没有中间回复的轮没有块。
+  await screen.findByText("第四问");
+  screen.getByRole("button", { name: "已工作 3 分 4 秒 · 2 条中间回复" });
+  expect(screen.queryByText("中间一")).toBeNull();
+  expect(document.querySelectorAll(".turn-toggle")).toHaveLength(1);
 
-  // 按钮切到全量模式（重新取页），中间回复出现；再点回去又隐藏。
-  fireEvent.click(screen.getByRole("button", { name: "显示中间回复" }));
-  await screen.findByText("中间的先看一眼");
-  fireEvent.click(screen.getByRole("button", { name: "隐藏中间回复" }));
-  await screen.findByText("第四句");
-  expect(screen.queryByText("中间的先看一眼")).toBeNull();
+  // 展开：取数范围正是 [boundary, final)，中间消息按序插在提问与最终回复之间。
+  fireEvent.click(screen.getByRole("button", { name: /已工作 3 分 4 秒/ }));
+  await screen.findByText("中间一");
+  screen.getByText("中间二");
+  expect(api.getSessionTurnIntermediates).toHaveBeenCalledWith("me", 4, 7);
+  const rendered = [...document.querySelectorAll(".conversation-scroll .event")]
+    .map((el) => el.getAttribute("data-seq"));
+  expect(rendered).toEqual(["4", "5", "6", "7", "8", "9"]);
+
+  // 收起即丢：中间消息消失，摘要还在；再展开是再取一次。
+  fireEvent.click(screen.getByRole("button", { name: /已工作 3 分 4 秒/ }));
+  await waitFor(() => expect(screen.queryByText("中间一")).toBeNull());
+  screen.getByRole("button", { name: /已工作 3 分 4 秒/ });
+  fireEvent.click(screen.getByRole("button", { name: /已工作 3 分 4 秒/ }));
+  await screen.findByText("中间一");
+  expect(api.getSessionTurnIntermediates).toHaveBeenCalledTimes(2);
+});
+
+it("says so in the block when a turn's intermediates were cut short", async () => {
+  vi.mocked(api.getSessionMessages).mockResolvedValue(page({
+    messages: [
+      message(4, "user", "第四问"),
+      message(9, "assistant", "最终回答", {
+        turn: { boundary_ordinal: 4, boundary_ts: null, count: 3 },
+      }),
+    ],
+    total: 6,
+    tail_ordinal: 9,
+    remaining: 0,
+    next_before_ordinal: null,
+  }));
+  vi.mocked(api.getSessionTurnIntermediates).mockResolvedValue({
+    messages: [
+      message(5, "assistant", "中间一", { turn_final: false }),
+      message(6, "assistant", "中间二", { turn_final: false }),
+    ],
+    truncated: true,
+  });
+
+  await renderConversation();
+
+  // 两端时间戳缺一个就给不出时长：摘要退化为条数。
+  fireEvent.click(await screen.findByRole("button", { name: "3 条中间回复" }));
+  await screen.findByText("中间二");
+  screen.getByText(/只显示了前 2 条/);
 });
 
 it("prepends the older page the cursor points at", async () => {
@@ -221,7 +280,6 @@ it("prepends the older page the cursor points at", async () => {
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
     beforeOrdinal: 1,
     limit: expect.any(Number),
-    turnsOnly: true,
   });
   const body = document.body.textContent ?? "";
   expect(body.indexOf("第一句")).toBeLessThan(body.indexOf("第四句"));
@@ -283,7 +341,6 @@ it("jumps to an unloaded user message by loading a window around it", async () =
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
     beforeOrdinal: 42,
     limit: expect.any(Number),
-    turnsOnly: true,
   });
   expect(screen.queryByText("较近的一条")).toBeNull();
 });
@@ -324,98 +381,7 @@ it("keeps reading forward after a jump", async () => {
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
     afterOrdinal: 2,
     limit: expect.any(Number),
-    turnsOnly: true,
   });
-});
-
-it("keeps the reading position across a mode switch", async () => {
-  // 骨架尾页：用户消息 4、6、8（3 条，预载不触发），每轮带最终回复。
-  const turnsPage = page({
-    messages: [
-      message(4, "user", "第四问"),
-      message(6, "assistant", "第六答"),
-      message(8, "user", "第八问"),
-      message(9, "assistant", "第九答"),
-    ],
-    total: 4,
-    tail_ordinal: 9,
-    remaining: 0,
-    next_before_ordinal: null,
-  });
-  // 全量模式多出中间回复 5、7。
-  const mid5 = message(5, "assistant", "中间输出五");
-  mid5.turn_final = false;
-  const mid7 = message(7, "assistant", "中间输出七");
-  mid7.turn_final = false;
-  const fullPage = page({
-    messages: [
-      message(4, "user", "第四问"),
-      mid5,
-      message(6, "assistant", "第六答"),
-      mid7,
-      message(8, "user", "第八问"),
-      message(9, "assistant", "第九答"),
-    ],
-    total: 6,
-    tail_ordinal: 9,
-    remaining: 0,
-    next_before_ordinal: null,
-  });
-  vi.mocked(api.getSessionMessages).mockImplementation((_sessionId, params) => {
-    const turnsOnly = !!(params as { turnsOnly?: boolean } | undefined)?.turnsOnly;
-    return Promise.resolve(turnsOnly ? turnsPage : fullPage);
-  });
-
-  const container = await renderConversation([mark(4, "第四问"), mark(6, "第六问"), mark(8, "第八问")]);
-  await screen.findByText("第四问");
-  const scroller = fakeRows(container);
-  // 读者停在视口顶部压着"第九答"（seq 9）的那条线上：正在读第八问这一轮。
-  scroller.scrollTop = 300;
-  fireEvent.scroll(scroller);
-
-  // 切到全量模式：回到正在读的那次提问（第八问，seq 8）落在视口上方 16px，
-  // 中间输出五、七出现在它与第六答之间——视角换了，位置没换。
-  fireEvent.click(screen.getByRole("button", { name: "显示中间回复" }));
-  await screen.findByText("中间输出五");
-  const row8 = scroller.querySelector<HTMLElement>('[data-seq="8"]')!;
-  const offsetAfter = row8.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-  expect(offsetAfter).toBe(16);
-
-  // 切回骨架：中间输出消失，仍回到第八问。
-  fireEvent.click(screen.getByRole("button", { name: "隐藏中间回复" }));
-  await screen.findByText("第四问");
-  expect(screen.queryByText("中间输出五")).toBeNull();
-  const row8b = scroller.querySelector<HTMLElement>('[data-seq="8"]')!;
-  const offsetBack = row8b.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-  expect(offsetBack).toBe(16);
-});
-
-it("switching with no nav marks stays in place instead of jumping to the tail", async () => {
-  // 无刻度可锚（导航条没有用户消息）：切换后停在新页当前位置，绝不回尾。
-  const mid5 = message(5, "assistant", "中间输出五");
-  mid5.turn_final = false;
-  vi.mocked(api.getSessionMessages).mockImplementation((_sessionId, params) => {
-    const turnsOnly = !!(params as { turnsOnly?: boolean } | undefined)?.turnsOnly;
-    return Promise.resolve(turnsOnly
-      ? page({
-          messages: [message(4, "user", "第四问"), message(6, "assistant", "第六答")],
-          total: 2, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
-        })
-      : page({
-          messages: [message(4, "user", "第四问"), mid5, message(6, "assistant", "第六答")],
-          total: 3, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
-        }));
-  });
-
-  const container = await renderConversation();
-  await screen.findByText("第四问");
-  const scroller = fakeRows(container);
-  scroller.scrollTop = 100;
-  fireEvent.scroll(scroller);
-
-  fireEvent.click(screen.getByRole("button", { name: "显示中间回复" }));
-  await screen.findByText("中间输出五");
-  expect(scroller.scrollTop).toBe(100);
 });
 
 it("keeps the row the reader is on when older messages are inserted above", async () => {
@@ -496,7 +462,6 @@ it("does not move the viewport when a newer page is appended below", async () =>
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
     afterOrdinal: 9,
     limit: expect.any(Number),
-    turnsOnly: true,
   });
   // 追加在下方：首页没变，锚点那一关不会过，视口原地不动。
   expect(scroller.scrollTop).toBe(400);
@@ -527,7 +492,7 @@ it("waits for the scroll to settle before pulling an older page", async () => {
 
   // 停稳之后才取那一页。
   await waitFor(() => expect(api.getSessionMessages).toHaveBeenCalledTimes(1), { timeout: 2000 });
-  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { beforeOrdinal: 1, limit: expect.any(Number), turnsOnly: true });
+  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { beforeOrdinal: 1, limit: expect.any(Number) });
 });
 
 it("lays the user-message ticks on a fixed pitch, not on their document position", async () => {
@@ -583,7 +548,7 @@ it("reloads from the tail when the conversation was rewritten", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "加载更早的消息（还有 2 条）" }));
 
   await screen.findByText("改写后的唯一一条");
-  expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", { limit: expect.any(Number), turnsOnly: true });
+  expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", { limit: expect.any(Number) });
   expect(screen.queryByText("旧会话的消息")).toBeNull();
 });
 
