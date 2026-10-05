@@ -369,34 +369,29 @@ impl SessionLauncher {
 
         let owner = session.owner_workstream_id.clone();
         let resolution = resolve_resume_cwd(db, session_id, owner.as_deref(), workspace)?;
-        // The Continue route rides on the ROOT member: its SOURCE FORMAT
-        // tells whether the Agent's CLI can resume at all and how
+        // The Continue route rides on the session's SOURCE FORMAT: it tells
+        // whether the Agent's CLI can resume at all and how
         // (`AgentAdapter::continue_route`). A refusal is stated HERE, at
         // preview time — a launch that cannot resume must never look
         // preparable.
-        let desktop_open = match db.root_member_for_session(session_id)? {
-            Some(root) => {
-                let adapter = crate::adapters::adapter_for(session.agent);
-                // A stored desktop preference only swaps in when the ROOT
-                // member's format really has a desktop route; anything else
-                // falls back to the format default, so Continue keeps working
-                // (e.g. the desktop app was uninstalled after choosing it).
-                let route = match stored_resume_method(db, session.agent)? {
-                    "desktop" => match adapter.desktop_resume_route(&root) {
-                        crate::adapters::ResumeRoute::Desktop(open) => {
-                            crate::adapters::ResumeRoute::Desktop(open)
-                        }
-                        _ => adapter.continue_route(&root),
-                    },
-                    _ => adapter.continue_route(&root),
-                };
-                match route {
-                    crate::adapters::ResumeRoute::Terminal => None,
-                    crate::adapters::ResumeRoute::Desktop(open) => Some(open),
-                    crate::adapters::ResumeRoute::Refused(reason) => return Err(other(reason)),
+        let adapter = crate::adapters::adapter_for(session.agent);
+        // A stored desktop preference only swaps in when the format really has
+        // a desktop route; anything else falls back to the format default, so
+        // Continue keeps working (e.g. the desktop app was uninstalled after
+        // choosing it).
+        let route = match stored_resume_method(db, session.agent)? {
+            "desktop" => match adapter.desktop_resume_route(&session) {
+                crate::adapters::ResumeRoute::Desktop(open) => {
+                    crate::adapters::ResumeRoute::Desktop(open)
                 }
-            }
-            None => None,
+                _ => adapter.continue_route(&session),
+            },
+            _ => adapter.continue_route(&session),
+        };
+        let desktop_open = match route {
+            crate::adapters::ResumeRoute::Terminal => None,
+            crate::adapters::ResumeRoute::Desktop(open) => Some(open),
+            crate::adapters::ResumeRoute::Refused(reason) => return Err(other(reason)),
         };
         let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, session.agent)?;
         let fingerprint = compute_state_fingerprint_in(
@@ -818,15 +813,15 @@ pub fn compute_state_fingerprint_in(
                     hasher.update(path_id.as_bytes());
                 }
                 hasher.update(b"|");
-                // the read state is the ROOT member's cursor; the
-                // ingested conversation frontier rides with it, so a preview
-                // made before a member ingest cannot silently launch against
-                // a different conversation.
-                if let Some(root) = db.root_member_for_session(sid).ok().flatten() {
-                    if let Ok(cursor) = db.get_member_cursor(&root.id) {
-                        hasher.update(&cursor.generation.to_le_bytes());
-                        hasher.update(&cursor.byte_offset.to_le_bytes());
-                        hasher.update(cursor.identity_tail_hash.as_bytes());
+                // the read state is the session's cursor; the ingested
+                // conversation frontier rides with it, so a preview made
+                // before an ingest cannot silently launch against a
+                // different conversation.
+                if let Ok(session) = db.get_session(sid) {
+                    if let Some(session) = session {
+                        hasher.update(&session.source_generation.to_le_bytes());
+                        hasher.update(&session.source_byte_offset.to_le_bytes());
+                        hasher.update(session.source_tail_hash.as_bytes());
                         hasher.update(b"|");
                     }
                 }

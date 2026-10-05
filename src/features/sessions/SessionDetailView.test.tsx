@@ -5,18 +5,14 @@ import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
 import type {
   Session,
-  SessionAggregateStats,
   SessionContextView,
   LocalDeletePreview,
   SessionDetail,
-  SessionMember,
   SessionMessage,
-  SessionMemberStats,
-  SourceAvailability,
   Workstream,
 } from "../../types";
 
-// 只覆盖重构后的详情页：执行成员与执行统计、源会话状态、fork 链接、
+// 只覆盖重构后的详情页：源会话状态、fork 链接、
 // 回收站横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
@@ -70,6 +66,19 @@ function session(id: string, over: Partial<Session> = {}): Session {
     last_activity_at: null,
     last_conversation_at: null,
     trashed_at: null,
+        source_kind: "codex_rollout",
+        source_path: "/tmp/rollout.jsonl",
+        metadata: {},
+        source_file_identity: "identity",
+        source_generation: 1,
+        source_byte_offset: 100,
+        source_last_seen_size: 100,
+        source_mtime: null,
+        source_prefix_hash: "",
+        source_tail_hash: "",
+        fact_generation: 1,
+        latest_message_seq: 2,
+    
     ...over,
   };
 }
@@ -86,57 +95,6 @@ function workstream(id: string, title: string): Workstream {
   };
 }
 
-function stats(over: Partial<SessionAggregateStats> = {}): SessionAggregateStats {
-  return {
-    member_count: 1,
-    child_count: 0,
-    side_count: 0,
-    max_depth: 0,
-    tool_call_count: 0,
-    user_message_count: 0,
-    assistant_message_count: 0,
-
-    side_activity_count: 0,
-    input_tokens: null,
-    output_tokens: null,
-    cached_tokens: null,
-    reasoning_tokens: null,
-    requests: 0,
-
-    ...over,
-  };
-}
-
-function member(
-  sessionId: string,
-  sourceMemberId: string,
-  relation: SessionMember["relation"],
-  parentSourceMemberId: string | null,
-  over: Partial<SessionMember> & {
-    stats?: SessionMemberStats | null;
-    source_status?: SourceAvailability;
-  } = {},
-): SessionMember & { stats: SessionMemberStats | null; source_status: SourceAvailability } {
-  const { stats: memberStats = null, source_status = "present", ...rest } = over;
-  return {
-    id: `${sessionId}-${sourceMemberId}`,
-    session_id: sessionId,
-    agent: "codex",
-    source_member_id: sourceMemberId,
-    relation,
-    parent_source_member_id: parentSourceMemberId,
-    source_kind: "codex_thread",
-    source_path: `/sources/${sourceMemberId}.jsonl`,
-    cwd: null,
-    started_at: null,
-    last_activity_at: null,
-    metadata: {},
-    stats: memberStats,
-    source_status,
-    ...rest,
-  };
-}
-
 function message(
   sessionId: string,
   sequence: number,
@@ -146,7 +104,6 @@ function message(
   return {
     id: `m${sequence}`,
     session_id: sessionId,
-    member_id: "root",
     sequence,
     role,
     content,
@@ -156,8 +113,6 @@ function message(
     source_generation: 0,
     source_position: "",
     source_identity_hash: "",
-    provider: null,
-    model: null,
     raw_ref: "",
   };
 }
@@ -168,12 +123,9 @@ function detail(me: Session, over: Partial<SessionDetail> = {}): SessionDetail {
     messages: [],
     owner_workstream: null,
     workspace_path: null,
-    members: [member(me.id, `${me.id}-root`, "root", null)],
-    stats: stats(),
-
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
-    root_source_status: "present",
+    source_status: "present",
     can_resume: true,
     forked_from: null,
     ...over,
@@ -188,192 +140,28 @@ async function renderDetail(d: SessionDetail) {
   return { navigate, container: document.body, rerender: view.rerender };
 }
 
-/** 「执行成员」里某个成员那一行的文本；汇总组与成员行有同样的标签，必须按行核对。 */
-function memberRow(sourceMemberId: string): string {
-  const row = [...document.querySelectorAll(".member-row")]
-    .find((r) => r.querySelector(".member-id")?.textContent === sourceMemberId);
-  if (!row) throw new Error(`成员行不存在：${sourceMemberId}`);
-  return row.textContent ?? "";
-}
-
 // 执行信息
 
-it("shows aggregate execution stats and the always-visible member tree", async () => {
-  const me = session("me");
-  await renderDetail(detail(me, {
-    members: [
-      member(me.id, `${me.id}-root`, "root", null, {
-        stats: {
-          member_id: "root", tool_call_count: 12, user_message_count: 3, assistant_message_count: 5,
-          input_tokens: 1200, output_tokens: 340,
-        } as SessionMemberStats,
-        source_path: "/sources/root.jsonl",
-      }),
-      member(me.id, "child-src-1", "child", `${me.id}-root`, {
-        stats: {
-          member_id: "child", tool_call_count: 2, input_tokens: 800,
-        } as SessionMemberStats,
-        source_path: "/sources/child-src-1.jsonl",
-      }),
-      // 辅成员：源什么都不报，只留身份与源文件——不拿 0 冒称观测。
-      member(me.id, "side-src-1", "side", `${me.id}-root`),
-    ],
-    stats: stats({
-      member_count: 3,
-      child_count: 1,
-      side_count: 1,
-      max_depth: 1,
-      tool_call_count: 12,
-      user_message_count: 3,
-      assistant_message_count: 5,
-
-    }),
-
-  }));
-
-  // 执行统计常驻：每个数各占一格，不再串成一行。整组是各成员份额的和，
-  // 与单个成员自己的数分开核对——同一批标签在汇总和成员行里都会出现。
-  const metrics = document.querySelector(".exec-metrics")!;
-  // 汇总夹具没有 token 轴 → Tokens 组不出现（有数据才显示）。
-  for (const cell of ["活动", "用户消息 3", "工具调用 12", "规模", "会话成员 3", "子会话 1", "辅会话 1", "深度 1"]) {
-    expect(metrics.textContent).toContain(cell);
-  }
-  expect(metrics.textContent).not.toContain("Tokens");
-  screen.getByText("执行统计");
-
-  // 成员不再展开/收起：子会话、辅会话各占一节「执行成员」，是这页的一等事实。
-  expect(screen.queryByRole("button", { name: /展开成员|收起成员/ })).toBeNull();
-  screen.getByText("执行成员");
-  screen.getByText("child-src-1");
-  screen.getByText("side-src-1");
-  // 关系标签：根 / 子 / 辅。
-  expect(screen.getAllByText("根")).toHaveLength(1);
-  screen.getByText("子");
-  screen.getByText("辅");
-
-  // 成员各自的数字默认不画：先给结构与来源。汇总组不受这个开关影响。
-  expect(memberRow("me-root")).not.toContain("用户");
-  expect(memberRow("me-root")).not.toContain("成本");
-  expect(memberRow("child-src-1")).toContain("源");
-  expect(metrics.textContent).toContain("用户消息 3");
-
-  fireEvent.click(screen.getByRole("button", { name: "显示统计" }));
-
-  // 每个成员各自的份额：计数、tokens 都是它自己的数。
-  expect(memberRow("me-root")).toContain("用户消息 3");
-  expect(memberRow("me-root")).toContain("工具调用 12");
-  expect(memberRow("me-root")).toContain("输入 1,200");
-  expect(memberRow("child-src-1")).toContain("工具调用 2");
-  expect(memberRow("child-src-1")).toContain("输入 800");
-  // 边成员源什么都没报：一行数字都不画，不拿 0 冒称观测。
-  expect(memberRow("side-src-1")).not.toContain("工具");
-  expect(memberRow("side-src-1")).not.toContain("成本");
-  // 子/边的源可复制（原值在 title 里，显示用中段省略）；root 的源只在「会话信息 · 源会话」出现。
-  screen.getByTitle(/\/sources\/child-src-1\.jsonl · 这个成员在 Agent 侧的源/);
-  expect(memberRow("me-root")).not.toContain("源");
-
-  // 成员是执行信息，不是可进入的其他会话页面：身份与源路径都不做导航入口
-  //（源路径的按钮是文件定位，名字是截断后的路径，不是成员身份本身）。
-  expect(screen.queryByRole("button", { name: "child-src-1" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "side-src-1" })).toBeNull();
-});
-
-it("keeps 执行成员 off a session that is only its root", async () => {
-  // 只有 root 时既没有成员清单也没有开关：汇总里的「规模」已经把话说完了。
-  await renderDetail(detail(session("me")));
-  screen.getByText("规模");
-  screen.getByText("会话成员 1");
-  screen.getByText("执行统计");
-  expect(screen.queryByText("me-root")).toBeNull();
-  expect(screen.queryByText("执行成员")).toBeNull();
-  // 没有成员行可藏，就不摆一个按不动的开关。
-  expect(screen.queryByRole("button", { name: /统计/ })).toBeNull();
-});
-
-it("shows message / token rows only when the data is present", async () => {
-  const me = session("me");
-  await renderDetail(detail(me, { stats: stats() }));
-
-  // 执行图的规模永远在；消息构成 / Tokens 这些组只在数据真的在场上时出现。
-  screen.getByText("规模");
-  expect(screen.queryByText("活动")).toBeNull();
-  expect(screen.queryByText("Tokens")).toBeNull();
-  expect(screen.queryByText("成本")).toBeNull();
-
-  cleanup();
-  await renderDetail(detail(me, {
-    stats: stats({
-      user_message_count: 2,
-      assistant_message_count: 3,
-      tool_call_count: 4,
-      side_activity_count: 3,
-      input_tokens: 1000,
-      output_tokens: 200,
-
-    }),
-
-  }));
-
-  screen.getByText("活动");
-  screen.getByText("用户消息 2");
-  screen.getByText("代理回复 3");
-  screen.getByText("工具调用 4");
-  screen.getByText("代理协同 3");
-  screen.getByText("Tokens");
-  screen.getByText("输入 1,000");
-  screen.getByText("输出 200");
-  expect(screen.queryByText("成本")).toBeNull();
-});
-
-it("does not display removed cost or compression metrics in the session detail or member rows", async () => {
-  const me = session("me");
-  await renderDetail(detail(me, {
-    members: [member(me.id, `${me.id}-root`, "root", null, {
-      stats: { member_id: "root", input_tokens: 1000 } as SessionMemberStats,
-    }), member(me.id, "child", "child", `${me.id}-root`)],
-    stats: stats({ input_tokens: 1000 }),
-  }));
-  fireEvent.click(screen.getByRole("button", { name: "显示统计" }));
-  expect(screen.queryByText(/成本|USD|credits|压缩/)).toBeNull();
-});
-
-// 源会话
-
-it("shows the root member's source as 源会话 without status noise when present", async () => {
+it("shows the session source as 源会话 without status noise when present", async () => {
   await renderDetail(detail(session("me")));
 
   screen.getByText("源会话");
-  screen.getByText(/sources\/me-root\.jsonl/);
+  screen.getByText("/tmp/rollout.jsonl");
   expect(screen.queryByText("源会话已不存在")).toBeNull();
   expect(screen.queryByText("无法确认源会话状态")).toBeNull();
 });
 
-it("reveals the root source by clicking the path itself", async () => {
+it("reveals the source by clicking the path itself", async () => {
   await renderDetail(detail(session("me")));
 
   // 路径本身就是入口，不再有单独的「在文件管理器中显示」链接。
-  fireEvent.click(screen.getByRole("button", { name: "/sources/me-root.jsonl" }));
+  fireEvent.click(screen.getByRole("button", { name: "/tmp/rollout.jsonl" }));
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("me"));
   expect(screen.queryByText("在文件管理器中显示")).toBeNull();
 });
 
-it("reveals a child member's source by clicking its path", async () => {
-  const me = session("me");
-  await renderDetail(detail(me, {
-    members: [
-      member(me.id, `${me.id}-root`, "root", null),
-      member(me.id, "child-src-1", "child", `${me.id}-root`),
-    ],
-  }));
-
-  fireEvent.click(screen.getByTitle(/child-src-1\.jsonl · 这个成员在 Agent 侧的源 · 点击在文件管理器中显示/));
-  await waitFor(() =>
-    expect(api.revealSessionMemberSource).toHaveBeenCalledWith(me.id, `${me.id}-child-src-1`)
-  );
-});
-
 it("warns and disables resume when the root source is missing", async () => {
-  await renderDetail(detail(session("me"), { root_source_status: "missing", can_resume: false }));
+  await renderDetail(detail(session("me"), { source_status: "missing", can_resume: false }));
 
   screen.getByText("源会话已不存在");
   const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
@@ -384,18 +172,11 @@ it("warns and disables resume when the root source is missing", async () => {
 });
 
 it("warns when the root source status is unavailable", async () => {
-  await renderDetail(detail(session("me"), { root_source_status: "unavailable", can_resume: false }));
+  await renderDetail(detail(session("me"), { source_status: "unavailable", can_resume: false }));
 
   screen.getByText("无法确认源会话状态");
   const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
   expect(resume.disabled).toBe(true);
-});
-
-it("treats a missing root member as unavailable even when the verdict says present", async () => {
-  await renderDetail(detail(session("me"), { members: [], root_source_status: "present" }));
-
-  screen.getByText(/没有 Root 成员记录/);
-  screen.getByText("无法确认源会话状态");
 });
 
 // 消息
@@ -457,7 +238,6 @@ function preview(over: Partial<LocalDeletePreview> = {}): LocalDeletePreview {
     root_agent_session_id: "me-agent",
     root_source_status: "missing",
     message_count: 3,
-    member_count: 1,
     session_context_count: 0,
     launch_intent_count: 0,
     context_revision_redaction_count: 0,
@@ -474,9 +254,9 @@ function trashedDetail(over: Partial<SessionDetail> = {}): SessionDetail {
 
 it("offers the same 删除 entry whatever the root source state", async () => {
   // Trash is the only gate: the source verdict never renames or hides the entry.
-  for (const root_source_status of ["missing", "present"] as const) {
+  for (const source_status of ["missing", "present"] as const) {
     cleanup();
-    await renderDetail(trashedDetail({ root_source_status }));
+    await renderDetail(trashedDetail({ source_status }));
     screen.getByRole("button", { name: "删除…" });
     expect(screen.queryByText(/重新入库…/)).toBeNull();
     expect(screen.queryByText(/删除不可用/)).toBeNull();
@@ -489,7 +269,7 @@ it("checks the root source before confirming and says the copy will be rebuilt",
   vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
     preview({ root_source_status: "present" }),
   );
-  await renderDetail(trashedDetail({ root_source_status: "present" }));
+  await renderDetail(trashedDetail({ source_status: "present" }));
 
   fireEvent.click(screen.getByRole("button", { name: "删除…" }));
 
@@ -498,7 +278,6 @@ it("checks the root source before confirming and says the copy will be rebuilt",
   // 每一条「将删除」都渲染出数字：后端改名而前端漏改时，这里会当场炸掉，
   // 而不是在生产里把整棵树渲染崩成黑屏。
   screen.getByText("3 条会话消息");
-  screen.getByText("1 个执行成员");
   screen.getByText("0 条 Context 摘要记录");
   screen.getByText("0 条启动记录");
   screen.getByText("上下文来源改写 0 条");
@@ -509,7 +288,7 @@ it("says the local data is unrecoverable when the root source is gone", async ()
   vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
     preview({ root_source_status: "missing" }),
   );
-  await renderDetail(trashedDetail({ root_source_status: "missing" }));
+  await renderDetail(trashedDetail({ source_status: "missing" }));
 
   fireEvent.click(screen.getByRole("button", { name: "删除…" }));
 

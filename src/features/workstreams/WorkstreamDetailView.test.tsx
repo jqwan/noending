@@ -151,6 +151,19 @@ it("lists the sessions owned by this task and nothing else", async () => {
     last_activity_at: "2026-09-21T00:00:00+00:00",
     last_conversation_at: null,
     trashed_at: null,
+        source_kind: "codex_rollout",
+        source_path: "/tmp/rollout.jsonl",
+        metadata: {},
+        source_file_identity: "identity",
+        source_generation: 1,
+        source_byte_offset: 100,
+        source_last_seen_size: 100,
+        source_mtime: null,
+        source_prefix_hash: "",
+        source_tail_hash: "",
+        fact_generation: 1,
+        latest_message_seq: 2,
+    
   }];
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
   vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);

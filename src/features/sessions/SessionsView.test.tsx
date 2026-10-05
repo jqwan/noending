@@ -44,6 +44,19 @@ function session(over: Partial<Session> = {}): Session {
     last_activity_at: "2026-09-02T00:00:00Z",
     last_conversation_at: "2026-09-02T00:00:00Z",
     trashed_at: null,
+        source_kind: "codex_rollout",
+        source_path: "/tmp/rollout.jsonl",
+        metadata: {},
+        source_file_identity: "identity",
+        source_generation: 1,
+        source_byte_offset: 100,
+        source_last_seen_size: 100,
+        source_mtime: null,
+        source_prefix_hash: "",
+        source_tail_hash: "",
+        fact_generation: 1,
+        latest_message_seq: 2,
+    
     ...over,
   };
 }

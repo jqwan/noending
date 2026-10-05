@@ -129,7 +129,6 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
           <div className="section-label" style={{ margin: "14px 0 2px" }}>将删除</div>
           <ul className="purge-list">
             <li>{fmtCount(preview.message_count)} 条会话消息</li>
-            <li>{fmtCount(preview.member_count)} 个执行成员</li>
             <li>{fmtCount(preview.session_context_count)} 条 Context 摘要记录</li>
             <li>{fmtCount(preview.launch_intent_count)} 条启动记录</li>
             <li>上下文来源改写 {fmtCount(preview.context_revision_redaction_count)} 条</li>

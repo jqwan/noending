@@ -1,6 +1,5 @@
 import Icon from "../../components/Icon";
-import { useViewState } from "../../hooks/useViewState";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
@@ -11,11 +10,9 @@ import ResumeSessionModal from "./ResumeSessionModal";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import {
   agentDisplayLabel,
-  cwdDisplayLabel,
   formatDateTime,
   projectCellFor,
   sessionDisplayTitle,
-  shrinkMiddle,
   NO_CWD,
   UNTITLED_SESSION,
 } from "./SessionTable";
@@ -24,22 +21,14 @@ import {
   type SessionContextFields,
   type SessionContextView,
   type SessionDetail,
-  type SessionMemberRelation,
   type Workstream,
 } from "../../types";
 import type { Route } from "../../app/routes";
 
-/** 详情里的一个执行成员：member 行 + 查询时带出的统计快照。 */
-type DetailMember = SessionDetail["members"][number];
-
-const MEMBER_ID_WIDTH = 24;
-/** 成员行里路径的显示宽度：尾段（文件名）最有信息量，按路径规则中段省略。 */
-const MEMBER_PATH_WIDTH = 22;
-
 /**
  * Session Detail：一个逻辑会话（用户可感知、可 Resume 的主会话）的四块内容——
  * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / Owner。
- * 没有 parent/children Session 链接：执行图以 members 呈现，唯一的会话→会话链接是 fork 来源。
+ * 唯一的会话→会话链接是 fork 来源。
  */
 export default function SessionDetailView({ sessionId, navigate, goBack }: {
   sessionId: string;
@@ -62,8 +51,6 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [trashBusy, setTrashBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
-  /** 成员各自的数字默认不画：先给结构与来源，要横向比各成员时再点开。 */
-  const [showMemberStats, setShowMemberStats] = useViewState("session.memberStats", false);
   /**
    * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字；
    * 派生链自带名字，正常情况下不多这一次读取。
@@ -121,8 +108,6 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     );
   }
   const { session, owner_workstream } = detail;
-  /** 没有子/辅成员时整节不出现：那时清单就是一行 root，汇总里的「规模」已经把话说完了。 */
-  const hasSubMembers = detail.members.some((m) => m.relation !== "root");
 
   /** 一次点击 → 最多一次模型调用 → 一份新的四字段摘要。失败按后端原因给可行动文案。 */
   const updateSummary = async () => {
@@ -223,15 +208,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     && messages.length > 0
     && (sessionCtx.fields === null || sessionCtx.pending);
 
-  /**
-   * 源会话：Root 成员的源文件 + 详情加载时的新鲜结论。
-   * members 里没有 root 行本身即异常，按 unavailable 对待。
-   */
-  const rootMember = detail.members.find((m) => m.relation === "root") ?? null;
-  const sourceMissing = rootMember !== null && detail.root_source_status === "missing";
-  const sourceUnavailable = rootMember === null || detail.root_source_status === "unavailable";
+  /** 源会话：会话自己的源文件 + 详情加载时的新鲜结论。 */
+  const sourceMissing = detail.source_status === "missing";
+  const sourceUnavailable = detail.source_status === "unavailable";
   /** 源在，路径本身才是入口；源不在就只是可复制的文本，点了也只会报错。 */
-  const canRevealSource = rootMember !== null && !sourceMissing && !sourceUnavailable;
+  const canRevealSource = !sourceMissing && !sourceUnavailable;
 
   const revealSource = async () => {
     try {
@@ -514,30 +495,21 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             <span className="muted">{NO_CWD}（该会话的原始记录里没有目录信息）</span>
           )}
         </Field>
-        {/* 源会话：Root 成员的源文件，不再是 session.raw_path。
+        {/* 源会话：会话自己的源文件。
             状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。
             路径本身就是「在文件管理器中显示」的入口，不再另配一行链接。 */}
         <Field label="源会话">
-          {rootMember ? (
-            <>
-              <CopyValue
-                value={rootMember.source_path}
-                mono
-                title={`${rootMember.source_path} · Agent 保存的 Root 源会话${canRevealSource ? " · 点击在文件管理器中显示" : ""}`}
-                onOpen={canRevealSource ? () => void revealSource() : undefined}
-              />
-              {sourceMissing && (
-                <div className="session-source-warning">源会话已不存在</div>
-              )}
-              {sourceUnavailable && (
-                <div className="session-source-warning">无法确认源会话状态</div>
-              )}
-            </>
-          ) : (
-            <>
-              <span className="muted small">这个会话没有 Root 成员记录。</span>
-              <div className="session-source-warning">无法确认源会话状态</div>
-            </>
+          <CopyValue
+            value={session.source_path}
+            mono
+            title={`${session.source_path} · Agent 保存的源会话${canRevealSource ? " · 点击在文件管理器中显示" : ""}`}
+            onOpen={canRevealSource ? () => void revealSource() : undefined}
+          />
+          {sourceMissing && (
+            <div className="session-source-warning">源会话已不存在</div>
+          )}
+          {sourceUnavailable && (
+            <div className="session-source-warning">无法确认源会话状态</div>
           )}
         </Field>
         <Field label="会话 ID">
@@ -576,32 +548,6 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       </div>
       </section>
 
-      {/* 执行成员：这次执行由哪些成员组成——根 / 子 / 辅、各自的身份与来源。
-          成员不是链接：它们是 Agent 内部的执行单元，不是另一个 Session 页面。
-          root 的源不在这里重复画（它在「会话信息 · 源会话」里，带着删除流程要用的结论）；
-          成员各自的数字默认不画，开关归这一节；没有子/辅成员时整节不出现。 */}
-      {hasSubMembers && (
-        <section className="rail-section">
-        <div className="row between" style={{ alignItems: "center" }}>
-          <div className="section-label" style={{ margin: 0 }}>执行成员</div>
-          <button
-            className="btn small ghost"
-            aria-expanded={showMemberStats}
-            title="显示每个成员自己的数字（计数、tokens）"
-            onClick={() => setShowMemberStats((on) => !on)}
-          >
-            {showMemberStats ? "隐藏统计" : "显示统计"}
-          </button>
-        </div>
-        <MemberTree members={detail.members} showStats={showMemberStats} />
-        </section>
-      )}
-
-      {/* 执行统计：会话级汇总——各成员自己份额的和。 */}
-      <section className="rail-section">
-      <div className="section-label">执行统计</div>
-      <ExecutionStats stats={detail.stats} />
-      </section>
       </aside>
       </div>
 
@@ -662,217 +608,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="muted small" style={{ whiteSpace: "nowrap" }}>{label}</div>
       <div style={{ minWidth: 0 }}>{children}</div>
     </>
-  );
-}
-
-/** 数值 → 千位分隔；null = 源不提供，显示「—」。 */
-const fmtCount = (n: number | null): string => (n === null ? "—" : n.toLocaleString("en-US"));
-import {
-  CACHE_HIT_HINT, cacheHitRate, fmtCacheHit, fmtTokens, sumTokens,
-} from "../usage/usageFormat";
-
-/**
- * 与统计面板（/usage）同一套口径：Tokens 组在前（总量 / 输入（含缓存读取）/
- * 输出 / 缓存命中），活动计数居中（面板统计项的会话级版本），执行图的规模
- * （成员数 / 子会话 / 辅会话 / 深度——面板没有的树事实）殿后。数字缩写、合并规则与
- * 命中率公式来自 features/usage/usageFormat，两处只有一份。
- *
- * 有数据才显示：某个轴没人记录就不画「0」去冒称观测；活动计数 >0 才出现。
- * 会话级不再显示推理——它是输出内的注记轴，面板已按用户决定移除。
- *
- * 不用「值 · 值 · 值」串烧：右栏只有 240–300px，十来个数字挤一行必然折行，
- * 两列网格让每个数各占一格，标签把「工具调用 4」这类孤零零的数字放回组里。
- */
-function ExecutionStats({
-  stats,
-}: {
-  stats: SessionDetail["stats"];
-}) {
-  const activityCells: string[] = [];
-  if (stats.user_message_count > 0) activityCells.push(`用户消息 ${stats.user_message_count}`);
-  if (stats.assistant_message_count > 0)
-    activityCells.push(`代理回复 ${stats.assistant_message_count}`);
-  if (stats.tool_call_count > 0) activityCells.push(`工具调用 ${stats.tool_call_count}`);
-  if (stats.side_activity_count > 0) activityCells.push(`代理协同 ${stats.side_activity_count}`);
-  if (stats.requests > 0) activityCells.push(`模型请求 ${fmtCount(stats.requests)}`);
-
-  const hasTokens =
-    stats.input_tokens !== null ||
-    stats.output_tokens !== null ||
-    stats.cached_tokens !== null;
-  const inputTotal = sumTokens(stats.input_tokens, stats.cached_tokens);
-  const total = sumTokens(stats.input_tokens, stats.cached_tokens, stats.output_tokens);
-  const rate = cacheHitRate(stats.input_tokens, stats.cached_tokens);
-  const inputHint =
-    stats.input_tokens === null && stats.cached_tokens === null
-      ? undefined
-      : `含缓存读取；非缓存 ${fmtCount(stats.input_tokens ?? 0)} · 缓存读取 ${fmtCount(stats.cached_tokens ?? 0)}`;
-
-  const group = (
-    label: string,
-    cells: { text: string; title?: string }[],
-    key: string,
-  ) => (
-    <Fragment key={key}>
-      <div className="muted small exec-label">{label}</div>
-      <div className="exec-pairs">
-        {cells.map((c) => <span key={c.text} title={c.title}>{c.text}</span>)}
-      </div>
-    </Fragment>
-  );
-
-  return (
-    <div className="exec-metrics">
-      {hasTokens && group("Tokens", [
-        { text: `总量 ${fmtTokens(total)}` },
-        { text: `输入 ${fmtTokens(inputTotal)}`, title: inputHint },
-        { text: `输出 ${fmtTokens(stats.output_tokens)}` },
-        { text: `缓存命中 ${fmtCacheHit(rate)}`, title: CACHE_HIT_HINT },
-      ], "tokens")}
-      {activityCells.length > 0 && group("活动", activityCells.map((text) => ({ text })), "activity")}
-      {group("规模", [
-        { text: `会话成员 ${stats.member_count}` },
-        { text: `子会话 ${stats.child_count}` },
-        { text: `辅会话 ${stats.side_count}` },
-        { text: `深度 ${stats.max_depth}` },
-      ], "tree")}
-    </div>
-  );
-}
-
-const RELATION_LABELS: Record<SessionMemberRelation, string> = {
-  root: "根",
-  child: "子",
-  side: "辅",
-};
-
-/**
- * 一行成员：关系标签 + 稳定身份（mono，居中断尾，原值在 title 里），其后是源文件
- * （可复制，源不在了就在同一行说清楚）；`showStats` 打开时才补上这个成员自己的数字。
- *
- * 每个成员——根、子、辅——都有自己的份额：消息构成、tokens 都是它自己的数，
- * 右栏上面的汇总只是把它们加起来。有数据才画那一行，没有就不拿 0 去冒称观测。
- *
- * 计数不再和身份挤同一行：「根 / 子 / 辅」三个标签宽度不同，身份列因此对不齐，
- * 计数又常把这一行挤到换行——树里于是出现一行 46px、一行 19px 的锯齿。
- * 关系标签固定列宽 + 其余各行各占一行后，每行等高、身份列对齐。
- */
-function MemberRow({ member, depth, showStats }: {
-  member: DetailMember;
-  depth: number;
-  showStats: boolean;
-}) {
-  const s = member.stats;
-  // 词汇与口径跟执行统计/统计面板一致：输入含缓存读取（原始拆分就不在行上重复了），
-  // 缓存只出命中率；推理是输出内的注记轴，这里不再显示。
-  const bits: string[] = [];
-
-  /** 子/辅成员的源定位：命令按 (session, member) 双键查库，只认这一行的源。 */
-  const revealMemberSource = async () => {
-    try {
-      await api.revealSessionMemberSource(member.session_id, member.id);
-    } catch (e) {
-      showToast(`定位源会话失败：${String(e)}`);
-    }
-  };
-
-  const counted = (label: string, value: number | null | undefined) => {
-    if (value != null && value > 0) bits.push(`${label} ${value}`);
-  };
-  counted("用户消息", s?.user_message_count);
-  counted("代理回复", s?.assistant_message_count);
-  counted("工具调用", s?.tool_call_count);
-  counted("代理协同", s?.side_activity_count);
-
-  // null = 源不提供这一项，与计数同一个判据。
-  const usage: string[] = [];
-  const inputTotal = sumTokens(s?.input_tokens ?? null, s?.cached_tokens ?? null);
-  if (inputTotal !== null) usage.push(`输入 ${fmtTokens(inputTotal)}`);
-  if (s?.output_tokens != null) usage.push(`输出 ${fmtTokens(s.output_tokens)}`);
-  const rate = cacheHitRate(s?.input_tokens ?? null, s?.cached_tokens ?? null);
-  if (rate !== null) usage.push(`缓存命中 ${fmtCacheHit(rate)}`);
-
-  return (
-    <div className="member-row" style={{ paddingLeft: depth * 16 }}>
-      <span className="badge member-rel">{RELATION_LABELS[member.relation]}</span>
-      <div className="member-body">
-        <div className="mono small member-id" title={member.source_member_id}>
-          {shrinkMiddle(member.source_member_id, MEMBER_ID_WIDTH)}
-        </div>
-        {showStats && bits.length > 0 && <MemberValues values={bits} />}
-        {showStats && usage.length > 0 && <MemberValues values={usage} />}
-        {/* root 的源在「会话信息 · 源会话」里（那里还带新鲜结论），不重复画。
-            子/辅的源路径同样可点定位；源不在了就退回纯文本，警告在下面说。 */}
-        {member.relation !== "root" && (
-          <div className="small">
-            <CopyValue
-              label="源"
-              value={member.source_path}
-              display={cwdDisplayLabel(member.source_path, MEMBER_PATH_WIDTH)}
-              truncate
-              mono
-              title={`${member.source_path} · 这个成员在 Agent 侧的源${member.source_status === "present" ? " · 点击在文件管理器中显示" : ""}`}
-              onOpen={member.source_status === "present" ? () => void revealMemberSource() : undefined}
-            />
-            {/* 子 / 辅的转写各自消失，一行只报路径会让人以为它还读得到。 */}
-            {member.source_status !== "present" && (
-              <div className="session-source-warning">
-                {member.source_status === "missing" ? "源文件已不存在" : "无法确认源文件状态"}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * 成员行里的一行数值：两列网格，与上面的汇总组同形——各成员的数字因此在列上对齐，
- * 值内部不折（「推理」「2,100」不能变成两行两个数）。没有的项直接不画，不用 0 占位。
- */
-function MemberValues({ values }: { values: string[] }) {
-  return (
-    <div className="muted exec-pairs">
-      {values.map((v) => <span key={v} style={{ whiteSpace: "nowrap" }}>{v}</span>)}
-    </div>
-  );
-}
-
-/**
- * 成员树：root 在顶，child / side 挂在自己的 parent 下，缩进呈现。
- * parent 记录缺席（未摄入或被清理）的成员不能消失——按顶层孤儿如实列出。
- * 常显，不再有展开/收起：这是详情页的一等事实，不是折叠起来的附录。
- */
-function MemberTree({ members, showStats }: {
-  members: DetailMember[];
-  showStats: boolean;
-}) {
-  const byParent = useMemo(() => {
-    const map = new Map<string, DetailMember[]>();
-    const ids = new Set(members.map((m) => m.source_member_id));
-    const top: DetailMember[] = [];
-    for (const m of members) {
-      const parent = m.relation === "root" ? null : m.parent_source_member_id;
-      if (parent === null || !ids.has(parent)) top.push(m);
-      else {
-        const list = map.get(parent) ?? [];
-        list.push(m);
-        map.set(parent, list);
-      }
-    }
-    return { map, top };
-  }, [members]);
-
-  const renderNode = (m: DetailMember, depth: number): React.ReactNode[] => [
-    <MemberRow key={m.id} member={m} depth={depth} showStats={showStats} />,
-    ...(byParent.map.get(m.source_member_id) ?? []).flatMap((c) => renderNode(c, depth + 1)),
-  ];
-
-  return (
-    <div style={{ display: "grid", gap: 10 }}>
-      {byParent.top.flatMap((m) => renderNode(m, 0))}
-    </div>
   );
 }
 

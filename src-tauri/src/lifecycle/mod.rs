@@ -89,14 +89,10 @@ pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {
         .ok_or_else(|| other("Session 不存在"))
 }
 
-/// The fresh ROOT source verdict for a session. `None` when the
-/// session has no root member row (it never completed discovery).
-pub fn root_source_status(db: &Db, session: &Session) -> Result<Option<SourceAvailability>> {
-    let Some(root) = db.root_member_for_session(&session.id)? else {
-        return Ok(None);
-    };
+/// The fresh source verdict for a session.
+pub fn root_source_status(_db: &Db, session: &Session) -> Result<Option<SourceAvailability>> {
     Ok(Some(
-        adapter_for(session.agent).inspect_member_source(&root)?,
+        adapter_for(session.agent).inspect_session_source(session)?,
     ))
 }
 
