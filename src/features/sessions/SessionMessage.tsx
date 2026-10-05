@@ -15,14 +15,11 @@ export interface SessionMessageData {
   content: string;
   ts: string | null;
   who: string;
-  /** 消息级生成溯源：仅 Assistant 有意义。 */
-  provider?: string | null;
-  model?: string | null;
   /** 仅 Assistant 有意义：是否该轮的最终回复。 */
   turnFinal: boolean;
 }
 
-/** 消息的展示形状：谁说的由角色决定，模型只挂在 Assistant 上。 */
+/** 消息的展示形状：谁说的由角色决定。 */
 export function messageData(m: SessionMessage, agent: Agent | null): SessionMessageData {
   return {
     sequence: m.sequence,
@@ -30,24 +27,8 @@ export function messageData(m: SessionMessage, agent: Agent | null): SessionMess
     content: m.content,
     ts: m.ts,
     who: m.role === "user" ? "用户" : agent === null ? "Agent" : agentDisplayLabel(agent),
-    provider: m.role === "assistant" ? m.provider : null,
-    model: m.role === "assistant" ? m.model : null,
     turnFinal: m.role === "assistant" ? m.turn_final : true,
   };
-}
-
-/** Assistant 消息头上的低干扰模型标签：provider+model → "model · provider"；
- *  只有其一 → 那一个；两者皆空 → null。User 消息不传。 */
-export function provenanceLabel(
-  provider: string | null | undefined,
-  model: string | null | undefined,
-): string | null {
-  const m = model?.trim();
-  const p = provider?.trim();
-  if (m && p) return `${m} · ${p}`;
-  if (m) return m;
-  if (p) return p;
-  return null;
 }
 
 /**
@@ -81,8 +62,6 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
   }, [text, md]);
 
   const stamp = `#${msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
-  // User 消息没有生成模型——即使调用方误传也不显示。
-  const prov = msg.role === "assistant" ? provenanceLabel(msg.provider, msg.model) : null;
 
   // 整行可点会变成一条与内容无关的宽条，所以热区和悬浮效果都只落在气泡上；
   // 键盘可达靠 role + tabIndex，焦点环由全局的 :focus-visible 给。
@@ -91,12 +70,6 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
       <div className={`event ${cls}`} data-seq={msg.sequence}>
         <div className="head">
           <span className="who">{msg.who}</span>
-          {msg.role === "assistant" && !msg.turnFinal && (
-            <span className="mid-turn" title="同一轮里代理的中间输出，该轮的最终回复在后面">
-              中间回复
-            </span>
-          )}
-          {prov && <span className="prov mono">{prov}</span>}
           <span className="when mono">{stamp}</span>
         </div>
         <div

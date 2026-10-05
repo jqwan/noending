@@ -41,6 +41,19 @@ function session(id: string): Session {
     last_activity_at: null,
     last_conversation_at: null,
     trashed_at: null,
+        source_kind: "codex_rollout",
+        source_path: "/tmp/rollout.jsonl",
+        metadata: {},
+        source_file_identity: "identity",
+        source_generation: 1,
+        source_byte_offset: 100,
+        source_last_seen_size: 100,
+        source_mtime: null,
+        source_prefix_hash: "",
+        source_tail_hash: "",
+        fact_generation: 1,
+        latest_message_seq: 2,
+    
   };
 }
 
@@ -50,27 +63,9 @@ function detail(me: Session): SessionDetail {
     messages: [],
     owner_workstream: null,
     workspace_path: null,
-    members: [],
-    stats: {
-      member_count: 1,
-      child_count: 0,
-      side_count: 0,
-      max_depth: 0,
-      tool_call_count: 0,
-      user_message_count: 0,
-      assistant_message_count: 0,
-
-      side_activity_count: 0,
-      input_tokens: null,
-      output_tokens: null,
-      cached_tokens: null,
-      reasoning_tokens: null,
-      requests: 0,
-
-    },
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
-    root_source_status: "present",
+    source_status: "present",
     can_resume: true,
     forked_from: null,
 
@@ -81,7 +76,6 @@ function message(ordinal: number, role: SessionMessage["role"], content: string)
   return {
     id: `m${ordinal}`,
     session_id: "me",
-    member_id: "root",
     sequence: ordinal,
     ordinal,
     role,
@@ -92,14 +86,12 @@ function message(ordinal: number, role: SessionMessage["role"], content: string)
     source_generation: 0,
     source_position: "",
     source_identity_hash: "",
-    provider: null,
-    model: null,
     raw_ref: "",
   };
 }
 
 function page(over: Partial<SessionMessageWindow> = {}): SessionMessageWindow {
-  return { messages: [], generation: 1, total: 0, next_before_ordinal: null, ...over };
+  return { messages: [], generation: 1, total: 0, tail_ordinal: 0, remaining: 0, next_before_ordinal: null, ...over };
 }
 
 function mark(ordinal: number, preview: string): SessionMessageMark {
@@ -144,46 +136,92 @@ function fakeRows(container: HTMLElement, rowHeight = 100, clientHeight = 150) {
 }
 
 it("opens on the newest page and counts the older messages left above it", async () => {
+  // 骨架模式（默认）：一页按「用户消息 + 最终回复」计，夹具给足 3 条用户消息，
+  // 首屏预载不再向上补页（补页逻辑另有专测）。
   vi.mocked(api.getSessionMessages).mockResolvedValue(page({
-    messages: [message(4, "user", "第四句"), message(5, "assistant", "第五句")],
-    total: 5,
-    next_before_ordinal: 3,
+    messages: [
+      message(2, "user", "第二句"),
+      message(3, "user", "第三句"),
+      message(4, "user", "第四句"),
+      message(5, "assistant", "第五句"),
+    ],
+    total: 4,
+    tail_ordinal: 5,
+    remaining: 2,
+    next_before_ordinal: 1,
   }));
 
   await renderConversation([mark(1, "第一次提问"), mark(4, "第四句")]);
 
   await screen.findByText("第四句");
   screen.getByText("第五句");
-  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { limit: expect.any(Number) });
-  screen.getByRole("button", { name: "加载更早的消息（还有 3 条）" });
-  screen.getByText(/共 5 条消息/);
+  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { limit: expect.any(Number), turnsOnly: true });
+  screen.getByRole("button", { name: "加载更早的消息（还有 2 条）" });
+  screen.getByText(/共 4 条消息/);
   // 导航条按用户消息给出 tick，悬停文案是消息首行。
   const ticks = document.querySelectorAll(".conversation-nav .nav-tick");
   expect(ticks).toHaveLength(2);
   expect(ticks[0].getAttribute("title")).toBe("第一次提问");
 });
 
+it("hides intermediate replies by default and the button reveals them", async () => {
+  // 后端按模式计页：骨架模式只回「用户 + 最终回复」，全量模式连中间输出一起回。
+  const mid = message(5, "assistant", "中间的先看一眼");
+  mid.turn_final = false;
+  vi.mocked(api.getSessionMessages).mockImplementation((_sessionId, params) => {
+    const turnsOnly = !!(params as { turnsOnly?: boolean } | undefined)?.turnsOnly;
+    return Promise.resolve(turnsOnly
+      ? page({
+          messages: [message(4, "user", "第四句"), message(6, "assistant", "最终回答")],
+          total: 2, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
+        })
+      : page({
+          messages: [message(4, "user", "第四句"), mid, message(6, "assistant", "最终回答")],
+          total: 3, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
+        }));
+  });
+
+  await renderConversation();
+
+  // 默认骨架模式：中间回复不出现，用户消息与最终回复照常。
+  await screen.findByText("第四句");
+  screen.getByText("最终回答");
+  expect(screen.queryByText("中间的先看一眼")).toBeNull();
+
+  // 按钮切到全量模式（重新取页），中间回复出现；再点回去又隐藏。
+  fireEvent.click(screen.getByRole("button", { name: "显示中间回复" }));
+  await screen.findByText("中间的先看一眼");
+  fireEvent.click(screen.getByRole("button", { name: "隐藏中间回复" }));
+  await screen.findByText("第四句");
+  expect(screen.queryByText("中间的先看一眼")).toBeNull();
+});
+
 it("prepends the older page the cursor points at", async () => {
   vi.mocked(api.getSessionMessages)
     .mockResolvedValueOnce(page({
-      messages: [message(4, "user", "第四句")],
-      total: 4,
-      next_before_ordinal: 3,
+      messages: [message(2, "user", "第二句"), message(3, "user", "第三句"), message(4, "user", "第四句")],
+      total: 3,
+      tail_ordinal: 4,
+      remaining: 2,
+      next_before_ordinal: 1,
     }))
     .mockResolvedValueOnce(page({
-      messages: [message(1, "user", "第一句"), message(2, "assistant", "第二句")],
-      total: 4,
+      messages: [message(0, "assistant", "第零句"), message(1, "user", "第一句")],
+      total: 3,
+      tail_ordinal: 4,
+      remaining: 0,
       next_before_ordinal: null,
     }));
 
   await renderConversation();
 
-  fireEvent.click(await screen.findByRole("button", { name: "加载更早的消息（还有 3 条）" }));
+  fireEvent.click(await screen.findByRole("button", { name: "加载更早的消息（还有 2 条）" }));
 
   await screen.findByText("第一句");
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
-    beforeOrdinal: 3,
+    beforeOrdinal: 1,
     limit: expect.any(Number),
+    turnsOnly: true,
   });
   const body = document.body.textContent ?? "";
   expect(body.indexOf("第一句")).toBeLessThan(body.indexOf("第四句"));
@@ -195,35 +233,43 @@ it("keeps the conversation ordered by ordinal even when a page repeats or arrive
   // 同一 ordinal 只留一条，最终顺序仍严格按 ordinal——不会出现「563 下一条是 504」。
   vi.mocked(api.getSessionMessages)
     .mockResolvedValueOnce(page({
-      messages: [message(3, "user", "第三句"), message(4, "assistant", "第四句")],
-      total: 4,
-      next_before_ordinal: 3,
+      messages: [message(2, "user", "第二句"), message(3, "user", "第三句"), message(4, "assistant", "第四句")],
+      total: 3,
+      tail_ordinal: 4,
+      remaining: 1,
+      next_before_ordinal: 1,
     }))
     .mockResolvedValueOnce(page({
-      messages: [message(3, "user", "第三句"), message(1, "user", "第一句"), message(2, "assistant", "第二句")],
-      total: 4,
+      messages: [message(3, "user", "第三句"), message(0, "assistant", "第零句"), message(1, "user", "第一句")],
+      total: 3,
+      tail_ordinal: 4,
+      remaining: 0,
       next_before_ordinal: null,
     }));
 
   await renderConversation();
 
-  fireEvent.click(await screen.findByRole("button", { name: "加载更早的消息（还有 3 条）" }));
+  fireEvent.click(await screen.findByRole("button", { name: "加载更早的消息（还有 1 条）" }));
   await screen.findByText("第一句");
 
   const rendered = [...document.querySelectorAll(".conversation-scroll .event")].map((el) => el.getAttribute("data-seq"));
-  expect(rendered).toEqual(["1", "2", "3", "4"]);
+  expect(rendered).toEqual(["0", "1", "2", "3", "4"]);
 });
 
 it("jumps to an unloaded user message by loading a window around it", async () => {
   vi.mocked(api.getSessionMessages)
     .mockResolvedValueOnce(page({
-      messages: [message(20, "user", "较近的一条"), message(21, "assistant", "回答")],
-      total: 30,
-      next_before_ordinal: 19,
+      messages: [message(18, "user", "较早的一条"), message(19, "user", "次近的一条"), message(20, "user", "较近的一条"), message(21, "assistant", "回答")],
+      total: 4,
+      tail_ordinal: 21,
+      remaining: 3,
+      next_before_ordinal: 17,
     }))
     .mockResolvedValueOnce(page({
       messages: [message(1, "user", "很久以前的提问"), message(2, "assistant", "当时的回答")],
-      total: 30,
+      total: 4,
+      tail_ordinal: 21,
+      remaining: 0,
       next_before_ordinal: null,
     }));
 
@@ -237,6 +283,7 @@ it("jumps to an unloaded user message by loading a window around it", async () =
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
     beforeOrdinal: 42,
     limit: expect.any(Number),
+    turnsOnly: true,
   });
   expect(screen.queryByText("较近的一条")).toBeNull();
 });
@@ -244,18 +291,24 @@ it("jumps to an unloaded user message by loading a window around it", async () =
 it("keeps reading forward after a jump", async () => {
   vi.mocked(api.getSessionMessages)
     .mockResolvedValueOnce(page({
-      messages: [message(20, "user", "较近的一条")],
-      total: 30,
-      next_before_ordinal: 19,
+      messages: [message(18, "user", "较早的一条"), message(19, "user", "次近的一条"), message(20, "user", "较近的一条")],
+      total: 4,
+      tail_ordinal: 20,
+      remaining: 3,
+      next_before_ordinal: 17,
     }))
     .mockResolvedValueOnce(page({
       messages: [message(1, "user", "很久以前的提问"), message(2, "assistant", "当时的回答")],
-      total: 30,
+      total: 4,
+      tail_ordinal: 20,
+      remaining: 0,
       next_before_ordinal: null,
     }))
     .mockResolvedValueOnce(page({
       messages: [message(3, "user", "接着往下")],
-      total: 30,
+      total: 4,
+      tail_ordinal: 20,
+      remaining: 0,
       next_before_ordinal: 2,
     }));
 
@@ -271,19 +324,119 @@ it("keeps reading forward after a jump", async () => {
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
     afterOrdinal: 2,
     limit: expect.any(Number),
+    turnsOnly: true,
   });
+});
+
+it("keeps the reading position across a mode switch", async () => {
+  // 骨架尾页：用户消息 4、6、8（3 条，预载不触发），每轮带最终回复。
+  const turnsPage = page({
+    messages: [
+      message(4, "user", "第四问"),
+      message(6, "assistant", "第六答"),
+      message(8, "user", "第八问"),
+      message(9, "assistant", "第九答"),
+    ],
+    total: 4,
+    tail_ordinal: 9,
+    remaining: 0,
+    next_before_ordinal: null,
+  });
+  // 全量模式多出中间回复 5、7。
+  const mid5 = message(5, "assistant", "中间输出五");
+  mid5.turn_final = false;
+  const mid7 = message(7, "assistant", "中间输出七");
+  mid7.turn_final = false;
+  const fullPage = page({
+    messages: [
+      message(4, "user", "第四问"),
+      mid5,
+      message(6, "assistant", "第六答"),
+      mid7,
+      message(8, "user", "第八问"),
+      message(9, "assistant", "第九答"),
+    ],
+    total: 6,
+    tail_ordinal: 9,
+    remaining: 0,
+    next_before_ordinal: null,
+  });
+  vi.mocked(api.getSessionMessages).mockImplementation((_sessionId, params) => {
+    const turnsOnly = !!(params as { turnsOnly?: boolean } | undefined)?.turnsOnly;
+    return Promise.resolve(turnsOnly ? turnsPage : fullPage);
+  });
+
+  const container = await renderConversation([mark(4, "第四问"), mark(6, "第六问"), mark(8, "第八问")]);
+  await screen.findByText("第四问");
+  const scroller = fakeRows(container);
+  // 读者停在视口顶部压着"第九答"（seq 9）的那条线上：正在读第八问这一轮。
+  scroller.scrollTop = 300;
+  fireEvent.scroll(scroller);
+
+  // 切到全量模式：回到正在读的那次提问（第八问，seq 8）落在视口上方 16px，
+  // 中间输出五、七出现在它与第六答之间——视角换了，位置没换。
+  fireEvent.click(screen.getByRole("button", { name: "显示中间回复" }));
+  await screen.findByText("中间输出五");
+  const row8 = scroller.querySelector<HTMLElement>('[data-seq="8"]')!;
+  const offsetAfter = row8.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  expect(offsetAfter).toBe(16);
+
+  // 切回骨架：中间输出消失，仍回到第八问。
+  fireEvent.click(screen.getByRole("button", { name: "隐藏中间回复" }));
+  await screen.findByText("第四问");
+  expect(screen.queryByText("中间输出五")).toBeNull();
+  const row8b = scroller.querySelector<HTMLElement>('[data-seq="8"]')!;
+  const offsetBack = row8b.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  expect(offsetBack).toBe(16);
+});
+
+it("switching with no nav marks stays in place instead of jumping to the tail", async () => {
+  // 无刻度可锚（导航条没有用户消息）：切换后停在新页当前位置，绝不回尾。
+  const mid5 = message(5, "assistant", "中间输出五");
+  mid5.turn_final = false;
+  vi.mocked(api.getSessionMessages).mockImplementation((_sessionId, params) => {
+    const turnsOnly = !!(params as { turnsOnly?: boolean } | undefined)?.turnsOnly;
+    return Promise.resolve(turnsOnly
+      ? page({
+          messages: [message(4, "user", "第四问"), message(6, "assistant", "第六答")],
+          total: 2, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
+        })
+      : page({
+          messages: [message(4, "user", "第四问"), mid5, message(6, "assistant", "第六答")],
+          total: 3, tail_ordinal: 6, remaining: 0, next_before_ordinal: null,
+        }));
+  });
+
+  const container = await renderConversation();
+  await screen.findByText("第四问");
+  const scroller = fakeRows(container);
+  scroller.scrollTop = 100;
+  fireEvent.scroll(scroller);
+
+  fireEvent.click(screen.getByRole("button", { name: "显示中间回复" }));
+  await screen.findByText("中间输出五");
+  expect(scroller.scrollTop).toBe(100);
 });
 
 it("keeps the row the reader is on when older messages are inserted above", async () => {
   vi.mocked(api.getSessionMessages)
     .mockResolvedValueOnce(page({
-      messages: [message(3, "user", "第三句"), message(4, "assistant", "第四句")],
+      messages: [
+        message(2, "user", "第二句"),
+        message(3, "user", "第三句"),
+        message(4, "user", "第四句"),
+        message(5, "assistant", "第五句"),
+      ],
       total: 4,
-      next_before_ordinal: 3,
+      tail_ordinal: 5,
+      remaining: 2,
+      next_before_ordinal: 1,
     }))
     .mockResolvedValueOnce(page({
-      messages: [message(1, "user", "第一句"), message(2, "assistant", "第二句")],
+      messages: [message(0, "assistant", "第零句"), message(1, "user", "第一句")],
       total: 4,
+      tail_ordinal: 5,
+      remaining: 0,
       next_before_ordinal: null,
     }));
 
@@ -295,14 +448,14 @@ it("keeps the row the reader is on when older messages are inserted above", asyn
     return [...scroller.querySelectorAll<HTMLElement>("[data-seq]")]
       .find((row) => row.getBoundingClientRect().bottom > box.top)?.dataset.seq;
   };
-  expect(topRowSeq()).toBe("3");
+  expect(topRowSeq()).toBe("2");
 
-  // 读者停在第三条上：向上翻页时它是视口最上方那条。
+  // 读者停在第二条上：向上翻页时它是视口最上方那条。
   scroller.scrollTop = 50;
   const offsetBefore = scroller.querySelector<HTMLElement>('[data-seq="3"]')!
     .getBoundingClientRect().top - scroller.getBoundingClientRect().top;
 
-  fireEvent.click(screen.getByRole("button", { name: "加载更早的消息（还有 3 条）" }));
+  fireEvent.click(screen.getByRole("button", { name: "加载更早的消息（还有 2 条）" }));
   await screen.findByText("第一句");
   fakeRows(container);
 
@@ -312,19 +465,23 @@ it("keeps the row the reader is on when older messages are inserted above", asyn
     .getBoundingClientRect().top - scroller.getBoundingClientRect().top;
   expect(scroller.scrollTop).toBe(250);
   expect(offsetAfter).toBe(offsetBefore);
-  expect(topRowSeq()).toBe("3");
+  expect(topRowSeq()).toBe("2");
 });
 
 it("does not move the viewport when a newer page is appended below", async () => {
   vi.mocked(api.getSessionMessages)
     .mockResolvedValueOnce(page({
-      messages: [4, 5, 6, 7, 8, 9].map((n) => message(n, "assistant", `第${n}句`)),
-      total: 10,
+      messages: [message(4, "user", "第4句"), message(5, "assistant", "第5句"), message(6, "user", "第6句"), message(7, "assistant", "第7句"), message(8, "user", "第8句"), message(9, "assistant", "第9句")],
+      total: 4,
+      tail_ordinal: 10,
+      remaining: 3,
       next_before_ordinal: 3,
     }))
     .mockResolvedValueOnce(page({
       messages: [message(10, "assistant", "第十句")],
-      total: 10,
+      total: 4,
+      tail_ordinal: 10,
+      remaining: 3,
       next_before_ordinal: 3,
     }));
 
@@ -339,6 +496,7 @@ it("does not move the viewport when a newer page is appended below", async () =>
   expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", {
     afterOrdinal: 9,
     limit: expect.any(Number),
+    turnsOnly: true,
   });
   // 追加在下方：首页没变，锚点那一关不会过，视口原地不动。
   expect(scroller.scrollTop).toBe(400);
@@ -346,9 +504,11 @@ it("does not move the viewport when a newer page is appended below", async () =>
 
 it("waits for the scroll to settle before pulling an older page", async () => {
   vi.mocked(api.getSessionMessages).mockResolvedValue(page({
-    messages: [message(4, "user", "第四句")],
-    total: 4,
-    next_before_ordinal: 3,
+    messages: [message(2, "user", "第二句"), message(3, "user", "第三句"), message(4, "user", "第四句")],
+    total: 3,
+    tail_ordinal: 4,
+    remaining: 2,
+    next_before_ordinal: 1,
   }));
 
   const container = await renderConversation();
@@ -367,7 +527,7 @@ it("waits for the scroll to settle before pulling an older page", async () => {
 
   // 停稳之后才取那一页。
   await waitFor(() => expect(api.getSessionMessages).toHaveBeenCalledTimes(1), { timeout: 2000 });
-  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { beforeOrdinal: 3, limit: expect.any(Number) });
+  expect(api.getSessionMessages).toHaveBeenCalledWith("me", { beforeOrdinal: 1, limit: expect.any(Number), turnsOnly: true });
 });
 
 it("lays the user-message ticks on a fixed pitch, not on their document position", async () => {
@@ -395,29 +555,35 @@ it("lays the user-message ticks on a fixed pitch, not on their document position
 it("reloads from the tail when the conversation was rewritten", async () => {
   vi.mocked(api.getSessionMessages)
     .mockResolvedValueOnce(page({
-      messages: [message(4, "user", "第四句")],
-      total: 4,
-      next_before_ordinal: 3,
+      messages: [message(2, "user", "第二句"), message(3, "user", "第三句"), message(4, "user", "第四句")],
+      total: 3,
+      tail_ordinal: 4,
+      remaining: 2,
+      next_before_ordinal: 1,
     }))
     .mockResolvedValueOnce(page({
       messages: [message(1, "user", "旧会话的消息")],
       generation: 2,
       total: 1,
+      tail_ordinal: 1,
+      remaining: 0,
       next_before_ordinal: null,
     }))
     .mockResolvedValueOnce(page({
       messages: [message(9, "user", "改写后的唯一一条")],
       generation: 2,
       total: 1,
+      tail_ordinal: 1,
+      remaining: 0,
       next_before_ordinal: null,
     }));
 
   await renderConversation();
 
-  fireEvent.click(await screen.findByRole("button", { name: "加载更早的消息（还有 3 条）" }));
+  fireEvent.click(await screen.findByRole("button", { name: "加载更早的消息（还有 2 条）" }));
 
   await screen.findByText("改写后的唯一一条");
-  expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", { limit: expect.any(Number) });
+  expect(api.getSessionMessages).toHaveBeenLastCalledWith("me", { limit: expect.any(Number), turnsOnly: true });
   expect(screen.queryByText("旧会话的消息")).toBeNull();
 });
 
@@ -425,6 +591,8 @@ it("offers 跳到最新 only after the viewport left the newest message", async 
   vi.mocked(api.getSessionMessages).mockResolvedValue(page({
     messages: [message(1, "user", "唯一一条")],
     total: 1,
+    tail_ordinal: 1,
+    remaining: 0,
   }));
 
   const container = await renderConversation();
