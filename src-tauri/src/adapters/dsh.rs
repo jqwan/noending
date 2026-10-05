@@ -54,10 +54,10 @@ use serde_json::Value;
 
 use crate::adapters::{
     ms_epoch_to_rfc3339, replay_cursor_update, AgentCommand, DesktopResume, DiscoveredMember,
-    DiscoveredMemberKind, ExecOptions, MemberObservation, MemberReadDelta, ParsedLine, ResumeRoute,
+    DiscoveredMemberKind, ExecOptions, MemberReadDelta, ParsedLine, ResumeRoute,
     SessionMessageRole,
 };
-use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
+use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
 
@@ -85,60 +85,6 @@ fn generation_of(file_name: &str) -> Option<u8> {
         .and_then(|rest| rest.strip_suffix(".jsonl"))
         .and_then(|num| num.parse::<u8>().ok())
 }
-
-/// The seq ranges a later `surfaceOp:{op:"replace", start, end}` row has
-/// superseded, sorted and merged into disjoint intervals. A replaced row is
-/// dead surface: the transcript KEEPS it on disk for provenance, but the
-/// live view answered through the replacing row — counting both would bill
-/// one execution per refresh (measured on the real corpus: 674 replace rows
-/// covering thousands of tool rows). The replacing row itself is not in any
-/// range and counts normally; a chained replace's range swallows the earlier
-/// replacing rows with everything else.
-fn collect_replace_ranges(raw: &[u8]) -> Vec<(i64, i64)> {
-    let mut ranges: Vec<(i64, i64)> = Vec::new();
-    scan_lines(raw, |line| {
-        if line.contains("\"surfaceOp\"") {
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
-                let so = v.get("surfaceOp");
-                if so.and_then(|s| s.get("op")).and_then(|o| o.as_str()) == Some("replace") {
-                    let start = so.and_then(|s| s.get("start")).and_then(|x| x.as_i64());
-                    let end = so.and_then(|s| s.get("end")).and_then(|x| x.as_i64());
-                    if let (Some(start), Some(end)) = (start, end) {
-                        ranges.push((start, end));
-                    }
-                }
-            }
-        }
-        true
-    });
-    ranges.sort_unstable();
-    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(ranges.len());
-    for (start, end) in ranges {
-        match merged.last_mut() {
-            Some(last) if start <= last.1 + 1 => last.1 = last.1.max(end),
-            _ => merged.push((start, end)),
-        }
-    }
-    merged
-}
-
-/// Is this seq inside any superseded range? Binary search over the merged
-/// intervals — the corpus has hundreds of ranges against thousands of tool
-/// rows per session.
-fn seq_is_covered(ranges: &[(i64, i64)], seq: i64) -> bool {
-    ranges
-        .binary_search_by(|(start, end)| {
-            if seq < *start {
-                std::cmp::Ordering::Greater
-            } else if seq > *end {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
-}
-
 /// v0 streaming frames, by byte prefix — `"type"` leads every dsh row, and
 /// these four types are 74.8% of an old session's lines, each fully decoded
 /// today only to be dropped. Skipping them for the cost of a memcmp retires
@@ -276,81 +222,14 @@ fn session_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// `data.usage` of one assistant step, in dsh's camelCase spelling. Every step
-/// carries its own usage, so they add up. dsh states no cost, and its own
-/// `totalTokens` is a derived sum: only the components are stored, so the UI
-/// never shows an invented number.
-fn usage_observation(v: &Value) -> MemberObservation {
-    let Some(usage) = v.pointer("/data/usage") else {
-        return MemberObservation::default();
-    };
-    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-    MemberObservation {
-        input_tokens: n("inputTokens"),
-        output_tokens: n("outputTokens"),
-        cached_tokens: n("cacheReadTokens"),
-        ..Default::default()
-    }
-}
-
-/// One decoded record's contribution to the member read. Root members
-/// produce conversation; child members produce observations only.
-/// The generation model an assistant-family row names
-/// (`data.message.source`, gated on `kind == "model"`); rows that name no
-/// model bill with a NULL one, like every other format's unknowns.
-fn model_of(v: &Value) -> Option<String> {
-    let source_meta = v.pointer("/data/message/source").unwrap_or(&Value::Null);
-    if source_meta.get("kind").and_then(|k| k.as_str()) == Some("model") {
-        source_meta
-            .get("model")
-            .and_then(|m| m.as_str())
-            .map(String::from)
-    } else {
-        None
-    }
-}
-
-fn provider_of(v: &Value) -> Option<String> {
-    let source = v.pointer("/data/message/source")?;
-    (source.get("kind")?.as_str()? == "model")
-        .then(|| source.get("provider")?.as_str().map(String::from))?
-}
-
-/// A usage-carrying row that is NOT a conversation message (a tool-only step,
-/// an attempt, a compaction summary): the ledger note anchors it to its
-/// bucket and model. Inherited fork rows never reach here — their callers
-/// return before building a line.
-fn billed_step(v: &Value, observation: MemberObservation, compaction: bool) -> ParsedLine {
-    ParsedLine::billed_observation(
-        observation,
-        crate::adapters::UsageNote {
-            category: if compaction {
-                crate::adapters::UsageCategory::Compaction
-            } else {
-                crate::adapters::UsageCategory::Conversation
-            },
-            model: model_of(v),
-            provider: provider_of(v),
-            key: None,
-        },
-    )
-}
-
-fn parsed_line(
-    v: &Value,
-    is_root: bool,
-    seed_length: i64,
-    replace_ranges: &[(i64, i64)],
-) -> Option<ParsedLine> {
+fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str())?;
     let seq = v.get("seq").and_then(|s| s.as_i64());
     let source_message_id = seq.map(|s| s.to_string());
     // A fork's header records how many events were inherited verbatim from the
     // parent (`seedLength`, `SessionStore::fork`): rows below that boundary are
-    // the parent's work — billing them again would charge the parent's calls
-    // to this session. The guard covers every spending row type; it is
-    // dormant on installs whose headers carry no `seedLength` (observed on
-    // 0.2.x: none do).
+    // the parent's work. The guard is dormant on installs whose headers carry
+    // no `seedLength` (observed on 0.2.x: none do).
     let inherited = seq.is_some_and(|seq| seq < seed_length);
     // A `user/message` is not necessarily the user: dsh labels the writer in
     // `data.source`, and the kinds bringing a `senderSessionId` are the messages
@@ -367,11 +246,8 @@ fn parsed_line(
                 return None;
             }
             if counterpart_id.is_some() {
-                // Agent-to-agent relay: observed, never conversation.
-                return Some(ParsedLine::observation_only(MemberObservation {
-                    side_activity: 1,
-                    ..Default::default()
-                }));
+                // Agent-to-agent relay: never conversation.
+                return None;
             }
             // `source.kind` is the row's authoritative author. A non-user
             // author (a plugin notice, a model switch) wrote machine traffic,
@@ -380,106 +256,35 @@ fn parsed_line(
             if author_kind.map(|k| k != "user").unwrap_or(false) {
                 return None;
             }
-            let observation = MemberObservation {
-                user_messages: 1,
-                ..Default::default()
-            };
             if !is_root {
-                return Some(ParsedLine::observation_only(observation));
+                return None;
             }
-            Some(ParsedLine {
-                message: Some(crate::adapters::parsed_message(
-                    source_message_id,
-                    SessionMessageRole::User,
-                    text,
-                )),
-                observation,
-                usage_note: None,
-            })
+            Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                source_message_id,
+                SessionMessageRole::User,
+                text,
+            )))
         }
         "assistant/message" => {
-            // Usage belongs to the step, not to its prose: a step that only
-            // called tools spent tokens too, and a CHILD member's own steps are
-            // its own execution cost. So it is counted before either the
-            // empty-text or the non-root early return can drop it.
-            let mut usage = if inherited {
-                MemberObservation::default()
-            } else {
-                usage_observation(v)
-            };
+            if inherited || !is_root {
+                return None;
+            }
             let text = text_blocks(v.pointer("/data/message/content"));
             if text.trim().is_empty() {
-                return Some(billed_step(v, usage, false));
+                return None;
             }
-            usage.assistant_messages = 1;
-            if !is_root {
-                return Some(billed_step(v, usage, false));
-            }
-            // The assistant record itself carries `data.message.source` — a
-            // discriminated union gated on `kind == "model"` holding the actual
-            // generation identity (`source.provider` / `source.model`).
-            // Profile/preset config is NOT message-level fact and is never read.
-            let source_meta = v.pointer("/data/message/source").unwrap_or(&Value::Null);
-            let provider = if source_meta.get("kind").and_then(|k| k.as_str()) == Some("model") {
-                source_meta
-                    .get("provider")
-                    .and_then(|p| p.as_str())
-                    .map(String::from)
-            } else {
-                None
-            };
-            let message = crate::adapters::parsed_message(
+            Some(ParsedLine::message_only(crate::adapters::parsed_message(
                 source_message_id,
                 SessionMessageRole::Assistant,
                 text,
-            )
-            .with_provenance(provider, model_of(v));
-            Some(ParsedLine {
-                message: Some(message),
-                observation: usage,
-                usage_note: None,
-            })
+            )))
         }
-        // A retried request attempt bills like the settled reply even when it
-        // never produced prose; it is execution cost, never conversation.
-        "assistant/attempt" => {
-            if inherited {
-                return None;
-            }
-            // A real attempt's `data` is {turn, step, stream} — the usage
-            // lands on the sibling `assistant/message` row, so an attempt
-            // bills nothing (an empty observation makes no event). The old
-            // fixture pretended `data.usage` exists here and the test
-            // celebrated a shape the writer never emits.
-            Some(billed_step(v, usage_observation(v), false))
-        }
-        // A compaction summary is a real provider call; retain its usage.
-        "compaction/summary" => {
-            if inherited {
-                return None;
-            }
-            let observation = usage_observation(v);
-            Some(billed_step(v, observation, true))
-        }
-        // Other compaction rows are machine bookkeeping, never conversation or usage.
+        // Attempts and compaction summaries are machine rows; usage is no
+        // longer recorded.
+        "assistant/attempt" | "compaction/summary" => None,
+        // Other compaction rows are machine bookkeeping, never conversation.
         t if t.starts_with("compaction/") => None,
-        // Count the CALL side only — one execution is one tool call, the
-        // same convention as every other adapter (claude/pi count the
-        // initiating block; counting result rows too made dsh report 2×
-        // its executions against them).
-        "tool/call" => {
-            // A row a later replace superseded is dead surface — the live
-            // view already answered through its replacing row.
-            let counted = match seq {
-                Some(seq) => !seq_is_covered(replace_ranges, seq),
-                None => true,
-            };
-            Some(ParsedLine::observation_only(MemberObservation {
-                tool_calls: u64::from(counted),
-                ..Default::default()
-            }))
-        }
-        "tool/result" => None,
+        "tool/call" | "tool/result" => None,
         _ => None,
     }
 }
@@ -696,30 +501,24 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         Ok(out)
     }
 
-    fn read_member_delta(
+    fn read_session_delta(
         &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
+        session: &Session,
+        cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
-        let path = PathBuf::from(&member.source_path);
+        let path = PathBuf::from(&session.source_path);
         let raw = std::fs::read(&path)?;
 
         // Decoded text cannot be seeked into, so every read replays the whole
         // body and leans on message identity: each record carries the writer's
         // own `seq`, so a replay stores nothing it already has.
-        let is_root = member.relation.as_str() == "root";
-        let seed_length = member
+        let is_root = true; // every stored session is its root source
+        let seed_length = session
             .metadata
             .get("seed_length")
             .and_then(|s| s.as_i64())
             .unwrap_or(0);
         let mut messages = Vec::new();
-        let mut observation = MemberObservation::default();
-        let mut usage_events = Vec::new();
-        // The replace ranges come from a cheap first walk (only lines that
-        // mention surfaceOp get decoded); the parse walk then knows which
-        // tool rows are dead surface.
-        let replace_ranges = collect_replace_ranges(&raw);
         let complete_snapshot = scan_lines(&raw, |line| {
             if is_streaming_frame(line) {
                 return true;
@@ -727,17 +526,13 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 return true;
             };
-            let Some(p) = parsed_line(&v, is_root, seed_length, &replace_ranges) else {
+            let Some(p) = parsed_line(&v, is_root, seed_length) else {
                 return true;
             };
-            observation.add_activity(&p.observation);
             let ts = v
                 .get("time")
                 .and_then(|t| t.as_i64())
                 .and_then(ms_epoch_to_rfc3339);
-            if let Some(event) = crate::adapters::UsageEvent::from_parsed_line(&p, ts.as_deref()) {
-                usage_events.push(event);
-            }
             if let Some(mut m) = p.message {
                 if !m.content.trim().is_empty() {
                     if m.ts.is_none() {
@@ -755,23 +550,15 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 
         let source = replay_cursor_update(&path, cursor, &raw)?;
         Ok(MemberReadDelta {
-            stats: crate::adapters::stats_update_from(
-                &observation,
-                &source,
-                crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY,
-            ),
             messages,
             source: Some(source),
             complete_snapshot,
-            next_active_provider: None,
-            next_active_model: None,
-            usage_events,
         })
     }
 
-    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+    fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
         Ok(crate::adapters::inspect_file_source(Path::new(
-            &member.source_path,
+            &session.source_path,
         )))
     }
 
@@ -784,7 +571,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 
     /// The registered scheme `dsh://` has no known session route, so Continue
     /// can only activate the app. App absent → refuse.
-    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+    fn continue_route(&self, _session: &Session) -> ResumeRoute {
         if !crate::platform::paths::app_bundle_present("DeepSeek Harness") {
             return ResumeRoute::Refused("未找到 dsh 桌面应用，无法继续该会话".into());
         }
@@ -827,7 +614,6 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
-    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -882,20 +668,33 @@ mod tests {
     const RUNTIME_CTX: &str = r#"{"type":"user/message","seq":1,"time":1788969927205,"data":{"content":[{"type":"text","text":"Current runtime context. This snapshot supersedes earlier runtime-context snapshots."}],"role":"user"}}"#;
     const REMINDER: &str = r#"{"type":"user/message","seq":2,"time":1788969927206,"data":{"content":[{"type":"text","text":"<system-reminder>\nworkspace instructions\n</system-reminder>"}],"role":"user"}}"#;
 
-    fn member_at(path: &Path, relation: SessionMemberRelation) -> SessionMember {
-        SessionMember {
-            id: "mem-dsh".into(),
-            session_id: "sess-dsh".into(),
+    fn session_at(path: &Path) -> Session {
+        Session {
+            id: "sess-dsh".into(),
             agent: Agent::Dsh,
-            source_member_id: "session-x".into(),
-            relation,
-            parent_source_member_id: None,
-            source_kind: "dsh_zstd_transcript".into(),
-            source_path: path.to_string_lossy().to_string(),
+            root_agent_session_id: "session-x".into(),
+            title: None,
             cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            owner_workstream_id: None,
+            forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,
+            last_conversation_at: None,
+            trashed_at: None,
+            source_kind: "dsh_zstd_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),
+            source_file_identity: String::new(),
+            source_generation: 0,
+            source_byte_offset: 0,
+            source_last_seen_size: 0,
+            source_mtime: None,
+            source_prefix_hash: String::new(),
+            source_tail_hash: String::new(),
+            fact_generation: 0,
+            latest_message_seq: 0,
         }
     }
 
@@ -1033,10 +832,7 @@ mod tests {
         );
         let file = dir.join("session.v2.jsonl.zstd");
         let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
+            .read_session_delta(&session_at(&file), &crate::domain::SourceCursor::default())
             .unwrap();
         let texts: Vec<(SessionMessageRole, &str)> = delta
             .messages
@@ -1056,12 +852,6 @@ mod tests {
             delta.messages[0].ts.as_deref(),
             Some("2026-09-09T16:05:27.205+00:00")
         );
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, Some(1));
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
     }
 
     /// A `user/message` that carries a `senderSessionId` was written by another
@@ -1086,10 +876,7 @@ mod tests {
         );
         let file = dir.join("session.v2.jsonl.zstd");
         let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
+            .read_session_delta(&session_at(&file), &crate::domain::SourceCursor::default())
             .unwrap();
         // The two relays are side activity; the plugin notice's author is not
         // the user (`source.kind = "plugin"`), so it is machine traffic —
@@ -1101,13 +888,6 @@ mod tests {
             "relays and plugin notices are out of the conversation"
         );
         assert_eq!(delta.messages[0].content, "怎么拆这个任务");
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.side_activity_count, Some(2));
-                assert_eq!(s.user_message_count, Some(1));
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1221,94 +1001,14 @@ mod tests {
         }
 
         let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
+            .read_session_delta(&session_at(&file), &crate::domain::SourceCursor::default())
             .unwrap();
         let texts: Vec<&str> = delta.messages.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(texts, vec!["first prompt", "first reply"], "{texts:?}");
     }
 
-    /// A child member replays to observations only.
     #[test]
-    fn a_child_member_produces_observations_only() {
-        let id = "session-child";
-        let dir = session_dir(
-            &unique_dir("child-read"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(
-                    id,
-                    r#","parentSession":"session-parent","origin":"subagent","delegationDepth":1"#,
-                ),
-                &user(1, "delegated task"),
-                &assistant(2, "done"),
-                // A child's own steps are its own execution cost.
-                r#"{"type":"assistant/message","seq":3,"time":3,"data":{"turn":1,"step":1,"usage":{"inputTokens":42,"outputTokens":7},"message":{"role":"assistant","content":[{"type":"text","text":"child"}]}}}"#,
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-        let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Child),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        assert!(delta.messages.is_empty());
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(usage[0], 42, "a child's own usage is counted");
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Usage is per STEP and adds up across the session. A step that emitted no
-    /// prose (tool calls only) spent tokens too, so it is counted without
-    /// becoming conversation.
-    #[test]
-    fn usage_adds_up_per_step_including_a_prose_less_step() {
-        let id = "session-usage";
-        let dir = session_dir(
-            &unique_dir("usage"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(id, ""),
-                &user(3, "跑一下"),
-                r#"{"type":"assistant/message","seq":4,"time":1,"data":{"turn":1,"step":1,"usage":{"inputTokens":100,"outputTokens":10,"totalTokens":110},"message":{"role":"assistant","content":[{"type":"tool_use","name":"read"}]}}}"#,
-                r#"{"type":"assistant/message","seq":5,"time":2,"data":{"turn":1,"step":2,"usage":{"inputTokens":8459,"outputTokens":64,"cacheReadTokens":7000,"totalTokens":8523},"message":{"role":"assistant","content":[{"type":"text","text":"好了。"}]}}}"#,
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-        let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(usage[0], 8559, "both steps, one prose-less");
-                assert_eq!(usage[1], 74);
-                assert_eq!(usage[2], 7000, "cacheReadTokens");
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        // The prose-less step produced no conversation, but the other did.
-        assert_eq!(delta.messages.len(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `data.message.source` gated on `kind == "model"` attributes the
-    /// generation identity; any other source kind stays NULL.
-    #[test]
-    fn assistant_source_kind_model_attributes_the_generation_identity() {
+    fn assistant_rows_of_every_source_kind_parse_to_prose() {
         let id = "session-prov";
         let with_model = r#"{"type":"assistant/message","seq":10,"time":1788969948545,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答一"}],"source":{"kind":"model","provider":"openai-codex","model":"gpt-5.6-luna"}}}}"#;
         let non_model = r#"{"type":"assistant/message","seq":11,"time":1788969948546,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答二"}],"source":{"kind":"plugin","provider":"x","model":"y"}}}}"#;
@@ -1329,25 +1029,14 @@ mod tests {
         );
         let file = dir.join("session.v2.jsonl.zstd");
         let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
+            .read_session_delta(&session_at(&file), &crate::domain::SourceCursor::default())
             .unwrap();
-        let assistant: Vec<(Option<&str>, Option<&str>)> = delta
+        let assistant = delta
             .messages
             .iter()
             .filter(|m| m.role == SessionMessageRole::Assistant)
-            .map(|m| (m.provider.as_deref(), m.model.as_deref()))
-            .collect();
-        assert_eq!(
-            assistant,
-            vec![
-                (Some("openai-codex"), Some("gpt-5.6-luna")),
-                (None, None),
-                (None, None),
-            ]
-        );
+            .count();
+        assert_eq!(assistant, 3);
     }
 
     /// dsh 只有桌面端这一个启动面。回归守卫：它曾被误标为 TUI/CLI。
@@ -1360,8 +1049,8 @@ mod tests {
     /// 应用在场时 Continue 打开桌面应用，缺席时明确拒绝。
     #[test]
     fn continue_route_opens_the_desktop_app_or_refuses() {
-        let member = member_at(Path::new("/tmp/dsh-session"), SessionMemberRelation::Root);
-        let route = DshAdapter.continue_route(&member);
+        let session = session_at(Path::new("/tmp/dsh-session"));
+        let route = DshAdapter.continue_route(&session);
         if crate::platform::paths::app_bundle_present("DeepSeek Harness") {
             match route {
                 ResumeRoute::Desktop(d) => assert_eq!(d.uri, "dsh://"),
@@ -1398,9 +1087,9 @@ mod tests {
         assert!(found[0].source_path.ends_with("session.v2.jsonl"));
 
         let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&found[0].source_path, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
+            .read_session_delta(
+                &session_at(Path::new(&found[0].source_path)),
+                &crate::domain::SourceCursor::default(),
             )
             .unwrap();
         let texts: Vec<&str> = delta.messages.iter().map(|m| m.content.as_str()).collect();
@@ -1426,260 +1115,5 @@ mod tests {
         let found = DshAdapter.discover_members_in(&[root], &|_| false).unwrap();
         assert_eq!(found.len(), 1);
         assert!(found[0].source_path.ends_with("session.jsonl.zstd"));
-    }
-
-    /// Compression markers contribute no counter or request. A summary's
-    /// actual model usage is retained without becoming conversation.
-    #[test]
-    fn a_compaction_summary_bills_its_call() {
-        let id = "session-summary";
-        let dir = session_dir(
-            &unique_dir("summary"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(id, ""),
-                &user(1, "长对话"),
-                r#"{"type":"compaction/summary","seq":2,"time":2,"data":{"usage":{"inputTokens":5000,"outputTokens":800,"cacheReadTokens":12000}}}"#,
-                r#"{"type":"compaction/prune","seq":3,"time":3,"data":{}}"#,
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-        let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        assert!(
-            delta
-                .messages
-                .iter()
-                .all(|m| m.role == SessionMessageRole::User),
-            "the summary never becomes conversation"
-        );
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(usage[0], 5000);
-                assert_eq!(usage[1], 800);
-                assert_eq!(usage[2], 12000);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        // The call lands in the ledger under the compaction bucket, not
-        // conversation — that is the whole point of the split.
-        assert_eq!(delta.usage_events.len(), 1);
-        let e = &delta.usage_events[0];
-        assert_eq!(e.category, crate::adapters::UsageCategory::Compaction);
-        assert_eq!(e.input_tokens, 5000);
-        assert!(e.ts.is_some(), "the row's own time anchors the event");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A retried attempt never becomes conversation and never bills. A REAL
-    /// attempt's `data` is `{turn, step, stream}` — the call's usage lands on
-    /// the sibling `assistant/message` row, so the attempt itself contributes
-    /// no event. (The old fixture invented a `data.usage` shape the writer
-    /// never emits, and the test celebrated it.)
-    #[test]
-    fn an_assistant_attempt_bills_without_becoming_conversation() {
-        let id = "session-attempt";
-        let dir = session_dir(
-            &unique_dir("attempt"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(id, ""),
-                &user(1, "问题"),
-                r#"{"type":"assistant/attempt","seq":2,"time":2,"data":{"turn":1,"step":2,"stream":[{"type":"chunk","time":2,"chunk":{"type":"block-start","index":0,"blockType":"text"}}]}}"#,
-                &assistant(3, "最终回答"),
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-        let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        assert_eq!(delta.messages.len(), 2, "the attempt is not conversation");
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.assistant_message_count, Some(1), "only the settled reply");
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        // The attempt makes no event — the source states no usage on it. The
-        // settled reply (whose fixture carries no usage block either) makes
-        // none in its place; usage belongs to whichever step carries it.
-        assert!(delta.usage_events.is_empty(), "{:?}", delta.usage_events);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A `tool/result` row a later `surfaceOp:replace` superseded is dead
-    /// surface: the replacing row counts, the covered row does not. A replace
-    /// that swallows a whole call+result pair leaves exactly the replacing
-    /// row — one execution, one count.
-    #[test]
-    fn a_replaced_tool_row_stops_counting() {
-        let id = "session-replace";
-        let dir = session_dir(
-            &unique_dir("replace"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(id, ""),
-                &user(1, "问题"),
-                r#"{"type":"tool/call","seq":4,"time":4,"data":{"name":"read"}}"#,
-                r#"{"type":"tool/result","seq":5,"time":5,"data":{"name":"read"}}"#,
-                // The refreshed surface of the SAME execution: covers seq 5.
-                r#"{"type":"tool/result","seq":6,"time":6,"data":{"name":"read"},"surfaceOp":{"op":"replace","start":5,"end":5}}"#,
-                // A second execution whose call+result pair is swallowed by
-                // one merged surface row.
-                r#"{"type":"tool/call","seq":7,"time":7,"data":{"name":"edit"}}"#,
-                r#"{"type":"tool/result","seq":8,"time":8,"data":{"name":"edit"}}"#,
-                r#"{"type":"tool/result","seq":9,"time":9,"data":{},"surfaceOp":{"op":"replace","start":7,"end":8}}"#,
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-        let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                // Call 4 counts. Call 7 is COVERED by the second replace
-                // (7..8), and the result rows never count under the
-                // per-execution convention.
-                assert_eq!(s.tool_call_count, Some(1), "{:?}", s);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `vN` is an open set — upstream's currentVersion climbs, and v4 files
-    /// already exist on disk. An unknown generation must still be selected
-    /// (it is the NEWEST one); missing it means the session reads a stale
-    /// older file or vanishes entirely.
-    #[test]
-    fn generation_of_parses_any_version() {
-        assert_eq!(generation_of("session.v4.jsonl.zstd"), Some(4));
-        assert_eq!(generation_of("session.v3.jsonl"), Some(3));
-        assert_eq!(generation_of("session.v2.jsonl.zstd"), Some(2));
-        assert_eq!(generation_of("session.v1.jsonl.zstd"), Some(1));
-        assert_eq!(generation_of("session.jsonl.zstd"), Some(0));
-        assert_eq!(generation_of("session.jsonl"), Some(0));
-        assert_eq!(generation_of("session.vx.jsonl"), None);
-        assert_eq!(generation_of("other.jsonl"), None);
-    }
-
-    /// A `user/message` whose authoritative author is not the user — a plugin
-    /// notice, a model switch — is machine traffic: never conversation, never
-    /// a user-message count. The relay branch keeps its own semantics.
-    #[test]
-    fn a_non_user_author_is_never_a_user_turn() {
-        let id = "session-kind";
-        let dir = session_dir(
-            &unique_dir("kind"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(id, ""),
-                r#"{"type":"user/message","seq":1,"time":1,"data":{"source":{"kind":"plugin","plugin":"compact"},"role":"user","content":[{"type":"text","text":"compaction checkpoint text"}]}}"#,
-                r#"{"type":"user/message","seq":2,"time":2,"data":{"source":{"kind":"user"},"role":"user","content":[{"type":"text","text":"真正的问题"}]}}"#,
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-        let delta = DshAdapter
-            .read_member_delta(
-                &member_at(&file, SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        assert_eq!(delta.messages.len(), 1);
-        assert_eq!(delta.messages[0].content, "真正的问题");
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => assert_eq!(s.user_message_count, Some(1)),
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A fork's `seedLength` marks the inherited prefix: rows below the
-    /// boundary are the parent's work and are never billed here, while the
-    /// inherited history stays part of the transcript.
-    #[test]
-    fn a_seeded_fork_does_not_bill_its_inherited_prefix() {
-        let id = "session-seed";
-        let dir = session_dir(
-            &unique_dir("seed"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(id, r#","seedLength":3"#),
-                &user(1, "inherited question"),
-                r#"{"type":"assistant/message","seq":2,"time":2,"data":{"usage":{"inputTokens":900,"outputTokens":60},"message":{"role":"assistant","content":[{"type":"text","text":"inherited answer"}]}}}"#,
-                r#"{"type":"assistant/message","seq":4,"time":4,"data":{"usage":{"inputTokens":120,"outputTokens":9},"message":{"role":"assistant","content":[{"type":"text","text":"own answer"}]}}}"#,
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-
-        let found = DshAdapter
-            .discover_members_in(&[dir.clone()], &|_| false)
-            .unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].metadata["seed_length"], 3,
-            "discovery carries the boundary"
-        );
-
-        let mut member = member_at(&file, SessionMemberRelation::Root);
-        member.metadata = serde_json::json!({ "seed_length": 3 });
-        let delta = DshAdapter
-            .read_member_delta(&member, &SessionMemberCursor::default())
-            .unwrap();
-        let texts: Vec<&str> = delta.messages.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(
-            texts,
-            vec!["inherited question", "inherited answer", "own answer"],
-            "the inherited history stays part of the transcript"
-        );
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(usage[0], 120, "only the fork's own work is billed");
-                assert_eq!(usage[1], 9);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        assert_eq!(
-            delta.usage_events.len(),
-            1,
-            "the inherited prefix never reaches the ledger either"
-        );
-        assert_eq!(delta.usage_events[0].input_tokens, 120);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    #[test]
-    fn prose_less_billing_uses_only_model_source_channel() {
-        for (kind, expected) in [("model", Some("302ai")), ("plugin", None)] {
-            let source = serde_json::json!({"data":{"message":{"source":{
-                "kind":kind,"provider":"302ai","model":"gpt-test"
-            }}}});
-            let parsed = billed_step(
-                &source,
-                MemberObservation {
-                    input_tokens: 100,
-                    ..Default::default()
-                },
-                false,
-            );
-            let event = crate::adapters::UsageEvent::from_parsed_line(&parsed, None).unwrap();
-            assert_eq!(event.provider.as_deref(), expected);
-        }
     }
 }

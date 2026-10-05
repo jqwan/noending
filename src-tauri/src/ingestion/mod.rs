@@ -1,32 +1,33 @@
-//! Session ingestion: discover members → resolve the logical graph → ensure
-//! Sessions + SessionMembers → ingest changed members.
+//! Session ingestion: discover sources → ensure Sessions → ingest changed
+//! sources.
 //!
 //! Ingestion is the AUTOMATIC half of the pipeline and it NEVER calls AI: it
-//! writes facts only (messages, stats, member cursors, the current-message
+//! writes facts only (messages, the source cursor, the current-message
 //! projection and the fact generation). Context is written only by an explicit
 //! user action elsewhere.
 //!
 //! Invariants:
 //! - raw agent sources are never modified;
 //! - already-ingested conversation is never auto-deleted or overwritten, even
-//!   when the source is truncated / compacted / replaced: member cursors track
-//!   source identity + generation + offset, and re-scans dedup by message
-//!   identity;
-//! - a member's messages, stats and cursor advance only in the ONE transaction
-//!   inside `Db::commit_member_ingest`, which re-checks the session's lifecycle
-//!   and the member's attachment first.
+//!   when the source is truncated / compacted / replaced: the session cursor
+//!   tracks source identity + generation + offset, and re-scans dedup by
+//!   message identity;
+//! - messages, the cursor and the activity stamps advance only in the ONE
+//!   transaction inside `Db::commit_ingest`, which re-checks the session's
+//!   lifecycle first.
 //!
-//! Graph resolution never lets scan order decide identity: roots resolve first,
-//! then children/sides walk their parent chain against the batch AND the
-//! database. A child/side that resolves to nothing is an ingestion diagnostic,
-//! never a Session. Concurrency is the storage layer's (`Db` = one writer + a
-//! WAL reader), so ingestion just reads files and calls the store.
+//! A session IS its root source. Child/side sources an Agent spawns alongside
+//! (subagent transcripts, sidechains, derived pages) are recognized at
+//! discovery and skipped silently — recognition is what keeps e.g. codex
+//! subagent rollouts from becoming fake sessions. Concurrency is the storage
+//! layer's (`Db` = one writer + a WAL reader), so ingestion just reads files
+//! and calls the store.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::adapters::{AgentAdapter, DiscoveredMember, DiscoveredMemberKind};
-use crate::domain::{Agent, Session, SessionMember, SessionMemberRelation, SourceAvailability};
+use crate::domain::{Session, SourceAvailability};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
@@ -41,70 +42,6 @@ pub fn session_title(d: &DiscoveredMember) -> Option<String> {
         .or(d.first_user_text.as_deref())
         .or(d.first_agent_text.as_deref())
         .and_then(crate::adapters::title_from_text)
-}
-
-/// One reconcile batch for one agent: the discovered members plus the index
-/// resolution walks against.
-struct DiscoveryBatch<'a> {
-    by_id: HashMap<&'a str, &'a DiscoveredMember>,
-}
-
-impl<'a> DiscoveryBatch<'a> {
-    fn new(discovered: &'a [DiscoveredMember]) -> Self {
-        Self {
-            by_id: discovered
-                .iter()
-                .map(|m| (m.source_member_id.as_str(), m))
-                .collect(),
-        }
-    }
-}
-
-/// Depth cap for parent-chain walks: a defensive bound, not a semantic one —
-/// real graphs are a few levels deep, and a cyclic or absurdly long source
-/// chain must end in "unresolved", never in a hang.
-const MAX_CHAIN_DEPTH: usize = 32;
-
-/// The Logical Session a child/side member belongs to, walked through the
-/// source's own parent chain. Per step: a parent inside THIS batch keeps the walk
-/// going (roots resolve below); a parent already stored as a member row gives its
-/// session as the answer, even if it is still under a diagnostic; anything else
-/// is unresolved, and the caller records the diagnostic.
-fn resolve_logical_session(
-    db: &Db,
-    agent: Agent,
-    batch: &DiscoveryBatch,
-    member: &DiscoveredMember,
-) -> Result<Option<String>> {
-    let mut current: Option<&str> = member.parent_source_member_id.as_deref();
-    for _ in 0..MAX_CHAIN_DEPTH {
-        let Some(parent_id) = current else {
-            break;
-        };
-        if let Some(parent) = batch.by_id.get(parent_id).copied() {
-            if parent.kind.is_logical_root() {
-                return Ok(db
-                    .find_session_by_root_agent_id(agent, &parent.source_member_id)?
-                    .map(|s| s.id));
-            }
-            current = parent.parent_source_member_id.as_deref();
-            continue;
-        }
-        // Not in this batch: is the parent already a stored member?
-        if let Some(stored) = db.find_member_by_source_id(agent, parent_id)? {
-            return Ok(Some(stored.session_id));
-        }
-        break;
-    }
-    // The strict chain failed. `root_hint` is the adapter's cross-file
-    // shortcut — never an authority on its own, but enough when the parent
-    // file names the root directly (e.g. a hint that IS a known root).
-    if let Some(hint) = member.root_hint.as_deref() {
-        if let Some(stored) = db.find_member_by_source_id(agent, hint)? {
-            return Ok(Some(stored.session_id));
-        }
-    }
-    Ok(None)
 }
 
 /// Ensure the Logical Session row for a Root/ForkRoot discovery: create or refresh
@@ -125,7 +62,7 @@ fn ensure_logical_session(
     let path_id =
         crate::workspace::session::resolve_session_path(&db.write(), attacher, observed_cwd)?;
 
-    let (session_id, is_new) = db.upsert_logical_root(
+    let (session_id, is_new) = db.upsert_logical_session(
         d.agent,
         &d.source_member_id,
         title.as_deref(),
@@ -136,7 +73,6 @@ fn ensure_logical_session(
         d.last_activity_at.as_deref(),
         &d.source_kind,
         &raw_path,
-        d.parent_source_member_id.as_deref(),
         &d.metadata,
     )?;
 
@@ -163,13 +99,13 @@ fn ensure_logical_session(
 }
 
 /// The "source is unchanged since its last ingest" predicate discovery uses to
-/// skip re-parsing members whose facts are already stored. A source is unchanged
+/// skip re-parsing sources whose facts are already stored. A source is unchanged
 /// when its stored cursor identity, size and mtime all still match the file on
-/// disk; anything else (new, grown, touched, replaced) gets parsed. Only members
-/// of TITLED sessions are listed: an untitled row may just predate a title source,
-/// and re-parsing its unchanged file is what heals it.
+/// disk; anything else (new, grown, touched, replaced) gets parsed. Only TITLED
+/// sessions are listed: an untitled row may just predate a title source, and
+/// re-parsing its unchanged file is what heals it.
 fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> {
-    let skipset = db.member_source_skipset()?;
+    let skipset = db.session_source_skipset()?;
     Ok(move |path: &std::path::Path| {
         let Some((identity, size, mtime)) = skipset.get(&path.to_string_lossy().to_string()) else {
             return false;
@@ -191,61 +127,6 @@ fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> 
         same_mtime && crate::adapters::file_identity(path) == *identity
     })
 }
-
-/// Record (or re-observe) an unattachable member, and clear the diagnostic of
-/// one that resolved. Diagnostics never enter Sessions/Search/Context/
-/// lifecycle — they are a Settings page, nothing else.
-fn note_unresolved(db: &Db, d: &DiscoveredMember, reason: &str) -> Result<()> {
-    db.upsert_ingestion_diagnostic(
-        d.agent,
-        crate::domain::diagnostic_kind::UNRESOLVED_SESSION_MEMBER,
-        Some(&d.source_member_id),
-        d.parent_source_member_id.as_deref(),
-        Some(&d.source_path.to_string_lossy()),
-        reason,
-        &serde_json::json!({
-            "kind": format!("{:?}", d.kind),
-            "root_hint": d.root_hint,
-        }),
-    )
-}
-
-fn resolve_diagnostic(db: &Db, d: &DiscoveredMember) -> Result<()> {
-    db.resolve_ingestion_diagnostic(
-        d.agent,
-        crate::domain::diagnostic_kind::UNRESOLVED_SESSION_MEMBER,
-        &d.source_member_id,
-    )?;
-    db.resolve_ingestion_diagnostic(
-        d.agent,
-        crate::domain::diagnostic_kind::MEMBER_RELATION_CONFLICT,
-        &d.source_member_id,
-    )
-}
-
-/// Discovery claims a root-ness the stored member contradicts. The storage
-/// layer refuses the flip; this records why in the diagnostics page.
-fn note_relation_conflict(db: &Db, d: &DiscoveredMember, stored: &SessionMember) -> Result<()> {
-    db.upsert_ingestion_diagnostic(
-        d.agent,
-        crate::domain::diagnostic_kind::MEMBER_RELATION_CONFLICT,
-        Some(&d.source_member_id),
-        d.parent_source_member_id.as_deref(),
-        Some(&d.source_path.to_string_lossy()),
-        &format!(
-            "discovery claims {:?}, but the stored member is {:?} of session {}; topology change refused",
-            d.kind,
-            stored.relation,
-            stored.session_id
-        ),
-        &serde_json::json!({
-            "discovered_kind": format!("{:?}", d.kind),
-            "stored_relation": stored.relation.as_str(),
-            "stored_session_id": stored.session_id,
-        }),
-    )
-}
-
 /// One full discovery→resolve→attach pass for one agent's batch. Roots
 /// first, children/sides second — so a parent discovered later in the same
 /// batch is still found, and scan order never decides identity.
@@ -260,7 +141,6 @@ fn resolve_batch(
     discovered: &[DiscoveredMember],
 ) -> Result<ResolvedBatch> {
     let agent = adapter.agent();
-    let batch = DiscoveryBatch::new(discovered);
     let attacher = crate::workspace::session::workspace_attacher();
     let mut roots_for_intent = Vec::new();
     let mut touched_session_ids = BTreeSet::new();
@@ -269,17 +149,8 @@ fn resolve_batch(
         if !d.kind.is_logical_root() {
             continue;
         }
-        // Topology guard: a stored child/side member must not be promoted to
-        // a Logical Root by a later discovery.
-        if let Some(stored) = db.find_member_by_source_id(agent, &d.source_member_id)? {
-            if stored.relation != SessionMemberRelation::Root {
-                note_relation_conflict(db, d, &stored)?;
-                continue;
-            }
-        }
         match ensure_logical_session(db, d, attacher.as_ref()) {
             Ok((s, is_new)) => {
-                resolve_diagnostic(db, d)?;
                 touched_session_ids.insert(s.id.clone());
                 roots_for_intent.push((s, is_new));
             }
@@ -294,65 +165,28 @@ fn resolve_batch(
         let Some(parent_id) = d.parent_source_member_id.as_deref() else {
             continue;
         };
-        let Ok(Some(parent_member)) = db.find_member_by_source_id(agent, parent_id) else {
+        let Ok(Some(parent_session)) = db.find_session_by_root_agent_id(agent, parent_id) else {
             continue;
         };
         let Ok(Some(fork_session)) = db.find_session_by_root_agent_id(agent, &d.source_member_id)
         else {
             continue;
         };
-        if fork_session.forked_from_session_id.is_none()
-            && parent_member.session_id != fork_session.id
-        {
+        if fork_session.forked_from_session_id.is_none() && parent_session.id != fork_session.id {
             let _ = db.tx(|tx| {
                 tx.execute(
                     "UPDATE sessions SET forked_from_session_id = ?2
                      WHERE id = ?1 AND forked_from_session_id IS NULL",
-                    rusqlite::params![fork_session.id, parent_member.session_id],
+                    rusqlite::params![fork_session.id, parent_session.id],
                 )?;
                 Ok(())
             });
         }
     }
 
-    for d in discovered {
-        if d.kind.is_logical_root() {
-            continue;
-        }
-        match resolve_logical_session(db, agent, &batch, d)? {
-            Some(session_id) => {
-                // Topology guard: a stored Root must not be re-homed as a
-                // child/side of another Logical Session.
-                if let Some(stored) = db.find_member_by_source_id(agent, &d.source_member_id)? {
-                    if stored.relation == SessionMemberRelation::Root {
-                        note_relation_conflict(db, d, &stored)?;
-                        continue;
-                    }
-                }
-                let raw_path = d.source_path.to_string_lossy().to_string();
-                if db
-                    .upsert_active_session_member(
-                        &session_id,
-                        agent,
-                        &d.source_member_id,
-                        d.kind.relation(),
-                        d.parent_source_member_id.as_deref(),
-                        &d.source_kind,
-                        &raw_path,
-                        d.cwd.as_deref(),
-                        d.started_at.as_deref(),
-                        d.last_activity_at.as_deref(),
-                        &d.metadata,
-                    )?
-                    .is_some()
-                {
-                    resolve_diagnostic(db, d)?;
-                    touched_session_ids.insert(session_id);
-                }
-            }
-            None => note_unresolved(db, d, "尚未发现其 Root 会话，无法归属到任何逻辑会话")?,
-        }
-    }
+    // 会话 = 根会话（2026-09-29 起）：内部执行单元（子代理转录、sidechain、
+    // 派生页）被识别后静默跳过——识别必须保留，否则 codex 的子代理 rollout
+    // 会被误当成独立逻辑会话。
     Ok(ResolvedBatch {
         roots_for_intent,
         touched_session_ids,
@@ -364,7 +198,7 @@ fn resolve_batch(
 /// reconcile pass alike — source parsing needs no database lock, and the storage
 /// layer serializes the writes itself.
 ///
-/// Pure ingestion: writes messages, stats, cursors, the current-message
+/// Pure ingestion: writes messages, cursors, the current-message
 /// projection and the fact generation, and NOTHING else. No Context, no AI.
 /// Returns the number of newly stored messages.
 pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
@@ -373,88 +207,49 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
         return Ok(0);
     }
     let adapter = crate::adapters::adapter_for(session.agent);
-    let members = db.members_for_session(&session.id)?;
-    let mut stored_total = 0i64;
-    let mut failures = Vec::new();
-    for member in &members {
-        // A stored member may outlive its source file. Keep its facts and cursor
-        // intact so a later discovery can resume it if the file returns.
-        if matches!(
-            adapter.inspect_member_source(member),
-            Ok(SourceAvailability::Missing)
-        ) {
-            continue;
-        }
-        // A member that raced a topology change mid-pass simply fails its
-        // membership re-check inside the commit and stores nothing.
-        let cursor = db.get_member_cursor(&member.id)?;
-        // Cross-file usage claims: a continuation rollout re-emits the thread's
-        // usage history, and the replay bills once — the first reader claims
-        // the identity, later files skip it. The registry is scoped PER LOGICAL
-        // SESSION: replays inside one session's own files dedup, but two
-        // sessions sharing message ids (a fork, a resumed copy of a transcript)
-        // are separate conversation records and each bills its own ledger.
-        // Registry errors degrade to billing (never lose real spend).
-        let scope = format!("{}|", session.id);
-        let member_id = member.id.clone();
-        let claims = |key: &str| -> bool {
-            let scoped = format!("{}{}", scope, key);
-            match db.usage_claim_owner(&scoped) {
-                Ok(Some(owner)) => owner == member_id,
-                Ok(None) => db.claim_usage(&scoped, &member_id).is_ok(),
-                Err(_) => true,
-            }
-        };
-        let delta = match adapter.read_member_delta_claimed(member, &cursor, &claims) {
-            Ok(d) => d,
-            Err(e) => {
-                // The source can disappear between inspection and reading;
-                // adapters wrap read errors differently, so confirm the
-                // current source verdict instead of matching error text.
-                if matches!(
-                    adapter.inspect_member_source(member),
-                    Ok(SourceAvailability::Missing)
-                ) {
-                    continue;
-                }
-                eprintln!(
-                    "[ingest] read member {} failed: {}",
-                    member.source_member_id, e
-                );
-                failures.push(format!(
-                    "member {} read failed: {e}",
-                    member.source_member_id
-                ));
-                continue;
-            }
-        };
-        let Some(source) = delta.source else {
-            continue;
-        };
-        if !delta.complete_snapshot {
-            failures.push(format!(
-                "member {} contains an incomplete or invalid frame",
-                member.source_member_id
-            ));
-        }
-        // The provenance frontier travels with the commit: same transaction,
-        // same lifetime as the messages the state covers. `complete_snapshot`
-        // tells the projection maintenance whether a full re-scan is whole.
-        let stored = db.commit_member_ingest_with_provenance_state(
-            &session.id,
-            &member.id,
-            &delta.messages,
-            delta.stats,
-            &source,
-            delta.complete_snapshot,
-            delta.next_active_provider,
-            delta.next_active_model,
-            &delta.usage_events,
-        )?;
-        if !stored.is_empty() {
-            stored_total += stored.len() as i64;
-        }
+    let cursor = session.source_cursor();
+    // The source may have vanished since discovery; keep the facts and cursor
+    // intact so a later discovery can resume it if the file returns.
+    if matches!(
+        adapter.inspect_session_source(session),
+        Ok(SourceAvailability::Missing)
+    ) {
+        return Ok(0);
     }
+    let delta = match adapter.read_session_delta(session, &cursor) {
+        Ok(d) => d,
+        Err(e) => {
+            // The source can disappear between inspection and reading;
+            // adapters wrap read errors differently, so confirm the current
+            // source verdict instead of matching error text.
+            if matches!(
+                adapter.inspect_session_source(session),
+                Ok(SourceAvailability::Missing)
+            ) {
+                return Ok(0);
+            }
+            return Err(other(format!(
+                "session {} source read failed: {e}",
+                session.root_agent_session_id
+            )));
+        }
+    };
+    let Some(source) = delta.source else {
+        return Ok(0);
+    };
+    let mut failures = Vec::new();
+    if !delta.complete_snapshot {
+        failures.push("source contains an incomplete or invalid frame".to_string());
+    }
+    // The bytes frontier travels with the commit: same transaction, same
+    // lifetime as the messages it covers. `complete_snapshot` tells the
+    // projection maintenance whether a full re-scan is whole.
+    let stored = db.commit_ingest_snapshot(
+        &session.id,
+        &delta.messages,
+        &source,
+        delta.complete_snapshot,
+    )?;
     if !failures.is_empty() {
         return Err(other(format!(
             "Session {} ingestion incomplete: {}",
@@ -462,7 +257,7 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
             failures.join("; ")
         )));
     }
-    Ok(stored_total)
+    Ok(stored.len() as i64)
 }
 
 /// Root-only LaunchIntent matching. The gate is "new OR still ownerless", not
@@ -520,7 +315,7 @@ where
         };
         processed.insert(id.clone());
         if reingest {
-            db.reset_member_cursors(&id)?;
+            db.rewind_source_cursor(&id)?;
         }
         on_session(&session);
         match ingest_session(db, &session) {
@@ -540,20 +335,12 @@ where
 }
 
 fn retry_candidate_in_source(
-    db: &Db,
+    _db: &Db,
     session: &Session,
     source: &crate::domain::IngestSource,
 ) -> Result<bool> {
-    let members = if session.owner_workstream_id.is_none() {
-        db.root_member_for_session(&session.id)?
-            .into_iter()
-            .collect()
-    } else {
-        db.members_for_session(&session.id)?
-    };
-    Ok(members
-        .iter()
-        .any(|member| crate::workspace::is_within(&member.source_path, &source.path)))
+    Ok(session.owner_workstream_id.is_none()
+        && crate::workspace::is_within(&session.source_path, &source.path))
 }
 
 /// Sessions with no Owner that may still claim a pending LaunchIntent, so a
@@ -757,11 +544,11 @@ where
     Ok((discovered_count, total_messages))
 }
 
-/// Re-ingest one source: rewind the member cursors of every session found under
+/// Re-ingest one source: rewind the cursors of every session found under
 /// its path and re-scan from scratch. THE MESSAGE STORE IS NEVER DELETED —
 /// message ids and every provenance ref stay valid, because unchanged content
-/// dedups by identity and only new/changed content appends. Stats snapshots
-/// replace on the re-scan; Context items, Owner and audit history are untouched.
+/// dedups by identity and only new/changed content appends. Context items,
+/// Owner and audit history are untouched.
 ///
 /// A re-scan that finds the conversation rewritten, truncated or reordered raises
 /// the Session's fact generation (via the projection), which makes its Context

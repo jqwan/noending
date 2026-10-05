@@ -27,23 +27,11 @@ use super::{with_db, AppState};
 
 /// How many Conversation messages the detail page previews. The conversation
 /// itself is read through `get_session_messages`, never wholesale.
-const DETAIL_MESSAGE_PREVIEW: i64 = 10;
+const DETAIL_MESSAGE_PREVIEW: i64 = 5;
 
 /// Page size for the conversation reader: what one upward scroll asks for.
 const MESSAGE_PAGE_DEFAULT: i64 = 60;
 const MESSAGE_PAGE_MAX: i64 = 200;
-
-/// One member of the execution graph, as the detail page shows it: the
-/// member facts, its own stats snapshot when one exists, and a fresh verdict
-/// on ITS source — a child or side transcript goes away on its own schedule,
-/// so the row that names it has to say when it is gone.
-#[derive(Serialize)]
-pub struct SessionMemberView {
-    #[serde(flatten)]
-    pub member: SessionMember,
-    pub stats: Option<SessionMemberStats>,
-    pub source_status: SourceAvailability,
-}
 
 #[derive(Serialize)]
 pub struct SessionDetail {
@@ -57,20 +45,15 @@ pub struct SessionDetail {
     /// alone would make the UI join a table it has no command for — and the
     /// Project shown here is derived through that path, never picked by a user.
     pub workspace_path: Option<SessionWorkspacePath>,
-    /// The execution graph: root / children / sides. Execution info,
-    /// never other user-visible Sessions.
-    pub members: Vec<SessionMemberView>,
-    /// Query-time aggregate over the whole graph (no cache to drift).
-    pub stats: crate::storage::SessionAggregateStats,
     /// The two frontiers the detail page shows: messages ingested, and how
     /// far Context processing has consumed them.
     pub ingested_message_sequence: i64,
     pub processed_message_sequence: i64,
-    /// Fresh (detail-load time) verdict on the ROOT source.
+    /// Fresh (detail-load time) verdict on the session's source.
     /// `missing` means the adapter confirmed it absent; every other failure
     /// stays `unavailable`.
-    pub root_source_status: SourceAvailability,
-    /// Resume eligibility: active session + a present root source.
+    pub source_status: SourceAvailability,
+    /// Resume eligibility: active session + a present source.
     pub can_resume: bool,
     /// when this session is a fork, its source Session summary.
     pub forked_from: Option<Session>,
@@ -113,22 +96,10 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        let messages = db.recent_messages(&session_id, DETAIL_MESSAGE_PREVIEW)?;
-        // A Logical Session is one Agent's graph, so one adapter covers every
-        // member — root, child and side alike.
+        // 详情页预览只保留对话的骨架：用户消息 + 每轮的最终回复。
+        let messages = db.recent_turn_messages(&session_id, DETAIL_MESSAGE_PREVIEW)?;
         let adapter = crate::adapters::adapter_for(session.agent);
-        let members = db.members_for_session(&session_id)?;
-        let member_views = members
-            .iter()
-            .map(|m| {
-                Ok(SessionMemberView {
-                    member: m.clone(),
-                    stats: db.get_member_stats(&m.id)?,
-                    source_status: adapter.inspect_member_source(m)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let stats = db.aggregate_session_stats(&session_id)?;
+        let source_status = adapter.inspect_session_source(&session)?;
         // The two frontiers the detail page shows: messages ingested, and how
         // far Context processing has consumed them.
         let ingested_message_sequence = db.ingested_message_sequence(&session_id)?;
@@ -140,14 +111,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             Some(id) => db.get_workstream(id)?,
             None => None,
         };
-        // The root's verdict is already in `member_views`; reading it there keeps
-        // the root from being inspected twice for the same page.
-        let root_source_status = member_views
-            .iter()
-            .find(|v| v.member.relation == SessionMemberRelation::Root)
-            .map(|v| v.source_status)
-            .unwrap_or(SourceAvailability::Unavailable);
-        let can_resume = !session.is_trashed() && root_source_status == SourceAvailability::Present;
+        let can_resume = !session.is_trashed() && source_status == SourceAvailability::Present;
         let workspace_path = match session.workspace_path_id.as_deref() {
             Some(id) => db.get_workspace_path(id)?.map(|wp| {
                 Ok::<_, crate::error::AppError>(SessionWorkspacePath {
@@ -174,43 +138,23 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             messages,
             owner_workstream,
             workspace_path: workspace_path.transpose()?,
-            members: member_views,
-            stats,
             ingested_message_sequence,
             processed_message_sequence,
-            root_source_status,
+            source_status,
             can_resume,
             forked_from,
         })
     })
 }
 
-/// Locate the current Root transcript from the stored Session identity.
+/// Locate the session's source from the stored identity.
 #[tauri::command]
 pub fn reveal_session_source(state: State<AppState>, session_id: String) -> Result<()> {
-    let root = state
+    let session = state
         .db
-        .root_member_for_session(&session_id)?
+        .get_session(&session_id)?
         .ok_or_else(|| other("源会话路径不可用"))?;
-    crate::platform::paths::reveal_file(std::path::Path::new(&root.source_path))
-}
-
-/// Locate ONE member's transcript: the child/side rows in the execution graph
-/// reveal their own source. The member is resolved against the session the
-/// page is already showing, so the webview never gets a free-form path reveal.
-#[tauri::command]
-pub fn reveal_session_member_source(
-    state: State<AppState>,
-    session_id: String,
-    member_id: String,
-) -> Result<()> {
-    let member = state
-        .db
-        .members_for_session(&session_id)?
-        .into_iter()
-        .find(|m| m.id == member_id)
-        .ok_or_else(|| other("会话成员不存在"))?;
-    crate::platform::paths::reveal_file(std::path::Path::new(&member.source_path))
+    crate::platform::paths::reveal_file(std::path::Path::new(&session.source_path))
 }
 
 /// One message of a window: the message plus the projection ordinal that puts
@@ -230,8 +174,13 @@ pub struct SessionMessageWindow {
     /// The fact generation the page was read from. A caller paging upward that
     /// sees it change must reload from the tail: the conversation was rewritten.
     pub generation: i64,
-    /// How many messages the CURRENT conversation holds.
+    /// How many messages the CURRENT mode counts (turns mode: 骨架消息数)。
     pub total: i64,
+    /// The max projection ordinal of the conversation（模式无关）："是否已在尾部"
+    /// 拿它比，不拿 total 比——turns 模式下 total 只数骨架消息。
+    pub tail_ordinal: i64,
+    /// 当前模式上方还有多少条没加载（「加载更早」的计数）。
+    pub remaining: i64,
     /// Cursor for the next, older page; `None` means the beginning was reached.
     pub next_before_ordinal: Option<i64>,
 }
@@ -247,6 +196,8 @@ pub struct SessionMessageMark {
 /// an older page is fetched by passing the previous page's cursor back.
 /// `after_ordinal` reads the other direction — the messages NEWER than it —
 /// which is how a reader that jumped into the middle keeps going forward.
+/// `turns_only = true`（会话消息页默认）：一页按「用户消息 + 每轮最终回复」计
+/// 数，代理的中间输出不占加载配额；`false`（显示中间回复模式）按全量消息计页。
 #[tauri::command]
 pub fn get_session_messages(
     state: State<AppState>,
@@ -254,14 +205,16 @@ pub fn get_session_messages(
     before_ordinal: Option<i64>,
     after_ordinal: Option<i64>,
     limit: Option<i64>,
+    turns_only: Option<bool>,
 ) -> Result<SessionMessageWindow> {
     let limit = limit
         .unwrap_or(MESSAGE_PAGE_DEFAULT)
         .clamp(1, MESSAGE_PAGE_MAX);
+    let turns_only = turns_only.unwrap_or(false);
     with_db(&state, |db| {
         let window = match after_ordinal {
-            Some(after) => db.newer_window(&session_id, after, limit)?,
-            None => db.message_window(&session_id, before_ordinal, limit)?,
+            Some(after) => db.newer_window(&session_id, after, limit, turns_only)?,
+            None => db.message_window(&session_id, before_ordinal, limit, turns_only)?,
         };
         Ok(SessionMessageWindow {
             messages: window
@@ -274,6 +227,8 @@ pub fn get_session_messages(
                 .collect(),
             generation: window.generation,
             total: window.total,
+            tail_ordinal: window.tail_ordinal,
+            remaining: window.remaining,
             next_before_ordinal: window.next_before_ordinal,
         })
     })
@@ -311,29 +266,4 @@ pub fn set_session_owner_workstream(
     with_db(&state, |db| {
         crate::workspace::session::set_session_owner(db, &session_id, workstream_id.as_deref())
     })
-}
-
-// ---------------- Ingestion diagnostics ----------------
-
-/// The Settings → Ingestion Diagnostics list: repeat offenders only by
-/// default (`observation_count >= 2`). Diagnostics are NOT sessions — they
-/// have no Owner, no Resume, no Trash, no Context.
-#[tauri::command]
-pub fn list_ingestion_diagnostics(
-    state: State<AppState>,
-    min_observations: Option<i64>,
-) -> Result<Vec<IngestionDiagnostic>> {
-    with_db(&state, |db| {
-        db.prune_missing_ingestion_diagnostics()?;
-        db.list_ingestion_diagnostics(min_observations.unwrap_or(2))
-    })
-}
-
-// ---------------- Usage panel ----------------
-
-/// 全库用量汇总：成员快照提供累计计数和 Token；用量账本提供模型归因、
-/// 请求数、时间序列和调用类别。纯本地读取。
-#[tauri::command]
-pub fn get_usage_overview(state: State<AppState>) -> Result<crate::storage::UsageOverview> {
-    with_db(&state, |db| db.usage_overview())
 }

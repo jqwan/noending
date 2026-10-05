@@ -2,14 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
   ContextItem, ContextItemRevision, CreateWorkstreamReport,
-  IngestionDiagnostic, IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
+  IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
   Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow,
   RecentWorkspacePath, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionContextView, SessionDetail,
   SessionMessageMark, SessionMessageWindow,
-  SessionUpdateOutcome, UsageOverview,
+  SessionUpdateOutcome,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamReviewState, WorkstreamReviewWindow, WorkstreamReviewSummary,
   WorkstreamUpdateOutcome,
@@ -153,31 +153,23 @@ export const api = {
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),
-  /** 执行成员（子/辅）自己的源文件定位：后端按 (session, member) 双键解析。 */
-  revealSessionMemberSource: (sessionId: string, memberId: string) =>
-    invoke<void>("reveal_session_member_source", { sessionId, memberId }),
   /** Conversation 的一页：`beforeOrdinal` 取更早的一页，`afterOrdinal` 取更新的一页，
-   *  都不传就是最新一页。 */
+   *  都不传就是最新一页。`turnsOnly = true`（会话消息页默认）按「用户消息 + 每轮
+   *  最终回复」计页，代理的中间输出不占加载配额。 */
   getSessionMessages: (
     sessionId: string,
-    page: { beforeOrdinal?: number | null; afterOrdinal?: number | null; limit?: number } = {},
+    page: { beforeOrdinal?: number | null; afterOrdinal?: number | null; limit?: number; turnsOnly?: boolean } = {},
   ) => invoke<SessionMessageWindow>("get_session_messages", {
     sessionId,
     beforeOrdinal: page.beforeOrdinal ?? null,
     afterOrdinal: page.afterOrdinal ?? null,
     limit: page.limit ?? null,
+    turnsOnly: page.turnsOnly ?? null,
   }),
   /** 导航条的用户消息位置：当前会话里所有 user 消息，按顺序。 */
   getSessionUserMessageMarks: (sessionId: string) =>
     invoke<SessionMessageMark[]>("get_session_user_message_marks", { sessionId }),
-  /** 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */
-  listIngestionDiagnostics: (minObservations?: number) =>
-    invoke<IngestionDiagnostic[]>("list_ingestion_diagnostics", {
-      minObservations: minObservations ?? null,
-    }),
-  /** 用量面板的一次读：成员快照和模型用量账本。 */
-  getUsageOverview: () => invoke<UsageOverview>("get_usage_overview"),
-  /**
+  /** 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */  /**
    * 设置 / 清空 Session 唯一的所属任务。`workstreamId === null` 即「未归属任务」。
    * 只写 `sessions.owner_workstream_id`，不碰 WorkstreamPath、cwd 或 Project。
    */

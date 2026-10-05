@@ -305,13 +305,11 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     );
     set_owner(&db, &s.id, &w.id);
     // A two-message conversation, seeded through the production commit path.
-    let member_id =
-        support::ensure_root_member(&db, &s.id, Agent::Codex, "src-s-keep", "/raw/s-keep.jsonl");
     let messages = [
         support::parsed_message("m-1", SessionMessageRole::User, "first"),
         support::parsed_message("m-2", SessionMessageRole::Assistant, "second"),
     ];
-    db.commit_member_ingest(&s.id, &member_id, &messages, None, &support::seed_source(0))
+    db.commit_ingest(&s.id, &messages, &support::seed_source(0))
         .unwrap();
     // A LaunchIntent naming this Workstream is historical evidence:
     // forbids a fourth path column on it, and M6 forbids touching it at all.
@@ -348,9 +346,7 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     );
     assert_eq!(db.message_count(&s.id).unwrap(), 2, "append-only history");
     assert_eq!(
-        db.get_session_ingest_state(&s.id)
-            .unwrap()
-            .latest_message_seq,
+        db.get_session_ingest_state(&s.id).unwrap().1,
         2,
         "the fact frontier survives the purge"
     );

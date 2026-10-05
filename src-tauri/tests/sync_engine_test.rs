@@ -1,6 +1,6 @@
-//! Read-side facts after ingestion: the message projection and the member
+//! Read-side facts after ingestion: the message projection and the source
 //! cursor's zero state. A stored conversation is exactly what `get_messages` /
-//! `message_projection_ids` return, and a fresh member cursor is the zero state.
+//! `message_projection_ids` return, and a fresh session cursor is the zero state.
 
 use noending::domain::{Agent, ParsedSessionMessage, SessionMessageRole};
 use noending::storage::{new_id, Db};
@@ -20,18 +20,21 @@ fn assistant_msg(id: &str, text: &str) -> ParsedSessionMessage {
     support::parsed_message(id, SessionMessageRole::Assistant, text)
 }
 
-/// The default member cursor for a fresh ROOT member is the zero state; the
-/// adapter layer treats it as "first ingest". Cursors belong to the MEMBER,
-/// never to the session — and no Context exists before any explicit update.
+/// The default source cursor for a fresh session is the zero state; the
+/// adapter layer treats it as "first ingest". The cursor lives on the SESSION
+/// row — and no Context exists before any explicit update.
 #[test]
-fn member_cursor_defaults_are_empties() {
+fn session_cursor_defaults_are_empties() {
     let db = open_temp_db();
     let session = support::ensure_session(&db, new_id(), Agent::Pi, "cursor-defaults");
-    let member_id =
-        support::ensure_root_member(&db, &session.id, Agent::Pi, "cursor-defaults", "/tmp/seed");
+    support::ensure_session_source(&db, Agent::Pi, "cursor-defaults", "/tmp/seed");
 
-    let c = db.get_member_cursor(&member_id).unwrap();
-    let d = noending::domain::SessionMemberCursor::default();
+    let c = db
+        .get_session(&session.id)
+        .unwrap()
+        .unwrap()
+        .source_cursor();
+    let d = noending::domain::SourceCursor::default();
     assert_eq!(c.source_file_identity, d.source_file_identity);
     assert_eq!(c.byte_offset, 0);
     assert_eq!(c.generation, 0);
@@ -39,8 +42,8 @@ fn member_cursor_defaults_are_empties() {
 
     // the fact frontier starts at zero, and no Session Context exists yet
     let state = db.get_session_ingest_state(&session.id).unwrap();
-    assert_eq!(state.generation, 0);
-    assert_eq!(state.latest_message_seq, 0);
+    assert_eq!(state.0, 0);
+    assert_eq!(state.1, 0);
     assert!(db.message_projection_ids(&session.id).unwrap().is_empty());
     assert!(db.get_session_context(&session.id).unwrap().is_none());
 }
@@ -50,7 +53,7 @@ fn member_cursor_defaults_are_empties() {
 #[test]
 fn projection_is_the_current_conversation() {
     let db = open_temp_db();
-    let (session, _member_id, stored) = support::seed_conversation(
+    let (session, stored) = support::seed_conversation(
         &db,
         Agent::Codex,
         "projection-fixture",

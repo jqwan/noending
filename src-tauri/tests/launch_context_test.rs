@@ -49,10 +49,9 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
     p
 }
 
-/// A Logical Session keyed by its ROOT member's Resume identity, with a REAL
-/// root source file: resume preparation refuses a Session whose ROOT member
-/// source is not present on disk, so every fixture session is
-/// resumable.
+/// A Logical Session keyed by its root source's Resume identity, with a REAL
+/// root source file: resume preparation refuses a Session whose root source
+/// is not present on disk, so every fixture session is resumable.
 fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<String>) -> Session {
     let root_id = format!("root-{}", new_id());
     let raw = std::env::temp_dir().join(format!("noending-raw-{}.jsonl", new_id()));
@@ -69,7 +68,7 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
             started_at.as_deref(),
         )
         .unwrap();
-    support::ensure_root_member(db, &id, agent, &root_id, &raw.to_string_lossy());
+    support::ensure_session_source(db, agent, &root_id, &raw.to_string_lossy());
     db.get_session(&id).unwrap().unwrap()
 }
 
@@ -363,7 +362,6 @@ fn list_sessions_all_filter_combinations() {
 fn message_ref_roundtrip() {
     let db = open_db("message-ref");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
-    let root = db.root_member_for_session(&s.id).unwrap().unwrap();
     let source = SourceCursorUpdate {
         file_identity: "dev:1:ino:3".into(),
         generation: 0,
@@ -374,15 +372,13 @@ fn message_ref_roundtrip() {
         prefix_hash: String::new(),
     };
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s.id,
-            &root.id,
             &[support::parsed_message(
                 "src-1",
                 SessionMessageRole::User,
                 "ref target",
             )],
-            None,
             &source,
         )
         .unwrap();
@@ -401,13 +397,13 @@ fn message_ref_roundtrip() {
         .is_none());
 }
 
-/// A member cursor row is written by the ingest commit and read back through
-/// `get_member_cursor`; the ingested conversation frontier rides separately.
+/// The session's source cursor columns are written by the ingest commit and
+/// read back through `source_cursor`; the ingested conversation frontier rides
+/// separately.
 #[test]
-fn member_cursor_roundtrip() {
+fn session_cursor_roundtrip() {
     let db = open_db("cursor-roundtrip");
     let s = session_row(&db, Agent::Codex, Some(now()), None);
-    let root = db.root_member_for_session(&s.id).unwrap().unwrap();
     let source = SourceCursorUpdate {
         file_identity: "unix:dev:1:ino:42".into(),
         generation: 3,
@@ -418,22 +414,19 @@ fn member_cursor_roundtrip() {
         prefix_hash: "abc123".into(),
     };
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s.id,
-            &root.id,
             &[support::parsed_message(
                 "m1",
                 SessionMessageRole::User,
                 "hello",
             )],
-            None,
             &source,
         )
         .unwrap();
     assert_eq!(stored.len(), 1);
 
-    let back = db.get_member_cursor(&root.id).unwrap();
-    assert_eq!(back.member_id, root.id);
+    let back = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert_eq!(back.source_file_identity, "unix:dev:1:ino:42");
     assert_eq!(back.generation, 3);
     assert_eq!(back.byte_offset, 900);
@@ -442,7 +435,7 @@ fn member_cursor_roundtrip() {
     assert_eq!(back.prefix_hash, "abc123");
     assert!(
         !back.identity_tail_hash.is_empty(),
-        "a committed message advances the member cursor's identity tail"
+        "a committed message advances the session cursor's identity tail"
     );
     assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 1);
 }

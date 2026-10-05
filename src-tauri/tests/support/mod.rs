@@ -35,8 +35,8 @@ pub fn workstream(id: Id, title: impl Into<String>) -> Workstream {
     }
 }
 
-/// An ownerless Logical Session with no workspace facts. `root_agent_session_id`
-/// is the ROOT member's Agent-side Resume identity; sources live on member rows.
+/// An ownerless Logical Session with no source facts. `root_agent_session_id`
+/// is the source's Agent-side Resume identity.
 pub fn session(id: Id, agent: Agent, root_agent_session_id: impl Into<String>) -> Session {
     Session {
         id,
@@ -52,6 +52,18 @@ pub fn session(id: Id, agent: Agent, root_agent_session_id: impl Into<String>) -
         last_activity_at: None,
         last_conversation_at: None,
         trashed_at: None,
+        source_kind: String::new(),
+        source_path: String::new(),
+        metadata: serde_json::json!({}),
+        source_file_identity: String::new(),
+        source_generation: 0,
+        source_byte_offset: 0,
+        source_last_seen_size: 0,
+        source_mtime: None,
+        source_prefix_hash: String::new(),
+        source_tail_hash: String::new(),
+        fact_generation: 0,
+        latest_message_seq: 0,
     }
 }
 
@@ -72,32 +84,33 @@ pub fn ensure_session(
     db.get_session(&row_id).unwrap().expect("session row")
 }
 
-/// Ensure the ROOT member row of a logical session (member identity = the
-/// session's root id), pointing at `source_path`.
-pub fn ensure_root_member(
+/// Ensure the session row's root-source columns point at `source_path`
+/// (source identity = the session's root id).
+pub fn ensure_session_source(
     db: &noending::storage::Db,
-    session_id: &str,
     agent: Agent,
     root_agent_session_id: &str,
     source_path: &str,
 ) -> String {
-    db.upsert_session_member(
-        session_id,
-        agent,
-        root_agent_session_id,
-        noending::domain::SessionMemberRelation::Root,
-        None,
-        "test_root",
-        source_path,
-        None,
-        None,
-        None,
-        &serde_json::json!({}),
-    )
-    .expect("ensure root member")
+    let (session_id, _) = db
+        .upsert_logical_session(
+            agent,
+            root_agent_session_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test_root",
+            source_path,
+            &serde_json::json!({}),
+        )
+        .expect("ensure session source");
+    session_id
 }
 
-/// A parsed root-conversation message, ready for `commit_member_ingest`.
+/// A parsed root-conversation message, ready for `commit_ingest`.
 pub fn parsed_message(
     source_message_id: impl Into<String>,
     role: noending::domain::SessionMessageRole,
@@ -109,21 +122,18 @@ pub fn parsed_message(
         ts: None,
         role,
         content: content.into(),
-        provider: None,
-        model: None,
     }
 }
 
-/// Seed a logical session + root member + conversation messages through the
-/// production commit path (`commit_member_ingest`), so a fixture conversation
-/// satisfies the same invariants a real ingest does. Returns (session row,
-/// root member id, stored messages).
+/// Seed a logical session + conversation messages through the production
+/// commit path (`commit_ingest`), so a fixture conversation satisfies the same
+/// invariants a real ingest does. Returns (session row, stored messages).
 pub fn seed_conversation(
     db: &noending::storage::Db,
     agent: Agent,
     root_agent_session_id: &str,
     messages: &[noending::domain::ParsedSessionMessage],
-) -> (Session, String, Vec<noending::domain::SessionMessage>) {
+) -> (Session, Vec<noending::domain::SessionMessage>) {
     let (session_id, _) = db
         .upsert_logical_session_unchecked(
             agent,
@@ -136,12 +146,11 @@ pub fn seed_conversation(
             None,
         )
         .expect("seed: ensure logical session");
-    let member_id = ensure_root_member(db, &session_id, agent, root_agent_session_id, "/tmp/seed");
     let stored = db
-        .commit_member_ingest(&session_id, &member_id, messages, None, &seed_source(0))
-        .expect("seed: commit member ingest");
+        .commit_ingest(&session_id, messages, &seed_source(0))
+        .expect("seed: commit ingest");
     let session = db.get_session(&session_id).unwrap().expect("seed: session");
-    (session, member_id, stored)
+    (session, stored)
 }
 
 /// A replay-shaped source update (full scan from genesis).

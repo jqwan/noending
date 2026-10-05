@@ -135,7 +135,7 @@ fn session_of_agent(db: &TestDb, agent: Agent, cwd: Option<&str>) -> Session {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_root_member(db, &id, agent, &root_id, &raw.to_string_lossy());
+    support::ensure_session_source(db, agent, &root_id, &raw.to_string_lossy());
     db.get_session(&id).unwrap().unwrap()
 }
 
@@ -851,8 +851,10 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
         1,
         "the rollout's user turn is ingested"
     );
-    let root = db.root_member_for_session(&stored.id).unwrap().unwrap();
-    assert_eq!(root.source_member_id, "rollout-thread-1");
+    assert_eq!(
+        stored.root_agent_session_id, "rollout-thread-1",
+        "the session is keyed by the root source's Resume identity"
+    );
 }
 
 // a match is one atomic ownership handover
@@ -884,21 +886,7 @@ fn a_failed_match_leaves_the_intent_pending() {
 
     // A Session row that is not there: the owner write cannot land, and
     // nothing else may land either.
-    let ghost = Session {
-        id: "no-such-session".into(),
-        agent: Agent::Codex,
-        root_agent_session_id: "ghost".into(),
-        title: None,
-        cwd: None,
-        workspace_path_id: None,
-        project_id: None,
-        owner_workstream_id: None,
-        forked_from_session_id: None,
-        started_at: None,
-        last_activity_at: None,
-        last_conversation_at: None,
-        trashed_at: None,
-    };
+    let ghost = support::session("no-such-session".into(), Agent::Codex, "ghost");
     assert!(apply_match(&db, &intent.id, &ghost, &LaunchWorkspace::default()).is_err());
 
     let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();

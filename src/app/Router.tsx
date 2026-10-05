@@ -5,7 +5,6 @@ import SessionsView from "../features/sessions/SessionsView";
 import SessionDetailView from "../features/sessions/SessionDetailView";
 import SessionConversationView from "../features/sessions/SessionConversationView";
 import AssistantView from "../features/assistant/AssistantView";
-import UsageView from "../features/usage/UsageView";
 import ProjectsView from "../features/projects/ProjectsView";
 import ProjectDetail from "../features/projects/ProjectDetail";
 import SettingsView from "../features/settings/SettingsView";
@@ -56,8 +55,6 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
       );
     case "assistant":
       return <AssistantView scope={route.scope} navigate={navigate} />;
-    case "usage":
-      return <UsageView navigate={navigate} />;
     case "projects":
       return <ProjectsView navigate={navigate} />;
     case "project":

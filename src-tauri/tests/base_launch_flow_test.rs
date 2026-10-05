@@ -328,13 +328,7 @@ fn the_continue_route_follows_the_source_format() {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_root_member(
-        &db,
-        &wb_id,
-        Agent::WorkBuddy,
-        "wb-root-1",
-        &raw.to_string_lossy(),
-    );
+    support::ensure_session_source(&db, Agent::WorkBuddy, "wb-root-1", &raw.to_string_lossy());
 
     match launcher.prepare_resume_in(&db, &wb_id, &workspace) {
         Ok(prepared) => {
@@ -375,13 +369,7 @@ fn the_continue_route_follows_the_source_format() {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_root_member(
-        &db,
-        &cx_id,
-        Agent::Codex,
-        "cx-root-1",
-        &raw.to_string_lossy(),
-    );
+    support::ensure_session_source(&db, Agent::Codex, "cx-root-1", &raw.to_string_lossy());
     let prepared = launcher
         .prepare_resume_in(&db, &cx_id, &workspace)
         .expect("codex resume prepares through the terminal route");
@@ -415,7 +403,7 @@ fn a_stored_desktop_preference_swaps_in_chatgpt_when_it_can_open_the_thread() {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_root_member(&db, &sid, Agent::Codex, "cx-pref-1", &raw.to_string_lossy());
+    support::ensure_session_source(&db, Agent::Codex, "cx-pref-1", &raw.to_string_lossy());
 
     let prepared = launcher
         .prepare_resume_in(&db, &sid, &workspace)
@@ -465,7 +453,7 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_root_member(&db, &sid, Agent::Codex, "dx-root-1", &raw.to_string_lossy());
+    support::ensure_session_source(&db, Agent::Codex, "dx-root-1", &raw.to_string_lossy());
 
     let mut prepared = launcher
         .prepare_resume_in(&db, &sid, &workspace)
@@ -498,31 +486,44 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
 /// app-only (and refuses when the app is not installed).
 #[test]
 fn antigravity_routes_by_source_format() {
-    let member = |kind: &str, path: &str| noending::domain::SessionMember {
-        id: "m".into(),
-        session_id: "s".into(),
+    let session = |kind: &str, path: &str| noending::domain::Session {
+        id: "s".into(),
         agent: Agent::Antigravity,
-        source_member_id: "conv-1".into(),
-        relation: noending::domain::SessionMemberRelation::Root,
-        parent_source_member_id: None,
-        source_kind: kind.into(),
-        source_path: path.into(),
+        root_agent_session_id: "conv-1".into(),
+        title: None,
+        owner_workstream_id: None,
         cwd: None,
+        workspace_path_id: None,
+        project_id: None,
+        forked_from_session_id: None,
         started_at: None,
         last_activity_at: None,
+        last_conversation_at: None,
+        trashed_at: None,
+        source_kind: kind.into(),
+        source_path: path.into(),
         metadata: serde_json::json!({}),
+        source_file_identity: String::new(),
+        source_generation: 0,
+        source_byte_offset: 0,
+        source_last_seen_size: 0,
+        source_mtime: None,
+        source_prefix_hash: String::new(),
+        source_tail_hash: String::new(),
+        fact_generation: 0,
+        latest_message_seq: 0,
     };
     let adapter = adapter_for(Agent::Antigravity);
 
     assert!(matches!(
-        adapter.continue_route(&member(
+        adapter.continue_route(&session(
             "antigravity_cli_conversation",
             "/home/x/.gemini/antigravity-cli/conversations/a.db"
         )),
         ResumeRoute::Terminal
     ));
 
-    let ide = adapter.continue_route(&member(
+    let ide = adapter.continue_route(&session(
         "antigravity_ide_conversation",
         "/home/x/.gemini/antigravity/conversations/a.db",
     ));

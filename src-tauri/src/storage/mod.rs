@@ -132,6 +132,9 @@ fn upsert_logical_session_conn(
     forked_from_session_id: Option<&str>,
     started_at: Option<&str>,
     last_activity_at: Option<&str>,
+    source_kind: &str,
+    source_path: &str,
+    metadata: &serde_json::Value,
 ) -> Result<(String, bool)> {
     let existing: Option<(String, Option<String>)> = conn
         .query_row(
@@ -155,7 +158,8 @@ fn upsert_logical_session_conn(
                    WHERE wp.id = workspace_path_id)),
                forked_from_session_id = COALESCE(forked_from_session_id, ?5),
                started_at = COALESCE(started_at, ?6),
-               last_activity_at = ?7
+               last_activity_at = ?7,
+               source_kind = ?8, source_path = ?9, metadata = ?10
              WHERE id = ?1",
             params![
                 id,
@@ -164,7 +168,10 @@ fn upsert_logical_session_conn(
                 workspace_path_id,
                 forked_from_session_id,
                 started_at,
-                activity
+                activity,
+                source_kind,
+                source_path,
+                metadata.to_string()
             ],
         )?;
         index_session_conn(conn, &id)?;
@@ -174,10 +181,11 @@ fn upsert_logical_session_conn(
     conn.execute(
         "INSERT INTO sessions
            (id, agent, root_agent_session_id, title, cwd, workspace_path_id, project_id,
-            forked_from_session_id, started_at, last_activity_at)
+            forked_from_session_id, started_at, last_activity_at,
+            source_kind, source_path, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6,
                  (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = ?6),
-                 ?7, ?8, ?9)",
+                 ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             id,
             agent.as_str(),
@@ -187,7 +195,10 @@ fn upsert_logical_session_conn(
             workspace_path_id,
             forked_from_session_id,
             started_at,
-            last_activity_at
+            last_activity_at,
+            source_kind,
+            source_path,
+            metadata.to_string()
         ],
     )?;
     index_session_conn(conn, &id)?;
@@ -454,7 +465,7 @@ impl Db {
     // Logical Sessions
 
     /// Session-only fixture helper. Production discovery uses
-    /// `upsert_logical_root` to create the Session and Root member atomically.
+    /// `upsert_logical_session` to create or refresh the whole row atomically.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_logical_session_unchecked(
         &self,
@@ -478,12 +489,17 @@ impl Db {
             forked_from_session_id,
             started_at,
             last_activity_at,
+            "test",
+            "/tmp/source",
+            &serde_json::json!({}),
         )
     }
 
-    /// Atomically upsert a Logical Session and its required Root member.
+    /// Atomically create or refresh a Logical Session — the session row now
+    /// carries its root source (`source_kind` / `source_path` / `metadata`)
+    /// directly; discovery is the authority and replaces them wholesale.
     #[allow(clippy::too_many_arguments)]
-    pub fn upsert_logical_root(
+    pub fn upsert_logical_session(
         &self,
         agent: Agent,
         root_agent_session_id: &str,
@@ -495,55 +511,23 @@ impl Db {
         last_activity_at: Option<&str>,
         source_kind: &str,
         source_path: &str,
-        parent_source_member_id: Option<&str>,
         metadata: &serde_json::Value,
     ) -> Result<(String, bool)> {
-        self.tx(|tx| {
-            // Topology guard: a stored child/side member must not be promoted
-            // to a Logical Root — refuse before the session row is created, so
-            // the refusal can never strand a session without its root member.
-            let stored_relation: Option<String> = tx
-                .query_row(
-                    "SELECT relation FROM session_members
-                     WHERE agent = ?1 AND source_member_id = ?2",
-                    params![agent.as_str(), root_agent_session_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(rel) = stored_relation {
-                if rel != SessionMemberRelation::Root.as_str() {
-                    return Err(other(format!(
-                        "member {root_agent_session_id} 已是 {rel} 成员，拒绝提升为 Logical Root"
-                    )));
-                }
-            }
-            let (id, is_new) = upsert_logical_session_conn(
-                tx,
-                agent,
-                root_agent_session_id,
-                title,
-                cwd,
-                workspace_path_id,
-                forked_from_session_id,
-                started_at,
-                last_activity_at,
-            )?;
-            upsert_session_member_conn(
-                tx,
-                &id,
-                agent,
-                root_agent_session_id,
-                SessionMemberRelation::Root,
-                parent_source_member_id,
-                source_kind,
-                source_path,
-                cwd,
-                started_at,
-                last_activity_at,
-                metadata,
-            )?;
-            Ok((id, is_new))
-        })
+        let conn = self.write();
+        upsert_logical_session_conn(
+            &conn,
+            agent,
+            root_agent_session_id,
+            title,
+            cwd,
+            workspace_path_id,
+            forked_from_session_id,
+            started_at,
+            last_activity_at,
+            source_kind,
+            source_path,
+            metadata,
+        )
     }
 
     /// Sessions that may still owe a LaunchIntent match: ownerless Sessions,
@@ -632,203 +616,19 @@ impl Db {
         Ok(rows)
     }
 
-    // Session Members
+    // Session source cursor
 
-    /// Insert or refresh one execution member. The identity is
-    /// `(agent, source_member_id)`; a member whose topology resolution moved
-    /// to another Logical Session is re-pointed by the same upsert.
-    /// Child / side cwds land on the MEMBER row only — they can never reach
-    /// `sessions.cwd` / `project_id`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_session_member(
-        &self,
-        session_id: &str,
-        agent: Agent,
-        source_member_id: &str,
-        relation: SessionMemberRelation,
-        parent_source_member_id: Option<&str>,
-        source_kind: &str,
-        source_path: &str,
-        cwd: Option<&str>,
-        started_at: Option<&str>,
-        last_activity_at: Option<&str>,
-        metadata: &serde_json::Value,
-    ) -> Result<String> {
-        let conn = self.write();
-        upsert_session_member_conn(
-            &conn,
-            session_id,
-            agent,
-            source_member_id,
-            relation,
-            parent_source_member_id,
-            source_kind,
-            source_path,
-            cwd,
-            started_at,
-            last_activity_at,
-            metadata,
-        )
-    }
-
-    /// Attach an observed non-root member to its Logical Session. The
-    /// existence check and topology write share one transaction.
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_active_session_member(
-        &self,
-        session_id: &str,
-        agent: Agent,
-        source_member_id: &str,
-        relation: SessionMemberRelation,
-        parent_source_member_id: Option<&str>,
-        source_kind: &str,
-        source_path: &str,
-        cwd: Option<&str>,
-        started_at: Option<&str>,
-        last_activity_at: Option<&str>,
-        metadata: &serde_json::Value,
-    ) -> Result<Option<String>> {
-        self.tx(|tx| {
-            if !session_lifecycle::session_exists_conn(tx, session_id)? {
-                return Ok(None);
-            }
-            Ok(Some(upsert_session_member_conn(
-                tx,
-                session_id,
-                agent,
-                source_member_id,
-                relation,
-                parent_source_member_id,
-                source_kind,
-                source_path,
-                cwd,
-                started_at,
-                last_activity_at,
-                metadata,
-            )?))
-        })
-    }
-
-    /// The member with this Adapter identity, in ANY session — the anchor for
-    /// topology resolution and diagnostics cleanup.
-    pub fn find_member_by_source_id(
-        &self,
-        agent: Agent,
-        source_member_id: &str,
-    ) -> Result<Option<SessionMember>> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT * FROM session_members WHERE agent = ?1 AND source_member_id = ?2",
-                params![agent.as_str(), source_member_id],
-                row_member,
-            )
-            .optional()?)
-    }
-
-    pub fn get_member(&self, member_id: &str) -> Result<Option<SessionMember>> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT * FROM session_members WHERE id = ?1",
-                params![member_id],
-                row_member,
-            )
-            .optional()?)
-    }
-
-    /// Every execution member of a Logical Session, root first.
-    pub fn members_for_session(&self, session_id: &str) -> Result<Vec<SessionMember>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT * FROM session_members WHERE session_id = ?1
-             ORDER BY CASE relation WHEN 'root' THEN 0 ELSE 1 END, started_at, id",
-        )?;
-        let rows = st
-            .query_map(params![session_id], row_member)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// The one ROOT member of a Logical Session. The partial unique index
-    /// guarantees at most one; `None` means the session has no root member
-    /// row yet.
-    pub fn root_member_for_session(&self, session_id: &str) -> Result<Option<SessionMember>> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT * FROM session_members WHERE session_id = ?1 AND relation = 'root'",
-                params![session_id],
-                row_member,
-            )
-            .optional()?)
-    }
-
-    // Member Cursors
-
-    /// Who claimed a cross-file usage identity, if anyone.
-    pub fn usage_claim_owner(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT member_id FROM ingest_usage_claims WHERE key = ?1",
-                params![key],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
-
-    /// Claim a cross-file usage identity for `member_id`. First claimant wins:
-    /// an existing claim (any member) is left untouched.
-    pub fn claim_usage(&self, key: &str, member_id: &str) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "INSERT OR IGNORE INTO ingest_usage_claims (key, member_id) VALUES (?1, ?2)",
-            params![key, member_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_member_cursor(&self, member_id: &str) -> Result<SessionMemberCursor> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash, active_provider, active_model
-                 FROM session_member_cursors WHERE member_id = ?1",
-                params![member_id],
-                |r| {
-                    Ok(SessionMemberCursor {
-                        member_id: r.get(0)?,
-                        source_file_identity: r.get(1)?,
-                        generation: r.get(2)?,
-                        byte_offset: r.get::<_, i64>(3)?.max(0) as u64,
-                        last_seen_size: r.get::<_, i64>(4)?.max(0) as u64,
-                        mtime: r.get(5)?,
-                        prefix_hash: r.get(6)?,
-                        identity_tail_hash: r.get(7)?,
-                        active_provider: r.get(8)?,
-                        active_model: r.get(9)?,
-                    })
-                },
-            )
-            .optional()?
-            .unwrap_or(SessionMemberCursor {
-                member_id: member_id.to_string(),
-                ..Default::default()
-            }))
-    }
-
-    /// Rewind every member cursor of a session so the next ingest re-scans from
+    /// Rewind the session's source cursor so the next ingest re-scans from
     /// the start. MESSAGES ARE NOT TOUCHED: their ids and every provenance ref
     /// stay valid, because unchanged content dedups by identity on the re-scan.
-    /// Stats snapshots replace on the rescan; the Context frontier is preserved.
-    pub fn reset_member_cursors(&self, session_id: &str) -> Result<()> {
+    /// The Context frontier is preserved.
+    pub fn rewind_source_cursor(&self, session_id: &str) -> Result<()> {
         let conn = self.write();
         conn.execute(
-            "UPDATE session_member_cursors
-             SET byte_offset = 0, last_seen_size = 0, prefix_hash = '', identity_tail_hash = '',
-                 active_provider = NULL, active_model = NULL
-             WHERE member_id IN (SELECT id FROM session_members WHERE session_id = ?1)",
+            "UPDATE sessions
+             SET source_byte_offset = 0, source_last_seen_size = 0,
+                 source_prefix_hash = '', source_tail_hash = ''
+             WHERE id = ?1",
             params![session_id],
         )?;
         Ok(())
@@ -836,8 +636,8 @@ impl Db {
 
     // Conversation Messages
 
-    /// The atomic member-ingest commit. Messages, stats, the member cursor and
-    /// the activity stamps commit or not at all.
+    /// The atomic member-ingest commit. Messages, the member cursor and the
+    /// activity stamps commit or not at all.
     ///
     /// Guards, in order, inside the transaction: the Logical Session still
     /// exists; the member still belongs to it; and messages require
@@ -848,82 +648,47 @@ impl Db {
     /// The identity chain starts from genesis on a full re-scan (start offset 0)
     /// and otherwise continues from the cursor's `identity_tail_hash` — the tail
     /// of the CURRENT source chain, never "last message in the store".
-    pub fn commit_member_ingest(
+    pub fn commit_ingest(
         &self,
         session_id: &str,
-        member_id: &str,
         messages: &[ParsedSessionMessage],
-        stats: Option<StatsUpdate>,
         source: &SourceCursorUpdate,
     ) -> Result<Vec<SessionMessage>> {
-        self.commit_member_ingest_with_provenance_state(
-            session_id,
-            member_id,
-            messages,
-            stats,
-            source,
-            true,
-            None,
-            None,
-            &[],
-        )
+        self.commit_ingest_snapshot(session_id, messages, source, true)
     }
 
-    /// Same transaction, plus the stateful provenance frontier: the bytes
-    /// frontier and the provenance state frontier are written together, so
-    /// they can never drift. Adapters with direct per-message evidence pass
-    /// `None`/`None` — their provenance travels on the messages themselves.
-    #[allow(clippy::too_many_arguments)]
-    pub fn commit_member_ingest_with_provenance_state(
+    /// The atomic ingest commit. Messages, the session's source cursor and
+    /// the activity stamps commit or not at all.
+    ///
+    /// Guards, inside the transaction: the Logical Session still exists (a
+    /// purge racing a parse stores NOTHING).
+    ///
+    /// The identity chain starts from genesis on a full re-scan (start offset 0)
+    /// and otherwise continues from the session's `source_tail_hash` — the tail
+    /// of the CURRENT source chain, never "last message in the store".
+    ///
+    /// Same transaction, for readers that can prove whether EVERY frame of
+    /// the read was whole (`complete_snapshot`): an incomplete full re-scan
+    /// keeps the projection, fact generation and cursor untouched for a retry.
+    pub fn commit_ingest_snapshot(
         &self,
         session_id: &str,
-        member_id: &str,
         messages: &[ParsedSessionMessage],
-        stats: Option<StatsUpdate>,
         source: &SourceCursorUpdate,
         complete_snapshot: bool,
-        next_active_provider: Option<String>,
-        next_active_model: Option<String>,
-        usage_events: &[crate::adapters::UsageEvent],
     ) -> Result<Vec<SessionMessage>> {
         self.tx(|tx| {
             // A session purged mid-parse takes NOTHING.
             if !session_lifecycle::session_exists_conn(tx, session_id)? {
                 return Ok(Vec::new());
             }
-            // The member must still belong to THIS session: a topology
-            // correction that moved it mid-parse invalidates the whole batch.
-            let member_row: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT relation, agent FROM session_members WHERE id = ?1 AND session_id = ?2",
-                    params![member_id, session_id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                )
-                .optional()?;
-            let Some((relation, agent)) = member_row else {
-                return Ok(Vec::new());
-            };
-            let is_root = relation == SessionMemberRelation::Root.as_str();
-            if !messages.is_empty() && !is_root {
-                return Err(other(format!(
-                    "member {member_id} (relation={relation}) 不是 root，拒绝写入会话消息"
-                )));
-            }
-            // Provenance guard: user messages have no generation model, so an
-            // adapter handing one over is a bug — reject the whole batch.
-            if messages.iter().any(|m| {
-                m.role == SessionMessageRole::User && (m.provider.is_some() || m.model.is_some())
-            }) {
-                return Err(other(
-                    "user 消息不允许携带 provider/model provenance，拒绝整批提交",
-                ));
-            }
 
             let old_cursor: Option<(String, i64, i64, i64, Option<f64>)> = tx
                 .query_row(
-                    "SELECT source_file_identity, generation, byte_offset, last_seen_size, mtime
-                     FROM session_member_cursors WHERE member_id = ?1",
-                    params![member_id],
+                    "SELECT source_file_identity, source_generation, source_byte_offset,
+                            source_last_seen_size, source_mtime
+                     FROM sessions WHERE id = ?1",
+                    params![session_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()?;
@@ -944,8 +709,8 @@ impl Db {
 
             let stored_tail: Option<String> = tx
                 .query_row(
-                    "SELECT identity_tail_hash FROM session_member_cursors WHERE member_id = ?1",
-                    params![member_id],
+                    "SELECT source_tail_hash FROM sessions WHERE id = ?1",
+                    params![session_id],
                     |r| r.get::<_, String>(0),
                 )
                 .optional()?
@@ -957,12 +722,12 @@ impl Db {
                     Some(tail) => tail,
                     // No chain tail is available for this cursor: fall back to
                     // the last stored message identity, and to genesis when
-                    // the member has no message at all.
+                    // the session has no message at all.
                     None => tx
                         .query_row(
                             "SELECT source_identity_hash FROM session_messages
-                             WHERE member_id = ?1 ORDER BY sequence DESC LIMIT 1",
-                            params![member_id],
+                             WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                            params![session_id],
                             |r| r.get::<_, String>(0),
                         )
                         .optional()?
@@ -979,21 +744,18 @@ impl Db {
 
             let mut stored = Vec::with_capacity(messages.len());
             let mut current_ids: Vec<String> = Vec::with_capacity(messages.len());
-            let raw_path = {
-                let p: String = tx.query_row(
-                    "SELECT source_path FROM session_members WHERE id = ?1",
-                    params![member_id],
-                    |r| r.get(0),
-                )?;
-                p
-            };
+            let raw_path: String = tx.query_row(
+                "SELECT source_path FROM sessions WHERE id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )?;
             {
                 let mut ins = tx.prepare(
                     "INSERT INTO session_messages
-                     (id, session_id, member_id, sequence, source_message_id, source_generation,
-                      source_position, source_identity_hash, ts, role, content, provider, model, raw_ref)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-                     ON CONFLICT(member_id, source_identity_hash) DO NOTHING",
+                     (id, session_id, sequence, source_message_id, source_generation,
+                      source_position, source_identity_hash, ts, role, content, raw_ref)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
                 )?;
                 for m in messages {
                     // On conflict the computed hash IS the stored one (the
@@ -1012,7 +774,6 @@ impl Db {
                     let n = ins.execute(params![
                         id,
                         session_id,
-                        member_id,
                         next_seq,
                         m.source_message_id,
                         source.generation,
@@ -1021,8 +782,6 @@ impl Db {
                         m.ts,
                         m.role.as_str(),
                         m.content,
-                        m.provider,
-                        m.model,
                         raw_ref,
                     ])?;
                     if n > 0 {
@@ -1030,15 +789,12 @@ impl Db {
                         stored.push(SessionMessage {
                             id: id.clone(),
                             session_id: session_id.to_string(),
-                            member_id: member_id.to_string(),
                             sequence: next_seq,
                             role: m.role,
                             content: m.content.clone(),
                             ts: m.ts.clone(),
                             // Derived from the projection after it moves.
                             turn_final: false,
-                            provider: m.provider.clone(),
-                            model: m.model.clone(),
                             source_message_id: m.source_message_id.clone(),
                             source_generation: source.generation,
                             source_position: m.source_position.clone(),
@@ -1047,18 +803,15 @@ impl Db {
                         });
                         next_seq += 1;
                     } else {
-                        // Dedup hit: same message identity. `NULL → confirmed`
-                        // enriches in place; a confirmed-vs-confirmed
-                        // contradiction keeps the stored value and logs.
-                        enrich_message_provenance_conn(tx, member_id, &hash, m)?;
-                        // The message is part of THIS read's conversation even
-                        // though it was already stored: a full re-scan's
-                        // projection must contain it.
+                        // Dedup hit: same message identity. The message is
+                        // part of THIS read's conversation even though it was
+                        // already stored: a full re-scan's projection must
+                        // contain it.
                         if let Some(existing) = tx
                             .query_row(
                                 "SELECT id FROM session_messages
-                                 WHERE member_id = ?1 AND source_identity_hash = ?2",
-                                params![member_id, hash],
+                                 WHERE session_id = ?1 AND source_identity_hash = ?2",
+                                params![session_id, hash],
                                 |r| r.get::<_, String>(0),
                             )
                             .optional()?
@@ -1075,7 +828,6 @@ impl Db {
             let projection = apply_projection_conn(
                 tx,
                 session_id,
-                is_root,
                 &current_ids,
                 source.start_byte_offset == 0,
                 complete_snapshot,
@@ -1083,63 +835,40 @@ impl Db {
             if projection == ProjectionOutcome::Incomplete {
                 // An unfinished frame means we cannot prove the whole
                 // conversation: keep the projection, the fact generation AND
-                // the cursor (and skip stats, whose delta would double-count
-                // on the retry that re-reads the same bytes).
-                eprintln!(
-                    "[ingest] member {member_id} 的完整重扫不完整，保留原投影与游标，等待重试"
-                );
+                // the cursor — the retry re-reads the same bytes.
+                eprintln!("[ingest] 完整重扫不完整，保留原投影与游标，等待重试");
                 return Ok(stored);
             }
 
-            if is_root {
-                sync_projected_message_search_conn(tx, session_id)?;
-            }
+            sync_projected_message_search_conn(tx, session_id)?;
 
-            apply_stats_conn(tx, member_id, stats)?;
-            // The ledger replaces when THIS read started at genesis (a full
-            // re-scan re-emits every call) — NOT on `complete_snapshot`,
-            // which an ordinary append also carries.
-            write_usage_events_conn(
-                tx,
-                session_id,
-                member_id,
-                agent.as_str(),
-                source.start_byte_offset == 0,
-                usage_events,
-            )?;
             let new_tail = if messages.is_empty() {
                 stored_tail.unwrap_or_default()
             } else {
                 prev_hash
             };
-            upsert_member_cursor_conn(
-                tx,
-                &SessionMemberCursor {
-                    member_id: member_id.to_string(),
-                    source_file_identity: source.file_identity.clone(),
-                    generation: source.generation,
-                    byte_offset: source.byte_offset,
-                    last_seen_size: source.last_seen_size,
-                    mtime: source.mtime,
-                    prefix_hash: source.prefix_hash.clone(),
-                    identity_tail_hash: new_tail,
-                    active_provider: next_active_provider,
-                    active_model: next_active_model,
-                },
+            tx.execute(
+                "UPDATE sessions
+                 SET source_file_identity = ?2, source_generation = ?3,
+                     source_byte_offset = ?4, source_last_seen_size = ?5,
+                     source_mtime = ?6, source_prefix_hash = ?7, source_tail_hash = ?8
+                 WHERE id = ?1",
+                params![
+                    session_id,
+                    source.file_identity,
+                    source.generation,
+                    source.byte_offset as i64,
+                    source.last_seen_size as i64,
+                    source.mtime,
+                    source.prefix_hash,
+                    new_tail
+                ],
             )?;
 
             // Source activity advances only when its observed cursor changes;
             // reading an unchanged file is not Agent activity.
             if source_changed {
-                let member_activity: Option<String> = tx.query_row(
-                    "SELECT last_activity_at FROM session_members WHERE id = ?1",
-                    params![member_id],
-                    |r| r.get(0),
-                )?;
-                let observed = later_timestamp(
-                    member_activity.as_deref(),
-                    mtime_timestamp(source.mtime).as_deref(),
-                );
+                let observed = mtime_timestamp(source.mtime);
                 if let Some(observed) = observed {
                     let current: Option<String> = tx.query_row(
                         "SELECT last_activity_at FROM sessions WHERE id = ?1",
@@ -1147,14 +876,12 @@ impl Db {
                         |r| r.get(0),
                     )?;
                     let activity = later_timestamp(current.as_deref(), Some(&observed));
-                    tx.execute(
-                        "UPDATE session_members SET last_activity_at = ?2 WHERE id = ?1",
-                        params![member_id, observed],
-                    )?;
-                    tx.execute(
-                        "UPDATE sessions SET last_activity_at = ?2 WHERE id = ?1",
-                        params![session_id, activity],
-                    )?;
+                    if let Some(activity) = activity {
+                        tx.execute(
+                            "UPDATE sessions SET last_activity_at = ?2 WHERE id = ?1",
+                            params![session_id, activity],
+                        )?;
+                    }
                 }
             }
             let latest = stored
@@ -1215,12 +942,30 @@ impl Db {
     }
 
     /// The newest `limit` messages of the CURRENT conversation, oldest first.
+    /// The newest `limit` messages of the CURRENT conversation, oldest first.
     pub fn recent_messages(&self, session_id: &str, limit: i64) -> Result<Vec<SessionMessage>> {
         let conn = self.read();
         Ok(window_messages_conn(&conn, session_id, None, limit)?
             .into_iter()
             .map(|(_, message)| message)
             .collect())
+    }
+
+    /// Like [`Self::recent_messages`], but keeping only user turns and each
+    /// turn's FINAL assistant reply — the conversation's structure, without
+    /// the assistant's intermediate outputs.
+    pub fn recent_turn_messages(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionMessage>> {
+        let conn = self.read();
+        Ok(
+            window_messages_filtered_conn(&conn, session_id, None, limit, true)?
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect(),
+        )
     }
 
     /// One page of the CURRENT conversation read BACKWARD from the tail:
@@ -1237,13 +982,15 @@ impl Db {
         session_id: &str,
         before_ordinal: Option<i64>,
         limit: i64,
+        turns_only: bool,
     ) -> Result<MessageWindow> {
         let conn = self.read();
         let state = get_ingest_state_conn(&conn, session_id)?;
+        let rows =
+            window_messages_filtered_conn(&conn, session_id, before_ordinal, limit, turns_only)?;
         Ok(message_window_from(
-            state,
-            window_messages_conn(&conn, session_id, before_ordinal, limit)?,
-        ))
+            state, turns_only, &conn, session_id, rows,
+        )?)
     }
 
     /// One page read FORWARD from `after_ordinal` (exclusive): the next newer
@@ -1254,13 +1001,15 @@ impl Db {
         session_id: &str,
         after_ordinal: i64,
         limit: i64,
+        turns_only: bool,
     ) -> Result<MessageWindow> {
         let conn = self.read();
         let state = get_ingest_state_conn(&conn, session_id)?;
+        let rows =
+            forward_messages_filtered_conn(&conn, session_id, after_ordinal, limit, turns_only)?;
         Ok(message_window_from(
-            state,
-            forward_messages_conn(&conn, session_id, after_ordinal, limit)?,
-        ))
+            state, turns_only, &conn, session_id, rows,
+        )?)
     }
 
     /// Where the USER messages sit in the CURRENT conversation, in order: the
@@ -1295,11 +1044,14 @@ impl Db {
     /// ordinal bound, never `session_messages.sequence`.
     pub fn ingested_message_sequence(&self, session_id: &str) -> Result<i64> {
         let conn = self.read();
-        Ok(conn.query_row(
-            "SELECT COALESCE((SELECT latest_message_seq FROM session_ingest_state WHERE session_id = ?1), 0)",
-            params![session_id],
-            |r| r.get(0),
-        )?)
+        Ok(conn
+            .query_row(
+                "SELECT latest_message_seq FROM sessions WHERE id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     pub fn message_count(&self, session_id: &str) -> Result<i64> {
@@ -1320,789 +1072,6 @@ impl Db {
                 .optional()?);
         }
         Ok(None)
-    }
-
-    // Member Stats
-
-    /// Workspace-wide counts from activity snapshots and tokens from usage_events.
-    /// Usage is aggregated per member before joining activity counts, so multiple
-    /// requests cannot multiply the counters. Trashed sessions still participate.
-    /// No usage events in a slice means its token totals are unknown (None).
-    pub fn usage_overview(&self) -> Result<UsageOverview> {
-        let conn = self.read();
-        let mut out = UsageOverview::default();
-
-        let mut stmt = conn.prepare(
-            "SELECT s.agent,
-                    COUNT(DISTINCT s.id), COUNT(DISTINCT m.id),
-                    COALESCE(SUM(st.assistant_message_count), 0),
-                    SUM(u.input_tokens), SUM(u.output_tokens),
-                    SUM(u.cached_tokens), SUM(u.reasoning_tokens),
-                    COUNT(DISTINCT m.id),
-                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(st.user_message_count), 0),
-                    COALESCE(SUM(st.assistant_message_count), 0),
-                    COALESCE(SUM(st.tool_call_count), 0),
-                    COALESCE(SUM(st.side_activity_count), 0)
-             FROM sessions s
-             JOIN session_members m ON m.session_id = s.id
-             LEFT JOIN session_member_stats st ON st.member_id = m.id
-             LEFT JOIN session_member_usage u ON u.member_id = m.id
-             GROUP BY s.agent
-             ORDER BY (COALESCE(SUM(u.input_tokens), 0)
-                     + COALESCE(SUM(u.cached_tokens), 0)
-                     + COALESCE(SUM(u.output_tokens), 0)) DESC,
-                      s.agent",
-        )?;
-        let slices = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, Option<i64>>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-                r.get::<_, Option<i64>>(6)?,
-                r.get::<_, Option<i64>>(7)?,
-                usage_slice_counts(r, 8)?,
-            ))
-        })?;
-        for slice in slices {
-            let (agent, sessions, members, assistant, input, output, cached, reasoning, counts) =
-                slice?;
-            out.sessions += sessions;
-            out.members += members;
-            out.assistant_messages += assistant;
-            out.input_tokens = or_add(out.input_tokens, input);
-            out.output_tokens = or_add(out.output_tokens, output);
-            out.cached_tokens = or_add(out.cached_tokens, cached);
-            out.reasoning_tokens = or_add(out.reasoning_tokens, reasoning);
-            out.by_agent.push(UsageAgentSlice {
-                cache_hit_rate: None,
-                requests: 0,
-                root_members: counts[1],
-                user_messages: counts[2],
-                agent_replies: counts[3],
-                tool_calls: counts[4],
-                side_activities: counts[5],
-                agent,
-                sessions,
-                members,
-                assistant_messages: assistant,
-                input_tokens: input,
-                output_tokens: output,
-                cached_tokens: cached,
-                reasoning_tokens: reasoning,
-            });
-        }
-        drop(stmt);
-
-        // The member/activity counts behind the panel's stats strip: total
-        // members (the user's 会话 vocabulary — root/child/side all count),
-        // how many are roots, and the four activity counters from the
-        // snapshots (counts are observed-zero based, unlike the token axes).
-        let mut stmt = conn.prepare(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(st.user_message_count), 0),
-                    COALESCE(SUM(st.assistant_message_count), 0),
-                    COALESCE(SUM(st.tool_call_count), 0),
-                    COALESCE(SUM(st.side_activity_count), 0)
-             FROM sessions s
-             JOIN session_members m ON m.session_id = s.id
-             LEFT JOIN session_member_stats st ON st.member_id = m.id
-             LEFT JOIN session_member_usage u ON u.member_id = m.id",
-        )?;
-        let (members, root_members, user_messages, agent_replies, tool_calls, side_activities): (
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-        ) = stmt.query_row([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        })?;
-        drop(stmt);
-        out.members = members;
-        out.root_members = root_members;
-        out.user_messages = user_messages;
-        out.agent_replies = agent_replies;
-        out.tool_calls = tool_calls;
-        out.side_activities = side_activities;
-
-        // Billed tokens by member class: the root conversation vs the
-        // sub-agents it spawned vs side coordination.
-        let mut stmt = conn.prepare(
-            "SELECT m.relation,
-                    SUM(u.input_tokens), SUM(u.output_tokens),
-                    SUM(u.cached_tokens), SUM(u.reasoning_tokens),
-                    COUNT(DISTINCT m.id),
-                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(st.user_message_count), 0),
-                    COALESCE(SUM(st.assistant_message_count), 0),
-                    COALESCE(SUM(st.tool_call_count), 0),
-                    COALESCE(SUM(st.side_activity_count), 0)
-             FROM sessions s
-             JOIN session_members m ON m.session_id = s.id
-             LEFT JOIN session_member_stats st ON st.member_id = m.id
-             LEFT JOIN session_member_usage u ON u.member_id = m.id
-             GROUP BY m.relation
-             ORDER BY CASE m.relation WHEN 'root' THEN 0 WHEN 'child' THEN 1 ELSE 2 END",
-        )?;
-        let slices = stmt.query_map([], |r| {
-            let counts = usage_slice_counts(r, 5)?;
-            Ok(UsageRelationSlice {
-                cache_hit_rate: None,
-                requests: 0,
-                members: counts[0],
-                root_members: counts[1],
-                user_messages: counts[2],
-                agent_replies: counts[3],
-                tool_calls: counts[4],
-                side_activities: counts[5],
-                relation: r.get(0)?,
-                input_tokens: r.get(1)?,
-                output_tokens: r.get(2)?,
-                cached_tokens: r.get(3)?,
-                reasoning_tokens: r.get(4)?,
-            })
-        })?;
-        for slice in slices {
-            out.by_relation.push(slice?);
-        }
-        drop(stmt);
-
-        for (table, column, workstream) in
-            [("projects", "name", false), ("workstreams", "title", true)]
-        {
-            let sql = format!(
-                "SELECT t.id, t.{column}, COUNT(DISTINCT s.id),
-                        SUM(u.input_tokens), SUM(u.output_tokens),
-                        SUM(u.cached_tokens), SUM(u.reasoning_tokens),
-                        COUNT(DISTINCT m.id),
-                        COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(st.user_message_count), 0),
-                        COALESCE(SUM(st.assistant_message_count), 0),
-                        COALESCE(SUM(st.tool_call_count), 0),
-                        COALESCE(SUM(st.side_activity_count), 0)
-                 FROM sessions s
-                 JOIN {table} t ON t.id = s.{}",
-                if workstream {
-                    "owner_workstream_id"
-                } else {
-                    "project_id"
-                }
-            ) + "
-                 JOIN session_members m ON m.session_id = s.id
-                 LEFT JOIN session_member_stats st ON st.member_id = m.id
-             LEFT JOIN session_member_usage u ON u.member_id = m.id
-                 GROUP BY t.id, t."
-                + column
-                + "
-                 ORDER BY (COALESCE(SUM(u.input_tokens), 0)
-                         + COALESCE(SUM(u.cached_tokens), 0)
-                         + COALESCE(SUM(u.output_tokens), 0)) DESC";
-            let mut stmt = conn.prepare(&sql)?;
-            let slices = stmt.query_map([], |r| {
-                let counts = usage_slice_counts(r, 7)?;
-                Ok(UsageNamedSlice {
-                    cache_hit_rate: None,
-                    requests: 0,
-                    members: counts[0],
-                    root_members: counts[1],
-                    user_messages: counts[2],
-                    agent_replies: counts[3],
-                    tool_calls: counts[4],
-                    side_activities: counts[5],
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    sessions: r.get(2)?,
-                    input_tokens: r.get(3)?,
-                    output_tokens: r.get(4)?,
-                    cached_tokens: r.get(5)?,
-                    reasoning_tokens: r.get(6)?,
-                })
-            })?;
-            for slice in slices {
-                let slice = slice?;
-                if workstream {
-                    out.by_workstream.push(slice);
-                } else {
-                    out.by_project.push(slice);
-                }
-            }
-            drop(stmt);
-        }
-
-        let mut stmt = conn.prepare(
-            "SELECT s.id, s.title, s.agent, s.last_activity_at,
-                    SUM(u.input_tokens), SUM(u.output_tokens),
-                    SUM(u.cached_tokens), SUM(u.reasoning_tokens),
-                    COALESCE(SUM(st.assistant_message_count), 0),
-                    COUNT(DISTINCT m.id),
-                    COALESCE(SUM(CASE WHEN m.relation = 'root' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(st.user_message_count), 0),
-                    COALESCE(SUM(st.assistant_message_count), 0),
-                    COALESCE(SUM(st.tool_call_count), 0),
-                    COALESCE(SUM(st.side_activity_count), 0)
-             FROM sessions s
-             JOIN session_members m ON m.session_id = s.id
-             LEFT JOIN session_member_stats st ON st.member_id = m.id
-             LEFT JOIN session_member_usage u ON u.member_id = m.id
-             GROUP BY s.id
-             ORDER BY (COALESCE(SUM(u.input_tokens), 0)
-                     + COALESCE(SUM(u.cached_tokens), 0)
-                         + COALESCE(SUM(u.output_tokens), 0)) DESC,
-                      s.last_activity_at DESC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            let counts = usage_slice_counts(r, 9)?;
-            Ok(UsageSessionSlice {
-                cache_hit_rate: None,
-                requests: 0,
-                members: counts[0],
-                root_members: counts[1],
-                user_messages: counts[2],
-                agent_replies: counts[3],
-                tool_calls: counts[4],
-                side_activities: counts[5],
-                session_id: r.get(0)?,
-                title: r.get(1)?,
-                agent: r.get(2)?,
-                last_activity_at: r.get(3)?,
-                input_tokens: r.get(4)?,
-                output_tokens: r.get(5)?,
-                cached_tokens: r.get(6)?,
-                reasoning_tokens: r.get(7)?,
-                assistant_messages: r.get(8)?,
-            })
-        })?;
-        for row in rows {
-            out.top_sessions.push(row?);
-        }
-        drop(stmt);
-
-        // ---- the ledger: per-model tokens, series, categories ----
-        let mut models: std::collections::BTreeMap<String, ModelFold> = Default::default();
-        let mut stmt = conn.prepare(
-            "SELECT ev.model, ev.model, ev.agent, COUNT(*),
-                    SUM(ev.input_tokens), SUM(ev.output_tokens),
-                    SUM(ev.cached_tokens), SUM(ev.reasoning_tokens),
-                    SUM(ev.requests)
-             FROM usage_events ev
-             JOIN sessions s ON s.id = ev.session_id
-             WHERE ev.model IS NOT NULL
-             GROUP BY LOWER(ev.model), ev.model, ev.agent",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, i64>(7)?,
-                r.get::<_, i64>(8)?,
-            ))
-        })?;
-        for row in rows {
-            let (key, spelling, agent, n, input, output, cached, reasoning, requests) = row?;
-            // The canonical key merges gateway prefixes and mode/tier
-            // suffixes; the verbatim spelling is kept for the display choice.
-            let fold = models.entry(canonical_model(&key)).or_default();
-            fold.total += n;
-            fold.requests += requests;
-            fold.input_tokens += input;
-            fold.output_tokens += output;
-            fold.cached_tokens += cached;
-            fold.reasoning_tokens += reasoning;
-            *fold.spellings.entry(spelling).or_default() += n;
-            fold.agents.insert(agent);
-        }
-        drop(stmt);
-        out.attributed_events = models.values().map(|f| f.total).sum();
-        out.by_model = models
-            .into_iter()
-            .map(|(model, fold)| {
-                let display = display_model(
-                    &fold
-                        .spellings
-                        .iter()
-                        .max_by_key(|(name, n)| (**n, std::cmp::Reverse((*name).clone())))
-                        .map(|(n, _)| n.clone())
-                        .unwrap_or_else(|| model.clone()),
-                );
-                UsageModelSlice {
-                    cache_hit_rate: cache_hit_rate(fold.input_tokens, fold.cached_tokens),
-                    model,
-                    display,
-                    events: fold.total,
-                    requests: fold.requests,
-                    input_tokens: fold.input_tokens,
-                    output_tokens: fold.output_tokens,
-                    cached_tokens: fold.cached_tokens,
-                    reasoning_tokens: fold.reasoning_tokens,
-                    agents: fold.agents.into_iter().collect(),
-                    members: 0,
-                    root_members: 0,
-                    user_messages: None,
-                    agent_replies: None,
-                    tool_calls: None,
-                    side_activities: None,
-                }
-            })
-            .collect();
-        out.by_model.sort_by(|a, b| {
-            let a_axis = a.input_tokens + a.cached_tokens + a.output_tokens;
-            let b_axis = b.input_tokens + b.cached_tokens + b.output_tokens;
-            b_axis.cmp(&a_axis).then_with(|| a.model.cmp(&b.model))
-        });
-
-        let mut stmt = conn.prepare(
-            "SELECT COUNT(*)
-             FROM usage_events ev
-             JOIN sessions s ON s.id = ev.session_id
-             WHERE ev.model IS NULL",
-        )?;
-        out.unattributed_events = stmt.query_row([], |r| r.get(0))?;
-        drop(stmt);
-
-        let mut stmt = conn.prepare(
-            "SELECT COUNT(*)
-             FROM usage_events ev
-             JOIN sessions s ON s.id = ev.session_id
-             ",
-        )?;
-        out.ledger_events = stmt.query_row([], |r| r.get(0))?;
-        drop(stmt);
-
-        let mut stmt = conn.prepare(
-            "SELECT ev.category, COUNT(*),
-                    SUM(ev.input_tokens), SUM(ev.output_tokens),
-                    SUM(ev.cached_tokens), SUM(ev.reasoning_tokens),
-                    SUM(ev.requests)
-             FROM usage_events ev
-             JOIN sessions s ON s.id = ev.session_id
-             GROUP BY ev.category",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(UsageCategorySlice {
-                category: r.get(0)?,
-                events: r.get(1)?,
-                requests: r.get(6)?,
-                input_tokens: r.get(2)?,
-                output_tokens: r.get(3)?,
-                cached_tokens: r.get(4)?,
-                reasoning_tokens: r.get(5)?,
-            })
-        })?;
-        for row in rows {
-            out.by_category.push(row?);
-        }
-        drop(stmt);
-
-        // Daily series, newest first. The day is the source timestamp's own
-        // date (UTC spelling in every format that writes RFC3339).
-        let mut stmt = conn.prepare(
-            "SELECT substr(ev.ts, 1, 10) AS day, COUNT(*),
-                    SUM(ev.input_tokens), SUM(ev.output_tokens),
-                    SUM(ev.cached_tokens), SUM(ev.reasoning_tokens)
-             FROM usage_events ev
-             JOIN sessions s ON s.id = ev.session_id
-              AND ev.ts IS NOT NULL
-             GROUP BY day
-             ORDER BY day DESC
-             LIMIT 90",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(UsageDaySlice {
-                day: r.get(0)?,
-                events: r.get(1)?,
-                input_tokens: r.get(2)?,
-                output_tokens: r.get(3)?,
-                cached_tokens: r.get(4)?,
-                reasoning_tokens: r.get(5)?,
-            })
-        })?;
-        for row in rows {
-            out.series.push(row?);
-        }
-        drop(stmt);
-
-        let mut stmt = conn.prepare(
-            "SELECT ev.model, s.id, s.agent, s.project_id, s.owner_workstream_id,
-                    m.id, m.relation, SUM(ev.requests),
-                    SUM(ev.input_tokens), SUM(ev.cached_tokens)
-             FROM usage_events ev
-             JOIN sessions s ON s.id = ev.session_id
-             JOIN session_members m ON m.id = ev.member_id AND m.session_id = s.id
-             GROUP BY ev.model, s.id, m.id",
-        )?;
-        let mut participants: std::collections::BTreeMap<
-            String,
-            (
-                std::collections::BTreeSet<String>,
-                std::collections::BTreeSet<String>,
-            ),
-        > = Default::default();
-        // Compute rates entirely from ledger tokens so missing history cannot
-        // mix different input populations.
-        let mut cache_totals: std::collections::BTreeMap<(&str, String), [i64; 2]> =
-            Default::default();
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, i64>(7)?,
-                r.get::<_, i64>(8)?,
-                r.get::<_, i64>(9)?,
-            ))
-        })?;
-        for row in rows {
-            let (
-                model,
-                session,
-                agent,
-                project,
-                workstream,
-                member,
-                relation,
-                requests,
-                input,
-                cached,
-            ) = row?;
-            for (kind, id) in [
-                ("total", Some("")),
-                ("agent", Some(agent.as_str())),
-                ("relation", Some(relation.as_str())),
-                ("session", Some(session.as_str())),
-                ("project", project.as_deref()),
-                ("workstream", workstream.as_deref()),
-            ] {
-                if let Some(id) = id {
-                    let totals = cache_totals.entry((kind, id.to_string())).or_default();
-                    totals[0] += input.max(0);
-                    totals[1] += cached.max(0);
-                }
-            }
-            out.requests += requests;
-            if let Some(model) = model {
-                let (members, roots) = participants.entry(canonical_model(&model)).or_default();
-                members.insert(member.clone());
-                if relation == "root" {
-                    roots.insert(member);
-                }
-            }
-            if let Some(slice) = out.by_agent.iter_mut().find(|s| s.agent == agent) {
-                slice.requests += requests;
-            }
-            if let Some(slice) = out.by_relation.iter_mut().find(|s| s.relation == relation) {
-                slice.requests += requests;
-            }
-            if let Some(slice) = out
-                .by_project
-                .iter_mut()
-                .find(|s| Some(&s.id) == project.as_ref())
-            {
-                slice.requests += requests;
-            }
-            if let Some(slice) = out
-                .by_workstream
-                .iter_mut()
-                .find(|s| Some(&s.id) == workstream.as_ref())
-            {
-                slice.requests += requests;
-            }
-            if let Some(slice) = out
-                .top_sessions
-                .iter_mut()
-                .find(|s| s.session_id == session)
-            {
-                slice.requests += requests;
-            }
-        }
-        for slice in &mut out.by_model {
-            if let Some((members, roots)) = participants.get(&slice.model) {
-                slice.members = members.len() as i64;
-                slice.root_members = roots.len() as i64;
-            }
-        }
-        drop(stmt);
-
-        let rate_for = |kind, id: &str| {
-            cache_totals
-                .get(&(kind, id.to_string()))
-                .and_then(|[input, cached]| cache_hit_rate(*input, *cached))
-        };
-        out.cache_hit_rate = rate_for("total", "");
-        for slice in &mut out.by_agent {
-            slice.cache_hit_rate = rate_for("agent", &slice.agent);
-        }
-        for slice in &mut out.by_relation {
-            slice.cache_hit_rate = rate_for("relation", &slice.relation);
-        }
-        for slice in &mut out.by_project {
-            slice.cache_hit_rate = rate_for("project", &slice.id);
-        }
-        for slice in &mut out.by_workstream {
-            slice.cache_hit_rate = rate_for("workstream", &slice.id);
-        }
-        for slice in &mut out.top_sessions {
-            slice.cache_hit_rate = rate_for("session", &slice.session_id);
-        }
-        Ok(out)
-    }
-
-    pub fn get_member_stats(&self, member_id: &str) -> Result<Option<SessionMemberStats>> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT m.id, st.tool_call_count, st.user_message_count,
-                    st.assistant_message_count, st.side_activity_count,
-                    u.input_tokens, u.output_tokens, u.cached_tokens, u.reasoning_tokens,
-                    COALESCE(st.updated_at, u.updated_at, ''), COALESCE(st.extra, '{}')
-             FROM session_members m
-             LEFT JOIN session_member_stats st ON st.member_id = m.id
-             LEFT JOIN session_member_usage u ON u.member_id = m.id
-             WHERE m.id = ?1 AND (st.member_id IS NOT NULL OR u.member_id IS NOT NULL)",
-                params![member_id],
-                row_member_stats,
-            )
-            .optional()?)
-    }
-
-    /// Query-time aggregate over the whole execution graph: no cache
-    /// table — the member count is small and this can never drift.
-    pub fn aggregate_session_stats(&self, session_id: &str) -> Result<SessionAggregateStats> {
-        let members = self.members_for_session(session_id)?;
-        let mut agg = SessionAggregateStats {
-            member_count: members.len() as i64,
-            ..Default::default()
-        };
-        for m in &members {
-            match m.relation.as_str() {
-                "child" => agg.child_count += 1,
-                "side" => agg.side_count += 1,
-                _ => {}
-            }
-        }
-        {
-            let conn = self.read();
-            let totals = conn.query_row(
-                "SELECT COALESCE(SUM(st.tool_call_count), 0),
-                        COALESCE(SUM(st.user_message_count), 0),
-                        COALESCE(SUM(st.assistant_message_count), 0),
-                        COALESCE(SUM(st.side_activity_count), 0),
-                        SUM(u.input_tokens), SUM(u.output_tokens),
-                        SUM(u.cached_tokens), SUM(u.reasoning_tokens),
-                        COALESCE(SUM(u.requests), 0)
-                 FROM session_members m
-                 LEFT JOIN session_member_stats st ON st.member_id = m.id
-                 LEFT JOIN session_member_usage u ON u.member_id = m.id
-                 WHERE m.session_id = ?1",
-                params![session_id],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, i64>(3)?,
-                        r.get::<_, Option<i64>>(4)?,
-                        r.get::<_, Option<i64>>(5)?,
-                        r.get::<_, Option<i64>>(6)?,
-                        r.get::<_, Option<i64>>(7)?,
-                        r.get::<_, i64>(8)?,
-                    ))
-                },
-            )?;
-            agg.tool_call_count = totals.0;
-            agg.user_message_count = totals.1;
-            agg.assistant_message_count = totals.2;
-            agg.side_activity_count = totals.3;
-            agg.input_tokens = totals.4;
-            agg.output_tokens = totals.5;
-            agg.cached_tokens = totals.6;
-            agg.reasoning_tokens = totals.7;
-            // 模型请求 comes off the same view join: the ledger's per-member
-            // totals live in one definition (session_member_usage).
-            agg.requests = totals.8;
-        }
-        // Depth over the parent chain (root = 0): member counts are tiny, so
-        // a plain walk beats a recursive SQL CTE.
-        let by_source: std::collections::HashMap<&str, &SessionMember> = members
-            .iter()
-            .map(|m| (m.source_member_id.as_str(), m))
-            .collect();
-        for m in &members {
-            let mut depth = 0i64;
-            let mut cursor: Option<&SessionMember> = Some(m);
-            let mut hops = 0usize;
-            while let Some(cur) = cursor {
-                if cur.relation.as_str() == "root" {
-                    break;
-                }
-                depth += 1;
-                hops += 1;
-                if hops > members.len() {
-                    break; // defensive: never loop on a cyclic source graph
-                }
-                cursor = cur
-                    .parent_source_member_id
-                    .as_deref()
-                    .and_then(|p| by_source.get(p).copied());
-            }
-            agg.max_depth = agg.max_depth.max(depth);
-        }
-        Ok(agg)
-    }
-
-    // Ingestion Diagnostics
-
-    /// Record (or re-observe) an unattachable source. The first sight
-    /// inserts quietly; every later reconcile bumps `observation_count` so the
-    /// Settings page can show only repeat offenders.
-    pub fn upsert_ingestion_diagnostic(
-        &self,
-        agent: Agent,
-        kind: &str,
-        source_member_id: Option<&str>,
-        parent_source_member_id: Option<&str>,
-        source_path: Option<&str>,
-        reason: &str,
-        details: &serde_json::Value,
-    ) -> Result<()> {
-        let conn = self.write();
-        let key = diagnostic_key(agent, kind, source_member_id);
-        let ts = now();
-        let n = conn.execute(
-            "UPDATE ingestion_diagnostics
-             SET last_seen_at = ?2, observation_count = observation_count + 1,
-                 reason = ?3, parent_source_member_id = COALESCE(?4, parent_source_member_id),
-                 source_path = COALESCE(?5, source_path), details = ?6
-             WHERE diagnostic_key = ?1",
-            params![
-                key,
-                ts,
-                reason,
-                parent_source_member_id,
-                source_path,
-                details.to_string()
-            ],
-        )?;
-        if n == 0 {
-            conn.execute(
-                "INSERT INTO ingestion_diagnostics
-                 (id, diagnostic_key, agent, kind, source_member_id, parent_source_member_id,
-                  source_path, reason, first_seen_at, last_seen_at, observation_count, details)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 1, ?10)",
-                params![
-                    new_id(),
-                    key,
-                    agent.as_str(),
-                    kind,
-                    source_member_id,
-                    parent_source_member_id,
-                    source_path,
-                    reason,
-                    ts,
-                    details.to_string()
-                ],
-            )?;
-        }
-        Ok(())
-    }
-
-    /// The member resolved: its diagnostic goes away. Missing key is a
-    /// no-op — resolution must never depend on a diagnostic having existed.
-    pub fn resolve_ingestion_diagnostic(
-        &self,
-        agent: Agent,
-        kind: &str,
-        source_member_id: &str,
-    ) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "DELETE FROM ingestion_diagnostics WHERE diagnostic_key = ?1",
-            params![diagnostic_key(agent, kind, Some(source_member_id))],
-        )?;
-        Ok(())
-    }
-
-    /// Drop diagnostics whose source path has been confirmed absent. Other
-    /// metadata errors are inconclusive, so keep those rows visible.
-    pub fn prune_missing_ingestion_diagnostics(&self) -> Result<usize> {
-        let candidates: Vec<(String, String)> = {
-            let conn = self.read();
-            let mut st = conn.prepare(
-                "SELECT id, source_path FROM ingestion_diagnostics
-                 WHERE source_path IS NOT NULL AND source_path != ''",
-            )?;
-            let rows = st
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<std::result::Result<_, _>>()?;
-            rows
-        };
-        let missing: Vec<_> = candidates
-            .into_iter()
-            .filter(|(_, path)| {
-                matches!(
-                    std::fs::metadata(path),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
-                )
-            })
-            .collect();
-        if missing.is_empty() {
-            return Ok(0);
-        }
-        self.tx(|tx| {
-            let mut removed = 0;
-            for (id, path) in &missing {
-                // Recheck in case the source returned while we acquired the
-                // writer; a different recorded path must also survive.
-                if matches!(
-                    std::fs::metadata(path),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
-                ) {
-                    removed += tx.execute(
-                        "DELETE FROM ingestion_diagnostics WHERE id = ?1 AND source_path = ?2",
-                        params![id, path],
-                    )?;
-                }
-            }
-            Ok(removed)
-        })
-    }
-
-    /// The Settings page list: repeat offenders only by default.
-    pub fn list_ingestion_diagnostics(
-        &self,
-        min_observation_count: i64,
-    ) -> Result<Vec<IngestionDiagnostic>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT * FROM ingestion_diagnostics
-             WHERE observation_count >= ?1
-             ORDER BY last_seen_at DESC LIMIT 200",
-        )?;
-        let rows = st
-            .query_map(params![min_observation_count], row_diagnostic)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
     }
 
     // Session Owner
@@ -2954,16 +1923,14 @@ impl Db {
     /// cannot have changed, so a reconcile pass costs O(changed sources). Only
     /// titled sessions are listed: an untitled row may just predate a title
     /// source, and re-parsing its unchanged file is what heals it.
-    pub fn member_source_skipset(
+    pub fn session_source_skipset(
         &self,
     ) -> Result<std::collections::HashMap<String, (String, i64, Option<f64>)>> {
         let conn = self.read();
         let mut st = conn.prepare(
-            "SELECT m.source_path, c.source_file_identity, c.last_seen_size, c.mtime
-             FROM session_members m
-             JOIN session_member_cursors c ON c.member_id = m.id
-             JOIN sessions s ON s.id = m.session_id
-             WHERE s.title IS NOT NULL AND c.source_file_identity != ''",
+            "SELECT source_path, source_file_identity, source_last_seen_size, source_mtime
+             FROM sessions
+             WHERE title IS NOT NULL AND source_file_identity != ''",
         )?;
         let rows = st
             .query_map([], |r| {
@@ -3245,283 +2212,6 @@ pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Resu
 /// graph-resolution pass can create members in the transaction that creates the
 /// Session they attach to.
 #[allow(clippy::too_many_arguments)]
-pub fn upsert_session_member_conn(
-    conn: &Connection,
-    session_id: &str,
-    agent: Agent,
-    source_member_id: &str,
-    relation: SessionMemberRelation,
-    parent_source_member_id: Option<&str>,
-    source_kind: &str,
-    source_path: &str,
-    cwd: Option<&str>,
-    started_at: Option<&str>,
-    last_activity_at: Option<&str>,
-    metadata: &serde_json::Value,
-) -> Result<String> {
-    let existing: Option<(String, String, Option<String>)> = conn
-        .query_row(
-            "SELECT id, relation, last_activity_at FROM session_members
-                 WHERE agent = ?1 AND source_member_id = ?2",
-            params![agent.as_str(), source_member_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    if let Some((id, existing_relation, previous_activity)) = existing {
-        // Topology guard: a member's root-ness never flips. A stored Root
-        // re-claimed as child/side (or the reverse) would re-home the member
-        // and strand its old Logical Session without a root member; such a
-        // claim is a source bug and is refused here — the row stays exactly
-        // as stored. child ↔ side changes stay allowed.
-        let root_flip = (existing_relation == SessionMemberRelation::Root.as_str())
-            != (relation == SessionMemberRelation::Root);
-        if root_flip {
-            return Ok(id);
-        }
-        let activity = later_timestamp(previous_activity.as_deref(), last_activity_at);
-        conn.execute(
-            "UPDATE session_members SET
-               session_id = ?2,
-               relation = ?3,
-               parent_source_member_id = ?4,
-               source_kind = ?5,
-               source_path = ?6,
-               cwd = COALESCE(?7, cwd),
-               started_at = COALESCE(started_at, ?8),
-               last_activity_at = ?9,
-               metadata = ?10
-             WHERE id = ?1",
-            params![
-                id,
-                session_id,
-                relation.as_str(),
-                parent_source_member_id,
-                source_kind,
-                source_path,
-                cwd,
-                started_at,
-                activity,
-                metadata.to_string()
-            ],
-        )?;
-        return Ok(id);
-    }
-    let id = new_id();
-    conn.execute(
-        "INSERT INTO session_members
-         (id, session_id, agent, source_member_id, relation, parent_source_member_id,
-          source_kind, source_path, cwd, started_at, last_activity_at, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![
-            id,
-            session_id,
-            agent.as_str(),
-            source_member_id,
-            relation.as_str(),
-            parent_source_member_id,
-            source_kind,
-            source_path,
-            cwd,
-            started_at,
-            last_activity_at,
-            metadata.to_string()
-        ],
-    )?;
-    Ok(id)
-}
-
-pub fn upsert_member_cursor_conn(conn: &Connection, c: &SessionMemberCursor) -> Result<()> {
-    conn.execute(
-        "INSERT INTO session_member_cursors
-         (member_id, source_file_identity, generation, byte_offset, last_seen_size, mtime, prefix_hash, identity_tail_hash, active_provider, active_model)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(member_id) DO UPDATE SET
-           source_file_identity = ?2, generation = ?3, byte_offset = ?4,
-           last_seen_size = ?5, mtime = ?6, prefix_hash = ?7, identity_tail_hash = ?8,
-           active_provider = ?9, active_model = ?10",
-        params![
-            c.member_id,
-            c.source_file_identity,
-            c.generation,
-            c.byte_offset as i64,
-            c.last_seen_size as i64,
-            c.mtime,
-            c.prefix_hash,
-            c.identity_tail_hash,
-            c.active_provider,
-            c.active_model
-        ],
-    )?;
-    Ok(())
-}
-
-/// Provenance enrichment on a dedup hit. The message is already recognised as
-/// the same one, so newly read provenance the stored row lacks fills the gap in
-/// place; a contradiction with an already-confirmed value keeps the stored one
-/// and logs instead of overwriting — the drift means adapter interpretation or
-/// source behaviour changed.
-fn enrich_message_provenance_conn(
-    conn: &Connection,
-    member_id: &str,
-    hash: &str,
-    m: &ParsedSessionMessage,
-) -> Result<()> {
-    let Some((stored_provider, stored_model)): Option<(Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT provider, model FROM session_messages
-             WHERE member_id = ?1 AND source_identity_hash = ?2",
-            params![member_id, hash],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?
-    else {
-        return Ok(());
-    };
-    for (field, stored, next) in [
-        ("provider", &stored_provider, &m.provider),
-        ("model", &stored_model, &m.model),
-    ] {
-        match (stored, next) {
-            (None, Some(v)) => {
-                conn.execute(
-                    &format!("UPDATE session_messages SET {field} = ?1 WHERE member_id = ?2 AND source_identity_hash = ?3"),
-                    params![v, member_id, hash],
-                )?;
-            }
-            (Some(a), Some(b)) if a != b => {
-                eprintln!(
-                    "[ingest] provenance conflict on message (member {member_id}): stored {field}={a:?}, source now says {b:?}; keeping stored value"
-                );
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// The existing model reference supports provider/model paths. Keep an event's
-/// source-confirmed channel in that reference; its original billing key stays
-/// unchanged, and the canonical model identity still strips all prefixes.
-fn qualified_usage_model(model: Option<&str>, provider: Option<&str>) -> Option<String> {
-    model.map(|model| match provider.filter(|p| !p.trim().is_empty()) {
-        Some(provider) => format!("{}/{}", provider.trim(), model),
-        None => model.to_string(),
-    })
-}
-
-/// The sole persisted token source, written in the same ingest transaction as
-/// activity counts. A full scan replaces this member's rows; an append adds
-/// new calls. Repeated event keys bill once, with the first row winning.
-fn write_usage_events_conn(
-    tx: &Transaction,
-    session_id: &str,
-    member_id: &str,
-    agent: &str,
-    started_at_genesis: bool,
-    events: &[crate::adapters::UsageEvent],
-) -> Result<()> {
-    if started_at_genesis {
-        tx.execute(
-            "DELETE FROM usage_events WHERE member_id = ?1",
-            params![member_id],
-        )?;
-    }
-    if events.is_empty() {
-        return Ok(());
-    }
-    let mut stmt = tx.prepare(
-        "INSERT OR IGNORE INTO usage_events
-           (id, member_id, session_id, agent, category, model, ts,
-            input_tokens, output_tokens, cached_tokens, reasoning_tokens,
-            requests, event_key)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-    )?;
-    for ev in events {
-        stmt.execute(params![
-            new_id(),
-            member_id,
-            session_id,
-            agent,
-            ev.category.as_str(),
-            qualified_usage_model(ev.model.as_deref(), ev.provider.as_deref()),
-            ev.ts,
-            ev.input_tokens as i64,
-            ev.output_tokens as i64,
-            ev.cached_tokens as i64,
-            ev.reasoning_tokens as i64,
-            (ev.request_count as i64).max(1),
-            ev.key,
-        ])?;
-    }
-    Ok(())
-}
-
-pub fn apply_stats_conn(
-    conn: &Connection,
-    member_id: &str,
-    update: Option<StatsUpdate>,
-) -> Result<bool> {
-    let Some(update) = update else {
-        return Ok(false);
-    };
-    // Dynamic SET list: only the fields this update speaks for move, so an
-    // absent observation leaves the column (and its NULL-vs-0 meaning) alone.
-    // A delta adds over COALESCE: a NULL column (never observed) starts from 0.
-    let mut sets: Vec<String> = Vec::new();
-    match update {
-        StatsUpdate::Delta(d) => {
-            if let Some(v) = d.tool_call_count {
-                sets.push(format!(
-                    "tool_call_count = COALESCE(tool_call_count, 0) + {v}"
-                ));
-            }
-            if let Some(v) = d.user_message_count {
-                sets.push(format!(
-                    "user_message_count = COALESCE(user_message_count, 0) + {v}"
-                ));
-            }
-            if let Some(v) = d.assistant_message_count {
-                sets.push(format!(
-                    "assistant_message_count = COALESCE(assistant_message_count, 0) + {v}"
-                ));
-            }
-            if let Some(v) = d.side_activity_count {
-                sets.push(format!(
-                    "side_activity_count = COALESCE(side_activity_count, 0) + {v}"
-                ));
-            }
-        }
-        StatsUpdate::Snapshot(s) => {
-            if let Some(v) = s.tool_call_count {
-                sets.push(format!("tool_call_count = {v}"));
-            }
-            if let Some(v) = s.user_message_count {
-                sets.push(format!("user_message_count = {v}"));
-            }
-            if let Some(v) = s.assistant_message_count {
-                sets.push(format!("assistant_message_count = {v}"));
-            }
-            if let Some(v) = s.side_activity_count {
-                sets.push(format!("side_activity_count = {v}"));
-            }
-        }
-    }
-    if sets.is_empty() {
-        return Ok(false);
-    }
-    conn.execute(
-        "INSERT INTO session_member_stats (member_id, updated_at) VALUES (?1, ?2)
-         ON CONFLICT(member_id) DO NOTHING",
-        params![member_id, now()],
-    )?;
-    let sql = format!(
-        "UPDATE session_member_stats SET {}, updated_at = ?1 WHERE member_id = ?2",
-        sets.join(", ")
-    );
-    conn.execute(&sql, params![now(), member_id])?;
-    Ok(true)
-}
-
 /// The CURRENT conversation, joined through the projection. `after_ordinal`
 /// is a projection ordinal; the rows come back in projection order.
 /// One page of the CURRENT conversation: its messages plus the cursor, total
@@ -3529,7 +2219,15 @@ pub fn apply_stats_conn(
 pub struct MessageWindow {
     pub messages: Vec<WindowedMessage>,
     pub generation: i64,
+    /// How many messages the CURRENT mode counts: the conversation skeleton
+    /// (user + final replies) in turns mode, every message in full mode.
     pub total: i64,
+    /// The max projection ordinal of the conversation (mode-independent):
+    /// "am I holding the tail" compares against this, never against `total`.
+    pub tail_ordinal: i64,
+    /// How many mode-matching messages sit above the loaded range (the
+    /// 「加载更早」 label): exact in every mode, jumps included.
+    pub remaining: i64,
     /// Exclusive upper bound for the next, older page. `None` means the
     /// conversation's beginning was reached.
     pub next_before_ordinal: Option<i64>,
@@ -3561,13 +2259,31 @@ fn window_messages_conn(
     before_ordinal: Option<i64>,
     limit: i64,
 ) -> Result<Vec<(i64, SessionMessage)>> {
-    let mut st = conn.prepare(
+    window_messages_filtered_conn(conn, session_id, before_ordinal, limit, false)
+}
+
+/// `turns_only` keeps just the messages that structure a conversation — user
+/// turns and each turn's FINAL assistant reply — hiding the assistant's
+/// intermediate (non-final) outputs.
+fn window_messages_filtered_conn(
+    conn: &Connection,
+    session_id: &str,
+    before_ordinal: Option<i64>,
+    limit: i64,
+    turns_only: bool,
+) -> Result<Vec<(i64, SessionMessage)>> {
+    let turn_filter = if turns_only {
+        " AND (m.role = 'user' OR m.turn_final = 1)"
+    } else {
+        ""
+    };
+    let mut st = conn.prepare(&format!(
         "SELECT p.ordinal AS ordinal, m.*
          FROM session_message_projection p
          JOIN session_messages m ON m.id = p.session_message_id
-         WHERE p.session_id = ?1 AND p.ordinal <= ?2
+         WHERE p.session_id = ?1 AND p.ordinal <= ?2{turn_filter}
          ORDER BY p.ordinal DESC LIMIT ?3",
-    )?;
+    ))?;
     let upper = before_ordinal.unwrap_or(i64::MAX);
     let mut rows = st
         .query_map(params![session_id, upper, limit], |r| {
@@ -3586,13 +2302,28 @@ fn forward_messages_conn(
     after_ordinal: i64,
     limit: i64,
 ) -> Result<Vec<(i64, SessionMessage)>> {
-    let mut st = conn.prepare(
+    forward_messages_filtered_conn(conn, session_id, after_ordinal, limit, false)
+}
+
+fn forward_messages_filtered_conn(
+    conn: &Connection,
+    session_id: &str,
+    after_ordinal: i64,
+    limit: i64,
+    turns_only: bool,
+) -> Result<Vec<(i64, SessionMessage)>> {
+    let turn_filter = if turns_only {
+        " AND (m.role = 'user' OR m.turn_final = 1)"
+    } else {
+        ""
+    };
+    let mut st = conn.prepare(&format!(
         "SELECT p.ordinal AS ordinal, m.*
          FROM session_message_projection p
          JOIN session_messages m ON m.id = p.session_message_id
-         WHERE p.session_id = ?1 AND p.ordinal > ?2
+         WHERE p.session_id = ?1 AND p.ordinal > ?2{turn_filter}
          ORDER BY p.ordinal ASC LIMIT ?3",
-    )?;
+    ))?;
     let rows = st
         .query_map(params![session_id, after_ordinal, limit], |r| {
             Ok((r.get::<_, i64>("ordinal")?, row_message(r)?))
@@ -3605,22 +2336,57 @@ fn forward_messages_conn(
 /// the same backward cursor — one step before the page they came with — so a
 /// reader paging up never handles projection ordinals itself.
 fn message_window_from(
-    state: SessionIngestState,
+    state: (i64, i64),
+    turns_only: bool,
+    conn: &Connection,
+    session_id: &str,
     rows: Vec<(i64, SessionMessage)>,
-) -> MessageWindow {
+) -> Result<MessageWindow> {
+    // `total` counts what the current mode pages over: the conversation
+    // skeleton (user + final replies) in turns mode, every message in full
+    // mode. `tail_ordinal` is mode-independent — a reader checks "am I holding
+    // the tail" against it, never against `total`.
+    let total = if turns_only {
+        let mut st = conn.prepare(
+            "SELECT COUNT(*) FROM session_message_projection p
+             JOIN session_messages m ON m.id = p.session_message_id
+             WHERE p.session_id = ?1 AND (m.role = 'user' OR m.turn_final = 1)",
+        )?;
+        st.query_row(params![session_id], |r| r.get::<_, i64>(0))?
+    } else {
+        state.1
+    };
     let next_before_ordinal = rows
         .first()
         .map(|(ordinal, _)| ordinal - 1)
         .filter(|cursor| *cursor > 0);
-    MessageWindow {
+    let remaining = match next_before_ordinal {
+        None => 0,
+        Some(before) => {
+            let turn_filter = if turns_only {
+                " AND (m.role = 'user' OR m.turn_final = 1)"
+            } else {
+                ""
+            };
+            let mut st = conn.prepare(&format!(
+                "SELECT COUNT(*) FROM session_message_projection p
+                 JOIN session_messages m ON m.id = p.session_message_id
+                 WHERE p.session_id = ?1 AND p.ordinal < ?2{turn_filter}",
+            ))?;
+            st.query_row(params![session_id, before], |r| r.get::<_, i64>(0))?
+        }
+    };
+    Ok(MessageWindow {
         messages: rows
             .into_iter()
             .map(|(ordinal, message)| WindowedMessage { ordinal, message })
             .collect(),
-        generation: state.generation,
-        total: state.latest_message_seq,
+        generation: state.0,
+        total,
+        tail_ordinal: state.1,
+        remaining,
         next_before_ordinal,
-    }
+    })
 }
 
 pub fn get_messages_conn(
@@ -3640,287 +2406,6 @@ pub fn get_messages_conn(
 /// The stable diagnostic identity of an unattachable member: one row
 /// per (agent, kind, source member), so repeat sightings update instead of
 /// duplicating.
-pub fn diagnostic_key(agent: Agent, kind: &str, source_member_id: Option<&str>) -> String {
-    format!(
-        "{}:{}:{}",
-        agent.as_str(),
-        kind,
-        source_member_id.unwrap_or("-")
-    )
-}
-
-/// `Some(a) + Some(b)`; `None` never erases a known total.
-fn or_add(current: Option<i64>, next: Option<i64>) -> Option<i64> {
-    match (current, next) {
-        (a, Some(b)) => Some(a.unwrap_or(0) + b),
-        (a, None) => a,
-    }
-}
-
-/// Shared snapshot count column order used by the panel's dimensional queries.
-fn usage_slice_counts(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<[i64; 6]> {
-    Ok([
-        row.get(offset)?,
-        row.get(offset + 1)?,
-        row.get(offset + 2)?,
-        row.get(offset + 3)?,
-        row.get(offset + 4)?,
-        row.get(offset + 5)?,
-    ])
-}
-
-/// One agent slice of the workspace usage rollup: the billed axes summed
-/// over the agent's sessions, including trashed sessions.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageAgentSlice {
-    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
-    pub cache_hit_rate: Option<f64>,
-    /// Recorded model requests from the usage ledger, including unattributed calls.
-    pub requests: i64,
-    pub agent: String,
-    pub sessions: i64,
-    pub members: i64,
-    pub assistant_messages: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    pub root_members: i64,
-    pub user_messages: i64,
-    pub agent_replies: i64,
-    pub tool_calls: i64,
-    pub side_activities: i64,
-}
-
-/// Billed tokens by member class: the root conversation vs the sub-agents
-/// vs side coordination.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageRelationSlice {
-    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
-    pub cache_hit_rate: Option<f64>,
-    /// Recorded model requests from the usage ledger, including unattributed calls.
-    pub requests: i64,
-    pub relation: String,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    pub members: i64,
-    pub root_members: i64,
-    pub user_messages: i64,
-    pub agent_replies: i64,
-    pub tool_calls: i64,
-    pub side_activities: i64,
-}
-
-/// One named owner of billed work — a Project or an owner Workstream.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageNamedSlice {
-    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
-    pub cache_hit_rate: Option<f64>,
-    /// Recorded model requests from the usage ledger, including unattributed calls.
-    pub requests: i64,
-    pub id: String,
-    pub name: String,
-    pub sessions: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    pub members: i64,
-    pub root_members: i64,
-    pub user_messages: i64,
-    pub agent_replies: i64,
-    pub tool_calls: i64,
-    pub side_activities: i64,
-}
-
-/// One canonical model from the ledger (`LOWER(model)` key). `display` is
-/// the most frequent verbatim spelling; tokens come from deduplicated events.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageModelSlice {
-    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
-    pub cache_hit_rate: Option<f64>,
-    pub model: String,
-    pub display: String,
-    pub events: i64,
-    /// Underlying model requests the events cover (zcode reports real counts;
-    /// the other formats assume one request per event).
-    pub requests: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cached_tokens: i64,
-    pub reasoning_tokens: i64,
-    pub agents: Vec<String>,
-    /// Distinct participating members; a member using multiple models counts in each.
-    pub members: i64,
-    pub root_members: i64,
-    /// The ledger has no message/tool provenance for these axes.
-    pub user_messages: Option<i64>,
-    pub agent_replies: Option<i64>,
-    pub tool_calls: Option<i64>,
-    pub side_activities: Option<i64>,
-}
-
-/// One call class from the ledger: conversation vs compaction vs side.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageCategorySlice {
-    pub category: String,
-    pub events: i64,
-    pub requests: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-}
-
-/// One day of the ledger series (newest first), day = the source timestamp's
-/// own UTC date.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageDaySlice {
-    pub day: String,
-    pub events: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-}
-
-/// One row of the top-sessions table: the session's billed totals.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageSessionSlice {
-    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
-    pub cache_hit_rate: Option<f64>,
-    /// Recorded model requests from the usage ledger, including unattributed calls.
-    pub requests: i64,
-    pub session_id: String,
-    pub title: Option<String>,
-    pub agent: String,
-    pub last_activity_at: Option<String>,
-    pub assistant_messages: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    pub members: i64,
-    pub root_members: i64,
-    pub user_messages: i64,
-    pub agent_replies: i64,
-    pub tool_calls: i64,
-    pub side_activities: i64,
-}
-
-/// The stats panel's single read: activity counters from member snapshots,
-/// all token totals, model requests and usage slices from deduplicated events.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct UsageOverview {
-    /// Token-weighted cache reads / (fresh input + cache reads), from the ledger.
-    pub cache_hit_rate: Option<f64>,
-    /// Recorded model requests from the usage ledger, including unattributed calls.
-    pub requests: i64,
-    pub sessions: i64,
-    /// Every member of every session — the user's 会话 vocabulary: roots,
-    /// children and sides all count.
-    pub members: i64,
-    /// The root members among them (根会话).
-    pub root_members: i64,
-    pub user_messages: i64,
-    /// Assistant generations (代理回复), from the snapshots.
-    pub agent_replies: i64,
-    pub tool_calls: i64,
-    /// Side-activity observations (代理协同 / 辅会话).
-    pub side_activities: i64,
-    pub assistant_messages: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    pub by_agent: Vec<UsageAgentSlice>,
-    pub by_relation: Vec<UsageRelationSlice>,
-    pub by_project: Vec<UsageNamedSlice>,
-    pub by_workstream: Vec<UsageNamedSlice>,
-    pub top_sessions: Vec<UsageSessionSlice>,
-    // ---- ledger sections (empty until a rebuild / from-scratch rescan) ----
-    pub ledger_events: i64,
-    pub attributed_events: i64,
-    pub unattributed_events: i64,
-    pub by_model: Vec<UsageModelSlice>,
-    pub by_category: Vec<UsageCategorySlice>,
-    pub series: Vec<UsageDaySlice>,
-}
-
-/// All usage slices use the same ledger population and token-weighted rate.
-fn cache_hit_rate(input: i64, cached: i64) -> Option<f64> {
-    let cached = cached.max(0) as f64;
-    let total = input.max(0) as f64 + cached;
-    (total > 0.0).then(|| cached / total)
-}
-
-/// The panel's canonical model key: lowercase, gateway/provider prefix
-/// stripped (`qwen/qwen3.8-27b` → `qwen3.8-27b`), routing/mode suffixes
-/// merged into the base model (`-tiered`, `-thinking`). Applied at aggregation;
-/// `usage_events.model` keeps the source's spelling, qualified with the confirmed
-/// channel when available.
-fn canonical_model(model: &str) -> String {
-    let lower = model.trim().to_lowercase();
-    let base = lower.rsplit('/').next().unwrap_or(&lower);
-    for suffix in ["-tiered", "-thinking"] {
-        if let Some(stripped) = base.strip_suffix(suffix) {
-            return stripped.to_string();
-        }
-    }
-    base.to_string()
-}
-
-/// The display spelling for a canonical group: the group's most frequent
-/// verbatim spelling, put through the same prefix/suffix strip — casing is
-/// kept (`GLM-5.3-Flash` stays cased), the noise is not.
-fn display_model(spelling: &str) -> String {
-    let base = spelling.rsplit('/').next().unwrap_or(spelling);
-    let lower = base.to_lowercase();
-    for suffix in ["-tiered", "-thinking"] {
-        if lower.ends_with(suffix) {
-            return base[..base.len() - suffix.len()].to_string();
-        }
-    }
-    base.to_string()
-}
-
-/// Fold state for one canonical model key while the ledger rows walk in.
-#[derive(Default)]
-struct ModelFold {
-    total: i64,
-    requests: i64,
-    input_tokens: i64,
-    output_tokens: i64,
-    cached_tokens: i64,
-    reasoning_tokens: i64,
-    spellings: std::collections::BTreeMap<String, i64>,
-    agents: std::collections::BTreeSet<String>,
-}
-
-/// Query-time aggregate over a session's execution graph — the session-level
-/// rollup: each member's own share, summed. No cache table: the member count is
-/// small and this can never drift.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct SessionAggregateStats {
-    pub member_count: i64,
-    pub child_count: i64,
-    pub side_count: i64,
-    pub max_depth: i64,
-    pub tool_call_count: i64,
-    pub user_message_count: i64,
-    pub assistant_message_count: i64,
-
-    pub side_activity_count: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-    /// Billed model requests of the whole member graph, straight off the
-    /// ledger — the panel's 模型请求 cell, at session scope. 0 = no events.
-    pub requests: i64,
-}
 
 pub fn insert_item_conn(
     conn: &Connection,
@@ -4320,24 +2805,18 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
         last_activity_at: r.get("last_activity_at")?,
         last_conversation_at: r.get("last_conversation_at")?,
         trashed_at: r.get("trashed_at")?,
-    })
-}
-
-fn row_member(r: &Row) -> rusqlite::Result<SessionMember> {
-    Ok(SessionMember {
-        id: r.get("id")?,
-        session_id: r.get("session_id")?,
-        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
-        source_member_id: r.get("source_member_id")?,
-        relation: SessionMemberRelation::parse(&r.get::<_, String>("relation")?)
-            .unwrap_or(SessionMemberRelation::Child),
-        parent_source_member_id: r.get("parent_source_member_id")?,
         source_kind: r.get("source_kind")?,
         source_path: r.get("source_path")?,
-        cwd: r.get("cwd")?,
-        started_at: r.get("started_at")?,
-        last_activity_at: r.get("last_activity_at")?,
         metadata: serde_json::from_str(&r.get::<_, String>("metadata")?).unwrap_or_default(),
+        source_file_identity: r.get("source_file_identity")?,
+        source_generation: r.get("source_generation")?,
+        source_byte_offset: r.get::<_, i64>("source_byte_offset")?.max(0) as u64,
+        source_last_seen_size: r.get::<_, i64>("source_last_seen_size")?.max(0) as u64,
+        source_mtime: r.get("source_mtime")?,
+        source_prefix_hash: r.get("source_prefix_hash")?,
+        source_tail_hash: r.get("source_tail_hash")?,
+        fact_generation: r.get("fact_generation")?,
+        latest_message_seq: r.get("latest_message_seq")?,
     })
 }
 
@@ -4345,7 +2824,6 @@ fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
     Ok(SessionMessage {
         id: r.get("id")?,
         session_id: r.get("session_id")?,
-        member_id: r.get("member_id")?,
         sequence: r.get("sequence")?,
         source_message_id: r.get("source_message_id")?,
         source_generation: r.get("source_generation")?,
@@ -4360,42 +2838,7 @@ fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
         },
         content: r.get("content")?,
         turn_final: r.get::<_, i64>("turn_final")? != 0,
-        provider: r.get("provider")?,
-        model: r.get("model")?,
         raw_ref: r.get("raw_ref")?,
-    })
-}
-
-fn row_member_stats(r: &Row) -> rusqlite::Result<SessionMemberStats> {
-    Ok(SessionMemberStats {
-        member_id: r.get(0)?,
-        tool_call_count: r.get(1)?,
-        user_message_count: r.get(2)?,
-        assistant_message_count: r.get(3)?,
-        side_activity_count: r.get(4)?,
-        input_tokens: r.get(5)?,
-        output_tokens: r.get(6)?,
-        cached_tokens: r.get(7)?,
-        reasoning_tokens: r.get(8)?,
-        updated_at: r.get(9)?,
-        extra: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
-    })
-}
-
-fn row_diagnostic(r: &Row) -> rusqlite::Result<IngestionDiagnostic> {
-    Ok(IngestionDiagnostic {
-        id: r.get("id")?,
-        diagnostic_key: r.get("diagnostic_key")?,
-        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
-        kind: r.get("kind")?,
-        source_member_id: r.get("source_member_id")?,
-        parent_source_member_id: r.get("parent_source_member_id")?,
-        source_path: r.get("source_path")?,
-        reason: r.get("reason")?,
-        first_seen_at: r.get("first_seen_at")?,
-        last_seen_at: r.get("last_seen_at")?,
-        observation_count: r.get("observation_count")?,
-        details: serde_json::from_str(&r.get::<_, String>("details")?).unwrap_or_default(),
     })
 }
 

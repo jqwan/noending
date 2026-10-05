@@ -60,8 +60,8 @@ fn write_transcript(dir: &std::path::Path, n: usize) -> PathBuf {
     file
 }
 
-/// A Logical Session whose ROOT member's source is the transcript at `path`.
-/// Ingestion reads the member's `source_path`, never a session-level raw_path.
+/// A Logical Session whose root source is the transcript at `path`.
+/// Ingestion reads the session's `source_path`, never a session-level raw_path.
 fn session_row(db: &Db, path: &std::path::Path) -> Session {
     let root_agent_session_id = format!("as-{}", new_id());
     let (id, _) = db
@@ -76,9 +76,8 @@ fn session_row(db: &Db, path: &std::path::Path) -> Session {
             Some(&now()),
         )
         .unwrap();
-    support::ensure_root_member(
+    support::ensure_session_source(
         db,
-        &id,
         Agent::ClaudeCode,
         &root_agent_session_id,
         &path.to_string_lossy(),
@@ -103,7 +102,7 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
 #[test]
 fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
     let db = open_db("empty-generation-context");
-    let (session, member_id, _) = support::seed_conversation(
+    let (session, _) = support::seed_conversation(
         &db,
         Agent::ClaudeCode,
         "empty-generation-context",
@@ -113,7 +112,7 @@ fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
             "old transcript",
         )],
     );
-    let initial_generation = db.get_session_ingest_state(&session.id).unwrap().generation;
+    let initial_generation = db.get_session_ingest_state(&session.id).unwrap().0;
     db.tx(|tx| {
         noending::storage::context_repo::commit_session_context_conn(
             tx,
@@ -130,11 +129,9 @@ fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
     })
     .unwrap();
 
-    db.commit_member_ingest(
+    db.commit_ingest(
         &session.id,
-        &member_id,
         &[],
-        None,
         &SourceCursorUpdate {
             file_identity: "empty-rewrite".into(),
             generation: 1,
@@ -204,9 +201,9 @@ fn ingestion_writes_facts_and_zero_context() {
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
     assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 3);
     let state = db.get_session_ingest_state(&s.id).unwrap();
-    assert_eq!(state.latest_message_seq, 3);
+    assert_eq!(state.1, 3);
     assert_eq!(
-        state.generation, 1,
+        state.0, 1,
         "the first genesis read establishes generation 1"
     );
 
@@ -220,12 +217,7 @@ fn ingestion_writes_facts_and_zero_context() {
         "the projection is the current conversation in order"
     );
 
-    let member_id = db.members_for_session(&s.id).unwrap()[0].id.clone();
-    assert!(
-        db.get_member_stats(&member_id).unwrap().is_some(),
-        "member stats were snapshotted on a genesis read"
-    );
-    let cursor = db.get_member_cursor(&member_id).unwrap();
+    let cursor = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert!(cursor.byte_offset > 0, "the read cursor advanced");
     assert!(
         !cursor.source_file_identity.is_empty(),
@@ -266,21 +258,17 @@ fn ingestion_writes_facts_and_zero_context() {
 }
 
 /// Two logical sessions whose transcripts share the same message ids — a fork
-/// or a resumed copy of a conversation — each bill their own ledger: the claim
-/// registry is scoped per logical session, so the second session's replay is
-/// NOT suppressed by the first. (Real-world shape: session ead8405f shared
-/// both message ids with the big session it was forked from and showed zero
-/// tokens.) Within one session, member files replaying the same identity
-/// still bill once — that gate is pinned by the codex registry test.
+/// or a resumed copy of a conversation — are independent conversation records:
+/// each ingests its own root prose (real-world shape: session ead8405f shared
+/// both message ids with the big session it was forked from).
 #[test]
-fn sessions_sharing_message_ids_bill_independently() {
+fn sessions_sharing_message_ids_ingest_independently() {
     let dir = unique_dir("claim-scope");
     let db = open_db("claim-scope");
 
-    // One usage-bearing assistant row, identical message id, two transcripts.
     let usage_row = |uuid: &str| {
         format!(
-            r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"2026-09-19T10:00:00Z","message":{{"id":"msg_shared","role":"assistant","model":"claude-sonnet","usage":{{"input_tokens":2000,"output_tokens":465}},"content":[{{"type":"text","text":"同一个回答"}}]}}}}"#
+            r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"2026-09-19T10:00:00Z","message":{{"id":"msg_shared","role":"assistant","content":[{{"type":"text","text":"同一个回答"}}]}}}}"#
         )
     };
     let file_a = dir.join("a.jsonl");
@@ -294,23 +282,16 @@ fn sessions_sharing_message_ids_bill_independently() {
     ingestion::ingest_session(&db, &s_a).unwrap();
     ingestion::ingest_session(&db, &s_b).unwrap();
 
-    let billed = |s: &Session| -> (Option<i64>, Option<i64>) {
-        let agg = db.aggregate_session_stats(&s.id).unwrap();
-        (agg.input_tokens, agg.output_tokens)
-    };
-    assert_eq!(
-        billed(&s_a),
-        (Some(2000), Some(465)),
-        "the first reader bills its record"
-    );
-    assert_eq!(
-        billed(&s_b),
-        (Some(2000), Some(465)),
-        "the fork bills its own record — the shared message id is not stolen"
-    );
+    for s in [&s_a, &s_b] {
+        assert_eq!(
+            db.message_count(&s.id).unwrap(),
+            1,
+            "each record keeps its own conversation"
+        );
+    }
 }
 
-/// Re-scanning an unchanged source adds nothing: the member cursor already
+/// Re-scanning an unchanged source adds nothing: the session cursor already
 /// covers the file, so the same content is never stored twice.
 #[test]
 fn rescanning_an_unchanged_source_adds_nothing() {
@@ -348,7 +329,7 @@ fn appended_source_ingests_only_the_delta() {
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
-    let generation = db.get_session_ingest_state(&s.id).unwrap().generation;
+    let generation = db.get_session_ingest_state(&s.id).unwrap().0;
 
     // Two offline days: the source grows by one event.
     write_transcript(&dir, 3);
@@ -361,7 +342,7 @@ fn appended_source_ingests_only_the_delta() {
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
     assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 3);
     assert_eq!(
-        db.get_session_ingest_state(&s.id).unwrap().generation,
+        db.get_session_ingest_state(&s.id).unwrap().0,
         generation,
         "an append extends the current generation"
     );
@@ -384,8 +365,7 @@ fn trashed_session_still_ingests_its_source() {
     let s = session_row(&db, &file);
 
     assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
-    let member_id = db.members_for_session(&s.id).unwrap()[0].id.clone();
-    let cursor_before = db.get_member_cursor(&member_id).unwrap();
+    let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
     lifecycle::trash_session(&db, &s.id).unwrap();
     write_transcript(&dir, 3);
@@ -397,8 +377,13 @@ fn trashed_session_still_ingests_its_source() {
     );
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
     assert!(
-        db.get_member_cursor(&member_id).unwrap().byte_offset > cursor_before.byte_offset,
-        "the member cursor advances exactly as it would for an active session"
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor()
+            .byte_offset
+            > cursor_before.byte_offset,
+        "the session cursor advances exactly as it would for an active session"
     );
     assert_eq!(context_footprint(&db), (0, 0, 0, 0));
 }
@@ -428,7 +413,7 @@ fn refresh_session_ingests_incrementally_and_writes_no_context() {
 #[test]
 fn the_conversation_reads_backward_from_the_newest_message() {
     let db = open_db("message-window");
-    let (session, _, _) = support::seed_conversation(
+    let (session, _) = support::seed_conversation(
         &db,
         Agent::ClaudeCode,
         "message-window",
@@ -459,7 +444,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
         "the detail preview is the newest messages, oldest first"
     );
 
-    let newest = db.message_window(&session.id, None, 2).unwrap();
+    let newest = db.message_window(&session.id, None, 2, false).unwrap();
     assert_eq!(newest.total, 5);
     assert_eq!(newest.messages.len(), 2);
     assert_eq!(newest.messages[1].message.content, "message 5");
@@ -479,7 +464,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
     );
 
     let older = db
-        .message_window(&session.id, newest.next_before_ordinal, 2)
+        .message_window(&session.id, newest.next_before_ordinal, 2, false)
         .unwrap();
     assert_eq!(
         older
@@ -497,7 +482,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
     );
 
     let oldest = db
-        .message_window(&session.id, older.next_before_ordinal, 2)
+        .message_window(&session.id, older.next_before_ordinal, 2, false)
         .unwrap();
     assert_eq!(oldest.messages.len(), 1);
     assert_eq!(oldest.messages[0].message.content, "message 1");
@@ -507,7 +492,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
         "the beginning was reached"
     );
 
-    let whole = db.message_window(&session.id, None, 50).unwrap();
+    let whole = db.message_window(&session.id, None, 50, false).unwrap();
     assert_eq!(
         whole.messages.len(),
         5,
@@ -531,7 +516,7 @@ fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
         "第一行\n第二行".to_string(),
         "回答三".to_string(),
     ];
-    let (session, _, _) = support::seed_conversation(
+    let (session, _) = support::seed_conversation(
         &db,
         Agent::ClaudeCode,
         "message-marks",
@@ -566,12 +551,12 @@ fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
     assert_eq!(marks[2].preview, "第一行", "the preview is the first line");
 
     // 两向分页在同一条缝上对接：向后那页的第一条，正是向前那页的下一条。
-    let older = db.message_window(&session.id, Some(4), 2).unwrap();
+    let older = db.message_window(&session.id, Some(4), 2, false).unwrap();
     assert_eq!(
         older.messages.iter().map(|m| m.ordinal).collect::<Vec<_>>(),
         vec![3, 4]
     );
-    let newer = db.newer_window(&session.id, 4, 2).unwrap();
+    let newer = db.newer_window(&session.id, 4, 2, false).unwrap();
     assert_eq!(
         newer.messages.iter().map(|m| m.ordinal).collect::<Vec<_>>(),
         vec![5, 6],
@@ -589,7 +574,7 @@ fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
         "a forward page still knows where to page back from"
     );
 
-    let past_the_tail = db.newer_window(&session.id, 6, 2).unwrap();
+    let past_the_tail = db.newer_window(&session.id, 6, 2, false).unwrap();
     assert!(
         past_the_tail.messages.is_empty(),
         "nothing newer than the tail"
@@ -601,7 +586,7 @@ fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
 #[test]
 fn a_replaced_conversation_reports_a_new_generation_to_paging_readers() {
     let db = open_db("message-window-rewrite");
-    let (session, member_id, _) = support::seed_conversation(
+    let (session, _) = support::seed_conversation(
         &db,
         Agent::ClaudeCode,
         "message-window-rewrite",
@@ -615,14 +600,14 @@ fn a_replaced_conversation_reports_a_new_generation_to_paging_readers() {
             })
             .collect::<Vec<_>>(),
     );
-    let before = db.message_window(&session.id, None, 2).unwrap();
+    let before = db.message_window(&session.id, None, 2, false).unwrap();
     assert_eq!(before.next_before_ordinal, Some(1));
 
-    db.commit_member_ingest(&session.id, &member_id, &[], None, &support::seed_source(1))
+    db.commit_ingest(&session.id, &[], &support::seed_source(1))
         .unwrap();
 
     let after = db
-        .message_window(&session.id, before.next_before_ordinal, 2)
+        .message_window(&session.id, before.next_before_ordinal, 2, false)
         .unwrap();
     assert_eq!(after.total, 0, "the replacement conversation is empty");
     assert!(after.messages.is_empty());

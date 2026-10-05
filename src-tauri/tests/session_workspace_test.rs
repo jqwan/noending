@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 mod support;
 
 use noending::adapters::{adapter_for, DiscoveredMember, DiscoveredMemberKind};
-use noending::domain::{Agent, Session, SessionMemberRelation, SessionMessageRole};
+use noending::domain::{Agent, Session, SessionMessageRole};
 use noending::error::Result;
 use noending::ingestion::{ingest_session, reconcile_all, session_title};
 use noending::launcher::LaunchWorkspace;
@@ -526,10 +526,10 @@ fn the_batch_refresh_is_alone_sufficient_and_idempotent() {
     assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
 }
 
-// 5. ordinary member ingestion does no Project work
+// 5. ordinary session ingestion does no Project work
 
 #[test]
-fn member_ingestion_alone_does_not_change_a_project() {
+fn session_ingestion_alone_does_not_change_a_project() {
     let (_d, db) = temp_db("ingest");
     project(&db, "p-repo", "repo");
 
@@ -548,7 +548,7 @@ fn member_ingestion_alone_does_not_change_a_project() {
         .unwrap();
 
     // Another ingest pass over the same (unchanged) source: the reconcile
-    // re-resolution is skipped by the cursor, and a direct member ingest has
+    // re-resolution is skipped by the cursor, and a direct session ingest has
     // no workspace code path at all — the session's Project facts stay put.
     let stored_count = ingest_session(&db, &before).unwrap();
     assert_eq!(stored_count, 0, "an unchanged source stores nothing");
@@ -1106,8 +1106,8 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
 
 /// `get_session_detail` is a thin Tauri command over storage/lifecycle queries.
 /// This pins exactly the rows those queries hand it, so the detail page's
-/// facts cannot drift from the store: the member graph (root first), the
-/// aggregate stats, the two frontiers, and the fresh root source verdict.
+/// facts cannot drift from the store: the conversation, the aggregate stats,
+/// the two frontiers, and the fresh root source verdict.
 #[test]
 fn the_detail_ingredients_come_from_storage_queries() {
     let dir = unique_dir("detail-src");
@@ -1124,7 +1124,7 @@ fn the_detail_ingredients_come_from_storage_queries() {
     };
     let root_id = "detail-root";
     let (s, _) = db
-        .upsert_logical_session_unchecked(
+        .upsert_logical_session(
             Agent::Codex,
             root_id,
             Some("detail title"),
@@ -1133,50 +1133,21 @@ fn the_detail_ingredients_come_from_storage_queries() {
             None,
             None,
             None,
-        )
-        .unwrap();
-    let root_member = db
-        .upsert_session_member(
-            &s,
-            Agent::Codex,
-            root_id,
-            SessionMemberRelation::Root,
-            None,
             "test_root",
             &file.to_string_lossy(),
-            Some("/repo/detail"),
-            None,
-            None,
-            &serde_json::json!({}),
-        )
-        .unwrap();
-    let child_member = db
-        .upsert_session_member(
-            &s,
-            Agent::Codex,
-            "detail-child",
-            SessionMemberRelation::Child,
-            Some(root_id),
-            "subagent_file",
-            "/raw/child.jsonl",
-            Some("/child/cwd"),
-            None,
-            None,
             &serde_json::json!({}),
         )
         .unwrap();
 
-    // One root conversation batch with stats, then a child stats-only update.
+    // One root conversation batch.
     let messages = vec![
         support::parsed_message("m1", SessionMessageRole::User, "detail first"),
         support::parsed_message("m2", SessionMessageRole::Assistant, "detail reply"),
     ];
     let stored_messages = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s,
-            &root_member,
             &messages,
-            Some(stats_delta(2, 1)),
             &noending::domain::SourceCursorUpdate {
                 file_identity: "identity".into(),
                 generation: 1,
@@ -1190,21 +1161,9 @@ fn the_detail_ingredients_come_from_storage_queries() {
         .unwrap();
     db.index_new_messages(&stored_messages).unwrap();
 
-    // The member graph, root first.
-    let members = db.members_for_session(&s).unwrap();
-    assert_eq!(members.len(), 2);
-    assert_eq!(members[0].relation.as_str(), "root");
-    assert_eq!(members[0].id, root_member);
-    assert_eq!(members[1].id, child_member);
-    // Child cwd never reached the session.
+    // The conversation belongs to this session alone.
+    assert!(stored_messages.iter().all(|m| m.session_id == s));
     assert_eq!(stored(&db, &s).cwd.as_deref(), Some("/repo/detail"));
-
-    // The aggregate is query-time and covers the whole graph.
-    let stats = db.aggregate_session_stats(&s).unwrap();
-    assert_eq!(stats.member_count, 2);
-    assert_eq!(stats.child_count, 1);
-    assert_eq!(stats.side_count, 0);
-    assert_eq!(stats.max_depth, 1, "the child hangs off the root");
 
     // The two frontiers the detail page shows: messages ingested, and how far
     // the explicit Session Context has consumed them (no Context row → 0).
@@ -1226,16 +1185,6 @@ fn the_detail_ingredients_come_from_storage_queries() {
 }
 
 /// A stats delta so the commit above reads like the observation batch it is.
-fn stats_delta(tool_calls: i64, user_messages: i64) -> noending::domain::StatsUpdate {
-    noending::domain::StatsUpdate::Delta(noending::domain::StatsDelta {
-        tool_call_count: Some(tool_calls),
-        user_message_count: Some(user_messages),
-
-        side_activity_count: None,
-        ..Default::default()
-    })
-}
-
 /// The adapter resolved by `adapter_for` is the one the lifecycle verdicts
 /// consult: a Codex root pointing at a real file is Present, and pointing at
 /// a removed file is Missing — never something in between.
@@ -1244,35 +1193,48 @@ fn the_source_verdict_follows_the_file_on_disk() {
     let dir = unique_dir("verdict-src");
     let file = dir.join("session.jsonl");
     std::fs::write(&file, "transcript\n").unwrap();
-    let member = |path: &Path| noending::domain::SessionMember {
-        id: "m".into(),
-        session_id: "s".into(),
+    let session_at = |path: &Path| Session {
+        id: "s".into(),
         agent: Agent::Codex,
-        source_member_id: "root".into(),
-        relation: SessionMemberRelation::Root,
-        parent_source_member_id: None,
-        source_kind: "test".into(),
-        source_path: path.to_string_lossy().to_string(),
+        root_agent_session_id: "root".into(),
+        title: None,
+        owner_workstream_id: None,
         cwd: None,
+        workspace_path_id: None,
+        project_id: None,
+        forked_from_session_id: None,
         started_at: None,
         last_activity_at: None,
+        last_conversation_at: None,
+        trashed_at: None,
+        source_kind: "test".into(),
+        source_path: path.to_string_lossy().to_string(),
         metadata: serde_json::json!({}),
+        source_file_identity: String::new(),
+        source_generation: 0,
+        source_byte_offset: 0,
+        source_last_seen_size: 0,
+        source_mtime: None,
+        source_prefix_hash: String::new(),
+        source_tail_hash: String::new(),
+        fact_generation: 0,
+        latest_message_seq: 0,
     };
 
     let adapter = adapter_for(Agent::Codex);
     assert_eq!(
-        adapter.inspect_member_source(&member(&file)).unwrap(),
+        adapter.inspect_session_source(&session_at(&file)).unwrap(),
         noending::domain::SourceAvailability::Present
     );
     std::fs::remove_file(&file).unwrap();
     assert_eq!(
-        adapter.inspect_member_source(&member(&file)).unwrap(),
+        adapter.inspect_session_source(&session_at(&file)).unwrap(),
         noending::domain::SourceAvailability::Missing
     );
 
     // A directory is a non-regular file: Unavailable — any doubt ≠ missing.
     assert_eq!(
-        adapter.inspect_member_source(&member(&dir)).unwrap(),
+        adapter.inspect_session_source(&session_at(&dir)).unwrap(),
         noending::domain::SourceAvailability::Unavailable
     );
 }

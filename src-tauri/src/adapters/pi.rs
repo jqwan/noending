@@ -13,9 +13,9 @@ use serde_json::Value;
 
 use crate::adapters::{
     detect_format, read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind,
-    MemberObservation, ParsedLine, SessionMessageRole,
+    ParsedLine, SessionMessageRole,
 };
-use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
+use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::Result;
 use crate::platform::exec_resolver::{self, AgentInstallation};
 
@@ -204,24 +204,19 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         Ok(out)
     }
 
-    fn read_member_delta(
+    fn read_session_delta(
         &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
+        session: &Session,
+        cursor: &SourceCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
-        let path = PathBuf::from(&member.source_path);
-        let is_root = member.relation.as_str() == "root";
-        read_jsonl_delta(
-            &path,
-            cursor,
-            crate::adapters::StatsCapabilities::TOOL_CALLS,
-            &|_idx, v| parse_line(v, is_root),
-        )
+        let path = PathBuf::from(&session.source_path);
+        let is_root = true; // every stored session is its root source
+        read_jsonl_delta(&path, cursor, &|_idx, v| parse_line(v, is_root))
     }
 
-    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+    fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
         Ok(crate::adapters::inspect_file_source(Path::new(
-            &member.source_path,
+            &session.source_path,
         )))
     }
 
@@ -291,24 +286,6 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 
 /// One line's contribution. `toolResult` messages and every other role are
 /// machine traffic; thinking blocks are filtered by `content_text`.
-/// `message.usage` of one assistant call, as counts. The source states each
-/// number directly — no derived sums: `input` excludes `cacheRead` / `cacheWrite`
-/// and folding them in would change the source's individual axes.
-fn usage_observation(msg: &Value) -> MemberObservation {
-    let Some(usage) = msg.get("usage") else {
-        return MemberObservation::default();
-    };
-    let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-    MemberObservation {
-        input_tokens: n("input"),
-        output_tokens: n("output"),
-        cached_tokens: n("cacheRead"),
-        reasoning_tokens: n("reasoning"),
-        request_count: 1,
-        ..Default::default()
-    }
-}
-
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let source_message_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
@@ -318,45 +295,8 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             let msg = v.get("message").unwrap_or(&Value::Null);
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
             let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-            // Usage rides on the assistant entry itself (verified: 63 usage
-            // records, all `message`/`assistant`). Counting it before the text
-            // gate keeps a usage-bearing entry from being dropped for having no
-            // prose.
-            let mut observation = usage_observation(msg);
-            // Tool calls are initiated by assistant `toolCall` blocks — counted
-            // (the call), never folded into the text.
-            observation.tool_calls = msg
-                .get("content")
-                .and_then(|c| c.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("toolCall"))
-                        .count() as u64
-                })
-                .unwrap_or(0);
-            // The generation identity travels on assistant entries; the
-            // ledger anchors need it on the no-message paths too.
-            let model = if role == "assistant" {
-                msg.get("model").and_then(|m| m.as_str()).map(String::from)
-            } else {
-                None
-            };
-            let provider = if role == "assistant" {
-                msg.get("provider")
-                    .and_then(|p| p.as_str())
-                    .map(String::from)
-            } else {
-                None
-            };
             if text.trim().is_empty() {
-                return (!observation.is_empty()).then(|| {
-                    ParsedLine::billed_without_message(
-                        model,
-                        crate::adapters::UsageCategory::Conversation,
-                        observation,
-                    )
-                    .with_usage_provider(provider.clone())
-                });
+                return None;
             }
             let role = match role {
                 // pi has no injection concept — its UserMessage is plain
@@ -364,74 +304,20 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 "user" => SessionMessageRole::User,
                 "assistant" => SessionMessageRole::Assistant,
                 // Tool output is a `toolResult` MESSAGE in pi; every other
-                // non-conversation role is runtime chatter. Usage, when the
-                // entry has any, is still counted.
-                _ => {
-                    return (!observation.is_empty()).then(|| {
-                        ParsedLine::billed_without_message(
-                            model,
-                            crate::adapters::UsageCategory::Conversation,
-                            observation,
-                        )
-                        .with_usage_provider(provider.clone())
-                    })
-                }
+                // non-conversation role is runtime chatter.
+                _ => return None,
             };
-            match role {
-                SessionMessageRole::User => observation.user_messages = 1,
-                SessionMessageRole::Assistant => observation.assistant_messages = 1,
-            }
             if !is_root {
-                return Some(
-                    ParsedLine::billed_without_message(
-                        model,
-                        crate::adapters::UsageCategory::Conversation,
-                        observation,
-                    )
-                    .with_usage_provider(provider.clone()),
-                );
+                return None;
             }
-            // The assistant entry itself carries `message.provider` /
-            // `message.model`, the actual generation identity (present on every
-            // assistant entry in the real corpus). Direct evidence wins over the
-            // redundant `model_change` events.
-            let (provider, model) = if role == SessionMessageRole::Assistant {
-                (
-                    msg.get("provider")
-                        .and_then(|p| p.as_str())
-                        .map(String::from),
-                    msg.get("model").and_then(|m| m.as_str()).map(String::from),
-                )
-            } else {
-                (None, None)
-            };
-            Some(ParsedLine {
-                message: Some(
-                    crate::adapters::parsed_message(source_message_id, role, text)
-                        .with_provenance(provider, model),
-                ),
-                observation,
-                usage_note: None,
-            })
+            Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                source_message_id,
+                role,
+                text,
+            )))
         }
-        // A compaction is a billed model call: the entry carries its usage at
-        // the top level, its own id is the stable ledger identity. The source
-        // states no model/provider on it, so the event stays unattributed —
-        // that is the source's truth, not a gap to invent values into.
-        "compaction" | "compact" => {
-            let observation = usage_observation(v);
-            (!observation.is_empty()).then(|| {
-                ParsedLine::billed_observation(
-                    observation,
-                    crate::adapters::UsageNote {
-                        category: crate::adapters::UsageCategory::Compaction,
-                        model: None,
-                        provider: None,
-                        key: source_message_id,
-                    },
-                )
-            })
-        }
+        // A compaction is a billed model call, but usage is no longer recorded.
+        "compaction" | "compact" => None,
         _ => None, // session headers and bookkeeping carry nothing
     }
 }
@@ -440,7 +326,6 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
-    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("noending-pi-{}-{}", tag, std::process::id()));
@@ -448,20 +333,33 @@ mod tests {
         dir
     }
 
-    fn root_member(path: &Path) -> SessionMember {
-        SessionMember {
-            id: "mem-pi".into(),
-            session_id: "sess-pi".into(),
+    fn root_session(path: &Path) -> Session {
+        Session {
+            id: "sess-pi".into(),
             agent: Agent::Pi,
-            source_member_id: "p1".into(),
-            relation: SessionMemberRelation::Root,
-            parent_source_member_id: None,
-            source_kind: "pi_session_transcript".into(),
-            source_path: path.to_string_lossy().to_string(),
+            root_agent_session_id: "p1".into(),
+            title: None,
             cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            owner_workstream_id: None,
+            forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,
+            last_conversation_at: None,
+            trashed_at: None,
+            source_kind: "pi_session_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),
+            source_file_identity: String::new(),
+            source_generation: 0,
+            source_byte_offset: 0,
+            source_last_seen_size: 0,
+            source_mtime: None,
+            source_prefix_hash: String::new(),
+            source_tail_hash: String::new(),
+            fact_generation: 0,
+            latest_message_seq: 0,
         }
     }
 
@@ -493,75 +391,28 @@ mod tests {
     /// Prose only; the injected env block and the toolResult message
     /// are not conversation; the compaction marker is a count.
     #[test]
-    fn the_root_read_keeps_prose_and_counts_compaction() {
-        let dir = unique_dir("parse");
-        let path = dir.join("a.jsonl");
-        std::fs::write(&path, session_lines()).unwrap();
-
-        let delta = PiAdapter
-            .read_member_delta(&root_member(&path), &SessionMemberCursor::default())
-            .unwrap();
-        let texts: Vec<(SessionMessageRole, &str)> = delta
-            .messages
-            .iter()
-            .map(|m| (m.role, m.content.as_str()))
-            .collect();
-        assert_eq!(
-            texts,
-            vec![
-                (SessionMessageRole::User, "帮我看看这个"),
-                (SessionMessageRole::Assistant, "看完了。")
-            ],
-            "the toolResult message stays out of the conversation"
-        );
-        assert_eq!(delta.messages[0].source_message_id.as_deref(), Some("m1"));
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, Some(1), "the assistant toolCall block");
-                assert_eq!(s.user_message_count, Some(1));
-                assert_eq!(s.assistant_message_count, Some(1));
-                assert_eq!(s.side_activity_count, None);
-                // Usage rides on the assistant entry; source cost is ignored.
-                // The compaction call bills in the same ledger.
-                assert_eq!(usage[0], 1746 + 1000);
-                assert_eq!(usage[1], 210 + 50);
-                assert_eq!(usage[2], 30, "cacheRead");
-                assert_eq!(usage[3], 47 + 10);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        assert_eq!(delta.usage_events.len(), 2);
-        assert_eq!(
-            delta.usage_events[1].category,
-            crate::adapters::UsageCategory::Compaction
-        );
-        assert_eq!(delta.usage_events[1].key.as_deref(), Some("c1"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn inspect_reports_missing_only_for_a_confirmed_absent_file() {
         let dir = unique_dir("inspect");
         let path = dir.join("a.jsonl");
         std::fs::write(&path, session_lines()).unwrap();
-        let member = root_member(&path);
+        let session = root_session(&path);
         assert_eq!(
-            PiAdapter.inspect_member_source(&member).unwrap(),
+            PiAdapter.inspect_session_source(&session).unwrap(),
             SourceAvailability::Present
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(
-            PiAdapter.inspect_member_source(&member).unwrap(),
+            PiAdapter.inspect_session_source(&session).unwrap(),
             SourceAvailability::Missing
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Direct evidence: the assistant entry's own `message.provider` /
-    /// `message.model` land on the message; an entry without them stays NULL.
+    /// Entries carrying `message.provider` / `message.model` (or lacking
+    /// them) parse to the same prose either way since the provenance
+    /// retirement.
     #[test]
-    fn assistant_entries_carry_source_provider_and_model() {
+    fn assistant_entries_parse_alike_with_or_without_model_fields() {
         let dir = unique_dir("prov");
         let file = dir.join("a.jsonl");
         let line = |id: &str, provider: Option<&str>, model: Option<&str>| {
@@ -589,39 +440,11 @@ mod tests {
         )
         .unwrap();
         let delta = PiAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .read_session_delta(
+                &root_session(&file),
+                &crate::domain::SourceCursor::default(),
+            )
             .unwrap();
         assert_eq!(delta.messages.len(), 2);
-        assert_eq!(delta.messages[0].provider.as_deref(), Some("openai-codex"));
-        assert_eq!(delta.messages[0].model.as_deref(), Some("gpt-5.6-luna"));
-        assert_eq!(delta.messages[1].provider, None);
-        assert_eq!(delta.messages[1].model, None, "missing fields stay NULL");
-    }
-    #[test]
-    fn billed_generations_keep_their_channels_without_conversation_messages() {
-        for is_root in [true, false] {
-            for (provider, content) in [
-                (
-                    "openai",
-                    serde_json::json!([{"type":"text","text":"answer"}]),
-                ),
-                (
-                    "302ai",
-                    serde_json::json!([{"type":"toolCall","name":"read"}]),
-                ),
-            ] {
-                let source = serde_json::json!({"type":"message", "message":{
-                    "role":"assistant", "provider":provider, "model":"gpt-test", "content":content,
-                    "usage":{"input":100,"output":10}
-                }});
-                let parsed = parse_line(&source, is_root).unwrap();
-                let event = crate::adapters::UsageEvent::from_parsed_line(&parsed, None).unwrap();
-                assert_eq!(event.provider.as_deref(), Some(provider));
-                assert_eq!(event.model.as_deref(), Some("gpt-test"));
-                if !is_root || provider == "302ai" {
-                    assert!(parsed.message.is_none());
-                }
-            }
-        }
     }
 }

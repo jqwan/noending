@@ -6,15 +6,14 @@
 //! replaced to match; sequences are app-assigned and never reused; a rewritten
 //! file is a new generation.
 //!
-//! Identity lives on the ROOT MEMBER: `commit_member_ingest` chains
+//! Identity lives on the SESSION: `commit_ingest` chains
 //! `message_identity_hash` from IDENTITY_GENESIS on a full re-scan, else from
-//! the cursor's `identity_tail_hash`. The cursor — not the session — owns the
-//! read position.
+//! the session's `source_tail_hash`. The session row — not a separate cursor
+//! row — owns the read position.
 
 use noending::adapters::AgentAdapter;
 use noending::domain::{
-    Agent, ParsedSessionMessage, Session, SessionMemberRelation, SessionMessageRole,
-    SourceCursorUpdate, StatsDelta, StatsUpdate,
+    Agent, ParsedSessionMessage, Session, SessionMessageRole, SourceCursorUpdate,
 };
 use noending::storage::{new_id, Db};
 use std::path::PathBuf;
@@ -86,24 +85,17 @@ fn append_framed(file: &std::path::Path, extra: &str) {
     f.write_all(&frame(extra)).unwrap();
 }
 
-/// A Logical Session + its ROOT member, pointed at a fixture transcript file.
-/// The member identity is the session's root Resume identity, exactly as
-/// discovery creates it.
+/// A Logical Session pointed at a fixture transcript file. The root Resume
+/// identity is the source's identity, exactly as discovery creates it.
 fn fixture_session(
     db: &Db,
     agent: Agent,
     root_agent_session_id: &str,
     path: &std::path::Path,
-) -> (Session, String) {
+) -> Session {
     let s = support::ensure_session(db, new_id(), agent, root_agent_session_id);
-    let member_id = support::ensure_root_member(
-        db,
-        &s.id,
-        agent,
-        root_agent_session_id,
-        &path.to_string_lossy(),
-    );
-    (s, member_id)
+    support::ensure_session_source(db, agent, root_agent_session_id, &path.to_string_lossy());
+    db.get_session(&s.id).unwrap().expect("session row")
 }
 
 /// A parsed root-conversation message with a stable synthetic id, so a rescan
@@ -114,8 +106,6 @@ fn msg(
     content: impl Into<String>,
 ) -> ParsedSessionMessage {
     ParsedSessionMessage {
-        provider: None,
-        model: None,
         source_message_id: Some(source_message_id.into()),
         source_position: String::new(),
         ts: Some("2026-09-13T10:00:00Z".into()),
@@ -220,21 +210,18 @@ fn dsh_line(role: &str, text: &str) -> String {
     format!(r#"{{"type":"{vtype}","seq":{seq},"time":1783137449113,"data":{data}}}"#)
 }
 
-/// One ingest round-trip exactly as production does it: read the MEMBER's
+/// One ingest round-trip exactly as production does it: read the session's
 /// delta from its own source, commit atomically through the one ingest path.
-fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session, member_id: &str) -> usize {
-    let member = db.get_member(member_id).unwrap().expect("member row");
-    let cursor = db.get_member_cursor(member_id).unwrap();
-    let delta = adapter.read_member_delta(&member, &cursor).unwrap();
+fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
+    let cursor = db
+        .get_session(&session.id)
+        .unwrap()
+        .expect("session row")
+        .source_cursor();
+    let delta = adapter.read_session_delta(session, &cursor).unwrap();
     let source = delta.source.clone().expect("source state");
     let stored = db
-        .commit_member_ingest(
-            &session.id,
-            member_id,
-            &delta.messages,
-            delta.stats,
-            &source,
-        )
+        .commit_ingest(&session.id, &delta.messages, &source)
         .unwrap();
     stored.len()
 }
@@ -260,10 +247,10 @@ macro_rules! identity_suite {
                     $user_line("user", "second user message")
                 ),
             );
-            let (s, member_id) = fixture_session(&db, $agent, stringify!($fn_name), &file);
+            let s = fixture_session(&db, $agent, stringify!($fn_name), &file);
 
             assert_eq!(
-                ingest(&db, adapter, &s, &member_id),
+                ingest(&db, adapter, &s),
                 3,
                 "initial ingest stores all messages"
             );
@@ -280,11 +267,11 @@ macro_rules! identity_suite {
                 "every message has a stable id"
             );
             assert!(
-                all.iter().all(|e| e.member_id == member_id),
-                "conversation rows belong to the ROOT member"
+                all.iter().all(|e| e.session_id == s.id),
+                "conversation rows belong to the session"
             );
 
-            let c = db.get_member_cursor(&member_id).unwrap();
+            let c = db.get_session(&s.id).unwrap().unwrap().source_cursor();
             assert_eq!(c.generation, 0);
             assert_eq!(
                 c.byte_offset as usize,
@@ -307,11 +294,7 @@ macro_rules! identity_suite {
                 ),
             );
 
-            assert_eq!(
-                ingest(&db, adapter, &s, &member_id),
-                2,
-                "append stores only new lines"
-            );
+            assert_eq!(ingest(&db, adapter, &s), 2, "append stores only new lines");
             let all = db.get_messages(&s.id, None, 100).unwrap();
             assert_eq!(all.len(), 5);
             assert_eq!(
@@ -321,11 +304,7 @@ macro_rules! identity_suite {
             );
 
             // no change: re-read is a no-op
-            assert_eq!(
-                ingest(&db, adapter, &s, &member_id),
-                0,
-                "unchanged file adds nothing"
-            );
+            assert_eq!(ingest(&db, adapter, &s), 0, "unchanged file adds nothing");
 
             // truncate + rewrite with different content
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -339,7 +318,7 @@ macro_rules! identity_suite {
             );
 
             assert_eq!(
-                ingest(&db, adapter, &s, &member_id),
+                ingest(&db, adapter, &s),
                 2,
                 "compacted content is new messages"
             );
@@ -363,7 +342,7 @@ macro_rules! identity_suite {
 
             // rescan of identical content dedups
             assert_eq!(
-                ingest(&db, adapter, &s, &member_id),
+                ingest(&db, adapter, &s),
                 0,
                 "identical rescan never duplicates"
             );
@@ -376,11 +355,11 @@ macro_rules! identity_suite {
                 &format!("{}\n", $user_line("user", "brand new session file content")),
             );
             assert_eq!(
-                ingest(&db, adapter, &s, &member_id),
+                ingest(&db, adapter, &s),
                 1,
                 "replaced file is ingested fresh"
             );
-            let c = db.get_member_cursor(&member_id).unwrap();
+            let c = db.get_session(&s.id).unwrap().unwrap().source_cursor();
             assert_eq!(c.generation, 2, "file replacement bumps the generation");
             assert_eq!(
                 raw_rows(&db, &s.id).len(),
@@ -472,14 +451,14 @@ fn same_size_rewrite_is_detected() {
     );
 
     std::fs::write(&file, format!("{}\n", before)).unwrap();
-    let (s, member_id) = fixture_session(&db, Agent::Pi, "same-size-root", &file);
-    assert_eq!(ingest(&db, adapter, &s, &member_id), 1);
+    let s = fixture_session(&db, Agent::Pi, "same-size-root", &file);
+    assert_eq!(ingest(&db, adapter, &s), 1);
 
     std::thread::sleep(std::time::Duration::from_millis(50));
     std::fs::write(&file, format!("{}\n", after)).unwrap();
 
     assert_eq!(
-        ingest(&db, adapter, &s, &member_id),
+        ingest(&db, adapter, &s),
         1,
         "same-size rewrite adds the new text"
     );
@@ -495,7 +474,7 @@ fn same_size_rewrite_is_detected() {
         2,
         "the raw store keeps the retired row too"
     );
-    let c = db.get_member_cursor(&member_id).unwrap();
+    let c = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert_eq!(c.generation, 1);
 }
 
@@ -509,7 +488,7 @@ fn same_size_rewrite_is_detected() {
 fn identity_dedup_follows_chain_semantics() {
     let db = open_db("chain-identity");
     let dir = unique_dir("chain-identity");
-    let (s, member_id) = fixture_session(
+    let s = fixture_session(
         &db,
         Agent::Codex,
         "chain-identity-root",
@@ -517,8 +496,6 @@ fn identity_dedup_follows_chain_semantics() {
     );
 
     let mk = |pos: &str, text: &str| ParsedSessionMessage {
-        provider: None,
-        model: None,
         source_message_id: None,
         source_position: pos.into(),
         ts: Some("t".into()),
@@ -526,8 +503,6 @@ fn identity_dedup_follows_chain_semantics() {
         content: text.into(),
     };
     let mk_native = |pos: &str, id: &str| ParsedSessionMessage {
-        provider: None,
-        model: None,
         source_message_id: Some(id.into()),
         source_position: pos.into(),
         ts: Some("t".into()),
@@ -537,99 +512,65 @@ fn identity_dedup_follows_chain_semantics() {
 
     // first sight of the content
     let first = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[mk("line:1", "same text")],
-            None,
-            &rescan(0),
-        )
+        .commit_ingest(&s.id, &[mk("line:1", "same text")], &rescan(0))
         .unwrap();
     assert_eq!(first.len(), 1);
 
     // identical re-scan (same chain position, later generation) → dedup
     let again = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[mk("line:9", "same text")],
-            None,
-            &rescan(1),
-        )
+        .commit_ingest(&s.id, &[mk("line:9", "same text")], &rescan(1))
         .unwrap();
     assert_eq!(again.len(), 0, "identical rescan never duplicates");
 
     // the SAME content appended after another event is a DIFFERENT logical
     // message ("继续" sent twice must not collapse): the append chains from
-    // the cursor's identity tail, so the second occurrence links to a
+    // the session's identity tail, so the second occurrence links to a
     // different predecessor.
     let second_msg = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[mk("line:2", "same text")],
-            None,
-            &append(0),
-        )
+        .commit_ingest(&s.id, &[mk("line:2", "same text")], &append(0))
         .unwrap();
     assert_eq!(second_msg.len(), 1, "repeated user message stays distinct");
 
     // native agent message ids dedup regardless of chain position
     let native1 = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[mk_native("line:3", "native-1")],
-            None,
-            &append(0),
-        )
+        .commit_ingest(&s.id, &[mk_native("line:3", "native-1")], &append(0))
         .unwrap();
     assert_eq!(native1.len(), 1);
     let native2 = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[mk_native("line:4", "native-1")],
-            None,
-            &append(0),
-        )
+        .commit_ingest(&s.id, &[mk_native("line:4", "native-1")], &append(0))
         .unwrap();
     assert_eq!(native2.len(), 0, "native id dedups across positions");
 
     // genuinely new content still inserts
     let third = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[mk("line:5", "different text")],
-            None,
-            &append(0),
-        )
+        .commit_ingest(&s.id, &[mk("line:5", "different text")], &append(0))
         .unwrap();
     assert_eq!(third.len(), 1);
 }
 
-/// A stats-only batch (no messages) advances the member cursor's read
+/// A stats-only batch (no messages) advances the session cursor's read
 /// position but must NOT move the identity tail: only messages advance the
 /// chain, so the next append keeps chaining from the last real message.
 #[test]
 fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
     let db = open_db("stats-only-tail");
     let dir = unique_dir("stats-only-tail");
-    let (s, member_id) =
-        fixture_session(&db, Agent::Codex, "stats-only-root", &dir.join("x.jsonl"));
+    let s = fixture_session(&db, Agent::Codex, "stats-only-root", &dir.join("x.jsonl"));
 
     let first = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s.id,
-            &member_id,
             &[msg("m-1", SessionMessageRole::User, "hello")],
-            None,
             &rescan(0),
         )
         .unwrap();
     assert_eq!(first.len(), 1);
-    let tail = db.get_member_cursor(&member_id).unwrap().identity_tail_hash;
+    let tail = db
+        .get_session(&s.id)
+        .unwrap()
+        .unwrap()
+        .source_cursor()
+        .identity_tail_hash;
     assert!(!tail.is_empty(), "a message batch sets the identity tail");
 
     // stats-only batch: the read moved, no message was parsed
@@ -642,118 +583,42 @@ fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
         start_byte_offset: 100,
         prefix_hash: "prefix".into(),
     };
-    let stored = db
-        .commit_member_ingest(
-            &s.id,
-            &member_id,
-            &[],
-            Some(StatsUpdate::Delta(StatsDelta {
-                tool_call_count: Some(2),
-                ..Default::default()
-            })),
-            &advanced,
-        )
-        .unwrap();
+    let stored = db.commit_ingest(&s.id, &[], &advanced).unwrap();
     assert!(stored.is_empty(), "a stats-only batch stores no messages");
 
-    let c = db.get_member_cursor(&member_id).unwrap();
+    let c = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert_eq!(c.byte_offset, 200, "the read position moved");
     assert_eq!(
         c.identity_tail_hash, tail,
         "stats-only batches keep the identity tail"
     );
-    let stats = db.get_member_stats(&member_id).unwrap().expect("stats row");
-    assert_eq!(stats.tool_call_count, Some(2));
     assert_eq!(db.message_count(&s.id).unwrap(), 1);
 
     // the next real append still chains from the preserved tail: an id-less
     // message appended after the stats batch links to the recorded tail as
     // its predecessor, landing as a genuinely new chain position.
     let appended = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s.id,
-            &member_id,
             &[ParsedSessionMessage {
-                provider: None,
-                model: None,
                 source_message_id: None,
                 source_position: String::new(),
                 ts: Some("2026-09-13T10:00:00Z".into()),
                 role: SessionMessageRole::User,
                 content: "hello".into(),
             }],
-            None,
             &append(0),
         )
         .unwrap();
     assert_eq!(appended.len(), 1, "an append is a new chain position");
     assert_ne!(
-        db.get_member_cursor(&member_id).unwrap().identity_tail_hash,
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor()
+            .identity_tail_hash,
         tail,
         "the tail advanced to the appended message"
-    );
-}
-
-/// Only the ROOT member may produce Conversation rows: an adapter handing
-/// child text to the conversation is a bug, and the commit must reject the
-/// whole batch — nothing stored, nothing moved.
-#[test]
-fn child_member_messages_are_rejected_not_stored() {
-    let db = open_db("child-guard");
-    let dir = unique_dir("child-guard");
-    let (s, _root_member) =
-        fixture_session(&db, Agent::Codex, "child-guard-root", &dir.join("x.jsonl"));
-    let child_id = db
-        .upsert_session_member(
-            &s.id,
-            Agent::Codex,
-            "child-guard-root:subagent:1",
-            SessionMemberRelation::Child,
-            Some("child-guard-root"),
-            "test_child",
-            "/tmp/child.jsonl",
-            None,
-            None,
-            None,
-            &serde_json::json!({}),
-        )
-        .unwrap();
-
-    let attempt = db.commit_member_ingest(
-        &s.id,
-        &child_id,
-        &[msg(
-            "c-1",
-            SessionMessageRole::User,
-            "child prose that must not land",
-        )],
-        None,
-        &rescan(0),
-    );
-    assert!(
-        attempt.is_err(),
-        "child-with-messages must be rejected at commit"
-    );
-    assert_eq!(
-        db.message_count(&s.id).unwrap(),
-        0,
-        "the rejected batch stored nothing"
-    );
-
-    // observations without messages stay legal for a child (stats surface)
-    let observations = db.commit_member_ingest(
-        &s.id,
-        &child_id,
-        &[],
-        Some(StatsUpdate::Delta(StatsDelta {
-            tool_call_count: Some(1),
-            ..Default::default()
-        })),
-        &rescan(0),
-    );
-    assert!(
-        observations.is_ok(),
-        "a stats-only child batch is a legal observation"
     );
 }
 
@@ -766,7 +631,7 @@ fn child_member_messages_are_rejected_not_stored() {
 fn truncate_replaces_the_projection_and_preserves_raw_history() {
     let db = open_db("truncate-frontier");
     let dir = unique_dir("truncate-frontier");
-    let (s, member_id) = fixture_session(
+    let s = fixture_session(
         &db,
         Agent::Codex,
         "truncate-frontier-root",
@@ -774,15 +639,13 @@ fn truncate_replaces_the_projection_and_preserves_raw_history() {
     );
 
     let first = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s.id,
-            &member_id,
             &[
                 msg("t-1", SessionMessageRole::User, "decision one"),
                 msg("t-2", SessionMessageRole::Assistant, "reply one"),
                 msg("t-3", SessionMessageRole::User, "decision two"),
             ],
-            None,
             &rescan(0),
         )
         .unwrap();
@@ -797,15 +660,13 @@ fn truncate_replaces_the_projection_and_preserves_raw_history() {
     // generation atomically replaces the projection — dedups nothing, deletes
     // no raw row.
     let compacted = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s.id,
-            &member_id,
             &[msg(
                 "t-4",
                 SessionMessageRole::User,
                 "compacted summary of it all",
             )],
-            None,
             &rescan(1),
         )
         .unwrap();
@@ -862,18 +723,15 @@ fn truncate_replaces_the_projection_and_preserves_raw_history() {
     }
 
     let state = db.get_session_ingest_state(&s.id).unwrap();
-    assert!(
-        state.generation > 0,
-        "the rewrite raised the fact generation"
-    );
+    assert!(state.0 > 0, "the rewrite raised the fact generation");
     assert_eq!(
-        state.latest_message_seq, 1,
+        state.1, 1,
         "the current projection now holds a single message"
     );
 }
 
 /// After a compact + dedup re-scan, the identity chain must continue from
-/// the CURRENT source tail (tracked on the member cursor), not from the
+/// the CURRENT source tail (tracked on the session row), not from the
 /// message store's last row: the store keeps newer history the source no
 /// longer has (append-only), and chaining an append from the store tail would
 /// make that append invisible to the next full re-scan (duplicated as "new").
@@ -901,9 +759,14 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
         ),
     )
     .unwrap();
-    let (s, member_id) = fixture_session(&db, Agent::Pi, "compact-tail-root", &file);
-    assert_eq!(ingest(&db, adapter, &s, &member_id), 4);
-    let store_tail_before = db.get_member_cursor(&member_id).unwrap().identity_tail_hash;
+    let s = fixture_session(&db, Agent::Pi, "compact-tail-root", &file);
+    assert_eq!(ingest(&db, adapter, &s), 4);
+    let store_tail_before = db
+        .get_session(&s.id)
+        .unwrap()
+        .unwrap()
+        .source_cursor()
+        .identity_tail_hash;
     assert!(
         !store_tail_before.is_empty(),
         "cursor tracks the source chain tail"
@@ -921,11 +784,7 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
         ),
     )
     .unwrap();
-    assert_eq!(
-        ingest(&db, adapter, &s, &member_id),
-        0,
-        "compacted prefix dedups"
-    );
+    assert_eq!(ingest(&db, adapter, &s), 0, "compacted prefix dedups");
 
     let hash_of = |t: &str| -> String {
         db.read()
@@ -937,7 +796,12 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
             )
             .unwrap()
     };
-    let tail = db.get_member_cursor(&member_id).unwrap().identity_tail_hash;
+    let tail = db
+        .get_session(&s.id)
+        .unwrap()
+        .unwrap()
+        .source_cursor()
+        .identity_tail_hash;
     assert_ne!(
         tail, store_tail_before,
         "tail follows the source, not the store"
@@ -957,14 +821,14 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
     use std::io::Write;
     writeln!(f, "{}", pi_line("user", &text('E'))).unwrap();
     drop(f);
-    assert_eq!(ingest(&db, adapter, &s, &member_id), 1, "E is new");
+    assert_eq!(ingest(&db, adapter, &s), 1, "E is new");
     let e_hash = hash_of(&text('E'));
 
     // full re-scan of A,B,E: E must dedup — it did NOT chain from the
     // stale store tail (the bug would duplicate it here)
-    db.reset_member_cursors(&s.id).unwrap();
+    db.rewind_source_cursor(&s.id).unwrap();
     assert_eq!(
-        ingest(&db, adapter, &s, &member_id),
+        ingest(&db, adapter, &s),
         0,
         "E survives a full re-scan without duplication"
     );
@@ -979,7 +843,11 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
         "the current conversation is the compacted A,B,E"
     );
     assert_eq!(
-        db.get_member_cursor(&member_id).unwrap().identity_tail_hash,
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor()
+            .identity_tail_hash,
         e_hash
     );
 }
@@ -1003,8 +871,8 @@ fn reingest_preserves_message_ids_and_dedups() {
         ),
     )
     .unwrap();
-    let (s, member_id) = fixture_session(&db, Agent::Pi, "reingest-root", &file);
-    assert_eq!(ingest(&db, adapter, &s, &member_id), 2);
+    let s = fixture_session(&db, Agent::Pi, "reingest-root", &file);
+    assert_eq!(ingest(&db, adapter, &s), 2);
     let ids_before: Vec<String> = db
         .get_messages(&s.id, None, 100)
         .unwrap()
@@ -1012,10 +880,10 @@ fn reingest_preserves_message_ids_and_dedups() {
         .map(|e| e.id)
         .collect();
 
-    // simulate 重新入库: rewind the member cursors, keep the message store
-    db.reset_member_cursors(&s.id).unwrap();
+    // simulate 重新入库: rewind the source cursor, keep the message store
+    db.rewind_source_cursor(&s.id).unwrap();
     assert_eq!(
-        ingest(&db, adapter, &s, &member_id),
+        ingest(&db, adapter, &s),
         0,
         "re-scan of unchanged source adds nothing"
     );
@@ -1046,7 +914,7 @@ fn reingest_preserves_message_ids_and_dedups() {
     .unwrap();
     drop(f);
     assert_eq!(
-        ingest(&db, adapter, &s, &member_id),
+        ingest(&db, adapter, &s),
         1,
         "new content appends after the re-scan"
     );
@@ -1059,14 +927,12 @@ fn reingest_preserves_message_ids_and_dedups() {
 fn message_by_ref_resolves_the_app_owned_identity() {
     let db = open_db("by-ref");
     let dir = unique_dir("by-ref");
-    let (s, member_id) = fixture_session(&db, Agent::Codex, "by-ref-root", &dir.join("x.jsonl"));
+    let s = fixture_session(&db, Agent::Codex, "by-ref-root", &dir.join("x.jsonl"));
 
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             &s.id,
-            &member_id,
             &[msg("r-1", SessionMessageRole::User, "cited evidence")],
-            None,
             &rescan(0),
         )
         .unwrap();

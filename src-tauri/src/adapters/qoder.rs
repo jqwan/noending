@@ -49,10 +49,9 @@ use serde_json::Value;
 
 use crate::adapters::{
     detect_format, read_jsonl_delta, AgentCommand, DesktopResume, DiscoveredMember,
-    DiscoveredMemberKind, ExecOptions, MemberObservation, ParsedLine, ResumeRoute,
-    SessionMessageRole,
+    DiscoveredMemberKind, ExecOptions, ParsedLine, ResumeRoute, SessionMessageRole,
 };
-use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
+use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct QoderAdapter;
@@ -322,143 +321,6 @@ impl QoderAdapter {
     }
 }
 
-/// The authoritative display names live in the app's SERVER-PUSHED dynamic
-/// text: `~/.qoder-cn/.auth/dynamic-texts.json` (override with
-/// `QODERCN_CONFIG_DIR`), flat keys `locales.<locale>.modelSelector.item.<code>`
-/// with a `{label, description, …}` node. The copy shipped inside the bundle
-/// (`Resources/dynamic-text/qoder-cn.json`) is a stale snapshot and is
-/// deliberately NOT read — it disagreed with the live UI (it said
-/// DeepSeek-V4-Flash while the app showed V4.1). Read once per process.
-///
-/// When the label carries no version at all (`dfmodel` → "DeepSeek-Flash"),
-/// the concrete identity is recovered from the description's parenthesized
-/// name (`（DeepSeek-V4.1-Flash）`) — versions must not silently disappear
-/// from the stats.
-fn dynamic_model_names() -> Option<std::collections::HashMap<String, String>> {
-    static CACHE: std::sync::OnceLock<Option<std::collections::HashMap<String, String>>> =
-        std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let base = std::env::var("QODERCN_CONFIG_DIR").unwrap_or_else(|_| {
-                crate::platform::paths::resolve_home()
-                    .map(|home| home.join(".qoder-cn").to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "~/.qoder-cn".to_string())
-            });
-            let raw = std::fs::read_to_string(
-                std::path::PathBuf::from(base).join(".auth/dynamic-texts.json"),
-            )
-            .ok()?;
-            let parsed: Value = serde_json::from_str(&raw).ok()?;
-            let entries = parsed.get("locales")?.get("en")?.as_object()?;
-            let out: std::collections::HashMap<String, String> = entries
-                .iter()
-                .filter_map(|(key, node)| {
-                    let code = key.strip_prefix("modelSelector.item.")?;
-                    let node = node.as_object()?;
-                    let label = node.get("label")?.as_str()?.trim();
-                    if label.is_empty() {
-                        return None;
-                    }
-                    let name = match versioned_from_description(node) {
-                        Some(versioned) if !label.chars().any(|c| c.is_ascii_digit()) => versioned,
-                        _ => label.to_string(),
-                    };
-                    Some((code.to_string(), name))
-                })
-                .collect();
-            (!out.is_empty()).then_some(out)
-        })
-        .as_ref()
-        .cloned()
-}
-
-/// The concrete model name inside the description's parentheses —
-/// `深度求索正式版模型（DeepSeek-V4.1-Flash）…` → `DeepSeek-V4.1-Flash`.
-/// The first parenthesized group that carries a version digit wins.
-fn versioned_from_description(node: &serde_json::Map<String, Value>) -> Option<String> {
-    let description = node
-        .get("description")
-        .or_else(|| node.get("markdownDescription"))
-        .or_else(|| node.get("detail"))?
-        .as_str()?;
-    // Either ASCII or fullwidth parens; `start` is the byte offset just past
-    // the opening character, so the closing slice excludes it entirely.
-    let open = ['(', '（'];
-    let close = [')', '）'];
-    let mut start: Option<usize> = None;
-    for (byte_pos, ch) in description.char_indices() {
-        if open.contains(&ch) && start.is_none() {
-            start = Some(byte_pos + ch.len_utf8());
-        } else if close.contains(&ch) && start.is_some() {
-            let candidate = &description[start.unwrap()..byte_pos];
-            if candidate.chars().any(|c| c.is_ascii_digit()) {
-                return Some(candidate.trim().to_string());
-            }
-            start = None;
-        }
-    }
-    None
-}
-
-/// The built-in fallback: the model display names of the 2026-09 server
-/// push (`dynamic-texts.json`), used when that file cannot be read. Codes
-/// shift meaning across releases (`gmodel`: GLM-5 → GLM-5.3; `dfmodel`:
-/// DeepSeek-V4-Flash → the V4.1 release) — the dynamic file is the
-/// authority, this table is only the safety net, so it tracks the CURRENT
-/// meanings and keeps retired codes (`qmodel_preview`) that historical rows
-/// can still name.
-fn built_in_model_name(code: &str) -> Option<&'static str> {
-    let name = match code {
-        "auto" | "experts-auto" | "quest-auto" => "Auto",
-        "cmodel" => "Cantus",
-        "dashscope_qmodel" => "Qwen3.7-Plus",
-        "dashscope_qwen3_coder" => "Qwen3-Coder-Plus",
-        "dashscope_qwen_max_latest" => "Qwen3-Max",
-        "dfmodel" => "DeepSeek-V4.1-Flash",
-        "dmodel" => "DeepSeek-V4-Pro",
-        "efficient" => "Efficient",
-        "gfmodel" => "GLM-5.3-Flash",
-        "gmodel" => "GLM-5.3",
-        "gm51model" => "GLM-5.2",
-        "kmodel" => "Kimi-K2.8-Preview",
-        "kmodel_latest" => "Kimi-K3",
-        "lite" => "Lite",
-        "mmodel" => "MiniMax-M2.7",
-        "performance" => "Performance",
-        "q35model" => "Qwen3.5-Plus",
-        "q35model_preview" => "Qwen3.7-Max-DogFooding",
-        "q36fmodel" => "Qwen3.6-Flash",
-        "q37fmodel" => "Qwen3.7-Flash",
-        "qfmodel" => "Qwen3.8-Flash",
-        "qmodel" => "Qwen3.7-Plus",
-        "qmodel_38max" => "Qwen3.8-Max",
-        "qmodel_latest" => "Qwen3.7-Max",
-        "qmodel_preview" => "Qwen3.8-Max-Preview", // retired code, same preview model
-        "ultimate" | "experts-ultimate" | "quest-ultimate" => "Ultimate",
-        _ => return None,
-    };
-    Some(name)
-}
-
-/// The assistant row's `message.model` is an internal CODE, not a name;
-/// resolve it to the app's display name when known. Routing tiers (`auto`,
-/// `ultimate`, …) are the user's selection, mapped like any code; locally
-/// synthesized error notices (`<synthetic>`) are no generation at all and
-/// stay NULL.
-fn model_display_name(code: &str) -> Option<String> {
-    if code == "<synthetic>" {
-        return None;
-    }
-    if let Some(map) = dynamic_model_names() {
-        if let Some(name) = map.get(code) {
-            return Some(name.clone());
-        }
-    }
-    built_in_model_name(code)
-        .map(str::to_string)
-        .or_else(|| Some(code.to_string()))
-}
-
 impl crate::adapters::AgentAdapter for QoderAdapter {
     fn agent(&self) -> Agent {
         Agent::Qoder
@@ -522,24 +384,19 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         Ok(out)
     }
 
-    fn read_member_delta(
+    fn read_session_delta(
         &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
+        session: &Session,
+        cursor: &SourceCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
-        let path = PathBuf::from(&member.source_path);
-        let is_root = member.relation.as_str() == "root";
-        read_jsonl_delta(
-            &path,
-            cursor,
-            crate::adapters::StatsCapabilities::TOOL_AND_SIDE_ACTIVITY,
-            &|_idx, v| parse_line(v, is_root),
-        )
+        let path = PathBuf::from(&session.source_path);
+        let is_root = true; // every stored session is its root source
+        read_jsonl_delta(&path, cursor, &|_idx, v| parse_line(v, is_root))
     }
 
-    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+    fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
         Ok(crate::adapters::inspect_file_source(Path::new(
-            &member.source_path,
+            &session.source_path,
         )))
     }
 
@@ -578,7 +435,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         Some("Qoder CN")
     }
 
-    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+    fn continue_route(&self, _session: &Session) -> ResumeRoute {
         if !crate::platform::paths::app_bundle_present("Qoder CN") {
             return ResumeRoute::Refused("未找到 Qoder 桌面应用，无法继续该会话".into());
         }
@@ -589,8 +446,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
     }
 }
 
-/// One transcript line's contribution. Root members produce
-/// conversation; child members produce observations only.
+/// One transcript line's contribution. Root members produce conversation.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let sidechain = v
@@ -610,62 +466,13 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 .get("isCompactSummary")
                 .and_then(|s| s.as_bool())
                 .unwrap_or(false);
-            if compact_summary {
+            if compact_summary || sidechain {
                 return None;
             }
             let msg = v.get("message").unwrap_or(&Value::Null);
             let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-            // A user line with toolUseResult is a completed tool call.
-            let tool_call = vtype == "user" && v.get("toolUseResult").is_some();
-            let mut observation = MemberObservation {
-                tool_calls: u64::from(tool_call),
-                side_activity: u64::from(sidechain),
-                ..Default::default()
-            };
-            // BYOK/custom-model rows carry MEASURED token counts (plan rows
-            // are structural zeros, so a zero never reaches the stats). Their
-            // `input_tokens` INCLUDES the cached subset — store the uncached
-            // input and keep the cached subset on its own axis, matching the
-            // fresh-input convention of the other adapters.
-            if let Some(usage) = msg.get("usage").and_then(|u| u.as_object()) {
-                if vtype == "assistant" {
-                    observation.request_count = 1;
-                }
-                let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                let (input, output, cache_read) = (
-                    n("input_tokens"),
-                    n("output_tokens"),
-                    n("cache_read_input_tokens"),
-                );
-                if input + output + cache_read > 0 {
-                    observation.input_tokens = input.saturating_sub(cache_read);
-                    observation.output_tokens = output;
-                    observation.cached_tokens = cache_read;
-                }
-            }
-            // The row's model code, resolved the same way the assistant arm
-            // resolves it — the ledger anchors on the no-message paths need
-            // the same attribution.
-            let model = if vtype == "assistant" {
-                msg.get("model")
-                    .and_then(|m| m.as_str())
-                    .and_then(model_display_name)
-            } else {
-                None
-            };
-            if sidechain {
-                return Some(ParsedLine::billed_without_message(
-                    model,
-                    crate::adapters::UsageCategory::SideActivity,
-                    observation,
-                ));
-            }
             if text.trim().is_empty() {
-                return Some(ParsedLine::billed_without_message(
-                    model,
-                    crate::adapters::UsageCategory::Conversation,
-                    observation,
-                ));
+                return None;
             }
             let role = if vtype == "user" {
                 SessionMessageRole::User
@@ -674,37 +481,20 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
             };
             // Injected context is never conversation.
             if role == SessionMessageRole::User && crate::adapters::is_injected_preamble(&text) {
-                return Some(ParsedLine::billed_without_message(
-                    model,
-                    crate::adapters::UsageCategory::Conversation,
-                    observation,
-                ));
-            }
-            match role {
-                SessionMessageRole::User => observation.user_messages = 1,
-                SessionMessageRole::Assistant => observation.assistant_messages = 1,
+                return None;
             }
             if !is_root {
-                // A sub-agent's turns are counted, but its prose is never this
-                // Session's Conversation.
-                return Some(ParsedLine::billed_without_message(
-                    model,
-                    crate::adapters::UsageCategory::Conversation,
-                    observation,
-                ));
+                // A sub-agent's prose is never this Session's Conversation.
+                return None;
             }
-            Some(ParsedLine {
-                message: Some(
-                    crate::adapters::parsed_message(source_message_id, role, text)
-                        .with_provenance(None, model),
-                ),
-                observation,
-                usage_note: None,
-            })
+            Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                source_message_id,
+                role,
+                text,
+            )))
         }
         // `attachment` lines are injected context (skill listings, system
-        // reminders) — machine chatter, same category as the tool events
-        // deliberately dropped.
+        // reminders) — machine chatter, deliberately dropped.
         _ => None,
     }
 }
@@ -713,7 +503,6 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
 mod tests {
     use super::*;
     use crate::adapters::{AgentAdapter, MemberReadDelta};
-    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir =
@@ -755,149 +544,47 @@ mod tests {
         )
         .unwrap();
         let delta: MemberReadDelta = QoderAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .read_session_delta(
+                &root_session(&file),
+                &crate::domain::SourceCursor::default(),
+            )
             .unwrap();
         assert_eq!(delta.messages.len(), 1);
         assert_eq!(delta.messages[0].content, "继续");
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => assert_eq!(s.user_message_count, Some(1)),
-            other => panic!("expected snapshot, got {other:?}"),
-        }
     }
 
-    fn root_member(path: &Path) -> SessionMember {
-        SessionMember {
-            id: "mem-qoder".into(),
-            session_id: "sess-qoder".into(),
+    fn root_session(path: &Path) -> Session {
+        Session {
+            id: "sess-qoder".into(),
             agent: Agent::Qoder,
-            source_member_id: "s-main".into(),
-            relation: SessionMemberRelation::Root,
-            parent_source_member_id: None,
-            source_kind: "qoder_transcript".into(),
-            source_path: path.to_string_lossy().to_string(),
+            root_agent_session_id: "s-main".into(),
+            title: None,
             cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            owner_workstream_id: None,
+            forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,
+            last_conversation_at: None,
+            trashed_at: None,
+            source_kind: "qoder_transcript".into(),
+            source_path: path.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),
+            source_file_identity: String::new(),
+            source_generation: 0,
+            source_byte_offset: 0,
+            source_last_seen_size: 0,
+            source_mtime: None,
+            source_prefix_hash: String::new(),
+            source_tail_hash: String::new(),
+            fact_generation: 0,
+            latest_message_seq: 0,
         }
     }
 
     /// Prose survives; attachments, tool results and bookkeeping lines
     /// never become messages.
-    #[test]
-    fn the_root_read_keeps_prose_and_counts_the_rest() {
-        let dir = unique_dir("parse");
-        let file = dir.join("s-main.jsonl");
-        std::fs::write(&file, main_lines()).unwrap();
-
-        let delta: MemberReadDelta = QoderAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let texts: Vec<(SessionMessageRole, &str)> = delta
-            .messages
-            .iter()
-            .map(|m| (m.role, m.content.as_str()))
-            .collect();
-        assert_eq!(
-            texts,
-            vec![
-                (SessionMessageRole::User, "把详情页的消息改一下"),
-                (SessionMessageRole::Assistant, "好，我先看现状。"),
-            ],
-            "the sidechain line and the tool-result line never become conversation"
-        );
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, Some(1));
-                assert_eq!(s.side_activity_count, Some(1));
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Source credits do not enter local statistics. Usage-bearing assistant
-    /// calls still contribute requests even when all reported token axes are zero.
-    #[test]
-    fn source_credits_are_ignored_and_zero_token_requests_are_preserved() {
-        let dir = unique_dir("credits");
-        let file = dir.join("s-main.jsonl");
-        std::fs::write(
-            &file,
-            [
-                r#"{"type":"user","uuid":"u1","timestamp":"2026-09-22T15:01:29.551Z","cwd":"/repo","sessionId":"s-main","message":{"role":"user","content":[{"type":"text","text":"跑一下"}]}}"#,
-                r#"{"type":"assistant","uuid":"u2","timestamp":"2026-09-22T15:01:31.000Z","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"credits":10.2176448},"content":[{"type":"text","text":"好了。"}]}}"#,
-                r#"{"type":"assistant","uuid":"u3","timestamp":"2026-09-22T15:01:41.000Z","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"credits":0.5},"content":[{"type":"text","text":"补充。"}]}}"#,
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .unwrap();
-
-        let delta = QoderAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(
-                    usage[0], 0,
-                    "plan rows are structural zeros — the axis exists, the source says 0"
-                );
-                assert_eq!(usage[1], 0);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        assert_eq!(delta.usage_events.len(), 2);
-        assert_eq!(
-            delta
-                .usage_events
-                .iter()
-                .map(|event| event.request_count)
-                .sum::<u64>(),
-            2
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// BYOK/custom-model rows carry MEASURED token counts, and their
-    /// `input_tokens` INCLUDES the cached subset: the uncached input is what
-    /// gets stored, with the cached subset on its own axis. The model code
-    /// resolves to the app's display name (`dmodel` → DeepSeek-V4-Pro).
-    #[test]
-    fn a_byok_row_bills_measured_tokens_with_uncached_input() {
-        let dir = unique_dir("byok");
-        let file = dir.join("s.jsonl");
-        std::fs::write(
-            &file,
-            r#"{"type":"assistant","uuid":"u1","timestamp":"2026-09-22T15:01:31.000Z","cwd":"/repo","sessionId":"s","message":{"role":"assistant","model":"dmodel","usage":{"input_tokens":1500,"output_tokens":210,"cache_read_input_tokens":1200},"content":[{"type":"text","text":"答"}]}}"#,
-        )
-        .unwrap();
-
-        let delta = QoderAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(usage[0], 300, "1500 raw input minus 1200 cached");
-                assert_eq!(usage[1], 210);
-                assert_eq!(usage[2], 1200);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        let assistant = delta
-            .messages
-            .iter()
-            .find(|m| m.role == SessionMessageRole::Assistant)
-            .unwrap();
-        assert_eq!(assistant.model.as_deref(), Some("DeepSeek-V4-Pro"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Sub-agent transcripts become CHILD members with an
-    /// Adapter-derived stable identity, while their text stays out of the
-    /// Conversation.
     #[test]
     fn subagent_transcripts_are_child_members_with_derived_identity() {
         let dir = unique_dir("subagent");
@@ -935,29 +622,6 @@ mod tests {
             child.first_user_text, None,
             "a child never carries a title source"
         );
-
-        // The child's text is execution observation only.
-        let member = SessionMember {
-            id: "mem-child".into(),
-            session_id: "sess-qoder".into(),
-            agent: Agent::Qoder,
-            source_member_id: child.source_member_id.clone(),
-            relation: SessionMemberRelation::Child,
-            parent_source_member_id: Some("s-main".into()),
-            source_kind: "qoder_subagent_transcript".into(),
-            source_path: child.source_path.to_string_lossy().to_string(),
-            cwd: None,
-            started_at: None,
-            last_activity_at: None,
-            metadata: serde_json::json!({}),
-        };
-        let delta: MemberReadDelta = QoderAdapter
-            .read_member_delta(&member, &SessionMemberCursor::default())
-            .unwrap();
-        assert!(
-            delta.messages.is_empty(),
-            "child transcript text never becomes conversation"
-        );
     }
 
     /// The app database still names the root session.
@@ -994,11 +658,11 @@ mod tests {
         let _ = SessionTitles::open_at(None);
     }
 
-    /// The assistant row's own `message.model` attributes (this is NOT the
-    /// runtime-config broadcast); synthesized error rows stay NULL, and the
-    /// runtime-config line itself contributes nothing.
+    /// Assistant rows carrying a model code (including the synthesized
+    /// `<synthetic>` notice) parse to prose since the provenance retirement,
+    /// and the `runtime-config` line itself contributes nothing.
     #[test]
-    fn assistant_rows_carry_their_model_but_synthetic_stays_null() {
+    fn assistant_rows_parse_regardless_of_model_codes() {
         let dir = unique_dir("prov");
         let file = dir.join("s.jsonl");
         let line = |idx: usize, vtype: &str, model: Option<&str>| {
@@ -1027,7 +691,10 @@ mod tests {
         )
         .unwrap();
         let delta = QoderAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
+            .read_session_delta(
+                &root_session(&file),
+                &crate::domain::SourceCursor::default(),
+            )
             .unwrap();
         let assistant: Vec<&crate::domain::ParsedSessionMessage> = delta
             .messages
@@ -1035,15 +702,5 @@ mod tests {
             .filter(|m| m.role == SessionMessageRole::Assistant)
             .collect();
         assert_eq!(assistant.len(), 2);
-        // The internal code resolves to the app's display name (server-pushed
-        // dynamic text when present, the built-in table otherwise — both say
-        // `dfmodel` → DeepSeek-V4.1-Flash; the fresh label drops the version
-        // and it is recovered from the description).
-        assert_eq!(assistant[0].model.as_deref(), Some("DeepSeek-V4.1-Flash"));
-        assert_eq!(assistant[0].provider, None, "no provider in the source");
-        assert_eq!(
-            assistant[1].model, None,
-            "a synthesized error notice is not a generation"
-        );
     }
 }

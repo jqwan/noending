@@ -30,14 +30,14 @@ fn ctx(ws: &str) -> MergeContext {
     }
 }
 
-/// A Logical Session + ROOT member seeded through the production commit path,
+/// A Logical Session seeded through the production commit path,
 /// with one stored user message per text.
 fn session_with_messages(
     db: &Db,
     root_agent_session_id: &str,
     texts: &[&str],
-) -> (Session, String, Vec<SessionMessage>) {
-    let (s, member_id, stored) = support::seed_conversation(
+) -> (Session, Vec<SessionMessage>) {
+    let (s, stored) = support::seed_conversation(
         db,
         Agent::Codex,
         root_agent_session_id,
@@ -53,7 +53,7 @@ fn session_with_messages(
             })
             .collect::<Vec<ParsedSessionMessage>>(),
     );
-    (s, member_id, stored)
+    (s, stored)
 }
 
 fn ws_row(db: &Db, id: &str, title: &str) -> noending::domain::Workstream {
@@ -195,7 +195,7 @@ fn retry_after_rollback_applies_once_and_reapply_is_deduped() {
 #[test]
 fn facts_and_context_are_separate_lifecycles() {
     let db = open_db("cursors");
-    let (s, member_id, _stored) = session_with_messages(
+    let (s, _stored) = session_with_messages(
         &db,
         "cursors-root",
         &["我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据"],
@@ -205,16 +205,16 @@ fn facts_and_context_are_separate_lifecycles() {
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
 
     // facts advanced through the production commit path
-    assert_eq!(
-        db.get_session_ingest_state(&s.id)
-            .unwrap()
-            .latest_message_seq,
-        1
-    );
+    assert_eq!(db.get_session_ingest_state(&s.id).unwrap().1, 1);
     assert_eq!(db.message_projection_ids(&s.id).unwrap().len(), 1);
     assert!(
-        db.get_member_cursor(&member_id).unwrap().byte_offset > 0,
-        "member (read) cursor advanced"
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor()
+            .byte_offset
+            > 0,
+        "the session (read) cursor advanced"
     );
 
     // no Context exists yet — only an explicit update would write it
@@ -230,9 +230,7 @@ fn facts_and_context_are_separate_lifecycles() {
     .unwrap();
     assert_eq!(db.items_for_workstream(&ws.id, true).unwrap().len(), 1);
     assert_eq!(
-        db.get_session_ingest_state(&s.id)
-            .unwrap()
-            .latest_message_seq,
+        db.get_session_ingest_state(&s.id).unwrap().1,
         1,
         "the fact frontier is unchanged by a Context write"
     );
@@ -603,7 +601,7 @@ fn mutation_outside_the_owner_is_skipped_not_written() {
 #[test]
 fn trashed_session_refuses_explicit_update() {
     let db = open_db("trash-reject");
-    let (s, _member, stored) = session_with_messages(
+    let (s, stored) = session_with_messages(
         &db,
         "trash-reject-root",
         &["我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据"],

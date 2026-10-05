@@ -1,5 +1,5 @@
 //! Session row metadata under the Logical Session model. A Session row is keyed
-//! by `(agent, root_agent_session_id)` — the ROOT member's real Resume identity —
+//! by `(agent, root_agent_session_id)` — the root source's real Resume identity —
 //! and follows the source through `upsert_logical_session`:
 //! - re-discovery of the same root updates the row in place (never duplicates);
 //! - cwd / workspace / activity follow the ROOT (child facts never reach here);
@@ -8,9 +8,7 @@
 //! - `project_id` is derived from `workspace_path_id` inside the statement, so
 //!   the cache can never drift from its source.
 
-use std::path::PathBuf;
-
-use noending::domain::{Agent, SessionMemberRelation};
+use noending::domain::Agent;
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, Db};
 
@@ -332,45 +330,4 @@ fn project_cache_follows_workspace_path() {
     let after = database.get_session(&row_id).unwrap().unwrap();
     assert_eq!(after.workspace_path_id.as_deref(), Some(path_id.as_str()));
     assert_eq!(after.project_id.as_deref(), Some("p-meta"));
-}
-
-/// A child member's execution identity never resolves as a root: only the
-/// session's `root_agent_session_id` is the Resume/lookup authority.
-#[test]
-fn a_child_member_identity_never_resolves_as_a_root() {
-    let database = db("child-not-root");
-    let root_id = format!("root-{}", new_id());
-    let session =
-        support::ensure_session(&database, format!("s-{}", new_id()), Agent::Codex, &root_id);
-
-    // A child of that session, with its own source identity.
-    let child_source_id = format!("child-{}", new_id());
-    database
-        .upsert_session_member(
-            &session.id,
-            Agent::Codex,
-            &child_source_id,
-            SessionMemberRelation::Child,
-            Some(&root_id),
-            "subagent_file",
-            "/tmp/child.jsonl",
-            Some("/child/only/cwd"),
-            None,
-            None,
-            &serde_json::json!({}),
-        )
-        .unwrap();
-
-    assert!(
-        database
-            .find_session_by_root_agent_id(Agent::Codex, &child_source_id)
-            .unwrap()
-            .is_none(),
-        "a child's source id must never look up the Logical Session"
-    );
-    //...and the child's cwd never flowed up onto the Session row.
-    let stored = database.get_session(&session.id).unwrap().unwrap();
-    assert_eq!(stored.cwd, None);
-    assert_eq!(stored.project_id, None);
-    let _ = PathBuf::new();
 }

@@ -348,8 +348,6 @@
 .event .when { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
 /* 消息级模型标签：低干扰，只有来源证实的 Assistant
    消息才有；与 .when 同级弱化显示，不占独立行。 */
-.event .prov { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
-.event .mid-turn {
   color: var(--text-muted);
   font-size: 11px;
   border: 1px solid var(--border);
@@ -929,20 +927,6 @@ button.icon-button { width: 28px; padding: 0; }
 .session-info-fields { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 12px; }
 .session-info-fields > *:nth-child(odd) { margin-top: 12px; }
 .session-info-fields > *:nth-child(odd):first-child { margin-top: 0; }
-/* 执行信息的数值块（同一个右栏，同样是 240–300px）：标签列 + 两列数字。
-   上面会话信息坚持单列，是因为它的值是路径与 Agent ID；这里的值是十来个短数字，
-   单列会白白拉出十来行，两列刚好放进 240px 而且永远不需要折行。 */
-.exec-metrics { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; margin-top: 12px; align-items: baseline; }
-.exec-metrics .exec-label { white-space: nowrap; }
-.exec-pairs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 10px; font-size: 12px; }
-/* 成员树：关系标签固定列宽（「根 / 子 / 边」都是单字，列宽固定才让身份列对齐），
-   其余各行各占一行：计数、tokens、源——谁没有数据谁就不占行。 */
-.member-row { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
-/* 2.6em 是按单字标签定的：1 个字 11px + 左右内边距 16px，窄一像素它就在徽章里折行。 */
-.member-row .member-rel { flex: none; width: 2.6em; text-align: center; white-space: nowrap; }
-/* 2px 而不是 1px：一行最多四段（身份 / 计数 / tokens / 源），挤在一起会读成一大块。 */
-.member-body { display: grid; gap: 2px; min-width: 0; }
-.member-id { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .search-result { display: block; width: 100%; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
 .search-result:hover { background: var(--bg-panel); }
 .project-detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 32px; }
@@ -1010,59 +994,5 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 .existing-path-option > input { width: 16px; flex: none; }
 .existing-path-info { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 
-/* ---------- Usage panel（用量面板） ---------- */
-.usage-totals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 4px 0 10px; }
-.usage-total { padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm, 10px); }
-.usage-total .num { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.usage-total .lbl { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
-.usage-card { padding: 14px 16px; margin-bottom: 14px; }
-.usage-card h2 { font-size: 13px; margin: 0 0 10px; }
-.usage-table-scroll { max-width: 100%; overflow-x: auto; }
-.usage-dimension-note { margin: 0 0 14px; }
-.usage-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.usage-table th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--border-subtle); white-space: nowrap; }
-/* 列标题即排序控件：继承表头排版，箭头只在生效列出现。 */
-.usage-table th .th-sort {
-  background: none;
-  border: 0;
-  padding: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-.usage-table th .th-sort:hover { text-decoration: underline; }
-.usage-table th .sort-arrow { font-size: 10px; opacity: 0.75; }
-/* 箭头画在伪元素里：不进 textContent，列头的可访问名保持纯标签。 */
-.usage-table th[aria-sort="ascending"] .sort-arrow::after { content: "↑"; }
-.usage-table th[aria-sort="descending"] .sort-arrow::after { content: "↓"; }
-/* 标题列定宽裁剪（全文在 title 里），阻止一行超长标题把表撑出几屏宽。 */
-.usage-table .cell-clip {
-  display: block;
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* 自绘滚动条：把 macOS 的覆盖式滚动条换成常驻细条——覆盖式在悬停选中或
-   拖拽后可能停留很久才自动隐藏，看起来像卡住了。 */
-.usage-table-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
-.usage-table-scroll::-webkit-scrollbar-track { background: transparent; }
-.usage-table-scroll::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
-}
-.usage-table-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
-.usage-table td { padding: 6px 8px; border-bottom: 1px solid var(--border-subtle); font-variant-numeric: tabular-nums; vertical-align: baseline; }
-.usage-table tr:last-child td { border-bottom: 0; }
-.usage-table .num { text-align: right; white-space: nowrap; }
-.usage-session-title { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.usage-session-link { display: block; width: 100%; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-.usage-note { color: var(--text-muted); font-size: 12px; margin: 10px 0 0; }
-.usage-series { display: flex; align-items: flex-end; gap: 3px; height: 96px; padding: 4px 0; }
-.usage-series-bar { flex: 1; min-width: 4px; height: 100%; display: flex; align-items: flex-end; border-bottom: 1px solid var(--border-subtle); }
-.usage-series-fill { width: 100%; background: var(--accent, #6c7cff); opacity: .75; border-radius: 2px 2px 0 0; }
-.usage-stats { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; margin: 4px 0 10px; }
-.usage-stats .usage-total .num { font-size: 18px; }
+/* 图标按钮的激活态：中间回复隐藏开关等 toggle 用。 */
+.btn.ghost.icon-button.on { color: var(--text-primary); background: var(--bg-active); }

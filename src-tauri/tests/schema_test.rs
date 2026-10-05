@@ -7,21 +7,20 @@
 //! generation, or an incomplete current-format database — is refused instead of
 //! migrated or repaired.
 //!
-//! The current format keys `sessions` by the root member's Resume identity, with execution
-//! in `session_members`, the RAW conversation in `session_messages` (root only,
-//! append-only for provenance), the CURRENT conversation in
-//! `session_message_projection`, reading in `session_member_cursors`,
-//! observation in `session_member_stats`, the fact generation in
-//! `session_ingest_state`, the Session summary frontier in `session_contexts` /
-//! `session_context_revisions`, and the Workstream revision pair in
-//! `workstream_context_state` / `workstream_session_frontiers`, and unattachable
-//! sources in `ingestion_diagnostics`.
+//! The current format keys `sessions` by the root source's Resume identity and
+//! carries the root source, its cursor and the fact frontier as SESSION columns
+//! (the former session_members / session_member_cursors /
+//! session_ingest_state / ingestion_diagnostics rows). The RAW conversation is
+//! `session_messages` (append-only for provenance), the CURRENT conversation is
+//! `session_message_projection`, the Session summary frontier is
+//! `session_contexts` / `session_context_revisions`, and the Workstream
+//! revision pair is `workstream_context_state` / `workstream_session_frontiers`.
+//! The retired objects must stay absent.
 //!
 //! `session_messages` carries `provider` / `model` (Assistant only, enforced by
-//! CHECK); `session_member_stats` has neither — a member-level "current model"
-//! was a second, semantically unclear authority.
+//! CHECK) — the one model provenance authority since the stats retirement.
 
-use noending::domain::{Agent, SessionMemberRelation, SessionMessageRole};
+use noending::domain::{Agent, SessionMessageRole};
 use noending::domain::{ParsedSessionMessage, SourceCursorUpdate};
 use noending::storage::{new_id, Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 use rusqlite::Connection;
@@ -116,8 +115,8 @@ fn fresh_database_uses_current_format_generation() {
     assert_eq!(user_version(&db.read()), DATABASE_FORMAT_VERSION);
 
     // the old-generation tables are gone, not carried
-    // forward: one conversation store, member-owned cursors, and no deletion
-    // job machinery (NoEnding never deletes an Agent-owned source).
+    // forward: one conversation store, one session-owned cursor, and no
+    // deletion job machinery (NoEnding never deletes an Agent-owned source).
     for table in [
         "session_events",
         "session_cursors",
@@ -126,6 +125,16 @@ fn fresh_database_uses_current_format_generation() {
         "project_affinity_evidence",
         "session_workstream_bindings",
         "session_binding_removals",
+        // 统计功能退役（2026-09-29）：连用量快照与事件账本一起退场。
+        "session_member_stats",
+        "usage_events",
+        "ingest_usage_claims",
+        "session_member_usage",
+        // 会话扁平化（2026-10-05）：成员图四表并入 sessions 的列。
+        "session_members",
+        "session_member_cursors",
+        "session_ingest_state",
+        "ingestion_diagnostics",
     ] {
         assert!(
             !object_exists(&db.read(), table),
@@ -133,14 +142,6 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
     for (table, column) in [
-        ("session_member_stats", "compaction_count"),
-        ("session_member_stats", "cost"),
-        ("usage_events", "cost"),
-        ("usage_events", "cache_write_tokens"),
-        ("session_member_stats", "input_tokens"),
-        ("session_member_stats", "output_tokens"),
-        ("session_member_stats", "cached_tokens"),
-        ("session_member_stats", "reasoning_tokens"),
         ("sessions", "agent_session_id"),
         ("sessions", "raw_path"),
         ("sessions", "parent_agent_session_id"),
@@ -158,21 +159,16 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
 
-    // The Logical Session graph is the replacement: every
-    // table of the new model exists, and so does the one-root guard.
+    // The Logical Session model is the replacement: every table of the new
+    // shape exists, and the session row carries the flattened source, cursor
+    // and fact-frontier columns.
     for object in [
-        "session_members",
-        "session_member_cursors",
         "session_messages",
         "session_message_projection",
-        "session_ingest_state",
-        "session_member_stats",
         "session_contexts",
         "session_context_revisions",
         "workstream_context_state",
         "workstream_session_frontiers",
-        "ingestion_diagnostics",
-        "idx_session_members_one_root",
         "idx_session_messages_session",
         "idx_projection_message",
     ] {
@@ -181,25 +177,27 @@ fn fresh_database_uses_current_format_generation() {
             "Logical Session object is missing: {object}"
         );
     }
-
-    //  — message-level model provenance lives on
-    // session_messages; the member-level runtime facts are gone.
-    assert!(
-        has_column(&db.read(), "session_messages", "provider"),
-        "session_messages.provider is missing"
-    );
-    assert!(
-        has_column(&db.read(), "session_messages", "model"),
-        "session_messages.model is missing"
-    );
-    for column in ["model", "provider", "effort"] {
+    for column in [
+        "source_kind",
+        "source_path",
+        "metadata",
+        "source_file_identity",
+        "source_generation",
+        "source_byte_offset",
+        "source_last_seen_size",
+        "source_mtime",
+        "source_prefix_hash",
+        "source_tail_hash",
+        "fact_generation",
+        "latest_message_seq",
+    ] {
         assert!(
-            !has_column(&db.read(), "session_member_stats", column),
-            "retired column remains: session_member_stats.{column}"
+            has_column(&db.read(), "sessions", column),
+            "flattened session column is missing: sessions.{column}"
         );
     }
 
-    // A Session is keyed by (agent, root_agent_session_id) — the ROOT member's
+    // A Session is keyed by (agent, root_agent_session_id) — the root source's
     // real Resume identity — and carries fork provenance only as a self-FK.
     {
         let conn = db.read();
@@ -241,10 +239,9 @@ fn fresh_database_uses_current_format_generation() {
 }
 
 /// The integrity rules the Logical Session tables promise are actually
-/// enforced by the schema itself, not only by the storage code: the
-/// relation/role CHECKs, the one-root partial
-/// unique index, member identity, sequence identity, session identity, and the
-/// cascade that keeps a purge atomic.
+/// enforced by the schema itself, not only by the storage code: the role
+/// CHECK, the sequence/identity uniqueness, the root-identity uniqueness, and
+/// the cascade that keeps a purge atomic.
 #[test]
 fn logical_session_schema_enforces_its_invariants() {
     let path = db_path("invariants");
@@ -253,59 +250,21 @@ fn logical_session_schema_enforces_its_invariants() {
     let insert_session = |db: &Db, id: &str, root: &str| {
         db.write()
             .execute(
-                "INSERT INTO sessions (id, agent, root_agent_session_id)
-                 VALUES (?1, 'codex', ?2)",
+                "INSERT INTO sessions (id, agent, root_agent_session_id, source_kind, source_path)
+                 VALUES (?1, 'codex', ?2, 'test', '/tmp/source')",
                 rusqlite::params![id, root],
             )
             .unwrap();
     };
-    let insert_member = |db: &Db, id: &str, session: &str, source: &str, relation: &str| {
-        db.write().execute(
-            "INSERT INTO session_members
-               (id, session_id, agent, source_member_id, relation, source_kind, source_path)
-             VALUES (?1, ?2, 'codex', ?3, ?4, 'test', '/tmp/source')",
-            rusqlite::params![id, session, source, relation],
-        )
-    };
 
     insert_session(&db, "s1", "root-1");
-    insert_member(&db, "m-root", "s1", "root-1", "root").unwrap();
-    insert_member(&db, "m-child", "s1", "child-1", "child").unwrap();
-
-    // CHECK — a member relation outside root|child|side is rejected.
-    let bad_relation = db.write().execute(
-        "INSERT INTO session_members
-           (id, session_id, agent, source_member_id, relation, source_kind, source_path)
-         VALUES ('m-bad', 's1', 'codex', 'bad-1', 'cousin', 'test', '/tmp/source')",
-        [],
-    );
-    assert!(
-        bad_relation.is_err(),
-        "relation CHECK must reject values outside root|child|side"
-    );
-
-    // Partial unique index — at most ONE root member per session.
-    let second_root = insert_member(&db, "m-root2", "s1", "root-2", "root");
-    assert!(
-        second_root.is_err(),
-        "idx_session_members_one_root must refuse a second root member"
-    );
-
-    // UNIQUE(agent, source_member_id) — a member identity exists once, even
-    // across sessions (this is what makes topology re-pointing an upsert).
-    insert_session(&db, "s2", "root-other");
-    let dup_member = insert_member(&db, "m-dup", "s2", "root-1", "child");
-    assert!(
-        dup_member.is_err(),
-        "a (agent, source_member_id) pair must be unique across sessions"
-    );
 
     // CHECK + UNIQUE on the conversation store.
     let insert_message = |db: &Db, id: &str, sequence: i64, role: &str, hash: &str| {
         db.write().execute(
             "INSERT INTO session_messages
-               (id, session_id, member_id, sequence, source_identity_hash, role, content, raw_ref)
-             VALUES (?1, 's1', 'm-root', ?2, ?3, ?4, 'content', 'test#1')",
+               (id, session_id, sequence, source_identity_hash, role, content, raw_ref)
+             VALUES (?1, 's1', ?2, ?3, ?4, 'content', 'test#1')",
             rusqlite::params![id, sequence, hash, role],
         )
     };
@@ -323,14 +282,14 @@ fn logical_session_schema_enforces_its_invariants() {
     let dup_identity = insert_message(&db, "msg-hash", 3, "user", "hash-1");
     assert!(
         dup_identity.is_err(),
-        "UNIQUE(member_id, source_identity_hash) must refuse a re-ingested message"
+        "UNIQUE(session_id, source_identity_hash) must refuse a re-ingested message"
     );
 
     // UNIQUE(agent, root_agent_session_id) — one Logical Session per root
     // Resume identity; re-discovery updates in place instead of duplicating.
     let dup_session = db.write().execute(
-        "INSERT INTO sessions (id, agent, root_agent_session_id)
-         VALUES ('s-dup', 'codex', 'root-1')",
+        "INSERT INTO sessions (id, agent, root_agent_session_id, source_kind, source_path)
+         VALUES ('s-dup', 'codex', 'root-1', 'test', '/tmp/source')",
         [],
     );
     assert!(
@@ -338,25 +297,8 @@ fn logical_session_schema_enforces_its_invariants() {
         "a (agent, root_agent_session_id) pair must be unique"
     );
 
-    // A member of ANOTHER session must survive s1's cascade.
-    insert_member(&db, "m-s2", "s2", "s2-own-member", "child").unwrap();
-
-    // CASCADE — deleting the session takes the whole graph with it in one
-    // step: members, messages, cursors, stats, and the Context frontier.
-    db.write()
-        .execute(
-            "INSERT INTO session_member_cursors
-               (member_id, source_file_identity, generation, byte_offset)
-             VALUES ('m-root', 'id', 1, 100)",
-            [],
-        )
-        .unwrap();
-    db.write()
-        .execute(
-            "INSERT INTO session_member_stats (member_id, updated_at) VALUES ('m-root', 't')",
-            [],
-        )
-        .unwrap();
+    // CASCADE — deleting the session takes everything with it in one step:
+    // messages, the projection, and the Context frontier.
     db.write()
         .execute(
             "INSERT INTO session_contexts (session_id, updated_at) VALUES ('s1', 't')",
@@ -369,37 +311,25 @@ fn logical_session_schema_enforces_its_invariants() {
         .unwrap();
 
     for (table, key_column, what) in [
-        ("session_members", "session_id", "members"),
         ("session_messages", "session_id", "messages"),
+        ("session_message_projection", "session_id", "projection"),
         ("session_contexts", "session_id", "context frontier"),
-        ("session_member_cursors", "member_id", "cursors"),
-        ("session_member_stats", "member_id", "stats"),
     ] {
         let n: i64 = db
             .read()
             .query_row(
-                &format!("SELECT COUNT(*) FROM {table} WHERE {key_column} IN ('s1', 'm-root', 'm-child')"),
+                &format!("SELECT COUNT(*) FROM {table} WHERE {key_column} = 's1'"),
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(n, 0, "cascade delete must remove {what} ({table})");
     }
-    // The other session is untouched by s1's cascade.
-    let s2_members: i64 = db
-        .read()
-        .query_row(
-            "SELECT COUNT(*) FROM session_members WHERE session_id = 's2'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(s2_members, 1, "another session's members must survive");
 }
 
-/// The storage-layer round trip over the same invariants: a member ingest
-/// commits messages with NoEnding's own sequence, dedups re-scans by identity,
-/// and refuses a second root.
+/// The storage-layer round trip over the same invariants: a session ingest
+/// commits messages with NoEnding's own sequence and dedups re-scans by
+/// identity.
 #[test]
 fn storage_round_trip_matches_the_schema_promises() {
     let path = db_path("round-trip");
@@ -417,25 +347,8 @@ fn storage_round_trip_matches_the_schema_promises() {
             None,
         )
         .unwrap();
-    let member = db
-        .upsert_session_member(
-            &s_id,
-            Agent::Codex,
-            "root-1",
-            SessionMemberRelation::Root,
-            None,
-            "test",
-            "/tmp/source",
-            None,
-            None,
-            None,
-            &serde_json::json!({}),
-        )
-        .unwrap();
     let messages = [
         ParsedSessionMessage {
-            provider: None,
-            model: None,
             source_message_id: Some("m1".into()),
             source_position: "0".into(),
             ts: None,
@@ -443,8 +356,6 @@ fn storage_round_trip_matches_the_schema_promises() {
             content: "first".into(),
         },
         ParsedSessionMessage {
-            provider: None,
-            model: None,
             source_message_id: Some("m2".into()),
             source_position: "1".into(),
             ts: None,
@@ -461,9 +372,7 @@ fn storage_round_trip_matches_the_schema_promises() {
         start_byte_offset: 0,
         prefix_hash: String::new(),
     };
-    let stored = db
-        .commit_member_ingest(&s_id, &member, &messages, None, &source)
-        .unwrap();
+    let stored = db.commit_ingest(&s_id, &messages, &source).unwrap();
     assert_eq!(stored.len(), 2);
     assert_eq!(
         stored.iter().map(|m| m.sequence).collect::<Vec<_>>(),
@@ -472,28 +381,10 @@ fn storage_round_trip_matches_the_schema_promises() {
     );
 
     // A full re-scan of the same source dedups by identity.
-    let replay = db
-        .commit_member_ingest(&s_id, &member, &messages, None, &source)
-        .unwrap();
+    let replay = db.commit_ingest(&s_id, &messages, &source).unwrap();
     assert!(replay.is_empty(), "a re-scan must not duplicate messages");
     assert_eq!(db.message_count(&s_id).unwrap(), 2);
     assert_eq!(db.ingested_message_sequence(&s_id).unwrap(), 2);
-
-    // A second root member for the same session is refused through the API too.
-    let second_root = db.upsert_session_member(
-        &s_id,
-        Agent::Codex,
-        "root-1b",
-        SessionMemberRelation::Root,
-        None,
-        "test",
-        "/tmp/source-b",
-        None,
-        None,
-        None,
-        &serde_json::json!({}),
-    );
-    assert!(second_root.is_err(), "one root member per session, always");
     let _ = new_id();
 }
 
@@ -588,8 +479,8 @@ fn incomplete_current_format_database_is_refused_without_repair() {
         ),
         (
             "missing-index",
-            vec!["DROP INDEX idx_session_members_one_root"],
-            "idx_session_members_one_root",
+            vec!["DROP INDEX idx_projection_message"],
+            "idx_projection_message",
         ),
         (
             "missing-fts",
@@ -598,11 +489,6 @@ fn incomplete_current_format_database_is_refused_without_repair() {
         ),
         // A same-named view is not the table the format declares: the check
         // matches on `sqlite_master.type` too.
-        (
-            "missing-usage-view",
-            vec!["DROP VIEW session_member_usage"],
-            "session_member_usage",
-        ),
         (
             "view-impersonator",
             vec![
@@ -778,222 +664,4 @@ fn runtime_defaults_are_reconciled_on_every_start() {
         )
         .unwrap();
     assert_eq!((enabled, origin.as_str()), (1, "user"));
-}
-
-/// message-level model provenance: Assistant rows
-/// round-trip source-native provider/model, User rows refuse provenance at both
-/// the commit guard and the schema CHECK, and a dedup re-read enriches
-/// `NULL → confirmed` in place without creating a second message or letting a
-/// confirmed value be overwritten.
-#[test]
-fn message_provenance_round_trip_guard_and_enrichment() {
-    let path = db_path("provenance");
-    let db = Db::open(path.path()).unwrap();
-
-    let (s_id, _) = db
-        .upsert_logical_session_unchecked(
-            Agent::Codex,
-            "root-prov",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-    let member = db
-        .upsert_session_member(
-            &s_id,
-            Agent::Codex,
-            "root-prov",
-            SessionMemberRelation::Root,
-            None,
-            "test",
-            "/tmp/source",
-            None,
-            None,
-            None,
-            &serde_json::json!({}),
-        )
-        .unwrap();
-    let source = |offset: u64| SourceCursorUpdate {
-        file_identity: "identity".into(),
-        generation: 1,
-        byte_offset: offset,
-        last_seen_size: offset,
-        mtime: None,
-        start_byte_offset: 0,
-        prefix_hash: String::new(),
-    };
-    let stored = db
-        .commit_member_ingest(
-            &s_id,
-            &member,
-            &[ParsedSessionMessage {
-                provider: Some("anthropic".into()),
-                model: Some("claude-opus-x".into()),
-                source_message_id: Some("a1".into()),
-                source_position: "0".into(),
-                ts: None,
-                role: SessionMessageRole::Assistant,
-                content: "这里存在一个并发问题。".into(),
-            }],
-            None,
-            &source(10),
-        )
-        .unwrap();
-    assert_eq!(stored[0].provider.as_deref(), Some("anthropic"));
-    assert_eq!(stored[0].model.as_deref(), Some("claude-opus-x"));
-
-    // Round-trip through the row mapper, plus the NULL/NULL Assistant case.
-    // A full re-scan carries the WHOLE current conversation, so the projection
-    // extends by prefix; the retired-row guard is exercised below.
-    let _ = db
-        .commit_member_ingest(
-            &s_id,
-            &member,
-            &[
-                ParsedSessionMessage {
-                    provider: Some("anthropic".into()),
-                    model: Some("claude-opus-x".into()),
-                    source_message_id: Some("a1".into()),
-                    source_position: "0".into(),
-                    ts: None,
-                    role: SessionMessageRole::Assistant,
-                    content: "这里存在一个并发问题。".into(),
-                },
-                ParsedSessionMessage {
-                    provider: None,
-                    model: None,
-                    source_message_id: Some("a2".into()),
-                    source_position: "1".into(),
-                    ts: None,
-                    role: SessionMessageRole::Assistant,
-                    content: "unknown provenance".into(),
-                },
-            ],
-            None,
-            &source(20),
-        )
-        .unwrap();
-    let all = db.get_messages(&s_id, None, 100).unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[1].provider, None);
-    assert_eq!(all[1].model, None);
-
-    // the commit guard: a User message with provenance is an adapter bug,
-    // and the whole batch is refused, not silently cleaned.
-    let user_with_model = db.commit_member_ingest(
-        &s_id,
-        &member,
-        &[ParsedSessionMessage {
-            provider: Some("openai".into()),
-            model: Some("gpt-x".into()),
-            source_message_id: Some("u1".into()),
-            source_position: "2".into(),
-            ts: None,
-            role: SessionMessageRole::User,
-            content: "你好".into(),
-        }],
-        None,
-        &source(30),
-    );
-    assert!(
-        user_with_model.is_err(),
-        "user messages must not carry provider/model"
-    );
-    // The schema CHECK backs the guard up even against direct SQL.
-    let direct = rusqlite::Connection::open(path.path()).unwrap();
-    let refused = direct.execute(
-        "INSERT INTO session_messages
-         (id, session_id, member_id, sequence, source_generation, source_position,
-          source_identity_hash, role, content, provider, raw_ref)
-         VALUES ('x', ?1, ?2, 99, 0, '', 'h', 'user', 'hi', 'openai', '')",
-        rusqlite::params![s_id, member],
-    );
-    assert!(
-        refused.is_err(),
-        "CHECK (user → provider IS NULL) must hold"
-    );
-
-    // dedup enrichment: the same identity re-read with a provenance the
-    // stored row lacks fills the gap; one message stays one message.
-    let enriched = db
-        .commit_member_ingest(
-            &s_id,
-            &member,
-            &[
-                ParsedSessionMessage {
-                    provider: Some("anthropic".into()),
-                    model: Some("claude-opus-x".into()),
-                    source_message_id: Some("a1".into()),
-                    source_position: "0".into(),
-                    ts: None,
-                    role: SessionMessageRole::Assistant,
-                    content: "这里存在一个并发问题。".into(),
-                },
-                ParsedSessionMessage {
-                    provider: None,
-                    model: Some("claude-opus-x".into()),
-                    source_message_id: Some("a2".into()),
-                    source_position: "1".into(),
-                    ts: None,
-                    role: SessionMessageRole::Assistant,
-                    content: "unknown provenance".into(),
-                },
-            ],
-            None,
-            &source(20),
-        )
-        .unwrap();
-    assert!(enriched.is_empty(), "enrichment is not a new message");
-    let all = db.get_messages(&s_id, None, 100).unwrap();
-    assert_eq!(all.len(), 2, "identity dedup must not duplicate");
-    assert_eq!(
-        all[1].model.as_deref(),
-        Some("claude-opus-x"),
-        "NULL → confirmed enrichment lands in place"
-    );
-
-    // a confirmed-vs-confirmed contradiction keeps the stored value.
-    let conflict = db
-        .commit_member_ingest(
-            &s_id,
-            &member,
-            &[
-                ParsedSessionMessage {
-                    provider: None,
-                    model: Some("some-other-model".into()),
-                    source_message_id: Some("a1".into()),
-                    source_position: "0".into(),
-                    ts: None,
-                    role: SessionMessageRole::Assistant,
-                    content: "这里存在一个并发问题。".into(),
-                },
-                ParsedSessionMessage {
-                    provider: None,
-                    model: Some("claude-opus-x".into()),
-                    source_message_id: Some("a2".into()),
-                    source_position: "1".into(),
-                    ts: None,
-                    role: SessionMessageRole::Assistant,
-                    content: "unknown provenance".into(),
-                },
-            ],
-            None,
-            &source(20),
-        )
-        .unwrap();
-    assert!(
-        conflict.is_empty(),
-        "a conflict is not a new message either"
-    );
-    let all = db.get_messages(&s_id, None, 100).unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(
-        all[0].model.as_deref(),
-        Some("claude-opus-x"),
-        "stored provenance is never silently overwritten"
-    );
 }

@@ -1,17 +1,15 @@
-//! Logical Session graph resolution end-to-end: discovery batch → root/child/side
-//! resolution → diagnostics → atomic member commit → LaunchIntent root-only.
+//! Logical Session resolution end-to-end: discovery batch → session
+//! resolution → atomic ingest commit → LaunchIntent root-only.
 //!
 //! Fixtures are Codex rollouts (plain JSONL), the one adapter whose sources
 //! express child threads (`thread_source=subagent`), side threads
 //! (`guardian_review`) and forked pages (`history_base`) — so one fixture family
-//! covers the whole graph vocabulary.
+//! covers the whole source-shape vocabulary.
 
 use std::path::{Path, PathBuf};
 
 use noending::adapters::all_adapters;
-use noending::domain::{
-    Agent, LaunchIntent, ParsedSessionMessage, SessionMemberRelation, SessionMessageRole,
-};
+use noending::domain::{Agent, LaunchIntent, ParsedSessionMessage, Session, SessionMessageRole};
 use noending::ingestion;
 use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
@@ -99,18 +97,17 @@ const SIDE_ID: &str = "019fccd3-47be-78f2-89fd-9deec2e4c6d9";
 const FORK_ID: &str = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
 
 #[test]
-fn logical_root_creation_rolls_back_if_root_member_cannot_be_written() {
+fn logical_session_creation_rolls_back_if_the_row_cannot_be_written() {
     let db = open_db("root-transaction");
     db.write()
         .execute_batch(
-            "CREATE TRIGGER reject_root_member BEFORE INSERT ON session_members
-             WHEN NEW.relation = 'root'
-             BEGIN SELECT RAISE(ABORT, 'test root insert failure'); END;",
+            "CREATE TRIGGER reject_session_insert BEFORE INSERT ON sessions
+             BEGIN SELECT RAISE(ABORT, 'test session insert failure'); END;",
         )
         .unwrap();
 
     assert!(db
-        .upsert_logical_root(
+        .upsert_logical_session(
             Agent::Codex,
             ROOT_ID,
             None,
@@ -121,7 +118,6 @@ fn logical_root_creation_rolls_back_if_root_member_cannot_be_written() {
             None,
             "test",
             "/tmp/root",
-            None,
             &serde_json::json!({}),
         )
         .is_err());
@@ -131,12 +127,14 @@ fn logical_root_creation_rolls_back_if_root_member_cannot_be_written() {
         .is_none());
 }
 
-// child/side resolution and diagnostics
+// child/side sources: recognized, then silently skipped
 
 /// A child discovered with no root anywhere: no Logical Session is created
-/// (no root, no session), the child is a diagnostic — not a fake root.
+/// and nothing is recorded. Since the stats retirement a session IS its root
+/// and child/side sources are invisible by design — the recognition itself
+/// is what keeps codex subagent rollouts from becoming fake sessions.
 #[test]
-fn a_child_without_a_root_is_a_diagnostic_not_a_session() {
+fn an_orphan_child_is_skipped_silently_not_a_session() {
     let root_dir = temp_root("orphan-child");
     write_rollout(
         &root_dir,
@@ -158,16 +156,13 @@ fn a_child_without_a_root_is_a_diagnostic_not_a_session() {
         db.list_sessions(Default::default()).unwrap().is_empty(),
         "no root, no Logical Session"
     );
-    let diags = db.list_ingestion_diagnostics(1).unwrap();
-    assert_eq!(diags.len(), 1, "the orphan child is recorded: {diags:?}");
-    assert_eq!(diags[0].source_member_id.as_deref(), Some(CHILD_ID));
 }
 
-/// The root shows up in a LATER batch: one Logical Session, the child (and a
-/// side) attach to it, and the diagnostic from the earlier pass is removed.
-/// Scan order never decides identity.
+/// The root shows up in a LATER batch: one Logical Session keyed by the
+/// root identity. Scan order never decides identity, and the child/side
+/// rollouts seen along the way are silently skipped, never attached.
 #[test]
-fn a_root_discovered_later_attaches_the_child_and_resolves_the_diagnostic() {
+fn a_root_discovered_in_a_later_batch_still_becomes_the_session() {
     let root_dir = temp_root("late-root");
     write_rollout(
         &root_dir,
@@ -180,7 +175,7 @@ fn a_root_discovered_later_attaches_the_child_and_resolves_the_diagnostic() {
     let db = open_db("late-root");
     enable_codex_source(&db, &root_dir);
     reconcile(&db);
-    assert_eq!(db.list_ingestion_diagnostics(1).unwrap().len(), 1);
+    assert!(db.list_sessions(Default::default()).unwrap().is_empty());
 
     // The batch with BOTH root and side arrives (root last in the walk order
     // is fine — the resolver is order-free).
@@ -206,17 +201,17 @@ fn a_root_discovered_later_attaches_the_child_and_resolves_the_diagnostic() {
     let sessions = db.list_sessions(Default::default()).unwrap();
     assert_eq!(sessions.len(), 1, "exactly one Logical Session");
     assert_eq!(sessions[0].root_agent_session_id, ROOT_ID);
-    let members = db.members_for_session(&sessions[0].id).unwrap();
-    let relations: std::collections::HashMap<&str, &str> = members
-        .iter()
-        .map(|m| (m.source_member_id.as_str(), m.relation.as_str()))
-        .collect();
-    assert_eq!(relations.get(ROOT_ID), Some(&"root"));
-    assert_eq!(relations.get(CHILD_ID), Some(&"child"));
-    assert_eq!(relations.get(SIDE_ID), Some(&"side"));
     assert!(
-        db.list_ingestion_diagnostics(1).unwrap().is_empty(),
-        "resolved members leave no diagnostic behind"
+        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+            .unwrap()
+            .is_none(),
+        "a skipped child never becomes a session"
+    );
+    assert!(
+        db.find_session_by_root_agent_id(Agent::Codex, SIDE_ID)
+            .unwrap()
+            .is_none(),
+        "a skipped side thread never becomes a session"
     );
 }
 
@@ -258,17 +253,19 @@ fn child_transcript_text_never_becomes_conversation() {
         vec!["父会话的提问", "父会话的回答"],
         "child prose stays out of the conversation: {contents:?}"
     );
-    // Every stored message points at the ROOT member.
-    let root_member = db
-        .root_member_for_session(&sessions[0].id)
-        .unwrap()
-        .unwrap();
-    assert!(messages.iter().all(|m| m.member_id == root_member.id));
+    // Every stored message belongs to the root's own session.
+    assert!(messages.iter().all(|m| m.session_id == sessions[0].id));
+    assert!(
+        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+            .unwrap()
+            .is_none(),
+        "a skipped child never becomes a session"
+    );
 }
 
 #[test]
-fn a_missing_member_does_not_fail_reconcile_and_resumes_when_it_returns() {
-    let root_dir = temp_root("missing-member");
+fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
+    let root_dir = temp_root("missing-root");
     let root_path = write_rollout(
         &root_dir,
         &rollout_name(ROOT_ID),
@@ -277,12 +274,7 @@ fn a_missing_member_does_not_fail_reconcile_and_resumes_when_it_returns() {
             message_line(1, "m1", "user", "最初的提问"),
         ],
     );
-    let child_lines = vec![meta_line(
-        CHILD_ID,
-        serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
-    )];
-    let child_path = write_rollout(&root_dir, &rollout_name(CHILD_ID), &child_lines);
-    let db = open_db("missing-member");
+    let db = open_db("missing-root");
     enable_codex_source(&db, &root_dir);
     reconcile(&db);
 
@@ -290,26 +282,30 @@ fn a_missing_member_does_not_fail_reconcile_and_resumes_when_it_returns() {
         .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
-    let child = db
-        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+    let cursor = db
+        .get_session(&session.id)
         .unwrap()
-        .unwrap();
-    let child_cursor = db.get_member_cursor(&child.id).unwrap();
+        .unwrap()
+        .source_cursor();
 
-    std::fs::remove_file(&child_path).unwrap();
+    std::fs::remove_file(&root_path).unwrap();
     for _ in 0..2 {
         let report =
             ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(db.message_count(&session.id).unwrap(), 1);
         assert_eq!(
-            db.get_member_cursor(&child.id).unwrap().byte_offset,
-            child_cursor.byte_offset,
+            db.get_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .source_cursor()
+                .byte_offset,
+            cursor.byte_offset,
             "a missing source must not advance its cursor"
         );
     }
 
-    // A changed root still ingests while an old child file is absent.
+    // The source returns and GREW: the stored session resumes from its cursor.
     std::fs::write(
         &root_path,
         format!(
@@ -320,34 +316,33 @@ fn a_missing_member_does_not_fail_reconcile_and_resumes_when_it_returns() {
         ),
     )
     .unwrap();
-    reconcile(&db);
-    assert_eq!(db.message_count(&session.id).unwrap(), 2);
-
-    // A path that exists but is not a readable file is still an error.
-    std::fs::create_dir(&child_path).unwrap();
-    let report =
-        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
-    assert!(!report.failures.is_empty());
-    std::fs::remove_dir(&child_path).unwrap();
-
-    let restored_lines = [
-        child_lines[0].clone(),
-        message_line(1, "c1", "assistant", "恢复后的子任务"),
-    ];
-    write_rollout(&root_dir, &rollout_name(CHILD_ID), &restored_lines);
     let report =
         ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
     assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(db.message_count(&session.id).unwrap(), 2);
     assert!(
-        db.get_member_cursor(&child.id).unwrap().byte_offset > child_cursor.byte_offset,
+        db.get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor()
+            .byte_offset
+            > cursor.byte_offset,
         "the returning file must be ingested"
     );
+
+    // A path that exists but is not a readable file is still an error.
+    std::fs::remove_file(&root_path).unwrap();
+    std::fs::create_dir(&root_path).unwrap();
+    let report =
+        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    assert!(!report.failures.is_empty());
 }
 
-/// A child whose cwd differs never moves the Session's physical location
-///: Session.cwd is Root authority only.
+/// A child rollout whose cwd differs is invisible: it never becomes a
+/// session, so its execution cwd can never reach any Session — Session.cwd
+/// is Root authority only.
 #[test]
-fn a_child_cwd_never_moves_the_session() {
+fn a_child_rollout_never_moves_the_session_or_becomes_a_member() {
     let root_dir = temp_root("child-cwd");
     write_rollout(
         &root_dir,
@@ -385,19 +380,19 @@ fn a_child_cwd_never_moves_the_session() {
     assert_eq!(
         sessions[0].cwd.as_deref(),
         Some("/repo-a"),
-        "child cwd is execution fact on the member row, never Session.cwd"
+        "child cwd is execution fact, never Session.cwd — and the child has no row at all"
     );
-    let child = db
-        .find_member_by_source_id(Agent::Codex, CHILD_ID)
+    assert!(db
+        .find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
         .unwrap()
-        .unwrap();
-    assert_eq!(child.cwd.as_deref(), Some("/repo-b-child"));
+        .is_none());
 }
 
-/// Child activity moves `last_activity_at` (the whole graph's activity) but
-/// never `last_conversation_at` (root conversation only).
+/// A growing child transcript touches nothing: skipped at discovery, it never
+/// becomes a session, so neither `last_activity_at` nor `last_conversation_at`
+/// may move for it.
 #[test]
-fn child_activity_moves_last_activity_but_not_last_conversation() {
+fn a_growing_child_transcript_touches_nothing() {
     let root_dir = temp_root("child-activity");
     write_rollout(
         &root_dir,
@@ -420,12 +415,6 @@ fn child_activity_moves_last_activity_but_not_last_conversation() {
     reconcile(&db);
     let session_id = db.list_sessions(Default::default()).unwrap()[0].id.clone();
     let before = db.get_session(&session_id).unwrap().unwrap();
-    let conversation_before = before.last_conversation_at.clone();
-    let child = db
-        .find_member_by_source_id(Agent::Codex, CHILD_ID)
-        .unwrap()
-        .unwrap();
-    let cursor_before = db.get_member_cursor(&child.id).unwrap();
 
     // A no-change read is not source activity.
     ingestion::ingest_session(&db, &before).unwrap();
@@ -448,13 +437,18 @@ fn child_activity_moves_last_activity_but_not_last_conversation() {
     reconcile(&db);
 
     let after = db.get_session(&session_id).unwrap().unwrap();
-    let cursor_after = db.get_member_cursor(&child.id).unwrap();
     assert_eq!(
-        after.last_conversation_at, conversation_before,
+        after.last_conversation_at, before.last_conversation_at,
         "child chatter is not conversation"
     );
-    assert!(cursor_after.byte_offset > cursor_before.byte_offset);
-    assert!(after.last_activity_at > before.last_activity_at);
+    assert_eq!(
+        after.last_activity_at, before.last_activity_at,
+        "a skipped child is not activity either"
+    );
+    assert!(db
+        .find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -473,8 +467,11 @@ fn trash_does_not_freeze_discovery() {
     enable_codex_source(&db, &root_dir);
     reconcile(&db);
     let session = db.list_sessions(Default::default()).unwrap()[0].clone();
-    let root_member = db.root_member_for_session(&session.id).unwrap().unwrap();
-    let before_cursor = db.get_member_cursor(&root_member.id).unwrap();
+    let before_cursor = db
+        .get_session(&session.id)
+        .unwrap()
+        .unwrap()
+        .source_cursor();
     noending::lifecycle::trash_session(&db, &session.id).unwrap();
 
     write_rollout(
@@ -501,11 +498,20 @@ fn trash_does_not_freeze_discovery() {
     assert!(current.is_trashed(), "discovery never Restores a Session");
     assert_eq!(current.cwd.as_deref(), Some("/repo-after-restore"));
     assert!(current.last_activity_at > session.last_activity_at);
-    assert!(db
-        .find_member_by_source_id(Agent::Codex, CHILD_ID)
-        .unwrap()
-        .is_some());
-    assert!(db.get_member_cursor(&root_member.id).unwrap().byte_offset > before_cursor.byte_offset);
+    assert!(
+        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+            .unwrap()
+            .is_none(),
+        "a child rollout discovered while trashed is skipped like any other"
+    );
+    assert!(
+        db.get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor()
+            .byte_offset
+            > before_cursor.byte_offset
+    );
 
     // Restore changes nothing about the facts, it only makes them visible again.
     noending::lifecycle::restore_session(&db, &session.id).unwrap();
@@ -514,10 +520,6 @@ fn trash_does_not_freeze_discovery() {
         db.get_session(&session.id).unwrap().unwrap().cwd.as_deref(),
         Some("/repo-after-restore")
     );
-    assert!(db
-        .find_member_by_source_id(Agent::Codex, CHILD_ID)
-        .unwrap()
-        .is_some());
 }
 
 // Fork
@@ -568,13 +570,6 @@ fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
         Some(parent.id.as_str()),
         "fork provenance points at the source Logical Session"
     );
-    // Both members are `root` relations of their own sessions.
-    let fork_member = db
-        .find_member_by_source_id(Agent::Codex, FORK_ID)
-        .unwrap()
-        .unwrap();
-    assert_eq!(fork_member.relation, SessionMemberRelation::Root);
-    assert_eq!(fork_member.session_id, fork.id);
 
     // Now give the PARENT an owner via the explicit user door and re-reconcile:
     // ownership is decided once, by explicit action or a matched intent —
@@ -727,96 +722,54 @@ fn unchanged_root_retries_a_pending_launch_intent() {
 
 // ingestion atomicity
 
-/// A member that moved to another session while its delta was being prepared:
-/// the stale commit is rejected in full.
-#[test]
-fn a_stale_commit_after_topology_correction_is_rejected() {
-    let db = open_db("topology-race");
-    let (session, _member_id, _) = seed_root(&db);
-
-    // A CHILD member of this session gets re-pointed at another session by a
-    // topology correction. (A root member cannot move: root-ness never flips —
-    // see a_stored_root_is_never_re_homed_as_a_child.)
-    let child_member_id = db
-        .upsert_session_member(
-            &session.id,
-            Agent::Codex,
-            "moved-member",
-            SessionMemberRelation::Child,
-            None,
-            "codex_rollout",
-            "/tmp/moved",
-            None,
-            None,
-            None,
-            &serde_json::json!({}),
-        )
-        .unwrap();
-    let (other_id, _) = db
-        .upsert_logical_session_unchecked(
-            Agent::Codex,
-            "other-root",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-    // The correction moves the child member: re-upsert it under the other
-    // session (same identity — child to child re-homing stays allowed).
-    db.upsert_session_member(
-        &other_id,
-        Agent::Codex,
-        "moved-member",
-        SessionMemberRelation::Child,
-        None,
-        "codex_rollout",
-        "/tmp/moved",
-        None,
-        None,
-        None,
-        &serde_json::json!({}),
-    )
-    .unwrap();
-
-    let delta = vec![ParsedSessionMessage {
-        provider: None,
-        model: None,
-        source_message_id: Some("m1".into()),
-        source_position: "line:1".into(),
-        ts: None,
-        role: SessionMessageRole::User,
-        content: "过期提交的提问".into(),
-    }];
-    let stored = db
-        .commit_member_ingest(
-            &session.id,
-            &child_member_id,
-            &delta,
-            None,
-            &seed_update(1, 40),
-        )
-        .unwrap();
-    assert!(stored.is_empty(), "the stale commit stores nothing");
-    assert_eq!(
-        db.message_count(&session.id).unwrap(),
-        1,
-        "the seed message stays; the stale delta added nothing"
-    );
-}
-
 /// The turn-final flag: an assistant message is its turn's FINAL reply when
 /// the next projected message is not another assistant message. An append
 /// that continues the same turn demotes the formerly-final reply.
 #[test]
+/// The detail-page preview query: user turns and each turn's FINAL reply
+/// only, newest first capped to the limit, oldest-first output.
+#[test]
+fn recent_turn_messages_keep_the_conversation_skeleton() {
+    let db = open_db("recent-turns");
+    let (session, _) = seed_root(&db);
+    let msg = |id: &str, role: SessionMessageRole, text: &str| ParsedSessionMessage {
+        source_message_id: Some(id.into()),
+        source_position: String::new(),
+        ts: None,
+        role,
+        content: text.into(),
+    };
+    db.commit_ingest(
+        &session.id,
+        &[
+            msg("u2", SessionMessageRole::User, "追问"),
+            msg("a-mid", SessionMessageRole::Assistant, "中间输出"),
+            msg("a3", SessionMessageRole::Assistant, "第二轮回答"),
+            msg("u3", SessionMessageRole::User, "再问"),
+            msg("a-mid2", SessionMessageRole::Assistant, "又一处中间"),
+            msg("a4", SessionMessageRole::Assistant, "第三轮回答"),
+        ],
+        &seed_update(1, 500),
+    )
+    .unwrap();
+
+    let turns = db.recent_turn_messages(&session.id, 4).unwrap();
+    let texts: Vec<&str> = turns.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["追问", "第二轮回答", "再问", "第三轮回答"],
+        "intermediates drop out; the newest `limit` survive, oldest first"
+    );
+
+    // A page of 1 takes only the newest turn message.
+    let one = db.recent_turn_messages(&session.id, 1).unwrap();
+    assert_eq!(one[0].content, "第三轮回答");
+}
+
 fn turn_final_flags_track_the_projection() {
     let db = open_db("turn-final");
-    let (session, member_id, _) = seed_root(&db);
+    let (session, _) = seed_root(&db);
     let msg = |id: &str, role: SessionMessageRole, text: &str| ParsedSessionMessage {
-        provider: None,
-        model: None,
         source_message_id: Some(id.into()),
         source_position: String::new(),
         ts: None,
@@ -841,7 +794,7 @@ fn turn_final_flags_track_the_projection() {
         msg("u2", SessionMessageRole::User, "追问"),
         msg("a3", SessionMessageRole::Assistant, "第二轮回答"),
     ];
-    db.commit_member_ingest(&session.id, &member_id, &turn, None, &seed_update(1, 500))
+    db.commit_ingest(&session.id, &turn, &seed_update(1, 500))
         .unwrap();
     assert!(!flags_of(&db, "u1"));
     assert!(!flags_of(&db, "a1"), "the turn continues after it");
@@ -854,11 +807,9 @@ fn turn_final_flags_track_the_projection() {
 
     // The turn continues: the appended reply takes the final flag and a3 is
     // demoted.
-    db.commit_member_ingest(
+    db.commit_ingest(
         &session.id,
-        &member_id,
         &[msg("a4", SessionMessageRole::Assistant, "补充")],
-        None,
         &seed_update(2, 700),
     )
     .unwrap();
@@ -871,7 +822,7 @@ fn turn_final_flags_track_the_projection() {
 #[test]
 fn duplicate_commits_dedup() {
     let db = open_db("dedup");
-    let (session, member_id, first) = seed_root(&db);
+    let (session, first) = seed_root(&db);
     assert_eq!(first.len(), 1);
     let first_seq = first[0].sequence;
 
@@ -879,19 +830,15 @@ fn duplicate_commits_dedup() {
     // generation) — the identical message dedups, nothing appends. Every
     // identity input (id, role, ts, content) must equal the seed's.
     let again = db
-        .commit_member_ingest(
+        .commit_ingest(
             &session.id,
-            &member_id,
             &[noending::domain::ParsedSessionMessage {
-                provider: None,
-                model: None,
                 source_message_id: Some("m1".into()),
                 source_position: "line:1".into(),
                 ts: Some("2026-09-20T13:01:48Z".into()),
                 role: SessionMessageRole::User,
                 content: "第一次的提问".into(),
             }],
-            None,
             &seed_update(1, 40),
         )
         .unwrap();
@@ -902,22 +849,18 @@ fn duplicate_commits_dedup() {
 }
 
 /// A source rewrite (new generation, full rescan): the old conversation is
-/// retained, identical messages dedup, genuinely new ones append — and a
-/// stats snapshot replaces the previous counters atomically.
+/// retained, identical messages dedup, genuinely new ones append.
 #[test]
-fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
+fn a_full_rescan_keeps_history_and_replaces_the_projection() {
     let db = open_db("rescan");
-    let (session, member_id, _) = seed_root(&db);
+    let (session, _) = seed_root(&db);
 
     // Generation 1 rescan: the same user message (dedup) plus a new reply.
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             &session.id,
-            &member_id,
             &[
                 ParsedSessionMessage {
-                    provider: None,
-                    model: None,
                     source_message_id: Some("m1".into()),
                     source_position: "line:1".into(),
                     ts: Some("2026-09-20T13:01:48Z".into()),
@@ -925,8 +868,6 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
                     content: "第一次的提问".into(),
                 },
                 ParsedSessionMessage {
-                    provider: None,
-                    model: None,
                     source_message_id: Some("m2".into()),
                     source_position: "line:2".into(),
                     ts: None,
@@ -934,197 +875,27 @@ fn a_full_rescan_keeps_history_and_replaces_the_stats_snapshot() {
                     content: "重扫描后的新回答".into(),
                 },
             ],
-            None,
             &seed_update(1, 80),
         )
         .unwrap();
     assert_eq!(stored.len(), 1, "only the new reply appends");
     assert_eq!(db.message_count(&session.id).unwrap(), 2);
-
-    // The snapshot replaces the counters wholesale.
-    db.commit_member_ingest(
-        &session.id,
-        &member_id,
-        &[],
-        Some(noending::domain::StatsUpdate::Snapshot(
-            noending::domain::StatsSnapshot {
-                tool_call_count: Some(7),
-                user_message_count: Some(5),
-                assistant_message_count: Some(6),
-
-                side_activity_count: Some(2),
-                ..Default::default()
-            },
-        )),
-        &seed_update(1, 80),
-    )
-    .unwrap();
-    // The member's own row is replaced wholesale.
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(stats.tool_call_count, Some(7));
-    assert_eq!(stats.user_message_count, Some(5));
-    assert_eq!(stats.assistant_message_count, Some(6));
-
-    assert_eq!(stats.side_activity_count, Some(2));
-    let member_json = serde_json::to_value(&stats).unwrap();
-    let session_json =
-        serde_json::to_value(db.aggregate_session_stats(&session.id).unwrap()).unwrap();
-    assert!(member_json.get("compaction_count").is_none());
-    assert!(session_json.get("compaction_count").is_none());
-}
-
-#[test]
-fn empty_full_scan_zeros_only_supported_stats() {
-    let db = open_db("zero-stats-rescan");
-    let (session, member_id, _) = seed_root(&db);
-    db.commit_member_ingest(
-        &session.id,
-        &member_id,
-        &[],
-        Some(noending::domain::StatsUpdate::Snapshot(
-            noending::domain::StatsSnapshot {
-                tool_call_count: Some(7),
-                user_message_count: Some(5),
-                assistant_message_count: Some(6),
-
-                side_activity_count: Some(4),
-                ..Default::default()
-            },
-        )),
-        &seed_update(1, 40),
-    )
-    .unwrap();
-    let source = seed_update(2, 40);
-    let stats = noending::adapters::stats_update_from(
-        &noending::domain::MemberObservation::default(),
-        &source,
-        noending::adapters::StatsCapabilities::TOOL_CALLS,
-    );
-    db.commit_member_ingest(&session.id, &member_id, &[], stats, &source)
-        .unwrap();
-
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(stats.tool_call_count, Some(0));
-    assert_eq!(stats.user_message_count, Some(0));
-    assert_eq!(stats.assistant_message_count, Some(0));
-
-    assert_eq!(stats.side_activity_count, Some(4));
-}
-
-/// Tokens are queried from deduplicated events, independent of activity stats.
-#[test]
-fn usage_events_supply_member_and_session_totals_on_append_and_rescan() {
-    use noending::adapters::UsageEvent;
-    let db = open_db("usage-events");
-    let (session, member_id, _) = seed_root(&db);
-    let event = |key: &str, input| UsageEvent {
-        key: Some(key.into()),
-        input_tokens: input,
-        ..Default::default()
-    };
-    let commit = |source: &noending::domain::SourceCursorUpdate, events: &[UsageEvent]| {
-        db.commit_member_ingest_with_provenance_state(
-            &session.id,
-            &member_id,
-            &[],
-            None,
-            source,
-            true,
-            None,
-            None,
-            events,
-        )
-        .unwrap();
-    };
-    commit(
-        &seed_update(1, 20),
-        &[event("first", 100), event("first", 100)],
-    );
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(
-        stats.input_tokens,
-        Some(100),
-        "duplicate event keys bill once"
-    );
-    assert_eq!(
-        stats.output_tokens,
-        Some(0),
-        "a recorded event states zero output"
-    );
-    let mut append = seed_update(1, 40);
-    append.start_byte_offset = 20;
-    commit(&append, &[event("first", 100), event("second", 50)]);
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(stats.input_tokens, Some(150));
-    let aggregate = db.aggregate_session_stats(&session.id).unwrap();
-    let overview = db.usage_overview().unwrap();
-    assert_eq!(aggregate.input_tokens, stats.input_tokens);
-    assert_eq!(overview.input_tokens, stats.input_tokens);
-    assert_eq!(overview.by_agent[0].input_tokens, stats.input_tokens);
-    assert_eq!(overview.top_sessions[0].input_tokens, stats.input_tokens);
-    assert_eq!(overview.requests, 2);
-    // Session-scope 模型请求 rides on the same view join as the token axes:
-    // two events × 1-request default (the fixture events carry request_count 0).
-    assert_eq!(aggregate.requests, 2);
-
-    commit(&seed_update(2, 60), &[event("replacement", 7)]);
-    assert_eq!(
-        db.get_member_stats(&member_id)
-            .unwrap()
-            .unwrap()
-            .input_tokens,
-        Some(7)
-    );
-    // An empty replacement removes usage rather than preserving a stale total.
-    commit(&seed_update(3, 80), &[]);
-    assert_eq!(
-        db.aggregate_session_stats(&session.id)
-            .unwrap()
-            .input_tokens,
-        None
-    );
-    assert_eq!(db.usage_overview().unwrap().input_tokens, None);
-}
-
-#[test]
-fn unsupported_stats_stay_null_on_a_full_scan() {
-    let db = open_db("unknown-stats-rescan");
-    let (session, member_id, _) = seed_root(&db);
-    let source = seed_update(1, 40);
-    let stats = noending::adapters::stats_update_from(
-        &noending::domain::MemberObservation::default(),
-        &source,
-        noending::adapters::StatsCapabilities::MESSAGE_COUNTS,
-    );
-    db.commit_member_ingest(&session.id, &member_id, &[], stats, &source)
-        .unwrap();
-
-    let stats = db.get_member_stats(&member_id).unwrap().unwrap();
-    assert_eq!(stats.tool_call_count, None);
-
-    assert_eq!(stats.side_activity_count, None);
-    // A root read always speaks for its own turns, even when they are zero.
-    assert_eq!(stats.user_message_count, Some(0));
-    assert_eq!(stats.assistant_message_count, Some(0));
 }
 
 #[test]
 fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
     let db = open_db("conversation-monotonic");
-    let (session, member_id, _) = seed_root(&db);
+    let (session, _) = seed_root(&db);
     let before = db
         .get_session(&session.id)
         .unwrap()
         .unwrap()
         .last_conversation_at;
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             &session.id,
-            &member_id,
             &[
                 ParsedSessionMessage {
-                    provider: None,
-                    model: None,
                     source_message_id: Some("m1".into()),
                     source_position: "line:1".into(),
                     ts: Some("2026-09-20T13:01:48Z".into()),
@@ -1132,8 +903,6 @@ fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
                     content: "第一次的提问".into(),
                 },
                 ParsedSessionMessage {
-                    provider: None,
-                    model: None,
                     source_message_id: Some("old".into()),
                     source_position: "line:0".into(),
                     ts: Some("2020-01-01T00:00:00Z".into()),
@@ -1141,7 +910,6 @@ fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
                     content: "旧历史".into(),
                 },
             ],
-            None,
             &seed_update(2, 80),
         )
         .unwrap();
@@ -1159,17 +927,14 @@ fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
 #[test]
 fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
     let db = open_db("conversation-mtime-fallback");
-    let (session, member_id, _) = seed_root(&db);
+    let (session, _) = seed_root(&db);
     let mut source = seed_update(1, 80);
     source.mtime = Some(1_893_456_000.0);
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             &session.id,
-            &member_id,
             &[
                 ParsedSessionMessage {
-                    provider: None,
-                    model: None,
                     source_message_id: Some("m2".into()),
                     source_position: "line:2".into(),
                     ts: Some("2027-01-01T00:00:00Z".into()),
@@ -1177,8 +942,6 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
                     content: "带时间戳的新回复".into(),
                 },
                 ParsedSessionMessage {
-                    provider: None,
-                    model: None,
                     source_message_id: Some("m3".into()),
                     source_position: "line:3".into(),
                     ts: None,
@@ -1186,7 +949,6 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
                     content: "没有时间戳的新回复".into(),
                 },
             ],
-            None,
             &source,
         )
         .unwrap();
@@ -1201,171 +963,87 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
     );
 }
 
-// diagnostics stay out of everything
-
-/// A repeat offender becomes visible at observation_count >= 2, and resolving
-/// the member removes it. Diagnostics never surface in search.
-#[test]
-fn diagnostics_are_repeat_visible_and_resolvable() {
-    let root_dir = temp_root("diag");
-    write_rollout(
-        &root_dir,
-        &rollout_name(CHILD_ID),
-        &[meta_line(
-            CHILD_ID,
-            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
-        )],
-    );
-    let db = open_db("diag");
-    enable_codex_source(&db, &root_dir);
-
-    reconcile(&db);
-    reconcile(&db);
-    let visible = db.list_ingestion_diagnostics(2).unwrap();
-    assert_eq!(visible.len(), 1, "two sightings make it visible");
-    assert_eq!(visible[0].observation_count, 2);
-    let reason = visible[0].reason.clone();
-
-    // Diagnostics are not searchable documents (no Search).
-    let hits = noending::search::search(&db, &reason, 20).unwrap();
-    assert!(
-        hits.is_empty(),
-        "a diagnostic must never surface in search: {hits:?}"
-    );
-
-    // The root arrives → attach → the diagnostic is gone.
-    write_rollout(
-        &root_dir,
-        &rollout_name(ROOT_ID),
-        &[
-            meta_line(ROOT_ID, serde_json::json!({})),
-            message_line(1, "m1", "user", "提问"),
-        ],
-    );
-    reconcile(&db);
-    assert!(db.list_ingestion_diagnostics(1).unwrap().is_empty());
-}
-
-#[test]
-fn a_diagnostic_is_removed_when_its_source_file_disappears() {
-    let root_dir = temp_root("missing-diagnostic");
-    let child_path = write_rollout(
-        &root_dir,
-        &rollout_name(CHILD_ID),
-        &[meta_line(
-            CHILD_ID,
-            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
-        )],
-    );
-    let db = open_db("missing-diagnostic");
-    enable_codex_source(&db, &root_dir);
-    reconcile(&db);
-    reconcile(&db);
-    assert_eq!(db.list_ingestion_diagnostics(2).unwrap().len(), 1);
-
-    std::fs::remove_file(&child_path).unwrap();
-    assert_eq!(db.prune_missing_ingestion_diagnostics().unwrap(), 1);
-    assert!(db.list_ingestion_diagnostics(1).unwrap().is_empty());
-
-    // A returning source starts a new observation history.
-    write_rollout(
-        &root_dir,
-        &rollout_name(CHILD_ID),
-        &[meta_line(
-            CHILD_ID,
-            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
-        )],
-    );
-    reconcile(&db);
-    assert!(db.list_ingestion_diagnostics(2).unwrap().is_empty());
-    reconcile(&db);
-    assert_eq!(db.list_ingestion_diagnostics(2).unwrap().len(), 1);
-
-    // A path that exists but cannot be parsed is still actionable.
-    std::fs::remove_file(&child_path).unwrap();
-    std::fs::create_dir(&child_path).unwrap();
-    assert_eq!(db.prune_missing_ingestion_diagnostics().unwrap(), 0);
-    assert_eq!(db.list_ingestion_diagnostics(2).unwrap().len(), 1);
-}
-
-/// Discovery never produces a member for an adapter that cannot identify one:
-/// the roster still works end to end (a smoke check over every adapter with a
-/// fabricated impossible source — nothing may panic).
+/// Discovery never panics for an adapter that cannot identify a source:
+/// the roster still works end to end (a smoke check over every adapter with
+/// a fabricated impossible source — no panic, never a false Present).
 #[test]
 fn every_adapter_inspects_sources_without_panicking() {
-    let db = open_db("inspect-all");
-    let (session, _, _) = seed_root(&db);
     for adapter in all_adapters() {
-        let member = noending::domain::SessionMember {
+        let session = Session {
             id: new_id(),
-            session_id: session.id.clone(),
             agent: adapter.agent(),
-            source_member_id: "no-such-member".into(),
-            relation: SessionMemberRelation::Root,
-            parent_source_member_id: None,
-            source_kind: "test".into(),
-            source_path: "/tmp/definitely-not-here".into(),
+            root_agent_session_id: "no-such-source".into(),
+            title: None,
+            owner_workstream_id: None,
             cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,
+            last_conversation_at: None,
+            trashed_at: None,
+            source_kind: "test".into(),
+            source_path: "/tmp/definitely-not-here".into(),
             metadata: serde_json::json!({}),
+            source_file_identity: String::new(),
+            source_generation: 0,
+            source_byte_offset: 0,
+            source_last_seen_size: 0,
+            source_mtime: None,
+            source_prefix_hash: String::new(),
+            source_tail_hash: String::new(),
+            fact_generation: 0,
+            latest_message_seq: 0,
         };
         // A missing FILE is Missing for file adapters; a missing RECORD in a
         // store adapter is only answerable when the store itself exists —
         // either way, no panic and never a false Present.
-        let verdict = adapter.inspect_member_source(&member).unwrap();
+        let verdict = adapter.inspect_session_source(&session).unwrap();
         assert_ne!(verdict, noending::domain::SourceAvailability::Present);
     }
 }
 
 // helpers
 
-/// Seed a logical session + root member + one message, the way production
-/// would after discovery (via the same storage APIs ingestion uses).
+/// Seed a logical session + one message, the way production would after
+/// discovery (via the same storage APIs ingestion uses).
 fn seed_root(
     db: &Db,
 ) -> (
     noending::domain::Session,
-    String,
     Vec<noending::domain::SessionMessage>,
 ) {
     let (session_id, _) = db
-        .upsert_logical_session_unchecked(Agent::Codex, ROOT_ID, None, None, None, None, None, None)
-        .unwrap();
-    let member_id = db
-        .upsert_session_member(
-            &session_id,
+        .upsert_logical_session(
             Agent::Codex,
             ROOT_ID,
-            SessionMemberRelation::Root,
             None,
-            "codex_rollout",
-            "/repo-a/rollout.jsonl",
             Some("/repo-a"),
             None,
             None,
+            None,
+            None,
+            "codex_rollout",
+            "/repo-a/rollout.jsonl",
             &serde_json::json!({}),
         )
         .unwrap();
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             &session_id,
-            &member_id,
             &[ParsedSessionMessage {
-                provider: None,
-                model: None,
                 source_message_id: Some("m1".into()),
                 source_position: "line:1".into(),
                 ts: Some("2026-09-20T13:01:48Z".into()),
                 role: SessionMessageRole::User,
                 content: "第一次的提问".into(),
             }],
-            None,
             &seed_update(0, 40),
         )
         .unwrap();
     let session = db.get_session(&session_id).unwrap().unwrap();
-    (session, member_id, stored)
+    (session, stored)
 }
 
 fn seed_update(generation: i64, byte_offset: u64) -> noending::domain::SourceCursorUpdate {
@@ -1382,10 +1060,10 @@ fn seed_update(generation: i64, byte_offset: u64) -> noending::domain::SourceCur
 
 const OTHER_ROOT_ID: &str = "01a0d943-53b8-7e82-8f84-0c2b33da8802";
 
-/// Topology guard: a member that anchors a Logical Session as its Root is
-/// never re-homed as a child by a later discovery. The flip is refused, the
-/// session survives with its root member (no ghost), and the contradiction is
-/// observable as an ingestion diagnostic.
+/// A stored Logical Session is never re-homed: when the source later claims
+/// the same session id as another session's subagent, the claim is a skipped
+/// child — the stored session survives untouched, and the new root still
+/// resolves as its own session.
 #[test]
 fn a_stored_root_is_never_re_homed_as_a_child() {
     let root_dir = temp_root("topo-guard");
@@ -1424,89 +1102,15 @@ fn a_stored_root_is_never_re_homed_as_a_child() {
     );
     reconcile(&db);
 
-    let member = db
-        .find_member_by_source_id(Agent::Codex, ROOT_ID)
+    // Session A survives, still keyed by its root identity — no ghost.
+    let stored = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
-    assert_eq!(member.relation.as_str(), "root", "no demotion");
-    assert_eq!(member.session_id, session_a.id, "no re-home");
-    let members_a = db.members_for_session(&session_a.id).unwrap();
-    assert!(
-        members_a
-            .iter()
-            .any(|m| m.relation.as_str() == "root" && m.source_member_id == ROOT_ID),
-        "Session A keeps its root member — no ghost session"
-    );
-    let diagnostics = db.list_ingestion_diagnostics(1).unwrap();
-    assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.diagnostic_key.contains("member_relation_conflict")
-                && d.source_member_id.as_deref() == Some(ROOT_ID)),
-        "the contradiction is observable: {diagnostics:?}"
-    );
+    assert_eq!(stored.id, session_a.id, "no re-home");
     // The new root still resolves as its own session.
     assert!(db
         .find_session_by_root_agent_id(Agent::Codex, OTHER_ROOT_ID)
         .unwrap()
         .is_some());
-}
-
-/// The reverse direction: a stored child/side member is never promoted to a
-/// Logical Root by a later discovery.
-#[test]
-fn a_stored_child_is_never_promoted_to_a_root() {
-    let root_dir = temp_root("topo-promote");
-    write_rollout(
-        &root_dir,
-        &rollout_name(ROOT_ID),
-        &[meta_line(ROOT_ID, serde_json::json!({}))],
-    );
-    write_rollout(
-        &root_dir,
-        &rollout_name(CHILD_ID),
-        &[meta_line(
-            CHILD_ID,
-            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
-        )],
-    );
-    let db = open_db("topo-promote");
-    enable_codex_source(&db, &root_dir);
-    reconcile(&db);
-    let stored = db
-        .find_member_by_source_id(Agent::Codex, CHILD_ID)
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.relation.as_str(), "child");
-
-    // The source now claims CHILD_ID is a root of its own.
-    write_rollout(
-        &root_dir,
-        &rollout_name(CHILD_ID),
-        &[
-            meta_line(CHILD_ID, serde_json::json!({})),
-            message_line(1, "m1", "user", "突然自称根会话"),
-        ],
-    );
-    reconcile(&db);
-
-    let stored = db
-        .find_member_by_source_id(Agent::Codex, CHILD_ID)
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.relation.as_str(), "child", "no promotion");
-    assert!(
-        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
-            .unwrap()
-            .is_none(),
-        "no Logical Session is created for the refused promotion"
-    );
-    let diagnostics = db.list_ingestion_diagnostics(1).unwrap();
-    assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.diagnostic_key.contains("member_relation_conflict")
-                && d.source_member_id.as_deref() == Some(CHILD_ID)),
-        "the contradiction is observable: {diagnostics:?}"
-    );
 }

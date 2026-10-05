@@ -172,16 +172,7 @@ fn get_context_revision_source_resolution() {
     // Seed one root-conversation message through the production commit path.
     // The message ROW id is store-assigned; the reference is built from the
     // returned row, never hardcoded.
-    let member_id = support::ensure_root_member(
-        &db,
-        &session.id,
-        Agent::Codex,
-        &session.root_agent_session_id,
-        "/tmp/workbench-test.jsonl",
-    );
     let parsed = noending::domain::ParsedSessionMessage {
-        provider: None,
-        model: None,
         source_message_id: Some("codex-ev-42".into()),
         source_position: "42".into(),
         ts: Some("2026-09-17T20:14:00Z".into()),
@@ -189,13 +180,7 @@ fn get_context_revision_source_resolution() {
         content: "Evidence: Migration implementation completed.".into(),
     };
     let stored = db
-        .commit_member_ingest(
-            &session.id,
-            &member_id,
-            &[parsed],
-            None,
-            &support::seed_source(0),
-        )
+        .commit_ingest(&session.id, &[parsed], &support::seed_source(0))
         .unwrap();
     assert_eq!(stored.len(), 1, "seed message must be stored");
     let message = &stored[0];

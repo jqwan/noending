@@ -278,16 +278,14 @@ impl Agent {
     }
 }
 
-/// A Logical Session: the one user-visible conversation plus every internal
-/// execution member (child agents, sidechains) it spawned. Not an Agent thread
-/// — it is keyed by the ROOT member's real Resume identity
-/// (`root_agent_session_id`), while children/sides live on as [`SessionMember`]
-/// rows and can never own, rename or resume it.
+/// A Logical Session: the one user-visible conversation, one root source, one
+/// cursor, one fact frontier. Not an Agent thread — it is keyed by the root
+/// source's real Resume identity (`root_agent_session_id`). Child/side sources
+/// an Agent spawns alongside are recognized at discovery and skipped silently.
 ///
 /// - `workspace_path_id` is the authoritative link to the physical workspace,
-///   set only when the ROOT member really has a cwd (the default workspace is a
+///   set only when the source really has a cwd (the default workspace is a
 ///   *launch* convenience, never retrofitted onto historical Sessions).
-///   Child/side cwds stay on their member rows and never flow up.
 /// - `project_id` is a **derived cache** of
 ///   `workspace_path_id → workspace_paths.project_id`, written by exactly two
 ///   code paths (see `storage::session_paths`); a manual write is a domain
@@ -296,8 +294,8 @@ impl Agent {
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
     pub agent: Agent,
-    /// The ROOT member's Agent-side Resume identity. Authority for
-    /// LaunchIntent matching and `resume` — never a child's external id.
+    /// The root source's Agent-side Resume identity. Authority for
+    /// LaunchIntent matching and `resume`.
     pub root_agent_session_id: String,
     pub title: Option<String>,
     /// Semantic ownership: the one Workstream this Logical Session belongs to,
@@ -313,9 +311,9 @@ pub struct Session {
     /// provenance note, not a parent link in the old sense.
     pub forked_from_session_id: Option<Id>,
     pub started_at: Option<String>,
-    /// Last activity across the WHOLE execution graph (root + child + side).
+    /// Last activity observed on the source.
     pub last_activity_at: Option<String>,
-    /// Last real user/assistant message time of the ROOT conversation.
+    /// Last real user/assistant message time of the conversation.
     pub last_conversation_at: Option<String>,
     /// Session lifecycle authority. `None` = Normal; `Some(ts)` = Trash. This
     /// is the single lifecycle authority — there is no separate visibility
@@ -323,6 +321,37 @@ pub struct Session {
     /// never touches the Agent source; permanent deletion removes the row
     /// entirely.
     pub trashed_at: Option<String>,
+    // ---- The root source (flattened from the former session_members row) ----
+    /// Adapter-owned descriptor of the source shape (`rollout_file`,
+    /// `transcript_file`, sqlite store kinds, …).
+    pub source_kind: String,
+    /// Where the source lives. For file-per-session Agents this is the
+    /// transcript path; for shared stores it is the store path.
+    pub source_path: String,
+    /// Adapter-specific, non-Conversation structural facts (thread_source,
+    /// session_dir, …). Never conversation text.
+    pub metadata: serde_json::Value,
+    // ---- The source cursor (flattened from session_member_cursors) ----
+    /// Stable identity of the source file; a change means replacement.
+    pub source_file_identity: String,
+    /// The source-shape generation: bumped on replace / truncate / rewrite,
+    /// never on a proven append.
+    pub source_generation: i64,
+    pub source_byte_offset: u64,
+    pub source_last_seen_size: u64,
+    pub source_mtime: Option<f64>,
+    /// SHA-256 of the read prefix when the offset was recorded; an append is
+    /// only accepted while the stored prefix is still the file's prefix.
+    pub source_prefix_hash: String,
+    /// Identity hash of the last message on the CURRENT source chain — the
+    /// base the next append batch continues from. Empty until a message exists.
+    pub source_tail_hash: String,
+    // ---- The conversation fact frontier (flattened from session_ingest_state) ----
+    /// Fact generation of the CURRENT conversation: raised only when a source
+    /// rewrite / truncate / reorder changes the effective conversation.
+    pub fact_generation: i64,
+    /// How many messages the store holds (the store's own append counter).
+    pub latest_message_seq: i64,
 }
 
 impl Session {
@@ -330,68 +359,33 @@ impl Session {
     pub fn is_trashed(&self) -> bool {
         self.trashed_at.is_some()
     }
-}
 
-/// How a [`SessionMember`] relates to its Logical Session's root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionMemberRelation {
-    Root,
-    Child,
-    Side,
-}
-
-impl SessionMemberRelation {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SessionMemberRelation::Root => "root",
-            SessionMemberRelation::Child => "child",
-            SessionMemberRelation::Side => "side",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<SessionMemberRelation> {
-        match s {
-            "root" => Some(SessionMemberRelation::Root),
-            "child" => Some(SessionMemberRelation::Child),
-            "side" => Some(SessionMemberRelation::Side),
-            _ => None,
+    /// The read cursor a fresh delta read continues from, in the session's
+    /// own columns.
+    pub fn source_cursor(&self) -> SourceCursor {
+        SourceCursor {
+            source_file_identity: self.source_file_identity.clone(),
+            generation: self.source_generation,
+            byte_offset: self.source_byte_offset,
+            last_seen_size: self.source_last_seen_size,
+            mtime: self.source_mtime,
+            prefix_hash: self.source_prefix_hash.clone(),
+            identity_tail_hash: self.source_tail_hash.clone(),
         }
     }
 }
 
-/// One internal execution unit of a Logical Session — the Agent-side thread,
-/// subagent transcript or sidechain file that together make up the session.
-/// Only the `root` member produces [`SessionMessage`]s; every member is an
-/// observation surface for stats.
-///
-/// `source_member_id` is the Adapter's stable execution identity and need not
-/// equal the Agent's native session id (Qoder subagent transcripts repeat the
-/// parent's, so the adapter derives `root-id:subagent:<stem>`). A source with no
-/// stable identity produces NO member — never a fabricated row just to make the
-/// topology look complete.
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionMember {
-    pub id: Id,
-    pub session_id: Id,
-    pub agent: Agent,
-    pub source_member_id: String,
-    pub relation: SessionMemberRelation,
-    /// Source-side parent identity; may temporarily resolve to no member row
-    /// (the parent appears in a later discovery batch).
-    pub parent_source_member_id: Option<String>,
-    /// Adapter-owned descriptor of the source shape (`rollout_file`,
-    /// `transcript_file`, `sqlite_record`, `subagent_file`, …).
-    pub source_kind: String,
-    /// Where the member's source lives. For file-per-session Agents this is
-    /// the transcript path; for shared stores it is the store path.
-    pub source_path: String,
-    pub cwd: Option<String>,
-    pub started_at: Option<String>,
-    pub last_activity_at: Option<String>,
-    /// Adapter-specific, non-Conversation structural facts (thread_source,
-    /// delegation depth, …). Never conversation text.
-    pub metadata: serde_json::Value,
+/// Where reading of a session's source stopped — the read-side view of the
+/// session's cursor columns.
+#[derive(Debug, Clone, Default)]
+pub struct SourceCursor {
+    pub source_file_identity: String,
+    pub generation: i64,
+    pub byte_offset: u64,
+    pub last_seen_size: u64,
+    pub mtime: Option<f64>,
+    pub prefix_hash: String,
+    pub identity_tail_hash: String,
 }
 
 /// The role of a [`SessionMessage`] — the only two shapes a conversation has.
@@ -413,7 +407,7 @@ impl SessionMessageRole {
     }
 }
 
-/// One user-visible conversation turn of the ROOT member — the ONLY
+/// One user-visible conversation turn of the root source — the ONLY
 /// conversation store NoEnding keeps. Thinking, tool traffic, system /
 /// developer prompts, compaction summaries and child/side transcripts never
 /// become rows here; every visible prose segment of an assistant turn is kept
@@ -422,10 +416,6 @@ impl SessionMessageRole {
 pub struct SessionMessage {
     pub id: Id,
     pub session_id: Id,
-    /// Must reference the Session's ROOT member — enforced again at commit
-    /// time (`commit_member_ingest`), even though the FK chain would accept a
-    /// child: a stray child message is an ingestion bug, not silent data.
-    pub member_id: Id,
     /// NoEnding's own per-session monotonic sequence. Never a source line
     /// number; never reused or rolled back.
     pub sequence: i64,
@@ -437,203 +427,12 @@ pub struct SessionMessage {
     /// next projected message is not another assistant message), never
     /// ingested; meaningless (false) on user rows.
     pub turn_final: bool,
-    /// Message-level generation provenance. Only
-    /// meaningful for Assistant messages; source-confirmed only — never
-    /// inferred from configuration, branding or runtime preference. Unknown
-    /// stays unknown (`NULL`).
-    pub provider: Option<String>,
-    pub model: Option<String>,
     // Source provenance.
     pub source_message_id: Option<String>,
     pub source_generation: i64,
     pub source_position: String,
     pub source_identity_hash: String,
     pub raw_ref: String,
-}
-
-/// Per-member execution statistics, stored as a 1:1 snapshot. This is
-/// "current observable source state", not an append-only telemetry log.
-///
-/// Every member — root, child and side — keeps its own composition, so a
-/// Session's totals are the sum over its graph.
-///
-/// `NULL` = the source does not provide / cannot reliably compute the metric;
-/// `0` = observed zero. Unknown is never folded into 0.
-#[derive(Debug, Clone, Serialize)]
-/// API view: persisted activity counts plus tokens summed from usage_events.
-pub struct SessionMemberStats {
-    pub member_id: Id,
-    pub tool_call_count: Option<i64>,
-    pub user_message_count: Option<i64>,
-    pub assistant_message_count: Option<i64>,
-
-    pub side_activity_count: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cached_tokens: Option<i64>,
-    pub reasoning_tokens: Option<i64>,
-
-    pub updated_at: String,
-    pub extra: serde_json::Value,
-}
-
-/// Activity counts one member read observed, written to its 1:1 stats row.
-/// Token usage is stored exclusively in usage_events.
-///
-/// Incremental form for an append-only read: each field is the number of new
-/// observations since the last commit. `None` = nothing observed this batch
-/// (the column is left untouched, not zeroed).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StatsDelta {
-    pub tool_call_count: Option<i64>,
-    pub user_message_count: Option<i64>,
-    pub assistant_message_count: Option<i64>,
-
-    pub side_activity_count: Option<i64>,
-}
-
-impl StatsDelta {
-    /// The delta of exactly one observation each — the spelling shared readers
-    /// produce from a single parsed line.
-    pub fn single(observation: MemberObservation) -> Self {
-        Self {
-            tool_call_count: (observation.tool_calls > 0).then_some(observation.tool_calls as i64),
-            user_message_count: (observation.user_messages > 0)
-                .then_some(observation.user_messages as i64),
-            assistant_message_count: (observation.assistant_messages > 0)
-                .then_some(observation.assistant_messages as i64),
-
-            side_activity_count: (observation.side_activity > 0)
-                .then_some(observation.side_activity as i64),
-        }
-    }
-}
-
-/// Full-scan form of [`StatsDelta`]. `Some(0)` is observed zero; `None` is
-/// unsupported and leaves the stored counter unchanged.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StatsSnapshot {
-    pub tool_call_count: Option<i64>,
-    pub user_message_count: Option<i64>,
-    pub assistant_message_count: Option<i64>,
-
-    pub side_activity_count: Option<i64>,
-}
-
-/// How a member read updates the stats rows.
-#[derive(Debug, Clone, Copy)]
-pub enum StatsUpdate {
-    Delta(StatsDelta),
-    Snapshot(StatsSnapshot),
-}
-
-/// Counters one source portion contributes (shared-reader vocabulary). Plain
-/// counts, converted into a [`StatsUpdate`] by the adapter.
-///
-/// `user_messages` / `assistant_messages` count the member's own conversation
-/// records — for the root those are the same records that become the
-/// Conversation; a sub-agent counts its own turns the same way, while relay
-/// chatter between agents stays on `side_activity` instead.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MemberObservation {
-    pub tool_calls: u64,
-    pub user_messages: u64,
-    pub assistant_messages: u64,
-
-    pub side_activity: u64,
-    /// Usage the source reports for this observation. Sources report per call /
-    /// per turn, never cumulatively, so these are additive like the counts; a
-    /// cumulative counter would have to be reduced to its per-call delta first.
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cached_tokens: u64,
-    pub reasoning_tokens: u64,
-    /// Source-confirmed requests; zero means this observation reports no count.
-    pub request_count: u64,
-}
-
-impl MemberObservation {
-    /// Sum activity counters only. Usage is retained on individual events.
-    pub fn add_activity(&mut self, other: &MemberObservation) {
-        self.tool_calls += other.tool_calls;
-        self.user_messages += other.user_messages;
-        self.assistant_messages += other.assistant_messages;
-        self.side_activity += other.side_activity;
-    }
-
-    /// Nothing observed — shared readers skip an update that only restates 0s.
-    pub fn is_empty(&self) -> bool {
-        self.tool_calls == 0
-            && self.user_messages == 0
-            && self.assistant_messages == 0
-            && self.side_activity == 0
-            && self.input_tokens == 0
-            && self.output_tokens == 0
-            && self.cached_tokens == 0
-            && self.reasoning_tokens == 0
-            && self.request_count == 0
-    }
-}
-
-/// Where a member's Agent source stands, as far as reading is concerned.
-/// Belongs to the MEMBER, never to the Session — each member reads its own
-/// source at its own pace; the Context frontier is tracked separately.
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct SessionMemberCursor {
-    pub member_id: Id,
-    pub source_file_identity: String,
-    pub generation: i64,
-    pub byte_offset: u64,
-    pub last_seen_size: u64,
-    pub mtime: Option<f64>,
-    /// SHA-256 of the read prefix when the offset was recorded; an append is
-    /// only accepted while the stored prefix is still the file's prefix.
-    pub prefix_hash: String,
-    /// Identity hash of the last message on the CURRENT source chain — the
-    /// base the next append batch continues from. Only messages advance it;
-    /// stats-only batches keep the tail. Empty until a message exists.
-    pub identity_tail_hash: String,
-    /// Provenance state frontier: the provenance a stateful-evidence adapter
-    /// (Codex `turn_context`) confirmed and that still governs the messages to
-    /// come. Every other adapter leaves them `None`; never a UI authority.
-    #[serde(default)]
-    pub active_provider: Option<String>,
-    #[serde(default)]
-    pub active_model: Option<String>,
-}
-
-impl SessionMemberCursor {
-    /// The cursor an adapter's just-observed source state produces — the
-    /// spelling tests and future callers need to chain a read onto a previous
-    /// one.
-    pub fn from_update(member_id: &str, u: &crate::domain::SourceCursorUpdate) -> Self {
-        Self {
-            member_id: member_id.to_string(),
-            source_file_identity: u.file_identity.clone(),
-            generation: u.generation,
-            byte_offset: u.byte_offset,
-            last_seen_size: u.last_seen_size,
-            mtime: u.mtime,
-            prefix_hash: u.prefix_hash.clone(),
-            identity_tail_hash: String::new(),
-            active_provider: None,
-            active_model: None,
-        }
-    }
-}
-
-/// Per-session ingest state: the FACT generation of the current conversation
-/// and how many ordinals the current-message projection holds.
-///
-/// `generation` is raised only when a source rewrite / truncate / reorder
-/// changes the effective conversation; a normal append leaves it and just
-/// extends `latest_message_seq`. Both numbers are PROJECTION ordinals, never
-/// `session_messages.sequence`.
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct SessionIngestState {
-    pub session_id: Id,
-    pub generation: i64,
-    pub latest_message_seq: i64,
 }
 
 /// The fixed, system-derived Session Context structure. All four fields are
@@ -733,37 +532,6 @@ pub enum ContextUpdateError {
     Storage(String),
 }
 
-/// An ingestion problem that is deliberately NOT a Session: a child or
-/// side source whose root has not been seen. Diagnostics never enter the
-/// Sessions UI, Search, Context, ownership or lifecycle; when the root shows
-/// up and the member attaches, the row is deleted.
-#[derive(Debug, Clone, Serialize)]
-pub struct IngestionDiagnostic {
-    pub id: Id,
-    /// Stable identity of the problem, e.g. `<agent>:unresolved:<member id>`.
-    pub diagnostic_key: String,
-    pub agent: Agent,
-    pub kind: String,
-    pub source_member_id: Option<String>,
-    pub parent_source_member_id: Option<String>,
-    pub source_path: Option<String>,
-    pub reason: String,
-    pub first_seen_at: String,
-    pub last_seen_at: String,
-    pub observation_count: i64,
-    pub details: serde_json::Value,
-}
-
-pub mod diagnostic_kind {
-    /// A discovered member that could not be resolved to any Logical Session
-    /// (no root, or the parent chain is broken for now).
-    pub const UNRESOLVED_SESSION_MEMBER: &str = "unresolved_session_member";
-    /// Discovery claims a root-ness the stored member contradicts (a Root
-    /// re-claimed as child/side, or the reverse). The flip is refused in
-    /// storage; this diagnostic is the observability.
-    pub const MEMBER_RELATION_CONFLICT: &str = "member_relation_conflict";
-}
-
 /// Adapter's strict verdict about one member's source. The semantics
 /// are load-bearing for permanent deletion:
 ///
@@ -795,9 +563,7 @@ impl SourceAvailability {
 }
 
 /// One parsed conversation message, before NoEnding assigns identity and
-/// sequence (adapter → core hand-off shape). `provider` / `model` carry only
-/// what the source itself confirms about THIS message;
-/// adapters must never fill them from configuration or branding.
+/// sequence (adapter → core hand-off shape).
 #[derive(Debug, Clone)]
 pub struct ParsedSessionMessage {
     pub source_message_id: Option<String>,
@@ -805,21 +571,9 @@ pub struct ParsedSessionMessage {
     pub ts: Option<String>,
     pub role: SessionMessageRole,
     pub content: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
 }
 
 impl ParsedSessionMessage {
-    /// Attach source-confirmed provenance to a parsed message. The only
-    /// normalization allowed: trim whitespace, empty string → `None`. No
-    /// alias remap, no family guessing, no provider prefixing — the strings
-    /// stay source-native.
-    pub fn with_provenance(mut self, provider: Option<String>, model: Option<String>) -> Self {
-        self.provider = normalize_provenance(provider);
-        self.model = normalize_provenance(model);
-        self
-    }
-
     /// Source position, when the adapter has a stable native one.
     pub fn with_position(mut self, position: String) -> Self {
         self.source_position = position;
@@ -831,12 +585,6 @@ impl ParsedSessionMessage {
         self.ts = ts;
         self
     }
-}
-
-/// `trim` + empty→`None` — the only provenance normalization the domain allows.
-pub fn normalize_provenance(v: Option<String>) -> Option<String> {
-    let v = v?.trim().to_string();
-    (!v.is_empty()).then_some(v)
 }
 
 /// Listing scope for Sessions. Default projections (Sessions page,

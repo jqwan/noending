@@ -22,8 +22,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::domain::{
-    Agent, MemberObservation, ParsedSessionMessage, SessionMember, SessionMemberCursor,
-    SessionMessageRole, SourceAvailability, StatsDelta, StatsSnapshot, StatsUpdate,
+    Agent, ParsedSessionMessage, Session, SessionMessageRole, SourceAvailability, SourceCursor,
 };
 use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
@@ -71,17 +70,6 @@ pub enum DiscoveredMemberKind {
 }
 
 impl DiscoveredMemberKind {
-    /// The member relation this discovery kind lands as. A ForkRoot becomes
-    /// the `root` member of its own new Logical Session.
-    pub fn relation(self) -> crate::domain::SessionMemberRelation {
-        use crate::domain::SessionMemberRelation as R;
-        match self {
-            DiscoveredMemberKind::Root | DiscoveredMemberKind::ForkRoot => R::Root,
-            DiscoveredMemberKind::Child => R::Child,
-            DiscoveredMemberKind::Side => R::Side,
-        }
-    }
-
     pub fn is_logical_root(self) -> bool {
         matches!(
             self,
@@ -170,272 +158,36 @@ impl ExecOptions {
     }
 }
 
-/// One parsed source line's contribution: at most one conversation message
-/// plus the execution observations the line carries. Lines that are neither
-/// (reasoning bodies, bookkeeping, session meta) return `None` from the
-/// adapter closure and never reach storage.
+/// One parsed source line's contribution: at most one conversation message.
+/// Lines that are neither (reasoning bodies, bookkeeping, session meta) return
+/// `None` from the adapter closure and never reach storage.
 pub struct ParsedLine {
     /// The conversation message this line contributes, if any.
     pub message: Option<ParsedSessionMessage>,
-    /// Execution observations (tool calls, side activity) this
-    /// line contributes — counted even on lines that carry no message.
-    pub observation: MemberObservation,
-    /// Ledger note for usage this line bills WITHOUT a conversation message
-    /// (a compaction summary, an assistant attempt, a codex token_count
-    /// event): which bucket, which model, what stable identity. `None` means
-    /// the event (if the observation bills usage at all) derives from
-    /// `message`; an observation-only line without a note keeps its usage out
-    /// of the ledger because no event identity or provenance was supplied.
-    pub usage_note: Option<UsageNote>,
-}
-
-/// The ledger anchor of a usage-carrying line that is not a conversation
-/// message.
-#[derive(Debug, Clone, Default)]
-pub struct UsageNote {
-    pub category: UsageCategory,
-    pub model: Option<String>,
-    /// Source-confirmed channel, never inferred from agent branding/configuration.
-    pub provider: Option<String>,
-    /// Source-stable identity across re-reads (codex token_count cumulative
-    /// totals). Scoped to the member by the storage layer.
-    pub key: Option<String>,
-}
-
-/// Which kind of model call a usage event represents. The ledger retains
-/// this category for the panel's per-category usage summaries.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum UsageCategory {
-    /// A conversation turn's generation call (the common case).
-    #[default]
-    Conversation,
-    /// A context-compaction call (dsh's summary, pi's compact).
-    Compaction,
-    /// Side activity between agents (relay chatter, sub-agent coordination).
-    SideActivity,
-}
-
-impl UsageCategory {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            UsageCategory::Conversation => "conversation",
-            UsageCategory::Compaction => "compaction",
-            UsageCategory::SideActivity => "side",
-        }
-    }
-}
-
-/// One billed call, as the source records it — the ledger row vocabulary. A
-/// events are the sole source of token totals; activity stats carry counts only.
-#[derive(Debug, Clone, Default)]
-pub struct UsageEvent {
-    pub key: Option<String>,
-    pub category: UsageCategory,
-    pub model: Option<String>,
-    /// Source-confirmed channel, never inferred from agent branding/configuration.
-    pub provider: Option<String>,
-    pub ts: Option<String>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cached_tokens: u64,
-    pub reasoning_tokens: u64,
-
-    /// Real model requests this event covers; 0 = assume one. Only sources
-    /// that count their own requests (zcode's `model_request_count`) carry a
-    /// bigger number — codex's per-turn token_count cannot see its per-request
-    /// splits, so its events stay at the one-request default (an undercount).
-    pub request_count: u64,
-}
-
-impl UsageEvent {
-    /// The event one parsed line contributes: the note wins when present
-    /// (compaction, attempt, token_count), otherwise a message line's own
-    /// model and ts speak. A line that bills no usage produces no event; an
-    /// observation-only line without a note produces none either — its usage
-    /// has no ledger anchor.
-    pub fn from_parsed_line(line: &ParsedLine, line_ts: Option<&str>) -> Option<UsageEvent> {
-        let obs = &line.observation;
-        if obs.input_tokens == 0
-            && obs.output_tokens == 0
-            && obs.cached_tokens == 0
-            && obs.reasoning_tokens == 0
-            && obs.request_count == 0
-        {
-            return None;
-        }
-        let (category, model, provider, ts, key) = match &line.usage_note {
-            Some(note) => (
-                note.category,
-                note.model.clone(),
-                note.provider.clone(),
-                line_ts.map(str::to_string),
-                note.key.clone(),
-            ),
-            None => {
-                let m = line.message.as_ref()?;
-                (
-                    UsageCategory::Conversation,
-                    m.model.clone(),
-                    m.provider.clone(),
-                    m.ts.clone().or_else(|| line_ts.map(str::to_string)),
-                    None,
-                )
-            }
-        };
-        Some(UsageEvent {
-            key,
-            category,
-            model,
-            provider,
-            ts,
-            input_tokens: obs.input_tokens,
-            output_tokens: obs.output_tokens,
-            cached_tokens: obs.cached_tokens,
-            reasoning_tokens: obs.reasoning_tokens,
-
-            request_count: obs.request_count,
-        })
-    }
-}
-
-/// Raw event totals for adapter regression tests; persisted queries also apply
-/// the database's per-member event-key deduplication.
-#[cfg(test)]
-pub(crate) fn test_usage_tokens(events: &[UsageEvent]) -> [i64; 4] {
-    events.iter().fold([0; 4], |mut total, event| {
-        for (i, value) in [
-            event.input_tokens,
-            event.output_tokens,
-            event.cached_tokens,
-            event.reasoning_tokens,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            total[i] += value as i64;
-        }
-        total
-    })
-}
-
-#[cfg(test)]
-mod usage_event_tests {
-    use super::{ParsedLine, UsageCategory, UsageEvent};
-    use crate::domain::MemberObservation;
-
-    #[test]
-    fn request_only_records_survive_without_cost_or_tokens() {
-        let line = ParsedLine::billed_without_message(
-            Some("model".into()),
-            UsageCategory::Conversation,
-            MemberObservation {
-                request_count: 2,
-                ..Default::default()
-            },
-        );
-        let event = UsageEvent::from_parsed_line(&line, Some("2026-10-01T00:00:00Z")).unwrap();
-        assert_eq!(event.request_count, 2);
-        assert_eq!(event.input_tokens, 0);
-        assert_eq!(event.model.as_deref(), Some("model"));
-    }
-
-    #[test]
-    fn empty_observations_do_not_invent_calls() {
-        let empty = ParsedLine::billed_without_message(
-            Some("model".into()),
-            UsageCategory::Conversation,
-            MemberObservation::default(),
-        );
-        assert!(UsageEvent::from_parsed_line(&empty, None).is_none());
-    }
 }
 
 impl ParsedLine {
-    /// A line that carries only observations (tool call, compaction marker,
-    /// side chatter).
-    pub fn observation_only(observation: MemberObservation) -> Self {
-        Self {
-            message: None,
-            observation,
-            usage_note: None,
-        }
-    }
-
-    /// An observation-only line that also bills usage under a known anchor
-    /// (compaction summary, assistant attempt, token_count event).
-    pub fn billed_observation(observation: MemberObservation, note: UsageNote) -> Self {
-        Self {
-            message: None,
-            observation,
-            usage_note: Some(note),
-        }
-    }
-
-    /// A usage-carrying line that stays out of the conversation: a
-    /// tool-call-only model response, a sidechain / sub-agent turn, a
-    /// non-root member's row. The ledger note anchors the billed call —
-    /// without it the shared readers would drop exactly the calls that
-    /// produced no prose (most of an agent loop). `category` matches how the
-    /// stats row classifies the line; the event's time comes from the line's
-    /// own timestamp.
-    pub fn billed_without_message(
-        model: Option<String>,
-        category: UsageCategory,
-        observation: MemberObservation,
-    ) -> Self {
-        Self::billed_observation(
-            observation,
-            UsageNote {
-                category,
-                model,
-                provider: None,
-                key: None,
-            },
-        )
-    }
-
-    /// Preserve a no-prose generation's own channel in its ledger anchor.
-    pub fn with_usage_provider(mut self, provider: Option<String>) -> Self {
-        if let Some(note) = &mut self.usage_note {
-            note.provider = provider;
-        }
-        self
-    }
-
-    /// A line that carries one conversation message and no counters.
+    /// A line that carries one conversation message.
     pub fn message_only(message: ParsedSessionMessage) -> Self {
         Self {
             message: Some(message),
-            observation: MemberObservation::default(),
-            usage_note: None,
         }
     }
 }
 
 /// Result of one incremental member read: conversation messages (root members
-/// only), how the read updates stats, and the source state AFTER reading.
-/// Messages carry no sequence — the storage layer assigns stable identities.
+/// only) and the source state AFTER reading. Messages carry no sequence — the
+/// storage layer assigns stable identities.
 ///
 /// `complete_snapshot` is true only when EVERY parsed frame of the read was
 /// whole (an unfinished last line or a failed decode is NOT complete); an
 /// incomplete full re-scan must leave projection, generation and cursor
 /// untouched and record a retryable error instead.
-///
-/// `next_active_provider` / `next_active_model` are the provenance frontier
-/// after this read — `None`/`None` for adapters whose evidence is direct
-/// per-message or absent.
 #[derive(Debug, Clone, Default)]
 pub struct MemberReadDelta {
     pub messages: Vec<ParsedSessionMessage>,
-    pub stats: Option<StatsUpdate>,
     pub source: Option<crate::domain::SourceCursorUpdate>,
     pub complete_snapshot: bool,
-    pub next_active_provider: Option<String>,
-    pub next_active_model: Option<String>,
-    /// The billed calls this read observed — the sole source of token totals.
-    /// On a full re-scan the storage layer replaces
-    /// the member's rows wholesale; on an append these are only the new calls.
-    pub usage_events: Vec<UsageEvent>,
 }
 
 impl MemberReadDelta {
@@ -448,16 +200,6 @@ impl MemberReadDelta {
             ..Default::default()
         }
     }
-}
-
-/// The provenance frontier a stateful-evidence adapter threads through one
-/// read: provenance the source has explicitly confirmed and that still governs
-/// messages to come. Seeded from the member cursor on appends, reset on any
-/// full re-scan.
-#[derive(Debug, Clone, Default)]
-pub struct ProvenanceState {
-    pub provider: Option<String>,
-    pub model: Option<String>,
 }
 
 /// Stable identity of the file itself (not its content): inode/device on
@@ -660,65 +402,6 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
         })
 }
 
-/// Counters an adapter can reliably observe in its source format.
-#[derive(Debug, Clone, Copy)]
-pub struct StatsCapabilities {
-    tool_calls: bool,
-    side_activity: bool,
-}
-
-impl StatsCapabilities {
-    pub const MESSAGE_COUNTS: Self = Self::new(false, false);
-    pub const TOOL_CALLS: Self = Self::new(true, false);
-    pub const TOOL_AND_SIDE_ACTIVITY: Self = Self::new(true, true);
-
-    const fn new(tool_calls: bool, side_activity: bool) -> Self {
-        Self {
-            tool_calls,
-            side_activity,
-        }
-    }
-}
-
-/// A genesis read is a full scan, so supported counters replace the snapshot;
-/// an append only adds supported observations. `None` means unsupported.
-pub fn stats_update_from(
-    observation: &MemberObservation,
-    source: &crate::domain::SourceCursorUpdate,
-    capabilities: StatsCapabilities,
-) -> Option<StatsUpdate> {
-    if source.start_byte_offset == 0 {
-        return Some(StatsUpdate::Snapshot(StatsSnapshot {
-            tool_call_count: capabilities
-                .tool_calls
-                .then_some(observation.tool_calls as i64),
-            user_message_count: Some(observation.user_messages as i64),
-            assistant_message_count: Some(observation.assistant_messages as i64),
-            side_activity_count: capabilities
-                .side_activity
-                .then_some(observation.side_activity as i64),
-        }));
-    }
-    let empty = (!capabilities.tool_calls || observation.tool_calls == 0)
-        && observation.user_messages == 0
-        && observation.assistant_messages == 0
-        && (!capabilities.side_activity || observation.side_activity == 0);
-    if empty {
-        None
-    } else {
-        Some(StatsUpdate::Delta(StatsDelta {
-            tool_call_count: (capabilities.tool_calls && observation.tool_calls > 0)
-                .then_some(observation.tool_calls as i64),
-            user_message_count: (observation.user_messages > 0)
-                .then_some(observation.user_messages as i64),
-            assistant_message_count: (observation.assistant_messages > 0)
-                .then_some(observation.assistant_messages as i64),
-            side_activity_count: (capabilities.side_activity && observation.side_activity > 0)
-                .then_some(observation.side_activity as i64),
-        }))
-    }
-}
-
 /// Shared incremental JSONL reader used by every file-backed adapter.
 ///
 /// Classification of the read (compared against the stored member cursor):
@@ -731,73 +414,15 @@ pub fn stats_update_from(
 /// - rewrite:     same file, same size, mtime changed → new generation, full rescan
 /// - replacement: different file identity       → new generation, full rescan
 ///
-/// Rescans are safe because storage dedups messages by identity and stats
-/// snapshots replace: unchanged messages are skipped, changed/new ones are
-/// added, and previously ingested history is never touched. A cursor without
+/// Rescans are safe because storage dedups messages by identity: unchanged
+/// messages are skipped, changed/new ones are added, and previously ingested
+/// history is never touched. A cursor without
 /// a usable prefix fingerprint cannot prove append-only continuity, so the
 /// source is conservatively treated as a rewrite and fully re-scanned.
 pub fn read_jsonl_delta(
     path: &Path,
-    cursor: &SessionMemberCursor,
-    capabilities: StatsCapabilities,
+    cursor: &SourceCursor,
     parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
-) -> Result<MemberReadDelta> {
-    read_jsonl_delta_stateful(
-        path,
-        cursor,
-        capabilities,
-        &mut ProvenanceState::default(),
-        &mut |idx, v, _prev, _state| parse_line(idx, v),
-    )
-}
-
-/// Prev-aware variant of [`read_jsonl_delta`]: the closure also sees the
-/// decoded value of the line immediately BEFORE the one it is handed — across
-/// an append boundary too, where that predecessor is the last line the previous
-/// read consumed. It exists for sources that write one logical record as
-/// several consecutive lines repeating a shared field: Claude Code writes an
-/// assistant message as one line per content block, every line carrying the
-/// SAME `message.id` and the SAME `usage`, so only a parse that can compare a
-/// line with its predecessor charges the usage exactly once.
-pub fn read_jsonl_delta_with_prev(
-    path: &Path,
-    cursor: &SessionMemberCursor,
-    capabilities: StatsCapabilities,
-    parse_line: &mut dyn FnMut(
-        usize,
-        &serde_json::Value,
-        Option<&serde_json::Value>,
-    ) -> Option<ParsedLine>,
-) -> Result<MemberReadDelta> {
-    read_jsonl_delta_stateful(
-        path,
-        cursor,
-        capabilities,
-        &mut ProvenanceState::default(),
-        &mut |idx, v, prev, _state| parse_line(idx, v, prev),
-    )
-}
-
-/// The stateful variant. `state` is the provenance
-/// frontier: seeded by the caller from the member cursor, and RESET by this
-/// function whenever the read starts at byte 0 (first read or any full
-/// re-scan) — a fresh scan re-derives the state from the source itself
-/// instead of trusting a frontier earned under a different file layout.
-/// The closure may mutate the state as lines are parsed and attaches the
-/// current state to the messages it emits; the final state lands on the
-/// returned delta's `next_active_*` fields and is committed with the same
-/// transaction as the messages.
-pub fn read_jsonl_delta_stateful(
-    path: &Path,
-    cursor: &SessionMemberCursor,
-    capabilities: StatsCapabilities,
-    state: &mut ProvenanceState,
-    parse_line: &mut dyn FnMut(
-        usize,
-        &serde_json::Value,
-        Option<&serde_json::Value>,
-        &mut ProvenanceState,
-    ) -> Option<ParsedLine>,
 ) -> Result<MemberReadDelta> {
     let (obs, text) = observe(path)?;
     // Prefix fingerprint over the (deterministic) lossy-decoded bytes; the
@@ -825,7 +450,6 @@ pub fn read_jsonl_delta_stateful(
             // nothing new at all — the frontier stays exactly as seeded
             return Ok(MemberReadDelta {
                 messages: vec![],
-                stats: None,
                 source: Some(crate::domain::SourceCursorUpdate {
                     file_identity: obs.identity,
                     generation: cursor.generation,
@@ -836,9 +460,6 @@ pub fn read_jsonl_delta_stateful(
                     prefix_hash: cursor.prefix_hash.clone(),
                 }),
                 complete_snapshot: true,
-                next_active_provider: state.provider.clone(),
-                next_active_model: state.model.clone(),
-                usage_events: Vec::new(),
             });
         }
         (cursor.generation + 1, 0) // same-size rewrite / touch
@@ -856,25 +477,11 @@ pub fn read_jsonl_delta_stateful(
         }
     };
 
-    // A full re-scan re-derives provenance from the source itself: the seed
-    // was earned under a file layout that no longer governs this read.
-    if start_offset == 0 {
-        *state = ProvenanceState::default();
-    }
-
     let mut messages: Vec<ParsedSessionMessage> = Vec::new();
-    let mut observation = MemberObservation::default();
-    let mut usage_events: Vec<UsageEvent> = Vec::new();
     let start_offset = start_offset as usize;
     let mut offset = 0usize;
     let mut complete_snapshot = true;
     let mut complete_end = text.len();
-    // The predecessor line, for prev-aware parsers: the last value parsed in
-    // THIS read, or — for an append — the last line the previous read consumed,
-    // which the seek skipped and must be decoded here (once) to keep a record
-    // that repeats across the boundary honest.
-    let mut prev: Option<serde_json::Value> = None;
-    let mut prev_raw: Option<&str> = None;
     for (idx, frame) in text.split_inclusive('\n').enumerate() {
         let line_start = offset;
         offset += frame.len();
@@ -884,9 +491,6 @@ pub fn read_jsonl_delta_stateful(
             .strip_suffix('\r')
             .unwrap_or_else(|| frame.strip_suffix('\n').unwrap_or(frame));
         if line_start < start_offset {
-            if !line.trim().is_empty() {
-                prev_raw = Some(line);
-            }
             continue;
         }
         if line.trim().is_empty() {
@@ -910,19 +514,7 @@ pub fn read_jsonl_delta_stateful(
             Some(serde_json::Value::Number(n)) => n.as_i64().and_then(ms_epoch_to_rfc3339),
             _ => None,
         };
-        let predecessor: Option<serde_json::Value> = prev.take().or_else(|| {
-            prev_raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        });
-        let parsed = parse_line(idx, &v, predecessor.as_ref(), state);
-        // Advance the predecessor for the next line BEFORE any message
-        // handling can skip it: the dedup a prev-aware parser does is about
-        // consecutive SOURCE lines, not about which ones became messages.
-        prev = Some(v);
-        if let Some(p) = parsed {
-            observation.add_activity(&p.observation);
-            if let Some(event) = UsageEvent::from_parsed_line(&p, ts.as_deref()) {
-                usage_events.push(event);
-            }
+        if let Some(p) = parse_line(idx, &v) {
             if let Some(mut m) = p.message {
                 if m.content.trim().is_empty() {
                     continue;
@@ -948,13 +540,9 @@ pub fn read_jsonl_delta_stateful(
         prefix_hash: prefix_hash_of(complete_end),
     };
     Ok(MemberReadDelta {
-        stats: stats_update_from(&observation, &source, capabilities),
         messages,
         source: Some(source),
         complete_snapshot,
-        next_active_provider: state.provider.clone(),
-        next_active_model: state.model.clone(),
-        usage_events,
     })
 }
 
@@ -962,14 +550,13 @@ pub fn read_jsonl_delta_stateful(
 /// zstd frames; ZCode's live store).
 ///
 /// Offsets stay in the source's OWN coordinates — that is what the reconcile
-/// pre-filter stats, and it is all that is known without decoding. A replay
+/// pre-filter sees, and it is all that is known without decoding. A replay
 /// always starts at genesis and message identity (the writer's own ids) absorbs
 /// it, so re-reading stores nothing. A new generation is a change of shape
-/// (file replaced or truncated), never a mere append; every replay is a full
-/// scan, so its observations become a stats SNAPSHOT.
+/// (file replaced or truncated), never a mere append.
 pub fn replay_cursor_update(
     path: &Path,
-    cursor: &SessionMemberCursor,
+    cursor: &SourceCursor,
     raw: &[u8],
 ) -> Result<crate::domain::SourceCursorUpdate> {
     let meta = std::fs::metadata(path)?;
@@ -1017,14 +604,14 @@ pub struct SqliteMemberFacts {
 /// Source observation for a member of a live SQLite store, in the MEMBER's
 /// own coordinates: `byte_offset`/`last_seen_size` carry the member's content
 /// position and `mtime` its activity time, so "this member changed" is
-/// decided per member — never by a shared file's stats or WAL noise (the
+/// decided per member — never by a shared file's size/mtime or WAL noise (the
 /// activity stamp in the commit path uses the same mtime). `file_identity`
 /// still keys on the container: a replaced database, like a content shrink,
-/// is a shape change worth a generation bump. Every replay is a full scan →
-/// stats SNAPSHOT; message-identity dedup absorbs the re-read.
+/// is a shape change worth a generation bump. Every replay is a full scan;
+/// message-identity dedup absorbs the re-read.
 pub fn sqlite_replay_cursor_update(
     path: &Path,
-    cursor: &SessionMemberCursor,
+    cursor: &SourceCursor,
     member: SqliteMemberFacts,
 ) -> Result<crate::domain::SourceCursorUpdate> {
     let meta = std::fs::metadata(path)?;
@@ -1117,36 +704,18 @@ pub trait AgentAdapter: Send + Sync {
         unchanged: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<DiscoveredMember>>;
 
-    /// Read only the delta since `cursor` for THIS member, detecting append /
-    /// truncate / rewrite / replacement. Only Root members may return
-    /// messages; child/side members contribute observations only — the core
-    /// commit rejects any message whose member is not the root.
-    fn read_member_delta(
+    /// Read only the delta since the session's cursor for THIS session,
+    /// detecting append / truncate / rewrite / replacement.
+    fn read_session_delta(
         &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
+        session: &Session,
+        cursor: &SourceCursor,
     ) -> Result<MemberReadDelta>;
 
-    /// Read with a cross-file usage-claim registry in scope. Adapters whose
-    /// usage can be REPLAYED across files (codex continuation chains re-emit
-    /// a thread's whole token_count history into each fresh rollout) override
-    /// this to skip an event another member already billed. `claims(key)`
-    /// answers whether THIS member may bill the event — the registry claims
-    /// it as a side effect. The default ignores the registry: every event
-    /// bills.
-    fn read_member_delta_claimed(
-        &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
-        _claims: &dyn Fn(&str) -> bool,
-    ) -> Result<MemberReadDelta> {
-        self.read_member_delta(member, cursor)
-    }
-
-    /// Strict availability verdict for the member's source. For a
-    /// ROOT member this is the permanent-delete and Resume authority: only a
-    /// fresh `Missing` may ever enable a local purge.
-    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability>;
+    /// Strict availability verdict for the session's source. This is the
+    /// permanent-delete and Resume authority: only a fresh `Missing` may ever
+    /// enable a local purge.
+    fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability>;
 
     /// Build the command line for a New Session.
     ///
@@ -1186,7 +755,7 @@ pub trait AgentAdapter: Send + Sync {
     /// CLI path; `Desktop` opens the Agent's own app (only when the app is
     /// actually present on this machine — a missing app must refuse, never
     /// dispatch a deep link into nothing); `Refused` states the reason.
-    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+    fn continue_route(&self, _session: &Session) -> ResumeRoute {
         ResumeRoute::Terminal
     }
 
@@ -1195,7 +764,7 @@ pub trait AgentAdapter: Send + Sync {
     /// whose store the desktop app can actually open implement it; the
     /// default refusal is what makes a format single-method. App absent →
     /// Refused (the caller falls back to [`Self::continue_route`]).
-    fn desktop_resume_route(&self, _member: &SessionMember) -> ResumeRoute {
+    fn desktop_resume_route(&self, _session: &Session) -> ResumeRoute {
         ResumeRoute::Refused("该会话来源格式不支持在桌面端打开".into())
     }
 
@@ -1363,9 +932,7 @@ pub fn title_from_text(text: &str) -> Option<String> {
 }
 
 /// A conversation message out of one parsed line — the spelling every
-/// adapter's closure constructs. Provenance defaults to `None`/`None`:
-/// most messages (every user message, unknown-provenance assistant turns)
-/// need nothing more.
+/// adapter's closure constructs.
 pub fn parsed_message(
     source_message_id: Option<String>,
     role: SessionMessageRole,
@@ -1377,8 +944,6 @@ pub fn parsed_message(
         ts: None,
         role,
         content,
-        provider: None,
-        model: None,
     }
 }
 
@@ -1400,13 +965,7 @@ mod jsonl_integrity_tests {
     fn a_valid_final_json_frame_does_not_need_a_newline() {
         let frame = r#"{"type":"event","value":1}"#;
         let path = temp_file(frame);
-        let delta = read_jsonl_delta(
-            &path,
-            &SessionMemberCursor::default(),
-            StatsCapabilities::MESSAGE_COUNTS,
-            &|_, _| None,
-        )
-        .unwrap();
+        let delta = read_jsonl_delta(&path, &SourceCursor::default(), &|_, _| None).unwrap();
 
         assert!(delta.complete_snapshot);
         assert_eq!(delta.source.unwrap().byte_offset, frame.len() as u64);
@@ -1418,13 +977,7 @@ mod jsonl_integrity_tests {
         let valid = r#"{"type":"event","value":1}"#;
         let body = format!("{valid}\n{{broken}}\n{valid}\n");
         let path = temp_file(&body);
-        let delta = read_jsonl_delta(
-            &path,
-            &SessionMemberCursor::default(),
-            StatsCapabilities::MESSAGE_COUNTS,
-            &|_, _| None,
-        )
-        .unwrap();
+        let delta = read_jsonl_delta(&path, &SourceCursor::default(), &|_, _| None).unwrap();
 
         assert!(!delta.complete_snapshot);
         let source = delta.source.unwrap();

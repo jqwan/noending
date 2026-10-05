@@ -120,7 +120,6 @@ pub fn reindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PermanentDeletionCounts {
     pub message_count: i64,
-    pub member_count: i64,
     /// Committed Session Context rows and their revision history.
     pub session_context_count: i64,
     pub launch_intent_count: i64,
@@ -136,7 +135,6 @@ impl PermanentDeletionCounts {
         };
         Ok(Self {
             message_count: count("SELECT COUNT(*) FROM session_messages WHERE session_id = ?1")?,
-            member_count: count("SELECT COUNT(*) FROM session_members WHERE session_id = ?1")?,
             session_context_count: count(
                 "SELECT (SELECT COUNT(*) FROM session_contexts WHERE session_id = ?1)
                       + (SELECT COUNT(*) FROM session_context_revisions WHERE session_id = ?1)",
@@ -337,45 +335,18 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usi
         "DELETE FROM workstream_session_frontiers WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 5. Diagnostics that describe exactly this session's members.
-    tx.execute(
-        "DELETE FROM ingestion_diagnostics
-         WHERE agent = (SELECT agent FROM sessions WHERE id = ?1)
-           AND source_member_id IN (SELECT source_member_id FROM session_members WHERE session_id = ?1)",
-        params![session_id],
-    )?;
-    // 6. The current-message projection goes with the conversation.
+    // 5. The current-message projection goes with the conversation.
     tx.execute(
         "DELETE FROM session_message_projection WHERE session_id = ?1",
         params![session_id],
     )?;
-    tx.execute(
-        "DELETE FROM session_ingest_state WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    // 7. The conversation store: THIS session's history ends here, after every
+    // 6. The conversation store: THIS session's history ends here, after every
     //    surviving provenance pointer was redacted.
     tx.execute(
         "DELETE FROM session_messages WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 8. Member stats and cursors (FK → members).
-    tx.execute(
-        "DELETE FROM session_member_stats WHERE member_id IN
-           (SELECT id FROM session_members WHERE session_id = ?1)",
-        params![session_id],
-    )?;
-    tx.execute(
-        "DELETE FROM session_member_cursors WHERE member_id IN
-           (SELECT id FROM session_members WHERE session_id = ?1)",
-        params![session_id],
-    )?;
-    // 9. The members themselves.
-    tx.execute(
-        "DELETE FROM session_members WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    // 10. The session row itself, last, once nothing references it.
+    // 7. The session row itself, last, once nothing references it.
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
     // FTS rows of this session's messages go with the data — a failure here
     // rolls the whole purge back, never a half-deleted session in search.

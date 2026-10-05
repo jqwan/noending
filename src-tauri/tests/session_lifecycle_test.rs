@@ -2,7 +2,7 @@
 //!
 //! Trash is a thin filter: it decides which lists a Session appears in and
 //! freezes its Context extraction. Everything else keeps following the source —
-//! member ingestion still commits, ownership still matches, and the Agent source
+//! ingestion still commits, ownership still matches, and the Agent source
 //! file is never touched (NoEnding never deletes an Agent-owned source). Restore
 //! keeps the same id, Owner, messages, cursors and Context frontier, then
 //! reindexes. Permanent delete is a NoEnding-LOCAL purge (no job, no filesystem
@@ -13,14 +13,10 @@
 //! Adapter verdicts are driven with REAL files via `inspect_file_source`; only
 //! temp dirs are used, never the real ~/.codex, ~/.claude or ~/.pi.
 
-use noending::domain::diagnostic_kind;
-use noending::domain::{
-    Agent, LaunchIntent, SessionMemberRelation, SessionMessageRole, SourceAvailability, StatsDelta,
-    StatsUpdate,
-};
+use noending::domain::{Agent, LaunchIntent, SessionMessageRole, SourceAvailability};
 use noending::lifecycle;
 use noending::search;
-use noending::storage::{diagnostic_key, new_id, now, Db};
+use noending::storage::{new_id, now, Db};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -69,20 +65,16 @@ impl Drop for TempDir {
     }
 }
 
-/// A Logical Session with a root member whose source is a REAL file at
-/// `dir/session.jsonl` — the file the adapter verdicts read, and the file the
-/// purge must never touch. Pass `source_kind = Directory` to get the
-/// deterministic Unavailable verdict instead (a non-regular file).
+/// A Logical Session whose root source is a REAL file at `dir/session.jsonl`
+/// — the file the adapter verdicts read, and the file the purge must never
+/// touch. Pass `source_kind = Directory` to get the deterministic Unavailable
+/// verdict instead (a non-regular file).
 enum SourceKind {
     File,
     Directory,
 }
 
-fn seeded_session(
-    db: &Db,
-    dir: &TempDir,
-    source: SourceKind,
-) -> (noending::domain::Session, String) {
+fn seeded_session(db: &Db, dir: &TempDir, source: SourceKind) -> noending::domain::Session {
     let root_id = format!("root-{}", new_id());
     let source_path = match source {
         SourceKind::File => {
@@ -97,22 +89,16 @@ fn seeded_session(
     if matches!(source, SourceKind::Directory) {
         std::fs::create_dir_all(&source_path).unwrap();
     }
-    let s = support::ensure_session(db, format!("s-{}", new_id()), Agent::Codex, &root_id);
-    let member = support::ensure_root_member(
-        db,
-        &s.id,
-        Agent::Codex,
-        &root_id,
-        &source_path.to_string_lossy(),
-    );
-    (s, member)
+    support::ensure_session_source(db, Agent::Codex, &root_id, &source_path.to_string_lossy());
+    db.find_session_by_root_agent_id(Agent::Codex, &root_id)
+        .unwrap()
+        .expect("seeded session")
 }
 
 /// Commit a one-message batch through the production path and index it.
 fn commit_message(
     db: &Db,
     session_id: &str,
-    member_id: &str,
     text: &str,
     offset: u64,
 ) -> Vec<noending::domain::SessionMessage> {
@@ -122,11 +108,9 @@ fn commit_message(
         text,
     )];
     let stored = db
-        .commit_member_ingest(
+        .commit_ingest(
             session_id,
-            member_id,
             &messages,
-            None,
             &noending::domain::SourceCursorUpdate {
                 file_identity: format!("identity-{}", offset),
                 generation: 1,
@@ -229,17 +213,14 @@ fn context_item_pointing_at(
 fn trash_keeps_every_fact_and_never_touches_the_source() {
     let db = open_db("trash-freezes");
     let dir = TempDir::new("trash-freezes-src");
-    let (s, member) = seeded_session(&db, &dir, SourceKind::File);
-    let source_file = {
-        let m = db.get_member(&member).unwrap().unwrap();
-        PathBuf::from(&m.source_path)
-    };
-    commit_message(&db, &s.id, &member, "决定使用 SQLite 存储", 100);
+    let s = seeded_session(&db, &dir, SourceKind::File);
+    let source_file = PathBuf::from(&s.source_path);
+    commit_message(&db, &s.id, "决定使用 SQLite 存储", 100);
     let ws = workstream(&db, "WS");
     set_owner(&db, &s.id, &ws.id);
     set_context_frontier(&db, &s.id, 1);
 
-    let cursor_before = db.get_member_cursor(&member).unwrap();
+    let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     let trashed = lifecycle::trash_session(&db, &s.id).unwrap();
     assert!(
         trashed.trashed_at.is_some(),
@@ -261,7 +242,7 @@ fn trash_keeps_every_fact_and_never_touches_the_source() {
         Some(ws.id.clone()),
         "Trash keeps the Owner Workstream (Trash Session → Owner 保留)"
     );
-    let cursor_after = db.get_member_cursor(&member).unwrap();
+    let cursor_after = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert_eq!(
         cursor_before.byte_offset, cursor_after.byte_offset,
         "the trash flip itself does not move the cursor"
@@ -273,7 +254,7 @@ fn trash_keeps_every_fact_and_never_touches_the_source() {
     assert_eq!(
         context_frontier(&db, &s.id),
         1,
-        "the Context frontier is member-lifecycle-independent"
+        "the Context frontier is session-lifecycle-independent"
     );
 }
 
@@ -281,7 +262,7 @@ fn trash_keeps_every_fact_and_never_touches_the_source() {
 fn trash_is_hidden_from_list_projections_and_cards() {
     let db = open_db("list-scope");
     let dir = TempDir::new("list-scope-src");
-    let (s, _member) = seeded_session(&db, &dir, SourceKind::File);
+    let s = seeded_session(&db, &dir, SourceKind::File);
     let ws = workstream(&db, "WS");
     set_owner(&db, &s.id, &ws.id);
 
@@ -322,19 +303,19 @@ fn trash_is_hidden_from_list_projections_and_cards() {
 fn inflight_ingest_commits_after_trash() {
     let db = open_db("inflight-guard");
     let dir = TempDir::new("inflight-src");
-    let (s, member) = seeded_session(&db, &dir, SourceKind::File);
-    commit_message(&db, &s.id, &member, "first round message", 100);
-    let cursor_before = db.get_member_cursor(&member).unwrap();
+    let s = seeded_session(&db, &dir, SourceKind::File);
+    commit_message(&db, &s.id, "first round message", 100);
+    let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
     // T1: the user trashes while the next batch is in flight…
     lifecycle::trash_session(&db, &s.id).unwrap();
 
     // …T2: the staged batch commits anyway — the source is the authority.
-    let stored = commit_message(&db, &s.id, &member, "second round message", 200);
+    let stored = commit_message(&db, &s.id, "second round message", 200);
     assert_eq!(stored.len(), 1, "a trashed session still takes its source");
 
     assert_eq!(db.message_count(&s.id).unwrap(), 2);
-    let cursor_after = db.get_member_cursor(&member).unwrap();
+    let cursor_after = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert!(
         cursor_before.byte_offset < cursor_after.byte_offset,
         "the cursor advanced with the committed batch"
@@ -351,12 +332,12 @@ fn inflight_ingest_commits_after_trash() {
 fn restore_keeps_identity_data_and_reindexes() {
     let db = open_db("restore-keeps");
     let dir = TempDir::new("restore-src");
-    let (s, member) = seeded_session(&db, &dir, SourceKind::File);
-    let stored = commit_message(&db, &s.id, &member, "the sqlite decision message", 100);
+    let s = seeded_session(&db, &dir, SourceKind::File);
+    let stored = commit_message(&db, &s.id, "the sqlite decision message", 100);
     let ws = workstream(&db, "WS");
     set_owner(&db, &s.id, &ws.id);
     set_context_frontier(&db, &s.id, 1);
-    let cursor_before = db.get_member_cursor(&member).unwrap();
+    let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
     lifecycle::trash_session(&db, &s.id).unwrap();
     let restored = lifecycle::restore_session(&db, &s.id).unwrap();
@@ -371,7 +352,7 @@ fn restore_keeps_identity_data_and_reindexes() {
         stored.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
         "the same messages, same app-owned ids"
     );
-    let cursor_after = db.get_member_cursor(&member).unwrap();
+    let cursor_after = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert_eq!(cursor_before.byte_offset, cursor_after.byte_offset);
     assert_eq!(
         context_frontier(&db, &s.id),
@@ -395,7 +376,7 @@ fn restore_keeps_identity_data_and_reindexes() {
 fn trashed_session_cannot_resume() {
     let db = open_db("no-resume");
     let dir = TempDir::new("no-resume-src");
-    let (s, _member) = seeded_session(&db, &dir, SourceKind::File);
+    let s = seeded_session(&db, &dir, SourceKind::File);
     lifecycle::trash_session(&db, &s.id).unwrap();
 
     let launcher = noending::launcher::SessionLauncher {
@@ -416,11 +397,8 @@ fn trashed_session_cannot_resume() {
 fn active_session_is_never_purgeable_even_when_root_is_missing() {
     let db = open_db("active-no-purge");
     let dir = TempDir::new("active-purge-src");
-    let (s, _member) = seeded_session(&db, &dir, SourceKind::File);
-    let source_file = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        PathBuf::from(&root.source_path)
-    };
+    let s = seeded_session(&db, &dir, SourceKind::File);
+    let source_file = PathBuf::from(&s.source_path);
 
     // The source disappears (user rm, sync tool) while the session is ACTIVE.
     std::fs::remove_file(&source_file).unwrap();
@@ -456,11 +434,8 @@ fn trashed_session_is_purgeable_whatever_the_root_source_says() {
     ] {
         let db = open_db(&format!("purge-{tag}"));
         let dir = TempDir::new(&format!("purge-{tag}-src"));
-        let (s, _member) = seeded_session(&db, &dir, kind);
-        let source_path = {
-            let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-            PathBuf::from(&root.source_path)
-        };
+        let s = seeded_session(&db, &dir, kind);
+        let source_path = PathBuf::from(&s.source_path);
         lifecycle::trash_session(&db, &s.id).unwrap();
 
         let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
@@ -490,40 +465,17 @@ fn trashed_session_is_purgeable_whatever_the_root_source_says() {
 fn permanent_delete_purges_local_rows_only() {
     let db = open_db("full-purge");
     let dir = TempDir::new("purge-src");
-    let (s, member) = seeded_session(&db, &dir, SourceKind::File);
-    let source_file = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        PathBuf::from(&root.source_path)
-    };
-    commit_message(&db, &s.id, &member, "决定使用 SQLite 存储", 100);
+    let s = seeded_session(&db, &dir, SourceKind::File);
+    let source_file = PathBuf::from(&s.source_path);
+    commit_message(&db, &s.id, "决定使用 SQLite 存储", 100);
     let ws = workstream(&db, "Surviving WS");
     set_owner(&db, &s.id, &ws.id);
     let (item_id, _) = context_item_pointing_at(&db, &ws.id, &s.id);
     launch_intent(&db, &s.id, Agent::Codex);
-    // A diagnostic describing exactly this session's root member.
-    let root_source_id = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        root.source_member_id
-    };
-    db.upsert_ingestion_diagnostic(
-        Agent::Codex,
-        diagnostic_kind::UNRESOLVED_SESSION_MEMBER,
-        Some(&root_source_id),
-        None,
-        Some(source_file.to_string_lossy().as_ref()),
-        "fixture",
-        &serde_json::json!({}),
-    )
-    .unwrap();
     // Stats via the production delta path.
-    db.commit_member_ingest(
+    db.commit_ingest(
         &s.id,
-        &member,
         &[],
-        Some(StatsUpdate::Delta(StatsDelta {
-            tool_call_count: Some(3),
-            ..Default::default()
-        })),
         &noending::domain::SourceCursorUpdate {
             file_identity: "identity".into(),
             generation: 1,
@@ -535,16 +487,12 @@ fn permanent_delete_purges_local_rows_only() {
         },
     )
     .unwrap();
-    assert!(
-        db.get_member_stats(&member).unwrap().is_some(),
-        "fixture sanity"
-    );
     set_context_frontier(&db, &s.id, 1);
 
     // …another session's context must NOT be redacted.
     let other_dir = TempDir::new("purge-other-src");
-    let (other, other_member) = seeded_session(&db, &other_dir, SourceKind::File);
-    commit_message(&db, &other.id, &other_member, "另一个会话的消息", 100);
+    let other = seeded_session(&db, &other_dir, SourceKind::File);
+    commit_message(&db, &other.id, "另一个会话的消息", 100);
     let (other_item, _) = context_item_pointing_at(&db, &ws.id, &other.id);
 
     // Trashed + root missing → purge allowed.
@@ -554,7 +502,6 @@ fn permanent_delete_purges_local_rows_only() {
     let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
     assert_eq!(preview.root_source_status, SourceAvailability::Missing);
     assert_eq!(preview.counts.message_count, 1);
-    assert_eq!(preview.counts.member_count, 1);
     assert!(preview.counts.session_context_count >= 1);
     assert_eq!(preview.counts.launch_intent_count, 1);
     assert!(
@@ -569,16 +516,6 @@ fn permanent_delete_purges_local_rows_only() {
 
     // Every session-owned row is gone ('s fixed order).
     assert!(db.get_session(&s.id).unwrap().is_none(), "session row gone");
-    assert!(db.root_member_for_session(&s.id).unwrap().is_none());
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_members WHERE session_id = ?",
-            &s.id
-        ),
-        0,
-        "members gone"
-    );
     assert_eq!(
         count(
             &db,
@@ -587,24 +524,6 @@ fn permanent_delete_purges_local_rows_only() {
         ),
         0,
         "conversation gone"
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_member_cursors WHERE member_id = ?",
-            &member
-        ),
-        0,
-        "member cursors gone"
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_member_stats WHERE member_id = ?",
-            &member
-        ),
-        0,
-        "member stats gone"
     );
     assert_eq!(
         count(
@@ -632,19 +551,6 @@ fn permanent_delete_purges_local_rows_only() {
         ),
         0,
         "matched launch history gone"
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM ingestion_diagnostics WHERE diagnostic_key = ?",
-            &diagnostic_key(
-                Agent::Codex,
-                diagnostic_kind::UNRESOLVED_SESSION_MEMBER,
-                Some(&root_source_id)
-            )
-        ),
-        0,
-        "diagnostics of this session's members are gone"
     );
     assert_eq!(
         count(
@@ -717,11 +623,8 @@ fn permanent_delete_purges_local_rows_only() {
 fn a_reappearing_source_does_not_block_the_purge() {
     let db = open_db("fresh-recheck");
     let dir = TempDir::new("recheck-src");
-    let (s, _member) = seeded_session(&db, &dir, SourceKind::File);
-    let source_file = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        PathBuf::from(&root.source_path)
-    };
+    let s = seeded_session(&db, &dir, SourceKind::File);
+    let source_file = PathBuf::from(&s.source_path);
 
     lifecycle::trash_session(&db, &s.id).unwrap();
     std::fs::remove_file(&source_file).unwrap();
@@ -740,36 +643,21 @@ fn a_reappearing_source_does_not_block_the_purge() {
     );
 }
 
-/// The purge has no filesystem step: a child member's source file survives a
-/// purge just like the root's.
+/// The purge has no filesystem step: a source file that is not the purged
+/// session's own root source survives untouched — and so does a sibling
+/// session's file.
 #[test]
-fn child_source_may_survive_when_root_is_missing() {
+fn the_purge_never_touches_other_files_on_disk() {
     let db = open_db("child-source");
     let dir = TempDir::new("child-src");
-    let (s, member) = seeded_session(&db, &dir, SourceKind::File);
-    let root_file = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        PathBuf::from(&root.source_path)
-    };
-    commit_message(&db, &s.id, &member, "root conversation", 100);
+    let s = seeded_session(&db, &dir, SourceKind::File);
+    let root_file = PathBuf::from(&s.source_path);
+    commit_message(&db, &s.id, "root conversation", 100);
 
-    // A child member with its own, still-existing source file.
-    let child_file = dir.path().join("child.jsonl");
-    std::fs::write(&child_file, "child transcript\n").unwrap();
-    db.upsert_session_member(
-        &s.id,
-        Agent::Codex,
-        "child-source-member",
-        SessionMemberRelation::Child,
-        Some(&s.root_agent_session_id),
-        "subagent_file",
-        &child_file.to_string_lossy(),
-        None,
-        None,
-        None,
-        &serde_json::json!({}),
-    )
-    .unwrap();
+    // An unrelated file in the same temp dir (the old "child transcript"
+    // spot): the purge is a LOCAL row purge with no filesystem step.
+    let sibling_file = dir.path().join("sibling.jsonl");
+    std::fs::write(&sibling_file, "unrelated transcript\n").unwrap();
 
     lifecycle::trash_session(&db, &s.id).unwrap();
     std::fs::remove_file(&root_file).unwrap();
@@ -781,8 +669,8 @@ fn child_source_may_survive_when_root_is_missing() {
     );
     assert!(db.get_session(&s.id).unwrap().is_none());
     assert!(
-        child_file.exists(),
-        "the child's Agent source file is NEVER touched — there is no filesystem step"
+        sibling_file.exists(),
+        "unrelated files are NEVER touched — there is no filesystem step"
     );
 }
 
@@ -792,13 +680,10 @@ fn child_source_may_survive_when_root_is_missing() {
 fn a_purged_root_may_be_reingested_as_a_new_session() {
     let db = open_db("no-tombstone");
     let dir = TempDir::new("tombstone-src");
-    let (s, member) = seeded_session(&db, &dir, SourceKind::File);
+    let s = seeded_session(&db, &dir, SourceKind::File);
     let root_id = s.root_agent_session_id.clone();
-    let source_file = {
-        let root = db.root_member_for_session(&s.id).unwrap().unwrap();
-        PathBuf::from(&root.source_path)
-    };
-    commit_message(&db, &s.id, &member, "the original conversation", 100);
+    let source_file = PathBuf::from(&s.source_path);
+    commit_message(&db, &s.id, "the original conversation", 100);
     let ws = workstream(&db, "WS");
     set_owner(&db, &s.id, &ws.id);
 
@@ -849,22 +734,10 @@ fn startup_backfill_skips_trashed_sessions() {
     let db = open_db("backfill-trashed");
     let dir_a = TempDir::new("backfill-a-src");
     let dir_b = TempDir::new("backfill-b-src");
-    let (active, active_member) = seeded_session(&db, &dir_a, SourceKind::File);
-    let (trashed, trashed_member) = seeded_session(&db, &dir_b, SourceKind::File);
-    let active_stored = commit_message(
-        &db,
-        &active.id,
-        &active_member,
-        "unique active marker goals",
-        100,
-    );
-    let trashed_stored = commit_message(
-        &db,
-        &trashed.id,
-        &trashed_member,
-        "unique trashed marker goals",
-        100,
-    );
+    let active = seeded_session(&db, &dir_a, SourceKind::File);
+    let trashed = seeded_session(&db, &dir_b, SourceKind::File);
+    let active_stored = commit_message(&db, &active.id, "unique active marker goals", 100);
+    let trashed_stored = commit_message(&db, &trashed.id, "unique trashed marker goals", 100);
 
     lifecycle::trash_session(&db, &trashed.id).unwrap();
     // 模拟重启：startup backfill 不得把回收站加回来。

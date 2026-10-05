@@ -158,8 +158,8 @@ fn fake_spawn(cmd: &AgentCommand) -> Result<LaunchOutcome> {
     })
 }
 
-/// A Logical Session keyed by its ROOT member's Resume identity, with a REAL
-/// root source file: resume preparation refuses a Session whose ROOT member
+/// A Logical Session keyed by its root source's Resume identity, with a REAL
+/// root source file: resume preparation refuses a Session whose root source
 /// source is not present on disk, so every fixture session is
 /// resumable. `workspace_path_id` goes through the production upsert, which
 /// derives `project_id` from the path row in the same statement.
@@ -180,7 +180,7 @@ fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> S
             Some(&ts),
         )
         .unwrap();
-    support::ensure_root_member(db, &id, Agent::Codex, &root_id, &raw.to_string_lossy());
+    support::ensure_session_source(db, Agent::Codex, &root_id, &raw.to_string_lossy());
     db.get_session(&id).unwrap().unwrap()
 }
 
@@ -422,10 +422,11 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
         .unwrap();
 
     // Discovery rewrites the cwd (the transcript is the source of truth)
-    // through the production upsert, keyed by the ROOT Resume identity.
+    // through the production upsert, keyed by the ROOT Resume identity — and
+    // it replaces the source columns wholesale, so they ride along.
     let moved = real_dir("resume-drift", "moved");
     let drifted = db.get_session(&s.id).unwrap().unwrap();
-    db.upsert_logical_session_unchecked(
+    db.upsert_logical_session(
         drifted.agent,
         &drifted.root_agent_session_id,
         None,
@@ -434,6 +435,9 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
         None,
         None,
         None,
+        &drifted.source_kind,
+        &drifted.source_path,
+        &drifted.metadata,
     )
     .unwrap();
 

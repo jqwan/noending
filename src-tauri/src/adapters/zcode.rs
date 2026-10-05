@@ -11,8 +11,6 @@
 //! data, sequence)` whose `data.type` is `text` / `reasoning` / `tool` /
 //! `step-start` / `step-finish` / `timeline` / `compaction` / `file`.
 //!
-//! Usage is in none of those rows: it lives in `turn_usage`, ZCode's per-turn
-//! rollup, read separately and summed. (`model_usage` is the per-request table,
 //! which a retried request would repeat — the rollup cannot double-count an
 //! attempt.) The store states no cost.
 //!
@@ -24,7 +22,6 @@
 //! Ingested is exactly the prose: the `text` parts of a message joined in
 //! `sequence` order, under the message's own id, and only for the ROOT member.
 //! Reasoning, tool traffic, step markers, timeline and file references are
-//! counted, never stored; a `compaction` part is a compaction observation. The
 //! user's prompt needs no unwrapping — the environment snapshot lives in
 //! `message.data.contextSnapshot` and leaves `text` clean.
 //!
@@ -53,11 +50,10 @@ use serde_json::Value;
 
 use crate::adapters::{
     ms_epoch_to_rfc3339, AgentCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
-    ExecOptions, MemberObservation, MemberReadDelta, ResumeRoute,
+    ExecOptions, MemberReadDelta, ResumeRoute,
 };
 use crate::domain::{
-    Agent, ParsedSessionMessage, SessionMember, SessionMemberCursor, SessionMessageRole,
-    SourceAvailability,
+    Agent, ParsedSessionMessage, Session, SessionMessageRole, SourceAvailability, SourceCursor,
 };
 use crate::error::{other, Result};
 use crate::platform::exec_resolver::AgentInstallation;
@@ -94,18 +90,6 @@ fn text_of(parts: &[Value]) -> String {
         .filter_map(|p| p.pointer("/data/text").and_then(|t| t.as_str()))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Tool-call observations one message's parts contribute.
-fn observation_of(parts: &[Value]) -> MemberObservation {
-    let mut obs = MemberObservation::default();
-    for p in parts {
-        match p.pointer("/data/type").and_then(|t| t.as_str()) {
-            Some("tool") => obs.tool_calls += 1,
-            _ => {}
-        }
-    }
-    obs
 }
 
 /// The conversation kind of a message, or `None` for the runtime's own
@@ -180,89 +164,11 @@ fn conversation(conn: &Connection, session_id: &str) -> Result<Vec<(Value, Vec<V
     Ok(out)
 }
 
-/// The session's usage, read per turn from `turn_usage` — ZCode's own
-/// per-turn rollup of `model_usage` (the per-request rows, which a retried
-/// request would repeat), so it is the authoritative total and cannot
-/// double-count an attempt. Returns one ledger event per turn reporting
-/// tokens or requests. Token totals are queried from these events.
-/// `cache_read_input_tokens` is the cached axis here, matching how every
-/// other adapter maps it. The model comes from the read's own message rows
-/// when they name exactly ONE (the common session); a mixed-model session
-/// attributes nothing rather than guessing. The channel is used only when
-/// every settled generation names the same model/channel pair.
-fn usage_of(
-    conn: &Connection,
-    session_id: &str,
-    model: Option<&str>,
-    provider: Option<&str>,
-) -> Result<Vec<crate::adapters::UsageEvent>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT turn_id, started_at, input_tokens, output_tokens,
-                    reasoning_tokens, cache_read_input_tokens, model_request_count
-             FROM turn_usage WHERE session_id = ?1 ORDER BY started_at",
-        )
-        .map_err(|e| other(format!("查询 ZCode turn_usage 失败: {e}")))?;
-    let rows = stmt
-        .query_map([session_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, i64>(6)?,
-            ))
-        })
-        .map_err(|e| other(format!("查询 ZCode turn_usage 失败: {e}")))?;
-
-    let mut events = Vec::new();
-    for row in rows {
-        let (turn_id, started_at, input, output, reasoning, cached, request_count) =
-            row.map_err(|e| other(format!("读取 ZCode turn_usage 失败: {e}")))?;
-        let (input_raw, output, reasoning, cached) = (
-            input.max(0) as u64,
-            output.max(0) as u64,
-            reasoning.max(0) as u64,
-            cached.max(0) as u64,
-        );
-        if input_raw + output + reasoning + cached == 0 && request_count <= 0 {
-            continue;
-        }
-        // The store's `input_tokens` INCLUDES `cache_read_input_tokens` (the
-        // row's `computed_total_tokens == input_tokens + output_tokens`, which
-        // only adds up with the cache inside). Store the fresh part.
-        let input = input_raw.saturating_sub(cached);
-        events.push(crate::adapters::UsageEvent {
-            key: Some(format!("turn:{turn_id}")),
-            category: crate::adapters::UsageCategory::Conversation,
-            model: model.map(str::to_string),
-            provider: provider.map(str::to_string),
-            ts: ms_epoch_to_rfc3339(started_at),
-            input_tokens: input,
-            output_tokens: output,
-            cached_tokens: cached,
-            reasoning_tokens: reasoning,
-
-            // The store's own request tally: one turn's tokens may cover many
-            // underlying requests (retries and tool loops included).
-            request_count: request_count.max(0) as u64,
-        });
-    }
-    Ok(events)
-}
-
-/// The conversation message one row contributes (root members only), plus its
-/// observations. A reply is only read once generation finished: the row
-/// appears when streaming starts and is rewritten in place, so an early read
-/// would freeze a truncated answer under its permanent message id.
-fn message_of(
-    message: &Value,
-    parts: &[Value],
-    is_root: bool,
-) -> (Option<ParsedSessionMessage>, MemberObservation) {
-    let mut observation = observation_of(parts);
+/// The conversation message one row contributes (root members only). A reply
+/// is only read once generation finished: the row appears when streaming
+/// starts and is rewritten in place, so an early read would freeze a
+/// truncated answer under its permanent message id.
+fn message_of(message: &Value, parts: &[Value], is_root: bool) -> Option<ParsedSessionMessage> {
     let id = message.get("id").and_then(|i| i.as_str()).unwrap_or("");
     let data = message.get("data").unwrap_or(&Value::Null);
     let kind = match message_kind(data) {
@@ -270,44 +176,21 @@ fn message_of(
         other => other,
     };
     let Some(kind) = kind else {
-        return (None, observation);
+        return None;
     };
     let text = text_of(parts);
     if text.trim().is_empty() {
-        return (None, observation);
+        return None;
     }
     let role = if kind == "user_prompt" {
         SessionMessageRole::User
     } else {
         SessionMessageRole::Assistant
     };
-    match role {
-        SessionMessageRole::User => observation.user_messages = 1,
-        SessionMessageRole::Assistant => observation.assistant_messages = 1,
-    }
-    // Every settled assistant response's own `data` carries the actual
-    // generation identity at the top level: `modelID` / `providerID`, older
-    // rows spelling them `modelId` / `providerId`. Read together with the
-    // settled guard above: provenance is only trusted once `time.completed`
-    // exists, and rows without the fields stay NULL.
-    let (provider, model) = if kind == "assistant_response" {
-        (
-            data.get("providerID")
-                .or_else(|| data.get("providerId"))
-                .and_then(|p| p.as_str())
-                .map(String::from),
-            data.get("modelID")
-                .or_else(|| data.get("modelId"))
-                .and_then(|m| m.as_str())
-                .map(String::from),
-        )
-    } else {
-        (None, None)
-    };
     if !is_root {
-        return (None, observation);
+        return None;
     }
-    let message = ParsedSessionMessage {
+    Some(ParsedSessionMessage {
         source_message_id: Some(id.to_string()),
         source_position: format!("msg:{id}"),
         ts: data
@@ -316,10 +199,7 @@ fn message_of(
             .and_then(ms_epoch_to_rfc3339),
         role,
         content: text,
-        provider,
-        model,
-    };
-    (Some(message), observation)
+    })
 }
 
 impl ZCodeAdapter {
@@ -469,79 +349,34 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         Ok(out)
     }
 
-    fn read_member_delta(
+    fn read_session_delta(
         &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
+        session: &Session,
+        cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
-        let path = PathBuf::from(&member.source_path);
+        let path = PathBuf::from(&session.source_path);
         let conn = open_read_only(&path)?;
-        let is_root = member.relation.as_str() == "root";
+        let is_root = true; // every stored session is its root source
         let mut messages = Vec::new();
-        let mut observation = MemberObservation::default();
-        let mut identities = std::collections::HashSet::new();
-        for (message, parts) in conversation(&conn, &member.source_member_id)? {
-            let data = &message["data"];
-            if message_kind(data) == Some("assistant_response") && is_settled(data) {
-                identities.insert((
-                    data.get("modelID")
-                        .or_else(|| data.get("modelId"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    data.get("providerID")
-                        .or_else(|| data.get("providerId"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                ));
-            }
-            let (m, obs) = message_of(&message, &parts, is_root);
-            observation.add_activity(&obs);
-            if let Some(m) = m {
+        for (message, parts) in conversation(&conn, &session.root_agent_session_id)? {
+            if let Some(m) = message_of(&message, &parts, is_root) {
                 messages.push(m);
             }
         }
-        // Usage is the store's own per-turn rollup, not derivable from the
-        // message rows, so it is read separately and summed onto the same
-        // snapshot — one ledger event per spending turn.
-        let models: std::collections::HashSet<&str> = identities
-            .iter()
-            .filter_map(|(model, _)| model.as_deref())
-            .collect();
-        let single_model = if models.len() == 1 {
-            models.iter().next().copied()
-        } else {
-            None
-        };
-        // No per-turn join key exists between rollups and message identities.
-        // Mixed or missing identities must never inherit the last channel.
-        let single_provider = if identities.len() == 1 && single_model.is_some() {
-            identities
-                .iter()
-                .next()
-                .and_then(|(_, provider)| provider.as_deref())
-        } else {
-            None
-        };
-        let usage_events = usage_of(
-            &conn,
-            &member.source_member_id,
-            single_model,
-            single_provider,
-        )?;
 
-        // Per-member facts, never container stats: every thread in the store
-        // shares one `db.sqlite` (+wal), so the file's size and mtime move
+        // Per-member facts, never container file facts: every thread in the
+        // store shares one `db.sqlite` (+wal), so the file's size and mtime move
         // whenever ANY session writes — keyed on them, one session's update
         // would churn every member's cursor and stamp a shared mtime onto all
         // their `last_activity_at`. The thread's own message count is its
         // content position; the store's own `time_updated` is its real
-        // activity time. Every replay is a full scan → stats SNAPSHOT, and
-        // message identity absorbs the re-read.
+        // activity time. Every replay is a full scan; message identity
+        // absorbs the re-read.
         let (count, time_updated): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM message WHERE session_id = ?1),
                         (SELECT time_updated FROM session WHERE id = ?1)",
-                [&member.source_member_id],
+                [&session.root_agent_session_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|e| other(format!("查询 ZCode 会话事实失败: {e}")))?;
@@ -554,25 +389,17 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             },
         )?;
         Ok(MemberReadDelta {
-            stats: crate::adapters::stats_update_from(
-                &observation,
-                &source,
-                crate::adapters::StatsCapabilities::TOOL_CALLS,
-            ),
             messages,
             source: Some(source),
             complete_snapshot: true,
-            next_active_provider: None,
-            next_active_model: None,
-            usage_events,
         })
     }
 
     /// The store decides: the member's record is present → Present, gone →
     /// Missing, and a store that cannot be opened is NEVER missing, only
     /// Unavailable.
-    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
-        let path = PathBuf::from(&member.source_path);
+    fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
+        let path = PathBuf::from(&session.source_path);
         let Ok(conn) = open_read_only(&path) else {
             return Ok(SourceAvailability::Unavailable);
         };
@@ -583,7 +410,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         // store must never read as an absent source.
         let record = match conn.query_row(
             "SELECT 1 FROM session WHERE id = ?1",
-            [&member.source_member_id],
+            [&session.root_agent_session_id],
             |r| r.get::<_, i64>(0),
         ) {
             Ok(_) => Some(()),
@@ -634,7 +461,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         Some("ZCode")
     }
 
-    fn continue_route(&self, _member: &SessionMember) -> ResumeRoute {
+    fn continue_route(&self, _session: &Session) -> ResumeRoute {
         if !crate::platform::paths::app_bundle_present("ZCode") {
             return ResumeRoute::Refused("未找到 ZCode 桌面应用，无法继续该会话".into());
         }
@@ -649,7 +476,6 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
-    use crate::domain::{SessionMemberRelation, StatsUpdate};
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -783,27 +609,6 @@ mod tests {
         )
         .unwrap();
     }
-
-    /// One settled turn's usage, as the store's own rollup writes it.
-    fn usage_row(
-        conn: &Connection,
-        session: &str,
-        turn: &str,
-        input: i64,
-        output: i64,
-        reasoning: i64,
-        cache_read: i64,
-    ) {
-        conn.execute(
-            "INSERT INTO turn_usage
-               (session_id, turn_id, status, started_at, input_tokens, output_tokens,
-                reasoning_tokens, cache_read_input_tokens)
-             VALUES (?1, ?2, 'completed', 0, ?3, ?4, ?5, ?6)",
-            rusqlite::params![session, turn, input, output, reasoning, cache_read],
-        )
-        .unwrap();
-    }
-
     /// A real human turn. The words live in the message's `text` parts, not in
     /// the message data — which is exactly what keeps ZCode's prose clean.
     fn prompt() -> Value {
@@ -837,20 +642,33 @@ mod tests {
         serde_json::json!({"type": "text", "text": text})
     }
 
-    fn member_of(db: &Path, id: &str, relation: SessionMemberRelation) -> SessionMember {
-        SessionMember {
-            id: "mem-zcode".into(),
-            session_id: "sess-zcode".into(),
+    fn session_of(db: &Path, id: &str) -> Session {
+        Session {
+            id: "sess-zcode".into(),
             agent: Agent::ZCode,
-            source_member_id: id.into(),
-            relation,
-            parent_source_member_id: None,
-            source_kind: "zcode_store_record".into(),
-            source_path: db.to_string_lossy().to_string(),
+            root_agent_session_id: id.into(),
+            title: None,
             cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            owner_workstream_id: None,
+            forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,
+            last_conversation_at: None,
+            trashed_at: None,
+            source_kind: "zcode_store_record".into(),
+            source_path: db.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),
+            source_file_identity: String::new(),
+            source_generation: 0,
+            source_byte_offset: 0,
+            source_last_seen_size: 0,
+            source_mtime: None,
+            source_prefix_hash: String::new(),
+            source_tail_hash: String::new(),
+            fact_generation: 0,
+            latest_message_seq: 0,
         }
     }
 
@@ -994,9 +812,9 @@ mod tests {
         drop(conn);
 
         let delta = ZCodeAdapter
-            .read_member_delta(
-                &member_of(&db, "s", SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
+            .read_session_delta(
+                &session_of(&db, "s"),
+                &crate::domain::SourceCursor::default(),
             )
             .unwrap();
         let got: Vec<(SessionMessageRole, &str, Option<&str>)> = delta
@@ -1011,12 +829,6 @@ mod tests {
                 (SessionMessageRole::Assistant, "回答\n尾部", Some("m4")),
             ]
         );
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, Some(1), "the tool part is observed");
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
         // The cursor stays in the member's own coordinates — the thread's
         // message count — never the container file's size.
         assert_eq!(delta.source.unwrap().byte_offset, 4);
@@ -1034,9 +846,9 @@ mod tests {
         part_row(&conn, "p2", "m2", "s", 0, text_part("半句"));
         drop(conn);
 
-        let member = member_of(&db, "s", SessionMemberRelation::Root);
+        let session = session_of(&db, "s");
         let first = ZCodeAdapter
-            .read_member_delta(&member, &SessionMemberCursor::default())
+            .read_session_delta(&session, &crate::domain::SourceCursor::default())
             .unwrap();
         let ids = |d: &MemberReadDelta| -> Vec<String> {
             d.messages
@@ -1056,9 +868,17 @@ mod tests {
 
         // The replay is unconditional, so the prompt comes back too — and that
         // is fine: message identity is the message id, so the store keeps it once.
-        let cursor =
-            SessionMemberCursor::from_update(member.id.as_str(), first.source.as_ref().unwrap());
-        let second = ZCodeAdapter.read_member_delta(&member, &cursor).unwrap();
+        let src = first.source.as_ref().unwrap();
+        let cursor = crate::domain::SourceCursor {
+            source_file_identity: src.file_identity.clone(),
+            generation: src.generation,
+            byte_offset: src.byte_offset,
+            last_seen_size: src.last_seen_size,
+            mtime: src.mtime,
+            prefix_hash: src.prefix_hash.clone(),
+            identity_tail_hash: String::new(),
+        };
+        let second = ZCodeAdapter.read_session_delta(&session, &cursor).unwrap();
         assert_eq!(ids(&second), vec!["m1", "m2"]);
         assert_eq!(
             second.source.unwrap().generation,
@@ -1095,160 +915,16 @@ mod tests {
         drop(conn);
 
         let delta = ZCodeAdapter
-            .read_member_delta(
-                &member_of(&db, "s", SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
+            .read_session_delta(
+                &session_of(&db, "s"),
+                &crate::domain::SourceCursor::default(),
             )
             .unwrap();
         assert!(delta.messages.is_empty());
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.user_message_count, Some(0));
-                assert_eq!(s.assistant_message_count, Some(0));
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        assert!(delta.usage_events.is_empty());
     }
 
     /// Usage comes from the store's own per-turn rollup and adds up across the
     /// session's turns; the message rows never carry it.
-    #[test]
-    fn usage_sums_the_turn_rollup() {
-        let root = unique_dir("usage");
-        let db = store(&root);
-        let conn = open(&db);
-        session_row(&conn, "s", None, "/repo", 100);
-        usage_row(&conn, "s", "t1", 100, 10, 3, 40);
-        usage_row(&conn, "s", "t2", 8459, 64, 0, 7000);
-        drop(conn);
-
-        let delta = ZCodeAdapter
-            .read_member_delta(
-                &member_of(&db, "s", SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(usage[0], 1519,
-                    "fresh input: (100−40) + (8459−7000); the store's input column includes the cache"
-                );
-                assert_eq!(usage[1], 74);
-                assert_eq!(usage[3], 3);
-                assert_eq!(usage[2], 7040, "cache_read_input_tokens");
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        // One ledger event per spending turn, keyed on the store's own turn id.
-        assert_eq!(delta.usage_events.len(), 2);
-        assert_eq!(
-            delta
-                .usage_events
-                .iter()
-                .map(|e| e.key.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("turn:t1"), Some("turn:t2")]
-        );
-        assert_eq!(
-            delta
-                .usage_events
-                .iter()
-                .map(|e| e.input_tokens)
-                .sum::<u64>(),
-            1519,
-            "event totals contain the fresh input from every turn"
-        );
-    }
-
-    #[test]
-    fn cache_creation_is_ignored_without_losing_request_only_turns() {
-        let root = unique_dir("usage-no-cache-creation");
-        let db = store(&root);
-        let conn = open(&db);
-        session_row(&conn, "s", None, "/repo", 100);
-        usage_row(&conn, "s", "requests", 0, 0, 0, 0);
-        usage_row(&conn, "s", "empty", 0, 0, 0, 0);
-        conn.execute(
-            "UPDATE turn_usage SET cache_creation_input_tokens = 12345",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE turn_usage SET model_request_count = 3 WHERE turn_id = 'requests'",
-            [],
-        )
-        .unwrap();
-        let events = usage_of(&conn, "s", None, None).unwrap();
-        assert_eq!(crate::adapters::test_usage_tokens(&events), [0; 4]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].key.as_deref(), Some("turn:requests"));
-        assert_eq!(events[0].request_count, 3);
-        drop(conn);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The per-turn events carry the session's model only when the read's
-    /// own assistant messages agree on ONE; a mixed-model session attributes
-    /// nothing rather than guessing.
-    #[test]
-    fn turn_events_carry_the_single_model_or_none() {
-        let root = unique_dir("usage-model");
-        let db_path = store(&root);
-        let conn = open(&db_path);
-        session_row(&conn, "s", None, "/repo", 100);
-        // Two assistant replies, both naming GLM-5.3 (different key spellings
-        // the store has been seen to write).
-        let mut r1 = reply(true);
-        r1["modelID"] = serde_json::json!("GLM-5.3");
-        message_row(&conn, "m1", "s", 1, r1);
-        part_row(&conn, "p1", "m1", "s", 1, text_part("回答一"));
-        let mut r2 = reply(true);
-        r2["modelId"] = serde_json::json!("GLM-5.3");
-        message_row(&conn, "m2", "s", 2, r2);
-        part_row(&conn, "p2", "m2", "s", 1, text_part("回答二"));
-        usage_row(&conn, "s", "t1", 100, 10, 3, 40);
-        usage_row(&conn, "s", "t2", 200, 20, 0, 0);
-        drop(conn);
-
-        let delta = ZCodeAdapter
-            .read_member_delta(
-                &member_of(&db_path, "s", SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        assert!(delta
-            .usage_events
-            .iter()
-            .all(|e| e.model.as_deref() == Some("GLM-5.3")));
-
-        // A second session mixing two models: the turns stay unattributed.
-        let conn = open(&db_path);
-        session_row(&conn, "s2", None, "/repo", 100);
-        let mut a = reply(true);
-        a["modelID"] = serde_json::json!("GLM-5.3");
-        message_row(&conn, "a1", "s2", 1, a);
-        part_row(&conn, "a1p", "a1", "s2", 1, text_part("一"));
-        let mut b = reply(true);
-        b["modelID"] = serde_json::json!("GLM-5.3-Flash");
-        message_row(&conn, "a2", "s2", 2, b);
-        part_row(&conn, "a2p", "a2", "s2", 1, text_part("二"));
-        usage_row(&conn, "s2", "u1", 50, 5, 0, 0);
-        drop(conn);
-
-        let delta = ZCodeAdapter
-            .read_member_delta(
-                &member_of(&db_path, "s2", SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
-            )
-            .unwrap();
-        assert_eq!(delta.usage_events.len(), 1);
-        assert_eq!(delta.usage_events[0].model, None, "mixed models: no guess");
-    }
-
-    /// No ZCode member is ever a ForkRoot: the source cannot express a genuine
-    /// user fork, and only an explicit fork marker would change that.
     #[test]
     fn task_type_decides_the_member_kind() {
         let root = unique_dir("task-type");
@@ -1310,13 +986,13 @@ mod tests {
 
         assert_eq!(
             ZCodeAdapter
-                .inspect_member_source(&member_of(&db, "alive", SessionMemberRelation::Root))
+                .inspect_session_source(&session_of(&db, "alive"))
                 .unwrap(),
             SourceAvailability::Present
         );
         assert_eq!(
             ZCodeAdapter
-                .inspect_member_source(&member_of(&db, "purged", SessionMemberRelation::Root))
+                .inspect_session_source(&session_of(&db, "purged"))
                 .unwrap(),
             SourceAvailability::Missing
         );
@@ -1326,16 +1002,16 @@ mod tests {
         std::fs::write(&broken, b"not a database").unwrap();
         assert_eq!(
             ZCodeAdapter
-                .inspect_member_source(&member_of(&broken, "s", SessionMemberRelation::Root))
+                .inspect_session_source(&session_of(&broken, "s"))
                 .unwrap(),
             SourceAvailability::Unavailable
         );
     }
 
-    /// A settled assistant response's own data carries its generation identity
-    /// in either field spelling; a row without the fields stays NULL.
+    /// A settled assistant response parses whether its data names a model
+    /// (either field spelling) or nothing at all.
     #[test]
-    fn settled_assistant_responses_carry_their_model_and_provider() {
+    fn settled_assistant_responses_parse_regardless_of_model_fields() {
         let root = unique_dir("prov");
         let db = store(&root);
         let conn = open(&db);
@@ -1355,30 +1031,19 @@ mod tests {
         drop(conn);
 
         let delta = ZCodeAdapter
-            .read_member_delta(
-                &member_of(&db, "s", SessionMemberRelation::Root),
-                &SessionMemberCursor::default(),
+            .read_session_delta(
+                &session_of(&db, "s"),
+                &crate::domain::SourceCursor::default(),
             )
             .unwrap();
-        let assistant: Vec<(Option<&str>, Option<&str>)> = delta
+        let assistant = delta
             .messages
             .iter()
             .filter(|m| m.role == SessionMessageRole::Assistant)
-            .map(|m| (m.provider.as_deref(), m.model.as_deref()))
-            .collect();
-        assert_eq!(
-            assistant,
-            vec![
-                (Some("builtin:bigmodel"), Some("GLM-5.3")),
-                (Some("bigmodel-api"), Some("GLM-5.3-Flash")),
-                (None, None),
-            ]
-        );
+            .count();
+        assert_eq!(assistant, 3);
     }
 
-    /// The store holds every thread in ONE db file: another thread's write
-    /// moves the container's stats but must not move THIS thread's cursor or
-    /// advance its `last_activity_at` — one session's update must never churn
     /// the whole agent's sessions.
     #[test]
     fn another_threads_write_does_not_churn_this_thread() {
@@ -1395,7 +1060,7 @@ mod tests {
 
         let db = Db::open(&root.join("noending.db")).unwrap();
         let (session_id, _) = db
-            .upsert_logical_session_unchecked(
+            .upsert_logical_session(
                 Agent::ZCode,
                 "b",
                 Some("B"),
@@ -1404,41 +1069,19 @@ mod tests {
                 None,
                 None,
                 None,
-            )
-            .unwrap();
-        let member_id = db
-            .upsert_session_member(
-                &session_id,
-                Agent::ZCode,
-                "b",
-                SessionMemberRelation::Root,
-                None,
                 "zcode_store_record",
                 &db_path.to_string_lossy(),
-                None,
-                None,
-                None,
                 &serde_json::json!({}),
             )
             .unwrap();
-        let member_b = member_of(&db_path, "b", SessionMemberRelation::Root);
+        let session_b = session_of(&db_path, "b");
 
         // Pass 1: thread B ingested; its activity is its own time_updated.
         let delta = ZCodeAdapter
-            .read_member_delta(&member_b, &SessionMemberCursor::default())
+            .read_session_delta(&session_b, &crate::domain::SourceCursor::default())
             .unwrap();
-        db.commit_member_ingest_with_provenance_state(
-            &session_id,
-            &member_id,
-            &delta.messages,
-            delta.stats,
-            delta.source.as_ref().unwrap(),
-            true,
-            None,
-            None,
-            &[],
-        )
-        .unwrap();
+        db.commit_ingest(&session_id, &delta.messages, delta.source.as_ref().unwrap())
+            .unwrap();
         let activity_before = db
             .get_session(&session_id)
             .unwrap()
@@ -1446,7 +1089,7 @@ mod tests {
             .last_activity_at;
 
         // Thread A writes: a new message plus a bumped time_updated. The
-        // container file's stats move; thread B's facts do not.
+        // container file's size/mtime move; thread B's facts do not.
         let conn = open(&db_path);
         message_row(&conn, "a1", "a", 0, prompt());
         conn.execute(
@@ -1458,8 +1101,14 @@ mod tests {
 
         // Pass 2: B's re-read sees an unchanged source, and the commit must
         // not touch its activity.
-        let cursor = db.get_member_cursor(&member_id).unwrap();
-        let delta = ZCodeAdapter.read_member_delta(&member_b, &cursor).unwrap();
+        let cursor = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .source_cursor();
+        let delta = ZCodeAdapter
+            .read_session_delta(&session_b, &cursor)
+            .unwrap();
         let source = delta.source.unwrap();
         assert_eq!(
             source.byte_offset, cursor.byte_offset,
@@ -1469,18 +1118,8 @@ mod tests {
             source.mtime, cursor.mtime,
             "B's activity time is its own, not the container's"
         );
-        db.commit_member_ingest_with_provenance_state(
-            &session_id,
-            &member_id,
-            &delta.messages,
-            delta.stats,
-            &source,
-            true,
-            None,
-            None,
-            &[],
-        )
-        .unwrap();
+        db.commit_ingest(&session_id, &delta.messages, &source)
+            .unwrap();
         let activity_after = db
             .get_session(&session_id)
             .unwrap()
@@ -1489,43 +1128,6 @@ mod tests {
         assert_eq!(
             activity_after, activity_before,
             "another thread's write must not churn this session's activity"
-        );
-    }
-    #[test]
-    fn usage_channel_requires_unambiguous_settled_generation_identity() {
-        let root = unique_dir("usage-channel");
-        let db = store(&root);
-        let conn = open(&db);
-        session_row(&conn, "s", None, "/repo", 100);
-        let mut generation = reply(true);
-        generation["modelID"] = serde_json::json!("glm-test");
-        generation["providerID"] = serde_json::json!("302ai");
-        message_row(&conn, "m1", "s", 1, generation.clone());
-        usage_row(&conn, "s", "t1", 100, 10, 0, 0);
-        let member = member_of(&db, "s", SessionMemberRelation::Child);
-        let read = || {
-            ZCodeAdapter
-                .read_member_delta(&member, &SessionMemberCursor::default())
-                .unwrap()
-        };
-        let first = read();
-        assert!(first.messages.is_empty());
-        assert_eq!(first.usage_events[0].provider.as_deref(), Some("302ai"));
-        assert_eq!(first.usage_events[0].model.as_deref(), Some("glm-test"));
-        generation["providerID"] = serde_json::json!("zai");
-        message_row(&conn, "m2", "s", 2, generation);
-        assert_eq!(
-            read().usage_events[0].provider,
-            None,
-            "mixed channels have no per-turn join"
-        );
-        conn.execute("DELETE FROM message WHERE id='m2'", [])
-            .unwrap();
-        message_row(&conn, "m3", "s", 3, reply(true));
-        assert_eq!(
-            read().usage_events[0].provider,
-            None,
-            "an unknown generation must not inherit a channel"
         );
     }
 }

@@ -46,7 +46,7 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
 }
 
 /// A Logical Session created the way every production discovery is: keyed by
-/// the ROOT member's Resume identity, row id store-assigned.
+/// the root source's Resume identity, row id store-assigned.
 fn session_row(db: &TestDb, agent: Agent) -> noending::domain::Session {
     support::ensure_session(db, new_id(), agent, format!("as-{}", new_id()))
 }
@@ -412,36 +412,24 @@ fn same_timestamp_boundary_is_lossless() {
 }
 
 /// Marking reviewed is purely observational and MUST NOT mutate Context items,
-/// revisions, conflicts, or member cursors.
+/// revisions, conflicts, or the session's source cursor.
 #[test]
 fn review_state_isolated_from_domain_state() {
     let db = open_db("domain-isolation");
     let ws = ws_row(&db, "Isolation WS");
     let s = session_row(&db, Agent::Codex);
 
-    // The read position lives on the ROOT member, never on the session.
-    let member_id = support::ensure_root_member(
-        &db,
-        &s.id,
-        Agent::Codex,
-        &s.root_agent_session_id,
-        "/tmp/review-isolation",
-    );
-    noending::storage::upsert_member_cursor_conn(
-        &db.write(),
-        &noending::domain::SessionMemberCursor {
-            member_id: member_id.clone(),
-            source_file_identity: "identity-1".into(),
-            generation: 1,
-            byte_offset: 100,
-            last_seen_size: 100,
-            mtime: None,
-            prefix_hash: String::new(),
-            identity_tail_hash: String::new(),
-            active_provider: None,
-            active_model: None,
-        },
-    )
+    // The read position lives on the session row itself.
+    db.tx(|tx| {
+        tx.execute(
+            "UPDATE sessions SET source_file_identity = 'identity-1',
+                    source_generation = 1, source_byte_offset = 100,
+                    source_last_seen_size = 100
+             WHERE id = ?1",
+            [&s.id],
+        )?;
+        Ok(())
+    })
     .unwrap();
 
     let item = noending::sync::create_item(
@@ -491,7 +479,7 @@ fn review_state_isolated_from_domain_state() {
     let item_before = db.get_item(&item.id).unwrap().unwrap();
     let history_before = db.item_history(&item.id).unwrap();
     let conflict_before = db.get_conflict(&conflict.id).unwrap().unwrap();
-    let cursor_before = db.get_member_cursor(&member_id).unwrap();
+    let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     let owner_before = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
     // Perform mark_workstream_reviewed
@@ -505,7 +493,7 @@ fn review_state_isolated_from_domain_state() {
     let item_after = db.get_item(&item.id).unwrap().unwrap();
     let history_after = db.item_history(&item.id).unwrap();
     let conflict_after = db.get_conflict(&conflict.id).unwrap().unwrap();
-    let cursor_after = db.get_member_cursor(&member_id).unwrap();
+    let cursor_after = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     let owner_after = db.get_session(&s.id).unwrap().unwrap().owner_workstream_id;
 
     assert_eq!(item_before.id, item_after.id);
@@ -535,7 +523,7 @@ fn review_state_isolated_from_domain_state() {
     assert_eq!(cursor_before.generation, cursor_after.generation);
     assert_eq!(
         cursor_before.identity_tail_hash, cursor_after.identity_tail_hash,
-        "review must not touch the member cursor"
+        "review must not touch the session cursor"
     );
 
     assert_eq!(owner_before, owner_after, "review must not touch the owner");

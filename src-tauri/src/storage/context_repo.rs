@@ -18,8 +18,8 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::domain::{
-    SessionContextFields, SessionContextRecord, SessionContextRevision, SessionIngestState,
-    WorkstreamContextState, WorkstreamSessionFrontier,
+    SessionContextFields, SessionContextRecord, SessionContextRevision, WorkstreamContextState,
+    WorkstreamSessionFrontier,
 };
 use crate::error::{other, Result};
 use crate::storage::{now, Db};
@@ -37,30 +37,20 @@ pub enum ProjectionOutcome {
     NewGeneration,
     /// An incomplete full re-scan: projection, generation and cursor are kept.
     Incomplete,
-    /// The member is not the root, so it contributes no conversation.
-    NotRoot,
 }
 
-pub fn get_ingest_state_conn(conn: &Connection, session_id: &str) -> Result<SessionIngestState> {
+/// The session's fact frontier: `(fact_generation, latest_message_seq)`, read
+/// straight off the flattened `sessions` row. No row is impossible (FK), but a
+/// missing read still answers the zero frontier.
+pub fn get_ingest_state_conn(conn: &Connection, session_id: &str) -> Result<(i64, i64)> {
     Ok(conn
         .query_row(
-            "SELECT session_id, generation, latest_message_seq FROM session_ingest_state
-             WHERE session_id = ?1",
+            "SELECT fact_generation, latest_message_seq FROM sessions WHERE id = ?1",
             params![session_id],
-            |r| {
-                Ok(SessionIngestState {
-                    session_id: r.get(0)?,
-                    generation: r.get(1)?,
-                    latest_message_seq: r.get(2)?,
-                })
-            },
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
-        .unwrap_or(SessionIngestState {
-            session_id: session_id.to_string(),
-            generation: 0,
-            latest_message_seq: 0,
-        }))
+        .unwrap_or((0, 0)))
 }
 
 /// The ordered message ids of the CURRENT conversation.
@@ -82,9 +72,7 @@ fn set_ingest_state_conn(
     latest_message_seq: i64,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO session_ingest_state (session_id, generation, latest_message_seq)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(session_id) DO UPDATE SET generation = ?2, latest_message_seq = ?3",
+        "UPDATE sessions SET fact_generation = ?2, latest_message_seq = ?3 WHERE id = ?1",
         params![session_id, generation, latest_message_seq],
     )?;
     Ok(())
@@ -143,8 +131,7 @@ fn append_projection_conn(
     Ok(ordinal)
 }
 
-/// Maintain the current-message projection inside the member-ingest
-/// transaction.
+/// Maintain the current-message projection inside the ingest transaction.
 ///
 /// * `current_ids` — the ordered message ids of THIS read, including messages
 ///   that deduped onto existing rows (they are still part of the conversation).
@@ -153,14 +140,10 @@ fn append_projection_conn(
 pub fn apply_projection_conn(
     conn: &Connection,
     session_id: &str,
-    is_root: bool,
     current_ids: &[String],
     full_rescan: bool,
     complete_snapshot: bool,
 ) -> Result<ProjectionOutcome> {
-    if !is_root {
-        return Ok(ProjectionOutcome::NotRoot);
-    }
     let state = get_ingest_state_conn(conn, session_id)?;
 
     if !full_rescan {
@@ -178,8 +161,8 @@ pub fn apply_projection_conn(
         if fresh.is_empty() {
             return Ok(ProjectionOutcome::Unchanged);
         }
-        let end = append_projection_conn(conn, session_id, &fresh, state.latest_message_seq)?;
-        set_ingest_state_conn(conn, session_id, state.generation, end)?;
+        let end = append_projection_conn(conn, session_id, &fresh, state.1)?;
+        set_ingest_state_conn(conn, session_id, state.0, end)?;
         recompute_turn_finals_conn(conn, session_id)?;
         return Ok(ProjectionOutcome::Appended);
     }
@@ -195,8 +178,8 @@ pub fn apply_projection_conn(
     }
     if !existing.is_empty() && current_ids.starts_with(&existing[..]) {
         let fresh: Vec<String> = current_ids[existing.len()..].to_vec();
-        let end = append_projection_conn(conn, session_id, &fresh, state.latest_message_seq)?;
-        set_ingest_state_conn(conn, session_id, state.generation, end)?;
+        let end = append_projection_conn(conn, session_id, &fresh, state.1)?;
+        set_ingest_state_conn(conn, session_id, state.0, end)?;
         recompute_turn_finals_conn(conn, session_id)?;
         return Ok(ProjectionOutcome::Appended);
     }
@@ -208,7 +191,7 @@ pub fn apply_projection_conn(
         "DELETE FROM session_message_projection WHERE session_id = ?1",
         params![session_id],
     )?;
-    let generation = state.generation + 1;
+    let generation = state.0 + 1;
     let end = append_projection_conn(conn, session_id, current_ids, 0)?;
     set_ingest_state_conn(conn, session_id, generation, end)?;
     recompute_turn_finals_conn(conn, session_id)?;
@@ -523,7 +506,8 @@ pub fn frontiers_for_workstream_conn(
 // Db-level wrappers
 
 impl Db {
-    pub fn get_session_ingest_state(&self, session_id: &str) -> Result<SessionIngestState> {
+    /// The session's fact frontier: `(fact_generation, latest_message_seq)`.
+    pub fn get_session_ingest_state(&self, session_id: &str) -> Result<(i64, i64)> {
         let conn = self.read();
         get_ingest_state_conn(&conn, session_id)
     }

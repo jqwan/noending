@@ -115,20 +115,20 @@ pub fn session_context_view(db: &Db, session_id: &str) -> Result<SessionContextV
     let ctx = db.get_session_context(session_id)?;
     let ingest = db.get_session_ingest_state(session_id)?;
     let from = match &ctx {
-        Some(c) if c.ingest_generation == ingest.generation => c.processed_through_seq,
+        Some(c) if c.ingest_generation == ingest.0 => c.processed_through_seq,
         _ => 0,
     };
     let generation_changed = ctx
         .as_ref()
-        .is_some_and(|context| context.ingest_generation != ingest.generation);
-    let pending = generation_changed || ingest.latest_message_seq > from;
+        .is_some_and(|context| context.ingest_generation != ingest.0);
+    let pending = generation_changed || ingest.1 > from;
     Ok(SessionContextView {
         session_id: session_id.to_string(),
         fields: ctx.as_ref().map(|c| c.fields.clone()),
         revision: ctx.as_ref().map(|c| c.revision).unwrap_or(0),
-        ingest_generation: ingest.generation,
+        ingest_generation: ingest.0,
         processed_through_seq: from,
-        latest_message_seq: ingest.latest_message_seq,
+        latest_message_seq: ingest.1,
         updated_at: ctx.as_ref().map(|c| c.updated_at.clone()),
         pending,
     })
@@ -168,7 +168,7 @@ fn session_needs_workstream_update(db: &Db, workstream_id: &str, s: &Session) ->
     let ctx = db.get_session_context(&s.id)?;
     if ctx
         .as_ref()
-        .is_some_and(|context| context.ingest_generation != ingest.generation)
+        .is_some_and(|context| context.ingest_generation != ingest.0)
     {
         return Ok(true);
     }
@@ -177,12 +177,12 @@ fn session_needs_workstream_update(db: &Db, workstream_id: &str, s: &Session) ->
         .into_iter()
         .find(|f| f.session_id == s.id);
     let Some(f) = frontier else {
-        return Ok(ingest.latest_message_seq > 0);
+        return Ok(ingest.1 > 0);
     };
-    if f.ingest_generation != ingest.generation {
+    if f.ingest_generation != ingest.0 {
         return Ok(true);
     }
-    if ingest.latest_message_seq > f.consumed_through_seq {
+    if ingest.1 > f.consumed_through_seq {
         return Ok(true);
     }
     let rev = ctx.as_ref().map(|c| c.revision).unwrap_or(0);
@@ -309,14 +309,14 @@ fn update_session_inner(
     let existing = db.get_session_context(session_id)?;
     let ingest = db.get_session_ingest_state(session_id)?;
     let from = match &existing {
-        Some(c) if c.ingest_generation == ingest.generation => c.processed_through_seq,
+        Some(c) if c.ingest_generation == ingest.0 => c.processed_through_seq,
         _ => 0,
     };
     let all = db.get_messages_after(session_id, from, 1_000_000)?;
     if all.is_empty() {
         if existing
             .as_ref()
-            .is_some_and(|context| context.ingest_generation != ingest.generation)
+            .is_some_and(|context| context.ingest_generation != ingest.0)
         {
             let expect_rev = existing
                 .as_ref()
@@ -327,7 +327,7 @@ fn update_session_inner(
                 db,
                 session_id,
                 expect_rev,
-                ingest.generation,
+                ingest.0,
                 0,
                 0,
                 &[],
@@ -361,7 +361,7 @@ fn update_session_inner(
     let build = |msgs: &[SessionMessage]| -> (String, PromptRefs) {
         let current_context = existing
             .as_ref()
-            .filter(|context| context.ingest_generation == ingest.generation);
+            .filter(|context| context.ingest_generation == ingest.0);
         let input = PromptInput {
             workstream_title: format!("仅更新该 Session 摘要（{heading}）"),
             workstream_description: String::new(),
@@ -410,7 +410,7 @@ fn update_session_inner(
         db,
         session_id,
         expect_rev,
-        ingest.generation,
+        ingest.0,
         from,
         upper,
         &prefix,
@@ -422,7 +422,7 @@ fn update_session_inner(
         ))
     })?;
 
-    let status = if upper >= ingest.latest_message_seq {
+    let status = if upper >= ingest.1 {
         ContextUpdateStatus::Updated
     } else {
         ContextUpdateStatus::Partial
@@ -455,7 +455,7 @@ fn commit_session_update(
         if cur_rev != expect_rev {
             return Ok(None);
         }
-        if get_ingest_state_conn(tx, session_id)?.generation != generation {
+        if get_ingest_state_conn(tx, session_id)?.0 != generation {
             return Ok(None);
         }
         let ids = projection_ids_conn(tx, session_id)?;
@@ -592,11 +592,11 @@ fn update_workstream_inner(
         let frontier = frontiers.get(&session.id).cloned();
 
         let generation_changed = match &frontier {
-            Some(f) => f.ingest_generation != ingest.generation,
-            None => ingest.latest_message_seq > 0,
+            Some(f) => f.ingest_generation != ingest.0,
+            None => ingest.1 > 0,
         } || existing
             .as_ref()
-            .is_some_and(|context| context.ingest_generation != ingest.generation);
+            .is_some_and(|context| context.ingest_generation != ingest.0);
         let from = if generation_changed {
             0
         } else {
@@ -612,7 +612,7 @@ fn update_workstream_inner(
                 session,
                 existing: existing.clone(),
                 frontier,
-                generation: ingest.generation,
+                generation: ingest.0,
                 from,
                 messages,
             });
@@ -620,8 +620,8 @@ fn update_workstream_inner(
             read_only.push(ReadOnlySession {
                 session_id: session.id,
                 context: existing,
-                generation: ingest.generation,
-                latest_message_seq: ingest.latest_message_seq,
+                generation: ingest.0,
+                latest_message_seq: ingest.1,
                 invalidate_context: true,
             });
         } else if let Some(c) = existing {
@@ -634,8 +634,8 @@ fn update_workstream_inner(
                 read_only.push(ReadOnlySession {
                     session_id: session.id,
                     context: Some(c),
-                    generation: ingest.generation,
-                    latest_message_seq: ingest.latest_message_seq,
+                    generation: ingest.0,
+                    latest_message_seq: ingest.1,
                     invalidate_context: false,
                 });
             }
@@ -775,7 +775,7 @@ fn commit_workstream_update(
                     )),
                 )));
             }
-            if get_ingest_state_conn(tx, &t.session.id)?.generation != t.generation {
+            if get_ingest_state_conn(tx, &t.session.id)?.0 != t.generation {
                 return Ok(Err(AppError::context(
                     ContextUpdateError::ConcurrencyConflict(format!(
                         "会话 {} 的对话已改写，请重新更新",
@@ -810,8 +810,8 @@ fn commit_workstream_update(
             let expected_revision = r.context.as_ref().map(|c| c.revision).unwrap_or(0);
             let ingest = get_ingest_state_conn(tx, &r.session_id)?;
             if current_revision != expected_revision
-                || ingest.generation != r.generation
-                || ingest.latest_message_seq != r.latest_message_seq
+                || ingest.0 != r.generation
+                || ingest.1 != r.latest_message_seq
             {
                 return Ok(Err(AppError::context(
                     ContextUpdateError::ConcurrencyConflict(format!(
@@ -1117,6 +1117,18 @@ mod tests {
             last_activity_at: None,
             last_conversation_at: None,
             trashed_at: None,
+            source_kind: String::new(),
+            source_path: String::new(),
+            metadata: serde_json::json!({}),
+            source_file_identity: String::new(),
+            source_generation: 0,
+            source_byte_offset: 0,
+            source_last_seen_size: 0,
+            source_mtime: None,
+            source_prefix_hash: String::new(),
+            source_tail_hash: String::new(),
+            fact_generation: 0,
+            latest_message_seq: 0,
         }
     }
 
@@ -1148,7 +1160,7 @@ mod tests {
             let db = self.db();
             let root_id = format!("context-service-root-{}", crate::storage::new_id());
             let session_id = db
-                .upsert_logical_session_unchecked(
+                .upsert_logical_session(
                     Agent::Codex,
                     &root_id,
                     Some("Context service fixture"),
@@ -1157,24 +1169,12 @@ mod tests {
                     None,
                     None,
                     None,
+                    "context_service_test",
+                    "/tmp/context-service-fixture",
+                    &serde_json::json!({}),
                 )
                 .unwrap()
                 .0;
-            let member_id = db
-                .upsert_session_member(
-                    &session_id,
-                    Agent::Codex,
-                    &root_id,
-                    crate::domain::SessionMemberRelation::Root,
-                    None,
-                    "context_service_test",
-                    "/tmp/context-service-fixture",
-                    None,
-                    None,
-                    None,
-                    &serde_json::json!({}),
-                )
-                .unwrap();
             let content = "x".repeat(message_size);
             let messages: Vec<ParsedSessionMessage> = (0..message_count)
                 .map(|i| ParsedSessionMessage {
@@ -1183,15 +1183,11 @@ mod tests {
                     ts: None,
                     role: SessionMessageRole::User,
                     content: content.clone(),
-                    provider: None,
-                    model: None,
                 })
                 .collect();
-            db.commit_member_ingest(
+            db.commit_ingest(
                 &session_id,
-                &member_id,
                 &messages,
-                None,
                 &SourceCursorUpdate {
                     file_identity: "context-service-fixture".into(),
                     generation: 0,

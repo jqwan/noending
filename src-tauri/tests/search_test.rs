@@ -108,7 +108,7 @@ fn a_root_message_is_searchable_regardless_of_length() {
     let db = open_db("message");
     let long = "决定使用 SQLite 作为本地存储，因为它是单文件、零配置且可嵌入的。";
     let short = "先做迁移";
-    let (_session, _member, stored) = support::seed_conversation(
+    let (_session, stored) = support::seed_conversation(
         &db,
         Agent::Codex,
         "root-search-1",
@@ -196,7 +196,7 @@ fn a_session_is_searchable_by_its_document() {
 #[test]
 fn trash_hides_a_session_and_restore_brings_it_back() {
     let db = open_db("lifecycle");
-    let (_session, _member, stored) = support::seed_conversation(
+    let (_session, stored) = support::seed_conversation(
         &db,
         Agent::Codex,
         "root-lifecycle-1",
@@ -253,7 +253,7 @@ fn trash_hides_a_session_and_restore_brings_it_back() {
 #[test]
 fn the_read_side_guard_hides_rows_without_a_live_session() {
     let db = open_db("stale-guard");
-    let (session, _member, stored) = support::seed_conversation(
+    let (session, stored) = support::seed_conversation(
         &db,
         Agent::Codex,
         "root-stale-1",

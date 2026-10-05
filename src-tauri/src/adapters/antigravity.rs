@@ -28,9 +28,6 @@
 //! Steps are appended once and never rewritten, so message identity is
 //! `step:<idx>` and the full replay dedups exactly.
 //!
-//! Token usage is NOT in `steps`: it is one `gen_metadata` row per generation
-//! call, whose blob's `1.4` subtree holds the counts (see `usage_of`). The rows
-//! are summed onto the same replay snapshot.
 //!
 //! The sibling `conversation_summaries.db` holds the title (empty → the
 //! `preview`, the first user input), `parent_conversation_id` and
@@ -50,22 +47,18 @@
 //! keyed on that mtime, an open would read as activity. A WAL-only step append
 //! still moves both facts, so `last_activity_at` keeps advancing.
 //!
-//! Provenance: each `gen_metadata` row names the model it served (`1.19`,
-//! e.g. `gemini-3.8-flash` / `claude-opus-4-6-thinking`) and the step-input
-//! boundary it ran against (`1.20`'s `last_step_index`), so assistant steps
-//! carry the serving model (see `read_member_delta`); the usage row's
-//! `api_provider` enum (field 6) is the channel.
+//! The `gen_metadata` table (model served, usage) is NOT read: it carried only
+//! per-generation provenance and usage, both retired.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::adapters::{
     ms_epoch_to_rfc3339, AgentCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
-    ExecOptions, MemberObservation, MemberReadDelta, ParsedLine, ResumeRoute, SessionMessageRole,
+    ExecOptions, MemberReadDelta, ParsedLine, ResumeRoute, SessionMessageRole,
 };
-use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
+use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct AntigravityAdapter;
@@ -191,29 +184,6 @@ fn pb_text(buf: &[u8], fnum: u32) -> Option<String> {
     pb_sub(buf, fnum)
         .and_then(|b| String::from_utf8(b.to_vec()).ok())
         .filter(|s| !s.trim().is_empty())
-}
-
-/// The model a generation served (`1.19`) and the step-input boundary it ran
-/// against (`1.20`'s repeated metadata map entry `last_step_index` — repeated,
-/// so a single-field lookup cannot reach it). A row without either attributes
-/// nothing.
-fn generation_model_and_boundary(data: &[u8]) -> Option<(i64, String)> {
-    let chat = pb_sub(data, 1)?;
-    let model = pb_str(chat, 19).filter(|m| !m.trim().is_empty())?;
-    let boundary = pb_fields(chat)
-        .into_iter()
-        .filter_map(|(f, v)| match v {
-            PbVal::Bytes(b) if f == 20 => Some(b),
-            _ => None,
-        })
-        .find_map(|entry| {
-            if pb_str(entry, 1).as_deref() == Some("last_step_index") {
-                pb_str(entry, 2).and_then(|v| v.parse::<i64>().ok())
-            } else {
-                None
-            }
-        })?;
-    Some((boundary, model))
 }
 
 /// `{seconds, nanos}` protobuf timestamp → RFC3339. Step envelopes keep it at
@@ -388,107 +358,35 @@ fn parse_member(
     }))
 }
 
-/// Token usage of ONE generation call, from the `gen_metadata` blob's `1.4`
-/// subtree. Cross-validated field-by-field against a real store and tokscale's
-/// independent reverse-engineering (2026-09-30): `.1` is the fixed
-/// system-prompt token count (1026–1319 across observed installs) and IS
-/// `ModelUsageStats` of one `gen_metadata` row. The field numbers are the
-/// agy binary's own embedded struct tags (`thinking_output_tokens` = 9,
-/// `response_output_tokens` = 10, `input_tokens` = 2, `cache_read_tokens` =
-/// 5, `api_provider` = 6) — an earlier mapping had 9/10 swapped and added
-/// field 1, which is the MODEL ENUM, into the input (measured inflation on
-/// the real corpus: +2.19 M input tokens).
-///
-/// `.2` is non-cached input; `.9`+`.10` is the billed generation (Google
-/// bills both at the output rate), so「输出」means billed generation here —
-/// the same thing it means for the subset-shape sources. Reasoning is the
-/// thinking axis (`.9`). One `gen_metadata` row is one call, so rows add up.
-fn usage_of(data: &[u8]) -> MemberObservation {
-    let Some(usage) = pb_sub(data, 1).and_then(|m| pb_sub(m, 4)) else {
-        return MemberObservation::default();
-    };
-    let n = |f: u32| pb_varint(usage, f).unwrap_or(0);
-    MemberObservation {
-        input_tokens: n(2),
-        output_tokens: n(9).saturating_add(n(10)),
-        cached_tokens: n(5),
-        reasoning_tokens: n(9),
-        ..Default::default()
-    }
-}
-
-/// `api_provider` (field 6) as a channel name. The two enum values the
-/// corpus names are mapped; an unknown one stays its raw number as a string
-/// rather than being guessed into a vendor.
-fn gen_provider(data: &[u8]) -> Option<String> {
-    let usage = pb_sub(data, 1).and_then(|m| pb_sub(m, 4))?;
-    Some(match pb_varint(usage, 6)? {
-        24 => "Google".to_string(),
-        26 => "Anthropic".to_string(),
-        other => other.to_string(),
-    })
-}
-
-/// The responseId (`1.4.11`) identifying one generation call. Unique across
-/// every observed store (3/3, 26/26, 1575/1575 distinct), so the dedup at the
-/// call site is purely defensive against a future duplicate-writing version.
-fn gen_response_id(data: &[u8]) -> Option<String> {
-    pb_sub(data, 1)
-        .and_then(|m| pb_sub(m, 4))
-        .and_then(|u| pb_str(u, 11))
-}
-
-/// One step row's contribution: conversation text (root only), or execution
-/// observations. `idx` is the step's stable native id.
-fn parse_step(
-    idx: i64,
-    step_type: i64,
-    payload: &[u8],
-    is_root: bool,
-    model: Option<&str>,
-) -> Option<ParsedLine> {
+/// One step row's contribution: conversation text on the root only.
+/// `idx` is the step's stable native id.
+fn parse_step(idx: i64, step_type: i64, payload: &[u8], is_root: bool) -> Option<ParsedLine> {
     match step_type {
         14 => {
             let text = user_text(payload)?;
-            let observation = MemberObservation {
-                user_messages: 1,
-                ..Default::default()
-            };
             if !is_root {
-                return Some(ParsedLine::observation_only(observation));
+                return None;
             }
-            Some(ParsedLine {
-                message: Some(parsed_message(idx, SessionMessageRole::User, text, payload)),
-                observation,
-                usage_note: None,
-            })
+            Some(ParsedLine::message_only(parsed_message(
+                idx,
+                SessionMessageRole::User,
+                text,
+                payload,
+            )))
         }
         15 => {
             let prose = agent_turn(payload);
             let text = prose.join("\n\n").trim().to_string();
-            if text.is_empty() {
+            if text.is_empty() || !is_root {
                 return None;
             }
-            let observation = MemberObservation {
-                assistant_messages: 1,
-                ..Default::default()
-            };
-            if !is_root {
-                return Some(ParsedLine::observation_only(observation));
-            }
-            Some(ParsedLine {
-                message: Some(
-                    parsed_message(idx, SessionMessageRole::Assistant, text, payload)
-                        .with_provenance(None, model.map(|m| m.to_string())),
-                ),
-                observation,
-                usage_note: None,
-            })
+            Some(ParsedLine::message_only(parsed_message(
+                idx,
+                SessionMessageRole::Assistant,
+                text,
+                payload,
+            )))
         }
-        132 => Some(ParsedLine::observation_only(MemberObservation {
-            tool_calls: 1,
-            ..Default::default()
-        })),
         _ => None,
     }
 }
@@ -576,14 +474,14 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         Ok(out)
     }
 
-    fn read_member_delta(
+    fn read_session_delta(
         &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
+        session: &Session,
+        cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
-        let path = PathBuf::from(&member.source_path);
+        let path = PathBuf::from(&session.source_path);
         let conn = open_read_only(&path)?;
-        let is_root = member.relation.as_str() == "root";
+        let is_root = true; // every stored session is its root source
 
         let mut stmt =
             conn.prepare("SELECT idx, step_type, step_payload FROM steps ORDER BY idx")?;
@@ -595,40 +493,14 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             ))
         })?;
 
-        // Per-generation model identity: each `gen_metadata` row names the
-        // model it served (`1.19`) and the input boundary it ran against
-        // (`1.20`'s `last_step_index`). A step belongs to the nearest boundary
-        // strictly BELOW its idx — the boundary is the last step the
-        // generation saw as input — so a turn nobody generated (the user turn
-        // at the first boundary) stays unattributed. Equal boundaries keep the
-        // later row: it is the later write.
-        let mut gen_rows = conn
-            .prepare("SELECT data FROM gen_metadata ORDER BY idx")?
-            .query_map([], |r| r.get::<_, Vec<u8>>(0))?
-            .filter_map(|row| generation_model_and_boundary(&row.ok()?))
-            .collect::<Vec<(i64, String)>>();
-        gen_rows.sort_by_key(|(boundary, _)| *boundary);
-        let mut gens: Vec<(i64, String)> = Vec::new();
-        for pair in gen_rows {
-            if gens.last().map(|(b, _)| *b) == Some(pair.0) {
-                gens.pop();
-            }
-            gens.push(pair);
-        }
-        let mut gen_cursor = 0usize;
-
         let mut messages = Vec::new();
-        let mut observation = MemberObservation::default();
         // Per-member content facts: the newest step's own time is this
         // conversation's real activity, and MAX(idx) is its position. The
-        // container's stats say nothing — a mere open of the conversation
+        // container's size/mtime say nothing — a mere open of the conversation
         // creates/touches a 0-byte `-wal`, and keyed on that mtime, other
         // sessions' activity would churn this one's `last_activity_at`.
         let mut max_idx: i64 = 0;
         let mut max_step_secs: Option<f64> = None;
-        // Step times, in idx order — a generation's ledger event is dated by
-        // the first step it served.
-        let mut step_secs: Vec<(i64, f64)> = Vec::new();
         for row in rows {
             let (idx, step_type, payload) = row?;
             max_idx = max_idx.max(idx);
@@ -637,17 +509,8 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                     Some(m) => m.max(secs),
                     None => secs,
                 });
-                step_secs.push((idx, secs));
             }
-            while gen_cursor + 1 < gens.len() && gens[gen_cursor + 1].0 < idx {
-                gen_cursor += 1;
-            }
-            let model = gens
-                .get(gen_cursor)
-                .filter(|(boundary, _)| *boundary < idx)
-                .map(|(_, model)| model.as_str());
-            if let Some(parsed) = parse_step(idx, step_type, &payload, is_root, model) {
-                observation.add_activity(&parsed.observation);
+            if let Some(parsed) = parse_step(idx, step_type, &payload, is_root) {
                 if let Some(m) = parsed.message {
                     if m.content.trim().is_empty() {
                         continue;
@@ -658,48 +521,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         }
         drop(stmt);
 
-        // Usage is not in `steps`: one `gen_metadata` row per generation call.
-        // Every read is a full replay, so storage replaces the ledger rows and
-        // every call becomes a ledger event carrying the row's own served
-        // model (`1.19`), its response id as the stable key, and the first
-        // step it generated as its time.
-        let mut gen_stmt = conn.prepare("SELECT data FROM gen_metadata")?;
-        let gen_rows = gen_stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
-        let mut seen_response_ids: HashSet<String> = HashSet::new();
-        let mut usage_events = Vec::new();
-        for row in gen_rows {
-            let data = row?;
-            let response_id = gen_response_id(&data);
-            if let Some(id) = &response_id {
-                if !seen_response_ids.insert(id.clone()) {
-                    continue;
-                }
-            }
-            let usage = usage_of(&data);
-            let provider = gen_provider(&data);
-            let (boundary, model) = match generation_model_and_boundary(&data) {
-                Some((b, m)) => (b, Some(m)),
-                None => (i64::MIN, None),
-            };
-            let ts = step_secs
-                .iter()
-                .find(|(idx, _)| *idx > boundary)
-                .and_then(|(_, secs)| ms_epoch_to_rfc3339((*secs * 1000.0) as i64));
-            usage_events.push(crate::adapters::UsageEvent {
-                key: response_id,
-                category: crate::adapters::UsageCategory::Conversation,
-                model,
-                provider,
-                ts,
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cached_tokens: usage.cached_tokens,
-                reasoning_tokens: usage.reasoning_tokens,
-
-                request_count: 0,
-            });
-        }
-        drop(gen_stmt);
         drop(conn);
 
         let source = crate::adapters::sqlite_replay_cursor_update(
@@ -711,23 +532,15 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             },
         )?;
         Ok(MemberReadDelta {
-            stats: crate::adapters::stats_update_from(
-                &observation,
-                &source,
-                crate::adapters::StatsCapabilities::TOOL_CALLS,
-            ),
             messages,
             source: Some(source),
             complete_snapshot: true,
-            next_active_provider: None,
-            next_active_model: None,
-            usage_events,
         })
     }
 
-    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+    fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
         Ok(crate::adapters::inspect_file_source(Path::new(
-            &member.source_path,
+            &session.source_path,
         )))
     }
 
@@ -786,12 +599,12 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         Some("Antigravity")
     }
 
-    fn continue_route(&self, member: &SessionMember) -> ResumeRoute {
-        match member.source_kind.as_str() {
+    fn continue_route(&self, session: &Session) -> ResumeRoute {
+        match session.source_kind.as_str() {
             "antigravity_cli_conversation" => ResumeRoute::Terminal,
             "antigravity_ide_conversation" | "antigravity_conversation" => {
-                if member.source_kind == "antigravity_conversation"
-                    && member.source_path.contains("antigravity-cli")
+                if session.source_kind == "antigravity_conversation"
+                    && session.source_path.contains("antigravity-cli")
                 {
                     return ResumeRoute::Terminal;
                 }
@@ -832,7 +645,6 @@ fn runtime_args(opts: &ExecOptions) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
-    use crate::domain::SessionMemberRelation;
 
     /// New runs the bare TUI; resume pins the conversation id after
     /// `--conversation` and both carry the frozen runtime intent as flags.
@@ -979,47 +791,6 @@ mod tests {
     /// been established for — it is written so a future reader cannot
     /// silently "claim" it.
     #[allow(clippy::too_many_arguments)]
-    fn gen_usage(
-        db: &Path,
-        idx: i64,
-        fresh_input: u64,
-        unknown_3: u64,
-        cache_read: u64,
-        output: u64,
-        thinking: u64,
-        response_id: &str,
-        model: &str,
-        boundary: i64,
-    ) {
-        // Field 1 is the MODEL ENUM (1319 is a plausible enum id, and it must
-        // never be counted as input); 9 = thinking_output, 10 = response_output.
-        let mut usage = [
-            int(1, 1319),
-            int(2, fresh_input),
-            int(3, unknown_3),
-            int(5, cache_read),
-            int(9, thinking),
-            int(10, output),
-        ]
-        .concat();
-        if !response_id.is_empty() {
-            usage.extend(str(11, response_id));
-        }
-        let mut chat = vec![msg(4, &usage), str(19, model)];
-        chat.push(msg(
-            20,
-            &[str(1, "last_step_index"), str(2, &boundary.to_string())].concat(),
-        ));
-        // blob.1 = the chat node: usage subtree at `.4`, model at `.19`.
-        let payload = msg(1, &chat.concat());
-        let conn = Connection::open(db).unwrap();
-        conn.execute(
-            "INSERT INTO gen_metadata (idx, data, size) VALUES (?1, ?2, ?3)",
-            rusqlite::params![idx, payload, payload.len() as i64],
-        )
-        .unwrap();
-    }
-
     fn summaries(root: &Path, rows: &[(&str, &str, &str, &str)]) {
         let conn = Connection::open(root.join("conversation_summaries.db")).unwrap();
         conn.execute_batch(
@@ -1035,20 +806,33 @@ mod tests {
         }
     }
 
-    fn root_member(db: &Path) -> SessionMember {
-        SessionMember {
-            id: "mem-ag".into(),
-            session_id: "sess-ag".into(),
+    fn root_session(db: &Path) -> Session {
+        Session {
+            id: "sess-ag".into(),
             agent: Agent::Antigravity,
-            source_member_id: db.file_stem().unwrap().to_str().unwrap().into(),
-            relation: SessionMemberRelation::Root,
-            parent_source_member_id: None,
-            source_kind: "antigravity_ide_conversation".into(),
-            source_path: db.to_string_lossy().to_string(),
+            root_agent_session_id: db.file_stem().unwrap().to_str().unwrap().into(),
+            title: None,
             cwd: None,
+            workspace_path_id: None,
+            project_id: None,
+            owner_workstream_id: None,
+            forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,
+            last_conversation_at: None,
+            trashed_at: None,
+            source_kind: "antigravity_ide_conversation".into(),
+            source_path: db.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),
+            source_file_identity: String::new(),
+            source_generation: 0,
+            source_byte_offset: 0,
+            source_last_seen_size: 0,
+            source_mtime: None,
+            source_prefix_hash: String::new(),
+            source_tail_hash: String::new(),
+            fact_generation: 0,
+            latest_message_seq: 0,
         }
     }
 
@@ -1094,7 +878,7 @@ mod tests {
             .join("conversations")
             .join("336f551c-58e8-491b-a31f-13b362786c85.db");
         let delta = AntigravityAdapter
-            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
+            .read_session_delta(&root_session(&db), &crate::domain::SourceCursor::default())
             .unwrap();
         let roles: Vec<(SessionMessageRole, &str)> = delta
             .messages
@@ -1118,221 +902,10 @@ mod tests {
             "the step idx is the native id"
         );
         assert!(delta.messages[0].ts.is_some());
-        match delta.stats {
-            Some(crate::domain::StatsUpdate::Snapshot(s)) => {
-                // 20.7 only announces the call; 132 is the execution record.
-                assert_eq!(s.tool_call_count, Some(1));
-                assert_eq!(s.user_message_count, Some(1));
-                assert_eq!(s.assistant_message_count, Some(1));
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-    }
-
-    /// Usage is one `gen_metadata` row per generation call — outside `steps` —
-    /// and the calls add up. Mapping per the agy binary's struct tags:
-    /// input = `.2` (fresh, non-cached), cache = `.5`, output = `.9`+`.10`
-    /// (billed generation), reasoning = `.9` (thinking).
-    #[test]
-    fn usage_sums_the_generation_calls() {
-        let root = temp_dir("usage");
-        let db = store(&root, "336f551c-58e8-491b-a31f-13b362786c86", &[]);
-        // Boundary 999 sits above every step: no attribution, usage only.
-        gen_usage(&db, 0, 17718, 138, 0, 93, 45, "", "gemini-3.8-flash", 999);
-        gen_usage(&db, 1, 5962, 71, 12211, 23, 48, "", "gemini-3.8-flash", 999);
-
-        let delta = AntigravityAdapter
-            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(crate::domain::StatsUpdate::Snapshot(_)) => {
-                assert_eq!(
-                    usage[0], 23680,
-                    "input = 1.4.2 only (17718+5962); the model enum in 1.4.1 is NOT tokens"
-                );
-                assert_eq!(
-                    usage[1], 209,
-                    "billed generation = 1.4.9 thinking (45+23) + 1.4.10 response (93+48) — the sum is swap-invariant"
-                );
-                assert_eq!(usage[2], 12211, "1.4.5");
-                assert_eq!(usage[3], 93, "reasoning = 1.4.9 thinking (45+48)");
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        // One ledger event per generation, carrying the row's own model; the
-        // boundary sits above every step, so no event is time-anchored here.
-        assert_eq!(delta.usage_events.len(), 2);
-        assert!(delta
-            .usage_events
-            .iter()
-            .all(|e| e.model.as_deref() == Some("gemini-3.8-flash")));
-        assert_eq!(
-            delta
-                .usage_events
-                .iter()
-                .map(|e| e.input_tokens)
-                .sum::<u64>(),
-            23680,
-            "fresh input only — the model enum is no longer billed as tokens"
-        );
-        assert!(delta.usage_events.iter().all(|e| e.ts.is_none()));
-    }
-
-    /// A generation that actually served steps is dated by its first step and
-    /// keyed on its response id.
-    #[test]
-    fn generation_events_carry_the_serving_models_and_step_times() {
-        let root = temp_dir("usage-events");
-        let id = "336f551c-58e8-491b-a31f-13b362786c89";
-        store(
-            &root,
-            id,
-            &[
-                (
-                    14,
-                    [timestamp(1_789_480_258), msg(19, &str(2, "问"))].concat(),
-                ),
-                (
-                    15,
-                    [timestamp(1_789_480_260), msg(20, &str(1, "答"))].concat(),
-                ),
-                (132, vec![]),
-                (
-                    16,
-                    [timestamp(1_789_480_270), msg(20, &str(1, "答二"))].concat(),
-                ),
-            ],
-        );
-        let db = root.join("conversations").join(format!("{id}.db"));
-        gen_usage(&db, 0, 500, 9, 0, 30, 12, "resp-1", "gemini-3.8-flash", 0);
-        gen_usage(&db, 1, 700, 9, 400, 25, 14, "resp-2", "claude-opus-4-6", 2);
-
-        let delta = AntigravityAdapter
-            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
-            .unwrap();
-        let got: Vec<(Option<&str>, Option<&str>)> = delta
-            .usage_events
-            .iter()
-            .map(|e| (e.key.as_deref(), e.model.as_deref()))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                (Some("resp-1"), Some("gemini-3.8-flash")),
-                (Some("resp-2"), Some("claude-opus-4-6")),
-            ]
-        );
-        // The time anchor is the first step each boundary served.
-        let times: Vec<Option<&str>> = delta.usage_events.iter().map(|e| e.ts.as_deref()).collect();
-        assert!(times[0].is_some_and(|t| t.contains("2026")));
-        assert!(times.iter().all(|t| t.is_some()));
-    }
-
-    /// Each generation names the model it served (`1.19`) and the input
-    /// boundary it ran against (`1.20`'s `last_step_index`): an assistant
-    /// step carries the model of the nearest boundary strictly below its idx,
-    /// and the user turn — which no generation produced — carries none.
-    #[test]
-    fn assistant_steps_carry_the_serving_model_from_gen_metadata() {
-        let root = temp_dir("provenance");
-        let id = "336f551c-58e8-491b-a31f-13b362786c88";
-        store(
-            &root,
-            id,
-            &[
-                (
-                    14,
-                    [timestamp(1_789_480_258), msg(19, &str(2, "问"))].concat(),
-                ),
-                (
-                    15,
-                    [timestamp(1_789_480_260), msg(20, &str(1, "答一"))].concat(),
-                ),
-                (132, vec![]),
-                (
-                    15,
-                    [timestamp(1_789_480_264), msg(20, &str(1, "答二"))].concat(),
-                ),
-            ],
-        );
-        let db = root.join("conversations").join(format!("{id}.db"));
-        gen_usage(&db, 0, 500, 9, 0, 30, 12, "", "gemini-3.8-flash", 0);
-        gen_usage(&db, 1, 700, 9, 400, 25, 14, "", "claude-opus-4-6", 2);
-
-        let delta = AntigravityAdapter
-            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
-            .unwrap();
-        let got: Vec<(SessionMessageRole, Option<&str>)> = delta
-            .messages
-            .iter()
-            .map(|m| (m.role, m.model.as_deref()))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                (SessionMessageRole::User, None),
-                (SessionMessageRole::Assistant, Some("gemini-3.8-flash")),
-                (SessionMessageRole::Assistant, Some("claude-opus-4-6")),
-            ]
-        );
     }
 
     /// A repeated responseId (a future version re-writing a row) is counted
     /// once; a row without a responseId is never deduped away.
-    #[test]
-    fn a_repeated_response_id_is_counted_once() {
-        let root = temp_dir("usage-dedup");
-        let db = store(&root, "336f551c-58e8-491b-a31f-13b362786c87", &[]);
-        gen_usage(
-            &db,
-            0,
-            17718,
-            138,
-            0,
-            93,
-            45,
-            "req-1",
-            "gemini-3.8-flash",
-            999,
-        );
-        gen_usage(
-            &db,
-            1,
-            5962,
-            71,
-            12211,
-            23,
-            48,
-            "req-1",
-            "gemini-3.8-flash",
-            999,
-        );
-        gen_usage(&db, 2, 100, 5, 0, 10, 4, "", "gemini-3.8-flash", 999);
-
-        let delta = AntigravityAdapter
-            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(crate::domain::StatsUpdate::Snapshot(_)) => {
-                assert_eq!(
-                    usage[0], 17818,
-                    "input = 1.4.2 only (17718+100); the duplicated req-1 row is deduped first"
-                );
-                assert_eq!(
-                    usage[1], 152,
-                    "billed generation = thinking 1.4.9 (45+4) + response 1.4.10 (93+10)"
-                );
-                assert_eq!(usage[3], 49, "reasoning = 1.4.9 (45+4)");
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-    }
-
-    /// The corpus shape of a final answer: a step-15 record whose only prose is
-    /// `20.1`. Reading `20.3` alone dropped exactly these — the turn answered,
-    /// the transcript showed nothing.
     #[test]
     fn an_answer_only_turn_is_ingested_instead_of_dropped() {
         let root = temp_dir("answer-only");
@@ -1355,7 +928,7 @@ mod tests {
 
         let db = root.join("conversations").join(format!("{id}.db"));
         let delta = AntigravityAdapter
-            .read_member_delta(&root_member(&db), &SessionMemberCursor::default())
+            .read_session_delta(&root_session(&db), &crate::domain::SourceCursor::default())
             .unwrap();
         let roles: Vec<(SessionMessageRole, &str)> = delta
             .messages
@@ -1440,8 +1013,8 @@ mod tests {
     }
 
     /// WAL regression: discovery must not consult the skipset. Even when the
-    /// caller reports every conversation "unchanged" (main-db stats frozen),
-    /// members are still re-listed.
+    /// caller reports every conversation "unchanged" (main-db size/mtime
+    /// frozen), members are still re-listed.
     #[test]
     fn discovery_ignores_the_unchanged_skipset() {
         let root = temp_dir("wal");
@@ -1558,114 +1131,48 @@ mod tests {
         );
     }
 
-    /// The cursor must be WAL-aware: a child member that keeps executing tool
+    /// The cursor must be WAL-aware: a conversation that keeps executing tool
     /// calls writes only into `<id>.db-wal` while the main `.db` file stays
-    /// byte-identical, and that MUST still advance the member and session
+    /// byte-identical, and that MUST still advance the session's cursor and
     /// `last_activity_at` through `source_changed`.
     #[test]
     fn wal_only_write_advances_activity() {
         use crate::storage::Db;
 
         let root = temp_dir("wal-activity");
-        let root_id = "11111111-2222-4333-8444-555555555555";
-        let child_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-        let user_turn = [timestamp(1_789_480_258), msg(19, &str(2, "问"))].concat();
-        store(&root, root_id, &[(14, user_turn)]);
-        store(&root, child_id, &[(132, vec![])]);
-        summaries(&root, &[(root_id, "", "", "[]"), (child_id, "", "", "[]")]);
-        let conn = Connection::open(root.join("conversation_summaries.db")).unwrap();
-        conn.execute(
-            "UPDATE conversation_summaries SET parent_conversation_id = ?2 WHERE conversation_id = ?1",
-            rusqlite::params![root_id, child_id],
-        )
-        .unwrap();
-        drop(conn);
+        let id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        // An untimed tool step only: the conversation carries no step
+        // timestamp, so the activity time is the store's own (file/WAL)
+        // mtime — exactly the coordinate a WAL-only write moves.
+        store(&root, id, &[(132, vec![])]);
+        summaries(&root, &[(id, "", "", "[]")]);
 
-        let child_db = root.join("conversations").join(format!("{child_id}.db"));
-        let root_db = root.join("conversations").join(format!("{root_id}.db"));
+        let db_path = root.join("conversations").join(format!("{id}.db"));
 
         let db = Db::open(&root.join("noending.db")).unwrap();
         let (session_id, _) = db
-            .upsert_logical_session_unchecked(
+            .upsert_logical_session(
                 Agent::Antigravity,
-                root_id,
+                id,
                 None,
                 None,
                 None,
                 None,
                 None,
-                None,
-            )
-            .unwrap();
-        let root_member_id = db
-            .upsert_session_member(
-                &session_id,
-                Agent::Antigravity,
-                root_id,
-                SessionMemberRelation::Root,
                 None,
                 "antigravity_ide_conversation",
-                &root_db.to_string_lossy(),
-                None,
-                None,
-                None,
+                &db_path.to_string_lossy(),
                 &serde_json::json!({}),
             )
             .unwrap();
-        let child_member_id = db
-            .upsert_session_member(
-                &session_id,
-                Agent::Antigravity,
-                child_id,
-                SessionMemberRelation::Child,
-                Some(root_id),
-                "antigravity_ide_conversation",
-                &child_db.to_string_lossy(),
-                None,
-                None,
-                None,
-                &serde_json::json!({}),
-            )
-            .unwrap();
+        let session = root_session(&db_path);
 
-        let member = |member_id: &str, source_path: &Path, relation| SessionMember {
-            id: member_id.to_string(),
-            session_id: session_id.clone(),
-            agent: Agent::Antigravity,
-            source_member_id: source_path.file_stem().unwrap().to_str().unwrap().into(),
-            relation,
-            parent_source_member_id: None,
-            source_kind: "antigravity_ide_conversation".into(),
-            source_path: source_path.to_string_lossy().to_string(),
-            cwd: None,
-            started_at: None,
-            last_activity_at: None,
-            metadata: serde_json::json!({}),
-        };
-        let root_member = member(&root_member_id, &root_db, SessionMemberRelation::Root);
-        let child_member = member(&child_member_id, &child_db, SessionMemberRelation::Child);
-
-        // Pass 1: both members ingested through the commit path.
-        for (m, member_id) in [
-            (&root_member, &root_member_id),
-            (&child_member, &child_member_id),
-        ] {
-            let delta = AntigravityAdapter
-                .read_member_delta(m, &SessionMemberCursor::default())
-                .unwrap();
-            db.commit_member_ingest_with_provenance_state(
-                &session_id,
-                member_id,
-                &delta.messages,
-                delta.stats,
-                delta.source.as_ref().unwrap(),
-                true,
-                None,
-                None,
-                &[],
-            )
+        // Pass 1: ingested through the commit path.
+        let delta = AntigravityAdapter
+            .read_session_delta(&session, &crate::domain::SourceCursor::default())
             .unwrap();
-        }
+        db.commit_ingest(&session_id, &delta.messages, delta.source.as_ref().unwrap())
+            .unwrap();
         let activity_before = db
             .get_session(&session_id)
             .unwrap()
@@ -1674,10 +1181,10 @@ mod tests {
 
         // WAL-only write: keep a writer open so the append never checkpoints,
         // and verify the main `.db` file is byte-for-byte unchanged.
-        let writer = Connection::open(&child_db).unwrap();
+        let writer = Connection::open(&db_path).unwrap();
         writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
         let (size_before, mtime_before) = {
-            let meta = std::fs::metadata(&child_db).unwrap();
+            let meta = std::fs::metadata(&db_path).unwrap();
             (meta.len(), meta.modified().unwrap())
         };
         writer
@@ -1686,7 +1193,7 @@ mod tests {
                 rusqlite::params![Vec::<u8>::new()],
             )
             .unwrap();
-        let meta = std::fs::metadata(&child_db).unwrap();
+        let meta = std::fs::metadata(&db_path).unwrap();
         assert_eq!(
             meta.len(),
             size_before,
@@ -1695,9 +1202,13 @@ mod tests {
         assert_eq!(meta.modified().unwrap(), mtime_before);
 
         // Pass 2: the logical cursor must move anyway.
-        let cursor = db.get_member_cursor(&child_member_id).unwrap();
+        let cursor = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .source_cursor();
         let delta = AntigravityAdapter
-            .read_member_delta(&child_member, &cursor)
+            .read_session_delta(&session, &cursor)
             .unwrap();
         let source = delta.source.unwrap();
         assert_ne!(
@@ -1705,18 +1216,8 @@ mod tests {
             "a WAL-only append must move the logical cursor"
         );
         assert_ne!(source.mtime, cursor.mtime);
-        db.commit_member_ingest_with_provenance_state(
-            &session_id,
-            &child_member_id,
-            &delta.messages,
-            delta.stats,
-            &source,
-            true,
-            None,
-            None,
-            &[],
-        )
-        .unwrap();
+        db.commit_ingest(&session_id, &delta.messages, &source)
+            .unwrap();
 
         let activity_after = db
             .get_session(&session_id)
@@ -1758,52 +1259,14 @@ mod tests {
                 None,
             )
             .unwrap();
-        let member_id = db
-            .upsert_session_member(
-                &session_id,
-                Agent::Antigravity,
-                root_id,
-                SessionMemberRelation::Root,
-                None,
-                "antigravity_ide_conversation",
-                &db_path.to_string_lossy(),
-                None,
-                None,
-                None,
-                &serde_json::json!({}),
-            )
-            .unwrap();
-        let member = SessionMember {
-            id: member_id.clone(),
-            session_id: session_id.clone(),
-            agent: Agent::Antigravity,
-            source_member_id: root_id.to_string(),
-            relation: SessionMemberRelation::Root,
-            parent_source_member_id: None,
-            source_kind: "antigravity_ide_conversation".into(),
-            source_path: db_path.to_string_lossy().to_string(),
-            cwd: None,
-            started_at: None,
-            last_activity_at: None,
-            metadata: serde_json::json!({}),
-        };
+        let session = root_session(&db_path);
 
         // Pass 1: ingested; activity is the step's own time.
         let delta = AntigravityAdapter
-            .read_member_delta(&member, &SessionMemberCursor::default())
+            .read_session_delta(&session, &crate::domain::SourceCursor::default())
             .unwrap();
-        db.commit_member_ingest_with_provenance_state(
-            &session_id,
-            &member_id,
-            &delta.messages,
-            delta.stats,
-            delta.source.as_ref().unwrap(),
-            true,
-            None,
-            None,
-            &[],
-        )
-        .unwrap();
+        db.commit_ingest(&session_id, &delta.messages, delta.source.as_ref().unwrap())
+            .unwrap();
         let activity_before = db
             .get_session(&session_id)
             .unwrap()
@@ -1814,11 +1277,15 @@ mod tests {
         let wal = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
         std::fs::write(&wal, b"").unwrap();
 
-        // Pass 2: the per-member cursor is unmoved by container noise, and
+        // Pass 2: the session cursor is unmoved by container noise, and
         // the commit leaves the session's activity alone.
-        let cursor = db.get_member_cursor(&member_id).unwrap();
+        let cursor = db
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .source_cursor();
         let delta = AntigravityAdapter
-            .read_member_delta(&member, &cursor)
+            .read_session_delta(&session, &cursor)
             .unwrap();
         let source = delta.source.unwrap();
         assert_eq!(
@@ -1829,18 +1296,8 @@ mod tests {
             source.mtime, cursor.mtime,
             "the activity time is the step's own, not the touched wal's"
         );
-        db.commit_member_ingest_with_provenance_state(
-            &session_id,
-            &member_id,
-            &delta.messages,
-            delta.stats,
-            &source,
-            true,
-            None,
-            None,
-            &[],
-        )
-        .unwrap();
+        db.commit_ingest(&session_id, &delta.messages, &source)
+            .unwrap();
         let activity_after = db
             .get_session(&session_id)
             .unwrap()

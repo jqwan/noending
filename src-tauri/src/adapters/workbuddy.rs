@@ -39,10 +39,10 @@ use serde_json::Value;
 
 use crate::adapters::{
     detect_format, ms_epoch_to_rfc3339, read_jsonl_delta, AgentCommand, DesktopResume,
-    DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberObservation, ParsedLine,
-    ResumeRoute, SessionMessageRole,
+    DiscoveredMember, DiscoveredMemberKind, ExecOptions, ParsedLine, ResumeRoute,
+    SessionMessageRole,
 };
-use crate::domain::{Agent, SessionMember, SessionMemberCursor, SourceAvailability};
+use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct WorkBuddyAdapter;
@@ -395,24 +395,19 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         Ok(out)
     }
 
-    fn read_member_delta(
+    fn read_session_delta(
         &self,
-        member: &SessionMember,
-        cursor: &SessionMemberCursor,
+        session: &Session,
+        cursor: &SourceCursor,
     ) -> Result<crate::adapters::MemberReadDelta> {
-        let path = PathBuf::from(&member.source_path);
-        let is_root = member.relation.as_str() == "root";
-        read_jsonl_delta(
-            &path,
-            cursor,
-            crate::adapters::StatsCapabilities::MESSAGE_COUNTS,
-            &|_idx, v| parse_line(v, is_root),
-        )
+        let path = PathBuf::from(&session.source_path);
+        let is_root = true; // every stored session is its root source
+        read_jsonl_delta(&path, cursor, &|_idx, v| parse_line(v, is_root))
     }
 
-    fn inspect_member_source(&self, member: &SessionMember) -> Result<SourceAvailability> {
+    fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
         Ok(crate::adapters::inspect_file_source(Path::new(
-            &member.source_path,
+            &session.source_path,
         )))
     }
 
@@ -452,270 +447,68 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         Some("WorkBuddy")
     }
 
-    fn continue_route(&self, member: &SessionMember) -> ResumeRoute {
+    fn continue_route(&self, session: &Session) -> ResumeRoute {
         if !crate::platform::paths::app_bundle_present("WorkBuddy") {
             return ResumeRoute::Refused("未找到 WorkBuddy 桌面应用，无法继续该会话".into());
         }
         ResumeRoute::Desktop(DesktopResume {
-            uri: format!("workbuddy://chat/{}", member.source_member_id),
+            uri: format!("workbuddy://chat/{}", session.root_agent_session_id),
             note: "将在 WorkBuddy 中打开并定位到该会话".into(),
         })
     }
 }
 
-/// `providerData.usage` of one model call, as counts. The source states each
-/// number directly (`inputTokens` excludes the cached ones; the details arrays
-/// name the cached / reasoning parts) — no derived sums.
-fn detail_sum(usage: &Value, key: &str, field: &str) -> u64 {
-    usage
-        .get(key)
-        .and_then(|d| d.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|i| i.get(field))
-                .filter_map(|v| v.as_u64())
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
-fn usage_observation(v: &Value) -> MemberObservation {
-    let provider = v.get("providerData");
-    if let Some(usage) = provider
-        .and_then(|p| p.get("usage"))
-        .filter(|u| u.is_object())
-    {
-        let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        // `inputTokens` is the full prompt INCLUDING the cached subset (the
-        // details block is a detail OF it) — store the fresh part only, like
-        // every other adapter's 输入 axis.
-        let cached = detail_sum(usage, "inputTokensDetails", "cached_tokens");
-        return MemberObservation {
-            input_tokens: n("inputTokens").saturating_sub(cached),
-            output_tokens: n("outputTokens"),
-            cached_tokens: cached,
-            reasoning_tokens: detail_sum(usage, "outputTokensDetails", "reasoning_tokens"),
-            request_count: n("requests").max(1),
-            ..Default::default()
-        };
-    }
-    // Some rows carry only `rawUsage`, the zhipu/OpenAI-style mirror of the
-    // same call (`prompt_tokens` == `inputTokens`; locally the two always
-    // ship together, but a build that writes only the raw shape must not
-    // bill zero). Same call, same components, snake_case spelling.
-    if let Some(raw) = provider
-        .and_then(|p| p.get("rawUsage"))
-        .filter(|u| u.is_object())
-    {
-        let n = |k: &str| raw.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        let detail = |obj: &str, key: &str| {
-            raw.get(obj)
-                .and_then(|d| d.get(0).or_else(|| d.as_object().map(|_| d)))
-                .and_then(|d| d.get(key))
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0)
-        };
-        // `prompt_tokens` = cache hits + misses (zhipu's two-way split) —
-        // inclusive, so the stored input is the miss (fresh) part.
-        let cached =
-            detail("prompt_tokens_details", "cached_tokens").max(n("prompt_cache_hit_tokens"));
-        return MemberObservation {
-            input_tokens: n("prompt_tokens").saturating_sub(cached),
-            output_tokens: n("completion_tokens"),
-            cached_tokens: cached,
-            reasoning_tokens: detail("completion_tokens_details", "reasoning_tokens")
-                .max(n("completion_thinking_tokens")),
-            request_count: 1,
-            ..Default::default()
-        };
-    }
-    MemberObservation::default()
-}
-
-/// One line's contribution: message lines only, prose only, machine
-/// traffic counted. Usage is the exception to the type gate — WorkBuddy hangs
-/// it on whichever record made the call (a `function_call` for a tool turn,
-/// the final assistant message for a text turn), and the two never share one
-/// call, so every record that has usage is counted.
+/// One line's contribution: root message lines only — a real user prompt's
+/// text or assistant prose. Machine traffic (function_call, tool results,
+/// compaction replays, injected envelopes) stays out.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    if vtype == "function_call" {
-        let usage = usage_observation(v);
-        let model = workbuddy_model(v);
-        return (!usage.is_empty()).then(|| {
-            ParsedLine::billed_without_message(
-                model,
-                crate::adapters::UsageCategory::Conversation,
-                usage,
-            )
-        });
-    }
     if vtype != "message" {
         return None;
     }
     let source_message_id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
     let raw = content_text(v.get("content").unwrap_or(&Value::Null));
-    let mut observation = usage_observation(v);
     if raw.trim().is_empty() {
-        let model = workbuddy_model(v);
-        return (!observation.is_empty()).then(|| {
-            ParsedLine::billed_without_message(
-                model,
-                crate::adapters::UsageCategory::Conversation,
-                observation,
-            )
-        });
+        return None;
     }
     match v.get("role").and_then(|r| r.as_str()).unwrap_or("") {
         "user" => match classify_user_turn(&raw, is_compaction_row(&v)) {
             UserTurn::Prompt(p) => {
-                observation.user_messages = 1;
                 if !is_root {
-                    return Some(ParsedLine::billed_without_message(
-                        workbuddy_model(v),
-                        crate::adapters::UsageCategory::Conversation,
-                        observation,
-                    ));
+                    return None;
                 }
-                Some(ParsedLine {
-                    message: Some(crate::adapters::parsed_message(
-                        source_message_id,
-                        SessionMessageRole::User,
-                        p,
-                    ))
-                    .map(|m| m.with_provenance(None, workbuddy_model(v))),
-                    observation,
-                    usage_note: None,
-                })
+                Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                    source_message_id,
+                    SessionMessageRole::User,
+                    p,
+                )))
             }
-            UserTurn::Compaction => Some(ParsedLine::billed_without_message(
-                workbuddy_model(v),
-                crate::adapters::UsageCategory::Compaction,
-                observation,
-            )),
-            _ => Some(ParsedLine::billed_without_message(
-                workbuddy_model(v),
-                crate::adapters::UsageCategory::Conversation,
-                observation,
-            )),
+            _ => None,
         },
         "assistant" => {
-            observation.assistant_messages = 1;
             if !is_root {
-                return Some(ParsedLine::billed_without_message(
-                    workbuddy_model(v),
-                    crate::adapters::UsageCategory::Conversation,
-                    observation,
-                ));
+                return None;
             }
-            let model = workbuddy_model(v);
-            Some(ParsedLine {
-                message: Some(crate::adapters::parsed_message(
-                    source_message_id,
-                    SessionMessageRole::Assistant,
-                    raw,
-                ))
-                .map(|m| m.with_provenance(None, model)),
-                observation,
-                usage_note: None,
-            })
+            Some(ParsedLine::message_only(crate::adapters::parsed_message(
+                source_message_id,
+                SessionMessageRole::Assistant,
+                raw,
+            )))
         }
-        _ => {
-            let model = workbuddy_model(v);
-            Some(ParsedLine::billed_without_message(
-                model,
-                crate::adapters::UsageCategory::Conversation,
-                observation,
-            ))
-        }
+        _ => None,
     }
-}
-
-/// The row's own `providerData.model` is the answering model's registry id
-/// (`deepseek-v4.1-flash`, …). The `auto` preference reuses the same slot and
-/// its resolution is not written anywhere in the transcript — an `auto` row
-/// attributes nothing. No provider field exists in the source → NULL.
-fn workbuddy_model(v: &Value) -> Option<String> {
-    v.get("providerData")
-        .and_then(|p| p.get("model"))
-        .and_then(|m| m.as_str())
-        .filter(|m| !m.is_empty() && *m != "auto")
-        .map(String::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapters::AgentAdapter;
-    use crate::domain::{SessionMemberRelation, StatsUpdate};
-
-    #[test]
-    fn non_conversation_usage_is_ledgered_for_roots_and_children() {
-        let rows = [
-            (
-                "user",
-                "<system-reminder>injected context</system-reminder>",
-            ),
-            ("user", "a real prompt"),
-            ("assistant", "a real reply"),
-            ("assistant", ""),
-        ];
-        for is_root in [true, false] {
-            let mut events = Vec::new();
-            for (i, (role, text)) in rows.iter().enumerate() {
-                let source = serde_json::json!({
-                    "type": "message", "id": format!("m{i}"), "role": role,
-                    "content": [{"type": "input_text", "text": text}],
-                    "providerData": {"model": "deepseek-test", "usage": {
-                        "requests": 2, "inputTokens": 100, "outputTokens": 10,
-                        "inputTokensDetails": [{"cached_tokens": 60}],
-                        "outputTokensDetails": [{"reasoning_tokens": 3}]
-                    }}
-                });
-                let parsed = parse_line(&source, is_root).unwrap();
-                if !is_root || i == 0 || i == 3 {
-                    assert!(parsed.message.is_none());
-                }
-                let event = crate::adapters::UsageEvent::from_parsed_line(
-                    &parsed,
-                    Some("2026-10-01T00:00:00Z"),
-                )
-                .unwrap();
-                assert_eq!(event.model.as_deref(), Some("deepseek-test"));
-                assert_eq!(event.ts.as_deref(), Some("2026-10-01T00:00:00Z"));
-                assert_eq!(event.request_count, 2);
-                events.push(event);
-            }
-            assert_eq!(
-                crate::adapters::test_usage_tokens(&events),
-                [160, 40, 240, 12]
-            );
-        }
-    }
 
     fn unique_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("noending-workbuddy-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    fn root_member(path: &Path) -> SessionMember {
-        SessionMember {
-            id: "mem-wb".into(),
-            session_id: "sess-wb".into(),
-            agent: Agent::WorkBuddy,
-            source_member_id: "s1".into(),
-            relation: SessionMemberRelation::Root,
-            parent_source_member_id: None,
-            source_kind: "workbuddy_transcript".into(),
-            source_path: path.to_string_lossy().to_string(),
-            cwd: None,
-            started_at: None,
-            last_activity_at: None,
-            metadata: serde_json::json!({}),
-        }
     }
 
     /// The shape measured on the real files: an enveloped opener whose prompt
@@ -817,18 +610,6 @@ mod tests {
             child.parent_source_member_id.as_deref(),
             Some(root.source_member_id.as_str())
         );
-
-        // Execution only: the same transcript contributes no conversation.
-        let child_member = SessionMember {
-            source_member_id: child.source_member_id.clone(),
-            relation: SessionMemberRelation::Child,
-            source_path: child_path.to_string_lossy().to_string(),
-            ..root_member(&child_path)
-        };
-        let delta = WorkBuddyAdapter
-            .read_member_delta(&child_member, &SessionMemberCursor::default())
-            .unwrap();
-        assert!(delta.messages.is_empty(), "{:?}", delta.messages);
     }
 
     /// WorkBuddy rewrites its `ai-title` as the conversation moves on; the
@@ -859,56 +640,6 @@ mod tests {
 
     /// Prose survives the envelope; the compaction replay is a count;
     /// reasoning and function traffic never appear.
-    #[test]
-    fn ingest_keeps_prose_and_counts_the_machine_traffic() {
-        let dir = unique_dir("delta");
-        let file = dir.join("s1.jsonl");
-        std::fs::write(&file, session_lines()).unwrap();
-
-        let delta = WorkBuddyAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let roles: Vec<(SessionMessageRole, &str)> = delta
-            .messages
-            .iter()
-            .map(|m| (m.role, m.content.as_str()))
-            .collect();
-        assert_eq!(
-            roles,
-            vec![
-                // the envelope is stripped to the prompt, not ingested whole
-                (SessionMessageRole::User, "整理一下昨天的会议纪要"),
-                (SessionMessageRole::Assistant, "整理好了。"),
-            ],
-            "got {roles:?}"
-        );
-        // The message timestamp survives the millis → RFC3339 normalization.
-        assert_eq!(
-            delta.messages[0].ts.as_deref(),
-            Some("2026-07-04T03:57:29.113+00:00")
-        );
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(s)) => {
-                assert_eq!(s.tool_call_count, None);
-                assert_eq!(s.user_message_count, Some(1));
-                assert_eq!(s.assistant_message_count, Some(1));
-                assert_eq!(s.side_activity_count, None);
-                // One model call each: the tool turn's usage rides on its
-                // function_call, the final text turn's on the message. Both add.
-                assert_eq!(
-                    usage[0], 260,
-                    "400 prompt − 140 cached across the two calls"
-                );
-                assert_eq!(usage[1], 46);
-                assert_eq!(usage[2], 140);
-                assert_eq!(usage[3], 10);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-    }
-
-    /// The user turn is the app's envelope, not the human's words.
     #[test]
     fn the_envelope_is_not_the_user_turn() {
         let enveloped = "<system-reminder data-role=\"user-context\">\n<user_info>\nOS Version: darwin\n</user_info>\n</system-reminder>\n<user_query>看一下这只股票</user_query>";
@@ -972,136 +703,5 @@ mod tests {
             .discover_members_in(&[dir], &|_| false)
             .unwrap();
         assert!(found.is_empty(), "{found:#?}");
-    }
-
-    /// `providerData.model = "auto"` is the user's request preference, and the
-    /// transcript records no resolution of it: nothing is attributed. A row
-    /// written under an explicit model carries that registry id instead.
-    #[test]
-    fn the_auto_preference_is_not_provenance() {
-        let dir = unique_dir("prov");
-        let file = dir.join("s1.jsonl");
-        std::fs::write(
-            &file,
-            [
-                r#"{"id":"m1","timestamp":1783137449113,"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>问</user_query>"}],"sessionId":"s1","cwd":"/repo"}"#,
-                r#"{"id":"m2","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"答"}],"providerData":{"agent":"x","model":"auto","requestModelId":"auto","requestModelName":"Auto","traceId":"t"},"sessionId":"s1","cwd":"/repo"}"#,
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .unwrap();
-        let delta = WorkBuddyAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let assistant = delta
-            .messages
-            .iter()
-            .find(|m| m.role == SessionMessageRole::Assistant)
-            .expect("the assistant turn is conversation");
-        assert_eq!(
-            assistant.model, None,
-            "a preference is not a generation fact"
-        );
-        assert_eq!(assistant.provider, None);
-    }
-
-    /// A missing model identity never suppresses the spend: the `auto` row's
-    /// usage is real consumption and bills into the session stats whether or
-    /// not the row attributes to a model.
-    #[test]
-    fn an_auto_row_still_bills_its_usage() {
-        let dir = unique_dir("prov-auto-usage");
-        let file = dir.join("s1.jsonl");
-        std::fs::write(
-            &file,
-            [
-                r#"{"id":"m1","timestamp":1783137449113,"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>问</user_query>"}],"sessionId":"s1","cwd":"/repo"}"#,
-                r#"{"id":"m2","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"答"}],"providerData":{"agent":"x","model":"auto","requestModelId":"auto","requestModelName":"Auto","traceId":"t","usage":{"requests":1,"inputTokens":900,"outputTokens":70,"totalTokens":970,"inputTokensDetails":[{"cached_tokens":300}],"outputTokensDetails":[{"reasoning_tokens":12}]}},"sessionId":"s1","cwd":"/repo"}"#,
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .unwrap();
-        let delta = WorkBuddyAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(
-                    usage[0], 600,
-                    "unattributed spend still bills (900 prompt − 300 cached)"
-                );
-                assert_eq!(usage[1], 70);
-                assert_eq!(usage[2], 300);
-                assert_eq!(usage[3], 12);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-        let assistant = delta
-            .messages
-            .iter()
-            .find(|m| m.role == SessionMessageRole::Assistant)
-            .unwrap();
-        assert_eq!(assistant.model, None, "attribution stays unset");
-    }
-
-    /// A row carrying only `rawUsage` (the zhipu/OpenAI-style mirror of the
-    /// same call) bills through the fallback: same components, snake_case.
-    #[test]
-    fn a_raw_usage_only_row_bills_through_the_fallback() {
-        let dir = unique_dir("raw-usage");
-        let file = dir.join("s1.jsonl");
-        std::fs::write(
-            &file,
-            r#"{"id":"m2","timestamp":1783137455216,"type":"function_call","callId":"call_1","name":"WebFetch","arguments":"{}","providerData":{"model":"deepseek-v4.1-flash","rawUsage":{"prompt_tokens":13044,"completion_tokens":132,"total_tokens":13176,"completion_tokens_details":{"reasoning_tokens":49,"cached_tokens":0},"prompt_tokens_details":{"reasoning_tokens":0,"cached_tokens":6208},"prompt_cache_hit_tokens":6208}},"sessionId":"s1","cwd":"/repo"}"#,
-        )
-        .unwrap();
-
-        let delta = WorkBuddyAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let usage = crate::adapters::test_usage_tokens(&delta.usage_events);
-        match delta.stats {
-            Some(StatsUpdate::Snapshot(_)) => {
-                assert_eq!(
-                    usage[0], 6836,
-                    "13044 prompt − 6208 cached: fresh input only"
-                );
-                assert_eq!(usage[1], 132);
-                assert_eq!(usage[2], 6208);
-                assert_eq!(usage[3], 49);
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
-    }
-
-    /// An explicit-model row carries its registry id as provenance — the
-    /// locally dominant shape (`deepseek-v4.1-flash` on 86.5% of rows).
-    #[test]
-    fn an_explicit_model_row_attributes_the_registry_id() {
-        let dir = unique_dir("prov-real");
-        let file = dir.join("s1.jsonl");
-        std::fs::write(
-            &file,
-            [
-                r#"{"id":"m1","timestamp":1783137449113,"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>问</user_query>"}],"sessionId":"s1","cwd":"/repo"}"#,
-                r#"{"id":"m2","timestamp":1783137455216,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"答"}],"providerData":{"agent":"x","model":"deepseek-v4.1-flash","requestModelId":"deepseek-v4.1-flash","requestModelName":"Deepseek-V4.1-Flash","traceId":"t"},"sessionId":"s1","cwd":"/repo"}"#,
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .unwrap();
-        let delta = WorkBuddyAdapter
-            .read_member_delta(&root_member(&file), &SessionMemberCursor::default())
-            .unwrap();
-        let assistant = delta
-            .messages
-            .iter()
-            .find(|m| m.role == SessionMessageRole::Assistant)
-            .unwrap();
-        assert_eq!(assistant.model.as_deref(), Some("deepseek-v4.1-flash"));
-        assert_eq!(assistant.provider, None, "no provider field in the source");
     }
 }

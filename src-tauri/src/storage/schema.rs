@@ -27,21 +27,26 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// No migrations and no backwards compatibility: a database whose generation
 /// differs must be discarded and rebuilt from Agent source data.
 ///
-/// v1 — ingestion writes FACTS only (sessions, members, messages, stats,
-/// cursors, the current-message projection, ingest generation); Context is
-/// written only by an explicit user action. The Session frontier is
+/// v1 — ingestion writes FACTS only (sessions, members, messages, cursors,
+/// the current-message projection, ingest generation); Context is written
+/// only by an explicit user action. The Session frontier is
 /// `(ingest_generation, processed_through_seq)` over the current-message
 /// projection; the Workstream side keeps its own `context_revision` /
 /// `input_revision` plus per-Session consumption frontier.
-/// Token totals come exclusively from usage_events; activity stats do not
-/// persist tokens, monetary values or compression counts.
 ///
-/// 2026-09-29 usage-claim scoping: claim keys are per logical session
-/// (`{session_id}|{adapter identity}`). A pre-change database must be
-/// deleted and rebuilt (a 重新入库 under the new scoping would double-bill
-/// rows that already carry events under the old unscoped keys) — the
-/// version stays 1 by the dev-stage ruling; the rebuild is communicated,
-/// not enforced.
+/// 2026-09-29 统计功能退役: `session_member_stats` / `usage_events` /
+/// `session_member_usage` / `ingest_usage_claims`（连同各 adapter 的用量分支与
+/// claim 注册表）已删除——产品只保留会话层。对象清单随之收缩，删除时重建。
+///
+/// 2026-10-05 模型溯源退役: `session_messages.provider/model` 与
+/// `session_member_cursors.active_provider/active_model`（连同有状态读取器的
+/// provenance 前沿）已删除。
+///
+/// 2026-10-05 会话扁平化: `session_members` / `session_member_cursors` /
+/// `session_ingest_state` / `ingestion_diagnostics` 四表删除——一个会话恰有一个
+/// 根源、一份游标、一个事实前沿，全部并入 `sessions` 的列；消息表随之去掉
+/// member 维度。拓扑守卫与诊断页失去存在前提（不再存任何非根成员），一并退场。
+/// 删除数据库重建。
 pub const DATABASE_FORMAT_VERSION: i64 = 1;
 
 /// Open an existing current-format database, or create one.
@@ -226,8 +231,11 @@ const CURRENT_SCHEMA: &str = r#"
       updated_at TEXT NOT NULL
     );
     -- The Logical Session: user-visible conversation + lifecycle + Owner.
-    -- Identity is (agent, root_agent_session_id): the ROOT member's real
-    -- Resume identity, not any child's external id.
+    -- Identity is (agent, root_agent_session_id): the root source's real
+    -- Resume identity. A session IS its root source: the former
+    -- session_members / session_member_cursors / session_ingest_state rows
+    -- live here as columns — exactly one source, one cursor, one frontier
+    -- per session.
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       agent TEXT NOT NULL,
@@ -252,66 +260,28 @@ const CURRENT_SCHEMA: &str = r#"
       -- ingestion, Owner and every other fact keep following the source. It is
       -- also the only gate on the permanent local purge.
       trashed_at TEXT,
-      UNIQUE(agent, root_agent_session_id)
-    );
-    -- One internal execution unit of a Logical Session. Only relation
-    -- 'root' may produce session_messages; exactly one root per session is
-    -- enforced by the partial unique index below.
-    CREATE TABLE IF NOT EXISTS session_members (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL
-        REFERENCES sessions(id) ON DELETE CASCADE,
-      agent TEXT NOT NULL,
-      source_member_id TEXT NOT NULL,
-      relation TEXT NOT NULL CHECK (relation IN ('root', 'child', 'side')),
-      parent_source_member_id TEXT,
+      -- The ROOT source: format descriptor, path (reveal in UI) and the
+      -- adapter's non-conversation structural facts (thread_source, …).
       source_kind TEXT NOT NULL,
       source_path TEXT NOT NULL,
-      cwd TEXT,
-      started_at TEXT,
-      last_activity_at TEXT,
       metadata TEXT NOT NULL DEFAULT '{}',
-      UNIQUE(agent, source_member_id)
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_members_one_root
-      ON session_members(session_id) WHERE relation = 'root';
-    CREATE INDEX IF NOT EXISTS idx_session_members_session
-      ON session_members(session_id);
-    CREATE INDEX IF NOT EXISTS idx_session_members_parent
-      ON session_members(agent, parent_source_member_id);
-    -- Where each member stopped reading ITS source. Member-owned, never
-    -- session-owned; the Context frontier lives in session_contexts.
-    CREATE TABLE IF NOT EXISTS session_member_cursors (
-      member_id TEXT PRIMARY KEY
-        REFERENCES session_members(id) ON DELETE CASCADE,
+      -- Where reading stopped: file identity, source-shape generation, byte
+      -- frontier and the append-proof / chain-tail hashes.
       source_file_identity TEXT NOT NULL DEFAULT '',
-      generation INTEGER NOT NULL DEFAULT 0,
-      byte_offset INTEGER NOT NULL DEFAULT 0,
-      last_seen_size INTEGER NOT NULL DEFAULT 0,
-      mtime REAL,
-      prefix_hash TEXT NOT NULL DEFAULT '',
-      identity_tail_hash TEXT NOT NULL DEFAULT '',
-      -- Stateful provenance frontier. Only a stateful
-      -- evidence adapter writes these; they are cursor state, never a UI
-      -- authority, and live in the same transaction as the messages they
-      -- cover so the bytes frontier and the provenance state cannot drift.
-      active_provider TEXT,
-      active_model TEXT
+      source_generation INTEGER NOT NULL DEFAULT 0,
+      source_byte_offset INTEGER NOT NULL DEFAULT 0,
+      source_last_seen_size INTEGER NOT NULL DEFAULT 0,
+      source_mtime REAL,
+      source_prefix_hash TEXT NOT NULL DEFAULT '',
+      source_tail_hash TEXT NOT NULL DEFAULT '',
+      -- The conversation fact frontier: the generation of the CURRENT
+      -- conversation and how many messages the store holds.
+      fact_generation INTEGER NOT NULL DEFAULT 0,
+      latest_message_seq INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(agent, root_agent_session_id)
     );
-    -- Cross-file usage identities. A session store can RE-EMIT a thread's
-    -- usage history into a fresh rollout file (codex continuation chains
-    -- replay the whole token_count stream); without a claim registry that
-    -- history bills once per file. The first reader to claim an identity
-    -- bills it; later claimants skip. member_id records who claimed it so
-    -- the owner's own re-reads keep billing. Claims linger after their
-    -- member is deleted: the spend was billed historically, and a later
-    -- replay must not resurrect it.
-    CREATE TABLE IF NOT EXISTS ingest_usage_claims (
-      key TEXT PRIMARY KEY,
-      member_id TEXT NOT NULL
-    );
-    -- The ONLY conversation store: user/assistant turns of the ROOT
-    -- member. Identity dedup is (member_id, source_identity_hash); sequence is
+    -- The ONLY conversation store: user/assistant turns of the root source.
+    -- Identity dedup is (session_id, source_identity_hash); sequence is
     -- NoEnding's own per-session append counter. Rows are AUDIT history and
     -- are never deleted by a re-scan — the CURRENT conversation is the
     -- projection below.
@@ -319,8 +289,6 @@ const CURRENT_SCHEMA: &str = r#"
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
         REFERENCES sessions(id) ON DELETE CASCADE,
-      member_id TEXT NOT NULL
-        REFERENCES session_members(id) ON DELETE CASCADE,
       sequence INTEGER NOT NULL,
       source_message_id TEXT,
       source_generation INTEGER NOT NULL DEFAULT 0,
@@ -334,25 +302,16 @@ const CURRENT_SCHEMA: &str = r#"
       -- assistant message). Derived from the projection at commit time, never
       -- ingested; an append that continues a turn demotes the old final.
       turn_final INTEGER NOT NULL DEFAULT 0,
-      -- Message-level generation provenance:
-      -- source-confirmed only, meaningful for Assistant rows alone. NULL =
-      -- the source cannot prove it; never inferred from configuration.
-      provider TEXT,
-      model TEXT,
       raw_ref TEXT NOT NULL,
-      CHECK (
-        role = 'assistant'
-        OR (provider IS NULL AND model IS NULL)
-      ),
       UNIQUE(session_id, sequence),
-      UNIQUE(member_id, source_identity_hash)
+      UNIQUE(session_id, source_identity_hash)
     );
     CREATE INDEX IF NOT EXISTS idx_session_messages_session
       ON session_messages(session_id, sequence);
     -- The CURRENT effective conversation: an ordered view over
     -- session_messages holding exactly one generation. A normal append adds
     -- to the tail; a source rewrite / truncate / reorder that changes the
-    -- conversation raises the session ingest generation and atomically
+    -- conversation raises the session fact generation and atomically
     -- replaces the whole projection, while the old session_messages rows stay
     -- for provenance audit. Conversation, search and Context read HERE.
     CREATE TABLE IF NOT EXISTS session_message_projection (
@@ -365,87 +324,6 @@ const CURRENT_SCHEMA: &str = r#"
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projection_message
       ON session_message_projection(session_id, session_message_id);
-    -- Per-session ingest state: the fact generation of the current
-    -- conversation and how many projection ordinals exist. Maintained inside
-    -- the member-ingest transaction.
-    CREATE TABLE IF NOT EXISTS session_ingest_state (
-      session_id TEXT PRIMARY KEY
-        REFERENCES sessions(id) ON DELETE CASCADE,
-      generation INTEGER NOT NULL DEFAULT 0,
-      latest_message_seq INTEGER NOT NULL DEFAULT 0
-    );
-    -- 1:1 execution snapshot per member: current observable source state, not
-    -- an append-only log. Every member — root, child and side — keeps its own
-    -- composition, so a Session's totals are the sum over its graph.
-    -- NULL = source does not provide the metric, 0 = observed zero.
-    CREATE TABLE IF NOT EXISTS session_member_stats (
-      member_id TEXT PRIMARY KEY
-        REFERENCES session_members(id) ON DELETE CASCADE,
-      tool_call_count INTEGER,
-      user_message_count INTEGER,
-      assistant_message_count INTEGER,
-      side_activity_count INTEGER,
-      updated_at TEXT NOT NULL,
-      extra TEXT NOT NULL DEFAULT '{}'
-    );
-    -- The usage LEDGER: one row per billed call, written in the same
-    -- transaction as the member ingest that observed it. This is the sole
-    -- source of token totals; a full re-scan replaces the member's events. It is
-    -- the per-call record that gives the panel per-model tokens, the time
-    -- series and the call-category split. `event_key` is the source-stable
-    -- identity (codex token_count cumulative totals), unique PER MEMBER —
-    -- cross-member replay dedup stays with ingest_usage_claims. A full
-    -- re-scan replaces the member's rows; deleting the member cascades.
-    CREATE TABLE IF NOT EXISTS usage_events (
-      id TEXT PRIMARY KEY,
-      member_id TEXT NOT NULL
-        REFERENCES session_members(id) ON DELETE CASCADE,
-      session_id TEXT NOT NULL
-        REFERENCES sessions(id) ON DELETE CASCADE,
-      agent TEXT NOT NULL,
-      category TEXT NOT NULL
-        CHECK (category IN ('conversation', 'compaction', 'side')),
-      model TEXT,
-      ts TEXT,
-      input_tokens INTEGER NOT NULL DEFAULT 0,
-      output_tokens INTEGER NOT NULL DEFAULT 0,
-      cached_tokens INTEGER NOT NULL DEFAULT 0,
-      reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-      -- Real underlying model requests this call covers. Most formats write
-      -- one usage record per request (so 1 is exact); zcode's store counts
-      -- them per turn (`model_request_count`); codex reports per turn and
-      -- cannot see its own per-request splits (1 here UNDERCOUNTS).
-      requests INTEGER NOT NULL DEFAULT 1,
-      event_key TEXT,
-      UNIQUE(member_id, event_key)
-    );
-    CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts);
-    CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model);
-    CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id);
-    -- Query-time usage rollup. No token totals are persisted outside the events.
-    CREATE VIEW IF NOT EXISTS session_member_usage AS
-      SELECT member_id, SUM(input_tokens) AS input_tokens,
-             SUM(output_tokens) AS output_tokens, SUM(cached_tokens) AS cached_tokens,
-             SUM(reasoning_tokens) AS reasoning_tokens, SUM(requests) AS requests,
-             MAX(ts) AS updated_at
-      FROM usage_events GROUP BY member_id;
-    -- Ingestion problems that are deliberately NOT Sessions: unattachable
-    -- child/side sources and the like. Never Search / Context / Owner /
-    -- lifecycle; deleted when the source resolves.
-    CREATE TABLE IF NOT EXISTS ingestion_diagnostics (
-      id TEXT PRIMARY KEY,
-      diagnostic_key TEXT NOT NULL UNIQUE,
-      agent TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      source_member_id TEXT,
-      parent_source_member_id TEXT,
-      source_path TEXT,
-      reason TEXT NOT NULL,
-      first_seen_at TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL,
-      observation_count INTEGER NOT NULL DEFAULT 1,
-      details TEXT NOT NULL DEFAULT '{}'
-    );
     -- Workstream Context content authority: items + revisions + conflicts.
     CREATE TABLE IF NOT EXISTS context_items (
       id TEXT PRIMARY KEY,
@@ -686,14 +564,8 @@ mod tests {
             ("table", "projects"),
             ("table", "workstreams"),
             ("table", "sessions"),
-            ("table", "session_members"),
-            ("table", "session_member_cursors"),
             ("table", "session_messages"),
             ("table", "session_message_projection"),
-            ("table", "session_ingest_state"),
-            ("table", "session_member_stats"),
-            ("view", "session_member_usage"),
-            ("table", "ingestion_diagnostics"),
             ("table", "context_items"),
             ("table", "context_item_revisions"),
             ("table", "session_contexts"),
@@ -716,9 +588,6 @@ mod tests {
             ("index", "idx_sessions_project"),
             ("index", "idx_items_workstream"),
             ("index", "idx_sessions_owner_workstream"),
-            ("index", "idx_session_members_one_root"),
-            ("index", "idx_session_members_session"),
-            ("index", "idx_session_members_parent"),
             ("index", "idx_session_messages_session"),
             ("index", "idx_projection_message"),
             ("index", "idx_intents_status"),
