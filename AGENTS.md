@@ -67,15 +67,25 @@ Match verification to the change; do not run full tests for every turn or commit
 
 * Docs: `git diff --check` only.
 * Copy/style/layout: inspect the affected UI; type-check TS/TSX changes.
-* Frontend behavior: `pnpm exec tsc --noEmit` + relevant test files.
-* Rust: in `src-tauri`, `cargo fmt --check`, `cargo check` + relevant tests.
-* Schema/storage/ingestion/statistics: add regression tests and check affected
+* Frontend behavior: `pnpm exec tsc --noEmit` + `pnpm test <path>` (never
+  `pnpm test -- --run <path>` — that silently runs the whole suite).
+* Rust: in `src-tauri`, `cargo fmt --check`, `cargo check`, plus
+  `cargo test <name>` or `cargo test --test <suite>`.
+* Schema/storage/ingestion: add regression tests and check affected
   consumers. API contract changes require checks on both sides.
 * Build/import/asset/config changes: run the affected build. Dependency changes:
   reinstall and run the affected-side full tests and build.
 
+Read the output, not the command line: a targeted run must show it filtered
+(vitest `Test Files 1`, a nonzero Rust test count — a filter matching nothing
+still exits 0); a full suite is green only by its exit status, which pipes
+through head/tail/grep discard, so redirect to a file before reading; and
+`cargo test` stops at the first failing target, so re-running that one target
+after a fix is not a green suite.
+
 Run full verification for major refactors, broad changes, stage acceptance,
-release preparation, or explicit requests:
+release preparation, or explicit requests — once, at the end, on the final
+code state:
 
 * Backend (`src-tauri`): `cargo fmt --check`, `cargo check --all-targets`,
   `cargo test --all-targets`.
@@ -83,8 +93,8 @@ release preparation, or explicit requests:
 
 Run `pnpm install --frozen-lockfile` only when dependencies/lockfile change or
 are missing. Reuse passing checks while covered code is unchanged; broaden
-checks when impact is uncertain. Confirm filtered tests run and report actual
-results and gaps.
+checks when impact is uncertain. A post-green touch-up re-runs only the
+affected slice plus tsc. Report actual results and gaps.
 
 For platform-sensitive changes, check macOS and Windows; use remote CI only
 when authorized, and report any unverified platform.
