@@ -236,9 +236,16 @@ export const api = {
       ownerWorkstreamId,
       cwd: cwd ?? null,
     }),
-  /** 活着的内嵌终端（新→旧）：看板的运行中伪行与运行态筛选都读这里。 */
+  /** 活着的内嵌终端（新→旧）：侧边栏「运行中」读这里；事件刷新，无轮询。 */
   terminalList: () =>
     invoke<import("./types").TerminalSummary[]>("terminal_list"),
+  /** 终端视图的刷新：已绑定同步该会话，未绑定定向扫该 Agent 的来源；
+   *  同步后的摄入尾步会做校验匹配并重连。 */
+  terminalRefresh: (terminalId: string) =>
+    invoke<void>("terminal_refresh", { terminalId }),
+  /** 侧边栏「运行中」的显式关闭：杀进程并移除记录。 */
+  terminalClose: (terminalId: string) =>
+    invoke<void>("terminal_close", { terminalId }),
 
   // 内嵌终端：终端子页的直启入口——prepare + embedded launch 一步完成（不走
   // 继续会话弹窗），之后通过 attach 协议接管。输出走

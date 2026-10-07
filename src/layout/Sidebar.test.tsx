@@ -12,11 +12,13 @@ import type { TerminalSummary } from "../types";
 vi.mock("../api", () => ({
   api: {
     terminalList: vi.fn(),
+    terminalClose: vi.fn(),
   },
 }));
 
 beforeEach(() => {
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
+  vi.mocked(api.terminalClose).mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(cleanup);
@@ -107,6 +109,37 @@ describe("Sidebar 运行中终端", () => {
     expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-1" });
     fireEvent.click(screen.getByText("修复布局"));
     expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-2" });
+  });
+
+  it("closing the unbound terminal on screen goes back to the sessions board", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "t-1" })]);
+    const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
+    expect(await screen.findByText("新终端")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：新终端" }));
+    await waitFor(() => expect(api.terminalClose).toHaveBeenCalledWith("t-1"));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "sessions" }));
+  });
+
+  it("closing a bound terminal on screen goes to its session detail", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ terminal_id: "t-2", session_id: "s1", session_title: "修复布局" }),
+    ]);
+    const navigate = renderSidebar({ view: "terminal", terminalId: "t-2" });
+    expect(await screen.findByText("修复布局")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：修复布局" }));
+    await waitFor(() => expect(api.terminalClose).toHaveBeenCalledWith("t-2"));
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s1" }),
+    );
+  });
+
+  it("closing a terminal that is not on screen does not navigate", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "t-1" })]);
+    const navigate = renderSidebar({ view: "home" });
+    expect(await screen.findByText("新终端")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：新终端" }));
+    await waitFor(() => expect(api.terminalClose).toHaveBeenCalledWith("t-1"));
+    await waitFor(() => expect(navigate).not.toHaveBeenCalled());
   });
 
   it("refetches once per terminals-changed event — no polling", async () => {

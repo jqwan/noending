@@ -88,7 +88,7 @@ fn enable_codex_source(db: &Db, root: &Path) {
 }
 
 fn reconcile(db: &Db) -> (usize, i64) {
-    ingestion::reconcile_all(db, &LaunchWorkspace::default(), &|_| {}).unwrap()
+    ingestion::reconcile_all(db, &LaunchWorkspace::default(), &|_, _| {}).unwrap()
 }
 
 const ROOT_ID: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
@@ -292,7 +292,7 @@ fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
     std::fs::remove_file(&root_path).unwrap();
     for _ in 0..2 {
         let report =
-            ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+            ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_, _| {}).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(db.message_count(&session.id).unwrap(), 1);
         assert_eq!(
@@ -318,7 +318,7 @@ fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
     )
     .unwrap();
     let report =
-        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_, _| {}).unwrap();
     assert!(report.failures.is_empty(), "{:?}", report.failures);
     assert_eq!(db.message_count(&session.id).unwrap(), 2);
     assert!(
@@ -335,7 +335,7 @@ fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
     std::fs::remove_file(&root_path).unwrap();
     std::fs::create_dir(&root_path).unwrap();
     let report =
-        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_, _| {}).unwrap();
     assert!(!report.failures.is_empty());
 }
 

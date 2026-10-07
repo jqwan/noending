@@ -16,6 +16,7 @@ vi.mock("../../api", () => ({
     terminalForSession: vi.fn(),
     terminalAttach: vi.fn(),
     terminalInput: vi.fn().mockResolvedValue(undefined),
+    terminalRefresh: vi.fn().mockResolvedValue(undefined),
     terminalResize: vi.fn().mockResolvedValue(undefined),
     launchEmbeddedResume: vi.fn(),
     readClipboardForTerminal: vi.fn(),
@@ -198,6 +199,14 @@ it("an unbound terminal keeps the session-detail entry disabled; binding lights 
   await waitFor(() => expect(screen.getByText("页面匹配的会话")).toBeTruthy());
   fireEvent.click(entry);
   expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s9" });
+});
+
+it("the refresh button runs one targeted sync for this terminal", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_id: null }));
+  renderView();
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "同步" }));
+  await waitFor(() => expect(api.terminalRefresh).toHaveBeenCalledWith("t-1"));
 });
 
 it("the route seed renders the final header on the first frame — no 新终端 flash", async () => {

@@ -9,6 +9,7 @@ import { copyToClipboard } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import { api } from "../../api";
+import { showToast } from "../../components/Toast";
 import { sessionDisplayTitle } from "./SessionTable";
 import type { Agent, TerminalSnapshot } from "../../types";
 import type { Route } from "../../app/routes";
@@ -90,6 +91,23 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   // 事件随后确认。没绑定时会话详情入口置灰。
   const [boundSessionId, setBoundSessionId] = useState<string | null>(initialSessionId ?? null);
   const [boundTitle, setBoundTitle] = useState<string | null>(initialTitle ?? null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  /** 刷新：一次定向同步摄入（绑定→RefreshSession；未绑定→该 Agent 的来源
+   *  定向扫描，不节流——点击即事件）。摄入尾步的校验匹配会把结果经
+   *  terminal-bound 推回来，入口与标题自动更新，无需手动重连。 */
+  const refreshTerminal = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await api.terminalRefresh(terminalId);
+      showToast(boundSessionId ? "已排队：正在同步该会话…" : "已排队：正在同步并尝试关联会话…");
+    } catch (e) {
+      showToast(`同步失败：${String(e)}`);
+    } finally {
+      setTimeout(() => setRefreshing(false), 500);
+    }
+  };
 
   /** 进入即用：按 terminalId 直接 attach——终端在新建弹窗确认或「先跳后启」
    *  启动时就已存在，本视图从不负责 spawn。 */
@@ -425,17 +443,28 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           )
         }
         actions={
-          <button
-            className="btn ghost icon-button"
-            aria-label="会话详情"
-            title={boundSessionId ? "打开会话详情" : "会话与终端绑定后可打开会话详情"}
-            disabled={!boundSessionId}
-            onClick={() => {
-              if (boundSessionId) navigate({ view: "session", sessionId: boundSessionId });
-            }}
-          >
-            <Icon name="info" />
-          </button>
+          <>
+            <button
+              className="btn ghost icon-button"
+              aria-label="同步"
+              title={boundSessionId ? "增量同步：从磁盘同步该会话的最新对话" : "同步并尝试关联会话"}
+              disabled={refreshing}
+              onClick={() => void refreshTerminal()}
+            >
+              <Icon name="refresh" />
+            </button>
+            <button
+              className="btn ghost icon-button"
+              aria-label="会话详情"
+              title={boundSessionId ? "打开会话详情" : "会话与终端绑定后可打开会话详情"}
+              disabled={!boundSessionId}
+              onClick={() => {
+                if (boundSessionId) navigate({ view: "session", sessionId: boundSessionId });
+              }}
+            >
+              <Icon name="info" />
+            </button>
+          </>
         }
       />
 

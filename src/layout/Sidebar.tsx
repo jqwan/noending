@@ -31,6 +31,20 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
       .catch(console.error);
   }, []);
 
+  /** 「运行中」子项的显式关闭：杀掉内嵌 Agent 并移出列表。关闭时正看着
+   *  这个终端 → 跳回它的会话（未绑定则回会话看板），不让用户停在尸体上。 */
+  const closeTerminal = async (t: TerminalSummary) => {
+    try {
+      await api.terminalClose(t.terminal_id);
+      if (route.view === "terminal" && route.terminalId === t.terminal_id) {
+        if (t.session_id) navigate({ view: "session", sessionId: t.session_id });
+        else navigate({ view: "sessions" });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(refresh, [refresh]);
   useEffect(() => onEvent(EVT_TERMINALS, refresh), [refresh]);
 
@@ -95,15 +109,24 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
                 ? sessionDisplayTitle(t.session_title)
                 : "新终端";
               return (
-                <button
-                  key={t.terminal_id}
-                  className={`nav-item ${active ? "active" : ""}`}
-                  title={t.cwd ? `${title} · ${t.cwd}` : title}
-                  onClick={() => navigate({ view: "terminal", terminalId: t.terminal_id })}
-                >
-                  <AgentIcon agent={t.agent} size={15} />
-                  <span className="truncate">{title}</span>
-                </button>
+                <div className="sidebar-task" key={t.terminal_id}>
+                  <button
+                    className={`nav-item ${active ? "active" : ""}`}
+                    title={t.cwd ? `${title} · ${t.cwd}` : title}
+                    onClick={() => navigate({ view: "terminal", terminalId: t.terminal_id })}
+                  >
+                    <AgentIcon agent={t.agent} size={15} />
+                    <span className="truncate">{title}</span>
+                  </button>
+                  <button
+                    className="pin-button terminal-close"
+                    aria-label={`关闭终端：${title}`}
+                    title={`关闭这个内嵌终端${t.session_id ? "，回到它的会话" : ""}`}
+                    onClick={() => void closeTerminal(t)}
+                  >
+                    <Icon name="trash" />
+                  </button>
+                </div>
               );
             })}
           </>

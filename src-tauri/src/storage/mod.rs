@@ -570,21 +570,51 @@ impl Db {
             .optional()?)
     }
 
-    /// The session's first user turn: text + timestamp. The on-demand
-    /// terminal matcher's content evidence — a live unbound terminal may
-    /// claim a session only if this text is visible in its scrollback.
-    /// None while the session has no user turn yet (nothing to verify).
-    pub fn first_user_message(&self, session_id: &str) -> Result<Option<(String, Option<String>)>> {
+    /// The session's recent user messages (oldest → newest, up to `limit`).
+    /// The verified terminal match's evidence set: a live unbound terminal
+    /// may claim a session only if every one of these is visible in its
+    /// scrollback. Empty while the session has no user turn yet.
+    pub fn recent_user_messages(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, Option<String>)>> {
         let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT content, ts FROM session_messages
-                 WHERE session_id = ?1 AND role = 'user'
-                 ORDER BY sequence LIMIT 1",
-                params![session_id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-            )
-            .optional()?)
+        let mut st = conn.prepare(
+            "SELECT content, ts FROM session_messages
+             WHERE session_id = ?1 AND role = 'user'
+             ORDER BY sequence DESC LIMIT ?2",
+        )?;
+        let mut rows = st
+            .query_map(params![session_id, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// Recent sessions for one agent working in one directory, newest first.
+    /// The ingestion-side terminal match's candidate pool: a live unbound
+    /// terminal only ever relates to sessions born in its own cwd, and the
+    /// matcher's ordering check discards anything older than the terminal.
+    pub fn list_recent_sessions_by_agent_cwd(
+        &self,
+        agent: Agent,
+        cwd: &str,
+        limit: i64,
+    ) -> Result<Vec<Session>> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT * FROM sessions
+             WHERE agent = ?1 AND cwd = ?2 AND trashed_at IS NULL
+             ORDER BY COALESCE(last_activity_at, started_at) DESC
+             LIMIT ?3",
+        )?;
+        let rows = st
+            .query_map(params![agent.as_str(), cwd, limit], row_session)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// The Logical Session for a root Resume identity. This is THE

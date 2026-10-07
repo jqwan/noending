@@ -47,6 +47,12 @@ pub const EVENT_CHANGED: &str = "terminals-changed";
 /// to light up its session-detail entry the moment binding happens.
 pub const EVENT_BOUND: &str = "terminal-bound";
 
+/// How many recent user messages the verified match demands as evidence.
+/// All of them must be visible in the terminal's scrollback — at first
+/// ingestion a session has one or two, so the bar is tight exactly when it
+/// matters.
+const RECENT_MESSAGE_NEEDLES: i64 = 5;
+
 /// The payload of `terminal-bound`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalBound {
@@ -373,35 +379,53 @@ impl TerminalRegistry {
         }
     }
 
-    /// The session page's on-demand match (the terminal entry click). For a
-    /// session whose CLI generates its own ids (codex / agy) there is no
-    /// birth identity to match on; binding happens HERE instead — the user
-    /// is asking for this session's terminal, so we verify before we claim:
-    /// same Agent, same working directory, the terminal existed when the
-    /// first message was sent, and the message text itself is visible in the
-    /// terminal's scrollback. Three independent facts agreeing is as close to
-    /// certain as the file side allows; a miss means "launch a fresh Resume
-    /// terminal", never "bind anyway".
+    /// The verified match: a session carrying evidence (its agent, cwd and
+    /// recent user messages) looks for ITS terminal among the live unbound
+    /// ones. Runs from the ingestion worker for every NEWLY ingested session
+    /// (the empty-shell gate guarantees it has messages) and from the session
+    /// page's terminal entry as a click-time fallback.
+    ///
+    /// Evidence bar, all of it: same Agent, same cwd, the terminal existed
+    /// when the newest message was sent, and EVERY one of the recent user
+    /// messages (whitespace-collapsed, long ones cut to a prefix) is visible
+    /// in the terminal's scrollback. A miss means "stay unbound" — a fresh
+    /// Resume terminal is launched on demand, never a guess.
     ///
     /// Bindings made here are as trustworthy as prespecified-id ones: the
     /// terminal view may open its session-detail entry, the sidebar may show
     /// the session's name.
-    pub fn match_unbound(
+    pub fn bind_verified(
         &self,
+        db: &crate::storage::Db,
         session_id: &str,
-        agent: Agent,
-        cwd: &str,
-        first_message_at: &str,
-        first_message: &str,
     ) -> Option<TerminalSummary> {
-        let needle = search_needle(first_message);
-        if needle.is_empty() {
+        let session = db.get_session(session_id).ok()??;
+        let cwd = session
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())?;
+        let messages = db
+            .recent_user_messages(session_id, RECENT_MESSAGE_NEEDLES)
+            .ok()?;
+        // 每条裁长坍缩成 needle；一条都提不出来（全空白）就没有证据可言。
+        let needles: Vec<String> = messages
+            .iter()
+            .filter_map(|(content, _)| {
+                let needle = search_needle(content);
+                (!needle.is_empty()).then_some(needle)
+            })
+            .collect();
+        if needles.is_empty() {
             return None;
         }
-        let sent_at = parse_ts(first_message_at);
-        // The records guard covers only the scan: bind() takes the same lock,
-        // and this mutex is not reentrant (a guard may never span a same-half
-        // call — the storage-concurrency rule, again).
+        let newest_sent = messages
+            .iter()
+            .filter_map(|(_, ts)| ts.as_deref())
+            .filter_map(parse_ts)
+            .max()?;
+        // The records guard covers only the scan: bind() takes the same
+        // lock, and this mutex is not reentrant.
         let best = {
             let records = self.records.lock().ok()?;
             let mut best: Option<(TerminalSummary, String)> = None;
@@ -409,20 +433,23 @@ impl TerminalRegistry {
                 let Ok(record) = record.lock() else { continue };
                 if !record.summary.live
                     || record.summary.session_id.is_some()
-                    || record.summary.agent != agent
+                    // claude / pi terminals wait for their own prespecified
+                    // id; they never take a verified match.
+                    || record.expected_root_session_id.is_some()
+                    || record.summary.agent != session.agent
                     || record.summary.cwd.as_deref() != Some(cwd)
                 {
                     continue;
                 }
-                // The terminal must have existed when the message was sent.
-                let created = parse_ts(&record.summary.created_at);
-                match (&created, &sent_at) {
-                    (Some(c), Some(s)) if c > s => continue,
-                    (None, _) if sent_at.is_some() => continue,
-                    _ => {}
+                // The terminal must have existed when the newest message was
+                // sent — a spawn can only be younger than what it shows.
+                if let Some(created) = parse_ts(&record.summary.created_at) {
+                    if newest_sent < created {
+                        continue;
+                    }
                 }
                 let haystack = normalize_ws(&strip_ansi(&record.scrollback.bytes()));
-                if !haystack.contains(&needle) {
+                if !needles.iter().all(|n| haystack.contains(n)) {
                     continue;
                 }
                 let newer = best
@@ -437,6 +464,53 @@ impl TerminalRegistry {
         };
         let (summary, terminal_id) = best?;
         self.bind(&terminal_id, session_id);
+        Some(summary)
+    }
+
+    /// Whether any live terminal is still waiting for an identity. The
+    /// worker's cheap gate: without waiting terminals the touched-session
+    /// loop never runs.
+    pub fn has_unbound_candidates(&self) -> bool {
+        self.records
+            .lock()
+            .map(|records| {
+                records.values().any(|record| {
+                    let Ok(record) = record.lock() else {
+                        return false;
+                    };
+                    record.summary.live && record.summary.session_id.is_none()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Explicit close from the sidebar's 运行中 item: kill the child and
+    /// REMOVE the record. Removal is deliberate — an explicitly closed
+    /// terminal has no replay value (ingestion keeps the conversation), and
+    /// a removed record cannot be resurrected by terminal_for_session, so
+    /// the next Resume spawns a fresh terminal instead of landing on a
+    /// corpse. The wait thread still reaps the child (it holds its own Arc)
+    /// and publishes terminal-exit + terminals-changed.
+    pub fn close(&self, terminal_id: &str) -> Option<TerminalSummary> {
+        let removed = {
+            let Ok(mut records) = self.records.lock() else {
+                return None;
+            };
+            records.remove(terminal_id)
+        }?;
+        let summary = {
+            let Ok(mut record) = removed.lock() else {
+                return None;
+            };
+            if record.summary.live {
+                let _ = record.killer.kill();
+            }
+            record.summary.clone()
+        };
+        // The live set shrank (the record is gone outright).
+        if let Some(app) = &self.app {
+            let _ = app.emit(EVENT_CHANGED, ());
+        }
         Some(summary)
     }
 
@@ -970,11 +1044,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_session_page_match_binds_a_verified_unbound_terminal() {
+    fn an_ingested_session_auto_binds_its_idless_terminal_through_the_verified_match() {
         let registry = registry();
-        let mut cmd = sh("echo waiting; sleep 30");
-        cmd.cwd = Some(std::path::PathBuf::from("/tmp"));
-        let outcome = spawn_embedded(
+        let mut cmd = sh("echo fix the layout; echo second turn; sleep 30");
+        cmd.cwd = Some(std::path::PathBuf::from("/repo"));
+        spawn_embedded(
             &cmd,
             &EmbeddedTarget {
                 registry: &registry,
@@ -984,54 +1058,180 @@ mod tests {
             },
         )
         .unwrap();
-        let id = outcome.terminal_id.clone().unwrap();
 
+        let root = std::env::temp_dir().join(format!(
+            "noending-term-autobind-{}",
+            crate::storage::new_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
         let ts = crate::storage::now();
-        // Polls until the echo reached the scrollback; a None before that is
-        // the honest "not verified yet", not a failure.
-        let matched = until("the verified match lands", || {
+        let (session_id, _) = db
+            .upsert_logical_session(
+                Agent::Codex,
+                "root-auto",
+                None,
+                Some("修复布局"),
+                Some("/repo"),
+                None,
+                None,
+                Some(ts.as_str()),
+                None,
+                "codex",
+                "/repo/rollout.jsonl",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        for (i, text) in ["fix the layout", "second turn"].iter().enumerate() {
+            db.write()
+                .execute(
+                    "INSERT INTO session_messages (id, session_id, sequence, source_generation, \
+                     source_position, source_identity_hash, role, content, turn_final, raw_ref, ts) \
+                     VALUES (?3, ?1, ?4, 0, '', ?5, 'user', ?6, 0, '', ?2)",
+                    rusqlite::params![session_id, ts, format!("m{i}"), i as i64, format!("h{i}"), text],
+                )
+                .unwrap();
+        }
+
+        // 摄入尾步对每个处理过的会话调 bind_verified：最近 5 条用户消息全部
+        // 可见于该终端的 scrollback 才绑定——消息到达屏幕后自动落定。
+        let bound = until("the verified match binds", || {
             registry
-                .match_unbound("s-page", Agent::Codex, "/tmp", &ts, "waiting")
+                .bind_verified(&db, &session_id)
                 .map(|s| s.terminal_id)
         });
-        assert_eq!(matched, id);
-        assert!(registry.for_session("s-page").is_some());
+        assert!(!bound.is_empty());
+        assert!(registry.for_session(&session_id).is_some());
+        // 绑定一次后不再改嫁：同一会话再问，终端已绑定，直接命中 for_session。
+        assert!(registry.bind_verified(&db, &session_id).is_none());
+        registry.kill_all();
+    }
 
-        // A different session asking for the same directory gets nothing:
-        // the terminal is bound once and its identity is not for sale.
-        assert!(registry
-            .match_unbound("s-other", Agent::Codex, "/tmp", &ts, "waiting")
-            .is_none());
-        // Wrong directory never matches.
-        let registry2 = TerminalRegistry::new(None);
-        let mut cmd2 = sh("echo hello; sleep 30");
-        cmd2.cwd = Some(std::path::PathBuf::from("/elsewhere"));
+    #[cfg(unix)]
+    #[test]
+    fn a_session_without_matching_evidence_never_takes_the_terminal() {
+        let registry = registry();
+        let mut cmd = sh("echo waiting; sleep 30");
+        cmd.cwd = Some(std::path::PathBuf::from("/repo"));
         spawn_embedded(
-            &cmd2,
+            &cmd,
             &EmbeddedTarget {
-                registry: &registry2,
+                registry: &registry,
                 session_id: None,
                 expected_root_session_id: None,
                 agent: Agent::Codex,
             },
         )
         .unwrap();
-        assert!(
-            registry2
-                .match_unbound("s-page", Agent::Codex, "/tmp", &ts, "waiting")
-                .is_none(),
-            "cwd is a hard filter"
-        );
+        until("the echo reaches the scrollback", || {
+            let ok = {
+                let records = registry.records.lock().unwrap();
+                records.values().all(|_| true)
+            };
+            ok.then_some(())
+        });
+
+        let root = std::env::temp_dir().join(format!(
+            "noending-term-nomatch-{}",
+            crate::storage::new_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
+        let ts = crate::storage::now();
+        let make_session = |root_id: &str, cwd: &str, text: &str| {
+            let (sid, _) = db
+                .upsert_logical_session(
+                    Agent::Codex,
+                    root_id,
+                    None,
+                    Some("候选"),
+                    Some(cwd),
+                    None,
+                    None,
+                    Some(ts.as_str()),
+                    None,
+                    "codex",
+                    cwd,
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+            db.write()
+                .execute(
+                    "INSERT INTO session_messages (id, session_id, sequence, source_generation, \
+                     source_position, source_identity_hash, role, content, turn_final, raw_ref, ts) \
+                     VALUES (?4, ?1, 0, 0, '', 'h', 'user', ?2, 0, '', ?3)",
+                    rusqlite::params![sid, text, ts, format!("m-{root_id}")],
+                )
+                .unwrap();
+            sid
+        };
+
+        // 同目录但屏幕上没有它的消息 → 证据不足，不绑。
+        let wrong_text = make_session("root-a", "/repo", "totally different words");
+        until("the echo lands before the negative check", || {
+            let hay = {
+                let records = registry.records.lock().unwrap();
+                let mut hay = String::new();
+                for r in records.values() {
+                    if let Ok(rec) = r.lock() {
+                        hay.push_str(&String::from_utf8_lossy(&rec.scrollback.bytes()));
+                    }
+                }
+                hay
+            };
+            hay.contains("waiting").then_some(())
+        });
+        assert!(registry.bind_verified(&db, &wrong_text).is_none());
+        // 消息在屏幕上但目录不同 → 不绑。
+        let wrong_cwd = make_session("root-b", "/elsewhere", "waiting");
+        assert!(registry.bind_verified(&db, &wrong_cwd).is_none());
+        // 没有任何用户消息的会话 → 无证据，不绑。
+        let (no_msgs, _) = db
+            .upsert_logical_session(
+                Agent::Codex,
+                "root-c",
+                None,
+                Some("空会话"),
+                Some("/repo"),
+                None,
+                None,
+                Some(ts.as_str()),
+                None,
+                "codex",
+                "/repo/x.jsonl",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        assert!(registry.bind_verified(&db, &no_msgs).is_none());
         registry.kill_all();
-        registry2.kill_all();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn ansi_stripping_keeps_plain_text_searchable() {
-        // CSI color + cursor addressing + OSC title around the message.
-        let raw = b"\x1b[2J\x1b[1;1H\x1b]0;my title\x07\x1b[32mhello\x1b[0m world";
-        let plain = strip_ansi(raw);
-        assert!(normalize_ws(&plain).contains("helloworld"));
+    fn an_explicit_close_kills_the_child_and_removes_the_record() {
+        let registry = registry();
+        let outcome = spawn_embedded(
+            &sh("sleep 30"),
+            &EmbeddedTarget {
+                registry: &registry,
+                session_id: Some("s-live"),
+                expected_root_session_id: None,
+                agent: Agent::Codex,
+            },
+        )
+        .unwrap();
+        let id = outcome.terminal_id.clone().unwrap();
+        assert!(registry.has_live("s-live"));
+
+        registry.close(&id).expect("closed");
+
+        // 记录整体移除：不进运行列表、查不到会话、attach 拒绝——显式关闭
+        // 的终端没有回放价值，下一次 Resume 起的是全新终端。
+        assert!(!registry.has_live("s-live"));
+        assert!(registry.list_live().iter().all(|t| t.terminal_id != id));
+        assert!(registry.for_session("s-live").is_none());
+        assert!(registry.attach(&id).is_err());
+        assert!(registry.close(&id).is_none(), "closing twice is a no-op");
     }
 
     #[test]

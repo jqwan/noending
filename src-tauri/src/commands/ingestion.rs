@@ -215,15 +215,21 @@ fn spawn_worker(app: AppHandle) {
             let state = app.state::<AppState>();
             state.ingestion.next()
         } {
-            let (discovered, messages, error) = run_scope(&app, &scope);
-            // A discovered session may have claimed a NEW launch's intent:
-            // attach its session_id to the unbound embedded terminal that
-            // launch spawned. No-op unless something is waiting.
+            let (discovered, messages, error, new_sessions) = run_scope(&app, &scope);
+            // 绑定收尾，两步都是精确事实：预指定 id（claude / pi）按身份认领；
+            // 自造 id 的 CLI（codex / agy）由本轮处理过的会话带着 agent + cwd +
+            // 最近用户消息的证据去找未绑定终端，命中才绑。没有等待中的终端时
+            // 整段空转一次内存判断。
             {
                 let state = app.state::<AppState>();
                 let _ = super::with_db(&state, |db| {
-                    app.state::<crate::terminal::TerminalRegistry>()
-                        .bind_discovered(db);
+                    let registry = app.state::<crate::terminal::TerminalRegistry>();
+                    registry.bind_discovered(db);
+                    if registry.has_unbound_candidates() {
+                        for session_id in &new_sessions {
+                            registry.bind_verified(db, session_id);
+                        }
+                    }
                     Ok(())
                 });
             }
@@ -249,10 +255,16 @@ fn spawn_worker(app: AppHandle) {
     });
 }
 
-fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String>) {
+fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String>, Vec<String>) {
     let state = app.state::<AppState>();
     let workspace = super::launch_workspace(app);
-    let notify = |s: &crate::domain::Session| {
+    // 本轮处理过的会话 id（新进库或新增了消息）：摄入尾步拿它们做终端绑定
+    // 校验——由会话带着证据找终端，不反着扫。
+    let new_sessions: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let notify = |s: &crate::domain::Session, is_new: bool| {
+        if is_new {
+            new_sessions.lock().unwrap().push(s.id.clone());
+        }
         eprintln!(
             "[ingest] processing: {}",
             s.title.as_deref().unwrap_or("(untitled)")
@@ -286,10 +298,10 @@ fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String
         }
     };
     match result {
-        Ok((d, m, error)) => (d, m, error),
+        Ok((d, m, error)) => (d, m, error, new_sessions.lock().unwrap().clone()),
         Err(e) => {
             eprintln!("[ingest] {} failed: {}", scope.label(), e);
-            (0, 0, Some(e.to_string()))
+            (0, 0, Some(e.to_string()), Vec::new())
         }
     }
 }

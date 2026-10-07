@@ -937,8 +937,8 @@ pub fn read_clipboard_for_terminal(app: AppHandle) -> Result<crate::commands::Cl
 /// 1. a terminal already bound to this session (prespecified-id discovery or
 ///    an earlier verified match) — jump to it;
 /// 2. a live unbound terminal that survives the verified match — same Agent,
-///    same cwd, existed when the first message was sent, and the message text
-///    visible in its scrollback — bind it on the spot and jump;
+///    same cwd, the session's recent user messages visible in its
+///    scrollback — bind it on the spot and jump;
 /// 3. nothing — the caller launches a fresh embedded Resume terminal.
 #[tauri::command]
 pub fn terminal_for_session(
@@ -949,23 +949,62 @@ pub fn terminal_for_session(
     if let Some(summary) = terminal.for_session(&session_id) {
         return Ok(Some(summary));
     }
-    let matched = with_db(&state, |db| {
-        let Some(session) = db.get_session(&session_id)? else {
-            return Ok(None);
-        };
-        let Some((content, ts)) = db.first_user_message(&session_id)? else {
-            return Ok(None);
-        };
-        let Some(cwd) = session.cwd.as_deref().filter(|c| !c.trim().is_empty()) else {
-            return Ok(None);
-        };
-        let sent_at = ts
-            .as_deref()
-            .or(session.started_at.as_deref())
-            .unwrap_or("");
-        Ok(terminal.match_unbound(&session_id, session.agent, cwd, sent_at, &content))
-    })?;
+    let matched = with_db(&state, |db| Ok(terminal.bind_verified(db, &session_id)))?;
     Ok(matched)
+}
+
+/// The terminal view's refresh button: one targeted sync, then the
+/// ingestion worker's post-pass bind step re-links whatever the pass
+/// surfaced. A bound terminal refreshes its session (RefreshSession, the
+/// session page's sync semantics); an unbound one walks its agent's own
+/// ingest sources with no throttle — the click IS the event — and the
+/// verified match binds when the pass finds the session. The terminal view
+/// needs no further wiring: terminal-bound / terminals-changed carry the
+/// result to it and the sidebar.
+#[tauri::command]
+pub fn terminal_refresh(
+    app: AppHandle,
+    state: State<AppState>,
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+) -> Result<()> {
+    let summary = terminal.attach(&terminal_id)?.summary;
+    if let Some(session_id) = &summary.session_id {
+        ingestion::enqueue(
+            &app,
+            ingestion::IngestScope::RefreshSession(session_id.clone()),
+        );
+        return Ok(());
+    }
+    let sources = with_db(&state, |db| {
+        Ok(db
+            .list_ingest_sources()?
+            .into_iter()
+            .filter(|s| s.enabled && s.agent == summary.agent)
+            .map(|s| s.id)
+            .collect::<Vec<_>>())
+    })?;
+    if sources.is_empty() {
+        return Err(other("该 Agent 没有启用的会话来源，无法同步"));
+    }
+    for id in sources {
+        ingestion::enqueue(&app, ingestion::IngestScope::ReconcileSource(id));
+    }
+    Ok(())
+}
+
+/// The sidebar 运行中 item's explicit close: kill the child and drop the
+/// record outright. The frontend navigates away when the closed terminal
+/// was on screen (it already holds the summary it clicked).
+#[tauri::command]
+pub fn terminal_close(
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+) -> Result<()> {
+    terminal
+        .close(&terminal_id)
+        .ok_or_else(|| other("终端不存在或已关闭"))?;
+    Ok(())
 }
 
 #[tauri::command]

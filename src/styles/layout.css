@@ -319,6 +319,9 @@
 .sidebar-task .nav-item { min-width: 0; flex: 1; }
 .pin-button { display: flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
 .pin-button:hover, .pin-button[aria-pressed="true"] { background: var(--bg-hover); color: var(--text-primary); }
+/* 运行中终端的关闭按钮：悬浮整行才现身，平时不占视觉。 */
+.sidebar-task .terminal-close { display: none; }
+.sidebar-task:hover .terminal-close, .sidebar-task .terminal-close:focus-visible { display: flex; }
 .task-detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 32px; }
 .task-detail-main, .task-detail-aside { min-width: 0; }
 .task-detail-aside { border-left: 1px solid var(--border-subtle); padding-left: 24px; }

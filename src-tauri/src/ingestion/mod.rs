@@ -59,14 +59,28 @@ pub fn session_title_sources(d: &DiscoveredMember) -> (Option<String>, Option<St
 /// The attach is discovery's only piece of workspace work, and deliberately not
 /// per-message: `workspace_path_id` is re-resolved only when the row is created or
 /// its cwd moved.
+/// `Ok(None)`：这是一条还不该入库的新会话——源文件里没有任何消息。
+/// TUI 启动即落盘的空源文件（codex 的 rollout 在首条消息前只有 meta 行）
+/// 不建行，等下一轮消息出现后再进库；已存在的会话永远照常走更新路径。
 fn ensure_logical_session(
     db: &Db,
     d: &DiscoveredMember,
     attacher: &dyn crate::workspace::WorkspaceAttaching,
-) -> Result<(Session, bool)> {
+) -> Result<Option<(Session, bool)>> {
     let (native_title, fallback_title) = session_title_sources(d);
     let raw_path = d.source_path.to_string_lossy().to_string();
     let observed_cwd = d.cwd.as_deref().map(str::trim).filter(|p| !p.is_empty());
+
+    // 新会话必须有消息才入库（空 TUI 壳不占看板，也空出匹配窗口）。
+    if db
+        .find_session_by_root_agent_id(d.agent, &d.source_member_id)?
+        .is_none()
+        && d.first_user_text.is_none()
+        && d.first_agent_text.is_none()
+    {
+        return Ok(None);
+    }
+
     let path_id =
         crate::workspace::session::resolve_session_path(&db.write(), attacher, observed_cwd)?;
 
@@ -104,7 +118,7 @@ fn ensure_logical_session(
             }
         }
     }
-    Ok((stored, is_new))
+    Ok(Some((stored, is_new)))
 }
 
 /// The "source is unchanged since its last ingest" predicate discovery uses to
@@ -159,10 +173,12 @@ fn resolve_batch(
             continue;
         }
         match ensure_logical_session(db, d, attacher.as_ref()) {
-            Ok((s, is_new)) => {
+            Ok(Some((s, is_new))) => {
                 touched_session_ids.insert(s.id.clone());
                 roots_for_intent.push((s, is_new));
             }
+            Ok(None) => {}
+
             Err(e) => eprintln!("[ingest] root {} failed: {}", d.source_member_id, e),
         }
     }
@@ -311,8 +327,13 @@ fn process_resolved_batch<F>(
     failures: &mut Vec<String>,
 ) -> Result<(i64, BTreeSet<String>)>
 where
-    F: Fn(&Session),
+    F: Fn(&Session, bool),
 {
+    let is_new_by_id: std::collections::BTreeMap<String, bool> = batch
+        .roots_for_intent
+        .iter()
+        .map(|(s, n)| (s.id.clone(), *n))
+        .collect();
     for (session, is_new) in &batch.roots_for_intent {
         finalize_newly_discovered_root(db, session, *is_new, workspace)?;
     }
@@ -326,7 +347,10 @@ where
         if reingest {
             db.rewind_source_cursor(&id)?;
         }
-        on_session(&session);
+        on_session(
+            &session,
+            is_new_by_id.get(&session.id).copied().unwrap_or(false),
+        );
         match ingest_session(db, &session) {
             Ok(messages) => total_messages += messages,
             Err(e) => {
@@ -364,7 +388,7 @@ fn process_retry_sessions<F>(
     failures: &mut Vec<String>,
 ) -> Result<i64>
 where
-    F: Fn(&Session),
+    F: Fn(&Session, bool),
 {
     let retry_intents = db.has_pending_launch_intents()?;
     let agent = scope.map(|source| source.agent);
@@ -384,7 +408,7 @@ where
         let Some(session) = db.get_session(&candidate.id)? else {
             continue;
         };
-        on_session(&session);
+        on_session(&session, false);
         match ingest_session(db, &session) {
             Ok(messages) => total_messages += messages,
             Err(e) => {
@@ -409,7 +433,7 @@ pub fn reconcile_all<F>(
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
-    F: Fn(&Session),
+    F: Fn(&Session, bool),
 {
     let report = reconcile_all_report(db, workspace, on_session)?;
     if !report.failures.is_empty() {
@@ -436,7 +460,7 @@ pub fn reconcile_all_report<F>(
     on_session: &F,
 ) -> Result<ReconcileReport>
 where
-    F: Fn(&Session),
+    F: Fn(&Session, bool),
 {
     let adapters = crate::adapters::all_adapters();
     let unchanged = unchanged_since_cursor(db)?;
@@ -526,7 +550,7 @@ pub fn reconcile_source<F>(
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
-    F: Fn(&Session),
+    F: Fn(&Session, bool),
 {
     let adapter = crate::adapters::adapter_for(source.agent);
     let unchanged = unchanged_since_cursor(db)?;
@@ -572,7 +596,7 @@ pub fn reingest_source<F>(
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
-    F: Fn(&Session),
+    F: Fn(&Session, bool),
 {
     let adapter = crate::adapters::adapter_for(source.agent);
     let roots = vec![PathBuf::from(&source.path)];

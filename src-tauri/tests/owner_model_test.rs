@@ -731,7 +731,7 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
     };
 
     let (discovered, _) =
-        reconcile_source(&db, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        reconcile_source(&db, &source, &LaunchWorkspace::default(), &|_, _| {}).unwrap();
     assert_eq!(discovered, 1, "the rollout fixture is discoverable");
 
     let stored = db
@@ -757,7 +757,7 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
     };
     db.insert_launch_intent(&intent).unwrap();
     let (discovered, _) =
-        reconcile_source(&db, &source, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        reconcile_source(&db, &source, &LaunchWorkspace::default(), &|_, _| {}).unwrap();
     assert_eq!(discovered, 0, "the unchanged root is skipped");
 
     let stored = db.get_session(&stored.id).unwrap().unwrap();
