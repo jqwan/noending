@@ -9,13 +9,32 @@ import {
   PreviewRow,
   DesktopOpenRow,
 } from "../launcher/LaunchPreviewRows";
-import type { PreparedLaunch, SessionDetail } from "../../types";
+import type { AgentStatusEntry, PreparedLaunch, SessionDetail } from "../../types";
+import type { Route } from "../../app/routes";
 
 /** SessionDetailView 通过此 Modal 继续已有 Session。 */
 export type ResumeSessionModalProps = {
   sessionId: string;
   onClose: () => void;
+  /** 内嵌终端启动成功后导航到该会话的终端子页；不传则只提示。 */
+  navigate?: (r: Route) => void;
 };
+
+/** 继续方式的选项：有 TUI CLI 才有终端两式，接了桌面端且在场才有桌面式。 */
+type MethodOption = { value: "terminal" | "desktop" | "embedded"; label: string };
+
+function methodOptionsOf(status: AgentStatusEntry | null): MethodOption[] {
+  if (!status) return [];
+  const options: MethodOption[] = [];
+  if (status.terminal_cli) {
+    options.push({ value: "terminal", label: "外部终端" });
+    options.push({ value: "embedded", label: "内嵌终端" });
+  }
+  if (status.desktop_app && status.desktop_app_present) {
+    options.push({ value: "desktop", label: "桌面应用" });
+  }
+  return options;
+}
 
 /**
  * 打开即准备（后端会先摄入这个 Session 的最新消息），预览显示 Agent / 工作目录 /
@@ -25,9 +44,11 @@ export type ResumeSessionModalProps = {
 export default function ResumeSessionModal({
   sessionId,
   onClose,
+  navigate,
 }: ResumeSessionModalProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [busy, setBusy] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<AgentStatusEntry | null>(null);
   const detailRequest = useRef(0);
 
   const refreshDetail = useCallback(async (isCurrent: () => boolean = () => true) => {
@@ -55,6 +76,33 @@ export default function ResumeSessionModal({
     };
   }, [refreshDetail]);
 
+  // 继续方式的选项是适配器静态事实（terminal_cli / desktop_app）+ 桌面端在场；
+  // 当前值是存储的偏好。读不到时不出这一行，预览的其余事实照常。
+  useEffect(() => {
+    let live = true;
+    api.getAgentStatus()
+      .then((status) => {
+        if (live) setAgentStatus(status[detail?.session.agent ?? ""] ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [detail?.session.agent]);
+
+  const methodOptions = methodOptionsOf(agentStatus);
+  const method = agentStatus?.resume_open_method ?? "terminal";
+  const changeMethod = async (next: MethodOption["value"]) => {
+    try {
+      await api.setResumeOpenMethod(detail!.session.agent, next);
+      setAgentStatus((prev) => (prev ? { ...prev, resume_open_method: next } : prev));
+      releasePrepared();
+      void prepare();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const handleClose = () => {
     releasePrepared();
     onClose();
@@ -70,6 +118,10 @@ export default function ResumeSessionModal({
     try {
       const res = await api.launchPrepared(current.id);
       announceLaunch("继续", res);
+      // 内嵌启动把用户带到终端子页：这就是这次「继续」的对话现场。
+      if (res?.terminal_id && navigate) {
+        navigate({ view: "session", sessionId, entry: "terminal" });
+      }
       onClose();
     } catch (e: unknown) {
       setBusy(false);
@@ -119,6 +171,27 @@ export default function ResumeSessionModal({
         resolution={prepared?.cwd_resolution}
       />
 
+      {methodOptions.length > 1 && (
+        <PreviewRow
+          label="继续方式"
+          hint="会记住，作为该 Agent 之后的默认方式；内嵌 = 在 NoEnding 里的终端子页运行"
+        >
+          <div className="settings-seg" role="group" aria-label="继续方式">
+            {methodOptions.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                className={method === o.value ? "on" : ""}
+                disabled={busy}
+                onClick={() => void changeMethod(o.value)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </PreviewRow>
+      )}
+
       <PreviewRow
         label="所属任务"
         hint={ownerDisplay}
@@ -162,7 +235,15 @@ export default function ResumeSessionModal({
           disabled={busy || preparing || !prepared}
           onClick={handleResume}
         >
-          {busy ? "继续中…" : preparing ? "准备中…" : "继续"}
+          {busy
+            ? "继续中…"
+            : preparing
+              ? "准备中…"
+              : method === "embedded"
+                ? "内嵌继续"
+                : method === "desktop"
+                  ? "在桌面应用中继续"
+                  : "继续"}
         </button>
       </div>
     </Modal>

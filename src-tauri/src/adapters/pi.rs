@@ -240,11 +240,22 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
+        source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         // pi [options] [--] [@files...] [messages...] — options first, then
         // the session selector.
+        //
+        // `--session <id>` searches pi's DEFAULT session dir only, so a
+        // session created with a project-local `--session-dir` is invisible
+        // to it ("No session found matching …"). `--session <path|id>`
+        // accepts a session FILE: the transcript path we ingested from is
+        // authoritative and works regardless of where pi stored it.
+        let selector = source_path
+            .filter(|p| !p.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| agent_session_id.to_string());
         let mut args = runtime_args(opts);
-        args.extend(["--session".into(), agent_session_id.into()]);
+        args.extend(["--session".into(), selector]);
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -446,5 +457,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(delta.messages.len(), 2);
+    }
+
+    #[test]
+    fn resume_prefers_the_source_file_path_over_the_session_id() {
+        let adapter = PiAdapter;
+        let install = crate::platform::exec_resolver::AgentInstallation {
+            agent: Agent::Pi,
+            executable_path: "/usr/local/bin/pi".into(),
+            version: None,
+            source: "test".into(),
+            last_verified_at: "test".into(),
+        };
+
+        // A project-local session file: `--session <id>` cannot see it, the
+        // path can. The path is the selector whenever we have one.
+        let cmd = adapter
+            .build_resume_command(
+                &install,
+                &crate::adapters::ExecOptions::default(),
+                "01a0682c-d5ca-7fb5-8dd5-e9785dc380af",
+                None,
+                Some("/Users/x/projects/workspace/sessions/b9f1-cb4d.jsonl"),
+            )
+            .unwrap();
+        assert_eq!(
+            cmd.args,
+            vec![
+                "--session".to_string(),
+                "/Users/x/projects/workspace/sessions/b9f1-cb4d.jsonl".to_string()
+            ]
+        );
+
+        // Without a recorded path (should not happen for ingested sessions,
+        // but stay honest) fall back to the id selector.
+        let cmd = adapter
+            .build_resume_command(
+                &install,
+                &crate::adapters::ExecOptions::default(),
+                "01a0682c-d5ca-7fb5-8dd5-e9785dc380af",
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            cmd.args,
+            vec![
+                "--session".to_string(),
+                "01a0682c-d5ca-7fb5-8dd5-e9785dc380af".to_string()
+            ]
+        );
     }
 }

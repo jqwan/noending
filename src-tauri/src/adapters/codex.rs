@@ -379,6 +379,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         opts: &ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
+        _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         // codex resume [OPTIONS] [SESSION_ID]
         let mut args = vec!["resume".into()];

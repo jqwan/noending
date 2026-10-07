@@ -699,6 +699,8 @@ export interface PreparedLaunch {
   runtime: AgentRuntimeOverrides;
   /** 非 null：继续 = 打开 Agent 桌面应用（CLI 无法恢复该会话的源格式）。 */
   desktop_open?: { uri: string; note: string } | null;
+  /** true：继续 = 在 NoEnding 内嵌终端里跑 CLI（与 desktop_open 互斥）。 */
+  embedded?: boolean;
   state_fingerprint: string;
   prepared_at: string;
 }
@@ -709,6 +711,36 @@ export interface LaunchResult {
   note: string;
   /** 本次启动留下的 LaunchIntent 行；crash recovery 与人工配对都靠它。 */
   launch_intent_id: string | null;
+  /** 内嵌终端启动才有：终端子页 attach 所需的 terminal_id。 */
+  terminal_id?: string | null;
+}
+
+// ---------------- Embedded terminal（内嵌终端子页） ----------------
+
+/** terminal_for_session 的一行：该会话最新（live 优先）的内嵌终端。 */
+export interface TerminalSummary {
+  terminal_id: string;
+  session_id: string;
+  agent: Agent;
+  cwd: string | null;
+  created_at: string;
+  live: boolean;
+  exit_code: number | null;
+}
+
+/** terminal_attach 的回答：元数据 + 当前 scrollback 快照（base64）+ 几何。 */
+export interface TerminalSnapshot extends TerminalSummary {
+  /** base64 的 PTY 原始字节，attach 时一次性全量重放。 */
+  scrollback: string;
+  cols: number;
+  rows: number;
+}
+
+/** read_clipboard_for_terminal：系统剪贴板的原生读取结果——非空文本优先，
+ *  否则图片落盘为 PNG 返回路径；两者都无 = 空对象。 */
+export interface ClipboardPaste {
+  text: string | null;
+  image_path: string | null;
 }
 
 export interface AssistantMessage {
@@ -781,8 +813,8 @@ export interface AgentStatusEntry {
   /** 接入的桌面应用名；null = 该 Agent 没有接入桌面端。 */
   desktop_app: string | null;
   desktop_app_present: boolean;
-  /** 会话格式的 resume 打开方式；只有同时支持两种的格式（codex）可改。 */
-  resume_open_method: "terminal" | "desktop";
+  /** 会话格式的 resume 打开方式：外部终端（默认）/ 桌面应用 / 内嵌终端。 */
+  resume_open_method: "terminal" | "desktop" | "embedded";
 }
 
 export const KIND_LABELS: Record<string, string> = {

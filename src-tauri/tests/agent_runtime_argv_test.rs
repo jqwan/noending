@@ -52,7 +52,7 @@ fn new_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
 
 fn resume_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
     adapter_for(agent)
-        .build_resume_command(&install(agent), opts, "agent-session-id", None)
+        .build_resume_command(&install(agent), opts, "agent-session-id", None, None)
         .expect("build")
         .args
 }
@@ -215,6 +215,7 @@ fn agents_without_a_cli_refuse_to_build_a_command() {
                 &install(agent),
                 &ExecOptions::default(),
                 "as-1",
+                None,
                 None,
             ),
             adapter_for(agent).build_exec_command(&install(agent), &ExecOptions::default(), "p"),

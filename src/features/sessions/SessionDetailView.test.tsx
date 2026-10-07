@@ -16,6 +16,7 @@ import type {
 // 回收站横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
+    getAgentStatus: vi.fn().mockResolvedValue({}),
     getSessionDetail: vi.fn(),
     revealSessionSource: vi.fn(),
     revealSessionMemberSource: vi.fn(),

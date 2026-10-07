@@ -527,6 +527,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       {resumeModalSessionId && (
         <ResumeSessionModal
           sessionId={resumeModalSessionId}
+          navigate={navigate}
           onClose={() => setResumeModalSessionId(null)}
         />
       )}

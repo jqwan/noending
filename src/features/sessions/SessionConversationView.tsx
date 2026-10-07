@@ -13,6 +13,7 @@ import PageHeader from "../../layout/PageHeader";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData } from "./SessionMessage";
+import SessionSubpageTabs from "./SessionSubpageTabs";
 import { agentDisplayLabel, sessionDisplayTitle, UNTITLED_SESSION } from "./SessionTable";
 import { sessionDetailCache } from "./SessionDetailView";
 import type {
@@ -144,13 +145,13 @@ export default function SessionConversationView({
   initialTitle,
   initialAgent,
   initialTotal,
-  goBack,
+  navigate,
 }: {
   sessionId: string;
   initialTitle?: string;
   initialAgent?: Agent;
   initialTotal?: number;
-  goBack: (fallback?: Route) => void;
+  navigate: (r: Route) => void;
 }) {
   const [session, setSession] = useState<Session | null>(null);
   const [messages, setMessages] = useState<SessionWindowMessage[]>([]);
@@ -497,6 +498,16 @@ export default function SessionConversationView({
   };
 
   const currentAgent = session?.agent ?? initialAgent;
+  // 终端子页门槛与 Resume 同源；对话页不加载详情，读详情缓存，缓存没热过
+  // 就按可用渲染——真正的拒绝在 prepare/launch 那一层仍然成立。
+  const cachedDetail = sessionDetailCache.get(sessionId);
+  const resumeGate = cachedDetail
+    ? (cachedDetail.can_resume
+      ? null
+      : cachedDetail.source_status === "missing"
+        ? "源会话已不存在，无法继续"
+        : "无法确认源会话状态，暂时不能继续")
+    : null;
   const rawTitle = session ? sessionDisplayTitle(session.title) : initialTitle;
   const displayTitle = rawTitle
     ? (rawTitle === UNTITLED_SESSION ? "未命名会话" : rawTitle)
@@ -504,7 +515,7 @@ export default function SessionConversationView({
 
   const headerTitle = currentAgent ? (
     <span className="session-title-with-icon" title={displayTitle}>
-      <AgentIcon agent={currentAgent} size={18} />
+      <AgentIcon agent={currentAgent ?? null} size={18} />
       <span className="session-title-text">{displayTitle}</span>
     </span>
   ) : (
@@ -515,41 +526,30 @@ export default function SessionConversationView({
     return (
       <div className="main narrow" role="status">
         <PageHeader
-          back="返回会话详情"
-          onBack={() =>
-            goBack({
-              view: "session",
-              sessionId,
-              initialTitle: displayTitle,
-              initialAgent: currentAgent,
-            })
-          }
           title={headerTitle}
         />
         <div className="empty">
           读不到这个会话的消息。
-          <div className="small" style={{ marginTop: 4 }}>返回详情页后重试。</div>
+          <div className="small" style={{ marginTop: 4 }}>请返回后重试；若持续失败，可从概览页增量同步。</div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="main narrow fill">
+    <div className="main fill">
       <PageHeader
-        back="返回会话详情"
-        onBack={() =>
-          goBack({
-            view: "session",
-            sessionId,
-            initialTitle: displayTitle,
-            initialAgent: currentAgent,
-          })
-        }
         title={headerTitle}
         sub={currentAgent && <>{agentDisplayLabel(currentAgent)} · 共 {total} 条消息</>}
         actions={(
           <span className="row" style={{ gap: 8 }}>
+            <SessionSubpageTabs
+              sessionId={sessionId}
+              entry="conversation"
+              agent={currentAgent ?? null}
+              terminalGate={resumeGate}
+              navigate={navigate}
+            />
             <button
               className="btn ghost icon-button"
               aria-label="重新读取"

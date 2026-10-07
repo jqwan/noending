@@ -155,6 +155,7 @@ fn fake_spawn(cmd: &AgentCommand) -> Result<LaunchOutcome> {
                 .unwrap_or_else(|| "<none>".into())
         ),
         pid: Some(4242),
+        terminal_id: None,
     })
 }
 
@@ -221,7 +222,7 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
     reorder_workstream_paths(&db, &w, &[path_id(&db, &second), path_id(&db, &first)]).unwrap();
 
     let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
         .expect_err("a reordered primary must not launch the old preview");
     assert!(is_stale(&err.to_string()), "got: {err}");
     assert_eq!(
@@ -248,6 +249,7 @@ fn reordering_the_primary_makes_a_prepared_launch_stale() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("a preview made after the reorder is launchable");
     assert!(
@@ -288,7 +290,7 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
         .unwrap();
     remove_workstream_path(&db, &w, &other_row.id).unwrap();
     let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
         .expect_err("a removed path must invalidate the preview");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
@@ -307,7 +309,7 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
     let primary_row = db.list_workstream_paths(&w).unwrap().remove(0);
     remove_workstream_path(&db, &w, &primary_row.id).unwrap();
     let err = launcher
-        .launch_prepared_in(&db, &after_removal, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &after_removal, &LaunchWorkspace::default(), None)
         .expect_err("removing the primary path must invalidate the preview");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
@@ -325,7 +327,7 @@ fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
     let owner = empty.owner_workstream_id.clone().expect("owner recorded");
     add_workstream_path(&db, &LexicalPaths, &owner, &primary).unwrap();
     let err = launcher
-        .launch_prepared_in(&db, &empty, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &empty, &LaunchWorkspace::default(), None)
         .expect_err("an added path must invalidate the preview too");
     assert!(is_stale(&err.to_string()), "got: {err}");
 }
@@ -347,13 +349,13 @@ fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     assert_eq!(prepared.cwd.as_deref(), Some(before.as_str()));
 
     let err = launcher
-        .launch_prepared_in(&db, &prepared, &workspace(Some(&after)))
+        .launch_prepared_in(&db, &prepared, &workspace(Some(&after)), None)
         .expect_err("the Home moved: the previewed directory is not the one to launch");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
     // Losing the default workspace entirely is a change too, never an accident.
     let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
         .expect_err("a launcher with no Home must not launch a Home-bound preview");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
@@ -364,6 +366,7 @@ fn a_default_workspace_change_makes_a_prepared_launch_stale() {
             &workspace(Some(&before)),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("the unchanged Home still satisfies the preview");
     assert!(same.command_line.ends_with(&before));
@@ -398,6 +401,7 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("a resume with its own directory launches");
     assert!(
@@ -443,7 +447,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     .unwrap();
 
     let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
         .expect_err("a moved Session directory must abort, not silently follow");
     assert!(is_stale(&err.to_string()), "got: {err}");
 
@@ -458,6 +462,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("re-previewed under the new cwd the launch proceeds");
     assert!(result.command_line.ends_with(&moved));
@@ -504,6 +509,7 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("a fallback is a legitimate launch");
     assert!(result.command_line.ends_with(&primary));
@@ -537,6 +543,7 @@ fn a_resume_falls_back_to_the_default_workspace_and_says_so() {
             &workspace(Some(&default_ws)),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("a default-workspace resume launches");
     assert!(result.command_line.ends_with(&default_ws));
@@ -572,7 +579,7 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
         .unwrap();
 
     let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
         .expect_err("a Session that now names a different WorkspacePath is a different launch");
     assert!(is_stale(&err.to_string()), "got: {err}");
 }
@@ -616,6 +623,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("the launch proceeds");
     assert_eq!(result.launched_via, "test-spawn");
@@ -998,7 +1006,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
         assert_eq!(prepared.cwd, prepared.cwd_resolution.cwd);
         assert_eq!(prepared.owner_workstream_id, owner);
         let result = launcher
-            .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn, fake_open)
+            .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn, fake_open, None)
             .unwrap_or_else(|e| panic!("{source:?} preview must launch: {e}"));
         match prepared.cwd.as_deref() {
             Some(dir) => assert!(

@@ -16,6 +16,7 @@ import type {
 // 中间回复块的展开与收起。
 vi.mock("../../api", () => ({
   api: {
+    getAgentStatus: vi.fn().mockResolvedValue({}),
     getSessionDetail: vi.fn(),
     getSessionMessages: vi.fn(),
     getSessionTurnIntermediates: vi.fn(),
@@ -109,7 +110,7 @@ function mark(ordinal: number, preview: string): SessionMessageMark {
 async function renderConversation(marks: SessionMessageMark[] = []) {
   vi.mocked(api.getSessionDetail).mockResolvedValue(detail(session("me")));
   vi.mocked(api.getSessionUserMessageMarks).mockResolvedValue(marks);
-  const view = render(<SessionConversationView sessionId="me" goBack={vi.fn()} />);
+  const view = render(<SessionConversationView sessionId="me" navigate={vi.fn()} />);
   return view.container;
 }
 
@@ -608,7 +609,7 @@ it("renders initial title and agent icon immediately without showing fallback pl
       initialTitle="正在进行的任务"
       initialAgent="codex"
       initialTotal={10}
-      goBack={vi.fn()}
+      navigate={vi.fn()}
     />
   );
 

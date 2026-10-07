@@ -63,7 +63,7 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
       ))}
 
       {resumeId && (
-        <ResumeSessionModal sessionId={resumeId} onClose={() => setResumeId(null)} />
+        <ResumeSessionModal sessionId={resumeId} navigate={navigate} onClose={() => setResumeId(null)} />
       )}
     </section>
   );

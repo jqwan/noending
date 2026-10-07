@@ -400,6 +400,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
+        _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         let mut args = vec!["--resume".into(), agent_session_id.into()];
         args.extend(runtime_args(opts));

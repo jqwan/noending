@@ -7,6 +7,7 @@ import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToCli
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
 import ResumeSessionModal from "./ResumeSessionModal";
+import SessionSubpageTabs from "./SessionSubpageTabs";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import {
   agentDisplayLabel,
@@ -308,14 +309,25 @@ export default function SessionDetailView({
             <span className="session-title-text">{title}</span>
           </span>
         }
-        actions={trashed ? (
-          // 回收站中的会话：后端拒绝 Resume——如实呈现为不可用。
-          <button className="btn ghost icon-button" disabled
-            aria-label="继续" title="回收站中的会话不能继续；先在上面的横幅里恢复它。">
-            <Icon name="play" />
-          </button>
-        ) : (
+        actions={(
           <>
+            {/* 子页切换：概览（本页）/ 对话 / 终端。终端段的能力与门槛
+                与 Resume 完全同源（has_terminal_cli + can_resume）。 */}
+            <SessionSubpageTabs
+              sessionId={sessionId}
+              entry={undefined}
+              agent={session.agent}
+              terminalGate={resumeDisabled ? resumeTitle : null}
+              navigate={navigate}
+            />
+            {trashed ? (
+              // 回收站中的会话：后端拒绝 Resume——如实呈现为不可用。
+              <button className="btn ghost icon-button" disabled
+                aria-label="继续" title="回收站中的会话不能继续；先在上面的横幅里恢复它。">
+                <Icon name="play" />
+              </button>
+            ) : (
+              <>
             <button className="btn ghost icon-button" aria-label="移入回收站" title="移入回收站" onClick={() => setConfirmTrash(true)} disabled={trashBusy}>
               <Icon name="trash" />
             </button>
@@ -331,6 +343,8 @@ export default function SessionDetailView({
             <button className="btn ghost icon-button" aria-label="继续" title={resumeTitle} onClick={() => setResumeOpen(true)} disabled={resumeDisabled}>
               <Icon name="play" />
             </button>
+              </>
+            )}
           </>
         )}
       />
@@ -741,6 +755,7 @@ export default function SessionDetailView({
       {resumeOpen && (
         <ResumeSessionModal
           sessionId={sessionId}
+          navigate={navigate}
           onClose={() => setResumeOpen(false)}
         />
       )}

@@ -196,14 +196,15 @@ describe("AgentsView", () => {
     });
   });
 
-  it("renders format-specific resume open methods and allows toggling only for formats with multiple methods (Codex)", async () => {
+  it("renders format-specific resume open methods and allows toggling only for formats with multiple methods", async () => {
     vi.mocked(api.setResumeOpenMethod).mockResolvedValue(undefined);
 
     render(<AgentsView navigate={vi.fn()} />);
 
-    // Codex has multiple methods -> has "打开方式切换" group
+    // 有多种方式的格式才有切换组：Codex（TUI/内嵌/Desktop）、Claude Code 与
+    // Pi（TUI/内嵌）；Antigravity 有两个格式，卡片级不出切换组。
     const toggleGroups = await screen.findAllByRole("group", { name: "打开方式切换" });
-    expect(toggleGroups.length).toBe(1); // Only Codex
+    expect(toggleGroups.length).toBe(3);
 
     const desktopBtn = screen.getByRole("button", { name: "Desktop" });
     fireEvent.click(desktopBtn);

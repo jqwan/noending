@@ -21,6 +21,10 @@ pub struct LaunchOutcome {
     pub launched_via: String,
     pub command_line: String,
     pub pid: Option<u32>,
+    /// Set only by the embedded-terminal spawn (`crate::terminal`): the id
+    /// the frontend terminal subpage attaches to. External terminal launches
+    /// have none.
+    pub terminal_id: Option<String>,
 }
 
 /// POSIX shell quoting: wrap in single quotes, escape embedded quotes.
@@ -205,6 +209,7 @@ mod imp {
                         launched_via: "macOS Terminal".into(),
                         command_line: cmd.display(),
                         pid: Some(pid),
+                        terminal_id: None,
                     });
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
@@ -249,6 +254,7 @@ mod imp {
             launched_via: "PowerShell".into(),
             command_line: cmd.display(),
             pid: Some(pid),
+            terminal_id: None,
         })
     }
 

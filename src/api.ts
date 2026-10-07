@@ -226,6 +226,23 @@ export const api = {
   cancelPrepared: (preparedId: string) =>
     invoke<void>("cancel_prepared", { preparedId }),
 
+  // 内嵌终端：终端子页的直启入口——prepare + embedded launch 一步完成（不走
+  // 继续会话弹窗），之后通过 attach 协议接管。输出走
+  // terminal-output://{id} / terminal-exit://{id} 事件。
+  launchEmbeddedResume: (sessionId: string) =>
+    invoke<LaunchResult>("launch_embedded_resume", { sessionId }),
+  terminalForSession: (sessionId: string) =>
+    invoke<import("./types").TerminalSummary | null>("terminal_for_session", { sessionId }),
+  terminalAttach: (terminalId: string) =>
+    invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId }),
+  terminalInput: (terminalId: string, data: string) =>
+    invoke<void>("terminal_input", { terminalId, data }),
+  terminalResize: (terminalId: string, cols: number, rows: number) =>
+    invoke<void>("terminal_resize", { terminalId, cols, rows }),
+  // 系统剪贴板的原生读取（arboard）：文本优先，图片落盘为 PNG 返回路径。
+  readClipboardForTerminal: () =>
+    invoke<import("./types").ClipboardPaste>("read_clipboard_for_terminal"),
+
   listIngestSources: () =>
     invoke<import("./types").IngestSource[]>("list_ingest_sources"),
   addIngestSource: (agent: Agent, path: string) =>
@@ -240,7 +257,7 @@ export const api = {
   search: (query: string, limit?: number) => invoke<SearchHit[]>("search", { query, limit: limit ?? 30 }),
   getAgentStatus: () =>
     invoke<Record<string, import("./types").AgentStatusEntry>>("get_agent_status"),
-  setResumeOpenMethod: (agent: Agent, method: "terminal" | "desktop") =>
+  setResumeOpenMethod: (agent: Agent, method: "terminal" | "desktop" | "embedded") =>
     invoke<void>("set_resume_open_method", { agent, method }),
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),

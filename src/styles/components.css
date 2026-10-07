@@ -421,6 +421,33 @@
 /* 整屏阅读：页面容器不滚（.main.fill），滚动只发生在消息列上，所以打开时能锚到
    最新、向上翻页时也能原地锚住。 */
 .conversation-body { position: relative; display: flex; flex: 1; min-height: 0; }
+
+/* 内嵌终端子页：PTY 在后端，这里只是 attach 的画布；深底是给 TUI 配色用的，
+   不随主题反转。 */
+.terminal-exit-banner {
+  flex: none;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.terminal-body { flex: 1; min-height: 0; display: flex; }
+/* WebKit 对屏幕外聚焦元素的 IME 插入不可靠（xterm 默认把辅助 textarea 扔在
+   left:-9999em）。用更高优先级的选择器把它拉回屏幕内（透明 2px，钉在终端
+   左上角）；组合期间 xterm 会以内联样式把它挪到光标处，内联优先级更高，
+   所以候选窗照常跟随光标。 */
+.terminal-host .xterm .xterm-helper-textarea {
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
+}
+.terminal-host {
+  flex: 1;
+  min-width: 0;
+  background: #101014;
+}
 .conversation-scroll {
   flex: 1;
   min-height: 0;
@@ -752,13 +779,149 @@
 .settings-pane .row-line:first-of-type { border-top: 0; }
 .settings-row-label { font-size: 13.5px; }
 .settings-row-hint { color: var(--text-muted); font-size: 12px; margin-top: 1px; }
+
+/* ---------- Settings storage section ---------- */
+.settings-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.settings-section-header h3 {
+  margin: 0;
+}
+.settings-storage-card {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.settings-storage-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.settings-storage-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.settings-storage-path-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.settings-storage-path-text {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+  flex: 1;
+}
+.settings-storage-subpaths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.settings-storage-subpath-item {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-storage-subpath-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.settings-storage-subpath-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-primary);
+}
+.settings-storage-subpath-path {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-panel);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.settings-callout {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  line-height: 1.65;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-callout.warn {
+  border: 1px solid var(--warning);
+  background: var(--warning-wash);
+  color: var(--text-primary);
+}
+.settings-callout-title {
+  color: var(--warning);
+  font-weight: 600;
+  font-size: 13px;
+}
+.settings-callout-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+
 .settings-seg { display: inline-flex; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
 .settings-seg button {
   border: 0; background: var(--bg-app); color: var(--text-secondary);
   font-family: inherit; font-size: 12.5px; padding: 5px 14px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .settings-seg button + button { border-left: 1px solid var(--border-subtle); }
 .settings-seg button.on { background: var(--bg-active); color: var(--text-primary); font-weight: 550; }
+.settings-seg.icon-seg button,
+.board-toolbar .settings-seg button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-seg button .ui-icon {
+  display: block;
+}
 .settings-agents { display: flex; flex-direction: column; gap: 6px; }
 .settings-agent-row {
   display: flex;
@@ -982,6 +1145,53 @@
 
 .context-updates-more {
   margin-top: 8px;
+}
+/* ---------- Session Cards (会话卡片网格) ---------- */
+.session-card {
+  min-height: 154px;
+}
+.session-card .ws-card-head {
+  align-items: center;
+}
+.session-card-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.session-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+.session-card-prop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.session-card-prop .ui-icon {
+  width: 13px;
+  height: 13px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.session-card-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+.session-card-meta {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .session-list { border-top: 1px solid var(--border-subtle); }

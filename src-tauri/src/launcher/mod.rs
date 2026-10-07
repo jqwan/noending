@@ -30,23 +30,27 @@ use crate::domain::{launch_status, Agent, LaunchIntent, Session};
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 
-/// Stored per-format preference for how Continue opens a session that BOTH the
-/// terminal CLI and the desktop app can resume (today: codex). `terminal` is
-/// the default and is stored by absence — only a desktop choice writes a row,
-/// so no row means the format default.
+/// Stored per-format preference for how Continue opens a session. `terminal`
+/// is the default and is stored by absence — only a non-default choice writes
+/// a row, so no row means the format default. `desktop` opens the Agent's own
+/// app (only formats that have one may choose it); `embedded` runs the CLI
+/// inside NoEnding's own embedded terminal (only formats with a TUI CLI).
 pub const RESUME_METHOD_KEY_PREFIX: &str = "resume.open_method.";
 
-/// The stored open method for `agent`: `"terminal"` (default) or `"desktop"`.
+/// The stored open method for `agent`: `"terminal"` (default), `"desktop"`,
+/// or `"embedded"`.
 pub fn stored_resume_method(db: &Db, agent: Agent) -> Result<&'static str> {
     let key = format!("{}{}", RESUME_METHOD_KEY_PREFIX, agent.as_str());
     Ok(match db.get_setting(&key)?.as_deref() {
         Some("desktop") => "desktop",
+        Some("embedded") => "embedded",
         _ => "terminal",
     })
 }
 
-/// Persist the open method chosen in 设置 → 会话来源. Only a format with BOTH
-/// surfaces may choose `desktop`; `terminal` clears the row back to default.
+/// Persist the open method chosen for `agent`. Only a format with BOTH
+/// surfaces may choose `desktop`; only a format with a TUI CLI may choose
+/// `embedded`; `terminal` clears the row back to default.
 pub fn write_resume_method(db: &Db, agent: Agent, method: &str) -> Result<()> {
     let key = format!("{}{}", RESUME_METHOD_KEY_PREFIX, agent.as_str());
     match method {
@@ -57,6 +61,13 @@ pub fn write_resume_method(db: &Db, agent: Agent, method: &str) -> Result<()> {
                 return Err(other("该会话格式只有一种打开方式"));
             }
             db.set_setting(&key, "desktop")?;
+        }
+        "embedded" => {
+            let adapter = crate::adapters::adapter_for(agent);
+            if !adapter.has_terminal_cli() {
+                return Err(other("该 Agent 没有可内嵌运行的 CLI"));
+            }
+            db.set_setting(&key, "embedded")?;
         }
         _ => return Err(other(format!("未知打开方式: {}", method))),
     }
@@ -232,6 +243,14 @@ pub struct PreparedLaunch {
     /// Preview like every other launch fact. `None` = the terminal CLI path.
     #[serde(default)]
     pub desktop_open: Option<DesktopResume>,
+    /// True when the spawn step must run the CLI inside NoEnding's embedded
+    /// terminal (`crate::terminal`) instead of an external window. Frozen at
+    /// Preview by the command layer from the stored open-method preference;
+    /// like `desktop_open` it rides on static format facts, so it is not
+    /// separately hashed. `desktop_open` and `embedded` are mutually
+    /// exclusive — a desktop route never carries the embedded flag.
+    #[serde(default)]
+    pub embedded: bool,
     pub state_fingerprint: String,
     pub prepared_at: String,
 }
@@ -242,6 +261,23 @@ pub struct LaunchResult {
     pub command_line: String,
     pub note: String,
     pub launch_intent_id: Option<String>,
+    /// Set when this launch opened the embedded terminal: the id the
+    /// frontend attaches the terminal subpage to.
+    #[serde(default)]
+    pub terminal_id: Option<String>,
+}
+
+/// The embedded spawn step made available to `launch_prepared`: the backend
+/// terminal registry plus the spawn function (`crate::terminal::spawn_embedded`
+/// in production, a fake in tests). `None` means this launch path has no
+/// embedded surface at all — an `embedded` prepared launch must then be
+/// refused, never silently downgraded to an external window.
+pub struct EmbeddedSpawn<'a> {
+    pub registry: &'a crate::terminal::TerminalRegistry,
+    pub spawn: fn(
+        &AgentCommand,
+        &crate::terminal::EmbeddedTarget,
+    ) -> Result<crate::platform::launcher::LaunchOutcome>,
 }
 
 pub struct SessionLauncher {
@@ -299,6 +335,7 @@ impl SessionLauncher {
             cwd_resolution: resolution,
             runtime,
             desktop_open: None,
+            embedded: false,
             state_fingerprint: fingerprint,
             prepared_at: now(),
         })
@@ -414,6 +451,11 @@ impl SessionLauncher {
             cwd_resolution: resolution,
             runtime,
             desktop_open,
+            // The embedded flag is a command-layer freeze (it needs the
+            // terminal registry for the double-open refusal); a launcher-level
+            // prepare resolves the route only, and embedded rides the same
+            // terminal route as the default.
+            embedded: false,
             state_fingerprint: fingerprint,
             prepared_at: now(),
         })
@@ -440,6 +482,7 @@ impl SessionLauncher {
         db: &Db,
         prepared: &PreparedLaunch,
         workspace: &LaunchWorkspace,
+        embedded: Option<&EmbeddedSpawn<'_>>,
     ) -> Result<LaunchResult> {
         self.launch_prepared_with_in(
             db,
@@ -447,6 +490,7 @@ impl SessionLauncher {
             workspace,
             crate::platform::launcher::launch,
             crate::platform::launcher::open_uri,
+            embedded,
         )
     }
 
@@ -468,6 +512,7 @@ impl SessionLauncher {
         workspace: &LaunchWorkspace,
         spawn: fn(&AgentCommand) -> Result<crate::platform::launcher::LaunchOutcome>,
         open: fn(&str) -> Result<()>,
+        embedded: Option<&EmbeddedSpawn<'_>>,
     ) -> Result<LaunchResult> {
         // re-resolve the launch directory from the state that
         // exists NOW (ordered Workstream paths, the Session's own cwd, the Home
@@ -552,6 +597,9 @@ impl SessionLauncher {
                     "已直接启动；本次未选择所属任务。".into()
                 },
                 launch_intent_id: Some(intent.id),
+                // New launches never go to the embedded terminal (its
+                // "pending attribution" landing is future scope).
+                terminal_id: None,
             })
         } else {
             let session_id = prepared
@@ -582,6 +630,7 @@ impl SessionLauncher {
                     command_line: desktop.uri.clone(),
                     note: desktop.note.clone(),
                     launch_intent_id: None,
+                    terminal_id: None,
                 });
             }
 
@@ -598,14 +647,36 @@ impl SessionLauncher {
                 &runtime_opts,
                 &session.root_agent_session_id,
                 cwd_path.as_deref(),
+                Some(&session.source_path),
             )?;
-            let outcome = spawn(&cmd)?;
+            // The embedded flag is the frozen preview fact; the spawn surface
+            // must exist to honor it. No silent downgrade to an external
+            // window: the user previewed "inside NoEnding".
+            let outcome = if prepared.embedded {
+                let embedded =
+                    embedded.ok_or_else(|| other("内嵌终端服务不可用，请刷新预览后重试"))?;
+                (embedded.spawn)(
+                    &cmd,
+                    &crate::terminal::EmbeddedTarget {
+                        registry: embedded.registry,
+                        session_id,
+                        agent: session.agent,
+                    },
+                )?
+            } else {
+                spawn(&cmd)?
+            };
 
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
                 command_line: outcome.command_line,
-                note: "已直接在原工作目录恢复该会话。".into(),
+                note: if prepared.embedded {
+                    "已在内嵌终端恢复该会话。".into()
+                } else {
+                    "已直接在原工作目录恢复该会话。".into()
+                },
                 launch_intent_id: None,
+                terminal_id: outcome.terminal_id,
             })
         }
     }
@@ -619,7 +690,9 @@ impl SessionLauncher {
         workspace: &LaunchWorkspace,
     ) -> Result<LaunchResult> {
         let prepared = self.prepare_new_in(db, agent, owner_workstream_id, cwd, workspace)?;
-        self.launch_prepared_in(db, &prepared, workspace)
+        // One-shot launches have no embedded surface: the terminal subpage
+        // attach protocol only exists for prepared resume launches.
+        self.launch_prepared_in(db, &prepared, workspace, None)
     }
 
     pub fn resume_session_in(
@@ -629,7 +702,10 @@ impl SessionLauncher {
         workspace: &LaunchWorkspace,
     ) -> Result<LaunchResult> {
         let prepared = self.prepare_resume_in(db, session_id, workspace)?;
-        self.launch_prepared_in(db, &prepared, workspace)
+        // Same as new: the one-shot path (Assistant, legacy command) is
+        // external-terminal only. The embedded flag is frozen by the
+        // prepared-resume command layer, which also passes the registry.
+        self.launch_prepared_in(db, &prepared, workspace, None)
     }
 }
 

@@ -87,6 +87,7 @@ fn fake_spawn(_cmd: &AgentCommand) -> Result<LaunchOutcome> {
         launched_via: FAKE_SPAWN_TAG.into(),
         command_line: "test spawn — no process started".into(),
         pid: Some(4242),
+        terminal_id: None,
     })
 }
 
@@ -138,6 +139,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("standalone prepared launch must succeed");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
@@ -177,6 +179,7 @@ fn bookkeeping_failure_after_spawn_keeps_the_successful_launch_result() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("a successful OS spawn remains a successful launch");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
@@ -210,6 +213,7 @@ fn prepared_launch_capability_is_single_use() {
             &LaunchWorkspace::default(),
             fake_spawn,
             fake_open,
+            None,
         )
         .expect("launch with the consumed token");
     assert_eq!(held_launch.launched_via, FAKE_SPAWN_TAG);
@@ -465,7 +469,7 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
     });
 
     let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open)
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
         .expect("desktop-open launch");
     assert_eq!(result.launched_via, "desktop app");
     assert_eq!(result.command_line, "workbuddy://chat/test-session");
@@ -532,4 +536,134 @@ fn antigravity_routes_by_source_format() {
     } else {
         assert!(matches!(ide, ResumeRoute::Refused(_)));
     }
+}
+
+// ---------------- Embedded terminal resume ----------------
+
+/// Records nothing (fn pointers cannot capture); its distinct tag and the
+/// frozen terminal id are the assertions: an embedded launch must come out
+/// of THIS seam, never the external one.
+fn fake_embedded_spawn(
+    _cmd: &AgentCommand,
+    target: &noending::terminal::EmbeddedTarget,
+) -> Result<LaunchOutcome> {
+    let _ = target.registry;
+    Ok(LaunchOutcome {
+        launched_via: "test-embedded-spawn".into(),
+        command_line: format!("embedded session={}", target.session_id),
+        pid: Some(77),
+        terminal_id: Some("term-test-1".into()),
+    })
+}
+
+fn codex_resume_session(db: &Db, tag: &str) -> String {
+    let raw = std::env::temp_dir().join(format!("noending-emb-{}-{}.jsonl", tag, new_id()));
+    std::fs::write(&raw, "").unwrap();
+    let ts = now();
+    let (sid, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            &format!("emb-root-{tag}"),
+            Some("EMB"),
+            None,
+            None,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_session_source(
+        db,
+        Agent::Codex,
+        &format!("emb-root-{tag}"),
+        &raw.to_string_lossy(),
+    );
+    sid
+}
+
+#[test]
+fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
+    let db = open_db("embedded-resume");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("embedded-resume");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "launch");
+
+    db.set_setting("resume.open_method.codex", "embedded")
+        .unwrap();
+    let mut prepared = launcher
+        .prepare_resume_in(&db, &sid, &workspace)
+        .expect("prepare");
+    // The command layer freezes this flag from the stored preference (the
+    // launcher-level prepare resolves only the route); the test freezes it
+    // the same way.
+    prepared.embedded = true;
+    assert!(prepared.desktop_open.is_none());
+
+    let registry = noending::terminal::TerminalRegistry::new(None);
+    let embedded = noending::launcher::EmbeddedSpawn {
+        registry: &registry,
+        spawn: fake_embedded_spawn,
+    };
+    let result = launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace,
+            fake_spawn,
+            fake_open,
+            Some(&embedded),
+        )
+        .expect("embedded prepared launch");
+    assert_eq!(result.launched_via, "test-embedded-spawn");
+    assert_eq!(result.terminal_id.as_deref(), Some("term-test-1"));
+    assert!(result.note.contains("内嵌终端"));
+    // Embedded launches nothing new in the ingestion sense: no LaunchIntent.
+    assert!(result.launch_intent_id.is_none());
+}
+
+#[test]
+fn an_embedded_prepared_launch_without_a_surface_is_refused_not_downgraded() {
+    let db = open_db("embedded-refused");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("embedded-refused");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "refuse");
+
+    let mut prepared = launcher
+        .prepare_resume_in(&db, &sid, &workspace)
+        .expect("prepare");
+    prepared.embedded = true;
+
+    let err = launcher
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
+        .expect_err("embedded without a registry must refuse");
+    assert!(err.to_string().contains("内嵌终端"));
+}
+
+#[test]
+fn the_embedded_open_method_round_trips_and_validates() {
+    let db = open_db("embedded-method");
+    // Default is terminal by absence.
+    assert_eq!(
+        noending::launcher::stored_resume_method(&db, Agent::Codex).unwrap(),
+        "terminal"
+    );
+    noending::launcher::write_resume_method(&db, Agent::Codex, "embedded").unwrap();
+    assert_eq!(
+        noending::launcher::stored_resume_method(&db, Agent::Codex).unwrap(),
+        "embedded"
+    );
+    // Terminal clears the row back to default.
+    noending::launcher::write_resume_method(&db, Agent::Codex, "terminal").unwrap();
+    assert_eq!(
+        noending::launcher::stored_resume_method(&db, Agent::Codex).unwrap(),
+        "terminal"
+    );
+    // An Agent without a TUI CLI may not choose embedded.
+    let err = noending::launcher::write_resume_method(&db, Agent::Dsh, "embedded")
+        .expect_err("dsh has no CLI to embed");
+    assert!(err.to_string().contains("CLI"));
+    // Unknown methods stay refused.
+    assert!(noending::launcher::write_resume_method(&db, Agent::Codex, "floating").is_err());
 }

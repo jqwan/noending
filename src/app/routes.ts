@@ -27,8 +27,8 @@ export type WorkstreamScope = "active" | "trash";
 
 export type WorkstreamEntry = "review" | "conflicts";
 
-/** Session 的页内子入口：`conversation` 是整屏的消息阅读界面。 */
-export type SessionEntry = "conversation";
+/** Session 的页内子入口：`conversation` 是整屏的消息阅读界面，`terminal` 是内嵌 TUI 终端。 */
+export type SessionEntry = "conversation" | "terminal";
 
 export type Route =
   | { view: "home" }

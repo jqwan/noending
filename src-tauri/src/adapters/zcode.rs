@@ -439,6 +439,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
+        _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         Err(other("ZCode 是桌面应用，没有可启动的 CLI"))
     }

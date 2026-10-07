@@ -736,6 +736,7 @@ pub trait AgentAdapter: Send + Sync {
         opts: &ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
+        source_path: Option<&str>,
     ) -> Result<AgentCommand>;
 
     /// The macOS application-bundle name of this Agent's desktop app, for

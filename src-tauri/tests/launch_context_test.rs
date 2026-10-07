@@ -553,7 +553,7 @@ fn state_fingerprint_stale_detection_on_context_change() {
 
     // Attempting to launch with stale prepared launch MUST fail with stale error
     let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default())
+        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
         .unwrap_err();
     assert!(
         err.to_string().contains("stale"),

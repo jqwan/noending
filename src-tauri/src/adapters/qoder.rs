@@ -415,6 +415,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
+        _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法恢复会话"))
     }

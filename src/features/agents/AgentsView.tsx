@@ -18,7 +18,7 @@ import {
 
 const ALL_AGENTS = Object.keys(AGENT_LABELS) as Agent[];
 
-type OpenMethod = "terminal" | "desktop";
+type OpenMethod = "terminal" | "desktop" | "embedded";
 
 type FilterTab = "all" | "tui" | "desktop";
 
@@ -31,15 +31,15 @@ interface SessionFormat {
 }
 
 const SESSION_FORMATS: SessionFormat[] = [
-  { id: "codex", label: "Codex 会话", agent: "codex", defaultPath: "~/.codex/sessions", methods: ["terminal", "desktop"] },
-  { id: "claude_code", label: "Claude Code 会话", agent: "claude_code", defaultPath: "~/.claude/projects", methods: ["terminal"] },
-  { id: "pi", label: "Pi 会话", agent: "pi", defaultPath: "~/.pi/agent/sessions", methods: ["terminal"] },
+  { id: "codex", label: "Codex 会话", agent: "codex", defaultPath: "~/.codex/sessions", methods: ["terminal", "embedded", "desktop"] },
+  { id: "claude_code", label: "Claude Code 会话", agent: "claude_code", defaultPath: "~/.claude/projects", methods: ["terminal", "embedded"] },
+  { id: "pi", label: "Pi 会话", agent: "pi", defaultPath: "~/.pi/agent/sessions", methods: ["terminal", "embedded"] },
   { id: "dsh", label: "DSH 会话", agent: "dsh", defaultPath: "~/.dsh", methods: ["desktop"] },
   { id: "qoder", label: "Qoder 会话", agent: "qoder", defaultPath: "~/.qoder-cn", methods: ["desktop"] },
   { id: "workbuddy", label: "WorkBuddy 会话", agent: "workbuddy", defaultPath: "~/.workbuddy", methods: ["desktop"] },
   { id: "zcode", label: "ZCode 会话", agent: "zcode", defaultPath: "~/.zcode", methods: ["desktop"] },
   { id: "antigravity_desktop", label: "Desktop 格式", agent: "antigravity", defaultPath: "~/.gemini/antigravity", methods: ["desktop"] },
-  { id: "antigravity_cli", label: "CLI 格式", agent: "antigravity", defaultPath: "~/.gemini/antigravity-cli", methods: ["terminal"] },
+  { id: "antigravity_cli", label: "CLI 格式", agent: "antigravity", defaultPath: "~/.gemini/antigravity-cli", methods: ["terminal", "embedded"] },
 ];
 
 function formatOf(src: IngestSource): string {
@@ -283,7 +283,7 @@ export default function AgentsView({
     }
   };
 
-  const handleSetResumeMethod = async (a: Agent, method: "terminal" | "desktop") => {
+  const handleSetResumeMethod = async (a: Agent, method: "terminal" | "desktop" | "embedded") => {
     clearMessages();
     try {
       await api.setResumeOpenMethod(a, method);
@@ -291,7 +291,9 @@ export default function AgentsView({
       showToast(
         method === "desktop"
           ? "已改为 Desktop 打开：继续会话时将唤起对应应用。"
-          : "已改为 TUI 打开。"
+          : method === "embedded"
+            ? "已改为内嵌终端打开：继续会话时在 NoEnding 内运行。"
+            : "已改为 TUI 打开。"
       );
     } catch (e) {
       setError(String(e));
@@ -535,7 +537,7 @@ export default function AgentsView({
                           title={absent ? `未找到 ${entry?.desktop_app}，Desktop 不可用` : undefined}
                           onClick={() => void handleSetResumeMethod(agent, m)}
                         >
-                          {m === "terminal" ? "TUI" : "Desktop"}
+                          {m === "terminal" ? "TUI" : m === "embedded" ? "内嵌" : "Desktop"}
                         </button>
                       );
                     })}

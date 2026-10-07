@@ -108,6 +108,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
       {resumeOpen && card.latest_session && (
         <ResumeSessionModal
           sessionId={card.latest_session.id}
+          navigate={navigate}
           onClose={() => setResumeOpen(false)}
         />
       )}

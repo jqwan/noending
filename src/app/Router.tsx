@@ -4,6 +4,7 @@ import WorkstreamDetailView from "../features/workstreams/WorkstreamDetailView";
 import SessionsView from "../features/sessions/SessionsView";
 import SessionDetailView from "../features/sessions/SessionDetailView";
 import SessionConversationView from "../features/sessions/SessionConversationView";
+import SessionTerminalView from "../features/sessions/SessionTerminalView";
 import AssistantView from "../features/assistant/AssistantView";
 import ProjectsView from "../features/projects/ProjectsView";
 import ProjectDetail from "../features/projects/ProjectDetail";
@@ -49,14 +50,22 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
         />
       );
     case "session":
-      return route.entry === "conversation" ? (
+      return route.entry === "terminal" ? (
+        <SessionTerminalView
+          key={route.sessionId}
+          sessionId={route.sessionId}
+          initialTitle={route.initialTitle}
+          initialAgent={route.initialAgent}
+          navigate={navigate}
+        />
+      ) : route.entry === "conversation" ? (
         <SessionConversationView
           key={route.sessionId}
           sessionId={route.sessionId}
           initialTitle={route.initialTitle}
           initialAgent={route.initialAgent}
           initialTotal={route.initialTotal}
-          goBack={goBack}
+          navigate={navigate}
         />
       ) : (
         <SessionDetailView

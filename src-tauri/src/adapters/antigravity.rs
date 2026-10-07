@@ -565,6 +565,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         opts: &ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
+        _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         // `--conversation <id>` resumes by id — but only for conversations in
         // the CLI's own store; the IDE store is invisible to the CLI (see the
@@ -684,6 +685,7 @@ mod tests {
                 &install,
                 &opts,
                 "5bbd1246-5106-49e4-b399-d23faa2ede93",
+                None,
                 None,
             )
             .unwrap();

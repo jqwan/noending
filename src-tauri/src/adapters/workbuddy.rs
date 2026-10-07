@@ -426,6 +426,7 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
+        _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
     }

@@ -15,6 +15,7 @@ pub mod platform;
 pub mod search;
 pub mod storage;
 pub mod sync;
+pub mod terminal;
 pub mod workspace;
 
 use std::sync::Mutex;
@@ -81,6 +82,11 @@ pub fn run() {
                 workspace_refresh_in_progress: std::sync::atomic::AtomicBool::new(false),
                 prepared_launches: Mutex::new(std::collections::HashMap::new()),
             });
+
+            // Embedded terminal registry. The AppHandle rides inside so the
+            // PTY reader/wait threads can emit to the webview without ever
+            // touching app state from a thread.
+            app.manage(terminal::TerminalRegistry::new(Some(app.handle().clone())));
 
             // make pre-existing messages searchable (idempotent)
             {
@@ -215,6 +221,12 @@ pub fn run() {
             commands::prepare_resume_session,
             commands::launch_prepared,
             commands::cancel_prepared,
+            commands::launch_embedded_resume,
+            commands::read_clipboard_for_terminal,
+            commands::terminal_for_session,
+            commands::terminal_attach,
+            commands::terminal_input,
+            commands::terminal_resize,
             commands::search,
             commands::get_agent_status,
             commands::get_agent_runtime_settings,
@@ -227,6 +239,15 @@ pub fn run() {
             commands::assistant_config_set,
             commands::assistant_execute_action,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Documented product behavior: closing NoEnding ends every
+            // embedded Agent. The external-terminal path is unaffected.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(registry) = app.try_state::<terminal::TerminalRegistry>() {
+                    registry.kill_all();
+                }
+            }
+        });
 }

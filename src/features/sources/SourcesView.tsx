@@ -17,7 +17,7 @@ import {
  * 摄入在后台单线程执行，完成事件是 `ingestion-completed`，最近一次结果来自
  * `get_ingestion_status`（纯读取）。
  */
-type OpenMethod = "terminal" | "desktop";
+type OpenMethod = "terminal" | "desktop" | "embedded";
 
 type SessionFormat = {
   id: string;
@@ -31,15 +31,15 @@ type SessionFormat = {
 
 /** 会话格式：来源按它分组，也是添加来源的单位。Antigravity 的两个存储是两种格式（9 种的由来）。 */
 const SESSION_FORMATS: SessionFormat[] = [
-  { id: "codex", label: "Codex", agent: "codex", methods: ["terminal", "desktop"] },
-  { id: "claude_code", label: "Claude Code", agent: "claude_code", methods: ["terminal"] },
-  { id: "pi", label: "Pi", agent: "pi", methods: ["terminal"] },
+  { id: "codex", label: "Codex", agent: "codex", methods: ["terminal", "embedded", "desktop"] },
+  { id: "claude_code", label: "Claude Code", agent: "claude_code", methods: ["terminal", "embedded"] },
+  { id: "pi", label: "Pi", agent: "pi", methods: ["terminal", "embedded"] },
   { id: "dsh", label: "DSH", agent: "dsh", methods: ["desktop"] },
   { id: "qoder", label: "Qoder", agent: "qoder", methods: ["desktop"] },
   { id: "workbuddy", label: "WorkBuddy", agent: "workbuddy", methods: ["desktop"] },
   { id: "zcode", label: "ZCode", agent: "zcode", methods: ["desktop"] },
   { id: "antigravity_desktop", label: "Antigravity", agent: "antigravity", defaultPath: "~/.gemini/antigravity", methods: ["desktop"] },
-  { id: "antigravity_cli", label: "Antigravity CLI", agent: "antigravity", defaultPath: "~/.gemini/antigravity-cli", methods: ["terminal"] },
+  { id: "antigravity_cli", label: "Antigravity CLI", agent: "antigravity", defaultPath: "~/.gemini/antigravity-cli", methods: ["terminal", "embedded"] },
 ];
 
 /** 一条来源属于哪个格式：antigravity 靠路径区分两个存储，其余格式即 agent。 */
@@ -381,7 +381,7 @@ function OpenMethodControl({ fmt, entry, onChoose }: {
 }) {
   const current = entry?.resume_open_method ?? "terminal";
   const label = (m: OpenMethod) =>
-    m === "terminal" ? "TUI" : entry?.desktop_app ? `桌面端（${entry.desktop_app}）` : "桌面端";
+    m === "terminal" ? "TUI" : m === "embedded" ? "内嵌" : entry?.desktop_app ? `桌面端（${entry.desktop_app}）` : "桌面端";
   // 在场未知（状态没回来）时不当作缺席。
   const desktopAbsent = entry != null && !entry.desktop_app_present;
 

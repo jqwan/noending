@@ -596,6 +596,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
+        _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         Err(other("dsh 需要指定 profile，NoEnding 无法替用户选择"))
     }

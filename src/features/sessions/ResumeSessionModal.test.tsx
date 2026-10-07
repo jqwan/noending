@@ -10,6 +10,8 @@ vi.mock("../../api", () => ({
     prepareResumeSession: vi.fn(),
     cancelPrepared: vi.fn().mockResolvedValue(undefined),
     launchPrepared: vi.fn(),
+    getAgentStatus: vi.fn().mockResolvedValue({}),
+    setResumeOpenMethod: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -199,5 +201,68 @@ describe("ResumeSessionModal owner display", () => {
     render(<ResumeSessionModal sessionId="s1" onClose={vi.fn()} />);
 
     await screen.findByText("未归属任务");
+  });
+});
+
+describe("ResumeSessionModal embedded resume", () => {
+  it("offers the method chooser for a TUI agent and re-prepares on switch", async () => {
+    vi.mocked(api.getSessionDetail).mockResolvedValue(detail("s1"));
+    vi.mocked(api.prepareResumeSession).mockResolvedValue(prepared("s1"));
+    vi.mocked(api.getAgentStatus).mockResolvedValue({
+      codex: {
+        name: "Codex",
+        detected: true,
+        executable: "/usr/local/bin/codex",
+        version: null,
+        terminal_cli: true,
+        desktop_app: null,
+        desktop_app_present: false,
+        resume_open_method: "terminal",
+      },
+    });
+
+    render(<ResumeSessionModal sessionId="s1" onClose={vi.fn()} />);
+    await screen.findByText("继续方式");
+    expect(screen.getByText("外部终端")).toBeTruthy();
+    expect(screen.getByText("内嵌终端")).toBeTruthy();
+    // 无桌面端时桌面式不出现。
+    expect(screen.queryByText("桌面应用")).toBeNull();
+
+    fireEvent.click(screen.getByText("内嵌终端"));
+    await waitFor(() =>
+      expect(api.setResumeOpenMethod).toHaveBeenCalledWith("codex", "embedded"),
+    );
+    // re-prepare：切换即取消旧令牌并重新准备（同一 sessionId 再准备一次）。
+    await waitFor(() =>
+      expect(api.prepareResumeSession).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("navigates to the terminal subpage when the launch returns a terminal_id", async () => {
+    vi.mocked(api.getSessionDetail).mockResolvedValue(detail("s1"));
+    vi.mocked(api.prepareResumeSession).mockResolvedValue(prepared("s1"));
+    vi.mocked(api.getAgentStatus).mockResolvedValue({});
+    vi.mocked(api.launchPrepared).mockResolvedValue({
+      launched_via: "内嵌终端",
+      command_line: "codex resume",
+      note: "已在内嵌终端恢复该会话。",
+      launch_intent_id: null,
+      terminal_id: "t-9",
+    });
+    const onClose = vi.fn();
+    const navigate = vi.fn();
+
+    render(<ResumeSessionModal sessionId="s1" onClose={onClose} navigate={navigate} />);
+    await screen.findByText("未归属任务");
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({
+        view: "session",
+        sessionId: "s1",
+        entry: "terminal",
+      }),
+    );
+    expect(onClose).toHaveBeenCalled();
   });
 });
