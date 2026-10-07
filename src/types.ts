@@ -717,16 +717,19 @@ export interface LaunchResult {
 
 // ---------------- Embedded terminal（内嵌终端子页） ----------------
 
-/** terminal_for_session 的一行：该会话最新（live 优先）的内嵌终端。 */
+/** terminal_list / terminal_for_session 的一行：一个内嵌终端的运行时事实。 */
 export interface TerminalSummary {
   terminal_id: string;
-  /** 未绑定（内嵌新建、会话未被发现）时为 null；摄入绑定后有值。 */
+  /** 未绑定时为 null。绑定只有两种精确来源：预指定 session id（claude/pi）
+   *  在摄入发现时精确匹配；codex/agy 由会话页终端入口校验匹配后当场绑定。 */
   session_id: string | null;
   agent: Agent;
   cwd: string | null;
   created_at: string;
   live: boolean;
   exit_code: number | null;
+  /** 绑定会话的显示标题（terminal_list 查库补齐）；未绑定为 null。 */
+  session_title: string | null;
 }
 
 /** terminal_attach 的回答：元数据 + 当前 scrollback 快照（base64）+ 几何。 */

@@ -27,8 +27,9 @@ export type WorkstreamScope = "active" | "trash";
 
 export type WorkstreamEntry = "review" | "conflicts";
 
-/** Session 的页内子入口：`conversation` 是整屏的消息阅读界面，`terminal` 是内嵌 TUI 终端。 */
-export type SessionEntry = "conversation" | "terminal";
+/** Session 的页内子入口：`conversation` 是整屏的消息阅读界面。终端不再是
+ *  会话的子页——它是一等独立视图（见下方 `view:"terminal"`）。 */
+export type SessionEntry = "conversation";
 
 export type Route =
   | { view: "home" }
@@ -43,9 +44,12 @@ export type Route =
       initialAgent?: Agent;
       initialTotal?: number;
     }
-  /** 未绑定会话的独立终端视图：内嵌新建的直接落点。摄入发现会话并完成
-   *  绑定后，视图 replace 成该会话的终端子页。 */
-  | { view: "terminal"; terminalId: string }
+  /** 内嵌终端视图（一等独立路由）：内嵌新建与「先跳后启」的共同落点。
+   *  会话身份由后端绑定（预指定 id 精确匹配 / 会话页按需校验匹配），绑定
+   *  事实经 `terminal-bound` 事件推给视图，点亮会话详情入口。从会话页跳转
+   *  时携带已知的身份种子（initialTitle/initialAgent/initialSessionId），
+   *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新终端」起步。 */
+  | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
   | { view: "agents"; agent?: Agent }
   | { view: "assistant"; scope?: AssistantScope }
   | { view: "projects" }
@@ -55,6 +59,10 @@ export type Route =
 
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */
 export const EVT_SYNCED = "noending:sync";
+
+/** 活终端集合变化（spawn / exit / bind）的全局刷新信号。后端 registry
+ *  发 Tauri 事件 `terminals-changed`，AppShell 桥接成 window 事件。 */
+export const EVT_TERMINALS = "noending:terminals";
 
 export function onEvent(evt: string, cb: () => void) {
   const h = () => cb();

@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import { onEvent, EVT_SYNCED, type Route } from "../app/routes";
+import { onEvent, EVT_TERMINALS, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import SidebarLogo from "../components/SidebarLogo";
-import type { WorkstreamCardData } from "../types";
+import AgentIcon from "../components/AgentIcon";
+import type { TerminalSummary } from "../types";
+import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 
 /**
  * Sidebar：Brand→Home、Search、工作区一级导航（Workstreams / Projects / Sessions /
- * Assistant）、最近（最近 6 个 open Workstream，可固定）、底部固定 Settings。
- * Project 不逐个铺在导航上，整体进入 Projects Board；Sidebar 自己加载数据。
+ * Assistant）、运行中（活内嵌终端，点击进入终端视图交互）、底部固定 Settings。
+ * Project 不逐个铺在导航上，整体进入 Projects Board。
+ *
+ * 「运行中」取代了旧的最近任务列表：跑着的会话终端才是此刻真正需要的入口，
+ * 未绑定的显示「新终端」，绑定后显示会话名。数据是 registry 运行时事实，
+ * 只在 spawn / exit / bind（terminals-changed 事件）时重取，无轮询。
  */
 export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
   route: Route;
@@ -16,36 +22,17 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
   onSearch: () => void;
   collapsed?: boolean;
 }) {
-  const [pinned, setPinned] = useState<string[]>(() => {
-    try {
-      const value: unknown = JSON.parse(localStorage.getItem("noending.pinnedTasks") ?? "[]");
-      return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
-    } catch { return []; }
-  });
-  const togglePin = (id: string) => setPinned(current => {
-    const next = current.includes(id) ? current.filter(value => value !== id) : [...current, id];
-    localStorage.setItem("noending.pinnedTasks", JSON.stringify(next));
-    return next;
-  });
-  const [recent, setRecent] = useState<WorkstreamCardData[]>([]);
+  const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
 
   const refresh = useCallback(() => {
     api
-      .listWorkstreamCards()
-      .then((cards) =>
-        setRecent(
-          cards
-            .filter((c) => c.lifecycle === "active" && c.visibility === "normal")
-            .sort((a, b) =>
-              (b.last_activity_at ?? b.updated_at).localeCompare(a.last_activity_at ?? a.updated_at),
-            ),
-        ),
-      )
+      .terminalList()
+      .then(setTerminals)
       .catch(console.error);
   }, []);
 
   useEffect(refresh, [refresh]);
-  useEffect(() => onEvent(EVT_SYNCED, refresh), [refresh]);
+  useEffect(() => onEvent(EVT_TERMINALS, refresh), [refresh]);
 
   const workspaceActive = (v: "workstreams" | "projects" | "sessions" | "agents" | "assistant") => {
     if (route.view === v) return "active";
@@ -99,24 +86,28 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
           <Icon name="spark" />助手
         </button>
 
-        {[{ label: "固定", rows: recent.filter(w => pinned.includes(w.id)) },
-          { label: "最近", rows: recent.filter(w => !pinned.includes(w.id)).slice(0, 6) }].map(group => (
-          <div key={group.label}>
-            {(group.rows.length > 0 || group.label === "最近") && <div className="nav-section">{group.label}</div>}
-            {group.rows.map(w => (
-              <div className="sidebar-task" key={w.id}>
-                <button className={`nav-item ${route.view === "workstream" && route.workstreamId === w.id ? "active" : ""}`}
-                  title={w.title} onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
-                  <span className="truncate">{w.title}</span>
+        {terminals.length > 0 && (
+          <>
+            <div className="nav-section">运行中</div>
+            {terminals.map((t) => {
+              const active = route.view === "terminal" && route.terminalId === t.terminal_id;
+              const title = t.session_title
+                ? sessionDisplayTitle(t.session_title)
+                : "新终端";
+              return (
+                <button
+                  key={t.terminal_id}
+                  className={`nav-item ${active ? "active" : ""}`}
+                  title={t.cwd ? `${title} · ${t.cwd}` : title}
+                  onClick={() => navigate({ view: "terminal", terminalId: t.terminal_id })}
+                >
+                  <AgentIcon agent={t.agent} size={15} />
+                  <span className="truncate">{title}</span>
                 </button>
-                <button className="pin-button" aria-label={`${pinned.includes(w.id) ? "取消固定" : "固定"}：${w.title}`}
-                  title={pinned.includes(w.id) ? "取消固定" : "固定"} aria-pressed={pinned.includes(w.id)} onClick={() => togglePin(w.id)}>
-                  <Icon name="pin" />
-                </button>
-              </div>
-            ))}
-          </div>
-        ))}
+              );
+            })}
+          </>
+        )}
       </div>
 
       <div className="sidebar-footer">

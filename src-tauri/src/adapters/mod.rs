@@ -129,6 +129,12 @@ pub struct ExecOptions {
     pub model: Option<String>,
     pub provider: Option<String>, // pi: --provider (e.g. openai-codex, lmstudio)
     pub effort: Option<String>,   // codex model_reasoning_effort / pi --thinking
+    /// NEW-session launches only: a UUID NoEnding generated before spawn.
+    /// Adapters whose CLI accepts a prespecified session id (claude --session-id,
+    /// pi --session-id) pass it on the command line, so the session file is born
+    /// with a known identity and terminal binding becomes exact matching. Only
+    /// set for adapters that answer `supports_prespecified_session_id()`.
+    pub root_session_id: Option<String>,
 }
 
 impl ExecOptions {
@@ -730,6 +736,16 @@ pub trait AgentAdapter: Send + Sync {
         cwd: Option<&Path>,
     ) -> Result<AgentCommand>;
 
+    /// Whether this CLI accepts a prespecified session id for a NEW session
+    /// (claude `--session-id`, pi `--session-id`). Only then does the launcher
+    /// generate one and set `opts.root_session_id` — the birth identity that
+    /// makes embedded-terminal binding an exact match instead of a guess.
+    /// CLIs that generate their own ids (codex, agy) stay false; their
+    /// terminals bind on demand through the session page's verified match.
+    fn supports_prespecified_session_id(&self) -> bool {
+        false
+    }
+
     fn build_resume_command(
         &self,
         install: &AgentInstallation,
@@ -1048,6 +1064,7 @@ mod context_extraction_command_tests {
                     model: Some("model-pi".into()),
                     provider: Some("provider-pi".into()),
                     effort: Some("high".into()),
+                    ..Default::default()
                 },
                 vec![
                     "--no-session",

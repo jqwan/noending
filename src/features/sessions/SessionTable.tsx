@@ -3,7 +3,7 @@ import Icon from "../../components/Icon";
 import { useMemo } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type AgentStatusEntry, type Session, type TerminalSummary } from "../../types";
+import { AGENT_LABELS, type Agent, type AgentStatusEntry, type Session } from "../../types";
 import { desktopContinueState, useAgentStatus } from "./continueDesktop";
 
 /* 展示层 helper —— SessionCards 与 SessionDetailView 共用。只做「怎么显示得下、
@@ -228,9 +228,7 @@ export default function SessionCards({
   workstreamTitleById,
   projectNameById,
   viewMode = "cards",
-  unboundTerminals,
   onOpen,
-  onOpenTerminal,
   onResume,
   onTrash,
 }: {
@@ -239,10 +237,7 @@ export default function SessionCards({
   workstreamTitleById: Map<string, string>;
   projectNameById: Map<string, string>;
   viewMode?: "cards" | "list";
-  /** 运行中且未绑定会话的内嵌终端（注册表事实）：看板顶部的伪行。 */
-  unboundTerminals?: TerminalSummary[];
   onOpen: (sessionId: string) => void;
-  onOpenTerminal?: (terminalId: string) => void;
   onResume: (sessionId: string) => void;
   onTrash: (sessionId: string) => void;
 }) {
@@ -267,24 +262,6 @@ export default function SessionCards({
   if (viewMode === "list") {
     return (
       <div className="session-list" key="session-list">
-        {(unboundTerminals ?? []).map((t) => (
-          <article className="session-list-row terminal-pseudo" key={`pseudo-${t.terminal_id}`}>
-            <button className="session-open" onClick={() => onOpenTerminal?.(t.terminal_id)}>
-              <span className="session-list-title" title={t.cwd ?? "新终端"}>
-                <AgentIcon agent={t.agent} size={15} />
-                <span>新终端</span>
-              </span>
-              <span className="session-list-meta">
-                <span>{agentDisplayLabel(t.agent)}</span>
-                <span>{t.cwd ? cwdDisplayLabel(t.cwd, 60) : "未设置目录"}</span>
-                <span>{timeAgo(t.created_at)}</span>
-              </span>
-            </button>
-            <div className="session-list-actions">
-              <span className="badge accent" title="内嵌终端运行中：点击进入，会话落盘后自动归属">运行中</span>
-            </div>
-          </article>
-        ))}
         {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
           <article className="session-list-row" key={`list-${s.id}`}>
             <button className="session-open" onClick={() => onOpen(s.id)}>
@@ -330,40 +307,6 @@ export default function SessionCards({
 
   return (
     <div className="ws-grid board-grid" key="session-cards">
-      {(unboundTerminals ?? []).map((t) => (
-        <article
-          className="ws-card session-card full terminal-pseudo"
-          key={`pseudo-${t.terminal_id}`}
-          tabIndex={0}
-          role="button"
-          onClick={() => onOpenTerminal?.(t.terminal_id)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              onOpenTerminal?.(t.terminal_id);
-            }
-          }}
-        >
-          <header className="ws-card-head">
-            <div className="session-card-title-wrap session-list-title">
-              <AgentIcon agent={t.agent} size={16} />
-              <h3 className="ws-card-title" style={{ minWidth: 0, flex: 1 }}>
-                <span className="card-title-link">新终端</span>
-              </h3>
-            </div>
-            <span className="badge accent" title="内嵌终端运行中：点击进入，会话落盘后自动归属">运行中</span>
-          </header>
-          <div className="session-card-body">
-            <div className="session-card-prop" title={t.cwd ?? undefined}>
-              <Icon name="folder" />
-              <span className="truncate">{t.cwd ? cwdDisplayLabel(t.cwd, 40) : "未设置目录"}</span>
-            </div>
-          </div>
-          <footer className="ws-card-meta session-card-meta">
-            <span className="muted small">{timeAgo(t.created_at)}启动</span>
-          </footer>
-        </article>
-      ))}
       {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
         <article
           className="ws-card session-card full"

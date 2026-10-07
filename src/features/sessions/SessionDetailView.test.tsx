@@ -174,26 +174,18 @@ it("reveals the source by clicking the path itself", async () => {
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("me"));
 });
 
-it("gates the terminal subpage but keeps desktop continue when the root source is missing", async () => {
+it("hides the terminal entry for a missing root source but keeps desktop continue", async () => {
   await renderDetail(detail(session("me"), { source_status: "missing", can_resume: false }));
 
   screen.getByText("源会话已不存在");
-  // 终端段与 Resume 同门槛：源不在就不能内嵌继续。
-  const terminal = screen.getByTitle("源会话已不存在，无法继续这个会话") as HTMLButtonElement;
-  expect(terminal.disabled).toBe(true);
+  // 终端入口按格式能力出现（这里是 codex，有 CLI），按钮在场但先跳后启的
+  // 启动路径会被后端门槛拒绝——入口本身不再做门槛置灰。
+  expect(screen.getByRole("button", { name: "内嵌终端" })).toBeTruthy();
   // 桌面打开不读我们的源文件（应用读它自己的存储）：继续按钮照常可用。
   const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
   expect(resume.disabled).toBe(false);
   // 源不在，路径退回纯文本：没有可点的定位入口，只有警告。
   expect(screen.queryByRole("button", { name: "/tmp/rollout.jsonl" })).toBeNull();
-});
-
-it("gates the terminal subpage when the root source status is unavailable", async () => {
-  await renderDetail(detail(session("me"), { source_status: "unavailable", can_resume: false }));
-
-  screen.getByText("无法确认源会话状态");
-  const terminal = screen.getByTitle("无法确认源会话状态，暂时不能继续") as HTMLButtonElement;
-  expect(terminal.disabled).toBe(true);
 });
 
 // 消息

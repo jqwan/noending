@@ -114,6 +114,7 @@ fn codex_renders_model_and_reasoning_effort() {
         model: Some("gpt-5.6-sol".into()),
         provider: None,
         effort: Some("high".into()),
+        root_session_id: None,
     };
     for args in [
         exec_args(Agent::Codex, &opts),
@@ -133,6 +134,7 @@ fn claude_renders_model_and_effort() {
         model: Some("sonnet".into()),
         provider: None,
         effort: Some("high".into()),
+        root_session_id: None,
     };
     for args in [
         exec_args(Agent::ClaudeCode, &opts),
@@ -156,6 +158,7 @@ fn pi_renders_provider_model_and_thinking() {
         model: Some("qwen/qwen3.8-27b".into()),
         provider: Some("lmstudio".into()),
         effort: Some("low".into()),
+        root_session_id: None,
     };
     for args in [
         exec_args(Agent::Pi, &opts),
@@ -185,6 +188,7 @@ fn an_override_value_is_passed_literally_as_one_argv_element() {
             model: Some(value.into()),
             provider: None,
             effort: None,
+            root_session_id: None,
         },
     );
     assert!(args.iter().any(|a| a == value), "{args:?}");

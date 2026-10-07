@@ -50,15 +50,7 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
         />
       );
     case "session":
-      return route.entry === "terminal" ? (
-        <SessionTerminalView
-          key={route.sessionId}
-          sessionId={route.sessionId}
-          initialTitle={route.initialTitle}
-          initialAgent={route.initialAgent}
-          navigate={navigate}
-        />
-      ) : route.entry === "conversation" ? (
+      return route.entry === "conversation" ? (
         <SessionConversationView
           key={route.sessionId}
           sessionId={route.sessionId}

@@ -205,7 +205,6 @@ fn an_embedded_new_launch_spawns_unbound_and_still_commits_the_intent() {
 }
 
 #[test]
-#[test]
 fn bookkeeping_failure_after_spawn_keeps_the_successful_launch_result() {
     let db = open_db("post-spawn-bookkeeping-failure");
     seed_installation(&db, Agent::Codex);
@@ -357,7 +356,6 @@ fn standalone_prepared_launch_reports_the_default_workspace() {
 /// agent: a desktop-only agent routes to its app (with the app present) and
 /// refuses loudly when the app is absent, while a CLI agent keeps the
 /// terminal route with `desktop_open` unset.
-#[test]
 /// continue_session_desktop asks `desktop_resume_route` — its default derives
 /// the Desktop variant from `continue_route`, so Antigravity's IDE store (no
 /// override of its own) still opens the desktop app instead of refusing.

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import SessionTerminalView, { resetLiveTerminalsForTests } from "./SessionTerminalView";
 import { api } from "../../api";
@@ -21,8 +21,14 @@ vi.mock("../../api", () => ({
     readClipboardForTerminal: vi.fn(),
   },
 }));
+const { eventHandlers } = vi.hoisted(() => ({
+  eventHandlers: new Map<string, (e: unknown) => void>(),
+}));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn().mockResolvedValue(() => {}),
+  listen: vi.fn((event: string, handler: (e: unknown) => void) => {
+    eventHandlers.set(event, handler);
+    return Promise.resolve(() => eventHandlers.delete(event));
+  }),
 }));
 const { readTextMock, copyMock } = vi.hoisted(() => ({ readTextMock: vi.fn(), copyMock: vi.fn() }));
 vi.mock("../../components/common", () => ({ copyToClipboard: copyMock }));
@@ -129,6 +135,7 @@ function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
     created_at: "2026-10-06T00:00:00Z",
     live: true,
     exit_code: null,
+    session_title: null,
     scrollback: "",
     cols: 80,
     rows: 24,
@@ -136,14 +143,9 @@ function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
   };
 }
 
-function renderView() {
+function renderView(navigate?: ReturnType<typeof vi.fn>) {
   return render(
-    <SessionTerminalView
-      sessionId="s1"
-      initialTitle="会话"
-      initialAgent="codex"
-      navigate={vi.fn()}
-    />,
+    <SessionTerminalView terminalId="t-1" navigate={navigate ?? vi.fn()} />,
   );
 }
 
@@ -162,33 +164,79 @@ it("attaches directly when the session already has an embedded terminal", async 
   await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "q"));
 });
 
-it("auto-launches an embedded resume when none exists, then attaches", async () => {
-  vi.mocked(api.terminalForSession)
-    .mockResolvedValueOnce(null)
-    .mockResolvedValueOnce(snapshot({ terminal_id: "t-2" }));
-  vi.mocked(api.launchEmbeddedResume).mockResolvedValue({
-    launched_via: "内嵌终端",
-    command_line: "pi --session x",
-    note: "已在内嵌终端恢复该会话。",
-    launch_intent_id: null,
-    terminal_id: "t-2",
-  });
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ terminal_id: "t-2" }));
-
-  renderView();
-  await waitFor(() => expect(api.launchEmbeddedResume).toHaveBeenCalledWith("s1"));
-  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
-  expect(api.terminalAttach).toHaveBeenCalledWith("t-2");
-});
-
-it("shows the stated reason and a retry when the direct launch fails", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(null);
-  vi.mocked(api.launchEmbeddedResume).mockRejectedValue(new Error("源会话已不存在，无法继续"));
+it("an attach failure shows the message with a retry", async () => {
+  vi.mocked(api.terminalAttach).mockRejectedValue(new Error("终端不存在或已随应用重启失效"));
 
   renderView();
   await screen.findByText(/内嵌终端不可用/);
-  expect(screen.getByText(/源会话已不存在/)).toBeTruthy();
+  expect(screen.getByText(/终端不存在或已随应用重启失效/)).toBeTruthy();
   expect(screen.getByText("重试")).toBeTruthy();
+});
+
+it("an unbound terminal keeps the session-detail entry disabled; binding lights it up", async () => {
+  const navigate = vi.fn();
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_id: null }));
+  vi.mocked(api.getSessionDetail).mockResolvedValue({
+    session: { agent: "codex", source_kind: "codex", trashed_at: null, title: "页面匹配的会话" },
+    messages: [],
+    owner_workstream: null,
+    workspace_path: null,
+    source_status: "available",
+    can_resume: true,
+  } as never);
+
+  renderView(navigate);
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  const entry = screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement;
+  expect(entry.disabled).toBe(true);
+
+  // 注册表 bind() 的广播：事件一到入口即亮，标题换成会话本名（无轮询）。
+  eventHandlers.get("terminal-bound")?.({
+    payload: { terminal_id: "t-1", session_id: "s9" },
+  });
+  await waitFor(() => expect(entry.disabled).toBe(false));
+  await waitFor(() => expect(screen.getByText("页面匹配的会话")).toBeTruthy());
+  fireEvent.click(entry);
+  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s9" });
+});
+
+it("the route seed renders the final header on the first frame — no 新终端 flash", async () => {
+  // attach 故意挂起不返回：种子必须独立于它成立（会话页跳转的防闪契约）。
+  vi.mocked(api.terminalAttach).mockReturnValue(new Promise(() => {}) as never);
+  const navigate = vi.fn();
+
+  render(
+    <SessionTerminalView
+      terminalId="t-1"
+      initialTitle="修复布局"
+      initialAgent="codex"
+      initialSessionId="s1"
+      navigate={navigate}
+    />,
+  );
+  // 同步首帧：标题就是会话本名，入口已可点。
+  expect(screen.getByText("修复布局")).toBeTruthy();
+  const entry = screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement;
+  expect(entry.disabled).toBe(false);
+  expect(screen.queryByText("新终端")).toBeNull();
+});
+
+it("a bound snapshot shows the session-detail entry enabled from the start", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_id: "s1" }));
+  vi.mocked(api.getSessionDetail).mockResolvedValue({
+    session: { agent: "codex", source_kind: "codex", trashed_at: null, title: "已有身份" },
+    messages: [],
+    owner_workstream: null,
+    workspace_path: null,
+    source_status: "available",
+    can_resume: true,
+  } as never);
+
+  renderView();
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  const entry = screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement;
+  expect(entry.disabled).toBe(false);
+  await waitFor(() => expect(screen.getByText("已有身份")).toBeTruthy());
 });
 
 it("paste keys intercept native event and deliver text as typed keystrokes", async () => {
@@ -441,44 +489,28 @@ it("the diff shim ignores non-IME typing and mid-composition states", async () =
 });
 
 it("shows the exit banner with the exit code for an exited terminal", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(
     snapshot({ live: false, exit_code: 7, scrollback: btoa("done") }),
   );
   renderView();
   await screen.findByText(/Agent 已退出/);
   expect(screen.getByText(/退出码 7/)).toBeTruthy();
-  expect(screen.getByText("再次启动")).toBeTruthy();
 });
 
-it("standalone mode attaches by terminal id and replaces to the session once bound", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
-  let bound = false;
-  vi.mocked(api.terminalAttach).mockImplementation(() =>
-    Promise.resolve(snapshot({
-      terminal_id: "t-free",
-      session_id: bound ? "s-bound" : null,
-    })),
-  );
+it("attaching by terminal id never launches and never navigates away on bind", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_id: null }));
   const navigate = vi.fn();
 
-  render(
-    <SessionTerminalView terminalId="t-free" navigate={navigate} />,
-  );
+  render(<SessionTerminalView terminalId="t-free" navigate={navigate} />);
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
-  // 未绑定阶段：直接 attach，不起任何 launch。
+  // 本视图只 attach：launch 是会话页终端入口的职责。
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
   expect(api.terminalForSession).not.toHaveBeenCalled();
 
-  // 摄入绑定完成：轮询发现 session_id（1.5s 一次），replace 到会话终端子页。
-  bound = true;
-  await waitFor(
-    () =>
-      expect(navigate).toHaveBeenCalledWith({
-        view: "session",
-        sessionId: "s-bound",
-        entry: "terminal",
-      }),
-    { timeout: 4000 },
-  );
+  // 绑定事实到达：视图留在原地，只点亮入口（旧的"replace 跳子页"已退场）。
+  eventHandlers.get("terminal-bound")?.({
+    payload: { terminal_id: "t-free", session_id: "s-bound" },
+  });
+  await tick();
+  expect(navigate).not.toHaveBeenCalled();
 });

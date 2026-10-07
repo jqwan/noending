@@ -1,11 +1,10 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import Router from "./Router";
 import { api } from "../api";
 import type { Route } from "./routes";
 
-// Router 的三分支（概览 / 对话 / 终端）此前没有渲染级覆盖：切换器测试只断言
-// navigate 被调用，这里证明 entry=terminal 真的渲染出终端子页而不是回落到详情页。
+// Router 的会话分支渲染级覆盖：概览 / 对话各归其位，终端是一等路由（另测）。
 vi.mock("../api", () => ({
   api: {
     getAgentStatus: vi.fn().mockResolvedValue({}),
@@ -41,15 +40,6 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class {} }));
 
 afterEach(() => cleanup());
-
-it("renders the terminal subpage for entry=terminal, not the detail page", async () => {
-  const route: Route = { view: "session", sessionId: "s1", entry: "terminal", initialTitle: "T", initialAgent: "codex" };
-  render(<Router route={route} navigate={vi.fn()} goBack={vi.fn()} actionSeq={0} />);
-  // 终端子页的标志性文案（直启失败的错误态带重试），详情页没有这段；
-  // 「进入即直启」由 SessionTerminalView 的专属测试覆盖。
-  expect(await screen.findByText(/内嵌终端不可用/)).toBeTruthy();
-  expect(screen.getByText("重试")).toBeTruthy();
-});
 
 it("renders the detail page when entry is absent", () => {
   vi.mocked(api.getSessionDetail).mockReturnValue(new Promise(() => {}) as never);

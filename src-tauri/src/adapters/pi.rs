@@ -220,13 +220,23 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         )))
     }
 
+    fn supports_prespecified_session_id(&self) -> bool {
+        true
+    }
+
     fn build_new_command(
         &self,
         install: &AgentInstallation,
         opts: &crate::adapters::ExecOptions,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let args = runtime_args(opts);
+        let mut args = runtime_args(opts);
+        // The launcher's prespecified id: pi creates the session with this
+        // exact id ("creating it if missing"), so the embedded terminal binds
+        // by exact match instead of cwd+time inference.
+        if let Some(id) = &opts.root_session_id {
+            args.extend(["--session-id".into(), id.clone()]);
+        }
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,

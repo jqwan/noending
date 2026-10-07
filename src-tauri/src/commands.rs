@@ -798,14 +798,28 @@ pub fn launch_embedded_new(
     Ok(result)
 }
 
-/// Live embedded terminals, newest first. The sessions board renders the
-/// unbound ones as 运行中 pseudo-rows and derives "terminal is running"
-/// for bound sessions from the rest.
+/// Live embedded terminals, newest first, each bound session's display title
+/// joined in (a DB lookup the registry itself never does). Consumers refresh
+/// on `terminals-changed` — never on a timer.
 #[tauri::command]
 pub fn terminal_list(
+    state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
 ) -> Result<Vec<crate::terminal::TerminalSummary>> {
-    Ok(terminal.list_live())
+    let mut summaries = terminal.list_live();
+    if summaries.iter().any(|t| t.session_id.is_some()) {
+        with_db(&state, |db| {
+            for t in &mut summaries {
+                if let Some(session_id) = &t.session_id {
+                    if let Ok(Some(session)) = db.get_session(session_id) {
+                        t.session_title = session.title;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(summaries)
 }
 
 #[tauri::command]
@@ -919,12 +933,39 @@ pub fn read_clipboard_for_terminal(app: AppHandle) -> Result<crate::commands::Cl
 // detach protocol the frontend terminal subpage speaks. The registry is the
 // source of truth — the subpage is a view, not a process owner.
 
+/// The session page's terminal entry. Resolution order, every step exact:
+/// 1. a terminal already bound to this session (prespecified-id discovery or
+///    an earlier verified match) — jump to it;
+/// 2. a live unbound terminal that survives the verified match — same Agent,
+///    same cwd, existed when the first message was sent, and the message text
+///    visible in its scrollback — bind it on the spot and jump;
+/// 3. nothing — the caller launches a fresh embedded Resume terminal.
 #[tauri::command]
 pub fn terminal_for_session(
-    state: State<'_, crate::terminal::TerminalRegistry>,
+    state: State<AppState>,
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
     session_id: String,
 ) -> Result<Option<crate::terminal::TerminalSummary>> {
-    Ok(state.for_session(&session_id))
+    if let Some(summary) = terminal.for_session(&session_id) {
+        return Ok(Some(summary));
+    }
+    let matched = with_db(&state, |db| {
+        let Some(session) = db.get_session(&session_id)? else {
+            return Ok(None);
+        };
+        let Some((content, ts)) = db.first_user_message(&session_id)? else {
+            return Ok(None);
+        };
+        let Some(cwd) = session.cwd.as_deref().filter(|c| !c.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let sent_at = ts
+            .as_deref()
+            .or(session.started_at.as_deref())
+            .unwrap_or("");
+        Ok(terminal.match_unbound(&session_id, session.agent, cwd, sent_at, &content))
+    })?;
+    Ok(matched)
 }
 
 #[tauri::command]

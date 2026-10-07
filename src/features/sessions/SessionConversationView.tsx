@@ -502,16 +502,7 @@ export default function SessionConversationView({
   };
 
   const currentAgent = session?.agent ?? initialAgent;
-  // 终端子页门槛与 Resume 同源；对话页不加载详情，读详情缓存，缓存没热过
-  // 就按可用渲染——真正的拒绝在 prepare/launch 那一层仍然成立。
   const cachedDetail = sessionDetailCache.get(sessionId);
-  const resumeGate = cachedDetail
-    ? (cachedDetail.can_resume
-      ? null
-      : cachedDetail.source_status === "missing"
-        ? "源会话已不存在，无法继续"
-        : "无法确认源会话状态，暂时不能继续")
-    : null;
   const rawTitle = session ? sessionDisplayTitle(session.title) : initialTitle;
   const displayTitle = rawTitle
     ? (rawTitle === UNTITLED_SESSION ? "未命名会话" : rawTitle)
@@ -549,9 +540,6 @@ export default function SessionConversationView({
             <SessionSubpageTabs
               sessionId={sessionId}
               entry="conversation"
-              agent={currentAgent ?? null}
-              sourceKind={cachedDetail?.session.source_kind}
-              terminalGate={resumeGate}
               navigate={navigate}
             />
             {currentAgent && (
@@ -561,6 +549,7 @@ export default function SessionConversationView({
                 sourceKind={cachedDetail?.session.source_kind}
                 title={displayTitle}
                 trashed={!!cachedDetail?.session.trashed_at}
+                navigate={navigate}
                 onChanged={reload}
               />
             )}

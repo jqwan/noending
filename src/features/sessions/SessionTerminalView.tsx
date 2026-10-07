@@ -7,25 +7,25 @@ import "@xterm/xterm/css/xterm.css";
 import PageHeader from "../../layout/PageHeader";
 import { copyToClipboard } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
+import Icon from "../../components/Icon";
 import { api } from "../../api";
-import SessionSubpageTabs from "./SessionSubpageTabs";
-import SessionHeaderActions from "./SessionHeaderActions";
 import { sessionDisplayTitle } from "./SessionTable";
-import { sessionDetailCache } from "./SessionDetailView";
-import type { Agent, SessionDetail, TerminalSnapshot } from "../../types";
+import type { Agent, TerminalSnapshot } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
- * 会话的第三个子页：内嵌 TUI 终端。PTY 与 scrollback 都归后端
- * （terminal registry），本组件只是 attach/detach 客户端——切走子页（remount）
- * 进程照跑，切回来重放 scrollback 快照。
+ * 内嵌终端视图（一等独立路由）。PTY 与 scrollback 都归后端（terminal
+ * registry），本组件只是 attach/detach 客户端——切走再切回（remount）进程
+ * 照跑，xterm 实例按 terminal_id 常驻，重挂零重建。
  *
- * 进入即用：没有内嵌终端时自动直启一次内嵌 Resume（launch_embedded_resume，
- * 不经过继续会话弹窗），失败给出原因和重试。已退出的终端回放只读，横幅里的
- * 「再次启动」直接再开一个新终端。
+ * 会话身份由后端绑定，只有两种精确来源：预指定 session id（claude / pi）
+ * 在摄入发现时精确匹配；codex / agy 由会话页的终端入口做校验匹配（cwd +
+ * 首条消息内容 + 发送时间）后当场绑定。绑定事实经 `terminal-bound` 事件
+ * 推送进来，点亮右上角的会话详情入口——没绑定就没有这个入口，因为没发
+ * 过消息（或 CLI 自造 id 尚未被认领）的会话根本不存在。
  *
  * 已知的产品边界：关闭 NoEnding 会结束后端里的内嵌 Agent（后端 RunEvent::Exit
- * 统一收割）；要挂后台的会话走外部终端。
+ * 统一收割）。
  */
 
 /** base64 → PTY 原始字节。xterm.write 直接吃 Uint8Array，不经过字符串化。 */
@@ -41,18 +41,20 @@ const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
 
 type TerminalState =
   | { kind: "loading" }
-  | { kind: "launching" }
   | { kind: "error"; message: string }
   | { kind: "ready"; snapshot: TerminalSnapshot; exited: boolean };
 
+/** 注册表 bind() 的广播事件（terminal/mod.rs），payload 带 terminal_id + session_id。 */
+const EVENT_BOUND = "terminal-bound";
+
 /**
- * 常驻 xterm 实例，按 terminal_id 键控（VS Code 同款）。切走子页只让 DOM
+ * 常驻 xterm 实例，按 terminal_id 键控（VS Code 同款）。切走视图只让 DOM
  * 节点脱离文档，Terminal / scrollback / 尺寸 / 监听全部存活，detach 期间的
  * PTY 输出持续写入同一个实例；切回只需把节点搬回新容器——不做 scrollback
  * 重放。重放是布局错乱的根源：字节流里的光标定位/清屏序列绑定产生时的终端
  * 尺寸，重放视口稍有出入（挂载瞬间的 fit 抖动、resize 竞态）就渲染错乱，
  * 还会把错误尺寸发给 PTY 触发 TUI 重绘错位、滑不动。实例常驻后整类问题
- * 不存在。注册表随会话数量有界；「再次启动」会销毁旧实例。
+ * 不存在。注册表随会话数量有界。
  */
 type LiveTerminal = {
   term: Terminal;
@@ -73,145 +75,66 @@ export function resetLiveTerminalsForTests(): void {
   liveTerminals.clear();
 }
 
-/** 与 Resume 门槛同一套语义：回收站 / 源不可用都不能再开终端（后端同样拒绝）。 */
-function terminalGateOf(detail: SessionDetail | undefined): string | null {
-  if (!detail) return null;
-  if (detail.can_resume) return null;
-  return detail.source_status === "missing"
-    ? "源会话已不存在，无法继续"
-    : "无法确认源会话状态，暂时不能继续";
-}
-
-export default function SessionTerminalView({
-  sessionId,
-  terminalId,
-  initialTitle,
-  initialAgent,
-  navigate,
-}: {
-  /** 会话终端子页模式：挂在某个已存在的会话上。 */
-  sessionId?: string;
-  /** 独立终端模式：内嵌新建的直接落点，会话身份由摄入发现后绑定。 */
-  terminalId?: string;
+export default function SessionTerminalView({ terminalId, initialTitle, initialAgent, initialSessionId, navigate }: {
+  /** 独立终端路由：内嵌新建与「先跳后启」的共同落点。 */
+  terminalId: string;
+  /** 会话页跳转带来的身份种子：首帧即终帧，标题不闪、入口即刻可点。 */
   initialTitle?: string;
   initialAgent?: Agent;
+  initialSessionId?: string;
   navigate: (r: Route) => void;
 }) {
-  const standalone = sessionId === undefined;
-  const cached = sessionId ? sessionDetailCache.get(sessionId) : undefined;
-  const agent = cached?.session.agent ?? initialAgent ?? null;
-  const displayTitle = cached
-    ? sessionDisplayTitle(cached.session.title)
-    : sessionDisplayTitle(initialTitle);
-
   const [state, setState] = useState<TerminalState>({ kind: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // 头部动作簇（回收/同步/继续）与终端段的能力判别需要会话事实（回收站态、
-  // source_kind）：详情是纯读取，进来读一次并写缓存，动作后刷新。独立终端
-  // 没有会话事实可读——绑定完成后整个视图会被替换掉。
-  const [detail, setDetail] = useState<SessionDetail | null>(
-    () => (sessionId ? sessionDetailCache.get(sessionId) ?? null : null),
-  );
-  const refreshDetail = useCallback(() => {
-    if (!sessionId) return;
-    api.getSessionDetail(sessionId)
-      .then((d) => {
-        sessionDetailCache.set(sessionId, d);
-        setDetail(d);
-      })
-      .catch(() => {
-        // 详情读不到时头部按 props 兜底；终端本身不受影响。
-      });
-  }, [sessionId]);
-  useEffect(() => {
-    refreshDetail();
-  }, [refreshDetail]);
+  // 绑定事实：路由种子（会话页跳转）优先，attach 快照与 terminal-bound
+  // 事件随后确认。没绑定时会话详情入口置灰。
+  const [boundSessionId, setBoundSessionId] = useState<string | null>(initialSessionId ?? null);
+  const [boundTitle, setBoundTitle] = useState<string | null>(initialTitle ?? null);
 
-  /**
-   * 进入即用。会话模式：查已有终端 → 有则 attach；没有则自动直启一次内嵌
-   * Resume 再 attach（门槛与 Resume 同源）。独立模式：按 terminalId 直接
-   * attach——终端在新建弹窗确认时就已起好。
-   */
+  /** 进入即用：按 terminalId 直接 attach——终端在新建弹窗确认或「先跳后启」
+   *  启动时就已存在，本视图从不负责 spawn。 */
   const bootstrap = useCallback(() => {
     setState({ kind: "loading" });
-    const attachOrCreate = async (): Promise<TerminalSnapshot> => {
-      if (standalone) {
-        if (!terminalId) throw new Error("缺少终端标识");
-        return api.terminalAttach(terminalId);
-      }
-      const summary = await api.terminalForSession(sessionId!);
-      if (summary) return api.terminalAttach(summary.terminal_id);
-      const gate = terminalGateOf(sessionDetailCache.get(sessionId!));
-      if (gate) throw new Error(gate);
-      setState({ kind: "launching" });
-      await api.launchEmbeddedResume(sessionId!);
-      const created = await api.terminalForSession(sessionId!);
-      if (!created) throw new Error("启动已完成，但找不到内嵌终端记录");
-      return api.terminalAttach(created.terminal_id);
-    };
-    attachOrCreate()
+    api.terminalAttach(terminalId)
       .then((snapshot) => {
+        if (snapshot.session_id) setBoundSessionId(snapshot.session_id);
         setState({ kind: "ready", snapshot, exited: !snapshot.live });
       })
       .catch((error) => {
         setState({ kind: "error", message: String(error) });
       });
-  }, [sessionId, standalone, terminalId]);
+  }, [terminalId]);
 
   useEffect(() => {
     bootstrap();
   }, [bootstrap]);
 
-  // 独立终端的绑定侦听：摄入完成（会话文件被发现、LaunchIntent 匹配、终端
-  // 绑定）后，快照里的 session_id 就有值了——就地 replace 成会话终端子页，
-  // xterm 实例按 terminal_id 常驻，换路由零重建。轮询 attach 而不是新事件：
-  // 绑定是后端一次内存写，事件面不加第二通道。
+  // 绑定事实的推送通道：注册表 bind()（预指定 id 精确匹配，或会话页的
+  // 校验匹配）一发事件这里就点亮入口。挂载期间没等到绑定的情形，由重新
+  // 挂载时 attach 快照里的身份兜底——两个方向都闭环，无轮询。
   useEffect(() => {
-    if (!standalone || !terminalId) return;
-    const poll = window.setInterval(() => {
-      api.terminalAttach(terminalId)
-        .then((snap) => {
-          if (snap.session_id) {
-            window.clearInterval(poll);
-            navigate({
-              view: "session",
-              sessionId: snap.session_id,
-              entry: "terminal",
-            });
-          }
-        })
-        .catch(() => {});
-    }, 1500);
-    return () => window.clearInterval(poll);
-  }, [standalone, terminalId, navigate]);
+    const un = listen<{ terminal_id: string; session_id: string }>(EVENT_BOUND, (e) => {
+      if (e.payload.terminal_id === terminalId) setBoundSessionId(e.payload.session_id);
+    });
+    return () => {
+      void un.then((f) => f()).catch(() => {});
+    };
+  }, [terminalId]);
 
-  /** 退出横幅的「再次启动」：跳过已退出终端的 attach，强制新开一个内嵌终端。
-   *  只在会话模式有意义——独立终端没有会话身份可供 Resume。 */
-  const relaunch = useCallback(() => {
-    if (standalone || !sessionId) return;
-    setState({ kind: "launching" });
-    // 旧实例就地销毁：它的 Agent 已退出，「再次启动」开的是新 PTY、新实例。
-    if (state.kind === "ready") {
-      const old = liveTerminals.get(state.snapshot.terminal_id);
-      if (old) {
-        old.unlisteners.forEach((u) => u());
-        old.term.dispose();
-        liveTerminals.delete(state.snapshot.terminal_id);
-      }
-    }
-    api.launchEmbeddedResume(sessionId)
-      .then(() => api.terminalForSession(sessionId))
-      .then((created) => {
-        if (!created) throw new Error("启动已完成，但找不到内嵌终端记录");
-        return api.terminalAttach(created.terminal_id);
+  // 绑定后把标题换成会话本名（种子只是首帧占位，权威仍是详情）；读失败
+  // 保持当前标题，终端本身不受影响。
+  useEffect(() => {
+    if (!boundSessionId) return;
+    let live = true;
+    api.getSessionDetail(boundSessionId)
+      .then((d) => {
+        if (live) setBoundTitle(sessionDisplayTitle(d.session.title));
       })
-      .then((snapshot) => {
-        setState({ kind: "ready", snapshot, exited: !snapshot.live });
-      })
-      .catch((error) => {
-        setState({ kind: "error", message: String(error) });
-      });
-  }, [sessionId, standalone, state]);
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [boundSessionId]);
 
   // xterm 生命周期：实例按 terminal_id 常驻（liveTerminals），本 effect 只做
   // 两件事——首次创建（open + 监听 + 回放一次 scrollback），或重挂（把存活的
@@ -483,10 +406,10 @@ export default function SessionTerminalView({
     };
   }, [snapshot]);
 
-  // 独立终端还没有会话标题：以「新终端」为名，绑定后整个视图被会话终端
-  // 子页替换，标题自然换成本名。
-  const headerTitle = standalone ? "新终端" : displayTitle;
-  const headerAgent = standalone ? snapshot?.agent ?? null : agent;
+  // 未绑定的终端以「新终端」为名；绑定后标题换成会话本名。agent 在
+  // attach 回来前用路由种子，避免首帧丢失图标。
+  const headerTitle = boundTitle ?? "新终端";
+  const headerAgent = snapshot?.agent ?? initialAgent ?? null;
 
   return (
     <div className="main fill">
@@ -501,34 +424,22 @@ export default function SessionTerminalView({
             headerTitle
           )
         }
-        actions={standalone ? null : (
-          <span className="row" style={{ gap: 8 }}>
-            <SessionSubpageTabs
-              sessionId={sessionId!}
-              entry="terminal"
-              agent={agent}
-              sourceKind={detail?.session.source_kind}
-              terminalGate={terminalGateOf(cached)}
-              navigate={navigate}
-            />
-            {agent && (
-              <SessionHeaderActions
-                sessionId={sessionId!}
-                agent={agent}
-                sourceKind={detail?.session.source_kind}
-                title={displayTitle}
-                trashed={!!detail?.session.trashed_at}
-                onChanged={refreshDetail}
-              />
-            )}
-          </span>
-        )}
+        actions={
+          <button
+            className="btn ghost icon-button"
+            aria-label="会话详情"
+            title={boundSessionId ? "打开会话详情" : "会话与终端绑定后可打开会话详情"}
+            disabled={!boundSessionId}
+            onClick={() => {
+              if (boundSessionId) navigate({ view: "session", sessionId: boundSessionId });
+            }}
+          >
+            <Icon name="info" />
+          </button>
+        }
       />
 
       {state.kind === "loading" && <div className="empty">正在连接内嵌终端…</div>}
-      {state.kind === "launching" && (
-        <div className="empty">正在启动内嵌终端：Agent 将恢复此会话…</div>
-      )}
       {state.kind === "error" && (
         <div className="empty">
           内嵌终端不可用。
@@ -540,27 +451,16 @@ export default function SessionTerminalView({
       )}
       {snapshot !== null && (
         <>
-          {standalone && snapshot.live && (
+          {snapshot.live && !boundSessionId && (
             <div className="terminal-exit-banner" role="status">
-              Agent 正在运行。会话落盘并被发现后，这里会自动成为该会话的终端。
+              Agent 正在运行。会话与终端绑定后，右上角会出现会话详情入口。
             </div>
           )}
           {exited && (
             <div className="terminal-exit-banner" role="status">
-              {standalone
-                ? "这个终端里的 Agent 已退出。"
-                : (
-                  <>
-                    这个终端里的 Agent 已退出
-                    {snapshot.exit_code !== null && <>（退出码 {snapshot.exit_code}）</>}
-                    。对话记录会随摄入出现在概览与对话页。
-                  </>
-                )}
-              {!standalone && (
-                <button className="btn small" style={{ marginLeft: 10 }} onClick={relaunch}>
-                  再次启动
-                </button>
-              )}
+              这个终端里的 Agent 已退出
+              {snapshot.exit_code !== null && <>（退出码 {snapshot.exit_code}）</>}
+              。对话记录会随摄入出现在会话页。
             </div>
           )}
           <div className="terminal-body">

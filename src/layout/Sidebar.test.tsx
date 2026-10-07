@@ -1,37 +1,52 @@
-// Projects Experience v0.2 前端契约：
-// Sidebar 只有一等 Projects 导航，不再渲染单个 Project 实体。
+// Sidebar 契约：一等导航 + 「运行中」终端列表（registry 运行时事实，事件刷新）。
+// 旧的最近任务/固定列表已由运行终端取代。
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
+import { EVT_TERMINALS } from "../app/routes";
 import type { Route } from "../app/routes";
+import type { TerminalSummary } from "../types";
 
 vi.mock("../api", () => ({
   api: {
-    listWorkstreamCards: vi.fn(),
+    terminalList: vi.fn(),
   },
 }));
 
 beforeEach(() => {
-  vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
+  vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
 });
 
 afterEach(cleanup);
 
-function renderSidebar(route: Route, navigate = vi.fn()) {
+function renderSidebar(route: Route = { view: "home" }, navigate = vi.fn()) {
   render(<Sidebar route={route} navigate={navigate} onSearch={() => {}} />);
   return navigate;
 }
 
-describe("Sidebar projects navigation", () => {
-  it("provides an explicit home entry", async () => {
-    const navigate = renderSidebar({ view: "home" });
+function terminal(over: Partial<TerminalSummary>): TerminalSummary {
+  return {
+    terminal_id: "t-1",
+    session_id: null,
+    agent: "codex",
+    cwd: "/repo/x",
+    created_at: new Date().toISOString(),
+    live: true,
+    exit_code: null,
+    session_title: null,
+    ...over,
+  };
+}
+
+describe("Sidebar navigation", () => {
+  it("provides an explicit home entry", () => {
+    const navigate = renderSidebar();
     const home = screen.getByRole("button", { name: "首页" });
     expect(home.className).toContain("active");
     fireEvent.click(home);
     expect(navigate).toHaveBeenCalledWith({ view: "home" });
-    await waitFor(() => expect(api.listWorkstreamCards).toHaveBeenCalled());
   });
 
   it("sidebar_has_projects_navigation", async () => {
@@ -62,31 +77,44 @@ describe("Sidebar projects navigation", () => {
     expect(item.className).toContain("active");
   });
 
-  it("sidebar_settings_is_active_when_route_is_settings", async () => {
+  it("sidebar_settings_is_active_when_route_is_settings", () => {
     const navigate = renderSidebar({ view: "settings" });
     const settings = screen.getByRole("button", { name: /设置/ });
     expect(settings.className).toContain("active");
     fireEvent.click(settings);
     expect(navigate).toHaveBeenCalledWith({ view: "settings" });
-    await waitFor(() => expect(api.listWorkstreamCards).toHaveBeenCalled());
   });
 });
 
-it("remembers pinned tasks and keeps them outside the recent six", async () => {
-  localStorage.clear();
-  const cards = Array.from({ length: 7 }, (_, i) => ({
-    id: `w${i}`, title: `任务${i}`, lifecycle: "active", visibility: "normal", updated_at: `2026-09-${20-i}`,
-  })) as Awaited<ReturnType<typeof api.listWorkstreamCards>>;
-  vi.mocked(api.listWorkstreamCards).mockResolvedValue(cards);
-  localStorage.setItem("noending.pinnedTasks", JSON.stringify(["w6"]));
-  const view = render(<Sidebar route={{ view: "home" }} navigate={vi.fn()} onSearch={() => {}} />);
-  const unpin = await screen.findByRole("button", { name: "取消固定：任务6" });
-  expect(screen.getByText("任务0")).toBeTruthy();
-  fireEvent.click(unpin);
-  expect(localStorage.getItem("noending.pinnedTasks")).toBe("[]");
-  fireEvent.click(screen.getByRole("button", { name: "固定：任务0" }));
-  view.unmount();
-  render(<Sidebar route={{ view: "home" }} navigate={vi.fn()} onSearch={() => {}} />);
-  expect(await screen.findByRole("button", { name: "取消固定：任务0" })).toBeTruthy();
-  localStorage.clear();
+describe("Sidebar 运行中终端", () => {
+  it("hides the section when no terminal is running", async () => {
+    renderSidebar();
+    await waitFor(() => expect(api.terminalList).toHaveBeenCalled());
+    expect(screen.queryByText("运行中")).toBeNull();
+  });
+
+  it("shows live terminals; unbound reads 新终端, bound reads the session name", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ terminal_id: "t-1" }),
+      terminal({ terminal_id: "t-2", session_id: "s1", session_title: "修复布局" }),
+    ]);
+    const navigate = renderSidebar();
+
+    expect(await screen.findByText("新终端")).toBeTruthy();
+    expect(screen.getByText("修复布局")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("新终端"));
+    expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-1" });
+    fireEvent.click(screen.getByText("修复布局"));
+    expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-2" });
+  });
+
+  it("refetches once per terminals-changed event — no polling", async () => {
+    renderSidebar();
+    await waitFor(() => expect(api.terminalList).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
+    window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
+    await waitFor(() => expect(api.terminalList).toHaveBeenCalledTimes(3));
+  });
 });

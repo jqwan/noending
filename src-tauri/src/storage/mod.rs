@@ -570,6 +570,23 @@ impl Db {
             .optional()?)
     }
 
+    /// The session's first user turn: text + timestamp. The on-demand
+    /// terminal matcher's content evidence — a live unbound terminal may
+    /// claim a session only if this text is visible in its scrollback.
+    /// None while the session has no user turn yet (nothing to verify).
+    pub fn first_user_message(&self, session_id: &str) -> Result<Option<(String, Option<String>)>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT content, ts FROM session_messages
+                 WHERE session_id = ?1 AND role = 'user'
+                 ORDER BY sequence LIMIT 1",
+                params![session_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?)
+    }
+
     /// The Logical Session for a root Resume identity. This is THE
     /// session lookup for LaunchIntent matching and Resume.
     pub fn find_session_by_root_agent_id(

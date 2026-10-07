@@ -165,6 +165,50 @@ pub fn enqueue(app: &AppHandle, scope: IngestScope) {
     }
 }
 
+/// One global gate on the PTY-output trigger: heavy TUI redraws emit
+/// thousands of chunks per second, and a cursor-incremental pass a couple of
+/// seconds late is indistinguishable from an immediate one.
+const UNBOUND_TRIGGER_MIN_INTERVAL_MS: u64 = 2000;
+static UNBOUND_TRIGGER_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An unbound terminal just produced bytes. A TUI writing its session file
+/// cannot do so silently, so output is the moment discovery becomes
+/// worthwhile — event-driven, never a timer. Scoped to the agent's own
+/// ingest sources: a terminal's output never sends the other formats'
+/// cursors on a walk. Binding happens inside the worker (bind_discovered),
+/// and once the terminal is bound this trigger simply stops being called.
+pub fn trigger_unbound_agent(app: &AppHandle, agent: crate::domain::Agent) {
+    use std::sync::atomic::Ordering;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = UNBOUND_TRIGGER_LAST.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < UNBOUND_TRIGGER_MIN_INTERVAL_MS {
+        return;
+    }
+    if UNBOUND_TRIGGER_LAST
+        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return; // another reader thread won the gate this round
+    }
+    let state = app.state::<AppState>();
+    let sources: Vec<crate::domain::IngestSource> = match state.db.list_ingest_sources() {
+        Ok(ss) => ss
+            .into_iter()
+            .filter(|s| s.enabled && s.agent == agent)
+            .collect(),
+        Err(e) => {
+            eprintln!("[ingest] unbound trigger: listing sources failed: {e}");
+            return;
+        }
+    };
+    for source in sources {
+        enqueue(app, IngestScope::ReconcileSource(source.id));
+    }
+}
+
 fn spawn_worker(app: AppHandle) {
     std::thread::spawn(move || {
         while let Some(scope) = {

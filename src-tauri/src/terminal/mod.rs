@@ -39,12 +39,27 @@ const INITIAL_ROWS: u16 = 24;
 
 pub const EVENT_OUTPUT_PREFIX: &str = "terminal-output://";
 pub const EVENT_EXIT_PREFIX: &str = "terminal-exit://";
+/// List-level fact: the set of live terminals changed (spawn / exit / bind).
+/// Sidebar and any terminal-list consumer refetch once per event — no polling.
+pub const EVENT_CHANGED: &str = "terminals-changed";
+/// Per-bind fact: an unbound terminal just received its session identity.
+/// Payload: [`TerminalBound`]. The standalone terminal view listens for this
+/// to light up its session-detail entry the moment binding happens.
+pub const EVENT_BOUND: &str = "terminal-bound";
+
+/// The payload of `terminal-bound`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalBound {
+    pub terminal_id: String,
+    pub session_id: String,
+}
 
 /// The facts a terminal subpage needs to decide what it is looking at.
 /// `session_id` is None for a NEW-session terminal: the Agent has been
-/// launched but its session file is not on disk yet. Ingestion binds it
-/// (`bind_discovered`) the moment a discovered session claims the launch's
-/// LaunchIntent.
+/// launched but its session file is not on disk yet. Binding happens only
+/// through exact facts — a prespecified session id (claude / pi) matched at
+/// discovery, or the session page's on-demand verified match — never by
+/// guessing from cwd + timing alone.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalSummary {
     pub terminal_id: String,
@@ -54,6 +69,11 @@ pub struct TerminalSummary {
     pub created_at: String,
     pub live: bool,
     pub exit_code: Option<i32>,
+    /// Filled by the `terminal_list` command (a DB lookup the registry
+    /// itself never does): the bound session's display title. None for
+    /// unbound terminals.
+    #[serde(default)]
+    pub session_title: Option<String>,
 }
 
 /// attach 的回答：元数据 + 当前 scrollback 快照 + 几何。一次性全量重放
@@ -106,6 +126,79 @@ impl Scrollback {
     }
 }
 
+/// Remove ANSI escape sequences (CSI `ESC [ … final`, OSC `ESC ] … BEL/ST`,
+/// and two-byte escapes) so TUI-rendered text becomes searchable. Raw PTY
+/// bytes are full of cursor addressing; the message content survives as the
+/// plain runs between sequences.
+fn strip_ansi(bytes: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            break;
+        }
+        match bytes[i + 1] {
+            b'[' => {
+                i += 2;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                i += 1; // final byte
+            }
+            b']' => {
+                i += 2;
+                while i < bytes.len() {
+                    if bytes[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => i += 2, // two-byte escape (charset, save cursor, …)
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// TUIs wrap text at terminal width and re-render on resize: whitespace of
+/// any kind must not break the needle. Collapsing everything (haystack and
+/// needle alike) makes "hello world" match "hello\r\n  world" and costs
+/// nothing in precision — the message text is high-entropy.
+fn normalize_ws(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The searchable form of a first message: whitespace-collapsed, and cut to
+/// a prefix when very long — a TUI may truncate or the scrollback ring may
+/// hold only the opening. A miss here means "no match", never a wrong bind.
+fn search_needle(message: &str) -> String {
+    let full = normalize_ws(message);
+    const MAX: usize = 120;
+    if full.chars().count() <= MAX {
+        return full;
+    }
+    full.chars().take(80).collect()
+}
+
+/// RFC3339 parse for ordering comparisons; the registry writes `now()`
+/// (chrono UTC) and ingestion timestamps share the family, but a foreign
+/// format must not panic the matcher — None just means "cannot verify".
+fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
 /// One embedded terminal. Fields are behind one per-record mutex because the
 /// reader thread (PTY output), the wait thread (exit), and the frontend
 /// commands (input / resize / attach) all touch it — each holds the lock only
@@ -113,6 +206,11 @@ impl Scrollback {
 /// emit, so contention is bounded to microseconds.
 struct TerminalRecord {
     summary: TerminalSummary,
+    /// For a NEW-session launch on a CLI that accepts a prespecified session
+    /// id (claude / pi): the identity NoEnding generated before spawn. The
+    /// discovered session will carry it as `root_agent_session_id`, which is
+    /// what `bind_discovered` matches on — exact, never inferred.
+    expected_root_session_id: Option<String>,
     scrollback: Scrollback,
     cols: u16,
     rows: u16,
@@ -200,7 +298,10 @@ impl TerminalRegistry {
     }
 
     /// Attach `session_id` to an unbound terminal. A terminal already bound
-    /// (to any session) is left alone — binding happens once.
+    /// (to any session) is left alone — binding happens once, from exact
+    /// facts only. The transition is announced twice: `terminal-bound` (with
+    /// the ids, for the attached terminal view) and `terminals-changed` (the
+    /// sidebar entry can now show the session's name).
     pub fn bind(&self, terminal_id: &str, session_id: &str) {
         let Ok(records) = self.records.lock() else {
             return;
@@ -209,22 +310,39 @@ impl TerminalRegistry {
             return;
         };
         drop(records);
-        let Ok(mut record) = record.lock() else {
-            return;
-        };
-        if record.summary.session_id.is_none() {
+        let bound = {
+            let Ok(mut record) = record.lock() else {
+                return;
+            };
+            if record.summary.session_id.is_some() {
+                return;
+            }
             record.summary.session_id = Some(session_id.to_string());
+            true
+        };
+        if bound {
+            if let Some(app) = &self.app {
+                let _ = app.emit(
+                    EVENT_BOUND,
+                    TerminalBound {
+                        terminal_id: terminal_id.to_string(),
+                        session_id: session_id.to_string(),
+                    },
+                );
+                let _ = app.emit(EVENT_CHANGED, ());
+            }
         }
     }
 
-    /// Ingestion's bind step: a discovered session that just claimed a
-    /// LaunchIntent is the session a NEW-session terminal was waiting for.
-    /// The intent carries the launch's agent + cwd — the same facts the
-    /// terminal was spawned with — so the pairing needs no new identity
-    /// machinery. Runs after every ingestion pass; a no-op when nothing
-    /// is waiting.
+    /// Discovery's bind step. Only exact facts bind here: a NEW-session
+    /// terminal whose command line carried a prespecified session id
+    /// (claude / pi) is matched against the discovered session's
+    /// `root_agent_session_id`. CLIs that generate their own ids (codex /
+    /// agy) never bind automatically — they bind on demand through the
+    /// session page's verified match, so a lookalike session in the same
+    /// directory can never steal the identity.
     pub fn bind_discovered(&self, db: &crate::storage::Db) {
-        let unbound: Vec<(String, Agent, Option<String>)> = {
+        let waiting: Vec<(String, Agent, String)> = {
             let Ok(records) = self.records.lock() else {
                 return;
             };
@@ -232,38 +350,94 @@ impl TerminalRegistry {
                 .values()
                 .filter_map(|record| {
                     let record = record.lock().ok()?;
-                    (record.summary.live && record.summary.session_id.is_none()).then(|| {
+                    (record.summary.live
+                        && record.summary.session_id.is_none()
+                        && record.expected_root_session_id.is_some())
+                    .then(|| {
                         (
                             record.summary.terminal_id.clone(),
                             record.summary.agent,
-                            record.summary.cwd.clone(),
+                            record
+                                .expected_root_session_id
+                                .clone()
+                                .expect("checked above"),
                         )
                     })
                 })
                 .collect()
         };
-        if unbound.is_empty() {
-            return;
+        for (terminal_id, agent, expected) in waiting {
+            if let Ok(Some(session)) = db.find_session_by_root_agent_id(agent, &expected) {
+                self.bind(&terminal_id, &session.id);
+            }
         }
-        for (terminal_id, agent, cwd) in unbound {
-            let Ok(intents) = db.list_launch_intents(&[crate::domain::launch_status::MATCHED], 50)
-            else {
-                return;
-            };
-            for intent in intents {
-                if intent.matched_session_id.is_none()
-                    || intent.agent != agent
-                    || intent.cwd.is_none()
-                    || intent.cwd != cwd
+    }
+
+    /// The session page's on-demand match (the terminal entry click). For a
+    /// session whose CLI generates its own ids (codex / agy) there is no
+    /// birth identity to match on; binding happens HERE instead — the user
+    /// is asking for this session's terminal, so we verify before we claim:
+    /// same Agent, same working directory, the terminal existed when the
+    /// first message was sent, and the message text itself is visible in the
+    /// terminal's scrollback. Three independent facts agreeing is as close to
+    /// certain as the file side allows; a miss means "launch a fresh Resume
+    /// terminal", never "bind anyway".
+    ///
+    /// Bindings made here are as trustworthy as prespecified-id ones: the
+    /// terminal view may open its session-detail entry, the sidebar may show
+    /// the session's name.
+    pub fn match_unbound(
+        &self,
+        session_id: &str,
+        agent: Agent,
+        cwd: &str,
+        first_message_at: &str,
+        first_message: &str,
+    ) -> Option<TerminalSummary> {
+        let needle = search_needle(first_message);
+        if needle.is_empty() {
+            return None;
+        }
+        let sent_at = parse_ts(first_message_at);
+        // The records guard covers only the scan: bind() takes the same lock,
+        // and this mutex is not reentrant (a guard may never span a same-half
+        // call — the storage-concurrency rule, again).
+        let best = {
+            let records = self.records.lock().ok()?;
+            let mut best: Option<(TerminalSummary, String)> = None;
+            for record in records.values() {
+                let Ok(record) = record.lock() else { continue };
+                if !record.summary.live
+                    || record.summary.session_id.is_some()
+                    || record.summary.agent != agent
+                    || record.summary.cwd.as_deref() != Some(cwd)
                 {
                     continue;
                 }
-                if let Some(session_id) = intent.matched_session_id {
-                    self.bind(&terminal_id, &session_id);
+                // The terminal must have existed when the message was sent.
+                let created = parse_ts(&record.summary.created_at);
+                match (&created, &sent_at) {
+                    (Some(c), Some(s)) if c > s => continue,
+                    (None, _) if sent_at.is_some() => continue,
+                    _ => {}
                 }
-                break;
+                let haystack = normalize_ws(&strip_ansi(&record.scrollback.bytes()));
+                if !haystack.contains(&needle) {
+                    continue;
+                }
+                let newer = best
+                    .as_ref()
+                    .map(|(prev, _)| record.summary.created_at > prev.created_at)
+                    .unwrap_or(true);
+                if newer {
+                    best = Some((record.summary.clone(), record.summary.terminal_id.clone()));
+                }
             }
-        }
+            best
+        };
+        let (summary, terminal_id) = best?;
+        self.bind(&terminal_id, session_id);
+        Some(summary)
     }
 
     pub fn attach(&self, terminal_id: &str) -> Result<TerminalSnapshot> {
@@ -361,6 +535,7 @@ impl TerminalRegistry {
     fn register(
         &self,
         summary: TerminalSummary,
+        expected_root_session_id: Option<String>,
         scrollback: Scrollback,
         master: Box<dyn portable_pty::MasterPty + Send>,
         writer: Box<dyn std::io::Write + Send>,
@@ -371,6 +546,7 @@ impl TerminalRegistry {
         let terminal_id = summary.terminal_id.clone();
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
             summary: summary.clone(),
+            expected_root_session_id,
             scrollback,
             cols: INITIAL_COLS,
             rows: INITIAL_ROWS,
@@ -380,6 +556,10 @@ impl TerminalRegistry {
         }));
         if let Ok(mut records) = self.records.lock() {
             records.insert(terminal_id.clone(), record.clone());
+        }
+        // The live set grew: sidebar and other list consumers refetch once.
+        if let Some(app) = &self.app {
+            let _ = app.emit(EVENT_CHANGED, ());
         }
 
         // Reader: PTY master → scrollback → webview event. The lock is taken
@@ -395,15 +575,29 @@ impl TerminalRegistry {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let encoded = {
+                        let (encoded, unbound_agent) = {
                             let Ok(mut record) = reader_record.lock() else {
                                 break;
                             };
                             record.scrollback.push(&chunk[..n]);
-                            base64::engine::general_purpose::STANDARD.encode(&chunk[..n])
+                            // Output is the downstream signal of "something
+                            // new to pick up": a TUI writing its session file
+                            // cannot do so silently. Unbound terminals only —
+                            // the throttle gate lives in the ingestion side
+                            // and the branch disappears once bound.
+                            let unbound = (record.summary.live
+                                && record.summary.session_id.is_none())
+                            .then_some(record.summary.agent);
+                            (
+                                base64::engine::general_purpose::STANDARD.encode(&chunk[..n]),
+                                unbound,
+                            )
                         };
                         if let Some(app) = &reader_app {
                             let _ = app.emit(&format!("{EVENT_OUTPUT_PREFIX}{reader_id}"), encoded);
+                            if let Some(agent) = unbound_agent {
+                                crate::commands::ingestion::trigger_unbound_agent(app, agent);
+                            }
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -430,6 +624,7 @@ impl TerminalRegistry {
                     &format!("{EVENT_EXIT_PREFIX}{wait_id}"),
                     TerminalExit { exit_code },
                 );
+                let _ = app.emit(EVENT_CHANGED, ());
             }
         });
 
@@ -443,8 +638,12 @@ impl TerminalRegistry {
 pub struct EmbeddedTarget<'a> {
     pub registry: &'a TerminalRegistry,
     /// None for a NEW-session launch: the session does not exist yet; the
-    /// registry entry starts unbound and ingestion attaches it later.
+    /// registry entry starts unbound and binds later — by prespecified-id
+    /// match at discovery, or the session page's on-demand verified match.
     pub session_id: Option<&'a str>,
+    /// The prespecified session id the command line carries (claude / pi);
+    /// None when the CLI generates its own ids (codex / agy).
+    pub expected_root_session_id: Option<&'a str>,
     pub agent: Agent,
 }
 
@@ -472,10 +671,12 @@ pub fn spawn_embedded(
         created_at: now(),
         live: true,
         exit_code: None,
+        session_title: None,
     };
 
     let summary = target.registry.register(
         summary,
+        target.expected_root_session_id.map(str::to_string),
         Scrollback::default(),
         pty.into_master(),
         writer,
@@ -529,6 +730,7 @@ mod tests {
         EmbeddedTarget {
             registry,
             session_id: Some(session),
+            expected_root_session_id: None,
             agent: Agent::Codex,
         }
     }
@@ -660,7 +862,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn an_unbound_new_terminal_binds_when_a_matched_intent_claims_a_session() {
+    fn a_codex_terminal_stays_unbound_even_when_an_intent_claims_a_session() {
         let registry = registry();
         let mut cmd = sh("sleep 30");
         cmd.cwd = Some(std::path::PathBuf::from("/tmp"));
@@ -669,28 +871,20 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: None,
+                expected_root_session_id: None,
                 agent: Agent::Codex,
             },
         )
         .unwrap();
         let id = outcome.terminal_id.clone().unwrap();
 
-        // Live, unbound, invisible to every session lookup.
-        assert!(
-            registry
-                .list_live()
-                .iter()
-                .any(|t| t.terminal_id == id && t.session_id.is_none()),
-            "the new-session terminal starts unbound"
-        );
-        assert!(registry.for_session("s-discovered").is_none());
-        assert!(!registry.has_live("s-discovered"));
-
-        // A discovered session claimed the launch's intent: the intent
-        // carries the same agent + cwd the terminal was spawned with, and
-        // bind_discovered pairs them.
+        // codex generates its own session ids, so nothing on the file side
+        // can identify "its" session with certainty. Even a MATCHED intent
+        // carrying the same agent + cwd must NOT bind the terminal — the
+        // old cwd+timing inference is retired; binding happens only through
+        // the session page's verified match.
         let root =
-            std::env::temp_dir().join(format!("noending-term-bind-{}", crate::storage::new_id()));
+            std::env::temp_dir().join(format!("noending-term-nobind-{}", crate::storage::new_id()));
         std::fs::create_dir_all(&root).unwrap();
         let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
         let ts = crate::storage::now();
@@ -702,7 +896,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             process_id: None,
             launched_at: ts.clone(),
-            matched_session_id: Some("s-discovered".into()),
+            matched_session_id: Some("s-external".into()),
             status: crate::domain::launch_status::MATCHED.into(),
             note: String::new(),
             created_at: ts.clone(),
@@ -712,16 +906,145 @@ mod tests {
 
         registry.bind_discovered(&db);
 
-        let bound = registry.for_session("s-discovered").expect("bound");
-        assert_eq!(bound.terminal_id, id);
-        assert!(registry.has_live("s-discovered"));
+        assert!(registry.for_session("s-external").is_none());
         assert!(
-            !registry
+            registry
                 .list_live()
                 .iter()
                 .any(|t| t.terminal_id == id && t.session_id.is_none()),
-            "the pseudo-row source dries up once bound"
+            "an id-less terminal is never auto-bound"
         );
         registry.kill_all();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_prespecified_id_binds_at_discovery() {
+        let registry = registry();
+        let mut cmd = sh("sleep 30");
+        cmd.cwd = Some(std::path::PathBuf::from("/tmp"));
+        let outcome = spawn_embedded(
+            &cmd,
+            &EmbeddedTarget {
+                registry: &registry,
+                session_id: None,
+                expected_root_session_id: Some("root-born-identity"),
+                agent: Agent::Pi,
+            },
+        )
+        .unwrap();
+        let id = outcome.terminal_id.clone().unwrap();
+
+        let root = std::env::temp_dir().join(format!(
+            "noending-term-prespec-{}",
+            crate::storage::new_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
+        let (session_id, _) = db
+            .upsert_logical_session(
+                Agent::Pi,
+                "root-born-identity",
+                None,
+                Some("出生即有身份"),
+                Some("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                "pi",
+                "/tmp/fake-session.jsonl",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+
+        registry.bind_discovered(&db);
+
+        let bound = registry
+            .for_session(&session_id)
+            .expect("bound by exact id");
+        assert_eq!(bound.terminal_id, id);
+        assert!(registry.has_live(&session_id));
+        registry.kill_all();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_session_page_match_binds_a_verified_unbound_terminal() {
+        let registry = registry();
+        let mut cmd = sh("echo waiting; sleep 30");
+        cmd.cwd = Some(std::path::PathBuf::from("/tmp"));
+        let outcome = spawn_embedded(
+            &cmd,
+            &EmbeddedTarget {
+                registry: &registry,
+                session_id: None,
+                expected_root_session_id: None,
+                agent: Agent::Codex,
+            },
+        )
+        .unwrap();
+        let id = outcome.terminal_id.clone().unwrap();
+
+        let ts = crate::storage::now();
+        // Polls until the echo reached the scrollback; a None before that is
+        // the honest "not verified yet", not a failure.
+        let matched = until("the verified match lands", || {
+            registry
+                .match_unbound("s-page", Agent::Codex, "/tmp", &ts, "waiting")
+                .map(|s| s.terminal_id)
+        });
+        assert_eq!(matched, id);
+        assert!(registry.for_session("s-page").is_some());
+
+        // A different session asking for the same directory gets nothing:
+        // the terminal is bound once and its identity is not for sale.
+        assert!(registry
+            .match_unbound("s-other", Agent::Codex, "/tmp", &ts, "waiting")
+            .is_none());
+        // Wrong directory never matches.
+        let registry2 = TerminalRegistry::new(None);
+        let mut cmd2 = sh("echo hello; sleep 30");
+        cmd2.cwd = Some(std::path::PathBuf::from("/elsewhere"));
+        spawn_embedded(
+            &cmd2,
+            &EmbeddedTarget {
+                registry: &registry2,
+                session_id: None,
+                expected_root_session_id: None,
+                agent: Agent::Codex,
+            },
+        )
+        .unwrap();
+        assert!(
+            registry2
+                .match_unbound("s-page", Agent::Codex, "/tmp", &ts, "waiting")
+                .is_none(),
+            "cwd is a hard filter"
+        );
+        registry.kill_all();
+        registry2.kill_all();
+    }
+
+    #[test]
+    fn ansi_stripping_keeps_plain_text_searchable() {
+        // CSI color + cursor addressing + OSC title around the message.
+        let raw = b"\x1b[2J\x1b[1;1H\x1b]0;my title\x07\x1b[32mhello\x1b[0m world";
+        let plain = strip_ansi(raw);
+        assert!(normalize_ws(&plain).contains("helloworld"));
+    }
+
+    #[test]
+    fn search_needle_handles_wrapped_and_long_messages() {
+        let message = "first line\nsecond   line";
+        let haystack = "prompt> first\r\nline second line $";
+        assert!(normalize_ws(&strip_ansi(haystack.as_bytes())).contains(&search_needle(message)));
+        let long: String = std::iter::repeat("甲").take(300).collect();
+        let needle = search_needle(&long);
+        assert_eq!(
+            needle.chars().count(),
+            80,
+            "long messages match on a prefix"
+        );
     }
 }

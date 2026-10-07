@@ -105,33 +105,6 @@ pub fn run() {
                 commands::ingestion::IngestScope::ReconcileAll,
             );
 
-            // Bind watcher for NEW-session embedded terminals: such a terminal
-            // stays unbound until ingestion discovers its session file — but
-            // the app sitting open in the foreground has NO ingestion trigger
-            // (start / foreground-return / explicit enqueue only), so the file
-            // that the TUI just wrote would sit undiscovered indefinitely and
-            // the board's pseudo-row would never become a session. While any
-            // live unbound terminal exists, tick a ReconcileAll every few
-            // seconds: reconciliation is cursor-incremental, so an extra pass
-            // that finds nothing new is cheap. The condition dries up the
-            // moment the terminal binds or exits.
-            {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    let waiting = handle
-                        .try_state::<terminal::TerminalRegistry>()
-                        .map(|registry| registry.list_live().iter().any(|t| t.session_id.is_none()))
-                        .unwrap_or(false);
-                    if waiting {
-                        commands::ingestion::enqueue(
-                            &handle,
-                            commands::ingestion::IngestScope::ReconcileAll,
-                        );
-                    }
-                });
-            }
-
             // Workspace Reconcile: Git detection on paths that so far exist
             // only as strings. It runs after ingestion is queued because a
             // Session's cwd is what tells us a directory is real, and it

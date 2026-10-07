@@ -100,30 +100,3 @@ it("renders card view by default and list view when viewMode is list", () => {
   expect(document.querySelector(".session-card")).toBeNull();
   expect(document.querySelector(".session-list-row")).toBeTruthy();
 });
-
-it("renders live unbound terminals as pseudo-rows that open the standalone view", () => {
-  const open = vi.fn(); const openTerminal = vi.fn();
-  render(<SessionCards
-    sessions={[session]}
-    workstreamTitleById={new Map()}
-    projectNameById={new Map()}
-    unboundTerminals={[{
-      terminal_id: "t-9",
-      session_id: null,
-      agent: "codex",
-      cwd: "/repo/x",
-      created_at: new Date(Date.now() - 60_000).toISOString(),
-      live: true,
-      exit_code: null,
-    }]}
-    onOpen={open}
-    onOpenTerminal={openTerminal}
-    onResume={() => {}}
-    onTrash={() => {}}
-  />);
-  fireEvent.click(screen.getByText("新终端"));
-  expect(openTerminal).toHaveBeenCalledWith("t-9");
-  expect(open).not.toHaveBeenCalled();
-  // 普通会话行不受影响。
-  expect(screen.getByText("修复布局")).toBeTruthy();
-});

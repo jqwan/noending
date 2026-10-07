@@ -220,9 +220,12 @@
   padding-bottom: 0;
   max-width: none;
 }
-.main.fill > .page-head { padding-left: 24px; padding-right: 24px; }
+/* 满宽页的标题行内距必须与普通 .main 的 gutter 字面一致（32，≤800 时 24）：
+   .fill 把 --main-gutter 清零让正文到边，标题行不能跟着归零——对话、终端与
+   概览页之间跳转时标题纹丝不动，满宽的是正文画布，对齐基准不变。 */
+.main.fill > .page-head { padding-left: 32px; padding-right: 32px; }
 @media (max-width: 800px) {
-  .main.fill > .page-head { padding-left: 16px; padding-right: 16px; }
+  .main.fill > .page-head { padding-left: 24px; padding-right: 24px; }
 }
 
 /* 标题行=应用标题栏那一条：吸在 .main 顶部，页面滚动时内容从它下面穿过。

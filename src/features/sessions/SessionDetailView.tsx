@@ -258,14 +258,6 @@ export default function SessionDetailView({
     }
   };
 
-  /** Resume 的门：源 missing / unavailable 时禁用，并说清为什么。 */
-  const resumeDisabled = !detail.can_resume;
-  const resumeTitle = detail.can_resume
-    ? "继续会话"
-    : sourceMissing
-      ? "源会话已不存在，无法继续这个会话"
-      : "无法确认源会话状态，暂时不能继续";
-
   return (
     <div className="main session-detail">
       <PageHeader
@@ -277,14 +269,10 @@ export default function SessionDetailView({
         }
         actions={(
           <>
-            {/* 子页切换：概览（本页）/ 对话 / 终端。终端段按会话格式出现，
-                置灰门槛与 Resume 同源（can_resume）。 */}
+            {/* 子页切换：概览（本页）/ 对话。终端入口在右侧动作簇。 */}
             <SessionSubpageTabs
               sessionId={sessionId}
               entry={undefined}
-              agent={session.agent}
-              sourceKind={session.source_kind}
-              terminalGate={resumeDisabled ? resumeTitle : null}
               navigate={navigate}
             />
             <SessionHeaderActions
@@ -293,6 +281,7 @@ export default function SessionDetailView({
               sourceKind={session.source_kind}
               title={title}
               trashed={trashed}
+              navigate={navigate}
               onChanged={refresh}
             />
           </>

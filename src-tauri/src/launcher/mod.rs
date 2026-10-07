@@ -508,13 +508,24 @@ impl SessionLauncher {
             let adapter = crate::adapters::adapter_for(prepared.agent);
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
 
+            // A CLI that accepts a prespecified session id (claude / pi) gets
+            // a UUID generated HERE, before spawn: the session file is born
+            // with a known identity and the embedded terminal binds to the
+            // discovered session by exact match. codex / agy generate their
+            // own ids and their terminals stay unbound until the session
+            // page's on-demand verified match.
+            let mut runtime_opts = prepared.runtime.exec_options();
+            let expected_root_session_id =
+                adapter.supports_prespecified_session_id().then(|| new_id());
+            runtime_opts.root_session_id = expected_root_session_id.clone();
+
             let cmd: AgentCommand =
                 adapter.build_new_command(&install, &runtime_opts, cwd_path.as_deref())?;
             // An embedded NEW launch spawns into NoEnding's own PTY with no
             // session identity yet: the registry entry starts unbound and
-            // ingestion binds it when the discovered session claims the
-            // intent committed above. External spawns stay the default when
-            // no embedded surface is provided.
+            // binds when the discovered session claims the intent committed
+            // above (by exact prespecified id where available). External
+            // spawns stay the default when no embedded surface is provided.
             let outcome = if prepared.embedded {
                 let embedded =
                     embedded.ok_or_else(|| other("内嵌终端服务不可用，请刷新预览后重试"))?;
@@ -523,6 +534,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: None,
+                        expected_root_session_id: expected_root_session_id.as_deref(),
                         agent: prepared.agent,
                     },
                 )?
@@ -624,6 +636,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: Some(session_id),
+                        expected_root_session_id: None,
                         agent: session.agent,
                     },
                 )?
