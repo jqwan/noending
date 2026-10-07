@@ -230,11 +230,12 @@ export const api = {
 
   /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
    *  摄入发现后经 LaunchIntent 绑定）。返回携带 terminal_id。 */
-  launchEmbeddedNew: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string) =>
+  launchEmbeddedNew: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string, initialMessage?: string) =>
     invoke<LaunchResult>("launch_embedded_new", {
       agent,
       ownerWorkstreamId,
       cwd: cwd ?? null,
+      initialMessage: initialMessage ?? null,
     }),
   /** 活着的内嵌终端（新→旧）：侧边栏「运行中」读这里；事件刷新，无轮询。 */
   terminalList: () =>

@@ -550,11 +550,16 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         opts: &ExecOptions,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        // Bare `agy` opens the interactive TUI in `cwd`; the conversation is
-        // created on the first turn and lands in the CLI store.
+        // Bare `agy` opens the interactive TUI. With a first message, its
+        // interactive-prompt flag runs that turn and keeps the TUI open;
+        // `--prompt` would run print mode and exit instead.
+        let mut args = runtime_args(opts);
+        if let Some(message) = opts.initial_message() {
+            args.extend(["--prompt-interactive".into(), message.into()]);
+        }
         Ok(AgentCommand {
             program: install.executable_path.clone(),
-            args: runtime_args(opts),
+            args,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
     }

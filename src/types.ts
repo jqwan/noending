@@ -687,6 +687,8 @@ export interface CwdResolution {
 
 export interface PreparedLaunch {
   id: string;
+  /** 新会话启动时交给 Agent 的首条消息。 */
+  initial_message?: string | null;
   mode: "new" | "resume";
   agent: Agent;
   session_id?: string | null;

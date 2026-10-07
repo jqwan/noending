@@ -396,6 +396,9 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         if let Some(id) = &opts.root_session_id {
             args.extend(["--session-id".into(), id.clone()]);
         }
+        if let Some(message) = opts.initial_message() {
+            args.extend(["--".into(), message.into()]);
+        }
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,

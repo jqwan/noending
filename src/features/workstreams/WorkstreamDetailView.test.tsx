@@ -107,14 +107,22 @@ function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamCont
   };
 }
 
-async function renderDetail() {
+async function renderDetail(navigate = vi.fn()) {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
   vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
   // 逐个测试独立：默认「已是最新」，pending 用例自己覆盖。
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState());
-  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
+  return navigate;
 }
+
+it("opens the new-session page with the current task selected", async () => {
+  const navigate = await renderDetail();
+  fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+  expect(navigate).toHaveBeenCalledWith({ view: "new-session", workstreamId: "w1" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
 
 it("lists the sessions owned by this task and nothing else", async () => {
   const ctx = context();

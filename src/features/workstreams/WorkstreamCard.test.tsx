@@ -2,17 +2,15 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import WorkstreamCard from "./WorkstreamCard";
 import type { WorkstreamCardData } from "../../types";
-vi.mock("../sessions/NewSessionModal", () => ({ default: () => <div role="dialog">新建面板</div> }));
 afterEach(cleanup);
 const card = { id: "w1", title: "优化看板", lifecycle: "active", visibility: "normal", session_count: 1, latest_session: { id: "s1", agent: "codex" } } as WorkstreamCardData;
 it("keeps card navigation separate from the new-session action", () => {
   const navigate = vi.fn();
   render(<WorkstreamCard card={card} mode="full" navigate={navigate} defaultAgent="codex" />);
   fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
-  expect(screen.getByText("新建面板")).toBeTruthy();
-  expect(navigate).not.toHaveBeenCalled();
+  expect(navigate).toHaveBeenCalledWith({ view: "new-session", workstreamId: "w1" });
   fireEvent.click(screen.getByRole("button", { name: "优化看板" }));
-  expect(navigate).toHaveBeenCalledTimes(1);
+  expect(navigate).toHaveBeenCalledTimes(2);
   expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1" });
 });
 it("offers no continue button on the card — continue lives in the session header", () => {

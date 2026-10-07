@@ -8,12 +8,12 @@ import type { TerminalSummary } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 
 /**
- * Sidebar：Brand→Home、Search、工作区一级导航（Workstreams / Projects / Sessions /
+ * Sidebar：Brand→新会话、Search、工作区一级导航（Workstreams / Projects / Sessions /
  * Assistant）、运行中（活内嵌终端，点击进入终端视图交互）、底部固定 Settings。
  * Project 不逐个铺在导航上，整体进入 Projects Board。
  *
  * 「运行中」取代了旧的最近任务列表：跑着的会话终端才是此刻真正需要的入口，
- * 未绑定的显示「新终端」，绑定后显示会话名。数据是 registry 运行时事实，
+ * 未绑定的显示「新会话」，绑定后显示会话名。数据是 registry 运行时事实，
  * 只在 spawn / exit / bind（terminals-changed 事件）时重取，无轮询。
  */
 export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
@@ -60,15 +60,15 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
 
   return (
     <div className={`sidebar${collapsed ? " collapsed" : ""}`}>
-      <button className="brand" onClick={() => navigate({ view: "home" })} title="首页">
+      <button className="brand" onClick={() => navigate({ view: "new-session" })} title="新会话">
         <SidebarLogo size={22} />
         <span className="brand-name">NoEnding</span>
       </button>
 
 
       <div className="sidebar-scroll">
-        <button className={`nav-item ${route.view === "home" ? "active" : ""}`} onClick={() => navigate({ view: "home" })}>
-          <Icon name="home" />首页
+        <button className={`nav-item ${route.view === "new-session" ? "active" : ""}`} onClick={() => navigate({ view: "new-session" })}>
+          <Icon name="plus" />新会话
         </button>
         <button className="nav-item" onClick={onSearch}>
           <Icon name="search" />搜索
@@ -107,7 +107,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
               const active = route.view === "terminal" && route.terminalId === t.terminal_id;
               const title = t.session_title
                 ? sessionDisplayTitle(t.session_title)
-                : "新终端";
+                : "新会话";
               return (
                 <div className="sidebar-task" key={t.terminal_id}>
                   <button

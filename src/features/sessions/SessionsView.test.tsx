@@ -72,6 +72,7 @@ function taskFilter(): HTMLSelectElement {
 }
 
 beforeEach(() => {
+  navigate.mockClear();
   clearSessionsCache();
   viewState.clear();
   vi.mocked(api.listSessions).mockReset();
@@ -91,7 +92,7 @@ describe("Sessions 页按所属任务筛选", () => {
       session({ id: "owned", title: "有归属", owner_workstream_id: "w1" }),
       session({ id: "free", title: "没归属", owner_workstream_id: null }),
     ]);
-    render(<SessionsView navigate={navigate} actionSeq={0} />);
+    render(<SessionsView navigate={navigate} />);
 
     await screen.findByText("全部任务");
     // 选中一个真实任务后，只剩 owner_workstream_id 等于它的那一条。
@@ -104,4 +105,17 @@ describe("Sessions 页按所属任务筛选", () => {
     screen.getByText("没归属");
     expect(screen.queryByText("有归属")).toBeNull();
   });
+});
+
+it("opens the new-session page from the toolbar and empty-state action", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([]);
+  render(<SessionsView navigate={navigate} />);
+
+  await screen.findByRole("button", { name: "配置会话来源" });
+  const buttons = screen.getAllByRole("button", { name: "新建会话" });
+  expect(buttons).toHaveLength(2);
+  buttons.forEach((button) => fireEvent.click(button));
+  expect(navigate).toHaveBeenCalledTimes(2);
+  expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
+  expect(screen.queryByRole("dialog")).toBeNull();
 });

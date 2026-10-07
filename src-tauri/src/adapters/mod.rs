@@ -135,9 +135,20 @@ pub struct ExecOptions {
     /// with a known identity and terminal binding becomes exact matching. Only
     /// set for adapters that answer `supports_prespecified_session_id()`.
     pub root_session_id: Option<String>,
+    /// NEW interactive sessions only: the user's first message. This is a
+    /// user turn, never generated Context or a runtime override. Each adapter
+    /// owns its CLI's interactive prompt argument; Resume and exec ignore it.
+    pub initial_message: Option<String>,
 }
 
 impl ExecOptions {
+    /// Ignore blank input without altering the message the user wrote.
+    pub fn initial_message(&self) -> Option<&str> {
+        self.initial_message
+            .as_deref()
+            .filter(|message| !message.trim().is_empty())
+    }
+
     pub fn is_default(&self) -> bool {
         self.model.is_none() && self.provider.is_none() && self.effort.is_none()
     }
@@ -726,9 +737,10 @@ pub trait AgentAdapter: Send + Sync {
     /// Build the command line for a New Session.
     ///
     /// NoEnding never injects Context at launch: the command carries only the
-    /// launch facts (Agent, cwd, runtime overrides). `opts` carries NoEnding's
-    /// override intent only — a `None` field must produce no CLI argument at
-    /// all, so the Agent's own configuration stays untouched and unguessed.
+    /// launch facts (Agent, cwd, runtime overrides) and an optional first user
+    /// message as the final argv element. A missing runtime override must
+    /// produce no corresponding CLI argument, so the Agent's own
+    /// configuration stays untouched and unguessed.
     fn build_new_command(
         &self,
         install: &AgentInstallation,

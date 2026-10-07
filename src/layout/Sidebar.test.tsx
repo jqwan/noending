@@ -23,7 +23,7 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-function renderSidebar(route: Route = { view: "home" }, navigate = vi.fn()) {
+function renderSidebar(route: Route = { view: "new-session" }, navigate = vi.fn()) {
   render(<Sidebar route={route} navigate={navigate} onSearch={() => {}} />);
   return navigate;
 }
@@ -43,12 +43,16 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
 }
 
 describe("Sidebar navigation", () => {
-  it("provides an explicit home entry", () => {
+  it("opens the new-session page from the navigation entry and brand", async () => {
     const navigate = renderSidebar();
-    const home = screen.getByRole("button", { name: "首页" });
-    expect(home.className).toContain("active");
-    fireEvent.click(home);
-    expect(navigate).toHaveBeenCalledWith({ view: "home" });
+    await waitFor(() => expect(api.terminalList).toHaveBeenCalled());
+    const newSession = screen.getByRole("button", { name: "新会话" });
+    expect(newSession.className).toContain("active");
+    fireEvent.click(newSession);
+    fireEvent.click(screen.getByRole("button", { name: /NoEnding/ }));
+    expect(navigate).toHaveBeenNthCalledWith(1, { view: "new-session" });
+    expect(navigate).toHaveBeenNthCalledWith(2, { view: "new-session" });
+    expect(screen.queryByText("首页")).toBeNull();
   });
 
   it("sidebar_has_projects_navigation", async () => {
@@ -95,17 +99,17 @@ describe("Sidebar 运行中终端", () => {
     expect(screen.queryByText("运行中")).toBeNull();
   });
 
-  it("shows live terminals; unbound reads 新终端, bound reads the session name", async () => {
+  it("shows live terminals; unbound reads 新会话, bound reads the session name", async () => {
     vi.mocked(api.terminalList).mockResolvedValue([
       terminal({ terminal_id: "t-1" }),
       terminal({ terminal_id: "t-2", session_id: "s1", session_title: "修复布局" }),
     ]);
     const navigate = renderSidebar();
 
-    expect(await screen.findByText("新终端")).toBeTruthy();
+    expect(await screen.findByTitle("新会话 · /repo/x")).toBeTruthy();
     expect(screen.getByText("修复布局")).toBeTruthy();
 
-    fireEvent.click(screen.getByText("新终端"));
+    fireEvent.click(screen.getByTitle("新会话 · /repo/x"));
     expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-1" });
     fireEvent.click(screen.getByText("修复布局"));
     expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-2" });
@@ -114,8 +118,8 @@ describe("Sidebar 运行中终端", () => {
   it("closing the unbound terminal on screen goes back to the sessions board", async () => {
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "t-1" })]);
     const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
-    expect(await screen.findByText("新终端")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "关闭终端：新终端" }));
+    expect(await screen.findByTitle("新会话 · /repo/x")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：新会话" }));
     await waitFor(() => expect(api.terminalClose).toHaveBeenCalledWith("t-1"));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "sessions" }));
   });
@@ -135,9 +139,9 @@ describe("Sidebar 运行中终端", () => {
 
   it("closing a terminal that is not on screen does not navigate", async () => {
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "t-1" })]);
-    const navigate = renderSidebar({ view: "home" });
-    expect(await screen.findByText("新终端")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "关闭终端：新终端" }));
+    const navigate = renderSidebar({ view: "new-session" });
+    expect(await screen.findByTitle("新会话 · /repo/x")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：新会话" }));
     await waitFor(() => expect(api.terminalClose).toHaveBeenCalledWith("t-1"));
     await waitFor(() => expect(navigate).not.toHaveBeenCalled());
   });

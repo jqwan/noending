@@ -60,7 +60,7 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     setTerminalBusy(true);
     try {
       // 跳转携带身份种子：终端视图首帧即显示本会话的标题与图标，
-      // 会话详情入口即刻可点——不闪「新终端」。
+      // 会话详情入口即刻可点——不闪「新会话」。
       const seed = {
         initialTitle: title,
         initialAgent: agent,

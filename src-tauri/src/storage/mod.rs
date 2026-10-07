@@ -23,6 +23,7 @@ pub mod context_repo;
 pub mod schema;
 pub mod session_lifecycle;
 pub mod session_paths;
+mod terminal_binding;
 pub mod workspace;
 pub mod workstream_paths;
 
@@ -36,6 +37,7 @@ pub use context_repo::{
 
 pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 pub use session_lifecycle::PermanentDeletionCounts;
+pub(crate) use terminal_binding::TerminalBindingCandidate;
 
 /// Two connections to one SQLite file so UI reads never queue behind writes:
 /// WAL allows one writer plus concurrent readers, every mutation goes through

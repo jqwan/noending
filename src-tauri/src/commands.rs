@@ -758,10 +758,10 @@ pub fn launch_embedded_resume(
     Ok(result)
 }
 
-/// The New-session modal's direct entry: prepare + launch an embedded NEW
+/// The New-session page's direct entry: prepare + launch an embedded NEW
 /// session in ONE step. The spawned terminal starts UNBOUND — the session
 /// does not exist until the TUI writes its file and ingestion discovers it,
-/// at which point the LaunchIntent match binds the terminal (bind_discovered)
+/// at which point native ID or unique first-message evidence binds the terminal
 /// and the board's pseudo-row becomes a real session. A reconcile is enqueued
 /// right away so discovery happens as soon as the file lands.
 #[tauri::command]
@@ -772,6 +772,7 @@ pub fn launch_embedded_new(
     agent: String,
     owner_workstream_id: Option<String>,
     cwd: Option<String>,
+    initial_message: Option<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = agent_of(&agent)?;
     let launcher = launcher_for(&app);
@@ -786,6 +787,7 @@ pub fn launch_embedded_new(
         )
     })?;
     prepared.embedded = true;
+    prepared.initial_message = initial_message.filter(|message| !message.trim().is_empty());
 
     let embedded = crate::launcher::EmbeddedSpawn {
         registry: &terminal,

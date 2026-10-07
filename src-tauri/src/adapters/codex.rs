@@ -365,7 +365,12 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         opts: &ExecOptions,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let args = runtime_args(opts);
+        let mut args = runtime_args(opts);
+        if let Some(message) = opts.initial_message() {
+            // Stop option/subcommand parsing even when the message starts
+            // with a dash or matches a CLI command such as `resume`.
+            args.extend(["--".into(), message.into()]);
+        }
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,

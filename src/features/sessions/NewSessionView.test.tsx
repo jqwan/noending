@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import NewSessionModal from "./NewSessionModal";
+import NewSessionView from "./NewSessionView";
 import { api } from "../../api";
 
 const mockAgentStatus = {
@@ -102,7 +102,28 @@ vi.mock("../../api", () => ({
   },
 }));
 
+const preparedFixture = {
+  id: "prep-1",
+  mode: "new",
+  agent: "codex",
+  owner_workstream_id: null,
+  cwd: "/tmp/workspace",
+  cwd_resolution: {
+    source: "default_workspace",
+    cwd: "/tmp/workspace",
+    fallback: false,
+    workstream_id: null,
+    path_position: null,
+    note: "使用默认工作路径",
+  },
+  runtime: { model: null, provider: null, effort: null },
+  state_fingerprint: "fp-1",
+  prepared_at: "2026-10-05T15:00:00Z",
+} satisfies import("../../types").PreparedLaunch;
+
 beforeEach(() => {
+  vi.mocked(api.launchEmbeddedNew).mockReset();
+  vi.mocked(api.cancelPrepared).mockClear();
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
   vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue("codex");
@@ -127,29 +148,17 @@ beforeEach(() => {
     },
   ]);
   vi.mocked(api.listWorkstreamPaths).mockReset().mockResolvedValue([]);
-  vi.mocked(api.prepareNewSession).mockReset().mockResolvedValue({
-    id: "prep-1",
-    mode: "new",
-    agent: "codex",
-    owner_workstream_id: null,
-    cwd: "/tmp/workspace",
-    cwd_resolution: {
-      source: "default_workspace",
-      cwd: "/tmp/workspace",
-      fallback: false,
-      workstream_id: null,
-      path_position: null,
-      note: "使用默认工作目录",
-    },
-    runtime: { model: null, provider: null, effort: null },
-    state_fingerprint: "fp-1",
-    prepared_at: "2026-10-05T15:00:00Z",
-  });
+  vi.mocked(api.prepareNewSession).mockReset().mockImplementation(async (agent, ownerId, cwd) => ({
+    ...preparedFixture,
+    agent,
+    owner_workstream_id: ownerId,
+    cwd: cwd ?? "/tmp/workspace",
+  }));
 });
 
 afterEach(cleanup);
 
-describe("NewSessionModal explicit agent resolution", () => {
+describe("NewSessionView explicit agent resolution", () => {
   it("uses explicitly specified agent over default agent and does not mutate global default setting", async () => {
     vi.mocked(api.prepareNewSession).mockResolvedValueOnce({
       id: "prep-claude",
@@ -163,14 +172,14 @@ describe("NewSessionModal explicit agent resolution", () => {
         fallback: false,
         workstream_id: null,
         path_position: null,
-        note: "使用默认工作目录",
+        note: "使用默认工作路径",
       },
       runtime: { model: null, provider: null, effort: null },
       state_fingerprint: "fp-claude",
       prepared_at: "2026-10-05T15:00:00Z",
     });
 
-    render(<NewSessionModal onClose={vi.fn()} agent="claude_code" />);
+    render(<NewSessionView navigate={vi.fn()} agent="claude_code" />);
 
     await waitFor(() => {
       expect(api.prepareNewSession).toHaveBeenCalledWith("claude_code", null);
@@ -182,7 +191,7 @@ describe("NewSessionModal explicit agent resolution", () => {
   });
 
   it("falls back to default agent when no agent is specified", async () => {
-    render(<NewSessionModal onClose={vi.fn()} />);
+    render(<NewSessionView navigate={vi.fn()} />);
 
     await waitFor(() => {
       expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null);
@@ -192,8 +201,18 @@ describe("NewSessionModal explicit agent resolution", () => {
     expect(select.value).toBe("codex");
   });
 
+  it("keeps a manual Agent selection when the default Agent arrives late", async () => {
+    let resolveDefault!: (agent: "codex") => void;
+    vi.mocked(api.getDefaultAgent).mockReturnValue(new Promise((resolve) => { resolveDefault = resolve; }));
+    render(<NewSessionView navigate={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "claude_code" } });
+    resolveDefault("codex");
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("claude_code", null));
+    expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code");
+  });
+
   it("only shows CLI agents in the dropdown options", async () => {
-    render(<NewSessionModal onClose={vi.fn()} />);
+    render(<NewSessionView navigate={vi.fn()} />);
 
     const select = await screen.findByLabelText("Agent");
     const optionTexts = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
@@ -211,8 +230,8 @@ describe("NewSessionModal explicit agent resolution", () => {
     expect(optionTexts.some((t) => t?.includes("ZCode"))).toBe(false);
   });
 
-  it("allows changing the selected agent in the modal and prepares launch with the new agent", async () => {
-    render(<NewSessionModal onClose={vi.fn()} />);
+  it("allows changing the selected agent on the page and prepares launch with the new agent", async () => {
+    render(<NewSessionView navigate={vi.fn()} />);
 
     await waitFor(() => {
       expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null);
@@ -230,11 +249,11 @@ describe("NewSessionModal explicit agent resolution", () => {
   });
 });
 
-describe("NewSessionModal working directory selection", () => {
+describe("NewSessionView working directory selection", () => {
   it("in standalone mode, defaults to NoEnding default workspace and lists existing working directories", async () => {
-    render(<NewSessionModal onClose={vi.fn()} />);
+    render(<NewSessionView navigate={vi.fn()} />);
 
-    const select = await screen.findByLabelText("工作目录") as HTMLSelectElement;
+    const select = await screen.findByLabelText("工作路径") as HTMLSelectElement;
 
     await waitFor(() => {
       expect(select.value).toBe("/tmp/workspace");
@@ -247,9 +266,9 @@ describe("NewSessionModal working directory selection", () => {
   });
 
   it("in standalone mode, allows choosing another existing working directory and calls prepareNewSession with it", async () => {
-    render(<NewSessionModal onClose={vi.fn()} />);
+    render(<NewSessionView navigate={vi.fn()} />);
 
-    const select = await screen.findByLabelText("工作目录");
+    const select = await screen.findByLabelText("工作路径");
     fireEvent.change(select, { target: { value: "/repo/existing-1" } });
 
     await waitFor(() => {
@@ -258,6 +277,10 @@ describe("NewSessionModal working directory selection", () => {
   });
 
   it("when created from a task with paths, lists task working directories, defaults to primary path, and allows switching", async () => {
+    vi.mocked(api.prepareNewSession).mockImplementation(async (_agent, _ownerId, cwd) => ({
+      ...preparedFixture,
+      cwd: cwd ?? "/repo/task-primary",
+    }));
     vi.mocked(api.listWorkstreamPaths).mockResolvedValue([
       {
         id: "wp-1",
@@ -283,9 +306,9 @@ describe("NewSessionModal working directory selection", () => {
       },
     ]);
 
-    render(<NewSessionModal workstreamId="ws-1" onClose={vi.fn()} />);
+    render(<NewSessionView workstreamId="ws-1" navigate={vi.fn()} />);
 
-    const select = await screen.findByLabelText("工作目录") as HTMLSelectElement;
+    const select = await screen.findByLabelText("工作路径") as HTMLSelectElement;
 
     await waitFor(() => {
       expect(select.value).toBe("/repo/task-primary");
@@ -306,9 +329,9 @@ describe("NewSessionModal working directory selection", () => {
   it("when created from a task with NO paths, defaults to NoEnding default workspace", async () => {
     vi.mocked(api.listWorkstreamPaths).mockResolvedValue([]);
 
-    render(<NewSessionModal workstreamId="ws-empty" onClose={vi.fn()} />);
+    render(<NewSessionView workstreamId="ws-empty" navigate={vi.fn()} />);
 
-    const select = await screen.findByLabelText("工作目录") as HTMLSelectElement;
+    const select = await screen.findByLabelText("工作路径") as HTMLSelectElement;
 
     await waitFor(() => {
       expect(select.value).toBe("/tmp/workspace");
@@ -326,16 +349,110 @@ it("launches embedded and navigates to the standalone terminal view", async () =
     terminal_id: "t-new-1",
   });
   const navigate = vi.fn();
-  const onClose = vi.fn();
 
-  render(<NewSessionModal onClose={onClose} navigate={navigate} />);
-  await screen.findByText("新建会话");
-  fireEvent.click(screen.getByRole("button", { name: "启动" }));
+  render(<NewSessionView navigate={navigate} />);
+  await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalled());
+  fireEvent.change(screen.getByRole("textbox", { name: "首条消息" }), { target: { value: "请检查这段代码\n并修复问题" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
   await waitFor(() =>
-    expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined),
+    expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined, "请检查这段代码\n并修复问题"),
   );
   expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new-1" });
-  expect(onClose).toHaveBeenCalled();
 });
+});
+
+
+describe("NewSessionView message composer", () => {
+  it("waits for a nonblank first message without creating a terminal on entry", async () => {
+    render(<NewSessionView navigate={vi.fn()} />);
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalled());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
+    const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "首条消息" }), { target: { value: " \n " } });
+    expect(send.disabled).toBe(true);
+  });
+
+  it("supports Enter to send, while Shift+Enter and IME Enter do not launch", async () => {
+    vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
+      launched_via: "内嵌终端", command_line: "codex", note: "已启动", launch_intent_id: null, terminal_id: "t-keyboard",
+    });
+    const navigate = vi.fn();
+    render(<NewSessionView navigate={navigate} />);
+    const input = screen.getByRole("textbox", { name: "首条消息" });
+    fireEvent.change(input, { target: { value: "检查当前项目" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-keyboard" }));
+    expect(api.launchEmbeddedNew).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the message and selections after a failed launch and allows retry", async () => {
+    vi.mocked(api.launchEmbeddedNew).mockRejectedValueOnce("CLI unavailable").mockResolvedValue({
+      launched_via: "内嵌终端", command_line: "claude", note: "已启动", launch_intent_id: null, terminal_id: "t-retry",
+    });
+    const navigate = vi.fn();
+    render(<NewSessionView navigate={navigate} />);
+    await screen.findByRole("option", { name: "/repo/existing-1 (Project 1)" });
+    fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "claude_code" } });
+    fireEvent.change(screen.getByLabelText("工作路径"), { target: { value: "/repo/existing-1" } });
+    const input = screen.getByRole("textbox", { name: "首条消息" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "  第一行\n第二行  " } });
+    const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+    await waitFor(() => expect(send.disabled).toBe(false));
+    fireEvent.click(send);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "启动失败：CLI unavailable重试");
+    expect(input.value).toBe("  第一行\n第二行  ");
+    expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code");
+    expect((screen.getByLabelText("工作路径") as HTMLSelectElement).value).toBe("/repo/existing-1");
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-retry" }));
+    expect(api.launchEmbeddedNew).toHaveBeenLastCalledWith("claude_code", null, "/repo/existing-1", "  第一行\n第二行  ");
+    expect(api.cancelPrepared).toHaveBeenCalled();
+  });
+});
+
+
+it("shows the resolved fallback directory and uses the same default-path intent when sending", async () => {
+  vi.mocked(api.prepareNewSession).mockResolvedValue({
+    ...preparedFixture,
+    cwd: "/repo/fallback",
+    cwd_resolution: { ...preparedFixture.cwd_resolution, cwd: "/repo/fallback", fallback: true, note: "主目录不可用，使用备用目录" },
+  });
+  vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
+    launched_via: "内嵌终端", command_line: "codex", note: "已启动", launch_intent_id: null, terminal_id: "t-fallback",
+  });
+  render(<NewSessionView navigate={vi.fn()} />);
+  const directory = screen.getByLabelText("工作路径") as HTMLSelectElement;
+  await waitFor(() => expect(directory.value).toBe("/repo/fallback"));
+  expect(screen.getByRole("status").textContent).toBe("主目录不可用，使用备用目录");
+  fireEvent.change(directory, { target: { value: "/tmp/workspace" } });
+  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始任务" } });
+  const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+  await waitFor(() => expect(send.disabled).toBe(false));
+  fireEvent.change(directory, { target: { value: "/tmp/workspace" } });
+  expect(send.disabled).toBe(false);
+  fireEvent.click(send);
+  await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined, "开始任务"));
+});
+
+
+it("does not prepare another launch if the user leaves while startup fails", async () => {
+  let rejectLaunch!: (reason: string) => void;
+  vi.mocked(api.launchEmbeddedNew).mockReturnValue(new Promise((_resolve, reject) => { rejectLaunch = reject; }));
+  const { unmount } = render(<NewSessionView navigate={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始任务" } });
+  const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+  await waitFor(() => expect(send.disabled).toBe(false));
+  fireEvent.click(send);
+  const prepareCount = vi.mocked(api.prepareNewSession).mock.calls.length;
+  unmount();
+  await act(async () => { rejectLaunch("startup failed"); });
+  expect(api.prepareNewSession).toHaveBeenCalledTimes(prepareCount);
 });

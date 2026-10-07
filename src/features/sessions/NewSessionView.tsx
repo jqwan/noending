@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import { Modal } from "../../components/common";
+import AgentIcon from "../../components/AgentIcon";
+import Icon from "../../components/Icon";
+import SidebarLogo from "../../components/SidebarLogo";
+import type { Route } from "../../app/routes";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import {
@@ -14,25 +17,13 @@ import {
   type WorkstreamPathRow,
 } from "../../types";
 
-/**
- * 全局新建 Session：确认即内嵌直启（`launchEmbeddedNew`，prepare + 起一个未绑定
- * 会话的内嵌终端一步完成），成功后带到独立终端视图；会话文件落盘被摄入发现后，
- * LaunchIntent 匹配把终端绑定到会话，那个视图就地变成会话的终端子页。
- * Modal 一打开仍先 Prepare——cwd 三级解析的预览事实（显示的就是这次启动真正
- * 使用的目录）由它提供。
- *
- * `workstreamId` 是可选预置入参：省略或 `"none"` 即 standalone（0 个所属任务完全合法）。
- * 预置后用户仍可改。下拉读 Workstream 卡片投影：标题相同的靠主路径才能分清，而启动
- * 目录恰由主路径决定，所以选项里必须能看到它。
- */
-export type NewSessionModalProps = {
-  onClose: () => void;
+/** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
+export type NewSessionViewProps = {
   /** 预置选中的所属任务；省略或 "none" = standalone。 */
   workstreamId?: string | null;
-  /** 预置选中的 Agent；若指定则优先使用。未指定时读取全局默认或首个可用 CLI Agent。单次指定绝不修改全局设置。 */
+  /** 单次指定 Agent，不修改全局默认设置。 */
   agent?: Agent | null;
-  /** 启动成功后带到独立终端视图（内嵌新建的唯一落点）。 */
-  navigate?: (r: import("../../app/routes").Route) => void;
+  navigate: (r: Route) => void;
 };
 
 const STANDALONE = "none";
@@ -52,12 +43,11 @@ function workstreamLabel(w: WorkstreamCardData): string {
   return `${w.title} · 无工作路径`;
 }
 
-export default function NewSessionModal({
-  onClose,
+export default function NewSessionView({
   workstreamId,
   agent: initialAgent,
   navigate,
-}: NewSessionModalProps) {
+}: NewSessionViewProps) {
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [ownerWorkstreamId, setOwnerWorkstreamId] = useState(
     workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
@@ -74,31 +64,42 @@ export default function NewSessionModal({
   const [taskPaths, setTaskPaths] = useState<WorkstreamPathRow[]>([]);
   const [selectedCwd, setSelectedCwd] = useState<string>("");
   const [customPaths, setCustomPaths] = useState<string[]>([]);
+  const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const mounted = useRef(true);
+  const launching = useRef(false);
+  const agentChanged = useRef(false);
 
   useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     api
       .listWorkstreamCards()
-      .then((ws) =>
-        setWorkstreams(ws.filter((w) => w.visibility === "normal"))
-      )
+      .then((ws) => {
+        if (!cancelled) setWorkstreams(ws.filter((w) => w.visibility === "normal"));
+      })
       .catch(console.error);
 
     api
       .getAgentStatus()
-      .then(setAgentStatus)
+      .then((status) => { if (!cancelled) setAgentStatus(status); })
       .catch(console.error);
 
     if (!initialAgent) {
       api
         .getDefaultAgent()
         .then((def) => {
-          if (def && CLI_AGENTS.includes(def)) {
+          if (!cancelled && !agentChanged.current && def && CLI_AGENTS.includes(def)) {
             setSelectedAgent(def);
           }
         })
         .catch(console.error);
     }
+    return () => { cancelled = true; };
   }, [initialAgent]);
 
   useEffect(() => {
@@ -217,26 +218,34 @@ export default function NewSessionModal({
       ? selectedCwd
       : defaultCwd;
 
+  const launchCwd = selectedCwd && selectedCwd !== defaultCwd && cwdOptions.some((o) => o.value === selectedCwd)
+    ? selectedCwd
+    : undefined;
+
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
     if (!selectedAgent) return null;
-    const isExplicit = Boolean(selectedCwd && selectedCwd !== defaultCwd);
     const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
-    if (isExplicit) {
-      return api.prepareNewSession(selectedAgent, ownerId, selectedCwd);
+    if (launchCwd) {
+      return api.prepareNewSession(selectedAgent, ownerId, launchCwd);
     }
     return api.prepareNewSession(selectedAgent, ownerId);
-  }, [selectedAgent, ownerWorkstreamId, selectedCwd, defaultCwd]);
+  }, [selectedAgent, ownerWorkstreamId, launchCwd, selectedCwd, defaultCwd]);
 
   const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
+  const displayedCwd = prepared?.cwd ?? effectiveCwd;
 
   const handleWsChange = (next: string) => {
+    if (next === ownerWorkstreamId) return;
     releasePrepared();
+    setTaskPaths([]);
     setOwnerWorkstreamId(next);
     setSelectedCwd("");
   };
 
   const handleAgentChange = (next: Agent) => {
+    agentChanged.current = true;
+    if (next === selectedAgent) return;
     releasePrepared();
     setSelectedAgent(next);
   };
@@ -247,6 +256,7 @@ export default function NewSessionModal({
         const picked = await open({ directory: true, multiple: false, title: "选择工作目录" });
         if (typeof picked === "string" && picked.trim() !== "") {
           const trimmed = picked.trim();
+          if (trimmed === selectedCwd) return;
           setCustomPaths((prev) => [trimmed, ...prev.filter((p) => p !== trimmed)]);
           releasePrepared();
           setSelectedCwd(trimmed);
@@ -256,21 +266,18 @@ export default function NewSessionModal({
       }
       return;
     }
+    if (val === selectedCwd) return;
     releasePrepared();
     setSelectedCwd(val);
   };
 
-  const handleClose = () => {
-    releasePrepared();
-    onClose();
-  };
+  const canSend = Boolean(message.trim() && selectedAgent && prepared && !preparing && !busy);
 
-  /** 唯一启动路径：内嵌直启（prepare 预览的 cwd/任务事实原样传给
-   *  launch_embedded_new，它内部重新 prepare + 强制 embedded）。返回的
-   *  terminal_id 把用户带到独立终端视图——会话被发现后那里就地变成会话。 */
   const start = async () => {
-    if (busy) return;
-    releasePrepared(true);
+    if (!canSend || launching.current) return;
+    launching.current = true;
+    agentChanged.current = true;
+    releasePrepared();
     setBusy(true);
     setError("");
     try {
@@ -278,111 +285,140 @@ export default function NewSessionModal({
       const r = await api.launchEmbeddedNew(
         selectedAgent,
         ownerId,
-        selectedCwd || undefined,
+        launchCwd,
+        message,
       );
       announceLaunch("启动", r);
-      if (r.terminal_id && navigate) {
+      if (r.terminal_id) {
         navigate({ view: "terminal", terminalId: r.terminal_id });
+      } else {
+        throw new Error("未返回新会话终端");
       }
-      onClose();
     } catch (e: unknown) {
+      if (!mounted.current) return;
+      launching.current = false;
       setBusy(false);
+      // launchEmbeddedNew 会重新 prepare；失败后恢复预览以便重试。
+      await prepare();
       setError(`启动失败：${String(e)}`);
     }
   };
 
   return (
-    <Modal title="新建会话" onClose={handleClose}>
-      <label className="field">
-        <span>所属任务（可选）</span>
-        <select value={ownerWorkstreamId} onChange={(e) => handleWsChange(e.target.value)}>
-          <option value={STANDALONE}>无（直接开始）</option>
-          {workstreams.map((w) => (
-            <option key={w.id} value={w.id}>
-              {workstreamLabel(w)}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="field">
-        <span>Agent</span>
-        <select
-          value={selectedAgent}
-          onChange={(e) => handleAgentChange(e.target.value as Agent)}
-          disabled={busy}
-        >
-          {cliAgents.map((a) => (
-            <option key={a} value={a}>
-              {AGENT_LABELS[a]}
-              {agentStatus && !agentStatus[a]?.detected ? " (未检测到 TUI)" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="field">
-        <span>工作目录</span>
-        <select
-          value={effectiveCwd}
-          onChange={(e) => void handleCwdChange(e.target.value)}
-          disabled={busy}
-        >
-          {cwdOptions.length === 0 && (
-            <option value="">{preparing ? "正在准备工作目录…" : "未设置工作目录"}</option>
-          )}
-          {cwdOptions.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-          {!isTask && <option value="__BROWSE__">浏览其他目录…</option>}
-        </select>
-      </label>
-
-
-      {prepared?.cwd_resolution?.fallback ? (
-        <div
-          className="settings-row-hint"
-          style={{ color: "var(--warning)", marginTop: -4, marginBottom: 8 }}
-        >
-          {prepared.cwd_resolution.note || "本次没有从这条流程通常的目录启动"}
+    <main className="main new-session-page" aria-labelledby="new-session-title">
+      <div className="new-session-content">
+        <div className="new-session-heading">
+          <SidebarLogo size={34} />
+          <h1 id="new-session-title">开启新会话</h1>
         </div>
-      ) : null}
 
-      {error && (
-        <div
-          className="badge warn"
-          style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}
-        >
-          <span style={{ flex: 1, overflowWrap: "anywhere" }}>{error}</span>
-          {!preparing && !busy && (
-            <button
-              type="button"
-              className="btn small"
-              onClick={() => {
-                releasePrepared();
-                void prepare();
+        <form onSubmit={(e) => { e.preventDefault(); void start(); }}>
+          <div className="new-session-context">
+            <label className="new-session-picker new-session-task">
+              <Icon name="tasks" />
+              <select
+                aria-label="所属任务（可选）"
+                title="所属任务（可选）"
+                value={ownerWorkstreamId}
+                onChange={(e) => handleWsChange(e.target.value)}
+                disabled={busy}
+              >
+                <option value={STANDALONE}>无所属任务</option>
+                {workstreams.map((w) => (
+                  <option key={w.id} value={w.id}>{workstreamLabel(w)}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="new-session-picker new-session-path">
+              <Icon name="folder" />
+              <select
+                aria-label="工作路径"
+                title={displayedCwd || "工作路径"}
+                value={displayedCwd}
+                onChange={(e) => void handleCwdChange(e.target.value)}
+                disabled={busy}
+              >
+                {cwdOptions.length === 0 && !displayedCwd && (
+                  <option value="">{preparing ? "正在准备工作路径…" : "未设置工作路径"}</option>
+                )}
+                {displayedCwd && !cwdOptions.some((o) => o.value === displayedCwd) && (
+                  <option value={displayedCwd}>{displayedCwd} (本次工作路径)</option>
+                )}
+                {cwdOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+                {!isTask && <option value="__BROWSE__">浏览其他目录…</option>}
+              </select>
+            </label>
+          </div>
+
+          <div className="new-session-composer" aria-busy={busy}>
+            <textarea
+              autoFocus
+              aria-label="首条消息"
+              placeholder="描述你想完成的任务…"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                  e.preventDefault();
+                  void start();
+                }
               }}
-            >
-              重试
-            </button>
-          )}
-        </div>
-      )}
+              disabled={busy}
+              rows={4}
+            />
+            <div className="new-session-composer-footer">
+              <label className="new-session-picker new-session-agent">
+                <AgentIcon agent={selectedAgent} size={18} />
+                <select
+                  aria-label="Agent"
+                  title="Agent"
+                  value={selectedAgent}
+                  onChange={(e) => handleAgentChange(e.target.value as Agent)}
+                  disabled={busy}
+                >
+                  {cliAgents.map((a) => (
+                    <option key={a} value={a}>
+                      {AGENT_LABELS[a]}
+                      {agentStatus && !agentStatus[a]?.detected ? " (未检测到 TUI)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="submit"
+                className="new-session-send"
+                aria-label={busy ? "启动中…" : "发送"}
+                title={busy ? "启动中…" : preparing ? "准备中…" : "发送"}
+                disabled={!canSend}
+              >
+                {busy ? <span className="new-session-spinner" aria-hidden="true" /> : (
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 19V5m-6 6 6-6 6 6" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
 
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
-        <button className="btn" onClick={handleClose} disabled={busy}>
-          取消
-        </button>
-        <button
-          className="btn primary"
-          disabled={busy || preparing || !selectedAgent || !prepared}
-          onClick={start}
-        >
-          {busy ? "启动中…" : preparing ? "准备中…" : "启动"}
-        </button>
+          {prepared?.cwd_resolution?.fallback && (
+            <p className="new-session-note" role="status">
+              {prepared.cwd_resolution.note || "本次没有从这条流程通常的目录启动"}
+            </p>
+          )}
+          {error && (
+            <div className="new-session-error" role="alert">
+              <span>{error}</span>
+              {!preparing && !busy && (
+                <button type="button" className="btn small" onClick={() => void prepare()}>重试</button>
+              )}
+            </div>
+          )}
+          <p className="new-session-hint">Enter 发送 · Shift + Enter 换行</p>
+        </form>
       </div>
-    </Modal>
+    </main>
   );
 }

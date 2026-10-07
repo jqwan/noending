@@ -204,6 +204,74 @@ fn an_embedded_new_launch_spawns_unbound_and_still_commits_the_intent() {
     assert_eq!(intents[0].status, noending::domain::launch_status::PENDING);
 }
 
+const FIRST_MESSAGE: &str = "  请开始实现\n$(id) 'literal' \"message\"  ";
+
+fn capture_embedded_new_message(
+    cmd: &AgentCommand,
+    target: &noending::terminal::EmbeddedTarget,
+) -> Result<LaunchOutcome> {
+    assert!(target.session_id.is_none());
+    assert_eq!(target.initial_message, Some(FIRST_MESSAGE));
+    assert_eq!(
+        target.expected_root_session_id.is_some(),
+        matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
+    );
+    assert_eq!(cmd.args.last().map(String::as_str), Some(FIRST_MESSAGE));
+    let expected_flag = if target.agent == Agent::Antigravity {
+        "--prompt-interactive"
+    } else {
+        "--"
+    };
+    assert_eq!(cmd.args[cmd.args.len() - 2], expected_flag);
+    Ok(LaunchOutcome {
+        launched_via: "captured-embedded-new".into(),
+        command_line: cmd.display(),
+        pid: Some(77),
+        terminal_id: Some("term-first-message".into()),
+    })
+}
+
+#[test]
+fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
+    for agent in [
+        Agent::Codex,
+        Agent::ClaudeCode,
+        Agent::Pi,
+        Agent::Antigravity,
+    ] {
+        let db = open_db(&format!("first-message-{}", agent.as_str()));
+        seed_installation(&db, agent);
+        let launcher = launcher_in("first-message");
+        let workspace = LaunchWorkspace::default();
+        let mut prepared = launcher
+            .prepare_new_in(&db, agent, None, None, &workspace)
+            .unwrap();
+        assert!(prepared.initial_message.is_none());
+        prepared.embedded = true;
+        prepared.initial_message = Some(FIRST_MESSAGE.into());
+
+        let registry = noending::terminal::TerminalRegistry::new(None);
+        let result = launcher
+            .launch_prepared_with_in(
+                &db,
+                &prepared,
+                &workspace,
+                fake_spawn,
+                fake_open,
+                Some(&noending::launcher::EmbeddedSpawn {
+                    registry: &registry,
+                    spawn: capture_embedded_new_message,
+                }),
+            )
+            .unwrap();
+        assert!(result.command_line.contains("[首条消息]"), "{agent:?}");
+        assert!(!result.command_line.contains("请开始实现"), "{agent:?}");
+        assert!(!result.command_line.contains("$(id)"), "{agent:?}");
+        assert_eq!(result.terminal_id.as_deref(), Some("term-first-message"));
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 1);
+    }
+}
+
 #[test]
 fn bookkeeping_failure_after_spawn_keeps_the_successful_launch_result() {
     let db = open_db("post-spawn-bookkeeping-failure");
@@ -599,7 +667,13 @@ fn fake_embedded_spawn(
     _cmd: &AgentCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
-    let _ = target.registry;
+    assert!(target.initial_message.is_none());
+    if let Some(session_id) = target.session_id {
+        assert!(
+            target.registry.reserve_resume(session_id).is_err(),
+            "the launcher must hold the resume reservation throughout spawn"
+        );
+    }
     Ok(LaunchOutcome {
         launched_via: "test-embedded-spawn".into(),
         command_line: format!("embedded session={:?}", target.session_id),
@@ -670,6 +744,117 @@ fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
     assert!(result.note.contains("内嵌终端"));
     // Embedded launches nothing new in the ingestion sense: no LaunchIntent.
     assert!(result.launch_intent_id.is_none());
+    assert!(
+        registry.reserve_resume(&sid).is_ok(),
+        "the reservation is released after the injected spawn returns"
+    );
+}
+
+fn unexpected_embedded_spawn(
+    _cmd: &AgentCommand,
+    _target: &noending::terminal::EmbeddedTarget,
+) -> Result<LaunchOutcome> {
+    panic!("a pending resume must be refused before the spawn step");
+}
+
+#[test]
+fn an_embedded_resume_launch_refuses_an_existing_reservation_before_spawn() {
+    let db = open_db("embedded-resume-pending");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("embedded-resume-pending");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "pending");
+    let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
+    prepared.embedded = true;
+
+    let registry = noending::terminal::TerminalRegistry::new(None);
+    let _existing = registry.reserve_resume(&sid).unwrap();
+    let expected_error = registry.reserve_resume(&sid).err().unwrap();
+    let error = launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace,
+            fake_spawn,
+            fake_open,
+            Some(&noending::launcher::EmbeddedSpawn {
+                registry: &registry,
+                spawn: unexpected_embedded_spawn,
+            }),
+        )
+        .expect_err("concurrent resume must be refused");
+    assert_eq!(error.to_string(), expected_error);
+}
+
+fn failed_embedded_spawn(
+    _cmd: &AgentCommand,
+    target: &noending::terminal::EmbeddedTarget,
+) -> Result<LaunchOutcome> {
+    assert!(target
+        .registry
+        .reserve_resume(target.session_id.unwrap())
+        .is_err());
+    Err(noending::error::other("test spawn failed"))
+}
+
+#[test]
+fn an_embedded_resume_launch_releases_its_reservation_after_spawn_failure() {
+    let db = open_db("embedded-resume-failed");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("embedded-resume-failed");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "failed");
+    let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
+    prepared.embedded = true;
+
+    let registry = noending::terminal::TerminalRegistry::new(None);
+    let error = launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace,
+            fake_spawn,
+            fake_open,
+            Some(&noending::launcher::EmbeddedSpawn {
+                registry: &registry,
+                spawn: failed_embedded_spawn,
+            }),
+        )
+        .expect_err("spawn fails");
+    assert_eq!(error.to_string(), "test spawn failed");
+    assert!(
+        registry.reserve_resume(&sid).is_ok(),
+        "a failed spawn must not leave the session reserved"
+    );
+}
+
+#[test]
+fn an_external_resume_does_not_consume_an_embedded_reservation() {
+    let db = open_db("external-resume-pending");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("external-resume-pending");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "external");
+    let prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
+    assert!(!prepared.embedded);
+
+    let registry = noending::terminal::TerminalRegistry::new(None);
+    let _existing = registry.reserve_resume(&sid).unwrap();
+    let result = launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace,
+            fake_spawn,
+            fake_open,
+            Some(&noending::launcher::EmbeddedSpawn {
+                registry: &registry,
+                spawn: unexpected_embedded_spawn,
+            }),
+        )
+        .expect("external resumes do not use the embedded registry");
+    assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
+    assert!(registry.reserve_resume(&sid).is_err());
 }
 
 #[test]

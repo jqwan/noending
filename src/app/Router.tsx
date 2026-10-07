@@ -1,4 +1,4 @@
-import HomeView from "../features/home/HomeView";
+import NewSessionView from "../features/sessions/NewSessionView";
 import WorkstreamsView from "../features/workstreams/WorkstreamsView";
 import WorkstreamDetailView from "../features/workstreams/WorkstreamDetailView";
 import SessionsView from "../features/sessions/SessionsView";
@@ -20,8 +20,15 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
   actionSeq: number;
 }) {
   switch (route.view) {
-    case "home":
-      return <HomeView navigate={navigate} />;
+    case "new-session":
+      return (
+        <NewSessionView
+          key={`${route.workstreamId ?? ""}:${route.agent ?? ""}`}
+          navigate={navigate}
+          workstreamId={route.workstreamId}
+          agent={route.agent}
+        />
+      );
     case "workstreams":
       return (
         <WorkstreamsView
@@ -45,8 +52,6 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
         <SessionsView
           navigate={navigate}
           scope={route.scope}
-          action={route.action}
-          actionSeq={actionSeq}
         />
       );
     case "session":

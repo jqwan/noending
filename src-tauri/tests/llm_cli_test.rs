@@ -294,7 +294,8 @@ fn real_pi_local_qwen_headless() {
             &ExecOptions {
                 model: Some("qwen/qwen3.8-27b".into()),
                 provider: Some("lmstudio".into()),
-                effort: Some("low".into()), root_session_id: None,
+                effort: Some("low".into()),
+                ..Default::default()
             },
             "只输出一个 JSON 对象，不要其他文字：{\"session_contexts\":[],\"workstream_mutations\":[{\"op\":\"add\",\"item_kind\":\"decision\",\"title\":\"采用方案A\",\"content\":\"测试\",\"refs\":[\"#1\"]}]}",
         )

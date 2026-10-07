@@ -32,7 +32,7 @@ export type WorkstreamEntry = "review" | "conflicts";
 export type SessionEntry = "conversation";
 
 export type Route =
-  | { view: "home" }
+  | { view: "new-session"; workstreamId?: string; agent?: Agent }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
@@ -48,7 +48,7 @@ export type Route =
    *  会话身份由后端绑定（预指定 id 精确匹配 / 会话页按需校验匹配），绑定
    *  事实经 `terminal-bound` 事件推给视图，点亮会话详情入口。从会话页跳转
    *  时携带已知的身份种子（initialTitle/initialAgent/initialSessionId），
-   *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新终端」起步。 */
+   *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新会话」起步。 */
   | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
   | { view: "agents"; agent?: Agent }
   | { view: "assistant"; scope?: AssistantScope }

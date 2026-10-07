@@ -1,8 +1,18 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import Router from "./Router";
 import { api } from "../api";
 import type { Route } from "./routes";
+import type { Agent } from "../types";
+
+vi.mock("../features/sessions/NewSessionView", () => ({
+  default: ({ workstreamId, agent }: { workstreamId?: string; agent?: Agent }) => (
+    <div>
+      <output aria-label="新会话预置">{`${workstreamId ?? ""}:${agent ?? ""}`}</output>
+      <input aria-label="首条消息" defaultValue="" />
+    </div>
+  ),
+}));
 
 // Router 的会话分支渲染级覆盖：概览 / 对话各归其位，终端是一等路由（另测）。
 vi.mock("../api", () => ({
@@ -40,6 +50,23 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class {} }));
 
 afterEach(() => cleanup());
+
+it("routes new-session presets and resets the draft when they change", () => {
+  const navigate = vi.fn();
+  const goBack = vi.fn();
+  const { rerender } = render(<Router route={{ view: "new-session", workstreamId: "w1", agent: "codex" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
+  expect(screen.getByLabelText("新会话预置").textContent).toBe("w1:codex");
+  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "任务一的消息" } });
+
+  rerender(<Router route={{ view: "new-session", workstreamId: "w2", agent: "codex" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
+  expect(screen.getByLabelText("新会话预置").textContent).toBe("w2:codex");
+  expect((screen.getByLabelText("首条消息") as HTMLInputElement).value).toBe("");
+
+  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "Codex 的消息" } });
+  rerender(<Router route={{ view: "new-session", workstreamId: "w2", agent: "claude_code" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
+  expect(screen.getByLabelText("新会话预置").textContent).toBe("w2:claude_code");
+  expect((screen.getByLabelText("首条消息") as HTMLInputElement).value).toBe("");
+});
 
 it("renders the detail page when entry is absent", () => {
   vi.mocked(api.getSessionDetail).mockReturnValue(new Promise(() => {}) as never);

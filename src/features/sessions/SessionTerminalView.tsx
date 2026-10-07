@@ -424,9 +424,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     };
   }, [snapshot]);
 
-  // 未绑定的终端以「新终端」为名；绑定后标题换成会话本名。agent 在
+  // 未绑定的终端以「新会话」为名；绑定后标题换成会话本名。agent 在
   // attach 回来前用路由种子，避免首帧丢失图标。
-  const headerTitle = boundTitle ?? "新终端";
+  const headerTitle = boundTitle ?? "新会话";
   const headerAgent = snapshot?.agent ?? initialAgent ?? null;
 
   return (

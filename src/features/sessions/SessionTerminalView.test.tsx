@@ -190,6 +190,7 @@ it("an unbound terminal keeps the session-detail entry disabled; binding lights 
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
   const entry = screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement;
   expect(entry.disabled).toBe(true);
+  expect(screen.getByRole("heading", { name: "新会话" })).toBeTruthy();
 
   // 注册表 bind() 的广播：事件一到入口即亮，标题换成会话本名（无轮询）。
   eventHandlers.get("terminal-bound")?.({
@@ -209,7 +210,7 @@ it("the refresh button runs one targeted sync for this terminal", async () => {
   await waitFor(() => expect(api.terminalRefresh).toHaveBeenCalledWith("t-1"));
 });
 
-it("the route seed renders the final header on the first frame — no 新终端 flash", async () => {
+it("the route seed renders the final header on the first frame — no 新会话 flash", async () => {
   // attach 故意挂起不返回：种子必须独立于它成立（会话页跳转的防闪契约）。
   vi.mocked(api.terminalAttach).mockReturnValue(new Promise(() => {}) as never);
   const navigate = vi.fn();
@@ -227,7 +228,7 @@ it("the route seed renders the final header on the first frame — no 新终端 
   expect(screen.getByText("修复布局")).toBeTruthy();
   const entry = screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement;
   expect(entry.disabled).toBe(false);
-  expect(screen.queryByText("新终端")).toBeNull();
+  expect(screen.queryByText("新会话")).toBeNull();
 });
 
 it("a bound snapshot shows the session-detail entry enabled from the start", async () => {

@@ -237,6 +237,17 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         if let Some(id) = &opts.root_session_id {
             args.extend(["--session-id".into(), id.clone()]);
         }
+        if let Some(message) = opts.initial_message() {
+            // Pi treats an argv beginning with `@` as a file attachment even
+            // after `--`. A leading space keeps that user message textual;
+            // all other input is passed exactly as written.
+            let message = if message.starts_with('@') {
+                format!(" {message}")
+            } else {
+                message.to_string()
+            };
+            args.extend(["--".into(), message]);
+        }
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,

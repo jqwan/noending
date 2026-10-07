@@ -15,9 +15,8 @@ import SessionCards, {
   sessionDisplayTitle,
 } from "./SessionTable";
 import PermanentDeleteModal from "./PermanentDeleteModal";
-import NewSessionModal from "./NewSessionModal";
 import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session } from "../../types";
-import type { Route, SessionScope, ViewAction } from "../../app/routes";
+import type { Route, SessionScope } from "../../app/routes";
 
 /**
  * Sessions = 执行记录页：第二天回来还能一眼找到并继续任意一次 Agent 会话，不承担
@@ -38,11 +37,9 @@ export function clearSessionsCache() {
   cachedWorkstreamTitleById = new Map();
 }
 
-export default function SessionsView({ navigate, scope, action, actionSeq }: {
+export default function SessionsView({ navigate, scope }: {
   navigate: (r: Route) => void;
   scope?: SessionScope;
-  action?: ViewAction;
-  actionSeq: number;
 }) {
   const [trashMode, setTrashMode] = useState(scope === "trash");
   const [sessions, setSessions] = useState<Session[] | null>(() => trashMode ? cachedTrashSessions : cachedNormalSessions);
@@ -58,7 +55,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [projectId, setProjectId] = useViewState("sessions.projectId", "all");
   const [wsFilter, setWsFilter] = useViewState("sessions.wsFilter", "all");
   const [viewMode, setViewMode] = useViewState<"cards" | "list">("sessions.viewMode", "cards");
-  const [creating, setCreating] = useState(false);
   const [trashSessionId, setTrashSessionId] = useState<string | null>(null);
   const [trashBusy, setTrashBusy] = useState(false);
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
@@ -123,11 +119,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     setTrashMode(isTrash);
     setSessions(isTrash ? cachedTrashSessions : cachedNormalSessions);
   }, [scope]);
-  // 页面动作随 Route 到达（palette → New Session）：actionSeq 让「已在 Sessions 页」
-  // 的重复命令同样触发。
-  useEffect(() => {
-    if (action === "new") setCreating(true);
-  }, [action, actionSeq]);
 
   const projectNameById = useMemo(
     () => new Map(projects.map((p) => [p.id, p.name])),
@@ -312,7 +303,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
                 <Icon name="archive" />
               </button>
             </div>
-            <button className="btn ghost icon-button" aria-label="新建会话" title="新建会话" onClick={() => setCreating(true)}>
+            <button className="btn ghost icon-button" aria-label="新建会话" title="新建会话" onClick={() => navigate({ view: "new-session" })}>
               <Icon name="plus" />
             </button>
           </>
@@ -424,7 +415,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
                   <button className="btn small" onClick={() => navigate({ view: "agents" })}>
                     配置会话来源
                   </button>
-                  <button className="btn small" onClick={() => setCreating(true)}>新建会话</button>
+                  <button className="btn small" onClick={() => navigate({ view: "new-session" })}>新建会话</button>
                 </>
               }
             />
@@ -541,7 +532,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
         </Modal>
       )}
 
-      {creating && <NewSessionModal onClose={() => setCreating(false)} navigate={navigate} />}
       {purgeSessionId && (
         <PermanentDeleteModal
           sessionId={purgeSessionId}

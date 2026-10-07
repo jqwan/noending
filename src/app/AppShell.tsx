@@ -19,6 +19,9 @@ function withoutAction(route: Route): Route {
 }
 
 export function normalizeRoute(route: Route): Route {
+  if (route.view === "sessions" && route.action === "new") {
+    return { view: "new-session" };
+  }
   if (route.view === "settings") {
     if (route.section === "agents" || route.section === "sources") {
       return { view: "agents" };
@@ -48,7 +51,7 @@ function sameRoute(a: Route, b: Route): boolean {
  */
 export default function AppShell() {
   const [navigation, setNavigation] = useState<NavigationState>({
-    entries: [{ view: "home" }],
+    entries: [{ view: "new-session" }],
     index: 0,
   });
   const [paletteOpen, setPaletteOpen] = useState(false);

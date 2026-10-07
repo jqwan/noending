@@ -13,9 +13,9 @@ interface PaletteItem {
 }
 
 /** 固定命令：导航 + New 动作，不与实体搜索混淆。
- *  New 动作以 route.action 携带意图，目标页已挂载时同样会打开 Modal。 */
+ *  新建会话进入输入页面；新建任务以 route.action 打开任务表单。 */
 const FIXED_COMMANDS: PaletteItem[] = [
-  { key: "cmd-home", kind: "命令", label: "前往首页", hint: "继续最近的工作", route: { view: "home" } },
+  { key: "cmd-new-session", kind: "命令", label: "新建会话", route: { view: "new-session" }, hint: "输入消息开始" },
   { key: "cmd-workstreams", kind: "命令", label: "前往任务", route: { view: "workstreams" } },
   { key: "cmd-sessions", kind: "命令", label: "前往会话", route: { view: "sessions" } },
   { key: "cmd-agents", kind: "命令", label: "前往代理", hint: "管理 Agent 与会话来源", route: { view: "agents" } },
@@ -23,7 +23,6 @@ const FIXED_COMMANDS: PaletteItem[] = [
   { key: "cmd-projects", kind: "命令", label: "前往项目", route: { view: "projects" } },
   { key: "cmd-settings", kind: "命令", label: "前往设置", route: { view: "settings" } },
   { key: "cmd-new-ws", kind: "命令", label: "新建任务", route: { view: "workstreams", action: "new" }, hint: "创建" },
-  { key: "cmd-new-session", kind: "命令", label: "新建会话", route: { view: "sessions", action: "new" }, hint: "默认 Agent" },
 ];
 
 export default function CommandPalette({ onClose, navigate }: {
@@ -96,7 +95,6 @@ export default function CommandPalette({ onClose, navigate }: {
 
   const go = (item: PaletteItem | undefined) => {
     if (!item) return;
-    // New 命令：意图随 route.action 到达页面，由页面打开 Modal（已在目标页时同样生效）。
     navigate(item.route);
     onClose();
   };

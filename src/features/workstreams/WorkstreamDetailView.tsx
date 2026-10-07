@@ -5,7 +5,6 @@ import Icon from "../../components/Icon";
 import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, submitsOnEnter, timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import NewSessionModal from "../sessions/NewSessionModal";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import {
   KIND_LABELS,
@@ -72,7 +71,6 @@ export default function WorkstreamDetailView({
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [actionError, setActionError] = useState("");
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
@@ -443,7 +441,7 @@ export default function WorkstreamDetailView({
         <WorkstreamSessions
           sessions={sessions}
           navigate={navigate}
-          onNewSession={archived ? undefined : () => setNewSessionOpen(true)}
+          onNewSession={archived ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
           allowActions={!archived}
         />
 
@@ -515,17 +513,6 @@ export default function WorkstreamDetailView({
         </section>
         </aside>
       </div>
-
-      {newSessionOpen && (
-        <NewSessionModal
-          workstreamId={workstream.id}
-          onClose={() => {
-            setNewSessionOpen(false);
-            refresh();
-          }}
-          navigate={navigate}
-        />
-      )}
 
       {editing && paths !== null && (
         <WorkstreamFormModal

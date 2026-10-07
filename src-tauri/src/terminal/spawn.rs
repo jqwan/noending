@@ -40,9 +40,12 @@ impl PtyPair {
         &self,
         cmd: &portable_pty::CommandBuilder,
     ) -> Result<Box<dyn portable_pty::Child + Send + Sync>> {
-        self.slave
-            .spawn_command(cmd.clone())
-            .map_err(|e| other(format!("在终端中启动 Agent 失败: {e}")))
+        self.slave.spawn_command(cmd.clone()).map_err(|e| {
+            other(format!(
+                "在终端中启动 Agent 失败: {}",
+                spawn_error_detail(&e.to_string())
+            ))
+        })
     }
 
     pub(crate) fn take_reader(&self) -> Result<Box<dyn std::io::Read + Send>> {
@@ -60,6 +63,25 @@ impl PtyPair {
     pub(crate) fn into_master(self) -> Box<dyn portable_pty::MasterPty + Send> {
         self.master
     }
+}
+
+/// portable-pty's Windows errors can embed the full command line, including
+/// the user's first message inside our wrapper script. Keep only the actual
+/// failure reason from those known formats; ordinary OS errors remain useful.
+fn spawn_error_detail(error: &str) -> &str {
+    if error.starts_with("CreateProcessW `") {
+        // The script itself can contain `failed:` (or this whole delimiter),
+        // so only the final boundary introduces the real OS error.
+        return error
+            .rsplit_once("` failed: ")
+            .map(|(_, reason)| reason)
+            .filter(|reason| !reason.trim().is_empty())
+            .unwrap_or("CreateProcessW 失败");
+    }
+    if error.starts_with("invalid encoding for command line argument ") {
+        return "命令参数包含无效编码";
+    }
+    error
 }
 
 /// POSIX login shell for the wrapper. A GUI process has no shell-derived
@@ -133,6 +155,40 @@ pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_error_detail_redacts_windows_command_lines_and_keeps_the_os_reason() {
+        let reason = "The system cannot find the file specified. (os error 2)";
+        let error = format!(
+            "CreateProcessW `\"powershell -Command & 'codex' '--' '用户首条消息 failed: fake ` failed: still user text'\"` in cwd `Some(\"C:\\\\work\")` failed: {reason}"
+        );
+        assert_eq!(spawn_error_detail(&error), reason);
+        assert_eq!(
+            spawn_error_detail("CreateProcessW `用户首条消息` unexpected failure"),
+            "CreateProcessW 失败"
+        );
+        assert_eq!(
+            spawn_error_detail("CreateProcessW `用户首条消息` in cwd `None` failed: "),
+            "CreateProcessW 失败"
+        );
+    }
+
+    #[test]
+    fn spawn_error_detail_redacts_invalid_arguments_and_preserves_other_failures() {
+        assert_eq!(
+            spawn_error_detail(
+                "invalid encoding for command line argument \"用户首条消息\\0script\""
+            ),
+            "命令参数包含无效编码"
+        );
+        for error in [
+            "Permission denied (os error 13)",
+            "No such file or directory (os error 2)",
+            "failed to resolve home dir",
+        ] {
+            assert_eq!(spawn_error_detail(error), error);
+        }
+    }
 
     #[test]
     #[cfg(unix)]

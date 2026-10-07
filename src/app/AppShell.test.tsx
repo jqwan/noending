@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import AppShell from "./AppShell";
+import type { Route } from "./routes";
 
 const focusListener = vi.hoisted(() => ({
   callback: undefined as undefined | ((event: { payload: boolean }) => void),
@@ -18,13 +19,18 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("../api", () => ({ api: { appForeground } }));
 vi.mock("../layout/Sidebar", () => ({ default: () => null }));
-vi.mock("./Router", () => ({ default: () => null }));
+vi.mock("./Router", () => ({ default: ({ route }: { route: Route }) => <output aria-label="当前页面">{route.view}</output> }));
 vi.mock("../components/Toast", () => ({ default: () => null }));
 vi.mock("../components/CommandPalette", () => ({ default: () => null }));
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
+
+it("starts on the new-session page", () => {
+  render(<AppShell />);
+  expect(screen.getByLabelText("当前页面").textContent).toBe("new-session");
+});
 
 it("remembers keyboard resizing, clamps width, and resets on double click", () => {
   const view = render(<AppShell />);
@@ -72,4 +78,5 @@ it("normalizes legacy settings sections to agents view", async () => {
   expect(normalizeRoute({ view: "settings", section: "sources" })).toEqual({ view: "agents" });
   expect(normalizeRoute({ view: "settings", section: "general" })).toEqual({ view: "settings", section: "general" });
   expect(normalizeRoute({ view: "workstreams" })).toEqual({ view: "workstreams" });
+  expect(normalizeRoute({ view: "sessions", action: "new" })).toEqual({ view: "new-session" });
 });

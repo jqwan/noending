@@ -8,8 +8,8 @@
 //!
 //! Resume: starts the Agent in the Session's own directory. Neither flow
 //! synchronizes or injects Context: a launch carries only launch facts (Agent,
-//! cwd, runtime, Owner, LaunchIntent). Context is consumed on demand from the
-//! Session / Workstream pages.
+//! cwd, runtime, Owner, LaunchIntent) and an optional first user turn for New.
+//! Context is consumed on demand from the Session / Workstream pages.
 //!
 //! Working directory: every launch resolves
 //! its directory through `resolve_new_cwd` / `resolve_resume_cwd`, which read
@@ -207,6 +207,10 @@ pub struct PreparedLaunch {
     /// exclusive — a desktop route never carries the embedded flag.
     #[serde(default)]
     pub embedded: bool,
+    /// The New Session composer's first user turn, frozen for this launch.
+    /// It is not Context and is never added to a Resume invocation.
+    #[serde(default)]
+    pub initial_message: Option<String>,
     pub state_fingerprint: String,
     pub prepared_at: String,
 }
@@ -292,6 +296,7 @@ impl SessionLauncher {
             runtime,
             desktop_open: None,
             embedded: false,
+            initial_message: None,
             state_fingerprint: fingerprint,
             prepared_at: now(),
         })
@@ -404,6 +409,7 @@ impl SessionLauncher {
             // prepare resolves the route only, and embedded rides the same
             // terminal route as the default.
             embedded: false,
+            initial_message: None,
             state_fingerprint: fingerprint,
             prepared_at: now(),
         })
@@ -512,19 +518,30 @@ impl SessionLauncher {
             // a UUID generated HERE, before spawn: the session file is born
             // with a known identity and the embedded terminal binds to the
             // discovered session by exact match. codex / agy generate their
-            // own ids and their terminals stay unbound until the session
-            // page's on-demand verified match.
+            // own ids, so the registry keeps the first message as additional
+            // evidence for binding after discovery.
             let mut runtime_opts = prepared.runtime.exec_options();
             let expected_root_session_id =
                 adapter.supports_prespecified_session_id().then(|| new_id());
             runtime_opts.root_session_id = expected_root_session_id.clone();
+            runtime_opts.initial_message = prepared.initial_message.clone();
 
             let cmd: AgentCommand =
                 adapter.build_new_command(&install, &runtime_opts, cwd_path.as_deref())?;
+            // Each interactive adapter puts the first message in the final
+            // argv element. Only redact that element in UI diagnostics: the
+            // real command still carries the original message into the PTY.
+            let public_command_line = runtime_opts.initial_message().map(|_| {
+                let mut display_cmd = cmd.clone();
+                if let Some(message_arg) = display_cmd.args.last_mut() {
+                    *message_arg = "[首条消息]".into();
+                }
+                display_cmd.display()
+            });
             // An embedded NEW launch spawns into NoEnding's own PTY with no
             // session identity yet: the registry entry starts unbound and
-            // binds when the discovered session claims the intent committed
-            // above (by exact prespecified id where available). External
+            // binds when discovery supplies unique matching evidence
+            // (by exact prespecified id where available). External
             // spawns stay the default when no embedded surface is provided.
             let outcome = if prepared.embedded {
                 let embedded =
@@ -535,6 +552,7 @@ impl SessionLauncher {
                         registry: embedded.registry,
                         session_id: None,
                         expected_root_session_id: expected_root_session_id.as_deref(),
+                        initial_message: prepared.initial_message.as_deref(),
                         agent: prepared.agent,
                     },
                 )?
@@ -568,7 +586,7 @@ impl SessionLauncher {
             }
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
-                command_line: outcome.command_line,
+                command_line: public_command_line.unwrap_or(outcome.command_line),
                 note: if prepared.owner_workstream_id.is_some() {
                     "新 Session 启动后会在发现时通过 LaunchIntent 自动归属所选任务。".into()
                 } else {
@@ -631,12 +649,22 @@ impl SessionLauncher {
             let outcome = if prepared.embedded {
                 let embedded =
                     embedded.ok_or_else(|| other("内嵌终端服务不可用，请刷新预览后重试"))?;
+                // Discovery may already have ingested a NEW terminal's
+                // session. Resolve that binding before atomically reserving
+                // this resume, and hold the reservation through spawn and
+                // registry registration to exclude concurrent resumes.
+                embedded.registry.bind_discovered(db);
+                let _reservation = embedded
+                    .registry
+                    .reserve_resume(session_id)
+                    .map_err(other)?;
                 (embedded.spawn)(
                     &cmd,
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: Some(session_id),
                         expected_root_session_id: None,
+                        initial_message: None,
                         agent: session.agent,
                     },
                 )?

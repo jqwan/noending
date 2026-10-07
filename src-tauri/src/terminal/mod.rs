@@ -1,4 +1,4 @@
-//! Embedded terminal backend — one real PTY per embedded Resume.
+//! Embedded terminal backend — one real PTY per embedded session.
 //!
 //! The four TUI agents (codex / claude / pi / agy) expect a terminal, not
 //! pipes: raw mode, alternate screen, `isatty`, window-size ioctls. This
@@ -13,7 +13,7 @@
 
 pub mod spawn;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::sync::Mutex;
 
@@ -57,9 +57,8 @@ pub struct TerminalBound {
 /// The facts a terminal subpage needs to decide what it is looking at.
 /// `session_id` is None for a NEW-session terminal: the Agent has been
 /// launched but its session file is not on disk yet. Binding happens only
-/// through exact facts — a prespecified session id (claude / pi) matched at
-/// discovery, or the session page's on-demand verified match — never by
-/// guessing from cwd + timing alone.
+/// through a prespecified session id (claude / pi), or a unique match of the
+/// submitted first message, Agent, directory and launch time after ingestion.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalSummary {
     pub terminal_id: String,
@@ -147,6 +146,9 @@ struct TerminalRecord {
     /// discovered session will carry it as `root_agent_session_id`, which is
     /// what `bind_discovered` matches on — exact, never inferred.
     expected_root_session_id: Option<String>,
+    /// Full submitted prompt for a NEW launch; kept only in memory and never
+    /// reconstructed from TUI output or the truncated session title.
+    initial_message: Option<String>,
     scrollback: Scrollback,
     cols: u16,
     rows: u16,
@@ -160,13 +162,101 @@ struct TerminalRecord {
 /// webview) and `None` in tests (emits are skipped, everything else runs).
 pub struct TerminalRegistry {
     records: Mutex<HashMap<String, std::sync::Arc<Mutex<TerminalRecord>>>>,
+    /// Also serializes discovery's query/claim step with Resume reservations.
+    /// Always acquired before `records`; never held across a process spawn.
+    resume_reservations: Mutex<HashSet<String>>,
     app: Option<AppHandle>,
+}
+
+/// A pending Resume claim. Every return path, including a failed spawn,
+/// releases it; a successful spawn has registered its live record by then.
+pub struct ResumeReservation<'a> {
+    registry: &'a TerminalRegistry,
+    session_id: String,
+}
+
+impl Drop for ResumeReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut reservations) = self.registry.resume_reservations.lock() {
+            reservations.remove(&self.session_id);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LaunchEvidence {
+    terminal_id: String,
+    agent: Agent,
+    cwd: Option<String>,
+    started_at: String,
+    expected_root_session_id: Option<String>,
+    initial_message: Option<String>,
+}
+
+fn normalized_message(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
+}
+
+fn matches_first_message(
+    launch: &LaunchEvidence,
+    session: &crate::storage::TerminalBindingCandidate,
+) -> bool {
+    if launch.agent != session.agent
+        || (launch.agent == Agent::Antigravity
+            && session.source_kind != "antigravity_cli_conversation")
+    {
+        return false;
+    }
+    let Some(started) = parse_ts(&launch.started_at) else {
+        return false;
+    };
+    let Some(source_started) = session.started_at.as_deref().and_then(parse_ts) else {
+        return false;
+    };
+    // Some source stores have only second precision. A bounded startup window
+    // prevents a much later conversation with the same prompt being claimed.
+    if source_started < started - chrono::Duration::seconds(1)
+        || source_started > started + chrono::Duration::minutes(5)
+    {
+        return false;
+    }
+    let Some(cwd) = launch
+        .cwd
+        .as_deref()
+        .and_then(crate::workspace::normalize_path)
+    else {
+        return false;
+    };
+    let Some(source_cwd) = session
+        .cwd
+        .as_deref()
+        .and_then(crate::workspace::normalize_path)
+    else {
+        return false;
+    };
+    if !crate::workspace::identity::same_location(&cwd, &source_cwd) {
+        return false;
+    }
+    let Some(message) = launch.initial_message.as_deref().map(normalized_message) else {
+        return false;
+    };
+    !message.is_empty()
+        && session
+            .first_user_message
+            .as_deref()
+            .map(normalized_message)
+            .as_deref()
+            == Some(message.as_str())
 }
 
 impl TerminalRegistry {
     pub fn new(app: Option<AppHandle>) -> Self {
         Self {
             records: Mutex::new(HashMap::new()),
+            resume_reservations: Mutex::new(HashSet::new()),
             app,
         }
     }
@@ -233,80 +323,203 @@ impl TerminalRegistry {
         live
     }
 
-    /// Attach `session_id` to an unbound terminal. A terminal already bound
-    /// (to any session) is left alone — binding happens once, from exact
-    /// facts only. The transition is announced twice: `terminal-bound` (with
-    /// the ids, for the attached terminal view) and `terminals-changed` (the
-    /// sidebar entry can now show the session's name).
-    pub fn bind(&self, terminal_id: &str, session_id: &str) {
-        let Ok(records) = self.records.lock() else {
-            return;
-        };
-        let Some(record) = records.get(terminal_id).cloned() else {
-            return;
-        };
-        drop(records);
-        let bound = {
-            let Ok(mut record) = record.lock() else {
-                return;
-            };
-            if record.summary.session_id.is_some() {
-                return;
-            }
-            record.summary.session_id = Some(session_id.to_string());
-            true
-        };
-        if bound {
-            if let Some(app) = &self.app {
-                let _ = app.emit(
-                    EVENT_BOUND,
-                    TerminalBound {
-                        terminal_id: terminal_id.to_string(),
-                        session_id: session_id.to_string(),
-                    },
-                );
-                let _ = app.emit(EVENT_CHANGED, ());
-            }
+    /// Atomically reject both a live Resume and another pending spawn.
+    pub fn reserve_resume(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<ResumeReservation<'_>, String> {
+        let mut reservations = self
+            .resume_reservations
+            .lock()
+            .map_err(|_| "terminal reservation lock poisoned".to_string())?;
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| "terminal registry lock poisoned".to_string())?;
+        let mut live = false;
+        for record in records.values() {
+            let record = record
+                .lock()
+                .map_err(|_| "terminal record lock poisoned".to_string())?;
+            live |= record.summary.live && record.summary.session_id.as_deref() == Some(session_id);
         }
+        if reservations.contains(session_id) || live {
+            return Err("该会话已有运行中或正在启动的内嵌终端；等它退出后可以再次启动".into());
+        }
+        reservations.insert(session_id.to_string());
+        Ok(ResumeReservation {
+            registry: self,
+            session_id: session_id.to_string(),
+        })
     }
 
-    /// Discovery's bind step. Only exact facts bind here: a NEW-session
-    /// terminal whose command line carried a prespecified session id
-    /// (claude / pi) is matched against the discovered session's
-    /// `root_agent_session_id`. CLIs that generate their own ids (codex /
-    /// agy) never auto-bind — content evidence cannot survive the TUI's
-    /// redraw stream, so their terminals stay unbound for life and are
-    /// reached through the sidebar. RESUME terminals are born bound
-    /// (session_id travels with the spawn) and never pass through here.
+    fn waiting_records(
+        records: &HashMap<String, std::sync::Arc<Mutex<TerminalRecord>>>,
+    ) -> Vec<LaunchEvidence> {
+        records
+            .values()
+            .filter_map(|record| {
+                let record = record.lock().ok()?;
+                (record.summary.live && record.summary.session_id.is_none()).then(|| {
+                    LaunchEvidence {
+                        terminal_id: record.summary.terminal_id.clone(),
+                        agent: record.summary.agent,
+                        cwd: record.summary.cwd.clone(),
+                        started_at: record.summary.created_at.clone(),
+                        expected_root_session_id: record.expected_root_session_id.clone(),
+                        initial_message: record.initial_message.clone(),
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Match ingested roots to live NEW terminals. Native IDs take priority;
+    /// otherwise the complete submitted first message, Agent, strict cwd and
+    /// launch time must match, with exactly one candidate on both sides.
+    /// The claim gate covers DB reads through binding so a concurrent Resume
+    /// cannot reserve a session while its existing terminal is being matched.
     pub fn bind_discovered(&self, db: &crate::storage::Db) {
-        // prespecified-id claim (claude / pi)
-        let waiting: Vec<(String, Agent, String)> = {
+        let Ok(reservations) = self.resume_reservations.lock() else {
+            return;
+        };
+        let waiting = {
             let Ok(records) = self.records.lock() else {
                 return;
             };
-            records
+            Self::waiting_records(&records)
+        };
+        let mut native_matches = HashMap::new();
+        let mut earliest = HashMap::<&str, (Agent, chrono::DateTime<chrono::Utc>)>::new();
+        for launch in &waiting {
+            if let Some(expected) = &launch.expected_root_session_id {
+                if let Ok(Some(session)) = db.find_session_by_root_agent_id(launch.agent, expected)
+                {
+                    if session.trashed_at.is_none() {
+                        native_matches
+                            .insert((launch.agent.as_str(), expected.clone()), session.id);
+                    }
+                }
+            } else if launch.initial_message.is_some() {
+                if let Some(started) = parse_ts(&launch.started_at) {
+                    earliest
+                        .entry(launch.agent.as_str())
+                        .and_modify(|(_, ts)| *ts = (*ts).min(started))
+                        .or_insert((launch.agent, started));
+                }
+            }
+        }
+        let mut candidates = Vec::new();
+        for &(agent, started) in earliest.values() {
+            if let Ok(mut roots) = db.terminal_binding_candidates(
+                agent,
+                &(started - chrono::Duration::seconds(1)).to_rfc3339(),
+            ) {
+                candidates.append(&mut roots);
+            }
+        }
+        // Include NEW records registered while DB queries ran in the uniqueness
+        // decision, holding records through the decision and commit.
+        let Ok(records) = self.records.lock() else {
+            return;
+        };
+        let waiting = Self::waiting_records(&records);
+        // A slow spawn may register AFTER our first snapshot despite starting
+        // earlier. Its source could have fallen below the queried time floor.
+        // Defer that Agent's text claims until a normal later ingestion pass.
+        let incomplete_agents: HashSet<_> = waiting
+            .iter()
+            .filter_map(|launch| {
+                if launch.expected_root_session_id.is_some() || launch.initial_message.is_none() {
+                    return None;
+                }
+                let started = parse_ts(&launch.started_at)?;
+                (!earliest
+                    .get(launch.agent.as_str())
+                    .is_some_and(|(_, floor)| started >= *floor))
+                .then_some(launch.agent.as_str())
+            })
+            .collect();
+        let native_sessions: HashSet<_> = native_matches.values().cloned().collect();
+        let matches: Vec<(String, Vec<String>)> = waiting
+            .iter()
+            .map(|launch| {
+                let ids = if let Some(expected) = &launch.expected_root_session_id {
+                    native_matches
+                        .get(&(launch.agent.as_str(), expected.clone()))
+                        .cloned()
+                        .into_iter()
+                        .collect()
+                } else if incomplete_agents.contains(launch.agent.as_str()) {
+                    Vec::new()
+                } else {
+                    candidates
+                        .iter()
+                        .filter(|session| {
+                            !native_sessions.contains(&session.session_id)
+                                && matches_first_message(launch, session)
+                        })
+                        .map(|session| session.session_id.clone())
+                        .collect()
+                };
+                (launch.terminal_id.clone(), ids)
+            })
+            .collect();
+        let mut claim_counts = HashMap::<&str, usize>::new();
+        for (_, ids) in &matches {
+            for id in ids {
+                *claim_counts.entry(id).or_default() += 1;
+            }
+        }
+        let mut bound = Vec::new();
+        {
+            let mut occupied: HashSet<String> = records
                 .values()
                 .filter_map(|record| {
                     let record = record.lock().ok()?;
-                    (record.summary.live
-                        && record.summary.session_id.is_none()
-                        && record.expected_root_session_id.is_some())
-                    .then(|| {
-                        (
-                            record.summary.terminal_id.clone(),
-                            record.summary.agent,
-                            record
-                                .expected_root_session_id
-                                .clone()
-                                .expect("checked above"),
-                        )
-                    })
+                    record
+                        .summary
+                        .live
+                        .then(|| record.summary.session_id.clone())
+                        .flatten()
                 })
-                .collect()
-        };
-        for (terminal_id, agent, expected) in waiting {
-            if let Ok(Some(session)) = db.find_session_by_root_agent_id(agent, &expected) {
-                self.bind(&terminal_id, &session.id);
+                .collect();
+            for (terminal_id, ids) in &matches {
+                if ids.len() != 1 {
+                    continue;
+                }
+                let session_id = &ids[0];
+                if claim_counts.get(session_id.as_str()) != Some(&1)
+                    || reservations.contains(session_id)
+                    || occupied.contains(session_id)
+                {
+                    continue;
+                }
+                let Some(record) = records.get(terminal_id) else {
+                    continue;
+                };
+                let Ok(mut record) = record.lock() else {
+                    continue;
+                };
+                if !record.summary.live || record.summary.session_id.is_some() {
+                    continue;
+                }
+                record.summary.session_id = Some(session_id.clone());
+                occupied.insert(session_id.clone());
+                bound.push(TerminalBound {
+                    terminal_id: terminal_id.clone(),
+                    session_id: session_id.clone(),
+                });
+            }
+        }
+        drop(records);
+        drop(reservations);
+        if let Some(app) = &self.app {
+            for fact in &bound {
+                let _ = app.emit(EVENT_BOUND, fact);
+            }
+            if !bound.is_empty() {
+                let _ = app.emit(EVENT_CHANGED, ());
             }
         }
     }
@@ -437,6 +650,7 @@ impl TerminalRegistry {
         &self,
         summary: TerminalSummary,
         expected_root_session_id: Option<String>,
+        initial_message: Option<String>,
         scrollback: Scrollback,
         master: Box<dyn portable_pty::MasterPty + Send>,
         writer: Box<dyn std::io::Write + Send>,
@@ -448,6 +662,7 @@ impl TerminalRegistry {
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
             summary: summary.clone(),
             expected_root_session_id,
+            initial_message,
             scrollback,
             cols: INITIAL_COLS,
             rows: INITIAL_ROWS,
@@ -525,12 +740,13 @@ impl TerminalRegistry {
 pub struct EmbeddedTarget<'a> {
     pub registry: &'a TerminalRegistry,
     /// None for a NEW-session launch: the session does not exist yet; the
-    /// registry entry starts unbound and binds later — by prespecified-id
-    /// match at discovery, or the session page's on-demand verified match.
+    /// registry entry starts unbound and binds after ingestion supplies identity
+    /// or unique first-message evidence.
     pub session_id: Option<&'a str>,
     /// The prespecified session id the command line carries (claude / pi);
     /// None when the CLI generates its own ids (codex / agy).
     pub expected_root_session_id: Option<&'a str>,
+    pub initial_message: Option<&'a str>,
     pub agent: Agent,
 }
 
@@ -542,6 +758,8 @@ pub fn spawn_embedded(
     cmd: &AgentCommand,
     target: &EmbeddedTarget,
 ) -> Result<crate::platform::launcher::LaunchOutcome> {
+    // Capture before spawning: a fast CLI can write its source before register.
+    let started_at = now();
     let terminal_id = new_id();
     let pty = spawn::PtyPair::open()?;
     let child = pty.spawn_command(&spawn::wrapped_command(cmd))?;
@@ -555,7 +773,7 @@ pub fn spawn_embedded(
         session_id: target.session_id.map(str::to_string),
         agent: target.agent,
         cwd: cmd.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
-        created_at: now(),
+        created_at: started_at,
         live: true,
         exit_code: None,
         session_title: None,
@@ -564,6 +782,7 @@ pub fn spawn_embedded(
     let summary = target.registry.register(
         summary,
         target.expected_root_session_id.map(str::to_string),
+        target.initial_message.map(str::to_string),
         Scrollback::default(),
         pty.into_master(),
         writer,
@@ -618,8 +837,262 @@ mod tests {
             registry,
             session_id: Some(session),
             expected_root_session_id: None,
+            initial_message: None,
             agent: Agent::Codex,
         }
+    }
+
+    fn evidence() -> LaunchEvidence {
+        LaunchEvidence {
+            terminal_id: "terminal".into(),
+            agent: Agent::Codex,
+            cwd: Some(if cfg!(windows) { r"C:\repo" } else { "/repo" }.into()),
+            started_at: "2026-10-07T12:00:00.500Z".into(),
+            expected_root_session_id: None,
+            initial_message: Some(format!("{}\r\n保留  内部空格\r\n", "完整消息".repeat(150))),
+        }
+    }
+
+    fn candidate(launch: &LaunchEvidence) -> crate::storage::TerminalBindingCandidate {
+        crate::storage::TerminalBindingCandidate {
+            session_id: "session".into(),
+            agent: launch.agent,
+            source_kind: "codex_rollout".into(),
+            cwd: launch.cwd.clone().map(|cwd| format!("{cwd}/")),
+            started_at: Some("2026-10-07T12:00:00Z".into()),
+            first_user_message: launch.initial_message.as_deref().map(normalized_message),
+        }
+    }
+
+    #[test]
+    fn first_message_matching_requires_full_text_strict_cwd_agent_and_time() {
+        let launch = evidence();
+        let good = candidate(&launch);
+        assert!(matches_first_message(&launch, &good));
+        let mut wrong = good.clone();
+        wrong.first_user_message = Some(
+            normalized_message(launch.initial_message.as_ref().unwrap())
+                .chars()
+                .take(400)
+                .collect(),
+        );
+        assert!(
+            !matches_first_message(&launch, &wrong),
+            "titles/prefixes are insufficient"
+        );
+        wrong = good.clone();
+        wrong.first_user_message = wrong.first_user_message.map(|text| text.replace("  ", " "));
+        assert!(
+            !matches_first_message(&launch, &wrong),
+            "internal whitespace is evidence"
+        );
+        for cwd in [
+            None,
+            Some("relative/path".into()),
+            Some(format!("{}/child", launch.cwd.as_ref().unwrap())),
+        ] {
+            wrong = good.clone();
+            wrong.cwd = cwd;
+            assert!(!matches_first_message(&launch, &wrong));
+        }
+        for ts in [
+            None,
+            Some("bad"),
+            Some("2026-10-07T11:59:59Z"),
+            Some("2026-10-07T12:05:01Z"),
+        ] {
+            wrong = good.clone();
+            wrong.started_at = ts.map(str::to_string);
+            assert!(!matches_first_message(&launch, &wrong));
+        }
+        wrong = good.clone();
+        wrong.agent = Agent::ClaudeCode;
+        assert!(!matches_first_message(&launch, &wrong));
+        wrong = good.clone();
+        wrong.first_user_message = None;
+        assert!(!matches_first_message(&launch, &wrong));
+        let mut blank = launch.clone();
+        blank.initial_message = Some("  ".into());
+        wrong.first_user_message = Some("  ".into());
+        assert!(!matches_first_message(&blank, &wrong));
+    }
+
+    #[test]
+    fn agy_first_message_matching_excludes_desktop_sources() {
+        let mut launch = evidence();
+        launch.agent = Agent::Antigravity;
+        let mut source = candidate(&launch);
+        source.source_kind = "antigravity_ide_conversation".into();
+        assert!(!matches_first_message(&launch, &source));
+        source.source_kind = "antigravity_cli_conversation".into();
+        assert!(matches_first_message(&launch, &source));
+    }
+
+    #[test]
+    fn resume_reservation_is_exclusive_and_released_on_drop() {
+        let registry = registry();
+        let start = std::sync::Barrier::new(8);
+        let claimed = std::sync::Barrier::new(8);
+        let results = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let registry = &registry;
+                    let start = &start;
+                    let claimed = &claimed;
+                    scope.spawn(move || {
+                        start.wait();
+                        let reservation = registry.reserve_resume("same-session");
+                        claimed.wait();
+                        reservation.is_ok()
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.into_iter().filter(|claimed| *claimed).count(), 1);
+        let claim = registry.reserve_resume("same-session").unwrap();
+        assert!(registry.reserve_resume("another-session").is_ok());
+        assert!(registry.reserve_resume("same-session").is_err());
+        drop(claim);
+        assert!(registry.reserve_resume("same-session").is_ok());
+    }
+
+    #[cfg(unix)]
+    fn new_with_message(registry: &TerminalRegistry, message: &str) -> String {
+        let mut cmd = sh("sleep 30");
+        cmd.cwd = Some("/tmp".into());
+        spawn_embedded(
+            &cmd,
+            &EmbeddedTarget {
+                registry,
+                session_id: None,
+                expected_root_session_id: None,
+                initial_message: Some(message),
+                agent: Agent::Codex,
+            },
+        )
+        .unwrap()
+        .terminal_id
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn binding_db() -> crate::storage::Db {
+        let dir = std::env::temp_dir().join(format!("noending-term-binding-{}", new_id()));
+        crate::storage::Db::open(&dir.join("db.sqlite")).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn ingested_root(db: &crate::storage::Db, native_id: &str, prompt: &str) -> String {
+        let ts = now();
+        let id = db
+            .upsert_logical_session(
+                Agent::Codex,
+                native_id,
+                None,
+                None,
+                Some("/tmp"),
+                None,
+                None,
+                Some(&ts),
+                Some(&ts),
+                "codex_rollout",
+                "/tmp/source.jsonl",
+                &serde_json::json!({}),
+            )
+            .unwrap()
+            .0;
+        db.commit_ingest(
+            &id,
+            &[crate::domain::ParsedSessionMessage {
+                source_message_id: Some("first".into()),
+                source_position: "0".into(),
+                ts: Some(ts),
+                role: crate::domain::SessionMessageRole::User,
+                content: prompt.into(),
+            }],
+            &crate::domain::SourceCursorUpdate {
+                file_identity: native_id.into(),
+                generation: 0,
+                byte_offset: 100,
+                last_seen_size: 100,
+                mtime: None,
+                start_byte_offset: 0,
+                prefix_hash: String::new(),
+            },
+        )
+        .unwrap();
+        id
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovered_full_first_message_binds_the_original_terminal_and_blocks_resume() {
+        let registry = registry();
+        let db = binding_db();
+        let prompt = format!("{}\n最后一行", "超过标题截断长度".repeat(100));
+        let terminal = new_with_message(&registry, &prompt);
+        let session = ingested_root(&db, "native-new", &prompt);
+        registry.bind_discovered(&db);
+        assert_eq!(
+            registry.for_session(&session).unwrap().terminal_id,
+            terminal
+        );
+        assert!(registry.reserve_resume(&session).is_err());
+        registry.kill_all();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovered_message_requires_uniqueness_in_both_directions() {
+        for (terminal_count, source_count) in [(1, 2), (2, 1)] {
+            let registry = registry();
+            let db = binding_db();
+            for _ in 0..terminal_count {
+                new_with_message(&registry, "same prompt");
+            }
+            for i in 0..source_count {
+                ingested_root(&db, &format!("root-{i}"), "same prompt");
+            }
+            registry.bind_discovered(&db);
+            assert_eq!(registry.list_live().len(), terminal_count);
+            assert!(registry
+                .list_live()
+                .iter()
+                .all(|terminal| terminal.session_id.is_none()));
+            registry.kill_all();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_respects_pending_and_live_resume_claims() {
+        let registry = registry();
+        let db = binding_db();
+        let terminal = new_with_message(&registry, "prompt");
+        let session = ingested_root(&db, "root", "prompt");
+        let pending = registry.reserve_resume(&session).unwrap();
+        registry.bind_discovered(&db);
+        assert!(registry.for_session(&session).is_none());
+        drop(pending);
+        registry.bind_discovered(&db);
+        assert_eq!(
+            registry.for_session(&session).unwrap().terminal_id,
+            terminal
+        );
+        // A second matching NEW must not take a session already held by a live terminal.
+        let second = new_with_message(&registry, "prompt");
+        registry.bind_discovered(&db);
+        assert!(registry
+            .attach(&second)
+            .unwrap()
+            .summary
+            .session_id
+            .is_none());
+        registry.kill_all();
     }
 
     #[test]
@@ -759,17 +1232,15 @@ mod tests {
                 registry: &registry,
                 session_id: None,
                 expected_root_session_id: None,
+                initial_message: None,
                 agent: Agent::Codex,
             },
         )
         .unwrap();
         let id = outcome.terminal_id.clone().unwrap();
 
-        // codex generates its own session ids, so nothing on the file side
-        // can identify "its" session with certainty. Even a MATCHED intent
-        // carrying the same agent + cwd must NOT bind the terminal — the
-        // old cwd+timing inference is retired; binding happens only through
-        // the session page's verified match.
+        // LaunchIntent ownership is not terminal identity. Without a submitted
+        // first message (or a native ID), matching agent + cwd cannot bind.
         let root =
             std::env::temp_dir().join(format!("noending-term-nobind-{}", crate::storage::new_id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -799,7 +1270,7 @@ mod tests {
                 .list_live()
                 .iter()
                 .any(|t| t.terminal_id == id && t.session_id.is_none()),
-            "an id-less terminal is never auto-bound"
+            "a terminal without first-message evidence must stay unbound"
         );
         registry.kill_all();
     }
@@ -816,6 +1287,7 @@ mod tests {
                 registry: &registry,
                 session_id: None,
                 expected_root_session_id: Some("root-born-identity"),
+                initial_message: Some("message evidence is unnecessary for a native ID"),
                 agent: Agent::Pi,
             },
         )
@@ -865,6 +1337,7 @@ mod tests {
                 registry: &registry,
                 session_id: Some("s-live"),
                 expected_root_session_id: None,
+                initial_message: None,
                 agent: Agent::Codex,
             },
         )

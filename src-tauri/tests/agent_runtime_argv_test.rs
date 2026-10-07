@@ -115,6 +115,7 @@ fn codex_renders_model_and_reasoning_effort() {
         provider: None,
         effort: Some("high".into()),
         root_session_id: None,
+        initial_message: None,
     };
     for args in [
         exec_args(Agent::Codex, &opts),
@@ -135,6 +136,7 @@ fn claude_renders_model_and_effort() {
         provider: None,
         effort: Some("high".into()),
         root_session_id: None,
+        initial_message: None,
     };
     for args in [
         exec_args(Agent::ClaudeCode, &opts),
@@ -159,6 +161,7 @@ fn pi_renders_provider_model_and_thinking() {
         provider: Some("lmstudio".into()),
         effort: Some("low".into()),
         root_session_id: None,
+        initial_message: None,
     };
     for args in [
         exec_args(Agent::Pi, &opts),
@@ -189,11 +192,91 @@ fn an_override_value_is_passed_literally_as_one_argv_element() {
             provider: None,
             effort: None,
             root_session_id: None,
+            initial_message: None,
         },
     );
     assert!(args.iter().any(|a| a == value), "{args:?}");
     assert_eq!(args.iter().filter(|a| a.as_str() == "--model").count(), 1);
     assert_eq!(args.last().map(|a| a.as_str()), Some("prompt text"));
+}
+
+#[test]
+fn new_session_sends_the_first_message_in_interactive_mode() {
+    // Option-like text, command names, Unicode and shell syntax must remain
+    // one user message rather than becoming CLI options or shell commands.
+    for message in [
+        "--model other",
+        "resume",
+        "  开始任务\n$(id) 'quoted' \"text\"  ",
+    ] {
+        for agent in launchable() {
+            let opts = ExecOptions {
+                initial_message: Some(message.into()),
+                ..Default::default()
+            };
+            let args = new_args(agent, &opts);
+            let selector = if agent == Agent::Antigravity {
+                "--prompt-interactive"
+            } else {
+                "--"
+            };
+            assert_eq!(args, [selector, message], "{agent:?}");
+            assert!(
+                !args.iter().any(|arg| arg == "--print" || arg == "-p"),
+                "{agent:?} must keep the interactive terminal open"
+            );
+            assert_eq!(
+                resume_args(agent, &opts),
+                resume_args(agent, &ExecOptions::default()),
+                "a first message must never leak into Resume"
+            );
+        }
+    }
+}
+
+#[test]
+fn new_session_omits_blank_messages_and_keeps_runtime_and_birth_identity() {
+    for agent in launchable() {
+        let blank = ExecOptions {
+            initial_message: Some(" \n\t ".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            new_args(agent, &blank),
+            new_args(agent, &ExecOptions::default())
+        );
+    }
+
+    for agent in [Agent::ClaudeCode, Agent::Pi] {
+        let without_message = ExecOptions {
+            model: Some("custom-model".into()),
+            effort: Some("high".into()),
+            root_session_id: Some("known-root-id".into()),
+            ..Default::default()
+        };
+        let mut with_message = without_message.clone();
+        with_message.initial_message = Some("开始任务".into());
+        let mut expected = new_args(agent, &without_message);
+        expected.extend(["--".into(), "开始任务".into()]);
+        assert_eq!(new_args(agent, &with_message), expected, "{agent:?}");
+    }
+}
+
+#[test]
+fn pi_keeps_at_prefixed_messages_textual_instead_of_attaching_files() {
+    let message = "@someone 请检查代码\n保留消息内容";
+    let args = new_args(
+        Agent::Pi,
+        &ExecOptions {
+            initial_message: Some(message.into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(args, ["--", &format!(" {message}")]);
+    assert!(
+        !args.last().unwrap().starts_with('@'),
+        "Pi parses @file even after --, so this must stay a text argument"
+    );
 }
 
 /// An Agent without a CLI must fail loudly. Returning an empty argv (or a
