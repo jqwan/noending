@@ -23,7 +23,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
 
   if (cards === null) {
     return (
-      <div className="main narrow home" role="status">
+      <div className="main home-page" role="status">
         <PageHeader title="首页" />
         {loadError ? (
           <div className="card hairline" style={{ padding: 16, marginTop: 20 }}>
@@ -67,7 +67,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
 
   if (activeCards.length === 0) {
     return (
-      <div className="main narrow home">
+      <div className="main home-page empty-home">
         <div className="hero">
           <SidebarLogo size={44} />
           <h1>开始新任务</h1>
@@ -108,7 +108,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   }
 
   return (
-    <div className="main narrow">
+    <div className="main home-page">
       <PageHeader
         title="继续工作"
         actions={

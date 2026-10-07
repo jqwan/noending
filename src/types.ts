@@ -813,8 +813,6 @@ export interface AgentStatusEntry {
   /** 接入的桌面应用名；null = 该 Agent 没有接入桌面端。 */
   desktop_app: string | null;
   desktop_app_present: boolean;
-  /** 会话格式的 resume 打开方式：外部终端（默认）/ 桌面应用 / 内嵌终端。 */
-  resume_open_method: "terminal" | "desktop" | "embedded";
 }
 
 export const KIND_LABELS: Record<string, string> = {

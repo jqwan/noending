@@ -220,7 +220,10 @@
   padding-bottom: 0;
   max-width: none;
 }
-.main.fill > .page-head { padding-left: 16px; padding-right: 16px; }
+.main.fill > .page-head { padding-left: 24px; padding-right: 24px; }
+@media (max-width: 800px) {
+  .main.fill > .page-head { padding-left: 16px; padding-right: 16px; }
+}
 
 /* 标题行=应用标题栏那一条：吸在 .main 顶部，页面滚动时内容从它下面穿过。
    左右用负 margin 抵消 .main 的内边距，背景才能盖住滚过去的正文。

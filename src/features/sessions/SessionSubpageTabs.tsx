@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
 import Icon from "../../components/Icon";
-import { api } from "../../api";
+import { capsOf } from "./sessionFormats";
 import type { Agent } from "../../types";
 import type { Route, SessionEntry } from "../../app/routes";
 
@@ -9,39 +8,28 @@ import type { Route, SessionEntry } from "../../app/routes";
  * 与会话看板的「会话列表/回收站」同一交互语言：settings-seg 分段控件、图标按钮、
  * navigate 驱动、无本地状态。
  *
- * 终端段只对有 TUI CLI 的 Agent 出现——这是 `get_agent_status` 里的静态适配器事实
- * （terminal_cli），不在前端硬编码名册；状态读不到时按无终端能力渲染，两个基础段
- * 仍然可用。回收站里或源不可用的会话，终端段置灰并说明原因（复用 Resume 的门槛语义）。
+ * 终端段按会话格式的静态能力出现（sessionFormats 的能力表，与后端 adapters 的
+ * 路由事实同源）：antigravity 的桌面存储没有 CLI，不出现终端段——能力跟格式走，
+ * 不跟 agent 走。回收站里或源不可用的会话，终端段置灰并说明原因（Resume 的
+ * 门槛语义）；这是父组件算好的 `terminalGate`。
  */
-export default function SessionSubpageTabs({ sessionId, entry, agent, terminalGate, navigate }: {
+export default function SessionSubpageTabs({ sessionId, entry, agent, sourceKind, terminalGate, navigate }: {
   sessionId: string;
   entry: SessionEntry | undefined;
   agent: Agent | null;
+  /** 会话的 source_kind；未读到时按 agent 键兜底。 */
+  sourceKind: string | undefined;
   /** 非 null：终端段置灰，值为原因；null = 可用。 */
   terminalGate: string | null;
   navigate: (r: Route) => void;
 }) {
-  const [hasTerminalCli, setHasTerminalCli] = useState(false);
-  useEffect(() => {
-    if (!agent) return;
-    let live = true;
-    api.getAgentStatus()
-      .then((status) => {
-        if (live) setHasTerminalCli(status[agent]?.terminal_cli === true);
-      })
-      .catch(() => {
-        // 读不到能力事实时按「无终端」渲染；基础两段不受影响。
-      });
-    return () => {
-      live = false;
-    };
-  }, [agent]);
+  const hasTerminal = agent ? capsOf(agent, sourceKind).terminal : false;
 
   const nav = (next: SessionEntry | undefined) =>
     navigate({ view: "session", sessionId, entry: next });
 
   return (
-    <div className="settings-seg" role="group" aria-label="会话子页">
+    <div className="settings-seg icon-seg" role="group" aria-label="会话子页">
       <button
         className={entry === undefined ? "on" : ""}
         aria-pressed={entry === undefined}
@@ -60,7 +48,7 @@ export default function SessionSubpageTabs({ sessionId, entry, agent, terminalGa
       >
         <Icon name="chat" />
       </button>
-      {hasTerminalCli && (
+      {hasTerminal && (
         <button
           className={entry === "terminal" ? "on" : ""}
           aria-pressed={entry === "terminal"}

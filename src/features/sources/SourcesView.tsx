@@ -17,7 +17,7 @@ import {
  * 摄入在后台单线程执行，完成事件是 `ingestion-completed`，最近一次结果来自
  * `get_ingestion_status`（纯读取）。
  */
-type OpenMethod = "terminal" | "desktop" | "embedded";
+type OpenMethod = "terminal" | "desktop";
 
 type SessionFormat = {
   id: string;
@@ -31,15 +31,15 @@ type SessionFormat = {
 
 /** 会话格式：来源按它分组，也是添加来源的单位。Antigravity 的两个存储是两种格式（9 种的由来）。 */
 const SESSION_FORMATS: SessionFormat[] = [
-  { id: "codex", label: "Codex", agent: "codex", methods: ["terminal", "embedded", "desktop"] },
-  { id: "claude_code", label: "Claude Code", agent: "claude_code", methods: ["terminal", "embedded"] },
-  { id: "pi", label: "Pi", agent: "pi", methods: ["terminal", "embedded"] },
+  { id: "codex", label: "Codex", agent: "codex", methods: ["terminal", "desktop"] },
+  { id: "claude_code", label: "Claude Code", agent: "claude_code", methods: ["terminal"] },
+  { id: "pi", label: "Pi", agent: "pi", methods: ["terminal"] },
   { id: "dsh", label: "DSH", agent: "dsh", methods: ["desktop"] },
   { id: "qoder", label: "Qoder", agent: "qoder", methods: ["desktop"] },
   { id: "workbuddy", label: "WorkBuddy", agent: "workbuddy", methods: ["desktop"] },
   { id: "zcode", label: "ZCode", agent: "zcode", methods: ["desktop"] },
   { id: "antigravity_desktop", label: "Antigravity", agent: "antigravity", defaultPath: "~/.gemini/antigravity", methods: ["desktop"] },
-  { id: "antigravity_cli", label: "Antigravity CLI", agent: "antigravity", defaultPath: "~/.gemini/antigravity-cli", methods: ["terminal", "embedded"] },
+  { id: "antigravity_cli", label: "Antigravity CLI", agent: "antigravity", defaultPath: "~/.gemini/antigravity-cli", methods: ["terminal"] },
 ];
 
 /** 一条来源属于哪个格式：antigravity 靠路径区分两个存储，其余格式即 agent。 */
@@ -187,21 +187,6 @@ export default function SourcesView() {
     }
   };
 
-  const setMethod = async (fmt: SessionFormat, method: OpenMethod) => {
-    clearMessages();
-    try {
-      await api.setResumeOpenMethod(fmt.agent, method);
-      setAgentStatus(await api.getAgentStatus());
-      setNotice(
-        method === "desktop"
-          ? "已改为桌面端打开：继续该格式的会话时打开对应应用。"
-          : "已改为终端打开。"
-      );
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   const enabledCount = sources.filter((s) => s.enabled).length;
 
   return (
@@ -255,7 +240,7 @@ export default function SourcesView() {
                 <AgentIcon agent={fmt.agent} />
                 {fmt.label}
               </div>
-              <OpenMethodControl fmt={fmt} entry={entry} onChoose={(m) => void setMethod(fmt, m)} />
+              <OpenMethodControl fmt={fmt} entry={entry} />
             </div>
 
             {rows.length === 0 && (
@@ -372,43 +357,23 @@ export default function SourcesView() {
   );
 }
 
-/** 组头的打开方式控件。两种方式（目前只有 codex）是可选项，桌面端选项在应用
- *  未安装时禁用——找不到的桌面应用不支持；只有一种方式的格式展示为固定事实。 */
-function OpenMethodControl({ fmt, entry, onChoose }: {
+/** 组头的打开方式徽标：每种格式只有一种「继续」方式（桌面应用，或内嵌终端
+ *  ——内嵌的入口在会话页的终端子页，不在这里选择），展示为固定事实；
+ *  桌面应用未安装时注明。 */
+function OpenMethodControl({ fmt, entry }: {
   fmt: SessionFormat;
   entry?: AgentStatusEntry;
-  onChoose: (m: OpenMethod) => void;
 }) {
-  const current = entry?.resume_open_method ?? "terminal";
   const label = (m: OpenMethod) =>
-    m === "terminal" ? "TUI" : m === "embedded" ? "内嵌" : entry?.desktop_app ? `桌面端（${entry.desktop_app}）` : "桌面端";
+    m === "terminal" ? "TUI（内嵌）" : entry?.desktop_app ? `桌面端（${entry.desktop_app}）` : "桌面端";
   // 在场未知（状态没回来）时不当作缺席。
   const desktopAbsent = entry != null && !entry.desktop_app_present;
-
-  if (fmt.methods.length === 1) {
-    const m = fmt.methods[0];
-    return (
-      <span className="badge" title="该会话格式只有这一种打开方式">
-        {label(m)}
-        {m === "desktop" && desktopAbsent ? " · 未安装" : ""}
-      </span>
-    );
-  }
+  const m = fmt.methods[0];
   return (
-    <div className="settings-seg" role="group" aria-label="resume 打开方式">
-      {fmt.methods.map((m) => {
-        const absent = m === "desktop" && desktopAbsent;
-        return (
-          <button key={m}
-            className={current === m ? "on" : ""}
-            disabled={absent}
-            title={absent ? `未找到 ${entry?.desktop_app}，桌面端打开不可用` : undefined}
-            onClick={() => onChoose(m)}>
-            {label(m)}
-          </button>
-        );
-      })}
-    </div>
+    <span className="badge" title="该会话格式固定通过此方式继续">
+      {label(m)}
+      {m === "desktop" && desktopAbsent ? " · 未安装" : ""}
+    </span>
   );
 }
 

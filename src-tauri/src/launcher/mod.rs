@@ -30,50 +30,6 @@ use crate::domain::{launch_status, Agent, LaunchIntent, Session};
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 
-/// Stored per-format preference for how Continue opens a session. `terminal`
-/// is the default and is stored by absence — only a non-default choice writes
-/// a row, so no row means the format default. `desktop` opens the Agent's own
-/// app (only formats that have one may choose it); `embedded` runs the CLI
-/// inside NoEnding's own embedded terminal (only formats with a TUI CLI).
-pub const RESUME_METHOD_KEY_PREFIX: &str = "resume.open_method.";
-
-/// The stored open method for `agent`: `"terminal"` (default), `"desktop"`,
-/// or `"embedded"`.
-pub fn stored_resume_method(db: &Db, agent: Agent) -> Result<&'static str> {
-    let key = format!("{}{}", RESUME_METHOD_KEY_PREFIX, agent.as_str());
-    Ok(match db.get_setting(&key)?.as_deref() {
-        Some("desktop") => "desktop",
-        Some("embedded") => "embedded",
-        _ => "terminal",
-    })
-}
-
-/// Persist the open method chosen for `agent`. Only a format with BOTH
-/// surfaces may choose `desktop`; only a format with a TUI CLI may choose
-/// `embedded`; `terminal` clears the row back to default.
-pub fn write_resume_method(db: &Db, agent: Agent, method: &str) -> Result<()> {
-    let key = format!("{}{}", RESUME_METHOD_KEY_PREFIX, agent.as_str());
-    match method {
-        "terminal" => db.delete_setting(&key)?,
-        "desktop" => {
-            let adapter = crate::adapters::adapter_for(agent);
-            if !adapter.has_terminal_cli() || adapter.desktop_app_name().is_none() {
-                return Err(other("该会话格式只有一种打开方式"));
-            }
-            db.set_setting(&key, "desktop")?;
-        }
-        "embedded" => {
-            let adapter = crate::adapters::adapter_for(agent);
-            if !adapter.has_terminal_cli() {
-                return Err(other("该 Agent 没有可内嵌运行的 CLI"));
-            }
-            db.set_setting(&key, "embedded")?;
-        }
-        _ => return Err(other(format!("未知打开方式: {}", method))),
-    }
-    Ok(())
-}
-
 /// LaunchIntent matching window: a discovered session may only claim an
 /// intent launched within this range before the session started.
 const MATCH_WINDOW_SECS: i64 = 6 * 3600;
@@ -412,19 +368,11 @@ impl SessionLauncher {
         // preview time — a launch that cannot resume must never look
         // preparable.
         let adapter = crate::adapters::adapter_for(session.agent);
-        // A stored desktop preference only swaps in when the format really has
-        // a desktop route; anything else falls back to the format default, so
-        // Continue keeps working (e.g. the desktop app was uninstalled after
-        // choosing it).
-        let route = match stored_resume_method(db, session.agent)? {
-            "desktop" => match adapter.desktop_resume_route(&session) {
-                crate::adapters::ResumeRoute::Desktop(open) => {
-                    crate::adapters::ResumeRoute::Desktop(open)
-                }
-                _ => adapter.continue_route(&session),
-            },
-            _ => adapter.continue_route(&session),
-        };
+        // The continue route is the format's own static fact. This prepare
+        // feeds the embedded terminal launch, which forces the terminal route
+        // anyway; desktop opens go through `continue_session_desktop`, which
+        // asks `desktop_resume_route` directly.
+        let route = adapter.continue_route(&session);
         let desktop_open = match route {
             crate::adapters::ResumeRoute::Terminal => None,
             crate::adapters::ResumeRoute::Desktop(open) => Some(open),

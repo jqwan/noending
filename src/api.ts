@@ -218,13 +218,15 @@ export const api = {
       ownerWorkstreamId,
       cwd: cwd ?? null,
     }),
-  /** Resume 不再传任何 Workstream：用 Session 当前的 Owner。 */
-  prepareResumeSession: (sessionId: string) =>
-    invoke<import("./types").PreparedLaunch>("prepare_resume_session", { sessionId }),
   launchPrepared: (preparedId: string) =>
     invoke<LaunchResult>("launch_prepared", { preparedId }),
   cancelPrepared: (preparedId: string) =>
     invoke<void>("cancel_prepared", { preparedId }),
+
+  /** Agent 图标「继续」按钮：直接在会话格式对应的桌面应用里打开，无预览。
+   *  没有桌面路由的格式（后端 desktop_resume_route 拒绝）在此报错。 */
+  continueSessionDesktop: (sessionId: string) =>
+    invoke<{ uri: string; note: string }>("continue_session_desktop", { sessionId }),
 
   // 内嵌终端：终端子页的直启入口——prepare + embedded launch 一步完成（不走
   // 继续会话弹窗），之后通过 attach 协议接管。输出走
@@ -257,8 +259,6 @@ export const api = {
   search: (query: string, limit?: number) => invoke<SearchHit[]>("search", { query, limit: limit ?? 30 }),
   getAgentStatus: () =>
     invoke<Record<string, import("./types").AgentStatusEntry>>("get_agent_status"),
-  setResumeOpenMethod: (agent: Agent, method: "terminal" | "desktop" | "embedded") =>
-    invoke<void>("set_resume_open_method", { agent, method }),
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
   setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),

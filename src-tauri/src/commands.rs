@@ -590,21 +590,6 @@ pub fn launch_new_session(
     Ok(result)
 }
 
-#[tauri::command]
-pub fn launch_resume_session(
-    app: AppHandle,
-    state: State<AppState>,
-    session_id: String,
-) -> Result<crate::launcher::LaunchResult> {
-    let launcher = launcher_for(&app);
-    let workspace = launch_workspace(&app);
-    let result = with_db(&state, |db| {
-        launcher.resume_session_in(db, &session_id, &workspace)
-    })?;
-    ingestion::enqueue(&app, ingestion::IngestScope::RefreshSession(session_id));
-    Ok(result)
-}
-
 /// Maximum time a prepared launch remains valid in memory before lazy cleanup (30 minutes).
 pub const PREPARED_LAUNCH_TTL_SECS: i64 = 30 * 60;
 
@@ -669,44 +654,35 @@ pub fn prepare_new_session(
     Ok(prepared)
 }
 
+/// The agent-icon continue button: open the session in its desktop app, no
+/// preview. The desktop route is the format's own fact (`desktop_resume_route`)
+/// — formats without one refuse here; the button is disabled for them and this
+/// is the backstop. Trash is the hard gate; source availability does not
+/// matter (the desktop app reads its own store, not our transcript).
 #[tauri::command]
-pub fn prepare_resume_session(
+pub fn continue_session_desktop(
     app: AppHandle,
     state: State<AppState>,
-    terminal: State<'_, crate::terminal::TerminalRegistry>,
     session_id: String,
-) -> Result<crate::launcher::PreparedLaunch> {
-    let launcher = launcher_for(&app);
-    let workspace = launch_workspace(&app);
-    // The embedded choice is frozen HERE, at prepare time, where the terminal
-    // registry can refuse a second live terminal for the same session: one
-    // conversation, one embedded Agent.
-    let (mut prepared, embedded_wanted) = with_db(&state, |db| {
-        let prepared = launcher.prepare_resume_in(db, &session_id, &workspace)?;
-        let embedded_wanted =
-            crate::launcher::stored_resume_method(db, prepared.agent)? == "embedded";
-        Ok((prepared, embedded_wanted))
+) -> Result<crate::adapters::DesktopResume> {
+    let route = with_db(&state, |db| {
+        let session = db
+            .get_session(&session_id)?
+            .ok_or_else(|| other("Session 不存在"))?;
+        if session.is_trashed() {
+            return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+        }
+        Ok(crate::adapters::adapter_for(session.agent).desktop_resume_route(&session))
     })?;
-    prepared.embedded = embedded_wanted;
-    if embedded_wanted {
-        if terminal.has_live(&session_id) {
-            return Err(other(
-                "该会话已有运行中的内嵌终端；等它退出后可以再次继续，或改用外部终端",
-            ));
+    match route {
+        crate::adapters::ResumeRoute::Desktop(open) => {
+            crate::platform::launcher::open_uri(&open.uri)?;
+            ingestion::enqueue(&app, ingestion::IngestScope::RefreshSession(session_id));
+            Ok(open)
         }
-        if prepared.desktop_open.is_some() {
-            // A frozen desktop route and the embedded flag are mutually
-            // exclusive; the embedded choice rides the terminal route.
-            return Err(other("该会话的继续方式已解析为桌面端，无法内嵌"));
-        }
+        crate::adapters::ResumeRoute::Terminal => Err(other("该会话格式没有桌面端打开方式")),
+        crate::adapters::ResumeRoute::Refused(reason) => Err(other(reason)),
     }
-    let mut map = state
-        .prepared_launches
-        .lock()
-        .map_err(|_| other("prepared_launches lock poisoned"))?;
-    prune_stale_prepared_launches(&mut map);
-    map.insert(prepared.id.clone(), prepared.clone());
-    Ok(prepared)
 }
 
 #[tauri::command]
@@ -741,10 +717,11 @@ pub fn launch_prepared(
 
 /// The terminal subpage's direct entry: prepare + launch an embedded resume
 /// in ONE step, no preview. The terminal button IS the explicit intent, so
-/// the embedded flag is forced here regardless of the stored open-method
-/// preference (which keeps governing the Resume modal's default); every
-/// prepare-side gate (trash, missing source) still applies, and a live
-/// embedded terminal for the same session is refused.
+/// the embedded flag is forced here — it is the only embedded entry; the
+/// stored open-method preference governs only the Resume modal's
+/// terminal-vs-desktop choice. Every prepare-side gate (trash, missing
+/// source) still applies, and a live embedded terminal for the same session
+/// is refused.
 #[tauri::command]
 pub fn launch_embedded_resume(
     app: AppHandle,
@@ -1042,9 +1019,6 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
         // 两者分开给，未安装的桌面应用也要列出来（标「未安装」）。
         let adapter = crate::adapters::adapter_for(*agent);
         let desktop_app = adapter.desktop_app_name();
-        let open_method = with_db(&state, |db| {
-            crate::launcher::stored_resume_method(db, *agent)
-        })?;
         out.insert(
             agent.as_str().to_string(),
             serde_json::json!({
@@ -1058,7 +1032,6 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
                 "desktop_app_present": desktop_app
                     .map(crate::platform::paths::app_bundle_present)
                     .unwrap_or(false),
-                "resume_open_method": open_method,
             }),
         );
     }
@@ -1130,16 +1103,6 @@ pub fn set_agent_runtime_overrides(
         // Validates, then persists; an unsupported field never reaches storage.
         crate::agent_runtime::set_runtime_overrides(db, agent, &overrides)?;
         runtime_settings(db, agent)
-    })
-}
-
-/// 选择某 Agent 会话格式的 resume 打开方式（设置 → 会话来源）。目前只有
-/// codex 同时支持终端与桌面端；其余格式只有一种，设置页展示为固定项。
-#[tauri::command]
-pub fn set_resume_open_method(state: State<AppState>, agent: String, method: String) -> Result<()> {
-    let agent = agent_of(&agent)?;
-    with_db(&state, |db| {
-        crate::launcher::write_resume_method(db, agent, &method)
     })
 }
 

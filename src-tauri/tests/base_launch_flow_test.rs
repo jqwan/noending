@@ -310,6 +310,61 @@ fn standalone_prepared_launch_reports_the_default_workspace() {
 /// refuses loudly when the app is absent, while a CLI agent keeps the
 /// terminal route with `desktop_open` unset.
 #[test]
+/// continue_session_desktop asks `desktop_resume_route` — its default derives
+/// the Desktop variant from `continue_route`, so Antigravity's IDE store (no
+/// override of its own) still opens the desktop app instead of refusing.
+#[test]
+fn antigravity_desktop_sessions_open_the_desktop_app() {
+    let db = open_db("agy-desktop-open");
+    let launcher = launcher_in("agy-desktop-open");
+    let workspace = LaunchWorkspace::default();
+
+    let raw = std::env::temp_dir().join(format!("noending-agy-{}.jsonl", new_id()));
+    std::fs::write(&raw, "").unwrap();
+    let ts = now();
+    let (sid, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Antigravity,
+            "agy-ide-root-1",
+            Some("AGY"),
+            None,
+            None,
+            None,
+            Some(&ts),
+            Some(&ts),
+        )
+        .unwrap();
+    support::ensure_session_source(
+        &db,
+        Agent::Antigravity,
+        "agy-ide-root-1",
+        &raw.to_string_lossy(),
+    );
+    // The IDE store kind decides the route: this is the desktop half.
+    db.write()
+        .execute(
+            "UPDATE sessions SET source_kind = 'antigravity_ide_conversation' WHERE root_agent_session_id = 'agy-ide-root-1'",
+            [],
+        )
+        .unwrap();
+
+    let prepared = launcher
+        .prepare_resume_in(&db, &sid, &workspace)
+        .expect("prepare");
+    let adapter = noending::adapters::adapter_for(Agent::Antigravity);
+    let session = db.get_session(&sid).unwrap().unwrap();
+    match adapter.desktop_resume_route(&session) {
+        noending::adapters::ResumeRoute::Desktop(open) => {
+            assert_eq!(open.uri, "antigravity://");
+        }
+        other => panic!("expected the desktop route, got {other:?}"),
+    }
+    // prepare itself stays a terminal-route plan (embedded rides it); the
+    // desktop answer lives on the adapter, consumed by continue_session_desktop.
+    let _ = prepared;
+}
+
+#[test]
 fn the_continue_route_follows_the_source_format() {
     let db = open_db("continue-route-format");
     let launcher = launcher_in("continue-route-format");
@@ -381,55 +436,6 @@ fn the_continue_route_follows_the_source_format() {
         prepared.desktop_open.is_none(),
         "codex continues in the terminal"
     );
-}
-
-/// A stored "desktop" preference (设置 → 会话来源) swaps in the ChatGPT route
-/// when the app can actually open the thread, and falls back to the terminal —
-/// never a refusal — when it cannot. Default (no row) is always terminal.
-#[test]
-fn a_stored_desktop_preference_swaps_in_chatgpt_when_it_can_open_the_thread() {
-    let db = open_db("resume-method-codex");
-    let launcher = launcher_in("resume-method-codex");
-    let workspace = LaunchWorkspace::default();
-
-    let raw = std::env::temp_dir().join(format!("noending-rm-{}.jsonl", new_id()));
-    std::fs::write(&raw, "").unwrap();
-    let ts = now();
-    let (sid, _) = db
-        .upsert_logical_session_unchecked(
-            Agent::Codex,
-            "cx-pref-1",
-            Some("CX"),
-            None,
-            None,
-            None,
-            Some(&ts),
-            Some(&ts),
-        )
-        .unwrap();
-    support::ensure_session_source(&db, Agent::Codex, "cx-pref-1", &raw.to_string_lossy());
-
-    let prepared = launcher
-        .prepare_resume_in(&db, &sid, &workspace)
-        .expect("default preference is terminal");
-    assert!(prepared.desktop_open.is_none(), "no row means terminal");
-
-    db.set_setting("resume.open_method.codex", "desktop")
-        .unwrap();
-    let prepared = launcher.prepare_resume_in(&db, &sid, &workspace).expect(
-        "a desktop route that cannot run must fall back to the format default, not fail prepare",
-    );
-    if noending::platform::paths::app_bundle_present("ChatGPT") {
-        let open = prepared
-            .desktop_open
-            .expect("ChatGPT present: the stored preference takes effect");
-        assert_eq!(open.uri, "codex://threads/cx-pref-1");
-    } else {
-        assert!(
-            prepared.desktop_open.is_none(),
-            "ChatGPT absent: Continue falls back to the terminal"
-        );
-    }
 }
 
 /// Launch honors the frozen desktop route: the URI goes through the
@@ -589,13 +595,11 @@ fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "launch");
 
-    db.set_setting("resume.open_method.codex", "embedded")
-        .unwrap();
     let mut prepared = launcher
         .prepare_resume_in(&db, &sid, &workspace)
         .expect("prepare");
-    // The command layer freezes this flag from the stored preference (the
-    // launcher-level prepare resolves only the route); the test freezes it
+    // The command layer (launch_embedded_resume) forces this flag — the
+    // launcher-level prepare resolves only the route; the test freezes it
     // the same way.
     prepared.embedded = true;
     assert!(prepared.desktop_open.is_none());
@@ -639,31 +643,4 @@ fn an_embedded_prepared_launch_without_a_surface_is_refused_not_downgraded() {
         .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
         .expect_err("embedded without a registry must refuse");
     assert!(err.to_string().contains("内嵌终端"));
-}
-
-#[test]
-fn the_embedded_open_method_round_trips_and_validates() {
-    let db = open_db("embedded-method");
-    // Default is terminal by absence.
-    assert_eq!(
-        noending::launcher::stored_resume_method(&db, Agent::Codex).unwrap(),
-        "terminal"
-    );
-    noending::launcher::write_resume_method(&db, Agent::Codex, "embedded").unwrap();
-    assert_eq!(
-        noending::launcher::stored_resume_method(&db, Agent::Codex).unwrap(),
-        "embedded"
-    );
-    // Terminal clears the row back to default.
-    noending::launcher::write_resume_method(&db, Agent::Codex, "terminal").unwrap();
-    assert_eq!(
-        noending::launcher::stored_resume_method(&db, Agent::Codex).unwrap(),
-        "terminal"
-    );
-    // An Agent without a TUI CLI may not choose embedded.
-    let err = noending::launcher::write_resume_method(&db, Agent::Dsh, "embedded")
-        .expect_err("dsh has no CLI to embed");
-    assert!(err.to_string().contains("CLI"));
-    // Unknown methods stay refused.
-    assert!(noending::launcher::write_resume_method(&db, Agent::Codex, "floating").is_err());
 }

@@ -9,6 +9,7 @@ import { copyToClipboard } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { api } from "../../api";
 import SessionSubpageTabs from "./SessionSubpageTabs";
+import SessionHeaderActions from "./SessionHeaderActions";
 import { sessionDisplayTitle } from "./SessionTable";
 import { sessionDetailCache } from "./SessionDetailView";
 import type { Agent, SessionDetail, TerminalSnapshot } from "../../types";
@@ -100,6 +101,24 @@ export default function SessionTerminalView({
 
   const [state, setState] = useState<TerminalState>({ kind: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // 头部动作簇（回收/同步/继续）与终端段的能力判别需要会话事实（回收站态、
+  // source_kind）：详情是纯读取，进来读一次并写缓存，动作后刷新。
+  const [detail, setDetail] = useState<SessionDetail | null>(
+    () => sessionDetailCache.get(sessionId) ?? null,
+  );
+  const refreshDetail = useCallback(() => {
+    api.getSessionDetail(sessionId)
+      .then((d) => {
+        sessionDetailCache.set(sessionId, d);
+        setDetail(d);
+      })
+      .catch(() => {
+        // 详情读不到时头部按 props 兜底；终端本身不受影响。
+      });
+  }, [sessionId]);
+  useEffect(() => {
+    refreshDetail();
+  }, [refreshDetail]);
 
   /**
    * 进入即用：查已有终端 → 有则 attach；没有则自动直启一次内嵌 Resume 再
@@ -446,9 +465,20 @@ export default function SessionTerminalView({
               sessionId={sessionId}
               entry="terminal"
               agent={agent}
+              sourceKind={detail?.session.source_kind}
               terminalGate={terminalGateOf(cached)}
               navigate={navigate}
             />
+            {agent && (
+              <SessionHeaderActions
+                sessionId={sessionId}
+                agent={agent}
+                sourceKind={detail?.session.source_kind}
+                title={displayTitle}
+                trashed={!!detail?.session.trashed_at}
+                onChanged={refreshDetail}
+              />
+            )}
           </span>
         )}
       />

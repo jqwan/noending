@@ -19,6 +19,8 @@ vi.mock("../../api", () => ({
     restoreSession: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
     permanentlyDeleteSession: vi.fn(),
+    getAgentStatus: vi.fn().mockResolvedValue({}),
+    continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
   },
 }));
 
@@ -98,25 +100,6 @@ describe("Sessions 页按所属任务筛选", () => {
 
     // 「未归属任务」是 `owner_workstream_id === null`，与任何任务 id 都不相等。
     fireEvent.change(taskFilter(), { target: { value: "unassigned" } });
-    screen.getByText("没归属");
-    expect(screen.queryByText("有归属")).toBeNull();
-  });
-
-  it("归属状态筛选同样直接读 owner，不做任何绑定推断", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "owned", title: "有归属", owner_workstream_id: "w1" }),
-      session({ id: "free", title: "没归属", owner_workstream_id: null }),
-    ]);
-    render(<SessionsView navigate={navigate} actionSeq={0} />);
-
-    await screen.findByText("全部任务");
-    const assigned = screen.getByText("全部").closest("select") as HTMLSelectElement;
-
-    fireEvent.change(assigned, { target: { value: "assigned" } });
-    screen.getByText("有归属");
-    expect(screen.queryByText("没归属")).toBeNull();
-
-    fireEvent.change(assigned, { target: { value: "unassigned" } });
     screen.getByText("没归属");
     expect(screen.queryByText("有归属")).toBeNull();
   });

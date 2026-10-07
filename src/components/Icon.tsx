@@ -8,6 +8,7 @@ const paths = {
   edit: "M11 3l4 4M3 15l1-5 8-8 4 4-8 8Z",
   plus: "M9 3v12M3 9h12",
   chevronRight: "M7 4l5 5-5 5",
+  arrowDown: "M9 3.5v11M4.5 10l4.5 4.5 4.5-4.5",
   home: "M3 8l6-5 6 5v7H11v-4H7v4H3Z",
   search: "M12 12l4 4M13 8A5 5 0 1 1 3 8a5 5 0 0 1 10 0",
   tasks: "M3 5l1 1 2-2M8 5h7M3 10l1 1 2-2M8 10h7M8 15h7",
@@ -26,6 +27,8 @@ const paths = {
   bot: "M9 2v2M4 6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6ZM6.5 8.5h.01M11.5 8.5h.01M6.5 12h5",
   copy: "M6 4.5V3a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-1.5M4 6h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Z",
   check: "M3.5 9.5l3.5 3.5 7.5-7.5",
+  grid: "M3.5 3.5h4.5v4.5h-4.5ZM10 3.5h4.5v4.5h-4.5ZM3.5 10h4.5v4.5h-4.5ZM10 10h4.5v4.5h-4.5Z",
+  list: "M3.5 4.5h11M3.5 9h11M3.5 13.5h11",
 };
 
 export default function Icon({ name }: { name: keyof typeof paths }) {

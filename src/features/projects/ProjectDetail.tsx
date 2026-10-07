@@ -5,13 +5,11 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import { showToast } from "../../components/Toast";
 import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
-import AgentIcon from "../../components/AgentIcon";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
-import { sessionDisplayTitle, UNTITLED_SESSION, cwdDisplayLabel } from "../sessions/SessionTable";
+import SessionMiniList from "../sessions/SessionMiniList";
 import { httpsRemoteUrl } from "./remoteUrl";
 import { cardSummaryLine } from "../workstreams/WorkstreamCard";
 import {
-  AGENT_LABELS,
   type ProjectDetailData,
   type WorkstreamCardData,
 } from "../../types";
@@ -33,7 +31,6 @@ export default function ProjectDetail({ projectId, navigate }: {
   projectId: string;
   navigate: (r: Route) => void;
 }) {
-  const [showAllSessions, setShowAllSessions] = useState(false);
   const [data, setData] = useState<ProjectDetailData | null>(() => projectDetailCache.get(projectId) ?? null);
   const [gone, setGone] = useState(false);
   const [failure, setFailure] = useState("");
@@ -224,7 +221,10 @@ export default function ProjectDetail({ projectId, navigate }: {
             <div key={w.id} className="list-row"
               onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
               <div className="grow">
-                <div className="title" title={w.title}>{w.title}</div>
+                <div className="title mini-title" title={w.title}>
+                  <span><Icon name="tasks" /></span>
+                  <span className="truncate">{w.title}</span>
+                </div>
                 {summary && <div className="meta">{summary}</div>}
               </div>
               <div className="side">
@@ -240,30 +240,7 @@ export default function ProjectDetail({ projectId, navigate }: {
       <section className="rail-section">
         <div className="section-label">会话</div>
 
-        {sessions.length === 0 && (
-          <div className="l1-none">这个项目下还没有会话。</div>
-        )}
-        {sessions.slice(0, showAllSessions ? undefined : 12).map((s) => (
-          <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
-            <div className="grow">
-              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
-                {sessionDisplayTitle(s.title)}
-              </div>
-              <div className="meta mono" title={s.cwd ?? undefined}>
-                {s.cwd ? cwdDisplayLabel(s.cwd, 56) : "没有记录到 cwd"}
-              </div>
-            </div>
-            <div className="side">
-              <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
-              <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
-            </div>
-          </div>
-        ))}
-        {sessions.length > 12 && (
-          <div className="small muted" style={{ marginTop: 6 }}>
-            <button className="btn small ghost" onClick={() => setShowAllSessions(value => !value)}>{showAllSessions ? "收起" : `查看全部 ${sessions.length} 个会话`}</button>
-          </div>
-        )}
+        <SessionMiniList sessions={sessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
       </section>
 
 

@@ -166,7 +166,6 @@ it("opens on the newest page and counts the older messages left above it", async
   screen.getByText("第五句");
   expect(api.getSessionMessages).toHaveBeenCalledWith("me", { limit: expect.any(Number) });
   screen.getByRole("button", { name: "加载更早的消息（还有 2 条）" });
-  screen.getByText(/共 4 条消息/);
   // 导航条按用户消息给出 tick，悬停文案是消息首行。
   const ticks = document.querySelectorAll(".conversation-nav .nav-tick");
   expect(ticks).toHaveLength(2);
@@ -617,7 +616,6 @@ it("renders initial title and agent icon immediately without showing fallback pl
   expect(screen.queryByText("会话消息")).toBeNull();
   expect(screen.getByText("正在进行的任务")).toBeDefined();
   expect(document.querySelector(".session-title-with-icon .agent-icon")).not.toBeNull();
-  expect(screen.getByText(/Codex · 共 10 条消息/)).toBeDefined();
 
   // Now resolve
   resolveDetail!(detail(session("me")));

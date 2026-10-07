@@ -457,7 +457,12 @@
   /* 位置只由代码里的锚点负责：引擎自己再补一次就会叠出一整页的位移。 */
   overflow-anchor: none;
   overscroll-behavior: contain;
-  padding: 4px 0 40px;
+  padding: 8px 32px 40px;
+}
+@media (max-width: 800px) {
+  .conversation-scroll {
+    padding: 8px 20px 40px;
+  }
 }
 /* 顶部「还有 N 条更早消息」：向上滑会自动加载，也可以直接点这一条。 */
 .conversation-more { display: flex; justify-content: center; padding: 12px 0 20px; }
@@ -558,9 +563,28 @@
 }
 .conversation-jump {
   position: absolute;
-  right: var(--main-gutter);
+  left: 0;
+  right: 0;
+  margin-inline: auto;
   bottom: 20px;
+  z-index: 5;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+button.btn.conversation-jump:active {
+  transform: scale(0.96);
+}
+.conversation-jump .ui-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 /* ---------- Session trash / permanent delete (Session Lifecycle & Deletion) ---------- */
@@ -675,7 +699,7 @@
 
 /* ---------- Hero: 空首页的那一个动作 ---------- */
 /* hero 占满正文余高并垂直居中：内容贴顶会让下面一大片空白看起来像还没加载完。 */
-.main.home { display: flex; flex-direction: column; }
+.main.home, .main.home-page.empty-home { display: flex; flex-direction: column; }
 .hero {
   flex: 1;
   display: flex;
@@ -1321,7 +1345,7 @@ button.icon-button.small .ui-icon {
   .project-detail-layout aside { border-left: 0; border-top: 1px solid var(--border-subtle); padding-left: 0; }
 }
 
-.board-page, .agents-page, .settings-page, .session-detail, .task-detail, .project-detail { max-width: none; }
+.board-page, .agents-page, .settings-page, .session-detail, .task-detail, .project-detail, .home-page { max-width: none; }
 .path-draft-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; margin-bottom: 10px; }
 .path-draft-list > .list-row { gap: 10px; flex-wrap: wrap; }
 .path-draft-name { min-width: 0; flex: 1; }
@@ -1633,4 +1657,16 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 
 .agent-source-row .agent-reingest-btn:hover {
   color: var(--text-primary);
+}
+
+/* 迷你列表行（项目/任务详情的会话与任务）：图标 + 标题同行，标题截断。 */
+.mini-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mini-title > span:first-child {
+  flex: none;
+  display: inline-flex;
 }

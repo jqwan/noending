@@ -14,7 +14,8 @@ import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
-import { agentDisplayLabel, sessionDisplayTitle, UNTITLED_SESSION } from "./SessionTable";
+import SessionHeaderActions from "./SessionHeaderActions";
+import { sessionDisplayTitle, UNTITLED_SESSION } from "./SessionTable";
 import { sessionDetailCache } from "./SessionDetailView";
 import type {
   Agent,
@@ -144,7 +145,6 @@ export default function SessionConversationView({
   sessionId,
   initialTitle,
   initialAgent,
-  initialTotal,
   navigate,
 }: {
   sessionId: string;
@@ -153,12 +153,18 @@ export default function SessionConversationView({
   initialTotal?: number;
   navigate: (r: Route) => void;
 }) {
-  const [session, setSession] = useState<Session | null>(null);
+  // 标题与 Agent 在首帧就要位：导航方给了 initialTitle 就以它为准（看板/列表
+  // 带来的当前事实）；没给（子页切换走 tabs）就同步取详情缓存——两条路都不让
+  // 标题先落兜底文案再跳回来（闪）。
+  const [session, setSession] = useState<Session | null>(
+    () => (initialTitle ? null : sessionDetailCache.get(sessionId)?.session ?? null),
+  );
   const [messages, setMessages] = useState<SessionWindowMessage[]>([]);
   const [marks, setMarks] = useState<SessionMessageMark[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
-  const [total, setTotal] = useState(initialTotal ?? 0);
   const [failed, setFailed] = useState(false);
+  /** 头部动作簇的就地刷新信号：重跑打开即取的那次读取。 */
+  const [reloadSeq, setReloadSeq] = useState(0);
   const [working, setWorking] = useState(false);
   const [atLatest, setAtLatest] = useState(true);
   /** 每轮的中间回复块：键是那轮最终回复的投影序号。默认收起，展开现取一轮的
@@ -209,7 +215,6 @@ export default function SessionConversationView({
     cursorRef.current = page.next_before_ordinal;
     setMessages(page.messages);
     setCursor(page.next_before_ordinal);
-    setTotal(page.total);
     setTailOrdinal(page.tail_ordinal);
     setRemaining(page.remaining);
   }, []);
@@ -282,7 +287,9 @@ export default function SessionConversationView({
         if (live) setFailed(true);
       });
     return () => { live = false; };
-  }, [sessionId, applyTail]);
+  }, [sessionId, applyTail, reloadSeq]);
+  // 头部动作簇（回收/同步）完成后的就地刷新：重走一遍打开即取。
+  const reload = useCallback(() => setReloadSeq((n) => n + 1), []);
 
   /** 打开、重新读取、以及跳回最新，都停在最新一条上。 */
   useLayoutEffect(() => {
@@ -383,7 +390,6 @@ export default function SessionConversationView({
       anchorRef.current = captureAnchor(scrollRef.current);
       setMessages((previous) => mergeMessages(previous, page.messages));
       setCursor(page.next_before_ordinal);
-      setTotal(page.total);
       setRemaining(page.remaining);
     } catch (error) {
       console.error(error);
@@ -409,7 +415,6 @@ export default function SessionConversationView({
       }
       // 追加在下方：首页没变，锚点那一关就不会过，视口不动。
       setMessages((previous) => mergeMessages(previous, page.messages));
-      setTotal(page.total);
     } catch (error) {
       console.error(error);
       showToast(String(error));
@@ -445,7 +450,6 @@ export default function SessionConversationView({
       anchorRef.current = null;
       setMessages(page.messages);
       setCursor(page.next_before_ordinal);
-      setTotal(page.total);
       setRemaining(page.remaining);
       setPendingJump(ordinal);
     } catch (error) {
@@ -540,30 +544,26 @@ export default function SessionConversationView({
     <div className="main fill">
       <PageHeader
         title={headerTitle}
-        sub={currentAgent && <>{agentDisplayLabel(currentAgent)} · 共 {total} 条消息</>}
         actions={(
           <span className="row" style={{ gap: 8 }}>
             <SessionSubpageTabs
               sessionId={sessionId}
               entry="conversation"
               agent={currentAgent ?? null}
+              sourceKind={cachedDetail?.session.source_kind}
               terminalGate={resumeGate}
               navigate={navigate}
             />
-            <button
-              className="btn ghost icon-button"
-              aria-label="重新读取"
-              title="回到最新一条"
-              onClick={() => {
-                void Promise.all([loadTail(), api.getSessionUserMessageMarks(sessionId).then(setMarks)])
-                  .catch((error) => {
-                    console.error(error);
-                    showToast(String(error));
-                  });
-              }}
-            >
-              <Icon name="refresh" />
-            </button>
+            {currentAgent && (
+              <SessionHeaderActions
+                sessionId={sessionId}
+                agent={currentAgent}
+                sourceKind={cachedDetail?.session.source_kind}
+                title={displayTitle}
+                trashed={!!cachedDetail?.session.trashed_at}
+                onChanged={reload}
+              />
+            )}
           </span>
         )}
       />
@@ -613,7 +613,14 @@ export default function SessionConversationView({
       </div>
 
       {!atLatest && (
-        <button className="btn small conversation-jump" onClick={jumpToLatest}>跳到最新 ↓</button>
+        <button
+          className="btn small conversation-jump"
+          aria-label="跳到最新"
+          title="跳到最新"
+          onClick={jumpToLatest}
+        >
+          <Icon name="arrowDown" />
+        </button>
       )}
     </div>
   );

@@ -7,6 +7,8 @@ import type { WorkstreamContext, WorkstreamContextView, WorkstreamPathRow } from
 // 只覆盖「页面把编辑入口收敛到弹窗」；命令怎么走由 WorkstreamFormModal.test.tsx 覆盖。
 vi.mock("../../api", () => ({
   api: {
+    getAgentStatus: vi.fn().mockResolvedValue({}),
+    continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
     getWorkstreamContext: vi.fn(),
     getWorkstreamContextState: vi.fn().mockResolvedValue(null),
     updateWorkstreamContext: vi.fn().mockResolvedValue({

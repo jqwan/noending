@@ -2,6 +2,10 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import SettingsView from "./SettingsView";
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn().mockResolvedValue("/custom/storage/dir"),
+}));
+
 vi.mock("../../api", () => ({
   api: {
     getWorkspaceSettings: vi.fn().mockResolvedValue({
@@ -12,6 +16,15 @@ vi.mock("../../api", () => ({
       db_path: "/tmp/noending/data/noending.db",
       home_source: "default_home",
     }),
+    setNoendingHome: vi.fn().mockResolvedValue({
+      noending_home: "/tmp/noending",
+      default_workspace: "/tmp/noending/workspace",
+      pending_home: "/custom/storage/dir",
+      restart_required: true,
+      db_path: "/tmp/noending/data/noending.db",
+      home_source: "bootstrap",
+    }),
+    openPath: vi.fn().mockResolvedValue(true),
   },
 }));
 
@@ -42,5 +55,25 @@ it("renders all settings in a single unified view", async () => {
   render(<SettingsView navigate={vi.fn()} />);
   expect(screen.getByText("主题")).toBeTruthy();
   expect(screen.getByText("Context 更新诊断")).toBeTruthy();
-  expect(await screen.findByText("/tmp/noending/data/noending.db")).toBeTruthy();
+  expect(screen.getByText("数据存储目录")).toBeTruthy();
+  expect(await screen.findByText("存储根目录")).toBeTruthy();
+  expect(screen.getByText("默认工作目录")).toBeTruthy();
+  expect(screen.getByText("SQLite 数据库")).toBeTruthy();
+  expect(screen.getByText("/tmp/noending/data/noending.db")).toBeTruthy();
+});
+
+it("opens modal to change data storage directory and can submit new path", async () => {
+  render(<SettingsView navigate={vi.fn()} />);
+  await screen.findByText("/tmp/noending/data/noending.db");
+
+  fireEvent.click(screen.getByRole("button", { name: "更改位置…" }));
+  expect(screen.getByText("更改数据存储目录")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "浏览…" })).toBeTruthy();
+
+  fireEvent.change(screen.getByPlaceholderText("/tmp/noending"), {
+    target: { value: "/custom/storage/dir" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "登记并在下次启动迁移" }));
+
+  await screen.findByText("待重启生效");
 });

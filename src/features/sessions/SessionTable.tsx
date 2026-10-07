@@ -3,7 +3,8 @@ import Icon from "../../components/Icon";
 import { useMemo } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type Session } from "../../types";
+import { AGENT_LABELS, type Agent, type AgentStatusEntry, type Session } from "../../types";
+import { desktopContinueState, useAgentStatus } from "./continueDesktop";
 
 /* 展示层 helper —— SessionCards 与 SessionDetailView 共用。只做「怎么显示得下、
  * 看得懂」：截断与中文占位，不改领域字段；完整值永远可达，所以截断不损失
@@ -222,16 +223,27 @@ const W_WORKSTREAM = 16;
  * Sessions 卡片：信息按卡片分组，随窗口宽度自适应，点击进入详情。
  * 一行最多一个任务：`session.owner_workstream_id` 指向的那一个。
  */
-export default function SessionCards({ sessions, workstreamTitleById, projectNameById, onOpen, onResume, onTrash }: {
+export default function SessionCards({
+  sessions,
+  workstreamTitleById,
+  projectNameById,
+  viewMode = "cards",
+  onOpen,
+  onResume,
+  onTrash,
+}: {
   sessions: Session[];
   /** Workstream id → 标题；用于给 `owner_workstream_id` 一个可读名字。 */
   workstreamTitleById: Map<string, string>;
   projectNameById: Map<string, string>;
+  viewMode?: "cards" | "list";
   onOpen: (sessionId: string) => void;
   onResume: (sessionId: string) => void;
   onTrash: (sessionId: string) => void;
 }) {
   const [visibleCount, setVisibleCount] = useViewState("sessions.visibleCount", 100);
+  // 「继续」按钮的可用性需要桌面端在场事实：读一次 agent 状态。
+  const agentStatus = useAgentStatus();
   const rows = useMemo(
     () => sessions.map((s) => {
       const wsTitle = s.owner_workstream_id
@@ -247,34 +259,149 @@ export default function SessionCards({ sessions, workstreamTitleById, projectNam
     [sessions, workstreamTitleById, projectNameById],
   );
 
-  return (
-    <div className="session-list">
-      {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
-        <article className="session-list-row" key={s.id}>
-          <button className="session-open" onClick={() => onOpen(s.id)}>
-            <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
-              <AgentIcon agent={s.agent} size={15} />
-              <span>{sessionDisplayTitle(s.title)}</span>
-            </span>
-            <span className="session-list-meta">
-              <span>{agentDisplayLabel(s.agent)}</span>
-              <span title={workstreamFull ?? undefined}>所属任务: {workstream ?? "未归属任务"}</span>
-              {!project.dim && <span title={project.hint}>{project.text}</span>}
-              <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
-            </span>
-            {s.cwd && (
-              <span className="session-list-path" title={s.cwd}>
-                {cwdDisplayLabel(s.cwd, 90)}
+  if (viewMode === "list") {
+    return (
+      <div className="session-list" key="session-list">
+        {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
+          <article className="session-list-row" key={`list-${s.id}`}>
+            <button className="session-open" onClick={() => onOpen(s.id)}>
+              <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
+                <AgentIcon agent={s.agent} size={15} />
+                <span>{sessionDisplayTitle(s.title)}</span>
               </span>
-            )}
-          </button>
-          <div className="session-list-actions">
-            <button className="btn small" onClick={() => onResume(s.id)}>继续</button>
-            <button className="btn small ghost icon-button" title="移入回收站" aria-label={`将${sessionDisplayTitle(s.title)}移入回收站`} onClick={() => onTrash(s.id)}><Icon name="trash" /></button>
+              <span className="session-list-meta">
+                <span>{agentDisplayLabel(s.agent)}</span>
+                <span title={workstreamFull ?? undefined}>{workstream ?? "未归属任务"}</span>
+                {!project.dim && <span title={project.hint}>{project.text}</span>}
+                <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
+              </span>
+              {s.cwd && (
+                <span className="session-list-path" title={s.cwd}>
+                  {cwdDisplayLabel(s.cwd, 90)}
+                </span>
+              )}
+            </button>
+            <div className="session-list-actions">
+              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} />
+              <button
+                className="btn small ghost icon-button"
+                title="移入回收站"
+                aria-label={`将${sessionDisplayTitle(s.title)}移入回收站`}
+                onClick={() => onTrash(s.id)}
+              >
+                <Icon name="trash" />
+              </button>
+            </div>
+          </article>
+        ))}
+        {rows.length > visibleCount && (
+          <div style={{ marginTop: 14, textAlign: "center" }}>
+            <button className="btn small ghost" onClick={() => setVisibleCount((count) => count + 100)}>
+              显示更多（剩余 {rows.length - visibleCount}）
+            </button>
           </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="ws-grid board-grid" key="session-cards">
+      {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
+        <article
+          className="ws-card session-card full"
+          key={`card-${s.id}`}
+          tabIndex={0}
+          role="button"
+          onClick={() => onOpen(s.id)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onOpen(s.id);
+            }
+          }}
+        >
+          <header className="ws-card-head">
+            <div className="session-card-title-wrap session-list-title" title={sessionDisplayTitle(s.title)}>
+              <AgentIcon agent={s.agent} size={16} />
+              <h3 className="ws-card-title" style={{ minWidth: 0, flex: 1 }}>
+                <span className="card-title-link">{sessionDisplayTitle(s.title)}</span>
+              </h3>
+            </div>
+            <span className="badge session-list-meta" title={`执行 Agent: ${agentDisplayLabel(s.agent)}`}>
+              {agentDisplayLabel(s.agent)}
+            </span>
+          </header>
+
+          <div className="session-card-body">
+            <div className="session-card-prop" title={workstreamFull ?? undefined}>
+              <Icon name="tasks" />
+              <span className="truncate">
+                {workstream ?? "未归属任务"}
+              </span>
+            </div>
+
+            {!project.dim && (
+              <div className="session-card-prop" title={project.hint}>
+                <Icon name="folder" />
+                <span className="truncate">{project.text}</span>
+              </div>
+            )}
+
+            {s.cwd && (
+              <div className="session-card-path" title={s.cwd}>
+                <span className="mono">{cwdDisplayLabel(s.cwd, 40)}</span>
+              </div>
+            )}
+          </div>
+
+          <footer className="ws-card-meta session-card-meta">
+            <span className="muted small" title={formatDateTime(s.last_activity_at ?? s.started_at)}>
+              {timeAgo(s.last_activity_at ?? s.started_at)}
+            </span>
+            <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
+              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} />
+              <button
+                className="btn small ghost icon-button"
+                title="移入回收站"
+                aria-label={`将${sessionDisplayTitle(s.title)}移入回收站`}
+                onClick={() => onTrash(s.id)}
+              >
+                <Icon name="trash" />
+              </button>
+            </div>
+          </footer>
         </article>
       ))}
-      {rows.length > visibleCount && <button className="btn small ghost" onClick={() => setVisibleCount(count => count + 100)}>显示更多（剩余 {rows.length - visibleCount}）</button>}
+      {rows.length > visibleCount && (
+        <div style={{ gridColumn: "1 / -1", textAlign: "center", marginTop: 8 }}>
+          <button className="btn small ghost" onClick={() => setVisibleCount((count) => count + 100)}>
+            显示更多（剩余 {rows.length - visibleCount}）
+          </button>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** 行内「继续」：Agent 图标按钮，点击直接在会话格式对应的桌面应用里打开。
+ *  格式没有桌面路由（claude_code / pi / antigravity_cli）或桌面应用未装时
+ *  置灰并说明原因——能力跟格式走，不跟 agent 走。 */
+function SessionResumeButton({ session, agentStatus, onResume }: {
+  session: Session;
+  agentStatus: Record<string, AgentStatusEntry> | null;
+  onResume: (sessionId: string) => void;
+}) {
+  const { disabled, title } = desktopContinueState(session, agentStatus?.[session.agent] ?? null);
+  return (
+    <button
+      className="btn small ghost icon-button"
+      title={title}
+      aria-label={`继续${sessionDisplayTitle(session.title)}`}
+      disabled={disabled}
+      onClick={() => onResume(session.id)}
+    >
+      <AgentIcon agent={session.agent} size={16} />
+    </button>
   );
 }

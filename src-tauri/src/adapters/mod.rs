@@ -760,13 +760,18 @@ pub trait AgentAdapter: Send + Sync {
         ResumeRoute::Terminal
     }
 
-    /// The desktop half of Continue for THIS member's session — the route a
-    /// stored "open in the desktop app" preference may swap in. Only formats
-    /// whose store the desktop app can actually open implement it; the
-    /// default refusal is what makes a format single-method. App absent →
-    /// Refused (the caller falls back to [`Self::continue_route`]).
-    fn desktop_resume_route(&self, _session: &Session) -> ResumeRoute {
-        ResumeRoute::Refused("该会话来源格式不支持在桌面端打开".into())
+    /// The desktop half of Continue for THIS member's session: the route
+    /// continue_session_desktop takes. The default derives from
+    /// [`Self::continue_route`] — its Desktop variant IS the desktop route —
+    /// so a format whose continue already opens the app is desktop-openable
+    /// without a second override. Formats with a richer desktop capability
+    /// (codex: per-thread deep link) still override; formats whose continue
+    /// is terminal-only refuse here, which is what makes them single-method.
+    fn desktop_resume_route(&self, session: &Session) -> ResumeRoute {
+        match self.continue_route(session) {
+            ResumeRoute::Desktop(open) => ResumeRoute::Desktop(open),
+            _ => ResumeRoute::Refused("该会话来源格式不支持在桌面端打开".into()),
+        }
     }
 
     /// Non-interactive one-shot run (codex exec / claude -p / pi -p).

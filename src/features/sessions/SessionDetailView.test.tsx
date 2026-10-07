@@ -174,23 +174,26 @@ it("reveals the source by clicking the path itself", async () => {
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("me"));
 });
 
-it("warns and disables resume when the root source is missing", async () => {
+it("gates the terminal subpage but keeps desktop continue when the root source is missing", async () => {
   await renderDetail(detail(session("me"), { source_status: "missing", can_resume: false }));
 
   screen.getByText("源会话已不存在");
+  // 终端段与 Resume 同门槛：源不在就不能内嵌继续。
+  const terminal = screen.getByTitle("源会话已不存在，无法继续这个会话") as HTMLButtonElement;
+  expect(terminal.disabled).toBe(true);
+  // 桌面打开不读我们的源文件（应用读它自己的存储）：继续按钮照常可用。
   const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
-  expect(resume.disabled).toBe(true);
-  expect(resume.title).toContain("源会话已不存在");
+  expect(resume.disabled).toBe(false);
   // 源不在，路径退回纯文本：没有可点的定位入口，只有警告。
   expect(screen.queryByRole("button", { name: "/tmp/rollout.jsonl" })).toBeNull();
 });
 
-it("warns when the root source status is unavailable", async () => {
+it("gates the terminal subpage when the root source status is unavailable", async () => {
   await renderDetail(detail(session("me"), { source_status: "unavailable", can_resume: false }));
 
   screen.getByText("无法确认源会话状态");
-  const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
-  expect(resume.disabled).toBe(true);
+  const terminal = screen.getByTitle("无法确认源会话状态，暂时不能继续") as HTMLButtonElement;
+  expect(terminal.disabled).toBe(true);
 });
 
 // 消息
@@ -326,9 +329,13 @@ it("shows the one owner workstream and links to it", async () => {
   }));
 
   screen.getByText("所属任务");
-  const link = screen.getByRole("button", { name: owner.title });
-  fireEvent.click(link);
+  screen.getByText(owner.title);
+  // 点击整栏直接跳转
+  const row = document.querySelector(".rail-row") as HTMLElement;
+  expect(row).toBeTruthy();
+  fireEvent.click(row);
   expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1" });
+
   // 只有一个所属任务：没有「添加」多任务入口。
   expect(screen.queryByRole("button", { name: /添加/ })).toBeNull();
 });

@@ -6,8 +6,8 @@ import AgentIcon from "../../components/AgentIcon";
 import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
-import ResumeSessionModal from "./ResumeSessionModal";
 import SessionSubpageTabs from "./SessionSubpageTabs";
+import SessionHeaderActions from "./SessionHeaderActions";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import {
   agentDisplayLabel,
@@ -50,16 +50,15 @@ export default function SessionDetailView({
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
   const [ownerOpen, setOwnerOpen] = useState(false);
-  const [resumeOpen, setResumeOpen] = useState(false);
   /** Context：纯读取的四字段摘要 + 显式「生成 / 更新摘要」。 */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const currentSessionId = useRef(sessionId);
-  // 回收站动作（Session Lifecycle & Deletion）：确认弹窗、执行中的 busy、
-  // 以及从详情页直接发起的删除 Modal。
-  const [confirmTrash, setConfirmTrash] = useState(false);
+  // 回收站动作（Session Lifecycle & Deletion）：执行中的 busy、
+  // 以及从详情页直接发起的删除 Modal。移入回收站的确认与执行在
+  // SessionHeaderActions（三个子页共用）。
   const [trashBusy, setTrashBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
   /**
@@ -93,23 +92,6 @@ export default function SessionDetailView({
   }, [sessionId]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
-
-  const [syncing, setSyncing] = useState(false);
-  const handleSyncSession = async () => {
-    if (syncing) return;
-    setSyncing(true);
-    try {
-      await api.refreshSession(sessionId);
-      refresh();
-      showToast("已排队：正在增量同步该会话最新对话…");
-    } catch (e) {
-      console.error(e);
-      refresh();
-      showToast(`同步失败：${String(e)}`);
-    } finally {
-      setTimeout(() => setSyncing(false), 500);
-    }
-  };
 
   const needsProjectName = !detail?.workspace_path && !!detail?.session.project_id;
   useEffect(() => {
@@ -220,22 +202,6 @@ export default function SessionDetailView({
   /** 单一生命周期权威：null = 正常，时间戳 = 在回收站。 */
   const trashed = session.trashed_at !== null;
 
-  /** 移入回收站：全局隐藏，不删任何数据。成功后返回上一个界面。 */
-  const doTrash = async () => {
-    if (trashBusy) return;
-    setTrashBusy(true);
-    try {
-      await api.trashSession(sessionId);
-      showToast("已移入回收站");
-      setConfirmTrash(false);
-      goBack({ view: "sessions" });
-    } catch (e) {
-      console.error(e);
-      showToast(`移入回收站失败：${String(e)}`);
-      setTrashBusy(false);
-    }
-  };
-
   /** 从回收站恢复：trashed_at 清空后本页就地回到正常形态。 */
   const doRestore = async () => {
     if (trashBusy) return;
@@ -311,40 +277,24 @@ export default function SessionDetailView({
         }
         actions={(
           <>
-            {/* 子页切换：概览（本页）/ 对话 / 终端。终端段的能力与门槛
-                与 Resume 完全同源（has_terminal_cli + can_resume）。 */}
+            {/* 子页切换：概览（本页）/ 对话 / 终端。终端段按会话格式出现，
+                置灰门槛与 Resume 同源（can_resume）。 */}
             <SessionSubpageTabs
               sessionId={sessionId}
               entry={undefined}
               agent={session.agent}
+              sourceKind={session.source_kind}
               terminalGate={resumeDisabled ? resumeTitle : null}
               navigate={navigate}
             />
-            {trashed ? (
-              // 回收站中的会话：后端拒绝 Resume——如实呈现为不可用。
-              <button className="btn ghost icon-button" disabled
-                aria-label="继续" title="回收站中的会话不能继续；先在上面的横幅里恢复它。">
-                <Icon name="play" />
-              </button>
-            ) : (
-              <>
-            <button className="btn ghost icon-button" aria-label="移入回收站" title="移入回收站" onClick={() => setConfirmTrash(true)} disabled={trashBusy}>
-              <Icon name="trash" />
-            </button>
-            <button
-              className="btn ghost icon-button"
-              aria-label="增量同步"
-              title="增量同步：从磁盘同步该会话的最新对话"
-              onClick={() => void handleSyncSession()}
-              disabled={syncing}
-            >
-              <Icon name="refresh" />
-            </button>
-            <button className="btn ghost icon-button" aria-label="继续" title={resumeTitle} onClick={() => setResumeOpen(true)} disabled={resumeDisabled}>
-              <Icon name="play" />
-            </button>
-              </>
-            )}
+            <SessionHeaderActions
+              sessionId={sessionId}
+              agent={session.agent}
+              sourceKind={session.source_kind}
+              title={title}
+              trashed={trashed}
+              onChanged={refresh}
+            />
           </>
         )}
       />
@@ -377,18 +327,32 @@ export default function SessionDetailView({
       {/* 一次最多一个 Owner：要么一条任务，要么「未归属任务」。
           没有「再添加一条」的入口——更换与清空都在这一个入口里。 */}
       {owner_workstream ? (
-        <div className="rail-row">
+        <div
+          className="rail-row"
+          role="link"
+          tabIndex={0}
+          title={`打开任务：${owner_workstream.title}`}
+          onClick={() => navigate({ view: "workstream", workstreamId: owner_workstream.id })}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && e.target === e.currentTarget) {
+              navigate({ view: "workstream", workstreamId: owner_workstream.id });
+            }
+          }}
+        >
           <div className="rail-main">
-            <button
-              className="link"
-              style={{ textAlign: "left", overflowWrap: "anywhere" }}
-              title={`打开任务：${owner_workstream.title}`}
-              onClick={() => navigate({ view: "workstream", workstreamId: owner_workstream.id })}
-            >
+            <div className="rail-title" style={{ overflowWrap: "anywhere" }}>
               {owner_workstream.title.trim() || "未命名任务"}
-            </button>
+            </div>
           </div>
-          <button className="btn small" onClick={() => setOwnerOpen(true)}>更改</button>
+          <button
+            className="btn small"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOwnerOpen(true);
+            }}
+          >
+            更改
+          </button>
         </div>
       ) : (
         <div className="rail-row">
@@ -707,31 +671,8 @@ export default function SessionDetailView({
       </aside>
       </div>
 
-      {/* 危险操作：只在正常状态下出现；回收站里的动作在顶部横幅。 */}
-      {confirmTrash && (
-        <Modal title="移入回收站" onClose={() => { if (!trashBusy) setConfirmTrash(false); }}>
-          <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            <b>{title}</b> 会从 Sessions 列表、搜索与继续入口中消失，出现在 Sessions 页的「回收站」里。
-          </p>
-          {/* 要求把两个概念摆在同一处明确区分：「从任务移除」只改这条会话的
-              所属任务（详情页的「更改 / 选择」），这里是全局回收站。 */}
-          <div className="card hairline" style={{ marginBottom: 12 }}>
-            <p style={{ margin: "0 0 6px" }}>
-              <b>从任务移除</b> = 只修改这条会话的所属任务，会话本身留在列表里。
-            </p>
-            <p style={{ margin: 0 }}>
-              <b>移入回收站</b> = 在 NoEnding 中全局隐藏该 Session。Agent 原始会话不会被删除。
-            </p>
-          </div>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setConfirmTrash(false)} disabled={trashBusy}>取消</button>
-            <button className="btn primary" onClick={doTrash} disabled={trashBusy}>
-              {trashBusy ? "处理中…" : "移入回收站"}
-            </button>
-          </div>
-        </Modal>
-      )}
-
+      {/* 危险操作：删除只在正常状态下出现；回收站里的动作在顶部横幅。
+          移入回收站的确认弹窗在 SessionHeaderActions 里。 */}
       {purgeOpen && (
         <PermanentDeleteModal
           sessionId={sessionId}
@@ -750,13 +691,6 @@ export default function SessionDetailView({
           projectId={sessionProjectId}
           onClose={() => setOwnerOpen(false)}
           onSubmit={setOwner}
-        />
-      )}
-      {resumeOpen && (
-        <ResumeSessionModal
-          sessionId={sessionId}
-          navigate={navigate}
-          onClose={() => setResumeOpen(false)}
         />
       )}
     </div>

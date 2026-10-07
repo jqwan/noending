@@ -41,7 +41,6 @@ const mockAgentStatus: Record<string, AgentStatusEntry> = {
     terminal_cli: true,
     desktop_app: "ChatGPT",
     desktop_app_present: true,
-    resume_open_method: "terminal",
   },
   claude_code: {
     name: "Claude Code",
@@ -51,7 +50,6 @@ const mockAgentStatus: Record<string, AgentStatusEntry> = {
     terminal_cli: true,
     desktop_app: null,
     desktop_app_present: false,
-    resume_open_method: "terminal",
   },
   antigravity: {
     name: "Antigravity",
@@ -61,7 +59,6 @@ const mockAgentStatus: Record<string, AgentStatusEntry> = {
     terminal_cli: true,
     desktop_app: "Antigravity",
     desktop_app_present: true,
-    resume_open_method: "desktop",
   },
 };
 
@@ -196,22 +193,14 @@ describe("AgentsView", () => {
     });
   });
 
-  it("renders format-specific resume open methods and allows toggling only for formats with multiple methods", async () => {
-    vi.mocked(api.setResumeOpenMethod).mockResolvedValue(undefined);
-
+  it("renders no open-method toggles: every format has exactly one continue method", async () => {
     render(<AgentsView navigate={vi.fn()} />);
 
-    // 有多种方式的格式才有切换组：Codex（TUI/内嵌/Desktop）、Claude Code 与
-    // Pi（TUI/内嵌）；Antigravity 有两个格式，卡片级不出切换组。
-    const toggleGroups = await screen.findAllByRole("group", { name: "打开方式切换" });
-    expect(toggleGroups.length).toBe(3);
-
-    const desktopBtn = screen.getByRole("button", { name: "Desktop" });
-    fireEvent.click(desktopBtn);
-
-    await waitFor(() => {
-      expect(api.setResumeOpenMethod).toHaveBeenCalledWith("codex", "desktop");
-    });
+    // 打开方式不再是偏好：内嵌退役后每种格式只有一种「继续」方式
+    // （桌面应用，或内嵌终端——后者的入口在会话页终端子页），
+    // 卡片只展示事实徽标，不再提供切换组。
+    await screen.findByText("Codex");
+    expect(screen.queryByRole("group", { name: "打开方式切换" })).toBeNull();
   });
 
   it("renders fixed resume badges for Antigravity desktop and CLI formats without toggle switches", async () => {

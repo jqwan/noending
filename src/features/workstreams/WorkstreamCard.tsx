@@ -1,10 +1,8 @@
 import Icon from "../../components/Icon";
 import { useState } from "react";
 import { timeAgo } from "../../components/common";
-import AgentIcon from "../../components/AgentIcon";
 import type { Route } from "../../app/routes";
 import NewSessionModal from "../sessions/NewSessionModal";
-import ResumeSessionModal from "../sessions/ResumeSessionModal";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
 
 // 词表：active → 进行中，completed → 已完成。v0.2 折叠了 abandoned。
@@ -30,9 +28,9 @@ export function searchFieldHint(): string {
 
 /**
  * Home（compact）与 Workstreams（full）共用的 Workstream 卡片，两种模式行为一致：
- * 卡片体 → Detail；新建 / 继续 → 挂载全局 NewSessionModal / ResumeSessionModal。
- * 启动路径唯一：Modal → prepareNewSession → launchPrepared。
- * 两个 Modal 渲染在 `<article>` 之外，否则卡片整体的「点击进详情」会吃掉弹窗里的点击。
+ * 卡片体 → Detail；新建走 NewSessionModal。卡片上没有「继续」——继续在会话
+ * 页头部（Agent 图标按钮直开桌面应用），卡片只保留新建入口。
+ * Modal 渲染在 `<article>` 之外，否则卡片整体的「点击进详情」会吃掉弹窗里的点击。
  */
 export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
   card: WorkstreamCardData;
@@ -41,7 +39,6 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
   defaultAgent: Agent | null;
 }) {
   const [newSessionOpen, setNewSessionOpen] = useState(false);
-  const [resumeOpen, setResumeOpen] = useState(false);
 
   const openDetail = () => navigate({ view: "workstream", workstreamId: card.id });
 
@@ -88,29 +85,12 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
             >
               <Icon name="plus" />{!card.latest_session && "新建会话"}
             </button>
-            {card.latest_session && (
-              <button
-                className="btn small ws-btn resume-primary"
-                title={`继续最近的 ${AGENT_LABELS[card.latest_session.agent]} 会话`}
-                onClick={() => setResumeOpen(true)}
-              >
-                <AgentIcon agent={card.latest_session.agent} />
-                继续
-              </button>
-            )}
           </div>}
         </footer>
       </article>
 
       {newSessionOpen && (
         <NewSessionModal workstreamId={card.id} onClose={() => setNewSessionOpen(false)} />
-      )}
-      {resumeOpen && card.latest_session && (
-        <ResumeSessionModal
-          sessionId={card.latest_session.id}
-          navigate={navigate}
-          onClose={() => setResumeOpen(false)}
-        />
       )}
     </>
   );

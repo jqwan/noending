@@ -16,11 +16,8 @@ import SessionCards, {
 } from "./SessionTable";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import NewSessionModal from "./NewSessionModal";
-import ResumeSessionModal from "./ResumeSessionModal";
 import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session } from "../../types";
 import type { Route, SessionScope, ViewAction } from "../../app/routes";
-
-type AssignedFilter = "all" | "assigned" | "unassigned";
 
 /**
  * Sessions = 执行记录页：第二天回来还能一眼找到并继续任意一次 Agent 会话，不承担
@@ -60,9 +57,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [agent, setAgent] = useViewState<"all" | Agent>("sessions.agent", "all");
   const [projectId, setProjectId] = useViewState("sessions.projectId", "all");
   const [wsFilter, setWsFilter] = useViewState("sessions.wsFilter", "all");
-  const [assigned, setAssigned] = useViewState<AssignedFilter>("sessions.assigned", "all");
+  const [viewMode, setViewMode] = useViewState<"cards" | "list">("sessions.viewMode", "cards");
   const [creating, setCreating] = useState(false);
-  const [resumeModalSessionId, setResumeModalSessionId] = useState<string | null>(null);
   const [trashSessionId, setTrashSessionId] = useState<string | null>(null);
   const [trashBusy, setTrashBusy] = useState(false);
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
@@ -152,7 +148,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
 
   const filtersActive =
     query.trim() !== "" || agent !== "all" || projectId !== "all"
-    || wsFilter !== "all" || assigned !== "all";
+    || wsFilter !== "all";
 
   const shown = useMemo(() => {
     if (!sessions) return null;
@@ -173,11 +169,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
         return wsFilter === "unassigned"
           ? s.owner_workstream_id === null
           : s.owner_workstream_id === wsFilter;
-      })
-      .filter((s) => {
-        if (assigned === "all") return true;
-        const has = s.owner_workstream_id !== null;
-        return assigned === "assigned" ? has : !has;
       })
       .filter((s) => {
         if (q === "") return true;
@@ -201,10 +192,14 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
           a.last_activity_at ?? a.started_at ?? "",
         ),
       );
-  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, assigned, projectNameById]);
+  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, projectNameById]);
 
+  /** 行内「继续」：直接在会话格式对应的桌面应用里打开（无预览）；格式没有
+   *  桌面路由时按钮本来就是灰的，这里的报错是兜底。 */
   const resume = (sessionId: string) => {
-    setResumeModalSessionId(sessionId);
+    api.continueSessionDesktop(sessionId)
+      .then((open) => showToast(open.note || "已在桌面应用中打开该会话。"))
+      .catch((e) => showToast(`打开失败：${String(e)}`));
   };
 
   const trashTarget = sessions?.find((s) => s.id === trashSessionId) ?? null;
@@ -271,7 +266,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     setAgent("all");
     setProjectId("all");
     setWsFilter("all");
-    setAssigned("all");
   };
 
   /** 空库的三种情况分开说话：没启用来源 / 启用的来源目录不在了 / 还没跑过。
@@ -366,14 +360,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
                 <option value="none">无项目</option>
               </select>
             </label>
-            <label className="ws-control">
-              <span className="muted small">归属状态</span>
-              <select value={assigned} onChange={(e) => setAssigned(e.target.value as AssignedFilter)}>
-                <option value="all">全部</option>
-                <option value="assigned">已归属</option>
-                <option value="unassigned">未归属</option>
-              </select>
-            </label>
             {filtersActive && (
               <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>
             )}
@@ -382,20 +368,52 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
                 {filtersActive ? `显示 ${shown.length} / 共 ${sessions?.length ?? 0} 条` : `共 ${shown.length} 条`}
               </span>
             )}
+            <div className="settings-seg icon-seg" role="group" aria-label="展示方式" style={{ marginLeft: "auto" }}>
+              <button
+                className={viewMode === "cards" ? "on" : ""}
+                aria-pressed={viewMode === "cards"}
+                aria-label="卡片视图"
+                title="卡片视图"
+                onClick={() => setViewMode("cards")}
+              >
+                <Icon name="grid" />
+              </button>
+              <button
+                className={viewMode === "list" ? "on" : ""}
+                aria-pressed={viewMode === "list"}
+                aria-label="列表视图"
+                title="列表视图"
+                onClick={() => setViewMode("list")}
+              >
+                <Icon name="list" />
+              </button>
+            </div>
           </div>
 
           </div>
 
           {shown === null && !loadFailed && (
-            <div className="session-list" aria-busy="true">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="skeleton"
-                  style={{ height: 68, borderRadius: "var(--radius-md)", marginBottom: 8 }}
-                />
-              ))}
-            </div>
+            viewMode === "cards" ? (
+              <div className="board-grid" role="status" aria-busy="true">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="skeleton card"
+                    style={{ minHeight: 160, borderRadius: "var(--radius-lg)" }}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="session-list" aria-busy="true">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="skeleton"
+                    style={{ height: 68, borderRadius: "var(--radius-md)", marginBottom: 8 }}
+                  />
+                ))}
+              </div>
+            )
           )}
           {loadFailed && loadFailedState}
           {shown !== null && shown.length === 0 && (sessions?.length ?? 0) === 0 && !loadFailed && (
@@ -426,6 +444,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
               sessions={shown}
               workstreamTitleById={workstreamTitleById}
               projectNameById={projectNameById}
+              viewMode={viewMode}
               onOpen={(id) => navigate({ view: "session", sessionId: id })}
               onResume={resume}
               onTrash={setTrashSessionId}
@@ -524,13 +543,6 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       )}
 
       {creating && <NewSessionModal onClose={() => setCreating(false)} />}
-      {resumeModalSessionId && (
-        <ResumeSessionModal
-          sessionId={resumeModalSessionId}
-          navigate={navigate}
-          onClose={() => setResumeModalSessionId(null)}
-        />
-      )}
       {purgeSessionId && (
         <PermanentDeleteModal
           sessionId={purgeSessionId}

@@ -9,6 +9,10 @@ import type { TerminalSnapshot } from "../../types";
 vi.mock("../../api", () => ({
   api: {
     getAgentStatus: vi.fn().mockResolvedValue({ codex: { terminal_cli: true } }),
+    getSessionDetail: vi.fn().mockResolvedValue({
+      session: { agent: "codex", source_kind: "codex", trashed_at: null, title: "会话" },
+      can_resume: true,
+    }),
     terminalForSession: vi.fn(),
     terminalAttach: vi.fn(),
     terminalInput: vi.fn().mockResolvedValue(undefined),
