@@ -61,6 +61,7 @@ fn repo(raw: &str, common: &str, kind: GitWorktreeKind) -> WorkspaceObservation 
             toplevel: Some(canon(raw)),
             kind,
             worktrees: vec![canon(raw)],
+            remotes: Vec::new(),
         },
         ..plain(raw)
     }

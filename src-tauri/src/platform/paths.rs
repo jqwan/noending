@@ -236,10 +236,17 @@ pub fn reveal_file(path: &std::path::Path) -> crate::error::Result<()> {
 }
 
 fn run_file_manager(opener: DirectoryOpener) -> crate::error::Result<()> {
+    run_opener(opener, "系统文件管理器")
+}
+
+fn run_opener(opener: DirectoryOpener, subject: &str) -> crate::error::Result<()> {
+    let launch_error = format!("无法启动{subject}，请检查系统配置");
+    let wait_error = format!("无法确认{subject}是否已打开目标");
+    let failure_error = format!("{subject}无法打开目标，请检查目标是否可访问");
     let mut child = std::process::Command::new(opener.program)
         .args(&opener.args)
         .spawn()
-        .map_err(|_| crate::error::other("无法启动系统文件管理器，请检查系统配置"))?;
+        .map_err(|_| crate::error::other(launch_error))?;
 
     // macOS `open` and `xdg-open` are short-lived launch helpers. Wait for
     // them so Unix reaps the child and reports a failed handoff. Explorer is
@@ -253,13 +260,11 @@ fn run_file_manager(opener: DirectoryOpener) -> crate::error::Result<()> {
                 // child unreaped. Try once more from a background reaper so a
                 // transient interruption cannot leave a zombie behind.
                 let _ = std::thread::spawn(move || child.wait());
-                return Err(crate::error::other("无法确认系统文件管理器是否已打开目录"));
+                return Err(crate::error::other(wait_error));
             }
         };
         if !status.success() {
-            return Err(crate::error::other(
-                "系统文件管理器无法打开路径，请检查路径是否可访问",
-            ));
+            return Err(crate::error::other(failure_error));
         }
     }
     Ok(())
@@ -311,6 +316,33 @@ fn file_revealer(path: &std::path::Path, platform: DirectoryPlatform) -> Directo
         args,
         wait_for_exit,
     }
+}
+
+/// Open an http(s) URL in the user's default browser, with the same launcher
+/// set the file manager uses: `open` (macOS), `explorer.exe` (Windows —
+/// handing it a URL opens the default browser), `xdg-open` (other). Only
+/// http/https passes: this launches an external handler and the URL comes
+/// from agent repository configs, so the scheme gate is the whole trust
+/// story; everything else is refused here, at the platform edge.
+pub fn open_url(url: &str) -> crate::error::Result<()> {
+    let trimmed = url.trim();
+    let scheme_ok = trimmed.starts_with("https://") || trimmed.starts_with("http://");
+    if !scheme_ok || trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(crate::error::other("只允许打开 http(s) 链接"));
+    }
+    let (program, wait_for_exit) = match () {
+        _ if cfg!(target_os = "macos") => ("open", true),
+        _ if cfg!(target_os = "windows") => ("explorer.exe", false),
+        _ => ("xdg-open", true),
+    };
+    run_opener(
+        DirectoryOpener {
+            program,
+            args: vec![trimmed.into()],
+            wait_for_exit,
+        },
+        "默认浏览器",
+    )
 }
 
 /// Identifier used for both the Tauri bundle and the OS-native app folder.

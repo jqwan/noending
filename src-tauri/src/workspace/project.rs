@@ -519,6 +519,7 @@ fn git_family(
         common_dir,
         kind,
         worktrees,
+        remotes,
         ..
     } = detection
     else {
@@ -534,6 +535,10 @@ fn git_family(
         return Ok(None);
     }
     let git_id = ensure_git_identity_conn(conn, &common_dir)?;
+    // The remotes are part of the same observation that recognized the
+    // family; refreshing them here keeps the Project-facing URL one reconcile
+    // behind the repository at most. Storage refreshes wholesale.
+    crate::storage::workspace::set_git_identity_remotes_conn(conn, &git_id, remotes)?;
     Ok(Some(GitFamily {
         git_id,
         kind: kind.as_str().to_string(),
@@ -1064,6 +1069,10 @@ pub struct ProjectDetail {
     pub workspace_paths: Vec<WorkspacePath>,
     pub workstreams: Vec<ProjectWorkstream>,
     pub sessions: Vec<Session>,
+    /// The linked repository's remote URL (origin preferred), read from the
+    /// git identity the Project anchors on. `None` for a directory project or
+    /// a repository without remotes.
+    pub remote_url: Option<String>,
 }
 
 /// Project detail as one read, derived entirely through the registry: the paths
@@ -1090,11 +1099,18 @@ pub fn project_detail(db: &Db, project_id: &str) -> Result<Option<ProjectDetail>
     for path in &workspace_paths {
         sessions.extend(db.list_sessions_for_workspace_path(&path.id)?);
     }
+    let remote_url = match project.git_id.as_deref() {
+        Some(git_id) => {
+            crate::storage::workspace::git_identity_remote_url_conn(&db.read(), git_id)?
+        }
+        None => None,
+    };
     Ok(Some(ProjectDetail {
         project,
         workspace_paths,
         workstreams,
         sessions,
+        remote_url,
     }))
 }
 

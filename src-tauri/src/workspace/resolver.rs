@@ -192,6 +192,10 @@ pub struct GitProbe {
     pub common_dir: Option<String>,
     pub toplevel: Option<String>,
     pub worktrees: Vec<WorktreeEntry>,
+    /// `(name, url)` pairs from the repository's config, read in the same
+    /// observation. URLs are credential-stripped at parse time (config files
+    /// may embed `user:token@`); the storage layer stores them as read here.
+    pub remotes: Vec<(String, String)>,
 }
 
 impl GitProbe {
@@ -201,6 +205,7 @@ impl GitProbe {
             common_dir: None,
             toplevel: None,
             worktrees: Vec::new(),
+            remotes: Vec::new(),
         }
     }
 }
@@ -298,12 +303,90 @@ impl GitAccess {
             _ => Vec::new(),
         };
 
+        // Remote URLs ride in the same observation. A failure here (no remote
+        // configured is `--get-regexp`'s exit 1) is not fatal: a repository
+        // without remotes is simply one without remotes.
+        let remotes = match exec_runner::run_with_env(
+            program,
+            &["config", "--get-regexp", r"^remote\..*\.url$"],
+            Some(dir),
+            self.timeout_secs,
+            &GIT_ENV,
+        ) {
+            Ok(out) if out.success => parse_remote_config(&out.stdout),
+            _ => Vec::new(),
+        };
+
         GitProbe {
             state: GitProbeState::Repo,
             common_dir: Some(common_dir),
             toplevel,
             worktrees,
+            remotes,
         }
+    }
+}
+
+/// Parse `git config --get-regexp '^remote\..*\.url$'` output: one
+/// `remote.<name>.url <url>` line per configured remote. Names keep their
+/// config spelling (case-sensitive, as git stores them); URLs are
+/// credential-stripped, because an https remote may embed `user:token@` in
+/// the config and the URL is bound for display.
+fn parse_remote_config(stdout: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        let Some((key, url)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(name) = key
+            .strip_prefix("remote.")
+            .and_then(|k| k.strip_suffix(".url"))
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        let url = url.trim();
+        if url.is_empty() {
+            continue;
+        }
+        out.push((name.to_string(), sanitize_remote_url(url)));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// Strip embedded credentials from an http(s) remote URL: everything up to the
+/// LAST `@` inside the authority is userinfo (`user:token@host`). Other
+/// schemes (ssh `git@host:path`, local paths) carry no credentials in the
+/// userinfo sense and are returned untouched.
+fn sanitize_remote_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some(pair) => pair,
+        None => return url.to_string(),
+    };
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) {
+        return url.to_string();
+    }
+    let (authority, path) = match rest.split_once('/') {
+        Some(pair) => pair,
+        // An authority-only URL (no path) still may carry userinfo.
+        None => (rest, ""),
+    };
+    match authority.rfind('@') {
+        Some(at) => {
+            let host = &authority[at + 1..];
+            if host.is_empty() {
+                return url.to_string();
+            }
+            if path.is_empty() {
+                format!("{scheme}://{host}")
+            } else {
+                format!("{scheme}://{host}/{path}")
+            }
+        }
+        None => url.to_string(),
     }
 }
 
@@ -584,6 +667,7 @@ pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> 
                 toplevel,
                 kind,
                 worktrees,
+                remotes: probe.remotes.clone(),
             }
         }
     }
@@ -784,6 +868,7 @@ mod tests {
             common_dir: Some(common.to_string()),
             toplevel: toplevel.map(str::to_string),
             worktrees: Vec::new(),
+            remotes: Vec::new(),
         }
     }
 
@@ -832,6 +917,7 @@ mod tests {
                 toplevel,
                 kind,
                 worktrees,
+                ..
             } => {
                 assert_eq!(common_dir, "/Users/tester/code/noending/.git");
                 assert_eq!(toplevel.as_deref(), Some("/Users/tester/code/noending"));
@@ -894,6 +980,7 @@ bare
             common_dir: Some("/Users/me/code/noending/.git".to_string()),
             toplevel: Some(observed.to_string()),
             worktrees: entries.clone(),
+            remotes: Vec::new(),
         };
         match classify_git(&c, observed, &probe) {
             GitDetection::Detected {
@@ -919,6 +1006,7 @@ bare
             common_dir: Some("/Users/me/code/noending/.git".to_string()),
             toplevel: Some("/Users/me/code/noending".to_string()),
             worktrees: entries,
+            remotes: Vec::new(),
         };
         match classify_git(&c, "/Users/me/code/noending", &probe_main) {
             GitDetection::Detected { kind, .. } => assert_eq!(kind, GitWorktreeKind::Main),
@@ -931,6 +1019,7 @@ bare
             common_dir: Some("/repo/.git".to_string()),
             toplevel: Some("/repo".to_string()),
             worktrees: Vec::new(),
+            remotes: Vec::new(),
         };
         match classify_git(&c, "/repo", &probe_nolist) {
             GitDetection::Detected { kind, .. } => assert_eq!(kind, GitWorktreeKind::Main),
@@ -941,6 +1030,7 @@ bare
             common_dir: Some("/repo/.git/worktrees/topic".to_string()),
             toplevel: Some("/worktrees/topic".to_string()),
             worktrees: Vec::new(),
+            remotes: Vec::new(),
         };
         match classify_git(&c, "/worktrees/topic", &probe_linked_nolist) {
             // Without a listing there is no proof this is a *linked* checkout, so
@@ -955,6 +1045,7 @@ bare
             common_dir: Some("/parent/.git/modules/vendor/dep".to_string()),
             toplevel: Some("/parent/vendor/dep".to_string()),
             worktrees: Vec::new(),
+            remotes: Vec::new(),
         };
         match classify_git(&c, "/parent/vendor/dep", &probe_submodule) {
             GitDetection::Detected {
@@ -1057,6 +1148,7 @@ bare
                     toplevel: None,
                     kind: GitWorktreeKind::Main,
                     worktrees: vec![],
+                    remotes: vec![],
                 }
             ),
             git_state::DETECTED
@@ -1252,5 +1344,49 @@ bare
             c.canonicalize("/repo/x/").as_deref(),
             c.canonicalize("/repo/x").as_deref()
         );
+    }
+    #[test]
+    fn remote_config_parses_names_and_strips_credentials() {
+        let parsed = parse_remote_config(
+            "remote.origin.url https://user:token@example.com/me/repo.git\nremote.upstream.url git@example.com:up.git\n",
+        );
+        assert_eq!(
+            parsed,
+            vec![
+                (
+                    "origin".to_string(),
+                    "https://example.com/me/repo.git".to_string()
+                ),
+                ("upstream".to_string(), "git@example.com:up.git".to_string()),
+            ]
+        );
+        // No remotes configured: git exits 1, the caller passes an empty body.
+        assert!(parse_remote_config("").is_empty());
+        // Malformed lines are skipped, never fatal.
+        assert!(parse_remote_config("nonsense line").is_empty());
+    }
+
+    #[test]
+    fn remote_url_sanitization_spares_non_http_schemes() {
+        // Only http(s) userinfo is credential-bearing; ssh and local paths go
+        // through untouched.
+        assert_eq!(
+            sanitize_remote_url("https://user:token@example.com/a/b.git"),
+            "https://example.com/a/b.git"
+        );
+        assert_eq!(
+            sanitize_remote_url("http://token@host/path"),
+            "http://host/path"
+        );
+        assert_eq!(
+            sanitize_remote_url("https://example.com/a.git"),
+            "https://example.com/a.git"
+        );
+        assert_eq!(sanitize_remote_url("https://user@host"), "https://host");
+        assert_eq!(
+            sanitize_remote_url("git@github.com:me/repo.git"),
+            "git@github.com:me/repo.git"
+        );
+        assert_eq!(sanitize_remote_url("/local/path"), "/local/path");
     }
 }

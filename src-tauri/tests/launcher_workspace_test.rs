@@ -430,6 +430,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
         drifted.agent,
         &drifted.root_agent_session_id,
         None,
+        None,
         Some(&moved),
         None,
         None,

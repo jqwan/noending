@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Icon from "../../components/Icon";
+import { openPath } from "../../components/common";
 import { usePathProbe } from "../../components/WorkspacePathField";
 import ExistingPathPicker from "./ExistingPathPicker";
 import type { PathProbe } from "../../types";
@@ -51,7 +52,25 @@ function DraftRow({ raw }: { raw: string }) {
     <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
       <div className="path-draft-name">
         <strong>{raw.split(/[\\/]/).filter(Boolean).pop() ?? raw}</strong>
-        <div className="mono small muted" title={raw}>{raw}</div>
+        <div
+          role="button"
+          tabIndex={0}
+          className="mono small muted path-link"
+          title={`${raw} · 点击在文件管理器中打开`}
+          onClick={(e) => {
+            e.stopPropagation();
+            void openPath(raw);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              e.stopPropagation();
+              void openPath(raw);
+            }
+          }}
+        >
+          {raw}
+        </div>
       </div>
       <RowFeedback probe={probe} />
     </div>

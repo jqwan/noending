@@ -8,6 +8,7 @@ import AssistantView from "../features/assistant/AssistantView";
 import ProjectsView from "../features/projects/ProjectsView";
 import ProjectDetail from "../features/projects/ProjectDetail";
 import SettingsView from "../features/settings/SettingsView";
+import AgentsView from "../features/agents/AgentsView";
 import SearchView from "../features/search/SearchView";
 import type { Route } from "./routes";
 
@@ -49,9 +50,22 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
       );
     case "session":
       return route.entry === "conversation" ? (
-        <SessionConversationView key={route.sessionId} sessionId={route.sessionId} goBack={goBack} />
+        <SessionConversationView
+          key={route.sessionId}
+          sessionId={route.sessionId}
+          initialTitle={route.initialTitle}
+          initialAgent={route.initialAgent}
+          initialTotal={route.initialTotal}
+          goBack={goBack}
+        />
       ) : (
-        <SessionDetailView sessionId={route.sessionId} navigate={navigate} goBack={goBack} />
+        <SessionDetailView
+          sessionId={route.sessionId}
+          initialTitle={route.initialTitle}
+          initialAgent={route.initialAgent}
+          navigate={navigate}
+          goBack={goBack}
+        />
       );
     case "assistant":
       return <AssistantView scope={route.scope} navigate={navigate} />;
@@ -59,8 +73,10 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
       return <ProjectsView navigate={navigate} />;
     case "project":
       return <ProjectDetail projectId={route.projectId} navigate={navigate} />;
+    case "agents":
+      return <AgentsView navigate={navigate} initialAgent={route.agent} />;
     case "settings":
-      return <SettingsView section={route.section ?? "general"} navigate={navigate} />;
+      return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
     case "search":
       return <SearchView query={route.query} navigate={navigate} />;
     default:

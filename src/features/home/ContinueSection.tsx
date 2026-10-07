@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { useWorkstreamCards } from "../workstreams/useWorkstreamCards";
 import WorkstreamCard from "../workstreams/WorkstreamCard";
-import { sessionDisplayTitle, UNTITLED_SESSION } from "../sessions/SessionTable";
+import { agentDisplayLabel, sessionDisplayTitle, UNTITLED_SESSION } from "../sessions/SessionTable";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Session } from "../../types";
+import type { Session } from "../../types";
 import type { Route } from "../../app/routes";
 
 /** Continue 区：最近 4 个（最多 6）Workstream，双列网格。 */
@@ -85,12 +85,13 @@ export function RecentSessions({ navigate, onNewSession }: {
         sessions.map((s) => (
           <div className="list-row" role="link" tabIndex={0} onKeyDown={e => { if (e.key === "Enter") navigate({ view: "session", sessionId: s.id }); }} key={s.id} onClick={() => navigate({ view: "session", sessionId: s.id })}>
             <div className="grow">
-              <div className="title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
-                {sessionDisplayTitle(s.title)}
+              <div className="title session-title-with-icon" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
+                <AgentIcon agent={s.agent} size={15} />
+                <span className="session-title-text">{sessionDisplayTitle(s.title)}</span>
               </div>
             </div>
             <div className="side">
-              <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
+              <span className="muted small">{agentDisplayLabel(s.agent)}</span>
               <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
             </div>
           </div>

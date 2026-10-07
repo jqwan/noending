@@ -21,9 +21,9 @@ function outcome(status: SourceAvailability): { warning: string | null; detail: 
       return {
         warning: "Root 源会话仍然存在：删掉的是 NoEnding 这份副本。",
         detail:
-          "源文件不会被删除。下一次同步会从它重新摄入——新的会话 id、没有所属任务、没有摘要，"
+          "源文件不会被删除。下一次同步会从它重新同步——新的会话 id、没有所属任务、没有摘要，"
           + "启动记录也不会恢复。想让它彻底消失，需要删除源会话文件。",
-        toast: "；源会话仍在，下次同步会作为新会话重新入库",
+        toast: "；源会话仍在，下次同步会作为新会话重新同步",
       };
     case "missing":
       return {
@@ -35,7 +35,7 @@ function outcome(status: SourceAvailability): { warning: string | null; detail: 
       return {
         warning: "无法确认 Root 源会话的状态。",
         detail:
-          "源文件不会被删除；如果它其实还在，下一次同步会把这个会话作为新会话重新入库。",
+          "源文件不会被删除；如果它其实还在，下一次同步会把这个会话作为新会话重新同步。",
         toast: "",
       };
   }

@@ -153,6 +153,9 @@ export const api = {
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),
+  /** 在系统默认浏览器打开 http(s) 链接（后端只放行 http/https）。 */
+  openRemoteUrl: (url: string) => invoke<void>("open_remote_url", { url }),
+  openPath: (path: string) => invoke<void>("open_path", { path }),
   /** Conversation 的一页（骨架：用户消息 + 每轮最终回复）：`beforeOrdinal` 取更早
    *  的一页，`afterOrdinal` 取更新的一页，都不传就是最新一页。中间回复不占页，
    *  挂在各条最终回复的 `turn` 摘要上，展开时走 getSessionTurnIntermediates。 */
@@ -180,12 +183,15 @@ export const api = {
 
   // Ingestion: 两个显式更新按钮 + 纯读取。后台摄入只由三个显式入口排队
   // （高级维护页）与两个自动触发（启动 / 回到前台的 freshness 回落）；普通页面打开从不触发。
-  /** 高级维护：重新扫描全部已启用来源。 */
+  /** 高级维护：增量同步全部已启用来源。 */
   reconcileAll: () => invoke<{ queued: boolean }>("reconcile_all"),
-  /** 高级维护：重新扫描单个来源。 */
+  /** 高级维护：增量同步单个来源。 */
   reconcileSource: (sourceId: string) => invoke<{ queued: boolean }>("reconcile_source", { sourceId }),
-  /** 高级维护：从头重扫单个来源。 */
+  /** 高级维护：全量同步单个来源。 */
   reingestSource: (sourceId: string) => invoke<{ queued: boolean }>("reingest_source", { sourceId }),
+  /** 单会话定向增量同步：重新读取该会话的成员文件并同步。 */
+  refreshSession: (sessionId: string) =>
+    invoke<{ queued: boolean }>("refresh_session", { sessionId }),
   /** 前台回落：只在距上次成功超过 freshness 阈值时才排队。 */
   appForeground: () => invoke<{ queued: boolean }>("app_foreground"),
   /** 最近一次后台摄入任务的结果（高级维护页展示）。 */

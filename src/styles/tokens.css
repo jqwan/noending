@@ -36,6 +36,10 @@
   --radius-lg: 12px;
   --sidebar-width: 248px;
 
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+
   --mono: "SF Mono", ui-monospace, Menlo, monospace;
 
   /* ---- legacy aliases (existing class CSS keeps working) ---- */
@@ -69,6 +73,10 @@
   --warning: #d9a04a;
   --warning-wash: #3a2f1c;
   --danger: #e07a6a;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
 
   color-scheme: dark;
 }

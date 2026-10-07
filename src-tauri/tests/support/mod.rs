@@ -102,6 +102,7 @@ pub fn ensure_session_source(
             None,
             None,
             None,
+            None,
             "test_root",
             source_path,
             &serde_json::json!({}),

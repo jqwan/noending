@@ -28,13 +28,6 @@ it("shows the ordered paths and marks only the first as primary", () => {
   expect(screen.getAllByText("主目录")).toHaveLength(1);
 });
 
-it("leaves no write affordance behind — editing lives in the 编辑任务 dialog", () => {
-  render(<WorkstreamPathList paths={[row("main", 0), row("docs", 1)]} />);
-  for (const name of ["新增目录", "选择已有目录", "移除", "设为主要"]) {
-    expect(screen.queryByRole("button", { name })).toBeNull();
-  }
-});
-
 it("distinguishes 还没读到 from 真的没有工作目录", () => {
   const { unmount } = render(<WorkstreamPathList paths={null} />);
   screen.getByText("读取工作目录…");

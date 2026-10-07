@@ -21,7 +21,24 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
   const [creatingWs, setCreatingWs] = useState(false);
   const [creatingSession, setCreatingSession] = useState(false);
 
-  if (cards === null) return <div className="main narrow" role="status">{loadError ? <>加载失败 <button className="btn small" onClick={refresh}>重试</button></> : "加载中…"}</div>;
+  if (cards === null) {
+    return (
+      <div className="main narrow home" role="status">
+        <PageHeader title="首页" />
+        {loadError ? (
+          <div className="card hairline" style={{ padding: 16, marginTop: 20 }}>
+            <p style={{ margin: "0 0 10px", color: "var(--danger)" }}>读取首页数据失败：{loadError}</p>
+            <button className="btn small" onClick={refresh}>重试</button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 24 }}>
+            <div className="skeleton" style={{ height: 160, borderRadius: "var(--radius-lg)" }} />
+            <div className="skeleton" style={{ height: 160, borderRadius: "var(--radius-lg)" }} />
+          </div>
+        )}
+      </div>
+    );
+  }
 
   const activeCards = cards.filter(
     (c) => c.lifecycle === "active" && c.visibility === "normal",

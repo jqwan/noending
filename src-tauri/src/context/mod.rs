@@ -1163,6 +1163,7 @@ mod tests {
                 .upsert_logical_session(
                     Agent::Codex,
                     &root_id,
+                    None,
                     Some("Context service fixture"),
                     None,
                     None,

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
-import { submitsOnEnter } from "./common";
+import { openPath, submitsOnEnter } from "./common";
 import type { PathProbe, RecentWorkspacePath } from "../types";
 
 /**
@@ -111,7 +111,23 @@ export function ProbeFeedback({ probe }: { probe: PathProbe | null }) {
         </span>
       )}
       {probe.canonical_path && probe.raw.trim() !== probe.canonical_path && (
-        <span className="mono small muted" title="NoEnding 会把输入规范化成这个路径">
+        <span
+          role="button"
+          tabIndex={0}
+          className="mono small muted path-link"
+          title={`${probe.canonical_path} · NoEnding 会把输入规范化成这个路径 · 点击在文件管理器中打开`}
+          onClick={(e) => {
+            e.stopPropagation();
+            void openPath(probe.canonical_path!);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              e.stopPropagation();
+              void openPath(probe.canonical_path!);
+            }
+          }}
+        >
           {probe.canonical_path}
         </span>
       )}

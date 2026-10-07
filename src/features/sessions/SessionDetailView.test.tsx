@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import SessionDetailView from "./SessionDetailView";
+import SessionDetailView, { sessionDetailCache } from "./SessionDetailView";
 import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
 import type {
@@ -41,6 +41,7 @@ vi.mock("../../api", () => ({
     setSessionOwnerWorkstream: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
     permanentlyDeleteSession: vi.fn(),
+    refreshSession: vi.fn().mockResolvedValue({ queued: true }),
   },
 }));
 
@@ -49,6 +50,7 @@ afterEach(() => {
   vi.clearAllMocks();
   // 「显示统计」这类开关活在模块级 view state 里，会跨用例残留。
   viewState.clear();
+  sessionDetailCache.clear();
 });
 
 function session(id: string, over: Partial<Session> = {}): Session {
@@ -140,24 +142,35 @@ async function renderDetail(d: SessionDetail) {
   return { navigate, container: document.body, rerender: view.rerender };
 }
 
-// 执行信息
+it("renders agent icon before session title and plain agent name under session info", async () => {
+  const d = detail(session("s1", { title: "测试会话标题", agent: "codex" }));
+  await renderDetail(d);
 
-it("shows the session source as 源会话 without status noise when present", async () => {
-  await renderDetail(detail(session("me")));
+  // Title in header has session-title-with-icon containing agent icon and title text
+  const titleContainer = document.querySelector(".session-title-with-icon");
+  expect(titleContainer).toBeTruthy();
+  expect(titleContainer?.querySelector(".agent-icon")).toBeTruthy();
+  expect(titleContainer?.textContent).toContain("测试会话标题");
 
-  screen.getByText("源会话");
-  screen.getByText("/tmp/rollout.jsonl");
-  expect(screen.queryByText("源会话已不存在")).toBeNull();
-  expect(screen.queryByText("无法确认源会话状态")).toBeNull();
+  // In aside section "会话信息":
+  const aside = document.querySelector(".task-detail-aside");
+  expect(aside).toBeTruthy();
+  // Shows agent label "Codex"
+  expect(aside?.textContent).toContain("Codex");
+  // But has NO agent icon inside aside
+  expect(aside?.querySelector(".agent-icon")).toBeNull();
 });
+
+// 执行信息
 
 it("reveals the source by clicking the path itself", async () => {
   await renderDetail(detail(session("me")));
 
-  // 路径本身就是入口，不再有单独的「在文件管理器中显示」链接。
+  screen.getByText("源会话");
+  expect(screen.queryByText("源会话已不存在")).toBeNull();
+  expect(screen.queryByText("无法确认源会话状态")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "/tmp/rollout.jsonl" }));
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("me"));
-  expect(screen.queryByText("在文件管理器中显示")).toBeNull();
 });
 
 it("warns and disables resume when the root source is missing", async () => {
@@ -168,7 +181,7 @@ it("warns and disables resume when the root source is missing", async () => {
   expect(resume.disabled).toBe(true);
   expect(resume.title).toContain("源会话已不存在");
   // 源不在，路径退回纯文本：没有可点的定位入口，只有警告。
-  expect(screen.queryByRole("button", { name: /me-root\.jsonl/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "/tmp/rollout.jsonl" })).toBeNull();
 });
 
 it("warns when the root source status is unavailable", async () => {
@@ -192,14 +205,21 @@ it("previews the newest messages and links to the whole conversation", async () 
   // 预览只是最后 10 条：说清还剩多少没显示，入口用当前会话总数。
   screen.getByText("以上是最近 1 条。");
   fireEvent.click(screen.getByRole("button", { name: "查看全部会话（共 420 条）" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "me", entry: "conversation" });
+  expect(navigate).toHaveBeenCalledWith({
+    view: "session",
+    sessionId: "me",
+    entry: "conversation",
+    initialTitle: "未命名会话",
+    initialAgent: "codex",
+    initialTotal: 420,
+  });
 });
 
 it("offers no conversation entry for a session that has no messages", async () => {
   await renderDetail(detail(session("me")));
 
   expect(screen.queryByRole("button", { name: /查看全部会话/ })).toBeNull();
-  screen.getByText(/还没有摄入消息/);
+  screen.getByText(/还没有同步消息/);
 });
 
 // Fork
@@ -274,7 +294,7 @@ it("checks the root source before confirming and says the copy will be rebuilt",
   fireEvent.click(screen.getByRole("button", { name: "删除…" }));
 
   await screen.findByText(/Root 源会话仍然存在/);
-  screen.getByText(/下一次同步会从它重新摄入/);
+  screen.getByText(/下一次同步会从它重新同步/);
   // 每一条「将删除」都渲染出数字：后端改名而前端漏改时，这里会当场炸掉，
   // 而不是在生产里把整棵树渲染崩成黑屏。
   screen.getByText("3 条会话消息");
@@ -480,4 +500,68 @@ it("clears a session's update error when the same detail view navigates to anoth
 
   rerender(<SessionDetailView sessionId="session-b" navigate={navigate} goBack={vi.fn()} />);
   await waitFor(() => expect(screen.queryByText(failure)).toBeNull());
+});
+
+it("triggers incremental scan when clicking the refresh button in header", async () => {
+  await renderDetail(detail(session("me")));
+
+  const refreshBtn = screen.getByRole("button", { name: "增量同步" });
+  expect(refreshBtn).toBeTruthy();
+  fireEvent.click(refreshBtn);
+  await waitFor(() => expect(api.refreshSession).toHaveBeenCalledWith("me"));
+});
+
+it("renders immediately from cache on remount without flashing 加载中", async () => {
+  const me = session("me", { title: "已缓存的会话" });
+  await renderDetail(detail(me));
+  expect(screen.getByText("已缓存的会话")).toBeDefined();
+
+  cleanup();
+
+  // On remount (e.g. returning from conversation):
+  // Delay api.getSessionDetail to verify cached detail is rendered immediately
+  let resolveDetail: (d: any) => void;
+  vi.mocked(api.getSessionDetail).mockReturnValue(new Promise((r) => { resolveDetail = r; }) as any);
+
+  render(<SessionDetailView sessionId="me" navigate={vi.fn()} goBack={vi.fn()} />);
+
+  // Should render "已缓存的会话" immediately, NOT "加载中…"
+  expect(screen.queryByText("加载中…")).toBeNull();
+  expect(screen.getByText("已缓存的会话")).toBeDefined();
+
+  await act(async () => {
+    resolveDetail!(detail(me));
+  });
+});
+
+it("renders copy icon buttons next to field labels and copies values on click", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+  const me = session("session-123", {
+    root_agent_session_id: "agent-root-456",
+    source_path: "/path/to/source.jsonl",
+  });
+  await renderDetail(detail(me));
+
+  // Copy icon button for "会话 ID"
+  const copySessionIdBtn = screen.getByRole("button", { name: "复制会话 ID" });
+  expect(copySessionIdBtn).toBeDefined();
+  fireEvent.click(copySessionIdBtn);
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith("session-123"));
+
+  // Copy icon button for "Agent 会话 ID"
+  const copyAgentIdBtn = screen.getByRole("button", { name: "复制 Agent 会话 ID" });
+  expect(copyAgentIdBtn).toBeDefined();
+  fireEvent.click(copyAgentIdBtn);
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith("agent-root-456"));
+
+  // Copy icon button for "源会话"
+  const copySourceBtn = screen.getByRole("button", { name: "复制源会话路径" });
+  expect(copySourceBtn).toBeDefined();
+  fireEvent.click(copySourceBtn);
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith("/path/to/source.jsonl"));
+
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
 });

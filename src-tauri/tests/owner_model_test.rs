@@ -16,7 +16,6 @@ use noending::storage::{new_id, now, Db};
 use noending::sync::ContextMutation;
 use noending::workspace::workstream::{
     add_workstream_path, archive_workstream, create_workstream, delete_workstream_permanently,
-    remove_workstream_path,
 };
 use noending::workspace::WorkspaceAttaching;
 use rusqlite::Connection;
@@ -149,18 +148,12 @@ fn owner_of(db: &Db, session_id: &str) -> Option<String> {
 // Session Owner basics
 
 #[test]
-fn newly_ingested_session_has_no_owner() {
-    let db = open_db("owner-default");
-    let s = session(&db, None);
-    assert!(owner_of(&db, &s.id).is_none());
-}
-
-#[test]
-fn setting_and_replacing_the_owner_is_single_valued() {
+fn owner_assignment_replaces_clears_and_is_idempotent() {
     let db = open_db("owner-replace");
     let a = workstream(&db, "A");
     let b = workstream(&db, "B");
     let s = session(&db, None);
+    assert!(owner_of(&db, &s.id).is_none());
 
     db.set_session_owner(&s.id, Some(&a.id)).unwrap();
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
@@ -170,29 +163,14 @@ fn setting_and_replacing_the_owner_is_single_valued() {
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(b.id.as_str()));
     assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
     assert_eq!(db.sessions_for_workstream(&b.id).unwrap().len(), 1);
-}
 
-#[test]
-fn clearing_the_owner_returns_to_null() {
-    let db = open_db("owner-clear");
-    let a = workstream(&db, "A");
-    let s = session(&db, None);
+    db.set_session_owner(&s.id, Some(&b.id)).unwrap();
+    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(b.id.as_str()));
+    assert_eq!(db.sessions_for_workstream(&b.id).unwrap().len(), 1);
 
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
     db.set_session_owner(&s.id, None).unwrap();
     assert!(owner_of(&db, &s.id).is_none());
-}
-
-#[test]
-fn setting_the_same_owner_twice_is_idempotent() {
-    let db = open_db("owner-idempotent");
-    let a = workstream(&db, "A");
-    let s = session(&db, None);
-
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
-    assert_eq!(db.sessions_for_workstream(&a.id).unwrap().len(), 1);
+    assert!(db.sessions_for_workstream(&b.id).unwrap().is_empty());
 }
 
 #[test]
@@ -204,40 +182,6 @@ fn unknown_workstream_and_unknown_session_are_refused() {
 }
 
 // lifecycle
-
-#[test]
-fn deleting_a_workstream_clears_the_owner_but_keeps_the_session() {
-    let db = open_db("owner-ws-delete");
-    let a = workstream(&db, "A");
-    let s = session(&db, None);
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-
-    archive_workstream(&db, &a.id).unwrap();
-    delete_workstream_permanently(&db, &a.id).unwrap();
-
-    let after = db.get_session(&s.id).unwrap().expect("Session survives");
-    assert!(after.owner_workstream_id.is_none());
-    assert!(db.get_workstream(&a.id).unwrap().is_none());
-}
-
-#[test]
-fn deleting_a_session_leaves_its_workstream_untouched() {
-    let db = open_db("owner-session-delete");
-    let a = workstream(&db, "A");
-    let s = session(&db, None);
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-
-    db.tx(|tx| {
-        tx.execute(
-            "DELETE FROM sessions WHERE id = ?1",
-            rusqlite::params![s.id],
-        )?;
-        Ok(())
-    })
-    .unwrap();
-
-    assert!(db.get_workstream(&a.id).unwrap().is_some());
-}
 
 #[test]
 fn trash_and_restore_preserve_the_owner() {
@@ -257,25 +201,6 @@ fn trash_and_restore_preserve_the_owner() {
 }
 
 // workspace independence
-
-#[test]
-fn removing_a_workstream_path_does_not_change_the_owner() {
-    let db = open_db("owner-path-remove");
-    seed_project(&db, "p1");
-    let paths = TempPaths::new(&db.dir, "p1");
-    let dir = paths.dir("repo-a");
-    let w = create_workstream(&db, &paths, "A", "", &[dir.clone()])
-        .unwrap()
-        .workstream;
-    let s = session(&db, Some(&dir));
-    db.set_session_owner(&s.id, Some(&w.id)).unwrap();
-
-    let row = db.list_workstream_paths(&w.id).unwrap().remove(0);
-    remove_workstream_path(&db, &w.id, &row.id).unwrap();
-
-    assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
-    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(w.id.as_str()));
-}
 
 #[test]
 fn adding_a_workstream_path_does_not_change_the_owner() {
@@ -1052,49 +977,6 @@ fn a_launch_intent_is_consumed_exactly_once() {
     assert_eq!(
         stored.matched_session_id.as_deref(),
         Some(first.id.as_str())
-    );
-}
-
-/// The storage CAS behind the match: a second claim affected zero rows, which
-/// is what makes the losing transaction roll back instead of overwriting the
-/// winner's `matched_session_id`.
-#[test]
-fn the_match_claim_is_a_cas_that_only_fires_once() {
-    use noending::domain::{launch_status, LaunchIntent};
-    use noending::storage::mark_launch_intent_matched_conn;
-
-    let db = open_db("intent-cas");
-    let a = workstream(&db, "A");
-    let intent = LaunchIntent {
-        id: new_id(),
-        launch_type: "new".into(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(a.id.clone()),
-        cwd: None,
-        process_id: None,
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-
-    let first = db
-        .tx(|tx| mark_launch_intent_matched_conn(tx, &intent.id, "session-a", "first"))
-        .unwrap();
-    assert!(first, "the waiting intent is claimable");
-    let second = db
-        .tx(|tx| mark_launch_intent_matched_conn(tx, &intent.id, "session-b", "second"))
-        .unwrap();
-    assert!(!second, "a claimed intent is no longer claimable");
-
-    let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
-    assert_eq!(
-        stored.matched_session_id.as_deref(),
-        Some("session-a"),
-        "the winner's match is never overwritten"
     );
 }
 

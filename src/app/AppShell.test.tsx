@@ -65,3 +65,11 @@ it("queues ingestion only after the window returns from the background", async (
 
   await waitFor(() => expect(appForeground).toHaveBeenCalledTimes(1));
 });
+
+it("normalizes legacy settings sections to agents view", async () => {
+  const { normalizeRoute } = await import("./AppShell");
+  expect(normalizeRoute({ view: "settings", section: "agents" })).toEqual({ view: "agents" });
+  expect(normalizeRoute({ view: "settings", section: "sources" })).toEqual({ view: "agents" });
+  expect(normalizeRoute({ view: "settings", section: "general" })).toEqual({ view: "settings", section: "general" });
+  expect(normalizeRoute({ view: "workstreams" })).toEqual({ view: "workstreams" });
+});

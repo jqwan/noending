@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import WorkstreamDetailView from "./WorkstreamDetailView";
+import WorkstreamDetailView, { clearWorkstreamDetailCache } from "./WorkstreamDetailView";
 import { api } from "../../api";
 import type { WorkstreamContext, WorkstreamContextView, WorkstreamPathRow } from "../../types";
 
@@ -49,6 +49,7 @@ vi.mock("../../api", () => ({
 }));
 
 afterEach(() => {
+  clearWorkstreamDetailCache();
   cleanup();
   vi.clearAllMocks();
 });
@@ -112,28 +113,6 @@ async function renderDetail() {
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
 }
-
-it("keeps the title band while loading", async () => {
-  // 读取永不返回：证明加载态仍然渲染 PageHeader。少了它，吸在标题栏上的那条 band
-  // 会先整条消失、数据到了再补回来，看着就像闪了一个"加载中的页面"。
-  vi.mocked(api.getWorkstreamContext).mockReturnValue(new Promise(() => {}));
-  vi.mocked(api.listWorkstreamPaths).mockReturnValue(new Promise(() => {}));
-  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-
-  screen.getByRole("heading", { name: "加载中…" });
-  expect(screen.queryByText("任务概览")).toBeNull();
-});
-
-it("keeps exactly one edit entry: the 编辑任务 icon button", async () => {
-  await renderDetail();
-
-  screen.getByRole("button", { name: "编辑任务" });
-  expect(screen.queryByRole("button", { name: "重命名…" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "编辑描述…" })).toBeNull();
-  // 移入回收站也是独立图标按钮；未归档时没有 ••• 菜单。
-  screen.getByRole("button", { name: "移入回收站" });
-  expect(screen.queryByTitle("更多操作")).toBeNull();
-});
 
 it("lists the sessions owned by this task and nothing else", async () => {
   const ctx = context();

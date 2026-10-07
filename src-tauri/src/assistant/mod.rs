@@ -286,7 +286,7 @@ mod exec_cwd_tests {
     use super::*;
 
     #[test]
-    fn ensure_creates_a_missing_directory_including_parents() {
+    fn ensure_creates_parents_and_accepts_an_existing_directory() {
         let root =
             std::env::temp_dir().join(format!("noending-assistant-cwd-{}", std::process::id()));
         let nested = root.join("assistant");
@@ -294,18 +294,8 @@ mod exec_cwd_tests {
         assert!(!nested.exists());
         ensure_exec_cwd(&nested).unwrap();
         assert!(nested.is_dir());
+        ensure_exec_cwd(&nested).unwrap();
+        assert!(nested.is_dir());
         std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn ensure_is_idempotent_when_the_directory_exists() {
-        let dir = std::env::temp_dir().join(format!(
-            "noending-assistant-cwd-exists-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        ensure_exec_cwd(&dir).unwrap();
-        assert!(dir.is_dir());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

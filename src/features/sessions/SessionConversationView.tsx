@@ -8,11 +8,13 @@ import {
   useState,
 } from "react";
 import Icon from "../../components/Icon";
+import AgentIcon from "../../components/AgentIcon";
 import PageHeader from "../../layout/PageHeader";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData } from "./SessionMessage";
 import { agentDisplayLabel, sessionDisplayTitle, UNTITLED_SESSION } from "./SessionTable";
+import { sessionDetailCache } from "./SessionDetailView";
 import type {
   Agent,
   Session,
@@ -137,15 +139,24 @@ function captureAnchor(scroller: HTMLElement | null): PagingAnchor | null {
  * 会话被改写时（事实代次变化）旧页不再属于同一个会话，直接回到最新。右侧的导航
  * 条给出一条到用户消息的快速通路。
  */
-export default function SessionConversationView({ sessionId, goBack }: {
+export default function SessionConversationView({
+  sessionId,
+  initialTitle,
+  initialAgent,
+  initialTotal,
+  goBack,
+}: {
   sessionId: string;
+  initialTitle?: string;
+  initialAgent?: Agent;
+  initialTotal?: number;
   goBack: (fallback?: Route) => void;
 }) {
   const [session, setSession] = useState<Session | null>(null);
   const [messages, setMessages] = useState<SessionWindowMessage[]>([]);
   const [marks, setMarks] = useState<SessionMessageMark[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState(initialTotal ?? 0);
   const [failed, setFailed] = useState(false);
   const [working, setWorking] = useState(false);
   const [atLatest, setAtLatest] = useState(true);
@@ -260,6 +271,7 @@ export default function SessionConversationView({ sessionId, goBack }: {
     ])
       .then(([detail, page, markList]) => {
         if (!live) return;
+        sessionDetailCache.set(sessionId, detail);
         setSession(detail.session);
         setMarks(markList);
         applyTail(page);
@@ -484,10 +496,36 @@ export default function SessionConversationView({ sessionId, goBack }: {
     node?.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
   };
 
+  const currentAgent = session?.agent ?? initialAgent;
+  const rawTitle = session ? sessionDisplayTitle(session.title) : initialTitle;
+  const displayTitle = rawTitle
+    ? (rawTitle === UNTITLED_SESSION ? "未命名会话" : rawTitle)
+    : "会话消息";
+
+  const headerTitle = currentAgent ? (
+    <span className="session-title-with-icon" title={displayTitle}>
+      <AgentIcon agent={currentAgent} size={18} />
+      <span className="session-title-text">{displayTitle}</span>
+    </span>
+  ) : (
+    displayTitle
+  );
+
   if (failed) {
     return (
       <div className="main narrow" role="status">
-        <PageHeader back="返回会话详情" onBack={() => goBack()} title="会话消息" />
+        <PageHeader
+          back="返回会话详情"
+          onBack={() =>
+            goBack({
+              view: "session",
+              sessionId,
+              initialTitle: displayTitle,
+              initialAgent: currentAgent,
+            })
+          }
+          title={headerTitle}
+        />
         <div className="empty">
           读不到这个会话的消息。
           <div className="small" style={{ marginTop: 4 }}>返回详情页后重试。</div>
@@ -496,16 +534,20 @@ export default function SessionConversationView({ sessionId, goBack }: {
     );
   }
 
-  const title = session === null ? "会话消息" : sessionDisplayTitle(session.title);
-  const untitled = title === UNTITLED_SESSION;
-
   return (
     <div className="main narrow fill">
       <PageHeader
         back="返回会话详情"
-        onBack={() => goBack()}
-        title={untitled ? "未命名会话" : title}
-        sub={session && <>{agentDisplayLabel(session.agent)} · 共 {total} 条消息</>}
+        onBack={() =>
+          goBack({
+            view: "session",
+            sessionId,
+            initialTitle: displayTitle,
+            initialAgent: currentAgent,
+          })
+        }
+        title={headerTitle}
+        sub={currentAgent && <>{agentDisplayLabel(currentAgent)} · 共 {total} 条消息</>}
         actions={(
           <span className="row" style={{ gap: 8 }}>
             <button
@@ -537,7 +579,7 @@ export default function SessionConversationView({ sessionId, goBack }: {
           )}
           {messages.length === 0 ? (
             <div className="empty">
-              还没有摄入消息。
+              还没有同步消息。
               <div className="small" style={{ marginTop: 4 }}>
                 这个会话的来源里没有可读的 user / assistant 消息。
               </div>

@@ -300,6 +300,13 @@ pub fn reingest_source(app: AppHandle, source_id: String) -> Result<serde_json::
     Ok(serde_json::json!({ "queued": true }))
 }
 
+/// Single Session incremental sync: re-reads the session's member files.
+#[tauri::command]
+pub fn refresh_session(app: AppHandle, session_id: String) -> Result<serde_json::Value> {
+    enqueue(&app, IngestScope::RefreshSession(session_id));
+    Ok(serde_json::json!({ "queued": true }))
+}
+
 /// Foreground-return hook: reconcile only when the last success is older than
 /// the freshness threshold. Ordinary navigation must not call this.
 #[tauri::command]

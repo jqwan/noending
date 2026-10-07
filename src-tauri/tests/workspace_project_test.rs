@@ -159,6 +159,7 @@ fn repo(
             toplevel: Some(toplevel),
             kind,
             worktrees: worktrees.iter().map(|w| canon(w)).collect(),
+            remotes: Vec::new(),
         },
     }
 }
@@ -1393,7 +1394,13 @@ fn project_detail_has_the_frozen_shape() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["project", "sessions", "workspace_paths", "workstreams"]
+        vec![
+            "project",
+            "remote_url",
+            "sessions",
+            "workspace_paths",
+            "workstreams"
+        ]
     );
     let mut workstream_keys: Vec<&str> = value["workstreams"][0]
         .as_object()
@@ -1859,5 +1866,74 @@ fn refresh_does_not_ingest_sessions() {
     assert_eq!(
         before, after,
         "workspace refresh never runs session ingestion"
+    );
+}
+
+/// The remotes an observation carries land in the git identity's metadata and
+/// surface on the Project detail — `origin` preferred over other remotes.
+/// URLs arrive credential-stripped from the resolver; the fixture feeds
+/// already-stripped ones.
+#[test]
+fn a_project_detail_surfaces_the_repository_remote() {
+    let (_dir, db) = temp_db();
+    let canonical = canon("/repo");
+    let observation = WorkspaceObservation {
+        path_id: path_identity(&canonical),
+        exists: true,
+        canonical_path: canonical.clone(),
+        git: GitDetection::Detected {
+            common_dir: canon("/repo/.git"),
+            toplevel: Some(canonical),
+            kind: GitWorktreeKind::Main,
+            worktrees: vec![canon("/repo")],
+            remotes: vec![
+                (
+                    "upstream".to_string(),
+                    "https://example.com/up/repo.git".to_string(),
+                ),
+                (
+                    "origin".to_string(),
+                    "https://example.com/me/repo.git".to_string(),
+                ),
+            ],
+        },
+    };
+    let path = ensure_workspace_path(&db, &observation, &UnrestrictedWorkspace).expect("ensure");
+    let project = db.get_project(&path.project_id).unwrap().expect("project");
+
+    let detail = project_detail(&db, &project.id).unwrap().expect("detail");
+    assert_eq!(
+        detail.remote_url.as_deref(),
+        Some("https://example.com/me/repo.git"),
+        "origin wins over the other remotes"
+    );
+
+    // A refresh where origin disappears: the fallback takes over, wholesale.
+    let git = match &observation.git {
+        GitDetection::Detected {
+            common_dir,
+            toplevel,
+            kind,
+            worktrees,
+            ..
+        } => GitDetection::Detected {
+            common_dir: common_dir.clone(),
+            toplevel: toplevel.clone(),
+            kind: kind.clone(),
+            worktrees: worktrees.clone(),
+            remotes: vec![(
+                "upstream".to_string(),
+                "https://example.com/up/repo.git".to_string(),
+            )],
+        },
+        other => panic!("{other:?}"),
+    };
+    let moved = WorkspaceObservation { git, ..observation };
+    ensure_workspace_path(&db, &moved, &UnrestrictedWorkspace).expect("re-ensure");
+    let detail = project_detail(&db, &project.id).unwrap().expect("detail");
+    assert_eq!(
+        detail.remote_url.as_deref(),
+        Some("https://example.com/up/repo.git"),
+        "a removed origin falls back to the first remaining remote"
     );
 }

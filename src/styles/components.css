@@ -29,18 +29,19 @@
 }
 .ws-card {
   border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--bg-app);
   padding: 16px 18px;
   cursor: pointer;
-  transition: background .12s, border-color .12s;
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .ws-card:hover {
-  background: var(--bg-panel);
+  background: var(--bg-app);
   border-color: var(--border-default);
+  box-shadow: var(--shadow-md);
 }
 .ws-card.compact { padding: 15px 18px; }
 .ws-card.full { min-height: 168px; }
@@ -106,7 +107,11 @@
 .ws-control select { width: auto; padding: 4px 8px; font-size: 12.5px; }
 
 /* ---------- Recent sessions (Home) ---------- */
-.recent-sessions .list-row { padding: 10px 4px; }
+.recent-sessions .list-row {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  transition: background 0.12s ease;
+}
 
 /* ---------- Workstream Detail: Context 段落 ---------- */
 /* Context 已并入主栏，单列堆叠：当前事实在上，冲突 / 变更在下。段间距由这里给，
@@ -346,16 +351,6 @@
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .event .when { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
-/* 消息级模型标签：低干扰，只有来源证实的 Assistant
-   消息才有；与 .when 同级弱化显示，不占独立行。 */
-  color: var(--text-muted);
-  font-size: 11px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0 5px;
-  line-height: 16px;
-  white-space: nowrap;
-}
 .event .body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 气泡只占 82%，对侧留白——一眼能看出「这句是谁说的」。标题行跟着气泡走，
    而不是横铺整列，否则右对齐的气泡下面挂着一行左起的名字，读起来是断裂的。 */
@@ -566,12 +561,27 @@
 
 /* ---------- Chat (Assistant) ---------- */
 .chat-log { display: flex; flex-direction: column; gap: 16px; margin: 14px 0; }
-.chat-msg { max-width: min(76%, 860px); }
+.chat-msg { max-width: min(78%, 860px); }
 .chat-msg .who { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
-.chat-msg .bubble { border-radius: 12px; padding: 10px 14px; white-space: pre-wrap; }
+.chat-msg .bubble {
+  border-radius: 14px;
+  padding: 12px 16px;
+  white-space: pre-wrap;
+  line-height: 1.55;
+  font-size: 13.5px;
+}
 .chat-msg.user { align-self: flex-end; }
-.chat-msg.user .bubble { background: var(--text-primary); color: var(--bg-app); border-bottom-right-radius: 4px; }
-.chat-msg.assistant .bubble { background: var(--bg-panel); border-bottom-left-radius: 4px; }
+.chat-msg.user .bubble {
+  background: var(--text-primary);
+  color: var(--bg-app);
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+.chat-msg.assistant .bubble {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-bottom-left-radius: 4px;
+}
 .chat-msg.assistant { align-self: flex-start; }
 
 .assistant-empty { text-align: center; padding: 48px 0 20px; }
@@ -589,11 +599,32 @@
   text-align: left;
   padding: 9px 14px;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 .suggest-chip:hover { background: var(--bg-panel); border-color: var(--border-default); color: var(--text-primary); }
 
-.scope-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.scope-row select { width: auto; padding: 4px 10px; font-size: 12.5px; }
+.scope-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  background: var(--bg-panel);
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  width: fit-content;
+}
+.scope-row select {
+  width: auto;
+  padding: 4px 10px;
+  font-size: 12.5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  cursor: pointer;
+  outline: none;
+}
 
 /* 输入行：`input` 全局是 width:100%，在 flex 行里会把整行算成自己的基准宽度，
    于是「发送」被反向压缩到内容宽度以下、两个字换行、按钮比输入框还高。
@@ -676,15 +707,38 @@
 }
 .settings-nav { display: flex; flex-direction: column; gap: 2px; }
 .settings-nav .nav-item { padding: 6px 10px; }
-.settings-page { max-width: 1120px; }
-.settings-pane { max-width: 760px; }
-.settings-pane section { margin-bottom: 16px; padding: 20px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
+.settings-page { max-width: none; }
+.settings-pane section {
+  margin-bottom: 20px;
+  padding: 22px 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  background: var(--bg-app);
+}
 .settings-pane section > h3:first-child { margin-top: 0; }
 .settings-pane .settings-row-hint { overflow-wrap: anywhere; }
 .settings-pane .settings-agent-runtime { padding: 16px 0; }
 .theme-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.theme-options > button { padding: 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-app); color: var(--text-secondary); font: inherit; cursor: pointer; }
-.theme-options > button.on { border-color: var(--text-primary); color: var(--text-primary); }
+.theme-options > button {
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.theme-options > button:hover {
+  border-color: var(--border-default);
+  background: var(--bg-panel);
+}
+.theme-options > button.on {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--accent-wash);
+}
 .theme-preview { display: flex; height: 66px; gap: 8px; padding: 10px; margin-bottom: 8px; border-radius: 5px; background: #f5f5f3; border: 1px solid #ccc; }
 .theme-preview > span:first-child { width: 25%; background: #d8d8d5; border-radius: 3px; }
 .theme-preview > span:last-child { flex: 1; border-top: 6px solid #a4a4a0; margin-top: 5px; }
@@ -744,9 +798,10 @@
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 8px;
   z-index: 1000;
-  animation: toast-in 160ms ease-out;
+  pointer-events: none;
 }
 .toast {
   display: flex;
@@ -758,6 +813,8 @@
   padding: 10px 16px;
   font-size: 13px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  pointer-events: auto;
+  animation: toast-in 160ms ease-out;
 }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
@@ -928,15 +985,67 @@
 }
 
 .session-list { border-top: 1px solid var(--border-subtle); }
-.session-list-row { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--border-subtle); }
+.session-list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  transition: background 0.12s ease;
+}
 .session-list-row:hover, .session-list-row:focus-within { background: var(--bg-panel); }
-.session-open { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; border: 0; padding: 0; background: transparent; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
-.session-list-title { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.session-open { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; border: 0; padding: 0; background: transparent; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+.session-list-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  font-weight: 600;
+}
+.session-list-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .session-list-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-secondary); font-size: 12px; }
-.session-list-meta > span { display: inline-flex; align-items: center; gap: 5px; }
 .session-list-path { color: var(--text-muted); font-size: 11px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-list-actions { display: flex; gap: 4px; flex: none; }
-button.icon-button { width: 28px; padding: 0; }
+.session-title-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.session-title-with-icon .session-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+button.icon-button {
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+button.icon-button.small {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+}
+button.icon-button.small .ui-icon {
+  width: 14px;
+  height: 14px;
+}
 .filter-panel { margin-bottom: 16px; }
 .filter-panel > summary { cursor: pointer; color: var(--text-secondary); width: fit-content; margin-bottom: 10px; }
 .filter-panel .toolbar { margin-bottom: 0; }
@@ -944,13 +1053,49 @@ button.icon-button { width: 28px; padding: 0; }
 .settings-nav { align-self: start; position: sticky; top: 0; }
 .settings-pane { min-width: 0; }
 .settings-pane .row-line { flex-wrap: wrap; }
-.settings-pane .settings-row-hint { max-width: 52ch; }
 /* 会话信息字段（只在 Session 详情页右栏，宽度 240–300px）：标签在上、值在下。
    两列的话值只剩一百来像素，路径与 Agent ID 会被拆成五六行，比多占几行更难读。
    Field 渲染的是「标签 div + 值 div」两个兄弟节点，所以 :nth-child(odd) 就是标签。 */
 .session-info-fields { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 12px; }
 .session-info-fields > *:nth-child(odd) { margin-top: 12px; }
 .session-info-fields > *:nth-child(odd):first-child { margin-top: 0; }
+.session-field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.session-field-copy-btn {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.session-field-copy-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.session-field-copy-btn.copied {
+  color: var(--text-accent);
+}
+.session-field-copy-btn .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+.path-link {
+  cursor: pointer;
+  transition: color var(--transition-fast), text-decoration-color var(--transition-fast);
+}
+.path-link:hover {
+  color: var(--accent) !important;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .search-result { display: block; width: 100%; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
 .search-result:hover { background: var(--bg-panel); }
 .project-detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 32px; }
@@ -966,7 +1111,7 @@ button.icon-button { width: 28px; padding: 0; }
   .project-detail-layout aside { border-left: 0; border-top: 1px solid var(--border-subtle); padding-left: 0; }
 }
 
-.board-page { max-width: none; }
+.board-page, .agents-page, .settings-page, .session-detail, .task-detail, .project-detail { max-width: none; }
 .path-draft-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; margin-bottom: 10px; }
 .path-draft-list > .list-row { gap: 10px; flex-wrap: wrap; }
 .path-draft-name { min-width: 0; flex: 1; }
@@ -981,10 +1126,12 @@ button.icon-button { width: 28px; padding: 0; }
   position: sticky;
   top: calc(var(--titlebar-height) + var(--head-gap));
   z-index: 5;
-  padding: 14px 16px;
+  padding: 16px 18px;
   margin-bottom: 20px;
-  background: var(--bg-panel);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
 }
 .board-toolbar::before {
   content: "";
@@ -993,9 +1140,50 @@ button.icon-button { width: 28px; padding: 0; }
   z-index: -1;
   background: var(--bg-app);
 }
-.board-toolbar .ws-search { margin: 0 0 12px; max-width: 100%; }
-.board-toolbar .ws-controls { margin: 0; gap: 10px 16px; align-items: center; }
-.board-toolbar .ws-control { gap: 6px; }
+.board-toolbar .ws-search {
+  margin: 0 0 12px;
+  max-width: 100%;
+}
+.board-toolbar .ws-controls {
+  margin: 0;
+  gap: 8px 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: 28px;
+}
+.board-toolbar .ws-control {
+  gap: 6px;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+}
+.board-toolbar .ws-control select {
+  width: auto;
+  height: 28px;
+  padding: 0 8px;
+  max-width: 170px;
+  text-overflow: ellipsis;
+  font-size: 12.5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.board-toolbar .ws-control select:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-default);
+}
+.board-toolbar .ws-controls > span {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+}
+.board-toolbar .ws-controls .btn.small {
+  height: 28px;
+  white-space: nowrap;
+}
 .board-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); align-items: stretch; gap: 16px; }
 button.project-card { font: inherit; text-align: left; color: var(--text-primary); }
 .project-card .ws-card-head { flex-wrap: wrap; gap: 8px; }
@@ -1020,3 +1208,219 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 
 /* 图标按钮的激活态：中间回复隐藏开关等 toggle 用。 */
 .btn.ghost.icon-button.on { color: var(--text-primary); background: var(--bg-active); }
+
+/* ---------- Agents Page (代理面板优化) ---------- */
+.agents-page {
+  width: 100%;
+}
+
+.agents-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.agents-overview-card {
+  padding: 16px 20px;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agents-overview-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.agents-stat-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agents-stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+}
+
+.agents-stat-pill.active {
+  background: var(--accent-wash);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+.agents-stat-pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.agents-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.agents-filter-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.agents-filter-pill {
+  padding: 4px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.agents-filter-pill:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.agents-filter-pill.active {
+  background: var(--text-primary);
+  color: var(--bg-app);
+  border-color: var(--text-primary);
+  font-weight: 500;
+}
+
+.agents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 980px) {
+  .agents-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.agent-card {
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.agent-card:hover {
+  border-color: var(--border-default);
+}
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.agent-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.agent-source-row {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-source-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.agent-source-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.agent-source-path {
+  min-width: 0;
+  max-width: fit-content;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-source-main button.icon-button {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.agent-source-main button.icon-button:hover {
+  color: var(--text-primary);
+}
+
+.agent-source-main button.icon-button .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.agent-source-row .agent-reingest-btn {
+  height: 24px;
+  min-height: 24px;
+  font-size: 11.5px;
+  padding: 0 8px;
+  line-height: 22px;
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+.agent-source-row .agent-reingest-btn:hover {
+  color: var(--text-primary);
+}

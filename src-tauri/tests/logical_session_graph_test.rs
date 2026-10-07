@@ -116,6 +116,7 @@ fn logical_session_creation_rolls_back_if_the_row_cannot_be_written() {
             None,
             None,
             None,
+            None,
             "test",
             "/tmp/root",
             &serde_json::json!({}),
@@ -722,10 +723,6 @@ fn unchanged_root_retries_a_pending_launch_intent() {
 
 // ingestion atomicity
 
-/// The turn-final flag: an assistant message is its turn's FINAL reply when
-/// the next projected message is not another assistant message. An append
-/// that continues the same turn demotes the formerly-final reply.
-#[test]
 /// The detail-page preview query: user turns and each turn's FINAL reply
 /// only, newest first capped to the limit, oldest-first output.
 #[test]
@@ -766,6 +763,8 @@ fn recent_turn_messages_keep_the_conversation_skeleton() {
     assert_eq!(one[0].content, "第三轮回答");
 }
 
+/// An append that continues the same turn demotes the formerly-final reply.
+#[test]
 fn turn_final_flags_track_the_projection() {
     let db = open_db("turn-final");
     let (session, _) = seed_root(&db);
@@ -1024,6 +1023,7 @@ fn seed_root(
             None,
             None,
             None,
+            None,
             "codex_rollout",
             "/repo-a/rollout.jsonl",
             &serde_json::json!({}),
@@ -1113,4 +1113,61 @@ fn a_stored_root_is_never_re_homed_as_a_child() {
         .find_session_by_root_agent_id(Agent::Codex, OTHER_ROOT_ID)
         .unwrap()
         .is_some());
+}
+
+/// Title policy across repeated ingests: the app's native title writes
+/// through (a rename follows), the text-derived fallback only fills an
+/// EMPTY slot — it never overwrites, and a later ingest without a native
+/// title never downgrades the stored one back to the fallback.
+#[test]
+fn a_native_title_renames_and_a_fallback_title_only_fills() {
+    let db = open_db("title-policy");
+    let refresh = |db: &Db, native: Option<&str>, fallback: Option<&str>| {
+        db.upsert_logical_session(
+            Agent::Codex,
+            "title-policy-root",
+            native,
+            fallback,
+            Some("/repo-a"),
+            None,
+            None,
+            None,
+            None,
+            "codex_rollout",
+            "/repo-a/rollout.jsonl",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        db.find_session_by_root_agent_id(Agent::Codex, "title-policy-root")
+            .unwrap()
+            .unwrap()
+            .title
+    };
+
+    // No native yet: the fallback fills the empty slot.
+    assert_eq!(
+        refresh(&db, None, Some("首条用户文本")).as_deref(),
+        Some("首条用户文本")
+    );
+    // A new fallback never overwrites — not even its own kind.
+    assert_eq!(
+        refresh(&db, None, Some("另一条兜底")).as_deref(),
+        Some("首条用户文本")
+    );
+    // The app names the thread: native replaces the fallback.
+    assert_eq!(
+        refresh(&db, Some("模型起的名字"), Some("首条用户文本")).as_deref(),
+        Some("模型起的名字")
+    );
+    // The app renames: the rename follows.
+    assert_eq!(
+        refresh(&db, Some("改名之后"), None).as_deref(),
+        Some("改名之后")
+    );
+    // An ingest without a native title keeps the stored one — no downgrade
+    // back to the fallback.
+    assert_eq!(
+        refresh(&db, None, Some("首条用户文本")).as_deref(),
+        Some("改名之后")
+    );
 }

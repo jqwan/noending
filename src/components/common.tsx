@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import Icon from "./Icon";
+import { api } from "../api";
+import { showToast } from "./Toast";
 
 /**
  * Enter 是否该被当成提交。中日文输入法用 Enter 确认候选词，那一下不是提交；
@@ -159,6 +161,34 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     return ok;
   } catch (e) {
     console.error(e);
+    return false;
+  }
+}
+
+/** 打开系统文件管理器：若是目录则打开目录，若是文件则定位选中该文件。 */
+export async function openPath(path: string): Promise<boolean> {
+  const trimmed = path.trim();
+  if (!trimmed) return false;
+  try {
+    await api.openPath(trimmed);
+    return true;
+  } catch (e) {
+    console.error("无法打开路径:", trimmed, e);
+    showToast(`无法打开路径：${String(e)}`);
+    return false;
+  }
+}
+
+/** 在系统默认浏览器打开 http(s) 链接（后端只放行 http/https）。 */
+export async function openRemoteUrl(url: string): Promise<boolean> {
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  try {
+    await api.openRemoteUrl(trimmed);
+    return true;
+  } catch (e) {
+    console.error("无法打开链接:", trimmed, e);
+    showToast(`无法打开链接：${String(e)}`);
     return false;
   }
 }

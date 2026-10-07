@@ -120,11 +120,16 @@ pub fn message_identity_hash(
     out
 }
 
+/// Title update policy, applied in the conflict branch below: the Agent app's
+/// own (native) title may keep renaming the session, so it writes through;
+/// the text-derived fallback is fixed at the conversation's beginning, so it
+/// only ever fills an EMPTY slot — it never overwrites anything.
 #[allow(clippy::too_many_arguments)]
 fn upsert_logical_session_conn(
     conn: &Connection,
     agent: Agent,
     root_agent_session_id: &str,
+    native_title: Option<&str>,
     title: Option<&str>,
     cwd: Option<&str>,
     workspace_path_id: Option<&str>,
@@ -147,21 +152,22 @@ fn upsert_logical_session_conn(
         let activity = later_timestamp(previous_activity.as_deref(), last_activity_at);
         conn.execute(
             "UPDATE sessions SET
-               title = COALESCE(title, ?2),
-               cwd = COALESCE(?3, cwd),
-               workspace_path_id = COALESCE(?4, workspace_path_id),
+               title = COALESCE(?2, title, ?3),
+               cwd = COALESCE(?4, cwd),
+               workspace_path_id = COALESCE(?5, workspace_path_id),
                project_id = COALESCE(
                  (SELECT wp.project_id FROM workspace_paths wp
-                   WHERE wp.id = COALESCE(?4, workspace_path_id)),
+                   WHERE wp.id = COALESCE(?5, workspace_path_id)),
                  (SELECT wp.project_id FROM workspace_paths wp
                    WHERE wp.id = workspace_path_id)),
-               forked_from_session_id = COALESCE(forked_from_session_id, ?5),
-               started_at = COALESCE(started_at, ?6),
-               last_activity_at = ?7,
-               source_kind = ?8, source_path = ?9, metadata = ?10
+               forked_from_session_id = COALESCE(forked_from_session_id, ?6),
+               started_at = COALESCE(started_at, ?7),
+               last_activity_at = ?8,
+               source_kind = ?9, source_path = ?10, metadata = ?11
              WHERE id = ?1",
             params![
                 id,
+                native_title,
                 title,
                 cwd,
                 workspace_path_id,
@@ -189,7 +195,7 @@ fn upsert_logical_session_conn(
             id,
             agent.as_str(),
             root_agent_session_id,
-            title,
+            native_title.or(title),
             cwd,
             workspace_path_id,
             forked_from_session_id,
@@ -482,6 +488,7 @@ impl Db {
             &conn,
             agent,
             root_agent_session_id,
+            None,
             title,
             cwd,
             workspace_path_id,
@@ -497,11 +504,17 @@ impl Db {
     /// Atomically create or refresh a Logical Session — the session row now
     /// carries its root source (`source_kind` / `source_path` / `metadata`)
     /// directly; discovery is the authority and replaces them wholesale.
+    ///
+    /// `native_title` is the Agent app's own name for the conversation and
+    /// writes through on every ingest; `title` is the text-derived fallback
+    /// and only fills an empty slot (see the policy on
+    /// [`upsert_logical_session_conn`]).
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_logical_session(
         &self,
         agent: Agent,
         root_agent_session_id: &str,
+        native_title: Option<&str>,
         title: Option<&str>,
         cwd: Option<&str>,
         workspace_path_id: Option<&str>,
@@ -517,6 +530,7 @@ impl Db {
             &conn,
             agent,
             root_agent_session_id,
+            native_title,
             title,
             cwd,
             workspace_path_id,

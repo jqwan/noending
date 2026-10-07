@@ -582,6 +582,43 @@ it("reports a failed read instead of showing an empty conversation", async () =>
   await renderConversation();
 
   await screen.findByText(/读不到这个会话的消息/);
-  expect(screen.queryByText(/还没有摄入消息/)).toBeNull();
+  expect(screen.queryByText(/还没有同步消息/)).toBeNull();
   await waitFor(() => expect(api.getSessionMessages).toHaveBeenCalledTimes(1));
+});
+
+it("renders initial title and agent icon immediately without showing fallback placeholder", async () => {
+  let resolveDetail: (val: any) => void;
+  const detailPromise = new Promise((resolve) => {
+    resolveDetail = resolve;
+  });
+  vi.mocked(api.getSessionDetail).mockReturnValue(detailPromise as any);
+  vi.mocked(api.getSessionMessages).mockResolvedValue({
+    messages: [message(1, "user", "你好")],
+    generation: 1,
+    next_before_ordinal: null,
+    total: 10,
+    remaining: 0,
+    tail_ordinal: 1,
+  });
+  vi.mocked(api.getSessionUserMessageMarks).mockResolvedValue([]);
+
+  render(
+    <SessionConversationView
+      sessionId="me"
+      initialTitle="正在进行的任务"
+      initialAgent="codex"
+      initialTotal={10}
+      goBack={vi.fn()}
+    />
+  );
+
+  // Before getSessionDetail resolves: title and agent icon are already present
+  expect(screen.queryByText("会话消息")).toBeNull();
+  expect(screen.getByText("正在进行的任务")).toBeDefined();
+  expect(document.querySelector(".session-title-with-icon .agent-icon")).not.toBeNull();
+  expect(screen.getByText(/Codex · 共 10 条消息/)).toBeDefined();
+
+  // Now resolve
+  resolveDetail!(detail(session("me")));
+  await screen.findByText("你好");
 });

@@ -1,4 +1,5 @@
 import { ellipsisPathMiddle } from "../sessions/SessionTable";
+import { openPath } from "../../components/common";
 import type {
   WorkspaceGitState,
   WorkstreamPathRow,
@@ -53,11 +54,44 @@ export function MissingBadge() {
   );
 }
 
-/** 完整路径：中段省略（末段才是识别信息），全串留在 title 上。 */
-export function PathText({ path, max = 46 }: { path: string; max?: number }) {
+/** 完整路径：中段省略（末段才是识别信息），全串留在 title 上。点击在文件管理器中打开对应目录或定位文件。 */
+export function PathText({
+  path,
+  max = 46,
+  interactive = true,
+}: {
+  path: string;
+  max?: number;
+  interactive?: boolean;
+}) {
+  const text = ellipsisPathMiddle(path, max);
+  if (!interactive) {
+    return (
+      <span className="mono" title={path} style={{ overflowWrap: "anywhere" }}>
+        {text}
+      </span>
+    );
+  }
   return (
-    <span className="mono" title={path} style={{ overflowWrap: "anywhere" }}>
-      {ellipsisPathMiddle(path, max)}
+    <span
+      role="button"
+      tabIndex={0}
+      className="mono path-link"
+      title={`${path} · 点击在文件管理器中打开`}
+      style={{ overflowWrap: "anywhere" }}
+      onClick={(e) => {
+        e.stopPropagation();
+        void openPath(path);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.stopPropagation();
+          e.preventDefault();
+          void openPath(path);
+        }
+      }}
+    >
+      {text}
     </span>
   );
 }

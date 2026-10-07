@@ -80,7 +80,7 @@ export function projectCellFor(
     }
     : {
       text: PROJECT_PENDING,
-      hint: "工作目录还没有被登记成工作路径，NoEnding 会在下次目录扫描后自动补上。",
+      hint: "工作目录还没有被登记成工作路径，NoEnding 会在下次目录同步后自动补上。",
       dim: true,
     };
 }
@@ -252,14 +252,21 @@ export default function SessionCards({ sessions, workstreamTitleById, projectNam
       {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
         <article className="session-list-row" key={s.id}>
           <button className="session-open" onClick={() => onOpen(s.id)}>
-            <span className="session-list-title" title={sessionDisplayTitle(s.title)}>{sessionDisplayTitle(s.title)}</span>
+            <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
+              <AgentIcon agent={s.agent} size={15} />
+              <span>{sessionDisplayTitle(s.title)}</span>
+            </span>
             <span className="session-list-meta">
-              <span><AgentIcon agent={s.agent} />{agentDisplayLabel(s.agent)}</span>
+              <span>{agentDisplayLabel(s.agent)}</span>
               <span title={workstreamFull ?? undefined}>所属任务: {workstream ?? "未归属任务"}</span>
               {!project.dim && <span title={project.hint}>{project.text}</span>}
               <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
             </span>
-            {s.cwd && <span className="session-list-path" title={s.cwd}>{cwdDisplayLabel(s.cwd, 90)}</span>}
+            {s.cwd && (
+              <span className="session-list-path" title={s.cwd}>
+                {cwdDisplayLabel(s.cwd, 90)}
+              </span>
+            )}
           </button>
           <div className="session-list-actions">
             <button className="btn small" onClick={() => onResume(s.id)}>继续</button>

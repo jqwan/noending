@@ -38,3 +38,26 @@ it("shows the single owner workstream and marks the unowned case", () => {
   screen.getByText("所属任务: 未归属任务");
   expect(screen.queryByText(/\+\d/)).toBeNull();
 });
+
+it("renders agent icon before session title and plain agent label in meta", () => {
+  render(
+    <SessionCards
+      sessions={[session]}
+      workstreamTitleById={new Map()}
+      projectNameById={new Map()}
+      onOpen={() => {}}
+      onResume={() => {}}
+      onTrash={() => {}}
+    />
+  );
+
+  const titleRow = document.querySelector(".session-list-title");
+  expect(titleRow).toBeTruthy();
+  expect(titleRow?.querySelector(".agent-icon")).toBeTruthy();
+  expect(titleRow?.textContent).toContain("修复布局");
+
+  const metaRow = document.querySelector(".session-list-meta");
+  expect(metaRow).toBeTruthy();
+  expect(metaRow?.textContent).toContain("Codex");
+  expect(metaRow?.querySelector(".agent-icon")).toBeNull();
+});

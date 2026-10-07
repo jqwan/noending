@@ -27,6 +27,20 @@ type AssignedFilter = "all" | "assigned" | "unassigned";
  * Workstream 浏览。搜索与筛选在前端做，规模大了再转后端。
  * 回收站不是第三种筛选，而是换一个数据面（scope=trash），行渲染与动作都专属。
  */
+let cachedNormalSessions: Session[] | null = null;
+let cachedTrashSessions: Session[] | null = null;
+let cachedProjects: Project[] = [];
+let cachedSources: IngestSource[] | null = null;
+let cachedWorkstreamTitleById = new Map<string, string>();
+
+export function clearSessionsCache() {
+  cachedNormalSessions = null;
+  cachedTrashSessions = null;
+  cachedProjects = [];
+  cachedSources = null;
+  cachedWorkstreamTitleById = new Map();
+}
+
 export default function SessionsView({ navigate, scope, action, actionSeq }: {
   navigate: (r: Route) => void;
   scope?: SessionScope;
@@ -34,13 +48,13 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   actionSeq: number;
 }) {
   const [trashMode, setTrashMode] = useState(scope === "trash");
-  const [sessions, setSessions] = useState<Session[] | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [sessions, setSessions] = useState<Session[] | null>(() => trashMode ? cachedTrashSessions : cachedNormalSessions);
+  const [projects, setProjects] = useState<Project[]>(cachedProjects);
   /** Workstream id → 标题：`session.owner_workstream_id` 只有一个 id，名字在这里解析。 */
-  const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(new Map());
+  const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(cachedWorkstreamTitleById);
   /** Session 来源只用来把"空"拆成两种真实情况：没启用来源 vs 启用了但还没发现。
    *  读失败时保持 null，文案退回中性说法，不把"读不到"说成"没启用"。 */
-  const [sources, setSources] = useState<IngestSource[] | null>(null);
+  const [sources, setSources] = useState<IngestSource[] | null>(cachedSources);
   const [loadFailed, setLoadFailed] = useState(false);
   const [query, setQuery] = useViewState("sessions.query", "");
   const [agent, setAgent] = useViewState<"all" | Agent>("sessions.agent", "all");
@@ -63,8 +77,19 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     // 变成"读取失败"；回收站模式压根用不到它，不发请求。
     if (!trashMode) {
       api.listIngestSources()
-        .then((ss) => { if (!cancelled) setSources(ss); })
-        .catch((e) => { console.error(e); if (!cancelled) setSources(null); });
+        .then((ss) => {
+          if (!cancelled) {
+            setSources(ss);
+            cachedSources = ss;
+          }
+        })
+        .catch((e) => {
+          console.error(e);
+          if (!cancelled) {
+            setSources(null);
+            cachedSources = null;
+          }
+        });
     }
     // 两个数据面各自的后端 scope：普通 = active，
     // 回收站 = trash。projects / workstreams 只服务普通模式的筛选列，回收站行不显示它们。
@@ -77,8 +102,14 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       .then(([ss, ps, ws]) => {
         if (cancelled) return;
         if (!trashMode) {
-          setWorkstreamTitleById(new Map((ws ?? []).map((w) => [w.id, w.title])));
+          const wsMap = new Map((ws ?? []).map((w) => [w.id, w.title]));
+          setWorkstreamTitleById(wsMap);
+          cachedWorkstreamTitleById = wsMap;
           setProjects(ps ?? []);
+          cachedProjects = ps ?? [];
+          cachedNormalSessions = ss;
+        } else {
+          cachedTrashSessions = ss;
         }
         setSessions(ss);
         setLoadFailed(false);
@@ -92,7 +123,11 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   }, [trashMode]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
-  useEffect(() => setTrashMode(scope === "trash"), [scope]);
+  useEffect(() => {
+    const isTrash = scope === "trash";
+    setTrashMode(isTrash);
+    setSessions(isTrash ? cachedTrashSessions : cachedNormalSessions);
+  }, [scope]);
   // 页面动作随 Route 到达（palette → New Session）：actionSeq 让「已在 Sessions 页」
   // 的重复命令同样触发。
   useEffect(() => {
@@ -180,6 +215,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
       await api.trashSession(trashTarget.id);
       showToast("已移入回收站");
       setTrashSessionId(null);
+      cachedTrashSessions = null;
       refresh();
     } catch (e) {
       console.error(e);
@@ -207,6 +243,8 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     }
     setBulkPurgeBusy(false);
     setBulkPurgeOpen(false);
+    cachedNormalSessions = null;
+    cachedTrashSessions = null;
     refresh();
     showToast(
       failed === 0
@@ -220,6 +258,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     try {
       await api.restoreSession(s.id);
       showToast(`已恢复「${sessionDisplayTitle(s.title)}」`);
+      cachedNormalSessions = null;
       refresh();
     } catch (e) {
       console.error(e);
@@ -347,7 +386,17 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
 
           </div>
 
-          {shown === null && !loadFailed && <div className="muted">加载中…</div>}
+          {shown === null && !loadFailed && (
+            <div className="session-list" aria-busy="true">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="skeleton"
+                  style={{ height: 68, borderRadius: "var(--radius-md)", marginBottom: 8 }}
+                />
+              ))}
+            </div>
+          )}
           {loadFailed && loadFailedState}
           {shown !== null && shown.length === 0 && (sessions?.length ?? 0) === 0 && !loadFailed && (
             <EmptyState
@@ -355,7 +404,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
               hint={emptyHint}
               actions={
                 <>
-                  <button className="btn small" onClick={() => navigate({ view: "settings", section: "sources" })}>
+                  <button className="btn small" onClick={() => navigate({ view: "agents" })}>
                     配置会话来源
                   </button>
                   <button className="btn small" onClick={() => setCreating(true)}>新建会话</button>
@@ -393,7 +442,17 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
             会在后续同步中作为新会话重新入库。
           </div>
 
-          {sessions === null && !loadFailed && <div className="muted">加载中…</div>}
+          {sessions === null && !loadFailed && (
+            <div className="session-list" aria-busy="true">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="skeleton"
+                  style={{ height: 68, borderRadius: "var(--radius-md)", marginBottom: 8 }}
+                />
+              ))}
+            </div>
+          )}
           {loadFailed && loadFailedState}
           {sessions !== null && sessions.length === 0 && !loadFailed && (
             <EmptyState
@@ -515,14 +574,22 @@ function TrashSessionTable({ sessions, onOpen, onRestore, onPurge }: {
             >
               <td className="cell-agent">
                 <span className="cell-agent-content">
-                  <AgentIcon agent={s.agent} />
                   {agentDisplayLabel(s.agent)}
                 </span>
               </td>
               <td className="cell-title" title={title}>
                 <div style={{ whiteSpace: "normal" }}>
-                  <div>{ellipsisTail(title, 40)}</div>
-                  <div className="muted small mono">{cwdDisplayLabel(cwd, 30)}</div>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <AgentIcon agent={s.agent} size={15} />
+                    <span>{ellipsisTail(title, 40)}</span>
+                  </div>
+                  {cwd ? (
+                    <div>
+                      <span className="muted small mono" title={cwd}>
+                        {cwdDisplayLabel(cwd, 30)}
+                      </span>
+                    </div>
+                  ) : null}
                 </div>
               </td>
               <td title={s.trashed_at ?? undefined}>

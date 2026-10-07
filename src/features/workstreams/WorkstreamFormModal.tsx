@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { api } from "../../api";
-import { Modal, submitsOnEnter } from "../../components/common";
+import { Modal, openPath, submitsOnEnter } from "../../components/common";
 import PathListEditor, { type PathEntryDraft } from "./PathListEditor";
 import type { CreateWorkstreamReport, Workstream, WorkstreamPathRow } from "../../types";
 
@@ -207,7 +207,20 @@ export default function WorkstreamFormModal({
           {report.paths.map((p, i) => (
             <div key={`${p.raw}-${i}`} className="list-row" style={{ cursor: "default" }}>
               <div className="grow" style={{ minWidth: 0 }}>
-                <span className="mono" style={{ overflowWrap: "anywhere" }} title={p.raw}>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="mono path-link"
+                  style={{ overflowWrap: "anywhere" }}
+                  title={`${p.raw} · 点击在文件管理器中打开`}
+                  onClick={() => void openPath(p.raw)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      void openPath(p.raw);
+                    }
+                  }}
+                >
                   {p.raw}
                 </span>
               </div>

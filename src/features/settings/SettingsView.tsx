@@ -1,237 +1,29 @@
-import Icon from "../../components/Icon";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
-import AgentIcon from "../../components/AgentIcon";
-import { Modal, submitsOnEnter } from "../../components/common";
+import { Modal, openPath, submitsOnEnter } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import SourcesSettings from "./SourcesSettings";
-import AgentRuntimeRow from "./AgentRuntimeSettings";
-import { AGENT_LABELS, type Agent, type AgentStatusEntry, type WorkspaceSettings } from "../../types";
-import type { Route, SettingsSection } from "../../app/routes";
+import type { WorkspaceSettings } from "../../types";
+import type { Route, SettingsSection, LegacySettingsSection } from "../../app/routes";
 
-const SECTIONS: { key: SettingsSection; label: string; icon: "settings" | "spark" | "folder" | "palette" | "database" }[] = [
-  { key: "general", icon: "settings", label: "通用" },
-  { key: "agents", icon: "spark", label: "Agent" },
-  { key: "sources", icon: "folder", label: "会话来源" },
-  { key: "appearance", icon: "palette", label: "外观" },
-  { key: "advanced", icon: "database", label: "数据与高级" },
-];
-
-/** Settings：Main 内部二级导航 + 内容区。只暴露有用户价值的设置。
- *  实现细节（threshold/authority/cursor）不进 UI。 */
-export default function SettingsView({ section, navigate }: {
-  section: SettingsSection;
-  navigate: (r: Route) => void;
+/** Settings：设置页合并为统一平铺视图，聚焦于全局系统设置。 */
+/** Settings：设置页合并为统一平铺视图，聚焦于主题外观与本地存储数据。 */
+export default function SettingsView({ section: _section, navigate: _navigate }: {
+  section?: SettingsSection | LegacySettingsSection;
+  navigate?: (r: Route) => void;
 }) {
-  const current = SECTIONS.some((s) => s.key === section) ? section : "general";
-
   return (
     <div className="main settings-page">
-      <PageHeader title="设置" />
-      <div className="settings-layout">
-        <nav className="settings-nav" aria-label="设置分类">
-          {SECTIONS.map((s) => (
-            <button key={s.key}
-              aria-current={current === s.key ? "page" : undefined}
-              className={`nav-item ${current === s.key ? "active" : ""}`}
-              onClick={() => navigate({ view: "settings", section: s.key })}>
-              <Icon name={s.icon} />{s.label}
-            </button>
-          ))}
-        </nav>
-        <div className="settings-pane">
-          {current === "general" && <GeneralSettings />}
-          {current === "agents" && <AgentsSettings />}
-          {current === "sources" && <SourcesSettings />}
-          {current === "appearance" && <AppearanceSettings />}
-          {current === "advanced" && <AdvancedSettings />}
-        </div>
+      <PageHeader
+        title="设置"
+        sub="配置主题外观、Context 诊断与本地存储数据。"
+      />
+      <div className="settings-pane" style={{ marginTop: 18 }}>
+        <AppearanceSettings />
+        <ContextDiagnosticsSettings />
+        <WorkspaceStorageSettings />
       </div>
     </div>
-  );
-}
-
-/** General：Default Agent 是最重要设置；Startup Page 第一版固定 Home。 */
-function GeneralSettings() {
-  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
-  const [agents, setAgents] = useState<Record<string, AgentStatusEntry>>({});
-
-  useEffect(() => {
-    api.getDefaultAgent().then(setDefaultAgent).catch(console.error);
-    api.getAgentStatus().then(setAgents).catch(console.error);
-  }, []);
-
-  const choose = async (agent: Agent) => {
-    await api.setDefaultAgent(agent).catch(console.error);
-    setDefaultAgent(agent);
-  };
-
-  const selectedUndetected =
-    defaultAgent !== null && agents[defaultAgent]?.detected === false;
-  // 新建会话由终端 CLI 承载：只有 TUI/CLI Agent 可以当默认。桌面端 Agent
-  // 没有可启动的命令行，不在选择之列。
-  const tuiAgents = (Object.keys(AGENT_LABELS) as Agent[]).filter(
-    (a) => agents[a]?.terminal_cli
-  );
-
-  return (
-    <>
-      <section>
-        <h3 style={{ marginTop: 0 }}>默认 Agent</h3>
-        <p className="muted small" style={{ marginTop: 0 }}>
-          用于新建会话；继续会话使用原来的 Agent。桌面端 Agent 无法新建会话，不在此列。
-        </p>
-        <div className="settings-agents">
-          {tuiAgents.length === 0 && <div className="muted small">读取中…</div>}
-          {tuiAgents.map((a) => (
-            <button key={a}
-              className={`settings-agent-row ${defaultAgent === a ? "selected" : ""}`}
-              onClick={() => choose(a)}>
-              <AgentIcon agent={a} size={16} />
-              <span className="grow">{AGENT_LABELS[a]}</span>
-              {agents[a] && !agents[a].detected && (
-                <span className="muted small">未检测</span>
-              )}
-              {defaultAgent === a && <span className="muted small">默认</span>}
-            </button>
-          ))}
-        </div>
-        {selectedUndetected && (
-          <p className="muted small" style={{ color: "var(--warning)", marginBottom: 0 }}>
-            当前默认 Agent 未在本机检测到，新建 / 继续会失败。请安装它，或改选其他已检测的 Agent。
-          </p>
-        )}
-        {defaultAgent === null && (
-          <p className="muted small" style={{ marginBottom: 0 }}>
-            未检测到任何 Agent CLI，新建 / 继续无法启动。安装任意 Agent CLI 后即可恢复。
-          </p>
-        )}
-      </section>
-      <section>
-        <h3>启动</h3>
-        <div className="row-line">
-          <div>
-            <div className="settings-row-label">启动页面</div>
-            <div className="settings-row-hint">应用启动固定进入首页，继续最近的工作。</div>
-          </div>
-          <span className="badge">首页</span>
-        </div>
-        <div className="row-line">
-          <div>
-            <div className="settings-row-label">启动会话前确认</div>
-            <div className="settings-row-hint">新建 / 继续一键直达，不经确认页。</div>
-          </div>
-          <span className="badge">关闭</span>
-        </div>
-      </section>
-    </>
-  );
-}
-
-/** Agents：按启动面分组——分组是 Agent 的静态能力，不是本机状态；本机状态由
- *  每行的检测 / 安装徽标表达。TUI/CLI 一组看 CLI 检测；桌面端一组看应用在场
- *  （桌面会话的「继续」是打开对应应用，路由按会话来源格式决定）。 */
-function AgentsSettings() {
-  const [status, setStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
-
-  useEffect(() => {
-    api.getAgentStatus()
-      .then(setStatus)
-      .catch((e) => { console.error(e); setStatus({}); });
-  }, []);
-
-  if (status === null) {
-    return (
-      <section>
-        <h3 style={{ marginTop: 0 }}>Agent</h3>
-        <div className="muted small">读取中…</div>
-      </section>
-    );
-  }
-
-  const agents = Object.keys(AGENT_LABELS) as Agent[];
-  const tui = agents.filter((a) => status[a]?.terminal_cli);
-  const desktop = agents.filter((a) => !!status[a]?.desktop_app);
-
-  return (
-    <section>
-      <h3 style={{ marginTop: 0 }}>TUI / CLI</h3>
-      <p className="muted small" style={{ marginTop: 0 }}>
-        NoEnding 在终端里启动与继续这些 Agent。
-      </p>
-      {tui.map((a) => (
-        <AgentRuntimeRow key={a} agent={a} />
-      ))}
-
-      <h3 style={{ marginTop: 26 }}>桌面端</h3>
-      <p className="muted small">
-        这些 Agent 的会话在桌面应用里，「继续」会打开对应应用；未安装的不支持。
-      </p>
-      {desktop.map((a) => (
-        <DesktopAppRow key={a} agent={a} entry={status[a]} />
-      ))}
-    </section>
-  );
-}
-
-/** 桌面端一行：接入的桌面应用与本机安装状态。没有设置项——应用名来自适配器
- *  （如 Codex 的桌面端是 ChatGPT），怎么打开会话由来源格式决定。 */
-function DesktopAppRow({ agent, entry }: { agent: Agent; entry?: AgentStatusEntry }) {
-  const app = entry?.desktop_app ?? AGENT_LABELS[agent];
-  return (
-    <div className="settings-agent-runtime">
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label row" style={{ gap: 7 }}>
-            <AgentIcon agent={agent} />
-            {app}
-            {app !== AGENT_LABELS[agent] && (
-              <span className="muted small">{AGENT_LABELS[agent]}</span>
-            )}
-          </div>
-        </div>
-        {entry ? (
-          <span className={`badge ${entry.desktop_app_present ? "success" : ""}`}>
-            {entry.desktop_app_present ? "已安装" : "未安装"}
-          </span>
-        ) : (
-          <span className="badge">—</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** 自动化：只读说明，状态必须是真的。 */
-function AutomationSettings() {
-  return (
-    <section>
-      <h3 style={{ marginTop: 0 }}>自动化</h3>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">会话摄入与索引</div>
-          <div className="settings-row-hint">发现会话、存下事件、建立搜索索引，始终运行。</div>
-        </div>
-        <span className="badge success">开</span>
-      </div>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">Context 更新</div>
-          <div className="settings-row-hint">
-            不再自动提取：在 Session 或任务页面点击「生成 / 更新摘要」与「更新状态」时才调用模型。
-          </div>
-        </div>
-        <span className="badge">手动</span>
-      </div>
-      <div className="row-line">
-        <div>
-          <div className="settings-row-label">后台补摄</div>
-          <div className="settings-row-hint">应用启动时补摄离开期间产生的会话内容。</div>
-        </div>
-        <span className="badge success">开</span>
-      </div>
-    </section>
   );
 }
 
@@ -273,17 +65,6 @@ function AppearanceSettings() {
   );
 }
 
-/** Data & Advanced：NoEnding Home + 自动化说明。 */
-function AdvancedSettings() {
-  return (
-    <>
-      <AutomationSettings />
-      <ContextDiagnosticsSettings />
-      <WorkspaceStorageSettings />
-    </>
-  );
-}
-
 function ContextDiagnosticsSettings() {
   const openLogs = async () => {
     try {
@@ -299,7 +80,7 @@ function ContextDiagnosticsSettings() {
     <section>
       <h3>Context 更新诊断</h3>
       <div className="row-line">
-        <div>
+        <div style={{ minWidth: 0, flex: 1 }}>
           <div className="settings-row-label">本地运行日志</div>
           <div className="settings-row-hint">
             记录更新时间、目标、Agent 和失败阶段；不记录提示词、模型输出或终端错误文本，保留 14 天。
@@ -423,7 +204,22 @@ function WorkspaceStorageSettings() {
             {pending ? (
               <>
                 下次启动时 NoEnding 会把数据搬到{" "}
-                <span className="mono" style={{ wordBreak: "break-all" }}>{pending}</span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="mono path-link"
+                  style={{ wordBreak: "break-all" }}
+                  title={`${pending} · 点击在文件管理器中打开`}
+                  onClick={() => void openPath(pending)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      void openPath(pending);
+                    }
+                  }}
+                >
+                  {pending}
+                </span>
                 ，搬完才打开数据库。
               </>
             ) : (
@@ -467,12 +263,31 @@ function PathRow({ label, value, hint, action }: {
   hint?: string;
   action?: React.ReactNode;
 }) {
+  const hasValue = value && value.trim() !== "";
   return (
     <div className="row-line">
-      <div style={{ minWidth: 0 }}>
+      <div style={{ minWidth: 0, flex: 1 }}>
         <div className="settings-row-label">{label}</div>
         <div className="settings-row-hint mono" style={{ wordBreak: "break-all" }}>
-          {value && value.trim() !== "" ? value : "—"}
+          {hasValue ? (
+            <span
+              role="button"
+              tabIndex={0}
+              className="path-link"
+              title={`${value} · 点击在文件管理器中打开`}
+              onClick={() => void openPath(value!)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  void openPath(value!);
+                }
+              }}
+            >
+              {value}
+            </span>
+          ) : (
+            "—"
+          )}
         </div>
         {hint && <div className="settings-row-hint" style={{ wordBreak: "break-word" }}>{hint}</div>}
       </div>

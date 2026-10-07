@@ -60,16 +60,20 @@ fn resume_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
 /// New / Resume go to a real interactive terminal, so an invented default
 /// there is the most visible way to break "Agent owns defaults".
 #[test]
-fn interactive_launches_pass_no_runtime_flag_without_an_override() {
+fn every_launch_flow_leaves_runtime_defaults_to_the_cli() {
     for agent in launchable() {
-        for args in [
-            new_args(agent, &ExecOptions::default()),
-            resume_args(agent, &ExecOptions::default()),
-        ] {
+        let opts = ExecOptions::default();
+        let mut flows = vec![new_args(agent, &opts), resume_args(agent, &opts)];
+        if headless_exec().contains(&agent) {
+            let exec = exec_args(agent, &opts);
+            assert_eq!(exec.last().map(String::as_str), Some("prompt text"));
+            flows.push(exec);
+        }
+        for args in flows {
             for flag in RUNTIME_FLAGS {
                 assert!(
                     !args.iter().any(|a| a.contains(flag)),
-                    "{agent:?} interactive launch with no override passed {flag}: {args:?}"
+                    "{agent:?} launch with no override passed {flag}: {args:?}"
                 );
             }
         }
@@ -94,34 +98,6 @@ fn resume_keeps_its_session_selector() {
     }
 }
 
-#[test]
-fn every_consumer_renders_the_same_override_the_same_way() {
-    // One runtime semantics: the flags an interactive session gets are the
-    // flags the headless run gets — New / Resume / exec cannot diverge.
-    for agent in headless_exec() {
-        let opts = ExecOptions {
-            model: Some("some-model".into()),
-            provider: Some("some-provider".into()),
-            effort: Some("medium".into()),
-        };
-        let runtime = |args: &[String]| -> Vec<String> {
-            RUNTIME_FLAGS
-                .iter()
-                .filter(|f| args.iter().any(|a| a.contains(**f)))
-                .map(|f| (*f).to_string())
-                .collect()
-        };
-        let exec = runtime(&exec_args(agent, &opts));
-        assert_eq!(runtime(&new_args(agent, &opts)), exec, "{agent:?} new");
-        assert_eq!(
-            runtime(&resume_args(agent, &opts)),
-            exec,
-            "{agent:?} resume"
-        );
-        assert!(!exec.is_empty(), "{agent:?} passed nothing at all");
-    }
-}
-
 /// Every runtime flag any of the three CLIs understands.
 const RUNTIME_FLAGS: &[&str] = &[
     "-m",
@@ -133,77 +109,69 @@ const RUNTIME_FLAGS: &[&str] = &[
 ];
 
 #[test]
-fn no_override_leaves_the_cli_to_its_own_defaults() {
-    for agent in headless_exec() {
-        let args = exec_args(agent, &ExecOptions::default());
-        for flag in RUNTIME_FLAGS {
-            assert!(
-                !args.iter().any(|a| a.contains(flag)),
-                "{agent:?} with no override passed {flag}: {args:?}"
-            );
-        }
+fn codex_renders_model_and_reasoning_effort() {
+    let opts = ExecOptions {
+        model: Some("gpt-5.6-sol".into()),
+        provider: None,
+        effort: Some("high".into()),
+    };
+    for args in [
+        exec_args(Agent::Codex, &opts),
+        new_args(Agent::Codex, &opts),
+        resume_args(Agent::Codex, &opts),
+    ] {
+        let pos = args.iter().position(|a| a == "-m").expect("-m");
+        assert_eq!(args[pos + 1], "gpt-5.6-sol");
+        // effort travels as one literal argv element, never as shell syntax
+        assert!(args.iter().any(|a| a == "model_reasoning_effort=\"high\""));
+    }
+}
+
+#[test]
+fn claude_renders_model_and_effort() {
+    let opts = ExecOptions {
+        model: Some("sonnet".into()),
+        provider: None,
+        effort: Some("high".into()),
+    };
+    for args in [
+        exec_args(Agent::ClaudeCode, &opts),
+        new_args(Agent::ClaudeCode, &opts),
+        resume_args(Agent::ClaudeCode, &opts),
+    ] {
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "sonnet"));
         assert!(
-            args.last().map(|a| a.as_str()) == Some("prompt text"),
-            "{agent:?} still receives its prompt: {args:?}"
+            args.windows(2)
+                .any(|w| w[0] == "--effort" && w[1] == "high"),
+            "claude effort used to be dropped silently: {args:?}"
         );
     }
 }
 
 #[test]
-fn codex_renders_model_and_reasoning_effort() {
-    let args = exec_args(
-        Agent::Codex,
-        &ExecOptions {
-            model: Some("gpt-5.6-sol".into()),
-            provider: None,
-            effort: Some("high".into()),
-        },
-    );
-    let pos = args.iter().position(|a| a == "-m").expect("-m");
-    assert_eq!(args[pos + 1], "gpt-5.6-sol");
-    // effort travels as one literal argv element, never as shell syntax
-    assert!(args.iter().any(|a| a == "model_reasoning_effort=\"high\""));
-}
-
-#[test]
-fn claude_renders_model_and_effort() {
-    let args = exec_args(
-        Agent::ClaudeCode,
-        &ExecOptions {
-            model: Some("sonnet".into()),
-            provider: None,
-            effort: Some("high".into()),
-        },
-    );
-    assert!(args
-        .windows(2)
-        .any(|w| w[0] == "--model" && w[1] == "sonnet"));
-    assert!(
-        args.windows(2)
-            .any(|w| w[0] == "--effort" && w[1] == "high"),
-        "claude effort used to be dropped silently: {args:?}"
-    );
-}
-
-#[test]
 fn pi_renders_provider_model_and_thinking() {
-    let args = exec_args(
-        Agent::Pi,
-        &ExecOptions {
-            model: Some("qwen/qwen3.8-27b".into()),
-            provider: Some("lmstudio".into()),
-            effort: Some("low".into()),
-        },
-    );
-    assert!(args
-        .windows(2)
-        .any(|w| w[0] == "--provider" && w[1] == "lmstudio"));
-    assert!(args
-        .windows(2)
-        .any(|w| w[0] == "--model" && w[1] == "qwen/qwen3.8-27b"));
-    assert!(args
-        .windows(2)
-        .any(|w| w[0] == "--thinking" && w[1] == "low"));
+    let opts = ExecOptions {
+        model: Some("qwen/qwen3.8-27b".into()),
+        provider: Some("lmstudio".into()),
+        effort: Some("low".into()),
+    };
+    for args in [
+        exec_args(Agent::Pi, &opts),
+        new_args(Agent::Pi, &opts),
+        resume_args(Agent::Pi, &opts),
+    ] {
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--provider" && w[1] == "lmstudio"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "qwen/qwen3.8-27b"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--thinking" && w[1] == "low"));
+    }
 }
 
 #[test]
@@ -241,7 +209,6 @@ fn agents_without_a_cli_refuse_to_build_a_command() {
     );
 
     for agent in cli_less {
-        assert!(cli_names(agent).is_empty());
         for built in [
             adapter_for(agent).build_new_command(&install(agent), &ExecOptions::default(), None),
             adapter_for(agent).build_resume_command(

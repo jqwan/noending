@@ -3,7 +3,7 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import SessionsView from "./SessionsView";
+import SessionsView, { clearSessionsCache } from "./SessionsView";
 import { api } from "../../api";
 import { listen } from "@tauri-apps/api/event";
 import { viewState } from "../../hooks/useViewState";
@@ -69,6 +69,7 @@ function taskFilter(): HTMLSelectElement {
 }
 
 beforeEach(() => {
+  clearSessionsCache();
   viewState.clear();
   vi.mocked(api.listSessions).mockReset();
   vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);

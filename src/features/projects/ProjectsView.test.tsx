@@ -3,7 +3,7 @@ import { viewState } from "../../hooks/useViewState";
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import ProjectsView from "./ProjectsView";
+import ProjectsView, { clearProjectCardsCache } from "./ProjectsView";
 import { api } from "../../api";
 import { listen } from "@tauri-apps/api/event";
 import type { ProjectCardData } from "../../types";
@@ -25,6 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 const navigate = vi.fn();
 
 beforeEach(() => {
+  clearProjectCardsCache();
   viewState.clear();
   vi.mocked(api.listProjectCards).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();

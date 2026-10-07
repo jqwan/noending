@@ -10,13 +10,11 @@ import type { Route } from "../app/routes";
 vi.mock("../api", () => ({
   api: {
     listWorkstreamCards: vi.fn(),
-    listProjects: vi.fn(),
   },
 }));
 
 beforeEach(() => {
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
-  vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);
 });
 
 afterEach(cleanup);
@@ -47,18 +45,30 @@ describe("Sidebar projects navigation", () => {
     });
   });
 
-  it("sidebar_projects_stays_weak_active_on_project_detail", async () => {
-    renderSidebar({ view: "project", projectId: "p-1" });
-    const item = await screen.findByText("项目");
-    // Project Detail 时保持弱高亮，与 Workstream Detail 的模式一致。
-    expect(item.className).toContain("weak");
+  it("sidebar_has_agents_navigation", async () => {
+    const navigate = renderSidebar({ view: "workstreams" });
+
+    const item = await screen.findByText("代理");
+    fireEvent.click(item);
+
+    await waitFor(() => {
+      expect(navigate).toHaveBeenCalledWith({ view: "agents" });
+    });
   });
 
-  it("sidebar_does_not_render_individual_projects", async () => {
-    renderSidebar({ view: "workstreams" });
-    await screen.findByText("项目"); // 导航项在
+  it("sidebar_agents_is_active_when_route_is_agents", async () => {
+    renderSidebar({ view: "agents" });
+    const item = await screen.findByText("代理");
+    expect(item.className).toContain("active");
+  });
 
-    expect(api.listProjects).not.toHaveBeenCalled();
+  it("sidebar_settings_is_active_when_route_is_settings", async () => {
+    const navigate = renderSidebar({ view: "settings" });
+    const settings = screen.getByRole("button", { name: /设置/ });
+    expect(settings.className).toContain("active");
+    fireEvent.click(settings);
+    expect(navigate).toHaveBeenCalledWith({ view: "settings" });
+    await waitFor(() => expect(api.listWorkstreamCards).toHaveBeenCalled());
   });
 });
 

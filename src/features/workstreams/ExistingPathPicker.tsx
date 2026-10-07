@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api";
-import { Modal } from "../../components/common";
+import { Modal, openPath } from "../../components/common";
 import type { RecentWorkspacePath } from "../../types";
 
 export default function ExistingPathPicker({ exclude, onClose, onSelect }: {
@@ -27,10 +27,39 @@ export default function ExistingPathPicker({ exclude, onClose, onSelect }: {
           : paths.length === 0 ? <div className="muted">暂无已有目录</div>
           : paths.map(p => {
             const added = exclude.includes(p.path);
-            return <label className={`existing-path-option${added ? " is-added" : ""}`} key={p.path}>
-              <input type="checkbox" disabled={added} checked={added || selected.includes(p.path)} onChange={e => setSelected(old => e.target.checked ? [...old, p.path] : old.filter(path => path !== p.path))} />
-              <span className="existing-path-info mono" title={p.path}>{p.path}</span>
-            </label>;
+            return (
+              <label className={`existing-path-option${added ? " is-added" : ""}`} key={p.path}>
+                <input
+                  type="checkbox"
+                  disabled={added}
+                  aria-label={p.path}
+                  checked={added || selected.includes(p.path)}
+                  onChange={e => setSelected(old => e.target.checked ? [...old, p.path] : old.filter(path => path !== p.path))}
+                />
+                <span className="existing-path-info mono" title={p.path} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{p.path}</span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="link small path-link"
+                  style={{ flex: "none", fontSize: "12px", marginLeft: "auto" }}
+                  title={`${p.path} · 点击在文件管理器中打开`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void openPath(p.path);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void openPath(p.path);
+                    }
+                  }}
+                >
+                  定位
+                </span>
+              </label>
+            );
           })}
       </div>
       <div className="row" style={{ justifyContent: "flex-end" }}>

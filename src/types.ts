@@ -149,6 +149,9 @@ export interface ProjectDetailData {
   workspace_paths: WorkspacePath[];
   workstreams: ProjectWorkstreamRow[];
   sessions: Session[];
+  /** 链接仓库的远程 URL（origin 优先），随 git 身份的最近一次观察刷新；
+   *  目录项目或无 remote 的仓库为 `null`。URL 已剥除内嵌凭据。 */
+  remote_url: string | null;
 }
 
 /** `is_primary` = the Workstream reaches the Project through its position-0 path. */
@@ -724,7 +727,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
   pi: "Pi",
   qoder: "Qoder",
   workbuddy: "WorkBuddy",
-  dsh: "dsh",
+  dsh: "DSH",
   zcode: "ZCode",
   antigravity: "Antigravity",
 };

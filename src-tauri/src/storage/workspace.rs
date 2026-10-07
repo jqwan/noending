@@ -332,6 +332,71 @@ pub fn ensure_git_identity_conn(conn: &Connection, common_dir: &str) -> Result<S
     )?)
 }
 
+/// Fold one observation's remote map into the identity's metadata JSON, under
+/// the `remotes` key. Refreshed wholesale per observation — a remote renamed
+/// or removed on the git side is reflected, never merged per-key. URLs arrive
+/// credential-stripped from the resolver.
+pub fn set_git_identity_remotes_conn(
+    conn: &Connection,
+    git_id: &str,
+    remotes: &[(String, String)],
+) -> Result<()> {
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM git_identities WHERE id = ?1",
+            params![git_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "{}".to_string());
+    let mut json: serde_json::Value =
+        serde_json::from_str(&metadata).unwrap_or_else(|_| serde_json::json!({}));
+    let map = remotes
+        .iter()
+        .map(|(name, url)| (name.clone(), serde_json::Value::String(url.clone())))
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    if !json.is_object() {
+        json = serde_json::json!({});
+    }
+    json["remotes"] = serde_json::Value::Object(map);
+    conn.execute(
+        "UPDATE git_identities SET metadata = ?2 WHERE id = ?1",
+        params![git_id, json.to_string()],
+    )?;
+    Ok(())
+}
+
+/// The Project-facing remote URL of a git identity: `origin` when configured,
+/// else the alphabetically first remote (deterministic). `None` when the
+/// repository has no remotes at all.
+pub fn git_identity_remote_url_conn(conn: &Connection, git_id: &str) -> Result<Option<String>> {
+    let metadata: Option<String> = conn
+        .query_row(
+            "SELECT metadata FROM git_identities WHERE id = ?1",
+            params![git_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    let json: serde_json::Value =
+        serde_json::from_str(&metadata).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(remotes) = json.get("remotes").and_then(|v| v.as_object()) else {
+        return Ok(None);
+    };
+    if let Some(origin) = remotes.get("origin").and_then(|v| v.as_str()) {
+        return Ok(Some(origin.to_string()));
+    }
+    let mut names: Vec<&str> = remotes.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    Ok(names
+        .first()
+        .and_then(|name| remotes.get(*name))
+        .and_then(|v| v.as_str())
+        .map(str::to_string))
+}
+
 pub fn touch_git_identity_conn(conn: &Connection, git_id: &str) -> Result<()> {
     conn.execute(
         "UPDATE git_identities SET last_seen_at = ?2 WHERE id = ?1",

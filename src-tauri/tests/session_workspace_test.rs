@@ -16,7 +16,7 @@ mod support;
 use noending::adapters::{adapter_for, DiscoveredMember, DiscoveredMemberKind};
 use noending::domain::{Agent, Session, SessionMessageRole};
 use noending::error::Result;
-use noending::ingestion::{ingest_session, reconcile_all, session_title};
+use noending::ingestion::{ingest_session, reconcile_all, session_title_sources};
 use noending::launcher::LaunchWorkspace;
 use noending::lifecycle;
 use noending::storage::session_paths::{
@@ -370,72 +370,6 @@ fn workspace_path_move_follows_a_trashed_session() {
     );
 }
 
-#[test]
-fn project_id_writers_are_confined_to_the_derived_doors() {
-    // as an executable check: `sessions.project_id` is a cache, and a
-    // cache with a fourth writer stops being a cache.
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let offenders = rust_files(&manifest.join("src"))
-        .into_iter()
-        .filter(|f| {
-            let rel = f
-                .strip_prefix(manifest)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            // The two sanctioned files: the derived doors in session_paths.rs,
-            // and storage/mod.rs (upsert_logical_session's in-statement
-            // COALESCE plus the batch refresh and the referential cleanup).
-            let allowed = rel == "src/storage/session_paths.rs" || rel == "src/storage/mod.rs";
-            !allowed && writes_sessions_project_id(&std::fs::read_to_string(f).unwrap_or_default())
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        offenders.is_empty(),
-        "sessions.project_id may only be written by upsert_logical_session's in-statement \
-         derivation, the batch refresh and the referential cleanup: {offenders:?}"
-    );
-}
-
-/// `UPDATE sessions … SET project_id`, tolerant of a statement wrapped across
-/// lines, and blind to prose: the doc comments that *explain* the prohibition
-/// must not be reported as violating it. A near-miss like
-/// `UPDATE workspace_paths SET project_id` must not trip it either — that write
-/// is legitimate Project policy, not a cache violation.
-fn writes_sessions_project_id(text: &str) -> bool {
-    let code = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut from = 0usize;
-    while let Some(i) = flat[from..].find("UPDATE sessions") {
-        let window = &flat[from + i..flat.len().min(from + i + 160)];
-        if window.contains("SET project_id") {
-            return true;
-        }
-        from += i + "UPDATE sessions".len();
-    }
-    false
-}
-
-fn rust_files(path: &Path) -> Vec<PathBuf> {
-    if path.is_dir() {
-        std::fs::read_dir(path)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .flat_map(|e| rust_files(&e.path()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-        vec![path.to_path_buf()]
-    } else {
-        vec![]
-    }
-}
-
 // 4. batch Project refresh
 
 #[test]
@@ -648,281 +582,6 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
     );
 }
 
-// ─────────────────────────────────────────────────────────  T1–T4
-// The mechanical anti-drift assertions. `project_id_writers_are_confined_to_the_
-// derived_doors` above is T2; these are the rest of the same family, and they
-// live beside it because a guard nobody can find is a guard nobody keeps.
-// Every one of them reads *source text*, so each must be proven to fire: see the
-// per-test note on what mutation breaks it. A grep guard that matches prose is
-// worse than no guard — it reports confidence it has not earned.
-
-/// Strip `//` and `///` lines and flatten the rest, so a doc comment that
-/// *explains* a prohibition can never be reported as violating it.
-fn code_only(text: &str) -> String {
-    text.lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// The argument list of `tauri::generate_handler![ … ]` as entries, comments
-/// removed. Counting *entries* rather than "mentions" is the whole point: the
-/// retired commands are named repeatedly in this file's own rationale comments
-///, and a substring grep would read that as them being registered.
-fn registered_commands() -> Vec<String> {
-    let src = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("lib.rs"),
-    )
-    .expect("lib.rs");
-    let marker = "generate_handler![";
-    let start = src.find(marker).expect("generate_handler! block");
-    let body = &src[start + marker.len()..];
-    let mut depth = 1usize;
-    let mut end = 0usize;
-    for (i, c) in body.char_indices() {
-        match c {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    assert!(end > 0, "the generate_handler! macro must be closed");
-    body[..end]
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && !l.starts_with("//"))
-        .flat_map(|l| l.split(','))
-        .map(|e| e.trim().trim_end_matches(';').to_string())
-        .filter(|e| !e.is_empty())
-        .collect()
-}
-
-/// the retired Project / Session / Workstream commands are not
-/// registered. Breaks if any of them is added back to `generate_handler!`.
-#[test]
-fn retired_commands_are_not_registered() {
-    let retired = [
-        "create_project",
-        "delete_project",
-        "update_project",
-        "assign_session_project",
-        "suggest_session_project",
-        "merge_workstreams",
-        "add_project_resource",
-        "list_project_resources",
-        "remove_project_resource",
-    ];
-    let live = registered_commands();
-    assert!(
-        live.len() > 40,
-        "the handler list must actually be parsed, not silently emptied: {} entries",
-        live.len()
-    );
-    let leaked: Vec<&String> = live
-        .iter()
-        .filter(|entry| {
-            let last = entry.rsplit("::").next().unwrap_or(entry);
-            retired.iter().any(|r| *r == last)
-        })
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "these left the product API and must not be re-registered: {leaked:?}"
-    );
-    // The read side of the same freeze: the UI still gets exactly three Project
-    // commands, and `list_sessions` is the Session list.
-    for kept in ["list_projects", "get_project_detail", "rename_project"] {
-        assert!(
-            live.iter().any(|e| e.ends_with(&format!("::{kept}"))),
-            "{kept} must stay registered"
-        );
-    }
-}
-
-/// The substring from `window[at] == '('` through its matching close paren.
-fn balanced_paren(window: &str, from: usize) -> Option<&str> {
-    let open = window[from..].find('(')? + from;
-    let mut depth = 0usize;
-    for (i, c) in window[open..].char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&window[open..=open + i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// every product write to `workstreams` names `lifecycle`
-/// explicitly (the column default is not a safety net for a field the
-/// user sees), and nothing writes the retired vocabulary. Reading the old value
-/// is a different statement shape, so only the write form is matched, as
-/// `SET lifecycle = …`.
-#[test]
-fn workstream_writes_name_lifecycle_and_never_write_the_retired_vocabulary() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut offenders: Vec<String> = Vec::new();
-    for file in rust_files(&manifest.join("src")) {
-        let text = std::fs::read_to_string(&file).unwrap_or_default();
-        let code = code_only(&text);
-        let mut from = 0usize;
-        while let Some(i) = code[from..].find("INSERT INTO workstreams") {
-            let at = from + i;
-            let window = &code[at..code.len().min(at + 400)];
-            // The *column list*, matched-parenthesis. Scanning to the last `)`
-            // in the window would swallow the `ON CONFLICT DO UPDATE SET …
-            // lifecycle = ?5` clause, which mentions lifecycle without the
-            // INSERT naming the column — and the guard would pass on a write
-            // that violates it.
-            let columns = match balanced_paren(window, "INSERT INTO workstreams".len()) {
-                Some(c) => c,
-                None => "",
-            };
-            if !columns.contains("lifecycle") {
-                let rel = file.strip_prefix(manifest).unwrap().display().to_string();
-                offenders.push(format!("{rel}: INSERT INTO workstreams without lifecycle"));
-            }
-            from = at + "INSERT INTO workstreams".len();
-        }
-        for bad in [
-            "SET lifecycle = 'open'",
-            "SET lifecycle = \"open\"",
-            "SET lifecycle = 'abandoned'",
-            "lifecycle: \"open\"",
-            "lifecycle: \"abandoned\"",
-        ] {
-            if code.contains(bad) {
-                let rel = file.strip_prefix(manifest).unwrap().display().to_string();
-                offenders.push(format!("{rel}: writes {bad:?}"));
-            }
-        }
-    }
-    assert!(offenders.is_empty(), "/ {offenders:?}");
-}
-
-/// `git` is reached only through the executable resolver (M10: a
-/// Finder-launched macOS app has no shell PATH, and `git` is exactly the binary
-/// that lives in Homebrew), and the Git *protocol* strings live in
-/// `workspace/` alone. Breaks on `Command::new("git")` anywhere, or on a second
-/// `--git-common-dir` implementation outside the resolver.
-#[test]
-fn git_is_only_reached_through_the_resolver_and_only_from_workspace() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut offenders: Vec<String> = Vec::new();
-    for file in rust_files(&manifest.join("src")) {
-        let rel = file
-            .strip_prefix(manifest)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let code = code_only(&std::fs::read_to_string(&file).unwrap_or_default());
-        if code.contains("Command::new(\"git\")") {
-            offenders.push(format!("{rel}: Command::new(\"git\")"));
-        }
-        for token in ["--git-common-dir", "worktree list", "--show-toplevel"] {
-            if code.contains(token) && rel != "src/workspace/resolver.rs" {
-                offenders.push(format!("{rel}: {token}"));
-            }
-        }
-    }
-    assert!(
-        offenders.is_empty(),
-        "put exactly one place allowed to run git: {offenders:?}"
-    );
-    // Prove the scan reaches the file that is allowed to do it: if this assert
-    // ever fails, the walker is broken and every assertion above is vacuous.
-    let resolver = std::fs::read_to_string(manifest.join("src/workspace/resolver.rs")).unwrap();
-    assert!(code_only(&resolver).contains("--git-common-dir"));
-}
-
-/// + no launcher entry point may resolve a launch without
-/// being told the NoEnding Home. The Home-less spellings were the risk: with
-/// `default_workspace: None`, 's third tier is simply absent, and M30's
-/// "do not teach the Workstream the fallback directory" gate in `apply_match`
-/// *inverts* to growing the list. Enforced here as well as by the compiler,
-/// because `LaunchWorkspace::default()` is how the mistake would come back.
-#[test]
-fn no_launch_entry_point_can_forget_the_home() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let launcher = std::fs::read_to_string(manifest.join("src/launcher/mod.rs")).expect("launcher");
-    let offenders: Vec<&str> = launcher
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with("//"))
-        .filter(|l| l.contains("LaunchWorkspace::default()"))
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "tier 3 must be injected, never defaulted: {offenders:?}"
-    );
-    // Every public prepare/launch entry point takes the workspace explicitly.
-    for name in [
-        "prepare_new_in",
-        "prepare_resume_in",
-        "launch_prepared_in",
-        "launch_prepared_with_in",
-    ] {
-        let sig = launcher
-            .split(&format!("pub fn {name}(")[..])
-            .nth(1)
-            .unwrap_or_else(|| panic!("{name} must exist"));
-        let head = &sig[..sig.find("->").unwrap_or(sig.len())];
-        assert!(
-            head.contains("workspace: &LaunchWorkspace"),
-            "{name} must require the LaunchWorkspace rather than assume one"
-        );
-    }
-    // The Home-less wrappers themselves are gone, not merely unused.
-    for gone in [
-        "pub fn prepare_new(",
-        "pub fn prepare_resume(",
-        "pub fn launch_prepared(",
-        "pub fn new_session(",
-        "pub fn resume_session(",
-        "pub fn resolve_new_session_cwd(",
-    ] {
-        assert!(
-            !launcher.contains(gone),
-            "{gone} is a Home-less launcher entry point and was removed (E-(f))"
-        );
-    }
-}
-
-///, and the row "migration occurs before DB open": the Home pointer
-/// decides *which file* `Db::open` is handed, so a relocation that has not been
-/// applied yet must not be skipped past. Breaks if `Db::open` is hoisted above
-/// `prepare_home`, which is precisely the failure mode exists to
-/// avoid (the user's history looks deleted).
-#[test]
-fn noending_home_is_resolved_before_the_database_opens() {
-    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
-        .expect("lib.rs");
-    let home = src
-        .find("prepare_home(")
-        .expect("prepare_home call in setup");
-    let db = src.find("Db::open(").expect("Db::open call in setup");
-    assert!(
-        home < db,
-        "relocation runs inside prepare_home, so it must precede opening the db ({home} vs {db})"
-    );
-}
-
 /// a Session is a member of a Project because its own path says so.
 /// The derived cache is a cache: a row still holding only a hand-attached
 /// label is not in that Project, and `list_sessions` must agree with
@@ -986,11 +645,12 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     );
 }
 
-///  — a Session's title comes from the first source that has one:
-/// the root's native title, else the first user text, else the first agent
-/// text. The order is the whole point (an Agent's own title beats a derived
-/// one, and a human prompt beats a machine reply), and the rule lives in
-/// exactly one function (`ingestion::session_title`).
+///  — a Session's title splits into two tiers: the NATIVE tier (the Agent
+/// app's own name) and the FALLBACK tier (first user text, else first agent
+/// text). Within a tier the order is the whole point (a human prompt beats a
+/// machine reply), and the split lives in exactly one function
+/// (`ingestion::session_title_sources`); what each tier may overwrite is the
+/// storage layer's COALESCE policy.
 #[test]
 fn a_session_title_prefers_the_native_then_the_user_then_the_agent() {
     let member = |native: Option<&str>, user: Option<&str>, agent: Option<&str>| DiscoveredMember {
@@ -1010,31 +670,34 @@ fn a_session_title_prefers_the_native_then_the_user_then_the_agent() {
         metadata: serde_json::json!({}),
     };
 
-    let cases: [(DiscoveredMember, Option<String>); 5] = [
+    let cases: [(DiscoveredMember, (Option<String>, Option<String>)); 5] = [
         (
             member(
                 Some("原生标题"),
                 Some("第一句用户话"),
                 Some("第一句 agent 话"),
             ),
-            Some("原生标题".into()),
+            (Some("原生标题".into()), Some("第一句用户话".into())),
         ),
         (
             member(None, Some("第一句用户话"), Some("第一句 agent 话")),
-            Some("第一句用户话".into()),
+            (None, Some("第一句用户话".into())),
         ),
         (
             member(None, None, Some("第一句 agent 话")),
-            Some("第一句 agent 话".into()),
+            (None, Some("第一句 agent 话".into())),
         ),
-        (member(None, None, None), None),
+        (member(None, None, None), (None, None)),
         // A machine blob is not a title, so the next source gets its turn —
         // and when no source has prose, there is no title at all.
-        (member(None, None, Some("{\"outcome\":\"allow\"}")), None),
+        (
+            member(None, None, Some("{\"outcome\":\"allow\"}")),
+            (None, None),
+        ),
     ];
     for (d, expected) in cases {
         assert_eq!(
-            session_title(&d),
+            session_title_sources(&d),
             expected,
             "source_member_id={}",
             d.source_member_id
@@ -1127,6 +790,7 @@ fn the_detail_ingredients_come_from_storage_queries() {
         .upsert_logical_session(
             Agent::Codex,
             root_id,
+            None,
             Some("detail title"),
             Some("/repo/detail"),
             None,

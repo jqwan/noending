@@ -21,8 +21,9 @@ afterEach(() => {
   delete document.documentElement.dataset.theme;
 });
 
-it("applies and persists themes, then restores system appearance", () => {
+it("applies and persists themes, then restores system appearance", async () => {
   render(<SettingsView section="appearance" navigate={vi.fn()} />);
+  await screen.findByText("/tmp/noending/data/noending.db");
   fireEvent.click(screen.getByRole("button", { name: "深色" }));
   expect(document.documentElement.dataset.theme).toBe("dark");
   expect(localStorage.getItem("noending.theme")).toBe("dark");
@@ -32,10 +33,14 @@ it("applies and persists themes, then restores system appearance", () => {
   expect(localStorage.getItem("noending.theme")).toBeNull();
 });
 
-it("shows local data settings without pricing controls", async () => {
+it("shows the configured local database path", async () => {
   render(<SettingsView section="advanced" navigate={vi.fn()} />);
   expect(await screen.findByText("/tmp/noending/data/noending.db")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "用量价格表" })).toBeNull();
-  expect(screen.queryByRole("textbox", { name: "自定义价格 JSON" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "立即刷新" })).toBeNull();
+});
+
+it("renders all settings in a single unified view", async () => {
+  render(<SettingsView navigate={vi.fn()} />);
+  expect(screen.getByText("主题")).toBeTruthy();
+  expect(screen.getByText("Context 更新诊断")).toBeTruthy();
+  expect(await screen.findByText("/tmp/noending/data/noending.db")).toBeTruthy();
 });

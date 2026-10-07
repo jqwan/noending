@@ -47,7 +47,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
   useEffect(refresh, [refresh]);
   useEffect(() => onEvent(EVT_SYNCED, refresh), [refresh]);
 
-  const workspaceActive = (v: "workstreams" | "projects" | "sessions" | "assistant") => {
+  const workspaceActive = (v: "workstreams" | "projects" | "sessions" | "agents" | "assistant") => {
     if (route.view === v) return "active";
     // Workstream Detail → Workstreams 保持弱高亮
     if (v === "workstreams" && route.view === "workstream") return "weak";
@@ -90,6 +90,10 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
           onClick={() => navigate({ view: "sessions" })}>
           <Icon name="chat" />会话
         </button>
+        <button className={`nav-item ${workspaceActive("agents")}`}
+          onClick={() => navigate({ view: "agents" })}>
+          <Icon name="bot" />代理
+        </button>
         <button className={`nav-item ${workspaceActive("assistant")}`}
           onClick={() => navigate({ view: "assistant" })}>
           <Icon name="spark" />助手
@@ -118,7 +122,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
       <div className="sidebar-footer">
         <button
           className={`nav-item ${route.view === "settings" ? "active" : ""}`}
-          onClick={() => navigate({ view: "settings", section: "general" })}
+          onClick={() => navigate({ view: "settings" })}
         >
           <Icon name="settings" />设置
         </button>

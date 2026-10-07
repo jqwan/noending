@@ -20,6 +20,9 @@ const paths = {
   more: "M4.5 9h.01M9 9h.01M13.5 9h.01",
   // 回收站（入口）用归档盒：垃圾桶留给「移入回收站」那个动作，两个含义不再共用图形。
   archive: "M3 4h12v3H3ZM4.5 7v7h9V7M7.5 10.5h3",
+  bot: "M9 2v2M4 6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6ZM6.5 8.5h.01M11.5 8.5h.01M6.5 12h5",
+  copy: "M6 4.5V3a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-1.5M4 6h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Z",
+  check: "M3.5 9.5l3.5 3.5 7.5-7.5",
 };
 
 export default function Icon({ name }: { name: keyof typeof paths }) {

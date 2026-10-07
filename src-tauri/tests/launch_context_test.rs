@@ -390,6 +390,7 @@ fn message_ref_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(by_id.id, msg.id);
+    assert_eq!(by_id.content, "ref target");
     // unknown ref → None, never fabricated
     assert!(db
         .get_message_by_ref("session-message:missing")

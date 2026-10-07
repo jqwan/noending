@@ -181,6 +181,9 @@
   padding-top: 8px;
   margin-top: 8px;
 }
+.sidebar-footer .nav-item.active::before {
+  display: none;
+}
 
 /* ---------- Main ---------- */
 .main {
@@ -236,6 +239,7 @@
   min-width: 0;
   margin: 0;
   font-size: 16px;
+  line-height: 28px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

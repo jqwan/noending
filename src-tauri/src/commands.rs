@@ -214,6 +214,33 @@ pub fn open_context_extraction_logs(app: AppHandle) -> Result<()> {
     crate::platform::paths::open_directory(&path)
 }
 
+/// Open a remote repository URL in the default browser. The platform layer
+/// only passes http/https through; the frontend normalizes scp/ssh spellings
+/// to https before it gets here.
+#[tauri::command]
+pub fn open_remote_url(url: String) -> Result<()> {
+    crate::platform::paths::open_url(&url)
+}
+
+/// Open a directory in the system file manager, or locate a file if the path is a file.
+#[tauri::command]
+pub fn open_path(path: String) -> Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(crate::error::other("路径不能为空"));
+    }
+    let expanded = crate::platform::paths::expand_tilde(trimmed);
+    let p = std::path::Path::new(&expanded);
+    if !p.exists() {
+        return Err(crate::error::other(format!("路径不存在：{}", p.display())));
+    }
+    if p.is_file() {
+        crate::platform::paths::reveal_file(p)
+    } else {
+        crate::platform::paths::open_directory(p)
+    }
+}
+
 // ---------------- Context Items ----------------
 
 #[derive(Deserialize)]
@@ -1054,5 +1081,35 @@ mod agent_runtime_refresh_seam_tests {
         assert_eq!(discovery.model_source, "suggested");
         assert!(!discovery.models.is_empty());
         assert!(discovery.warnings.is_empty());
+    }
+
+    #[test]
+    fn open_path_rejects_empty_and_nonexistent_paths() {
+        let err = open_path("".to_string()).unwrap_err();
+        assert!(err.to_string().contains("路径不能为空"));
+
+        let err2 = open_path("   ".to_string()).unwrap_err();
+        assert!(err2.to_string().contains("路径不能为空"));
+
+        let err3 =
+            open_path("/path/that/definitely/does/not/exist/noending_test_12345".to_string())
+                .unwrap_err();
+        assert!(err3.to_string().contains("路径不存在"));
+    }
+
+    /// Only the rejection side is tested here: a passing URL would really
+    /// launch the user's browser. The pass-through is one `run_opener` call.
+    #[test]
+    fn open_remote_url_only_passes_http_schemes() {
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ssh://git@example.com/repo.git",
+            "   ",
+            "",
+        ] {
+            let err = open_remote_url(bad.to_string()).unwrap_err();
+            assert!(err.to_string().contains("http"), "{bad}: {err}");
+        }
     }
 }

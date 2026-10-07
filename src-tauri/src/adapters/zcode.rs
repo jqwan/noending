@@ -1063,6 +1063,7 @@ mod tests {
             .upsert_logical_session(
                 Agent::ZCode,
                 "b",
+                None,
                 Some("B"),
                 None,
                 None,

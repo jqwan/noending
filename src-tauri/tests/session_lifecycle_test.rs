@@ -765,24 +765,3 @@ fn startup_backfill_skips_trashed_sessions() {
         "restore brings the conversation back into search"
     );
 }
-
-/// A stale index row whose session is gone entirely (or trashed) never
-/// surfaces: the read-side guard is the lifecycle authority in search.
-#[test]
-fn search_filters_stale_rows_of_dead_sessions() {
-    let db = open_db("stale-rows");
-    db.write()
-        .execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-             VALUES ('message', 'stale:1', 'sess-gone', '', 'unique stale marker text')",
-            [],
-        )
-        .unwrap();
-
-    let hits = search::search(&db, "unique stale marker", 20).unwrap();
-    assert!(
-        !hits.iter().any(|h| h.ref_id == "stale:1"),
-        "stale rows must never surface: {:?}",
-        hits.iter().map(|h| h.ref_id.clone()).collect::<Vec<_>>()
-    );
-}

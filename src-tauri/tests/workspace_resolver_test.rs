@@ -126,6 +126,7 @@ fn a_plain_repository_is_detected() {
         toplevel,
         kind,
         worktrees,
+        ..
     } = obs.git
     else {
         panic!("expected detection, got {:?}", obs.git);
@@ -413,6 +414,7 @@ fn the_child_process_runs_in_the_requested_directory() {
         common_dir: Some(repo.join(".git").to_string_lossy().to_string()),
         toplevel: Some(repo.to_string_lossy().to_string()),
         worktrees: vec![],
+        remotes: Vec::new(),
     };
     assert!(matches!(
         noending::workspace::resolver::classify_git(

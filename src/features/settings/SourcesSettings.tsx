@@ -1,6 +1,6 @@
 import SourcesView from "../sources/SourcesView";
 
-/** 设置 → Session 来源：复用现有 SourcesView。 */
+/** @deprecated 设置项已简化，会话来源已统一迁移至侧边栏 features/agents/AgentsView。保留此模块仅作向下兼容。 */
 export default function SourcesSettings() {
   return (
     <section>

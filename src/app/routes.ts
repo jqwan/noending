@@ -6,12 +6,15 @@ export type AssistantScope =
   | { type: "workstream"; id: string }
   | { type: "session"; id: string };
 
+import type { Agent } from "../types";
+
 export type SettingsSection =
   | "general"
-  | "agents"
-  | "sources"
   | "appearance"
   | "advanced";
+
+/** 兼容历史旧设置子入口；在 AppShell 导航入口统一归一化为 agents 面板 */
+export type LegacySettingsSection = "agents" | "sources";
 
 /**
  * 页面动作直接携带在 Route 上（palette → 页面 Modal），目标页已挂载时也能收到：
@@ -32,11 +35,19 @@ export type Route =
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
-  | { view: "session"; sessionId: string; entry?: SessionEntry }
+  | {
+      view: "session";
+      sessionId: string;
+      entry?: SessionEntry;
+      initialTitle?: string;
+      initialAgent?: Agent;
+      initialTotal?: number;
+    }
+  | { view: "agents"; agent?: Agent }
   | { view: "assistant"; scope?: AssistantScope }
   | { view: "projects" }
   | { view: "project"; projectId: string }
-  | { view: "settings"; section?: SettingsSection }
+  | { view: "settings"; section?: SettingsSection | LegacySettingsSection }
   | { view: "search"; query: string };
 
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */

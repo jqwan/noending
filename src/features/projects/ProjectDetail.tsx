@@ -4,10 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import { showToast } from "../../components/Toast";
-import { submitsOnEnter, timeAgo, useRefreshSignal, Modal } from "../../components/common";
+import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import { sessionDisplayTitle, UNTITLED_SESSION, cwdDisplayLabel } from "../sessions/SessionTable";
+import { httpsRemoteUrl } from "./remoteUrl";
 import { cardSummaryLine } from "../workstreams/WorkstreamCard";
 import {
   AGENT_LABELS,
@@ -22,12 +23,18 @@ import type { Route } from "../../app/routes";
  * Sessions（走权威链，不走缓存列，M29）。
  * 用户在这页唯一能做的编辑是改名：其余事实都是派生的，手工新建 / 删除 / 移动都已退出产品 API。
  */
+export const projectDetailCache = new Map<string, ProjectDetailData>();
+
+export function clearProjectDetailCache() {
+  projectDetailCache.clear();
+}
+
 export default function ProjectDetail({ projectId, navigate }: {
   projectId: string;
   navigate: (r: Route) => void;
 }) {
   const [showAllSessions, setShowAllSessions] = useState(false);
-  const [data, setData] = useState<ProjectDetailData | null>(null);
+  const [data, setData] = useState<ProjectDetailData | null>(() => projectDetailCache.get(projectId) ?? null);
   const [gone, setGone] = useState(false);
   const [failure, setFailure] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -42,6 +49,7 @@ export default function ProjectDetail({ projectId, navigate }: {
     api.getProjectDetail(projectId)
       .then((d) => {
         if (seq !== seqRef.current) return;
+        projectDetailCache.set(projectId, d);
         setData(d);
         setGone(false);
         setFailure("");
@@ -52,7 +60,11 @@ export default function ProjectDetail({ projectId, navigate }: {
         setFailure(text);
         // 只按「Project <id> 不存在」判定已消失，其余一律当作读取失败——
         // 猜错的代价是让用户以为自己的 Project 没了。
-        setGone(text.includes(`Project ${projectId} 不存在`));
+        const isGone = text.includes(`Project ${projectId} 不存在`);
+        if (isGone) {
+          projectDetailCache.delete(projectId);
+        }
+        setGone(isGone);
       });
   }, [projectId]);
 
@@ -106,7 +118,11 @@ export default function ProjectDetail({ projectId, navigate }: {
     setRenameError("");
     try {
       const renamed = await api.renameProject(project.id, next);
-      setData((cur) => (cur ? { ...cur, project: renamed } : cur));
+      setData((cur) => {
+        const nextData = cur ? { ...cur, project: renamed } : cur;
+        if (nextData) projectDetailCache.set(projectId, nextData);
+        return nextData;
+      });
       setRenaming(false);
       refresh();
     } catch (e) {
@@ -120,10 +136,23 @@ export default function ProjectDetail({ projectId, navigate }: {
   };
 
   if (detail === null || project === null) {
+    if (failure === "" && !gone) {
+      return (
+        <div className="main project-detail" role="status">
+          <PageHeader
+            title={<span className="skeleton" style={{ display: "inline-block", width: 160, height: 24, borderRadius: "var(--radius-sm)" }} />}
+          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
+            <div className="skeleton" style={{ height: 100, borderRadius: "var(--radius-lg)" }} />
+            <div className="skeleton" style={{ height: 160, borderRadius: "var(--radius-lg)" }} />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="main project-detail">
         <PageHeader
-          title={gone ? "这个项目已经不存在" : (failure === "" ? "加载中…" : "读取项目失败")}
+          title={gone ? "这个项目已经不存在" : "读取项目失败"}
         >
           {failure !== "" && <PathError text={failure} />}
           {gone && (
@@ -247,8 +276,28 @@ export default function ProjectDetail({ projectId, navigate }: {
           <span className={`badge ${project.git_id ? "accent" : ""}`}>
             {project.git_id ? "Git 项目" : "目录项目"}
           </span>
-          <span className="small muted">{project.name_customized ? "自定义名称" : "自动命名"}</span>
+          {project.name_customized && <span className="small muted">自定义名称</span>}
         </div>
+        {detail.remote_url && (
+          <a
+            className="path-link small muted mono"
+            href={httpsRemoteUrl(detail.remote_url)}
+            style={{ marginTop: 6, display: "block", overflowWrap: "anywhere" }}
+            title="在浏览器打开远程仓库"
+            onClick={(e) => {
+              e.preventDefault();
+              void openRemoteUrl(httpsRemoteUrl(detail.remote_url!));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                void openRemoteUrl(httpsRemoteUrl(detail.remote_url!));
+              }
+            }}
+          >
+            {httpsRemoteUrl(detail.remote_url)}
+          </a>
+        )}
         <div className="small muted" style={{ marginTop: 6 }}>
           {detail.workspace_paths.length} 个工作目录 ·{" "}
           {detail.workstreams.length} 个任务 · {detail.sessions.length} 个会话
@@ -271,9 +320,6 @@ export default function ProjectDetail({ projectId, navigate }: {
                   而末段正是用户用来认目录的那一段。 */}
               <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
                 <PathText path={p.canonical_path} max={72} />
-              </div>
-              <div className="meta" style={{ whiteSpace: "normal" }}>
-                首次见到 {timeAgo(p.first_seen_at)} · 最近确认 {timeAgo(p.last_seen_at)}
               </div>
             </div>
             <div className="side">

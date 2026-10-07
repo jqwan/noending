@@ -135,6 +135,9 @@ pub enum GitDetection {
         /// `git worktree list --porcelain` result. Discovery of a worktree
         /// never adds a WorkstreamPath.
         worktrees: Vec<String>,
+        /// `(name, url)` remotes from the repository's config, URLs
+        /// credential-stripped. A fact read, not a naming guess.
+        remotes: Vec<(String, String)>,
     },
     /// A path that was previously detected now has no `.git`. Not a resolver
     /// output: it is derived by `workspace::project` from the stored
@@ -244,7 +247,7 @@ impl Agent {
             Agent::Pi => "Pi",
             Agent::Qoder => "Qoder",
             Agent::WorkBuddy => "WorkBuddy",
-            Agent::Dsh => "dsh",
+            Agent::Dsh => "DSH",
             Agent::ZCode => "ZCode",
             Agent::Antigravity => "Antigravity",
         }
@@ -911,7 +914,7 @@ mod agent_wire_spelling_tests {
     /// (the Tauri IPC boundary). They are hand-written in two places and derived
     /// in the third, so only a test keeps them equal.
     #[test]
-    fn serde_spelling_equals_as_str_for_every_agent() {
+    fn agent_spellings_agree_across_storage_and_ipc() {
         for agent in Agent::all() {
             let wire = serde_json::to_value(agent).unwrap();
             assert_eq!(
@@ -920,26 +923,8 @@ mod agent_wire_spelling_tests {
                 "{}: the wire spelling must be as_str(), or the frontend cannot label it",
                 agent.display_name()
             );
-        }
-    }
-
-    /// Whatever we emit, we must be able to read back — a command that takes an
-    /// `agent` argument receives exactly this string.
-    #[test]
-    fn every_emitted_spelling_deserializes_back_to_the_same_agent() {
-        for agent in Agent::all() {
-            let wire = serde_json::to_string(agent).unwrap();
-            let back: Agent = serde_json::from_str(&wire).unwrap();
-            assert_eq!(back, *agent, "round trip failed for {wire}");
-        }
-    }
-
-    /// `parse` is the third spelling beside `as_str` and serde: it also accepts
-    /// the short CLI aliases, and must keep accepting the canonical one or a
-    /// stored row could stop round-tripping.
-    #[test]
-    fn parse_accepts_the_canonical_spelling_of_every_agent() {
-        for agent in Agent::all() {
+            let back: Agent = serde_json::from_value(wire).unwrap();
+            assert_eq!(back, *agent);
             assert_eq!(Agent::parse(agent.as_str()), Some(*agent));
         }
     }

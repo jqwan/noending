@@ -18,6 +18,15 @@ function withoutAction(route: Route): Route {
   return base as Route;
 }
 
+export function normalizeRoute(route: Route): Route {
+  if (route.view === "settings") {
+    if (route.section === "agents" || route.section === "sources") {
+      return { view: "agents" };
+    }
+  }
+  return route;
+}
+
 function sameRoute(a: Route, b: Route): boolean {
   const left = withoutAction(a);
   const right = withoutAction(b);
@@ -26,6 +35,9 @@ function sameRoute(a: Route, b: Route): boolean {
   }
   if (left.view === "workstreams" && right.view === "workstreams") {
     return (left.scope ?? "active") === (right.scope ?? "active");
+  }
+  if (left.view === "session" && right.view === "session") {
+    return left.sessionId === right.sessionId && left.entry === right.entry;
   }
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -81,7 +93,8 @@ export default function AppShell() {
     };
   }, []);
 
-  const navigate = useCallback((r: Route) => {
+  const navigate = useCallback((target: Route) => {
+    const r = normalizeRoute(target);
     setNavigation((current) => {
       const entries = current.entries.slice(0, current.index + 1);
       const currentRoute = entries[entries.length - 1];

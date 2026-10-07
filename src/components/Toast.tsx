@@ -26,15 +26,36 @@ export default function ToastHost() {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   useEffect(() => {
-    const l = (t: Toast) => {
-      setToasts((ts) => [...ts, t]);
-      setTimeout(() => {
-        setToasts((ts) => ts.filter((x) => x.id !== t.id));
+    const timers = new Map<number, ReturnType<typeof setTimeout>>();
+
+    const scheduleDismiss = (id: number) => {
+      const existingTimer = timers.get(id);
+      if (existingTimer) clearTimeout(existingTimer);
+      const timer = setTimeout(() => {
+        setToasts((curr) => curr.filter((x) => x.id !== id));
+        timers.delete(id);
       }, TOAST_MS);
+      timers.set(id, timer);
+    };
+
+    const l = (t: Toast) => {
+      setToasts((ts) => {
+        const existing = ts.find(
+          (x) => x.text === t.text && x.action?.label === t.action?.label
+        );
+        if (existing) {
+          scheduleDismiss(existing.id);
+          return ts;
+        }
+        scheduleDismiss(t.id);
+        return [...ts, t];
+      });
     };
     listeners.push(l);
     return () => {
       listeners = listeners.filter((x) => x !== l);
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
     };
   }, []);
 

@@ -240,7 +240,7 @@ export default function AssistantView({ scope, navigate }: {
       </div>
 
       <div className="row chat-composer" style={{ marginTop: 10 }}>
-        <input type="text" placeholder="问 NoEnding…（问上下文、启动会话、查摄入历史）" value={input}
+        <input type="text" placeholder="问 NoEnding…（问上下文、启动会话、查同步历史）" value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => submitsOnEnter(e) && send()} />
         <button className="btn primary" onClick={() => send()} disabled={busy}>发送</button>
@@ -251,7 +251,7 @@ export default function AssistantView({ scope, navigate }: {
           <div className="modal">
             <h2>助手使用的 Agent</h2>
             <p className="muted small">
-              助手经你已登录的 Agent CLI 无头运行，无需单独 API Key。只有 TUI/CLI Agent
+              助手经你已登录的 Agent TUI 运行，无需单独 API Key。只有 TUI Agent
               能被助手调用（桌面端 Agent 没有命令行）；模型 / 思考强度一律沿用 Agent 默认值。
             </p>
             {[...tuiAgents, "none"].map((k) => (
@@ -266,15 +266,15 @@ export default function AssistantView({ scope, navigate }: {
             ) : runtime ? (
               !runtime.detected && (
                 <div className="badge warn" style={{ marginTop: 8 }}>
-                  未检测到 {CHOICE_LABELS[cfg.agent]} CLI —— 助手会退回仅检索。
+                  未检测到 {CHOICE_LABELS[cfg.agent]} TUI —— 助手会退回仅检索。
                 </div>
               )
             ) : (
               <p className="muted small">Agent 配置读取中…</p>
             )}
             <div className="row" style={{ justifyContent: "space-between", marginTop: 14 }}>
-              <button className="btn" onClick={() => { setCfgOpen(false); navigate({ view: "settings", section: "agents" }); }}>
-                前往设置 → Agent
+              <button className="btn" onClick={() => { setCfgOpen(false); navigate({ view: "agents" }); }}>
+                前往代理管理
               </button>
               <button className="btn primary" onClick={() => setCfgOpen(false)}>完成</button>
             </div>

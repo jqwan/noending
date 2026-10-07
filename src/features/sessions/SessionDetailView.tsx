@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, timeAgo, useRefreshSignal } from "../../components/common";
+import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
 import ResumeSessionModal from "./ResumeSessionModal";
@@ -17,6 +17,7 @@ import {
   UNTITLED_SESSION,
 } from "./SessionTable";
 import {
+  type Agent,
   type Project,
   type SessionContextFields,
   type SessionContextView,
@@ -30,12 +31,22 @@ import type { Route } from "../../app/routes";
  * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / Owner。
  * 唯一的会话→会话链接是 fork 来源。
  */
-export default function SessionDetailView({ sessionId, navigate, goBack }: {
+export const sessionDetailCache = new Map<string, SessionDetail>();
+
+export default function SessionDetailView({
+  sessionId,
+  initialTitle,
+  initialAgent,
+  navigate,
+  goBack,
+}: {
   sessionId: string;
+  initialTitle?: string;
+  initialAgent?: Agent;
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
 }) {
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
   const [ownerOpen, setOwnerOpen] = useState(false);
   const [resumeOpen, setResumeOpen] = useState(false);
@@ -45,7 +56,6 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const currentSessionId = useRef(sessionId);
-  currentSessionId.current = sessionId;
   // 回收站动作（Session Lifecycle & Deletion）：确认弹窗、执行中的 busy、
   // 以及从详情页直接发起的删除 Modal。
   const [confirmTrash, setConfirmTrash] = useState(false);
@@ -61,12 +71,20 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     setCtxError(null);
     setCtxReadError(null);
     setCtxBusy(false);
+    if (currentSessionId.current !== sessionId) {
+      currentSessionId.current = sessionId;
+      setDetail(sessionDetailCache.get(sessionId) ?? null);
+    }
   }, [sessionId]);
 
   /** 打开 / 刷新这一页：详情与 Session Context 都是纯读取。 */
   const refresh = useCallback(() => {
     api.getSessionDetail(sessionId)
-      .then((d) => { setDetail(d); setFailed(false); })
+      .then((d) => {
+        sessionDetailCache.set(sessionId, d);
+        setDetail(d);
+        setFailed(false);
+      })
       .catch((e) => { console.error(e); setFailed(true); });
     api.getSessionContext(sessionId)
       .then((c) => { setSessionCtx(c); setCtxReadError(null); })
@@ -74,6 +92,23 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   }, [sessionId]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
+
+  const [syncing, setSyncing] = useState(false);
+  const handleSyncSession = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      await api.refreshSession(sessionId);
+      refresh();
+      showToast("已排队：正在增量同步该会话最新对话…");
+    } catch (e) {
+      console.error(e);
+      refresh();
+      showToast(`同步失败：${String(e)}`);
+    } finally {
+      setTimeout(() => setSyncing(false), 500);
+    }
+  };
 
   const needsProjectName = !detail?.workspace_path && !!detail?.session.project_id;
   useEffect(() => {
@@ -85,14 +120,42 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
     [projects],
   );
 
+  const fallbackAgent = initialAgent;
+  const fallbackRawTitle = initialTitle;
+  const fallbackDisplayTitle = fallbackRawTitle ? (
+    fallbackRawTitle === UNTITLED_SESSION ? "未命名会话" : fallbackRawTitle
+  ) : (
+    <span
+      className="skeleton"
+      style={{
+        display: "inline-block",
+        width: 140,
+        height: 20,
+        borderRadius: "var(--radius-sm)",
+        verticalAlign: "middle",
+      }}
+    />
+  );
+
+  const fallbackHeaderTitle = failed ? (
+    "读取会话失败"
+  ) : fallbackAgent ? (
+    <span className="session-title-with-icon" title={typeof fallbackDisplayTitle === "string" ? fallbackDisplayTitle : undefined}>
+      <AgentIcon agent={fallbackAgent} size={18} />
+      <span className="session-title-text">{fallbackDisplayTitle}</span>
+    </span>
+  ) : (
+    fallbackDisplayTitle
+  );
+
   /**
    * 没拿到数据时也要把 PageHeader 画出来：标题行吸在应用标题栏那条 band 上，
    * 加载态若不渲染它，整条标题栏会先消失再补回来，比"内容区里一行加载中"显眼得多。
    */
   if (!detail) {
     return (
-      <div className="main narrow">
-        <PageHeader title={failed ? "读取会话失败" : "加载中…"}>
+      <div className="main session-detail" role="status">
+        <PageHeader title={fallbackHeaderTitle}>
           {failed && (
             <>
               <p className="muted small">
@@ -104,6 +167,12 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             </>
           )}
         </PageHeader>
+        {!failed && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
+            <div className="skeleton" style={{ height: 120, borderRadius: "var(--radius-lg)" }} />
+            <div className="skeleton" style={{ height: 180, borderRadius: "var(--radius-lg)" }} />
+          </div>
+        )}
       </div>
     );
   }
@@ -231,9 +300,14 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       : "无法确认源会话状态，暂时不能继续";
 
   return (
-    <div className="main narrow">
+    <div className="main session-detail">
       <PageHeader
-        title={title}
+        title={
+          <span className="session-title-with-icon" title={title}>
+            <AgentIcon agent={session.agent} size={18} />
+            <span className="session-title-text">{title}</span>
+          </span>
+        }
         actions={trashed ? (
           // 回收站中的会话：后端拒绝 Resume——如实呈现为不可用。
           <button className="btn ghost icon-button" disabled
@@ -245,7 +319,15 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             <button className="btn ghost icon-button" aria-label="移入回收站" title="移入回收站" onClick={() => setConfirmTrash(true)} disabled={trashBusy}>
               <Icon name="trash" />
             </button>
-            <button className="btn ghost icon-button" aria-label="重新读取" title="重新读取本地数据（不会触发摄入）" onClick={refresh}><Icon name="refresh" /></button>
+            <button
+              className="btn ghost icon-button"
+              aria-label="增量同步"
+              title="增量同步：从磁盘同步该会话的最新对话"
+              onClick={() => void handleSyncSession()}
+              disabled={syncing}
+            >
+              <Icon name="refresh" />
+            </button>
             <button className="btn ghost icon-button" aria-label="继续" title={resumeTitle} onClick={() => setResumeOpen(true)} disabled={resumeDisabled}>
               <Icon name="play" />
             </button>
@@ -362,7 +444,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         </div>
       ) : (
         <div className="l1-none" style={{ marginTop: 8 }}>
-          {messages.length === 0 ? "还没有摘要；先摄入消息后即可生成。" : "还没有摘要。"}
+          {messages.length === 0 ? "还没有摘要；先同步消息后即可生成。" : "还没有摘要。"}
         </div>
       )}
 
@@ -373,7 +455,16 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         {detail.ingested_message_sequence > 0 && (
           <button
             className="btn small ghost"
-            onClick={() => navigate({ view: "session", sessionId, entry: "conversation" })}
+            onClick={() =>
+              navigate({
+                view: "session",
+                sessionId,
+                entry: "conversation",
+                initialTitle: title,
+                initialAgent: session.agent,
+                initialTotal: detail.ingested_message_sequence,
+              })
+            }
           >
             查看全部会话（共 {detail.ingested_message_sequence} 条）
           </button>
@@ -387,9 +478,9 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
       )}
       {messages.length === 0 && (
         <div className="empty">
-          还没有摄入消息。
+          还没有同步消息。
           <div className="small" style={{ marginTop: 4 }}>
-            重新读取以加载已摄入的原始会话。
+            重新读取以加载已同步的原始会话。
           </div>
           <div className="invite">
             <button className="btn small" onClick={refresh}>重新读取</button>
@@ -403,8 +494,7 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
           直接用展开的正文，不用 <details>——默认收起把这页最有用的事实藏了起来。 */}
       <section className="rail-section">
       <div className="section-label">会话信息</div>
-      <div className="row" style={{ gap: 6 }}>
-        <AgentIcon agent={session.agent} />
+      <div>
         <span>{agentDisplayLabel(session.agent)}</span>
       </div>
       {/* 消息条数在下面的统计里有，这里只留状态徽标；两个都没有就不摆空行。 */}
@@ -460,17 +550,34 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             </span>
           )}
         </Field>
-        <Field label="工作目录">
+        <Field
+          label="工作目录"
+          copyValue={workspacePath ? workspacePath.canonical_path : (cwd || undefined)}
+          copyTitle="复制工作目录"
+        >
           {workspacePath ? (
             <>
-              <CopyValue
-                value={workspacePath.canonical_path}
-                mono
-                title={`${workspacePath.canonical_path} · NoEnding 识别工作位置用的规范化路径`}
-              />
+              <button
+                type="button"
+                className="link mono"
+                title={`${workspacePath.canonical_path} · 点击在文件管理器中打开`}
+                style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
+                onClick={() => void openPath(workspacePath.canonical_path)}
+              >
+                {workspacePath.canonical_path}
+              </button>
               {cwd !== "" && cwd !== workspacePath.canonical_path && (
                 <div className="muted small" style={{ marginTop: 4 }}>
-                  Agent 原始记录：{cwd}
+                  Agent 原始记录：
+                  <button
+                    type="button"
+                    className="link mono"
+                    title={`${cwd} · 点击在文件管理器中打开`}
+                    style={{ textAlign: "left", wordBreak: "break-all" }}
+                    onClick={() => void openPath(cwd)}
+                  >
+                    {cwd}
+                  </button>
                 </div>
               )}
               {!workspacePath.exists && (
@@ -486,9 +593,17 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             </>
           ) : cwd ? (
             <>
-              <CopyValue value={cwd} title={`${cwd} · Agent 原始记录里的 cwd，是这条会话自己的事实`} />
+              <button
+                type="button"
+                className="link mono"
+                title={`${cwd} · 点击在文件管理器中打开`}
+                style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
+                onClick={() => void openPath(cwd)}
+              >
+                {cwd}
+              </button>
               <div className="muted small" style={{ marginTop: 4 }}>
-                这个目录还没有被登记成工作路径 —— NoEnding 会在下一次目录扫描后自动补上，不需要手工操作。
+                这个目录还没有被登记成工作路径 —— NoEnding 会在下一次目录同步后自动补上，不需要手工操作。
               </div>
             </>
           ) : (
@@ -498,13 +613,29 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         {/* 源会话：会话自己的源文件。
             状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。
             路径本身就是「在文件管理器中显示」的入口，不再另配一行链接。 */}
-        <Field label="源会话">
-          <CopyValue
-            value={session.source_path}
-            mono
-            title={`${session.source_path} · Agent 保存的源会话${canRevealSource ? " · 点击在文件管理器中显示" : ""}`}
-            onOpen={canRevealSource ? () => void revealSource() : undefined}
-          />
+        <Field
+          label="源会话"
+          copyValue={session.source_path}
+          copyTitle="复制源会话路径"
+        >
+          {canRevealSource ? (
+            <button
+              className="link mono"
+              title={`${session.source_path} · Agent 保存的源会话 · 点击在文件管理器中显示`}
+              style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
+              onClick={() => void revealSource()}
+            >
+              {session.source_path}
+            </button>
+          ) : (
+            <span
+              className="mono"
+              title={`${session.source_path} · Agent 保存的源会话`}
+              style={{ minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
+            >
+              {session.source_path}
+            </span>
+          )}
           {sourceMissing && (
             <div className="session-source-warning">源会话已不存在</div>
           )}
@@ -512,12 +643,23 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
             <div className="session-source-warning">无法确认源会话状态</div>
           )}
         </Field>
-        <Field label="会话 ID">
-          <CopyValue value={session.id} mono />
+        <Field label="会话 ID" copyValue={session.id} copyTitle="复制会话 ID">
+          <div className="mono" style={{ wordBreak: "break-all", userSelect: "all" }}>
+            {session.id}
+          </div>
         </Field>
-        <Field label="Agent 会话 ID">
-          <CopyValue value={session.root_agent_session_id} mono
-            title="Root 成员在 Agent 侧的会话身份；Resume 与 LaunchIntent 匹配的唯一依据" />
+        <Field
+          label="Agent 会话 ID"
+          copyValue={session.root_agent_session_id}
+          copyTitle="复制 Agent 会话 ID"
+        >
+          <div
+            className="mono"
+            title="Root 成员在 Agent 侧的会话身份；Resume 与 LaunchIntent 匹配的唯一依据"
+            style={{ wordBreak: "break-all", userSelect: "all" }}
+          >
+            {session.root_agent_session_id}
+          </div>
         </Field>
         {/* Fork：唯一的会话→会话链接。来源只是 provenance，
             生命周期完全独立；来源不在本地库时也如实说明。 */}
@@ -580,7 +722,11 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
         <PermanentDeleteModal
           sessionId={sessionId}
           onClose={() => { setPurgeOpen(false); refresh(); }}
-          onDeleted={() => { setPurgeOpen(false); goBack({ view: "sessions" }); }}
+          onDeleted={() => {
+            sessionDetailCache.delete(sessionId);
+            setPurgeOpen(false);
+            goBack({ view: "sessions" });
+          }}
         />
       )}
 
@@ -602,68 +748,47 @@ export default function SessionDetailView({ sessionId, navigate, goBack }: {
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <>
-      <div className="muted small" style={{ whiteSpace: "nowrap" }}>{label}</div>
-      <div style={{ minWidth: 0 }}>{children}</div>
-    </>
-  );
-}
-
-/**
- * 值 + 复制：报障时用户要能原样给出 Session ID 与工作目录。
- * `display` 只改显示（路径按中段省略，尾段最有信息量），复制与 `title` 仍是原值；
- * 传了 `display` 就配 `truncate`：已经省略过的东西再折行只会把尾段折断。
- * `onOpen` 给了就把值本身变成可点（如在文件管理器中显示）；没有就只是可复制的文本。
- */
-function CopyValue({ label, value, display, truncate, mono, title, onOpen }: {
-  label?: string;
-  value: string;
-  display?: string;
-  truncate?: boolean;
-  mono?: boolean;
-  title?: string;
-  onOpen?: () => void;
+function Field({
+  label,
+  copyValue,
+  copyTitle,
+  children,
+}: {
+  label: string;
+  copyValue?: string | null;
+  copyTitle?: string;
+  children: React.ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
 
-  const copy = async () => {
-    const ok = await copyToClipboard(value);
-    setCopied(ok);
+  const onCopy = async () => {
+    if (!copyValue) return;
+    const ok = await copyToClipboard(copyValue);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
     showToast(ok ? "已复制到剪贴板" : "复制失败，请手动选中文字复制");
-    if (ok) setTimeout(() => setCopied(false), 2500);
   };
 
   return (
-    <span className="row" style={{ gap: 8 }}>
-      {label && <span className="muted small" style={{ flex: "none" }}>{label}</span>}
-      {onOpen ? (
-        <button
-          className={mono ? "link mono" : "link"}
-          title={title ?? value}
-          style={truncate
-            ? { minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
-            : { minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
-          onClick={onOpen}
-        >
-          {display ?? value}
-        </button>
-      ) : (
-        <span
-          className={mono ? "mono" : undefined}
-          title={title ?? value}
-          style={truncate
-            ? { minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", userSelect: "all" }
-            : { minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
-        >
-          {display ?? value}
-        </span>
-      )}
-      <button className="link" style={{ flex: "none" }} onClick={copy}>
-        {copied ? "已复制" : "复制"}
-      </button>
-    </span>
+    <>
+      <div className="session-field-label-row">
+        <span className="muted small" style={{ whiteSpace: "nowrap" }}>{label}</span>
+        {copyValue && (
+          <button
+            type="button"
+            className={`btn ghost icon-button small session-field-copy-btn${copied ? " copied" : ""}`}
+            title={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
+            aria-label={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
+            onClick={onCopy}
+          >
+            <Icon name={copied ? "check" : "copy"} />
+          </button>
+        )}
+      </div>
+      <div style={{ minWidth: 0 }}>{children}</div>
+    </>
   );
 }
 

@@ -47,8 +47,14 @@ function cardMatches(c: ProjectCardData, q: string): boolean {
   );
 }
 
+let cachedProjectCards: ProjectCardData[] | null = null;
+
+export function clearProjectCardsCache() {
+  cachedProjectCards = null;
+}
+
 export default function ProjectsView({ navigate }: { navigate: (r: Route) => void }) {
-  const [cards, setCards] = useState<ProjectCardData[] | null>(null);
+  const [cards, setCards] = useState<ProjectCardData[] | null>(cachedProjectCards);
   const [listError, setListError] = useState("");
   const [query, setQuery] = useViewState("projects.query", "");
   const [filter, setFilter] = useViewState<FilterKey>("projects.filter", "all");
@@ -60,6 +66,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
     api
       .listProjectCards()
       .then((cs) => {
+        cachedProjectCards = cs;
         setCards(cs);
         setListError("");
       })
@@ -186,7 +193,13 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
 
       </div>
 
-      {list === null && listError === "" && <div className="muted">加载中…</div>}
+      {list === null && listError === "" && (
+        <div className="board-grid" role="status">
+          <div className="skeleton card" style={{ minHeight: 140 }} />
+          <div className="skeleton card" style={{ minHeight: 140 }} />
+          <div className="skeleton card" style={{ minHeight: 140 }} />
+        </div>
+      )}
       {listError !== "" && (
         <div className="card hairline" style={{ padding: 14 }}>
           <div className="small" style={{ color: "var(--danger)" }}>{listError}</div>
@@ -237,7 +250,7 @@ function ProjectCard({ card, navigate }: {
       <div className="project-card-path">
         {card.representative_paths.slice(0, 1).map((p) => (
           <div key={p} className="small" style={{ marginBottom: 2 }}>
-            <PathText path={p} />
+            <PathText path={p} interactive={false} />
           </div>
         ))}
         {restPaths > 0 && <div className="muted small">另有 {restPaths} 个目录</div>}

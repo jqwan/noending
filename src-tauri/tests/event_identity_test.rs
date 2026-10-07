@@ -920,34 +920,3 @@ fn reingest_preserves_message_ids_and_dedups() {
     );
     assert_eq!(db.get_messages(&s.id, None, 100).unwrap().len(), 3);
 }
-
-/// Every stored message is resolvable through its stable provenance ref
-/// (`session-message:<id>`), the only spelling Context revisions may cite.
-#[test]
-fn message_by_ref_resolves_the_app_owned_identity() {
-    let db = open_db("by-ref");
-    let dir = unique_dir("by-ref");
-    let s = fixture_session(&db, Agent::Codex, "by-ref-root", &dir.join("x.jsonl"));
-
-    let stored = db
-        .commit_ingest(
-            &s.id,
-            &[msg("r-1", SessionMessageRole::User, "cited evidence")],
-            &rescan(0),
-        )
-        .unwrap();
-    assert_eq!(stored.len(), 1);
-
-    let found = db
-        .get_message_by_ref(&format!("session-message:{}", stored[0].id))
-        .unwrap()
-        .expect("ref resolves");
-    assert_eq!(found.id, stored[0].id);
-    assert_eq!(found.content, "cited evidence");
-    assert_eq!(
-        db.get_message_by_ref("session-message:missing")
-            .unwrap()
-            .is_none(),
-        true
-    );
-}

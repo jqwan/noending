@@ -31,17 +31,25 @@ use crate::domain::{Session, SourceAvailability};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-/// A Session's display title: the first of the three sources that has one — the
-/// root's native title, the first real user text, the first visible assistant
-/// text. Child / side members can never rename a Logical Session because they
-/// never reach this function, and the rule lives here and only here: adapters
-/// report the three sources, they do not decide between them.
-pub fn session_title(d: &DiscoveredMember) -> Option<String> {
-    d.native_title
+/// A Session's display title, in two tiers: the root's NATIVE title (the Agent
+/// app's own name — it may appear or be renamed as the conversation moves on,
+/// so each ingest writes it through) and a text-derived FALLBACK (the first
+/// real user text, then the first visible assistant text — fixed at the
+/// conversation's beginning, so it only ever fills an EMPTY slot). Child /
+/// side members can never rename a Logical Session because they never reach
+/// this function, and the split lives here and only here: adapters report the
+/// sources, they do not decide between them.
+pub fn session_title_sources(d: &DiscoveredMember) -> (Option<String>, Option<String>) {
+    let native = d
+        .native_title
         .as_deref()
-        .or(d.first_user_text.as_deref())
+        .and_then(crate::adapters::title_from_text);
+    let fallback = d
+        .first_user_text
+        .as_deref()
         .or(d.first_agent_text.as_deref())
-        .and_then(crate::adapters::title_from_text)
+        .and_then(crate::adapters::title_from_text);
+    (native, fallback)
 }
 
 /// Ensure the Logical Session row for a Root/ForkRoot discovery: create or refresh
@@ -56,7 +64,7 @@ fn ensure_logical_session(
     d: &DiscoveredMember,
     attacher: &dyn crate::workspace::WorkspaceAttaching,
 ) -> Result<(Session, bool)> {
-    let title = session_title(d);
+    let (native_title, fallback_title) = session_title_sources(d);
     let raw_path = d.source_path.to_string_lossy().to_string();
     let observed_cwd = d.cwd.as_deref().map(str::trim).filter(|p| !p.is_empty());
     let path_id =
@@ -65,7 +73,8 @@ fn ensure_logical_session(
     let (session_id, is_new) = db.upsert_logical_session(
         d.agent,
         &d.source_member_id,
-        title.as_deref(),
+        native_title.as_deref(),
+        fallback_title.as_deref(),
         d.cwd.as_deref(),
         path_id.as_deref(),
         None, // fork provenance is resolved separately, below

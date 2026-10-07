@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import AgentIcon from "../../components/AgentIcon";
 import WorkspacePathField from "../../components/WorkspacePathField";
-import { copyToClipboard, Modal, timeAgo } from "../../components/common";
+import { copyToClipboard, Modal, openPath, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import {
   type Agent, type AgentStatusEntry, type IngestSource, type IngestTaskStatus,
@@ -34,7 +34,7 @@ const SESSION_FORMATS: SessionFormat[] = [
   { id: "codex", label: "Codex", agent: "codex", methods: ["terminal", "desktop"] },
   { id: "claude_code", label: "Claude Code", agent: "claude_code", methods: ["terminal"] },
   { id: "pi", label: "Pi", agent: "pi", methods: ["terminal"] },
-  { id: "dsh", label: "dsh", agent: "dsh", methods: ["desktop"] },
+  { id: "dsh", label: "DSH", agent: "dsh", methods: ["desktop"] },
   { id: "qoder", label: "Qoder", agent: "qoder", methods: ["desktop"] },
   { id: "workbuddy", label: "WorkBuddy", agent: "workbuddy", methods: ["desktop"] },
   { id: "zcode", label: "ZCode", agent: "zcode", methods: ["desktop"] },
@@ -102,7 +102,7 @@ export default function SourcesView() {
     try {
       await api.setIngestSourceEnabled(src.id, enabled);
       reload();
-      if (enabled) setNotice("已启用。点这一行的「重新扫描」开始摄入。");
+      if (enabled) setNotice("已启用。点这一行的「增量同步」开始同步。");
     } catch (e) {
       setError(String(e));
     }
@@ -121,7 +121,7 @@ export default function SourcesView() {
             ? "全部来源本来就已启用。"
             : "全部来源本来就已停用。"
           : enabled
-            ? `已启用 ${changed} 个来源。点各行的「重新扫描」开始摄入。`
+            ? `已启用 ${changed} 个来源。点各行的「增量同步」开始同步。`
             : `已停用 ${changed} 个来源。`
       );
     } catch (e) {
@@ -138,7 +138,7 @@ export default function SourcesView() {
       await api.addIngestSource(fmt.agent, p);
       setDrafts((d) => ({ ...d, [fmt.id]: "" }));
       setAddOpenFor(null);
-      setNotice("已添加并启用。点这一行的「重新扫描」开始摄入。");
+      setNotice("已添加并启用。点这一行的「增量同步」开始同步。");
       reload();
     } catch (e) {
       setError(String(e));
@@ -164,7 +164,7 @@ export default function SourcesView() {
       if (action === "scan") await api.reconcileSource(src.id);
       else await api.reingestSource(src.id);
       setQueued(true);
-      setNotice(action === "scan" ? "已排队：正在重新扫描这个来源。" : "已排队：正在重新入库这个来源。");
+      setNotice(action === "scan" ? "已排队：正在增量同步这个来源。" : "已排队：正在全量同步这个来源。");
     } catch (e) {
       setError(String(e));
     }
@@ -181,7 +181,7 @@ export default function SourcesView() {
     try {
       await api.reconcileAll();
       setQueued(true);
-      setNotice("已排队：正在重新扫描全部已启用来源。");
+      setNotice("已排队：正在同步全部已启用来源。");
     } catch (e) {
       setError(String(e));
     }
@@ -207,7 +207,7 @@ export default function SourcesView() {
   return (
     <div>
       <p className="muted small" style={{ marginTop: 0 }}>
-        仅扫描已启用的目录。这些按钮是高级维护入口，普通使用不需要它们。
+        仅同步已启用的目录。这些按钮是高级维护入口，普通使用不需要它们。
       </p>
 
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}>
@@ -230,7 +230,7 @@ export default function SourcesView() {
         {/* 按钮名不随排队状态改：名字是动作，状态由旁边的徽标说。 */}
         <button className="btn primary" disabled={queued} onClick={scanAll}
           title="只读取新增内容：从每个会话上次停下的位置继续">
-          重新扫描全部来源
+          增量同步全部来源
         </button>
         {queued && <span className="badge accent">已排队，后台处理中…</span>}
         <span className="muted small">
@@ -285,11 +285,11 @@ export default function SourcesView() {
                   <div className="row" style={{ gap: 8, flex: "none" }}>
                     <button className="btn small" disabled={queued} onClick={() => queue(src, "scan")}
                       title="只读取新增内容：从每个会话上次停下的位置继续">
-                      重新扫描
+                      增量同步
                     </button>
                     <button className="btn small ghost" disabled={queued} onClick={() => setReingestTarget(src)}
-                      title="从头重扫这个来源的全部文件；已摄入的事件及其引用保持不变">
-                      重新入库
+                      title="从头重新同步这个来源的全部文件；已同步的事件及其引用保持不变">
+                      全量同步
                     </button>
                     {src.origin === "user" && (
                       <button className="btn small ghost" disabled={queued} onClick={() => remove(src)}>
@@ -299,7 +299,22 @@ export default function SourcesView() {
                   </div>
                 </div>
                 <div className="row" style={{ gap: 8, alignItems: "baseline", marginTop: 4 }}>
-                  <span className="mono small" style={{ minWidth: 0, overflowWrap: "anywhere", userSelect: "all" }}>{src.path}</span>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    className="mono small path-link"
+                    style={{ minWidth: 0, overflowWrap: "anywhere", userSelect: "all" }}
+                    title={`${src.path} · 点击在文件管理器中打开`}
+                    onClick={() => void openPath(src.path)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void openPath(src.path);
+                      }
+                    }}
+                  >
+                    {src.path}
+                  </span>
                   <button className="link" style={{ flex: "none" }} onClick={() => copyPath(src.path)}>复制</button>
                 </div>
               </div>
@@ -341,15 +356,15 @@ export default function SourcesView() {
       })}
 
       {reingestTarget && (
-        <Modal title="重新入库" onClose={() => setReingestTarget(null)}>
+        <Modal title="全量同步" onClose={() => setReingestTarget(null)}>
           <p className="small" style={{ marginTop: 0 }}>
-            将从头重扫 <span className="mono">{reingestTarget.path}</span> 的全部会话文件。
-            已摄入的事件及其引用保持不变，只有真正新增或变化的内容会被追加；会话归属、
+            将从头重新同步 <span className="mono">{reingestTarget.path}</span> 的全部会话文件。
+            已同步的事件及其引用保持不变，只有真正新增或变化的内容会被追加；会话归属、
             Context 条目与审计历史都保留。
           </p>
           <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
             <button className="btn" onClick={() => setReingestTarget(null)}>取消</button>
-            <button className="btn primary" onClick={confirmReingest}>重新入库</button>
+            <button className="btn primary" onClick={confirmReingest}>全量同步</button>
           </div>
         </Modal>
       )}
@@ -366,7 +381,7 @@ function OpenMethodControl({ fmt, entry, onChoose }: {
 }) {
   const current = entry?.resume_open_method ?? "terminal";
   const label = (m: OpenMethod) =>
-    m === "terminal" ? "TUI / CLI" : entry?.desktop_app ? `桌面端（${entry.desktop_app}）` : "桌面端";
+    m === "terminal" ? "TUI" : entry?.desktop_app ? `桌面端（${entry.desktop_app}）` : "桌面端";
   // 在场未知（状态没回来）时不当作缺席。
   const desktopAbsent = entry != null && !entry.desktop_app_present;
 
@@ -400,16 +415,16 @@ function OpenMethodControl({ fmt, entry, onChoose }: {
 /** 作用域的中文说明。单个来源时报出它的路径——scope 里那个 id 对人没有意义，
  *  只说「单个来源」等于没说清刚扫的是哪一个。 */
 function scopeLabel(scope: string, sources: IngestSource[]): string {
-  if (scope === "reconcile_all") return "重新扫描全部来源";
+  if (scope === "reconcile_all") return "同步全部来源";
   const path = (prefix: string) =>
     sources.find((s) => scope === `${prefix}${s.id}`)?.path;
-  if (scope.startsWith("reconcile_source:")) return `重新扫描 ${path("reconcile_source:") ?? "单个来源"}`;
-  if (scope.startsWith("reingest_source:")) return `重新入库 ${path("reingest_source:") ?? "单个来源"}`;
-  if (scope.startsWith("refresh_session:")) return "刷新单个会话";
+  if (scope.startsWith("reconcile_source:")) return `同步 ${path("reconcile_source:") ?? "单个来源"}`;
+  if (scope.startsWith("reingest_source:")) return `全量同步 ${path("reingest_source:") ?? "单个来源"}`;
+  if (scope.startsWith("refresh_session:")) return "同步单个会话";
   return scope;
 }
 
-/** 最近一次后台摄入。一行事实就画一行——不套卡片、不占一个区块；没有记录时什么都不画。 */
+/** 最近一次后台同步。一行事实就画一行——不套卡片、不占一个区块；没有记录时什么都不画。 */
 function IngestionStatus({ status, sources }: {
   status: IngestTaskStatus | null;
   sources: IngestSource[];
@@ -418,7 +433,7 @@ function IngestionStatus({ status, sources }: {
   return (
     <>
       <div className="muted small" style={{ marginBottom: 14 }}>
-        最近一次摄入：{scopeLabel(status.scope, sources)} · 发现 {status.discovered} 个会话 · 写入 {status.messages} 条新消息
+        最近一次同步：{scopeLabel(status.scope, sources)} · 发现 {status.discovered} 个会话 · 写入 {status.messages} 条新消息
         {status.finished_at ? <span> · {timeAgo(status.finished_at)}</span> : null}
       </div>
       {status.error && (

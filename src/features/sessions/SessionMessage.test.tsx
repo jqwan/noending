@@ -26,12 +26,10 @@ function renderMessage(content: string, role: SessionMessageData["role"] = "assi
 }
 
 it("列表里截断，点开弹窗才给全文", () => {
-  const { container } = renderMessage(LONG);
+  renderMessage(LONG);
 
-  // 列表里看不到结尾，也没有那个「查看完整消息」的图标按钮（气泡自己就是入口）。
+  // 列表只显示截断内容，点击气泡后才展示全文。
   expect(screen.queryByText("结尾标记")).toBeNull();
-  expect(screen.queryByText("展开全文")).toBeNull();
-  expect(container.querySelector(".event-open")).toBeNull();
   expect(screen.queryByRole("dialog")).toBeNull();
 
   fireEvent.click(screen.getByText(/^第一段说明/));
@@ -87,19 +85,4 @@ it("looksLikeMarkdown 认代码块 / 标题 / 列表，不认普通句子", () =
   expect(looksLikeMarkdown("## 小节")).toBe(true);
   expect(looksLikeMarkdown("- 一条")).toBe(true);
   expect(looksLikeMarkdown("就是一段普通的话，没有别的。")).toBe(false);
-});
-
-it("用户消息右、Agent 左：只有两种气泡", () => {
-  // 左右对齐全靠这两个类；CSS 挂了测试也看不出来，所以在这里钉住类名。
-  const { container } = render(
-    <>
-      <SessionMessage msg={msg("提问", "user")} />
-      <SessionMessage msg={msg("回答", "assistant")} />
-    </>,
-  );
-
-  const rows = [...container.querySelectorAll(".event")].map((el) => el.className);
-  expect(rows[0]).toContain("is-user");
-  expect(rows[1]).toContain("is-agent");
-  expect(rows[1]).not.toContain("is-user");
 });

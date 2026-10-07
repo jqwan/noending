@@ -4,7 +4,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import Icon from "../../components/Icon";
-import { Modal, timeAgo } from "../../components/common";
+import { Modal, openPath, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import WorkstreamCard, { cardSearchFields, searchFieldHint } from "./WorkstreamCard";
 import WorkstreamFormModal from "./WorkstreamFormModal";
@@ -248,7 +248,13 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           </div>
 
           {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
-          {list === null && !loadError && <div className="muted" role="status">加载中…</div>}
+          {list === null && !loadError && (
+            <div className="ws-grid board-grid" role="status">
+              <div className="skeleton card" style={{ minHeight: 140 }} />
+              <div className="skeleton card" style={{ minHeight: 140 }} />
+              <div className="skeleton card" style={{ minHeight: 140 }} />
+            </div>
+          )}
           {list !== null && list.length === 0 && (
             <EmptyState
               title={
@@ -288,7 +294,13 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             归属与 Context 都原样保留；打开任务详情后可以恢复或永久删除。
           </div>
           {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
-          {list === null && !loadError && <div className="muted" role="status">加载中…</div>}
+          {list === null && !loadError && (
+            <div className="ws-grid board-grid" role="status">
+              <div className="skeleton card" style={{ minHeight: 140 }} />
+              <div className="skeleton card" style={{ minHeight: 140 }} />
+              <div className="skeleton card" style={{ minHeight: 140 }} />
+            </div>
+          )}
           {list !== null && list.length === 0 && (
             <EmptyState
               title="回收站是空的。"
@@ -396,7 +408,29 @@ function TrashWorkstreamTable({ tasks, onOpen, onRestore, onPurge, busyId }: {
             <td title={task.project_name ?? undefined}>{task.project_name ?? "未归属项目"}</td>
             <td>{task.session_count}</td>
             <td className={task.primary_path ? "mono" : "muted"} title={task.primary_path ?? undefined}>
-              {task.primary_path ?? "未设置"}
+              {task.primary_path ? (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="path-link"
+                  title={`${task.primary_path} · 点击在文件管理器中打开`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void openPath(task.primary_path!);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void openPath(task.primary_path!);
+                    }
+                  }}
+                >
+                  {task.primary_path}
+                </span>
+              ) : (
+                "未设置"
+              )}
             </td>
             <td>{timeAgo(task.updated_at)}</td>
             <td onClick={(e) => e.stopPropagation()}>

@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import {
-  AgentRow,
-  CwdRow,
-} from "../launcher/LaunchPreviewRows";
-import type { Agent, PreparedLaunch, WorkstreamCardData } from "../../types";
+  AGENT_LABELS,
+  type Agent,
+  type AgentStatusEntry,
+  type PreparedLaunch,
+  type RecentWorkspacePath,
+  type WorkstreamCardData,
+  type WorkstreamPathRow,
+} from "../../types";
 
 /**
  * 全局新建 Session。启动路径唯一：`prepareNewSession → launchPrepared`。Modal 一打开
@@ -22,9 +27,14 @@ export type NewSessionModalProps = {
   onClose: () => void;
   /** 预置选中的所属任务；省略或 "none" = standalone。 */
   workstreamId?: string | null;
+  /** 预置选中的 Agent；若指定则优先使用。未指定时读取全局默认或首个可用 CLI Agent。单次指定绝不修改全局设置。 */
+  agent?: Agent | null;
 };
 
 const STANDALONE = "none";
+
+/** 支持终端 CLI 启动的 Agent 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI Agent 不在此列） */
+const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
 
 /** 下拉选项里路径的紧凑形态：末段才是识别信息，整条路径留给 title。 */
 function pathTail(path: string): string {
@@ -41,13 +51,24 @@ function workstreamLabel(w: WorkstreamCardData): string {
 export default function NewSessionModal({
   onClose,
   workstreamId,
+  agent: initialAgent,
 }: NewSessionModalProps) {
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [ownerWorkstreamId, setOwnerWorkstreamId] = useState(
     workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
   );
-  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
-  const [agentResolved, setAgentResolved] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<Agent>(() => {
+    if (initialAgent && CLI_AGENTS.includes(initialAgent)) {
+      return initialAgent;
+    }
+    return "codex";
+  });
+  const [defaultWorkspace, setDefaultWorkspace] = useState<string>("");
+  const [recentPaths, setRecentPaths] = useState<RecentWorkspacePath[]>([]);
+  const [taskPaths, setTaskPaths] = useState<WorkstreamPathRow[]>([]);
+  const [selectedCwd, setSelectedCwd] = useState<string>("");
+  const [customPaths, setCustomPaths] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -57,26 +78,181 @@ export default function NewSessionModal({
         setWorkstreams(ws.filter((w) => w.visibility === "normal"))
       )
       .catch(console.error);
+
     api
-      .getDefaultAgent()
-      .then(setDefaultAgent)
-      .catch(console.error)
-      .finally(() => setAgentResolved(true));
+      .getAgentStatus()
+      .then(setAgentStatus)
+      .catch(console.error);
+
+    if (!initialAgent) {
+      api
+        .getDefaultAgent()
+        .then((def) => {
+          if (def && CLI_AGENTS.includes(def)) {
+            setSelectedAgent(def);
+          }
+        })
+        .catch(console.error);
+    }
+  }, [initialAgent]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getWorkspaceSettings?.()
+      ?.then((s) => {
+        if (!cancelled && s?.default_workspace) {
+          setDefaultWorkspace(s.default_workspace);
+        }
+      })
+      ?.catch(console.error);
+
+    api
+      .listRecentWorkspacePaths?.()
+      ?.then((rows) => {
+        if (!cancelled && rows) {
+          setRecentPaths(rows);
+        }
+      })
+      ?.catch(console.error);
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
+  useEffect(() => {
+    if (ownerWorkstreamId === STANDALONE) {
+      setTaskPaths([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listWorkstreamPaths?.(ownerWorkstreamId)
+      ?.then((rows) => {
+        if (!cancelled && rows) {
+          setTaskPaths(rows);
+        }
+      })
+      ?.catch(console.error);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ownerWorkstreamId]);
+
+  const cliAgents = agentStatus
+    ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
+        (a) => agentStatus[a]?.terminal_cli
+      )
+    : CLI_AGENTS;
+
+  const isTask = ownerWorkstreamId !== STANDALONE;
+
+  // 默认工作目录：
+  // 1. 若来自任务：如果有工作路径，默认为主目录（第 0 条）；若无目录，默认为 NoEnding 默认工作区
+  // 2. 若直接开始（无任务）：默认为 NoEnding 默认工作区
+  const defaultCwd = useMemo(() => {
+    if (isTask) {
+      if (taskPaths.length > 0) {
+        return taskPaths[0].canonical_path;
+      }
+      return defaultWorkspace;
+    }
+    return defaultWorkspace;
+  }, [isTask, taskPaths, defaultWorkspace]);
+
+  // 可选工作目录列表：
+  // 1. 若来自任务：为当前任务下的工作目录列表，没有目录时为 NoEnding 默认工作区
+  // 2. 若无任务：从已有工作目录进行选择（NoEnding 默认工作区置顶，配合最近/已知目录）
+  const cwdOptions = useMemo<{ value: string; label: string }[]>(() => {
+    if (isTask) {
+      if (taskPaths.length > 0) {
+        return taskPaths.map((p, idx) => ({
+          value: p.canonical_path,
+          label: idx === 0 ? `${p.canonical_path} (主目录)` : p.canonical_path,
+        }));
+      }
+      if (defaultWorkspace) {
+        return [
+          {
+            value: defaultWorkspace,
+            label: `${defaultWorkspace} (NoEnding 默认工作区)`,
+          },
+        ];
+      }
+      return [];
+    }
+
+    const opts: { value: string; label: string }[] = [];
+    if (defaultWorkspace) {
+      opts.push({
+        value: defaultWorkspace,
+        label: `${defaultWorkspace} (NoEnding 默认工作区)`,
+      });
+    }
+    for (const p of customPaths) {
+      if (p !== defaultWorkspace && !opts.some((o) => o.value === p)) {
+        opts.push({ value: p, label: p });
+      }
+    }
+    for (const r of recentPaths) {
+      if (r.path && r.path !== defaultWorkspace && !opts.some((o) => o.value === r.path)) {
+        opts.push({
+          value: r.path,
+          label: r.project_name ? `${r.path} (${r.project_name})` : r.path,
+        });
+      }
+    }
+    return opts;
+  }, [isTask, taskPaths, defaultWorkspace, customPaths, recentPaths]);
+
+  const effectiveCwd =
+    selectedCwd && cwdOptions.some((o) => o.value === selectedCwd)
+      ? selectedCwd
+      : defaultCwd;
+
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
-    if (!defaultAgent) return null;
-    return api.prepareNewSession(
-      defaultAgent,
-      ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId,
-    );
-  }, [defaultAgent, ownerWorkstreamId]);
+    if (!selectedAgent) return null;
+    const isExplicit = Boolean(selectedCwd && selectedCwd !== defaultCwd);
+    const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
+    if (isExplicit) {
+      return api.prepareNewSession(selectedAgent, ownerId, selectedCwd);
+    }
+    return api.prepareNewSession(selectedAgent, ownerId);
+  }, [selectedAgent, ownerWorkstreamId, selectedCwd, defaultCwd]);
+
   const { prepared, preparedRef, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
 
   const handleWsChange = (next: string) => {
     releasePrepared();
     setOwnerWorkstreamId(next);
+    setSelectedCwd("");
+  };
+
+  const handleAgentChange = (next: Agent) => {
+    releasePrepared();
+    setSelectedAgent(next);
+  };
+
+  const handleCwdChange = async (val: string) => {
+    if (val === "__BROWSE__") {
+      try {
+        const picked = await open({ directory: true, multiple: false, title: "选择工作目录" });
+        if (typeof picked === "string" && picked.trim() !== "") {
+          const trimmed = picked.trim();
+          setCustomPaths((prev) => [trimmed, ...prev.filter((p) => p !== trimmed)]);
+          releasePrepared();
+          setSelectedCwd(trimmed);
+        }
+      } catch (e) {
+        console.error("浏览目录失败:", e);
+      }
+      return;
+    }
+    releasePrepared();
+    setSelectedCwd(val);
   };
 
   const handleClose = () => {
@@ -122,22 +298,50 @@ export default function NewSessionModal({
         </select>
       </label>
 
-      {defaultAgent ? (
-        <AgentRow agent={defaultAgent} hint="默认 Agent" first />
-      ) : (
-        <div className="row-line" style={{ borderTop: 0 }}>
-          <div>
-            <div className="settings-row-label">Agent</div>
-            <div className="settings-row-hint">
-              {agentResolved
-                ? "未检测到可用的 Agent CLI — 请先到「设置 → Agent」配置"
-                : "加载中…"}
-            </div>
-          </div>
-          <span className="badge">{agentResolved ? "未检测" : "—"}</span>
+      <label className="field">
+        <span>Agent</span>
+        <select
+          value={selectedAgent}
+          onChange={(e) => handleAgentChange(e.target.value as Agent)}
+          disabled={busy}
+        >
+          {cliAgents.map((a) => (
+            <option key={a} value={a}>
+              {AGENT_LABELS[a]}
+              {agentStatus && !agentStatus[a]?.detected ? " (未检测到 TUI)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="field">
+        <span>工作目录</span>
+        <select
+          value={effectiveCwd}
+          onChange={(e) => void handleCwdChange(e.target.value)}
+          disabled={busy}
+        >
+          {cwdOptions.length === 0 && (
+            <option value="">{preparing ? "正在准备工作目录…" : "未设置工作目录"}</option>
+          )}
+          {cwdOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+          {!isTask && <option value="__BROWSE__">浏览其他目录…</option>}
+        </select>
+      </label>
+
+
+      {prepared?.cwd_resolution?.fallback ? (
+        <div
+          className="settings-row-hint"
+          style={{ color: "var(--warning)", marginTop: -4, marginBottom: 8 }}
+        >
+          {prepared.cwd_resolution.note || "本次没有从这条流程通常的目录启动"}
         </div>
-      )}
-      <CwdRow cwd={prepared?.cwd} pending={preparing} resolution={prepared?.cwd_resolution} />
+      ) : null}
 
       {error && (
         <div
@@ -166,7 +370,7 @@ export default function NewSessionModal({
         </button>
         <button
           className="btn primary"
-          disabled={busy || preparing || !defaultAgent || !prepared}
+          disabled={busy || preparing || !selectedAgent || !prepared}
           onClick={start}
         >
           {busy ? "启动中…" : preparing ? "准备中…" : "启动"}

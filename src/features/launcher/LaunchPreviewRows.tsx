@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import AgentIcon from "../../components/AgentIcon";
+import { openPath } from "../../components/common";
 import {
   AGENT_LABELS,
   type Agent,
@@ -96,9 +97,28 @@ export function CwdRow({
   return (
     <>
       <PreviewRow label="工作目录" hint={hint}>
-        <span className="badge" style={{ maxWidth: 240, overflowWrap: "anywhere" }}>
-          {pending && !cwd ? "—" : cwd || "未指定"}
-        </span>
+        {pending && !cwd ? (
+          <span className="badge" style={{ maxWidth: 240, overflowWrap: "anywhere" }}>—</span>
+        ) : cwd ? (
+          <span
+            role="button"
+            tabIndex={0}
+            className="badge path-link"
+            style={{ maxWidth: 240, overflowWrap: "anywhere" }}
+            title={`${cwd} · 点击在文件管理器中打开`}
+            onClick={() => void openPath(cwd)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                void openPath(cwd);
+              }
+            }}
+          >
+            {cwd}
+          </span>
+        ) : (
+          <span className="badge" style={{ maxWidth: 240, overflowWrap: "anywhere" }}>未指定</span>
+        )}
       </PreviewRow>
       {resolution?.fallback && (
         <div

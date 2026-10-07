@@ -1160,6 +1160,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 "antigravity_ide_conversation",
                 &db_path.to_string_lossy(),
                 &serde_json::json!({}),

@@ -3,8 +3,7 @@ import { api } from "../../api";
 import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Agent, type AgentRuntimeSettings } from "../../types";
 
-/** 设置 → Agent → TUI/CLI 的一块：安装状态。模型 / 思考强度不再提供 override，
- *  一律沿用 Agent 默认值——NoEnding 不替用户做这类选择。 */
+/** @deprecated 设置项已简化，Agent 运行时检测已统一迁移至侧边栏 features/agents/AgentsView。保留此模块仅作向下兼容。 */
 export default function AgentRuntimeRow({ agent }: { agent: Agent }) {
   const [st, setSt] = useState<AgentRuntimeSettings | null>(null);
 

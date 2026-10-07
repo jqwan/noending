@@ -35,6 +35,19 @@ import SinceLastReview from "./SinceLastReview";
  * v0.2 边界：工作目录是有序 WorkstreamPath 列表；Project 是只读投影（取第 1 条路径）；
  * 归档 / 恢复 / 永久删除是三个单向命令，不是一枚翻转开关。
  */
+export const workstreamDetailCache = new Map<
+  string,
+  {
+    ctx: WorkstreamContextData;
+    ctxState: WorkstreamContextView | null;
+    paths: WorkstreamPathRow[] | null;
+  }
+>();
+
+export function clearWorkstreamDetailCache() {
+  workstreamDetailCache.clear();
+}
+
 export default function WorkstreamDetailView({
   workstreamId,
   entry,
@@ -46,14 +59,15 @@ export default function WorkstreamDetailView({
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
 }) {
+  const cached = workstreamDetailCache.get(workstreamId);
   const [loadError, setLoadError] = useState("");
   const [retry, setRetry] = useState(0);
-  const [ctx, setCtx] = useState<WorkstreamContextData | null>(null);
+  const [ctx, setCtx] = useState<WorkstreamContextData | null>(() => cached?.ctx ?? null);
   /** Context 状态（只读）：当前投影 + revision + 待更新。 */
-  const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(null);
+  const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
   const [ctxUpdating, setCtxUpdating] = useState(false);
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
-  const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(null);
+  const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(() => cached?.paths ?? null);
   const [pathsError, setPathsError] = useState("");
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -86,27 +100,53 @@ export default function WorkstreamDetailView({
 
   useEffect(() => {
     let cancelled = false;
-    // 换 Workstream 时先清空手里的投影：本页写操作都以 workstreamId 为准，留着上一条的
-    // 路径列表会让用户在错的列表上按按钮。宁可闪一下「加载中…」，也不拿旧数据当现状。
-    setCtx(null);
+    const currentCached = workstreamDetailCache.get(workstreamId);
+    if (currentCached) {
+      setCtx(currentCached.ctx);
+      setCtxState(currentCached.ctxState);
+      setPaths(currentCached.paths);
+    } else {
+      setCtx(null);
+      setCtxState(null);
+      setPaths(null);
+    }
     setLoadError("");
-    setCtxState(null);
     setCtxUpdateError(null);
-    setPaths(null);
     setPathsError("");
     setMenuOpen(false);
     setEditing(false);
     setConfirmTrash(false);
     setConfirmPurge(false);
     setActionError("");
+
     api.getWorkstreamContext(workstreamId).then((c) => {
-      if (!cancelled) setCtx(c);
+      if (cancelled) return;
+      setCtx(c);
+      const prev = workstreamDetailCache.get(workstreamId);
+      workstreamDetailCache.set(workstreamId, {
+        ctx: c,
+        ctxState: prev?.ctxState ?? null,
+        paths: prev?.paths ?? null,
+      });
     }).catch(e => { if (!cancelled) setLoadError(String(e)); });
+
     api.getWorkstreamContextState(workstreamId).then((s) => {
-      if (!cancelled) setCtxState(s);
+      if (cancelled) return;
+      setCtxState(s);
+      const prev = workstreamDetailCache.get(workstreamId);
+      if (prev) {
+        workstreamDetailCache.set(workstreamId, { ...prev, ctxState: s });
+      }
     }).catch(e => { if (!cancelled) setCtxUpdateError(contextUpdateErrorDetails(e)); });
+
     api.listWorkstreamPaths(workstreamId).then((rows) => {
-      if (!cancelled) { setPaths(rows); setPathsError(""); }
+      if (cancelled) return;
+      setPaths(rows);
+      setPathsError("");
+      const prev = workstreamDetailCache.get(workstreamId);
+      if (prev) {
+        workstreamDetailCache.set(workstreamId, { ...prev, paths: rows });
+      }
     }).catch((e) => {
       if (!cancelled) { setPaths(null); setPathsError(`读取工作目录失败：${String(e)}`); }
     });
@@ -118,12 +158,34 @@ export default function WorkstreamDetailView({
   // Background refresh only re-reads the projection; the intelligence panels own
   // their own (frozen-window) refresh so this page never touches ReviewState.
   const refresh = useCallback(() => {
-    api.getWorkstreamContext(workstreamId).then(setCtx).catch(console.error);
-    api.getWorkstreamContextState(workstreamId).then(setCtxState).catch(console.error);
+    api.getWorkstreamContext(workstreamId).then((c) => {
+      setCtx(c);
+      const prev = workstreamDetailCache.get(workstreamId);
+      workstreamDetailCache.set(workstreamId, {
+        ctx: c,
+        ctxState: prev?.ctxState ?? null,
+        paths: prev?.paths ?? null,
+      });
+    }).catch(console.error);
+
+    api.getWorkstreamContextState(workstreamId).then((s) => {
+      setCtxState(s);
+      const prev = workstreamDetailCache.get(workstreamId);
+      if (prev) {
+        workstreamDetailCache.set(workstreamId, { ...prev, ctxState: s });
+      }
+    }).catch(console.error);
+
     api.listWorkstreamPaths(workstreamId).then((rows) => {
-      setPaths(rows); setPathsError("");
+      setPaths(rows);
+      setPathsError("");
+      const prev = workstreamDetailCache.get(workstreamId);
+      if (prev) {
+        workstreamDetailCache.set(workstreamId, { ...prev, paths: rows });
+      }
     }).catch((e) => {
-      setPaths(null); setPathsError(`读取工作目录失败：${String(e)}`);
+      setPaths(null);
+      setPathsError(`读取工作目录失败：${String(e)}`);
     });
   }, [workstreamId]);
 
@@ -165,17 +227,23 @@ export default function WorkstreamDetailView({
   };
 
   // 同 SessionDetailView：加载态也要渲染 PageHeader，否则整条标题栏会先消失再补回来。
-  // 标题承担"是什么状态"，正文只放具体的错误详情，不再重复一遍状态名。
   if (!ctx) {
+    if (loadError === "") {
+      return (
+        <div className="main task-detail" role="status">
+          <PageHeader title={<span className="skeleton" style={{ display: "inline-block", width: 180, height: 24, borderRadius: "var(--radius-sm)" }} />} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
+            <div className="skeleton" style={{ height: 120, borderRadius: "var(--radius-lg)" }} />
+            <div className="skeleton" style={{ height: 200, borderRadius: "var(--radius-lg)" }} />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="main narrow" role="status">
-        <PageHeader title={loadError !== "" ? "读取任务失败" : "加载中…"}>
-          {loadError !== "" && (
-            <>
-              <p>{loadError}</p>
-              <button className="btn" onClick={() => setRetry(value => value + 1)}>重试</button>
-            </>
-          )}
+        <PageHeader title="读取任务失败">
+          <p>{loadError}</p>
+          <button className="btn" onClick={() => setRetry(value => value + 1)}>重试</button>
         </PageHeader>
       </div>
     );
@@ -184,7 +252,16 @@ export default function WorkstreamDetailView({
 
   /** 一条命令返回新 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
    *  留着旧的 lifecycle / visibility，下一次整对象保存会被后端拒绝。 */
-  const adopt = (next: Workstream) => setCtx((c) => (c ? { ...c, workstream: next } : c));
+  const adopt = (next: Workstream) => setCtx((c) => {
+    const nextCtx = c ? { ...c, workstream: next } : c;
+    if (nextCtx) {
+      const prev = workstreamDetailCache.get(workstreamId);
+      if (prev) {
+        workstreamDetailCache.set(workstreamId, { ...prev, ctx: nextCtx });
+      }
+    }
+    return nextCtx;
+  });
 
   /** lifecycle 只是分类，无行为差异，随时可切；它不碰路径、会话归属、visibility 或 Context。 */
   const setLifecycle = async (next: WorkstreamLifecycle) => {
@@ -258,6 +335,7 @@ export default function WorkstreamDetailView({
     setActionError("");
     try {
       await api.deleteWorkstreamPermanently(workstream.id);
+      workstreamDetailCache.delete(workstream.id);
       goBack({ view: "workstreams" });
     } catch (e) {
       console.error(e);
