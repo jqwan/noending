@@ -191,23 +191,27 @@ export default function SessionTerminalView({
       // 按内容路由：非空文本 → 打字语义交付；图片 → 落盘为 PNG、路径按打字
       // 交付。不走 webview 的 paste 事件——WKWebView 对图片内容会把它派发
       // 两次且 flavor 不一致，事件层怎么防重都会有半份从另一条路漏出去。
-      // 中文 IME 的 WKWebView 兼容层。xterm 对 keyCode 229（IME 已接管）的
-      // keydown 走「preventDefault + textarea 差分轮询」交付，WebKit 在首次
-      // 直提交标点（？》"等）时插入与事件的先后顺序不保证：可能被
-      // preventDefault 取消、可能晚于轮询、可能晚于 keyup——顺序敏感的修法
-      // 都会漏。这里的交付与顺序无关：
-      //   1) 武装窗口由两类按键开启：229，和裸修饰键——首键直提交时 WebKit
-      //      只派发 Shift keydown，字符键的 keydown 整个被吞，229 要到第二键
-      //      才出现（IME 探针 A/B 实测），只认 229 第一个键必丢；修饰键自己
-      //      不产生可打印数据，空武装无害；
-      //   2) 「武装窗口 + 差分扣账」：武装时记 textarea 快照，窗口内 xterm
-      //      经 onData 发出的全部记账，交付时只发「差分 − xterm 已发」——
-      //      无论插入发生在 keydown/keyup/input/组合结束后的哪一步，
-      //      尾查都会把它交出去，且绝不与 xterm 的 keypress/finalize 双发。
+      // 中文 IME 的 WKWebView 兼容层。xterm 6 的 input 通路（_inputEvent）在
+      // _keyDownSeen 被 keyup 清零后会同步交付 ev.data，而 IME 直提交的事件
+      // 顺序 WebKit 不保证：首键只有裸修饰键 keydown（字符键被吞、229 第二键
+      // 才出现，探针 A/B 实测），按住修饰键连打时还会对同一次插入派发两次
+      // input——单通道、顺序敏感的修法都会漏或多发。这里的交付与顺序无关：
+      //   1) 武装窗口由 229 和裸修饰键的 keydown 开启（修饰键不产生可打印
+      //      数据，空武装无害）；
+      //   2) 武装窗口内的 insertText 在 .xterm 根元素的捕获层统一收口：就地
+      //      终结事件（xterm 的 input 通路退场，杜绝它的那份），载荷经差分
+      //      扣账交付——窗口内 xterm 经 onData 发过的全部记账，只发余额；
+      //      「载荷相同且 textarea 未再变化」视为同一次插入的重复派发，只交
+      //      第一份（基线只在 textarea 落上新内容时才推进，跨窗口仍有效）；
+      //   3) 组合中间态与窗口外输入一律放行：候选窗归 xterm finalize，emoji
+      //      面板等无 keydown 的输入走 xterm 原路径。
       let armed = false;
       let armValue = "";
       let xtermSent = "";
       let composing = false;
+      // 重复派发鉴别基线：上一次交付的载荷与其时的 textarea 值。
+      let lastPayload = "";
+      let lastPayloadValue: string | null = null;
       // 扣账交付：投入的文本先减去 xterm 在本窗口内已经发过的部分——
       // 无论这条文本来自 input 载荷还是 textarea 差分，都恰好交付一次。
       const deliverText = (text: string) => {
@@ -232,6 +236,12 @@ export default function SessionTerminalView({
         armed = true;
         armValue = term.textarea?.value ?? "";
         xtermSent = "";
+        // 鉴别基线只在 textarea 落上新内容时才推进：同载荷且值未变，跨窗口
+        // 仍视为重复派发（重复派发的两份之间可能隔着一个 229 keydown）。
+        if (term.textarea?.value !== lastPayloadValue) {
+          lastPayload = "";
+          lastPayloadValue = term.textarea?.value ?? null;
+        }
         setTimeout(deliver, 0);
         setTimeout(deliver, 120);
       };
@@ -246,17 +256,24 @@ export default function SessionTerminalView({
         setTimeout(deliver, 0);
         setTimeout(deliver, 120);
       });
-      term.textarea?.addEventListener("input", (e) => {
-        const ie = e as InputEvent;
-        if (ie.inputType === "insertCompositionText") return; // 候选窗中间态
-        if (armed && !composing && ie.inputType === "insertText" && ie.data) {
+      // input 的唯一收口（捕获层，先于 xterm 挂在 textarea 上的监听）。
+      term.element?.addEventListener(
+        "input",
+        (e) => {
+          const ie = e as InputEvent;
+          if (!armed || composing || ie.inputType !== "insertText" || !ie.data) return;
+          // 武装窗口内 xterm 的 input 通路退场：_keyDownSeen 已被上一键的
+          // keyup 清零时，它会对同一份 ev.data 再交付一次。
+          e.stopImmediatePropagation();
+          if (ie.data === lastPayload && term.textarea?.value === lastPayloadValue) return;
+          lastPayload = ie.data;
+          lastPayloadValue = term.textarea?.value ?? null;
           // input 载荷是权威文本：textarea 可能被随时清空，差分读不到，
           // 但载荷永远带着本次插入的内容（首键丢失的正是这一份）。
           deliverText(ie.data);
-          return;
-        }
-        setTimeout(deliver, 0);
-      });
+        },
+        true,
+      );
 
       term.attachCustomKeyEventHandler((e) => {
         if (e.type === "keyup") {

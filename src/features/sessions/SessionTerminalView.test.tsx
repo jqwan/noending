@@ -80,11 +80,13 @@ const { FakeTerminal } = vi.hoisted(() => {
       },
     };
     capturePasteHandler: ((e: unknown) => void) | null = null;
+    captureInputHandler: ((e: unknown) => void) | null = null;
     element: HTMLElement = (() => {
       const el = document.createElement("div");
       const original = el.addEventListener.bind(el);
       el.addEventListener = ((type: string, handler: EventListenerOrEventListenerObject, opts?: boolean | AddEventListenerOptions) => {
         if (type === "paste") FakeTerminal.last!.capturePasteHandler = handler as (e: unknown) => void;
+        if (type === "input") FakeTerminal.last!.captureInputHandler = handler as (e: unknown) => void;
         return original(type, handler, opts);
       }) as typeof el.addEventListener;
       return el;
@@ -316,7 +318,7 @@ it("IME direct-commit punctuation is delivered from the input payload", async ()
   // 首键插入——载荷是权威文本；即使 textarea 被清空/不落盘（WebKit 首次
   // 直提交的怪癖，差分永远读空），载荷路径也立即交付。
   term.keyHandler!({ type: "keyup", keyCode: 229 });
-  term.inputHandler!({ inputType: "insertText", data: "？" });
+  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
   expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？");
 });
 
@@ -332,11 +334,63 @@ it("first direct-commit arms on the bare Shift keydown (probe log sequence)", as
   expect(
     term.keyHandler!({ type: "keydown", keyCode: 16, key: "Shift", preventDefault: () => {} }),
   ).toBe(true);
-  term.inputHandler!({ inputType: "insertText", data: "？" });
+  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
   await tick();
   await tick();
   const delivered = vi.mocked(api.terminalInput).mock.calls.filter((c) => c[1] === "？");
   expect(delivered).toHaveLength(1);
+});
+
+it("armed input events die at capture so xterm's input path never fires", async () => {
+  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+
+  renderView();
+  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
+  const term = FakeTerminal.last!;
+  // _keyDownSeen 被上一键 keyup 清零后 xterm 的 _inputEvent 会同步交付同一份
+  // ev.data——武装窗口内必须在捕获层终结事件，杜绝它的那份。
+  const stopped = vi.fn();
+  term.keyHandler!({ type: "keydown", keyCode: 229, preventDefault: () => {} });
+  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: stopped });
+  expect(stopped).toHaveBeenCalledTimes(1);
+  // 窗口外放行：普通输入不经捕获终结（xterm 原路径负责）。
+  const untouched = vi.fn();
+  term.keyHandler!({ type: "keydown", keyCode: 65, preventDefault: () => {} });
+  term.captureInputHandler!({ inputType: "insertText", data: "a", stopImmediatePropagation: untouched });
+  expect(untouched).not.toHaveBeenCalled();
+});
+
+it("a re-dispatched identical payload for one insertion is delivered once", async () => {
+  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+
+  renderView();
+  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
+  const term = FakeTerminal.last!;
+  term.keyHandler!({ type: "keydown", keyCode: 229, preventDefault: () => {} });
+  // 第一次派发：插入落地（textarea 变为 "？"），交付一次。
+  term.textarea.value = "？";
+  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
+  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？");
+  // 按住修饰键连打时 WebKit 会对同一次插入重复派发：载荷相同且 textarea
+  // 未再变化 → 不再交付。
+  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
+  // 两份之间隔着 229 keydown 也不放行：值未落新内容，鉴别基线跨窗口保留。
+  term.keyHandler!({ type: "keydown", keyCode: 229, preventDefault: () => {} });
+  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
+  await tick();
+  await tick();
+  expect(
+    vi.mocked(api.terminalInput).mock.calls.filter((c) => c[1] === "？"),
+  ).toHaveLength(1);
+  // 落上新内容后的同载荷是下一次真实按键：正常交付。
+  term.textarea.value = "？？";
+  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
+  await tick();
+  expect(
+    vi.mocked(api.terminalInput).mock.calls.filter((c) => c[1] === "？"),
+  ).toHaveLength(2);
 });
 
 it("the diff shim deducts what xterm already delivered — no double send", async () => {
@@ -352,7 +406,7 @@ it("the diff shim deducts what xterm already delivered — no double send", asyn
   // 组合提交的字符 xterm 已经发过（onData 记账；经输入通道进 PTY 是合法路径）：
   term.dataHandler("你");
   term.textarea.value = "你";
-  term.inputHandler!({ inputType: "insertText", data: "你" });
+  term.captureInputHandler!({ inputType: "insertText", data: "你", stopImmediatePropagation: () => {} });
   await tick();
   await tick();
   // 差分层必须扣掉 xterm 已发的部分——「你」恰好交付一次，不能双发。
@@ -370,14 +424,14 @@ it("the diff shim ignores non-IME typing and mid-composition states", async () =
   // 普通按键（非 229）不武装：输入事件归 xterm 的 keypress 通路。
   term.keyHandler!({ type: "keydown", keyCode: 65, preventDefault: () => {} });
   term.textarea.value = "a";
-  term.inputHandler!({ inputType: "insertText", data: "a" });
+  term.captureInputHandler!({ inputType: "insertText", data: "a", stopImmediatePropagation: () => {} });
   await tick();
   expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "a");
   // 候选窗中间态（composition 未结束）不投递。
   term.keyHandler!({ type: "keydown", keyCode: 229, preventDefault: () => {} });
   term.compositionStartHandler!();
   term.textarea.value = "ni";
-  term.inputHandler!({ inputType: "insertCompositionText", data: "ni" });
+  term.captureInputHandler!({ inputType: "insertCompositionText", data: "ni", stopImmediatePropagation: () => {} });
   await tick();
   expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "ni");
 });
