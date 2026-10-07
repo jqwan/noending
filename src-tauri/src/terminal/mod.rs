@@ -47,12 +47,6 @@ pub const EVENT_CHANGED: &str = "terminals-changed";
 /// to light up its session-detail entry the moment binding happens.
 pub const EVENT_BOUND: &str = "terminal-bound";
 
-/// How many recent user messages the verified match demands as evidence.
-/// All of them must be visible in the terminal's scrollback — at first
-/// ingestion a session has one or two, so the bar is tight exactly when it
-/// matters.
-const RECENT_MESSAGE_NEEDLES: i64 = 5;
-
 /// The payload of `terminal-bound`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalBound {
@@ -130,70 +124,6 @@ impl Scrollback {
     fn bytes(&self) -> Vec<u8> {
         self.data.iter().copied().collect()
     }
-}
-
-/// Remove ANSI escape sequences (CSI `ESC [ … final`, OSC `ESC ] … BEL/ST`,
-/// and two-byte escapes) so TUI-rendered text becomes searchable. Raw PTY
-/// bytes are full of cursor addressing; the message content survives as the
-/// plain runs between sequences.
-fn strip_ansi(bytes: &[u8]) -> String {
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != 0x1b {
-            out.push(bytes[i]);
-            i += 1;
-            continue;
-        }
-        if i + 1 >= bytes.len() {
-            break;
-        }
-        match bytes[i + 1] {
-            b'[' => {
-                i += 2;
-                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                    i += 1;
-                }
-                i += 1; // final byte
-            }
-            b']' => {
-                i += 2;
-                while i < bytes.len() {
-                    if bytes[i] == 0x07 {
-                        i += 1;
-                        break;
-                    }
-                    if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                        i += 2;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            _ => i += 2, // two-byte escape (charset, save cursor, …)
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// TUIs wrap text at terminal width and re-render on resize: whitespace of
-/// any kind must not break the needle. Collapsing everything (haystack and
-/// needle alike) makes "hello world" match "hello\r\n  world" and costs
-/// nothing in precision — the message text is high-entropy.
-fn normalize_ws(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).collect()
-}
-
-/// The searchable form of a first message: whitespace-collapsed, and cut to
-/// a prefix when very long — a TUI may truncate or the scrollback ring may
-/// hold only the opening. A miss here means "no match", never a wrong bind.
-fn search_needle(message: &str) -> String {
-    let full = normalize_ws(message);
-    const MAX: usize = 120;
-    if full.chars().count() <= MAX {
-        return full;
-    }
-    full.chars().take(80).collect()
 }
 
 /// RFC3339 parse for ordering comparisons; the registry writes `now()`
@@ -344,10 +274,12 @@ impl TerminalRegistry {
     /// terminal whose command line carried a prespecified session id
     /// (claude / pi) is matched against the discovered session's
     /// `root_agent_session_id`. CLIs that generate their own ids (codex /
-    /// agy) never bind automatically — they bind on demand through the
-    /// session page's verified match, so a lookalike session in the same
-    /// directory can never steal the identity.
+    /// agy) never auto-bind — content evidence cannot survive the TUI's
+    /// redraw stream, so their terminals stay unbound for life and are
+    /// reached through the sidebar. RESUME terminals are born bound
+    /// (session_id travels with the spawn) and never pass through here.
     pub fn bind_discovered(&self, db: &crate::storage::Db) {
+        // prespecified-id claim (claude / pi)
         let waiting: Vec<(String, Agent, String)> = {
             let Ok(records) = self.records.lock() else {
                 return;
@@ -377,111 +309,6 @@ impl TerminalRegistry {
                 self.bind(&terminal_id, &session.id);
             }
         }
-    }
-
-    /// The verified match: a session carrying evidence (its agent, cwd and
-    /// recent user messages) looks for ITS terminal among the live unbound
-    /// ones. Runs from the ingestion worker for every NEWLY ingested session
-    /// (the empty-shell gate guarantees it has messages) and from the session
-    /// page's terminal entry as a click-time fallback.
-    ///
-    /// Evidence bar, all of it: same Agent, same cwd, the terminal existed
-    /// when the newest message was sent, and EVERY one of the recent user
-    /// messages (whitespace-collapsed, long ones cut to a prefix) is visible
-    /// in the terminal's scrollback. A miss means "stay unbound" — a fresh
-    /// Resume terminal is launched on demand, never a guess.
-    ///
-    /// Bindings made here are as trustworthy as prespecified-id ones: the
-    /// terminal view may open its session-detail entry, the sidebar may show
-    /// the session's name.
-    pub fn bind_verified(
-        &self,
-        db: &crate::storage::Db,
-        session_id: &str,
-    ) -> Option<TerminalSummary> {
-        let session = db.get_session(session_id).ok()??;
-        let cwd = session
-            .cwd
-            .as_deref()
-            .map(str::trim)
-            .filter(|c| !c.is_empty())?;
-        let messages = db
-            .recent_user_messages(session_id, RECENT_MESSAGE_NEEDLES)
-            .ok()?;
-        // 每条裁长坍缩成 needle；一条都提不出来（全空白）就没有证据可言。
-        let needles: Vec<String> = messages
-            .iter()
-            .filter_map(|(content, _)| {
-                let needle = search_needle(content);
-                (!needle.is_empty()).then_some(needle)
-            })
-            .collect();
-        if needles.is_empty() {
-            return None;
-        }
-        let newest_sent = messages
-            .iter()
-            .filter_map(|(_, ts)| ts.as_deref())
-            .filter_map(parse_ts)
-            .max()?;
-        // The records guard covers only the scan: bind() takes the same
-        // lock, and this mutex is not reentrant.
-        let best = {
-            let records = self.records.lock().ok()?;
-            let mut best: Option<(TerminalSummary, String)> = None;
-            for record in records.values() {
-                let Ok(record) = record.lock() else { continue };
-                if !record.summary.live
-                    || record.summary.session_id.is_some()
-                    // claude / pi terminals wait for their own prespecified
-                    // id; they never take a verified match.
-                    || record.expected_root_session_id.is_some()
-                    || record.summary.agent != session.agent
-                    || record.summary.cwd.as_deref() != Some(cwd)
-                {
-                    continue;
-                }
-                // The terminal must have existed when the newest message was
-                // sent — a spawn can only be younger than what it shows.
-                if let Some(created) = parse_ts(&record.summary.created_at) {
-                    if newest_sent < created {
-                        continue;
-                    }
-                }
-                let haystack = normalize_ws(&strip_ansi(&record.scrollback.bytes()));
-                if !needles.iter().all(|n| haystack.contains(n)) {
-                    continue;
-                }
-                let newer = best
-                    .as_ref()
-                    .map(|(prev, _)| record.summary.created_at > prev.created_at)
-                    .unwrap_or(true);
-                if newer {
-                    best = Some((record.summary.clone(), record.summary.terminal_id.clone()));
-                }
-            }
-            best
-        };
-        let (summary, terminal_id) = best?;
-        self.bind(&terminal_id, session_id);
-        Some(summary)
-    }
-
-    /// Whether any live terminal is still waiting for an identity. The
-    /// worker's cheap gate: without waiting terminals the touched-session
-    /// loop never runs.
-    pub fn has_unbound_candidates(&self) -> bool {
-        self.records
-            .lock()
-            .map(|records| {
-                records.values().any(|record| {
-                    let Ok(record) = record.lock() else {
-                        return false;
-                    };
-                    record.summary.live && record.summary.session_id.is_none()
-                })
-            })
-            .unwrap_or(false)
     }
 
     /// Explicit close from the sidebar's 运行中 item: kill the child and
@@ -649,29 +476,15 @@ impl TerminalRegistry {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let (encoded, unbound_agent) = {
+                        let encoded = {
                             let Ok(mut record) = reader_record.lock() else {
                                 break;
                             };
                             record.scrollback.push(&chunk[..n]);
-                            // Output is the downstream signal of "something
-                            // new to pick up": a TUI writing its session file
-                            // cannot do so silently. Unbound terminals only —
-                            // the throttle gate lives in the ingestion side
-                            // and the branch disappears once bound.
-                            let unbound = (record.summary.live
-                                && record.summary.session_id.is_none())
-                            .then_some(record.summary.agent);
-                            (
-                                base64::engine::general_purpose::STANDARD.encode(&chunk[..n]),
-                                unbound,
-                            )
+                            base64::engine::general_purpose::STANDARD.encode(&chunk[..n])
                         };
                         if let Some(app) = &reader_app {
                             let _ = app.emit(&format!("{EVENT_OUTPUT_PREFIX}{reader_id}"), encoded);
-                            if let Some(agent) = unbound_agent {
-                                crate::commands::ingestion::trigger_unbound_agent(app, agent);
-                            }
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -1044,170 +857,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_ingested_session_auto_binds_its_idless_terminal_through_the_verified_match() {
-        let registry = registry();
-        let mut cmd = sh("echo fix the layout; echo second turn; sleep 30");
-        cmd.cwd = Some(std::path::PathBuf::from("/repo"));
-        spawn_embedded(
-            &cmd,
-            &EmbeddedTarget {
-                registry: &registry,
-                session_id: None,
-                expected_root_session_id: None,
-                agent: Agent::Codex,
-            },
-        )
-        .unwrap();
-
-        let root = std::env::temp_dir().join(format!(
-            "noending-term-autobind-{}",
-            crate::storage::new_id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
-        let ts = crate::storage::now();
-        let (session_id, _) = db
-            .upsert_logical_session(
-                Agent::Codex,
-                "root-auto",
-                None,
-                Some("修复布局"),
-                Some("/repo"),
-                None,
-                None,
-                Some(ts.as_str()),
-                None,
-                "codex",
-                "/repo/rollout.jsonl",
-                &serde_json::json!({}),
-            )
-            .unwrap();
-        for (i, text) in ["fix the layout", "second turn"].iter().enumerate() {
-            db.write()
-                .execute(
-                    "INSERT INTO session_messages (id, session_id, sequence, source_generation, \
-                     source_position, source_identity_hash, role, content, turn_final, raw_ref, ts) \
-                     VALUES (?3, ?1, ?4, 0, '', ?5, 'user', ?6, 0, '', ?2)",
-                    rusqlite::params![session_id, ts, format!("m{i}"), i as i64, format!("h{i}"), text],
-                )
-                .unwrap();
-        }
-
-        // 摄入尾步对每个处理过的会话调 bind_verified：最近 5 条用户消息全部
-        // 可见于该终端的 scrollback 才绑定——消息到达屏幕后自动落定。
-        let bound = until("the verified match binds", || {
-            registry
-                .bind_verified(&db, &session_id)
-                .map(|s| s.terminal_id)
-        });
-        assert!(!bound.is_empty());
-        assert!(registry.for_session(&session_id).is_some());
-        // 绑定一次后不再改嫁：同一会话再问，终端已绑定，直接命中 for_session。
-        assert!(registry.bind_verified(&db, &session_id).is_none());
-        registry.kill_all();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_session_without_matching_evidence_never_takes_the_terminal() {
-        let registry = registry();
-        let mut cmd = sh("echo waiting; sleep 30");
-        cmd.cwd = Some(std::path::PathBuf::from("/repo"));
-        spawn_embedded(
-            &cmd,
-            &EmbeddedTarget {
-                registry: &registry,
-                session_id: None,
-                expected_root_session_id: None,
-                agent: Agent::Codex,
-            },
-        )
-        .unwrap();
-        until("the echo reaches the scrollback", || {
-            let ok = {
-                let records = registry.records.lock().unwrap();
-                records.values().all(|_| true)
-            };
-            ok.then_some(())
-        });
-
-        let root = std::env::temp_dir().join(format!(
-            "noending-term-nomatch-{}",
-            crate::storage::new_id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
-        let ts = crate::storage::now();
-        let make_session = |root_id: &str, cwd: &str, text: &str| {
-            let (sid, _) = db
-                .upsert_logical_session(
-                    Agent::Codex,
-                    root_id,
-                    None,
-                    Some("候选"),
-                    Some(cwd),
-                    None,
-                    None,
-                    Some(ts.as_str()),
-                    None,
-                    "codex",
-                    cwd,
-                    &serde_json::json!({}),
-                )
-                .unwrap();
-            db.write()
-                .execute(
-                    "INSERT INTO session_messages (id, session_id, sequence, source_generation, \
-                     source_position, source_identity_hash, role, content, turn_final, raw_ref, ts) \
-                     VALUES (?4, ?1, 0, 0, '', 'h', 'user', ?2, 0, '', ?3)",
-                    rusqlite::params![sid, text, ts, format!("m-{root_id}")],
-                )
-                .unwrap();
-            sid
-        };
-
-        // 同目录但屏幕上没有它的消息 → 证据不足，不绑。
-        let wrong_text = make_session("root-a", "/repo", "totally different words");
-        until("the echo lands before the negative check", || {
-            let hay = {
-                let records = registry.records.lock().unwrap();
-                let mut hay = String::new();
-                for r in records.values() {
-                    if let Ok(rec) = r.lock() {
-                        hay.push_str(&String::from_utf8_lossy(&rec.scrollback.bytes()));
-                    }
-                }
-                hay
-            };
-            hay.contains("waiting").then_some(())
-        });
-        assert!(registry.bind_verified(&db, &wrong_text).is_none());
-        // 消息在屏幕上但目录不同 → 不绑。
-        let wrong_cwd = make_session("root-b", "/elsewhere", "waiting");
-        assert!(registry.bind_verified(&db, &wrong_cwd).is_none());
-        // 没有任何用户消息的会话 → 无证据，不绑。
-        let (no_msgs, _) = db
-            .upsert_logical_session(
-                Agent::Codex,
-                "root-c",
-                None,
-                Some("空会话"),
-                Some("/repo"),
-                None,
-                None,
-                Some(ts.as_str()),
-                None,
-                "codex",
-                "/repo/x.jsonl",
-                &serde_json::json!({}),
-            )
-            .unwrap();
-        assert!(registry.bind_verified(&db, &no_msgs).is_none());
-        registry.kill_all();
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn an_explicit_close_kills_the_child_and_removes_the_record() {
         let registry = registry();
         let outcome = spawn_embedded(
@@ -1232,19 +881,5 @@ mod tests {
         assert!(registry.for_session("s-live").is_none());
         assert!(registry.attach(&id).is_err());
         assert!(registry.close(&id).is_none(), "closing twice is a no-op");
-    }
-
-    #[test]
-    fn search_needle_handles_wrapped_and_long_messages() {
-        let message = "first line\nsecond   line";
-        let haystack = "prompt> first\r\nline second line $";
-        assert!(normalize_ws(&strip_ansi(haystack.as_bytes())).contains(&search_needle(message)));
-        let long: String = std::iter::repeat("甲").take(300).collect();
-        let needle = search_needle(&long);
-        assert_eq!(
-            needle.chars().count(),
-            80,
-            "long messages match on a prefix"
-        );
     }
 }

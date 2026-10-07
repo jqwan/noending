@@ -165,71 +165,21 @@ pub fn enqueue(app: &AppHandle, scope: IngestScope) {
     }
 }
 
-/// One global gate on the PTY-output trigger: heavy TUI redraws emit
-/// thousands of chunks per second, and a cursor-incremental pass a couple of
-/// seconds late is indistinguishable from an immediate one.
-const UNBOUND_TRIGGER_MIN_INTERVAL_MS: u64 = 2000;
-static UNBOUND_TRIGGER_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// An unbound terminal just produced bytes. A TUI writing its session file
-/// cannot do so silently, so output is the moment discovery becomes
-/// worthwhile — event-driven, never a timer. Scoped to the agent's own
-/// ingest sources: a terminal's output never sends the other formats'
-/// cursors on a walk. Binding happens inside the worker (bind_discovered),
-/// and once the terminal is bound this trigger simply stops being called.
-pub fn trigger_unbound_agent(app: &AppHandle, agent: crate::domain::Agent) {
-    use std::sync::atomic::Ordering;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let last = UNBOUND_TRIGGER_LAST.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last) < UNBOUND_TRIGGER_MIN_INTERVAL_MS {
-        return;
-    }
-    if UNBOUND_TRIGGER_LAST
-        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
-        return; // another reader thread won the gate this round
-    }
-    let state = app.state::<AppState>();
-    let sources: Vec<crate::domain::IngestSource> = match state.db.list_ingest_sources() {
-        Ok(ss) => ss
-            .into_iter()
-            .filter(|s| s.enabled && s.agent == agent)
-            .collect(),
-        Err(e) => {
-            eprintln!("[ingest] unbound trigger: listing sources failed: {e}");
-            return;
-        }
-    };
-    for source in sources {
-        enqueue(app, IngestScope::ReconcileSource(source.id));
-    }
-}
-
 fn spawn_worker(app: AppHandle) {
     std::thread::spawn(move || {
         while let Some(scope) = {
             let state = app.state::<AppState>();
             state.ingestion.next()
         } {
-            let (discovered, messages, error, new_sessions) = run_scope(&app, &scope);
-            // 绑定收尾，两步都是精确事实：预指定 id（claude / pi）按身份认领；
-            // 自造 id 的 CLI（codex / agy）由本轮处理过的会话带着 agent + cwd +
-            // 最近用户消息的证据去找未绑定终端，命中才绑。没有等待中的终端时
-            // 整段空转一次内存判断。
+            let (discovered, messages, error) = run_scope(&app, &scope);
+            // 绑定收尾：预指定 id（claude / pi）按精确身份认领未绑定终端。
+            // codex / agy 不参与——内容证据活不过 TUI 的重绘流，它们的终端
+            // 保持未绑定，入口在侧边栏。
             {
                 let state = app.state::<AppState>();
                 let _ = super::with_db(&state, |db| {
-                    let registry = app.state::<crate::terminal::TerminalRegistry>();
-                    registry.bind_discovered(db);
-                    if registry.has_unbound_candidates() {
-                        for session_id in &new_sessions {
-                            registry.bind_verified(db, session_id);
-                        }
-                    }
+                    app.state::<crate::terminal::TerminalRegistry>()
+                        .bind_discovered(db);
                     Ok(())
                 });
             }
@@ -255,16 +205,10 @@ fn spawn_worker(app: AppHandle) {
     });
 }
 
-fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String>, Vec<String>) {
+fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String>) {
     let state = app.state::<AppState>();
     let workspace = super::launch_workspace(app);
-    // 本轮处理过的会话 id（新进库或新增了消息）：摄入尾步拿它们做终端绑定
-    // 校验——由会话带着证据找终端，不反着扫。
-    let new_sessions: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let notify = |s: &crate::domain::Session, is_new: bool| {
-        if is_new {
-            new_sessions.lock().unwrap().push(s.id.clone());
-        }
+    let notify = |s: &crate::domain::Session| {
         eprintln!(
             "[ingest] processing: {}",
             s.title.as_deref().unwrap_or("(untitled)")
@@ -298,10 +242,10 @@ fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String
         }
     };
     match result {
-        Ok((d, m, error)) => (d, m, error, new_sessions.lock().unwrap().clone()),
+        Ok((d, m, error)) => (d, m, error),
         Err(e) => {
             eprintln!("[ingest] {} failed: {}", scope.label(), e);
-            (0, 0, Some(e.to_string()), Vec::new())
+            (0, 0, Some(e.to_string()))
         }
     }
 }

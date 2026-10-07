@@ -933,24 +933,16 @@ pub fn read_clipboard_for_terminal(app: AppHandle) -> Result<crate::commands::Cl
 // detach protocol the frontend terminal subpage speaks. The registry is the
 // source of truth — the subpage is a view, not a process owner.
 
-/// The session page's terminal entry. Resolution order, every step exact:
-/// 1. a terminal already bound to this session (prespecified-id discovery or
-///    an earlier verified match) — jump to it;
-/// 2. a live unbound terminal that survives the verified match — same Agent,
-///    same cwd, the session's recent user messages visible in its
-///    scrollback — bind it on the spot and jump;
-/// 3. nothing — the caller launches a fresh embedded Resume terminal.
+/// The session page's terminal entry: jump to the session's bound terminal
+/// (prespecified-id discovery or the ingestion worker's verified match) or
+/// report none — the caller launches a fresh embedded Resume terminal. No
+/// matching happens here; matching belongs to ingestion.
 #[tauri::command]
 pub fn terminal_for_session(
-    state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     session_id: String,
 ) -> Result<Option<crate::terminal::TerminalSummary>> {
-    if let Some(summary) = terminal.for_session(&session_id) {
-        return Ok(Some(summary));
-    }
-    let matched = with_db(&state, |db| Ok(terminal.bind_verified(db, &session_id)))?;
-    Ok(matched)
+    Ok(terminal.for_session(&session_id))
 }
 
 /// The terminal view's refresh button: one targeted sync, then the

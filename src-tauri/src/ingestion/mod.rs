@@ -327,13 +327,8 @@ fn process_resolved_batch<F>(
     failures: &mut Vec<String>,
 ) -> Result<(i64, BTreeSet<String>)>
 where
-    F: Fn(&Session, bool),
+    F: Fn(&Session),
 {
-    let is_new_by_id: std::collections::BTreeMap<String, bool> = batch
-        .roots_for_intent
-        .iter()
-        .map(|(s, n)| (s.id.clone(), *n))
-        .collect();
     for (session, is_new) in &batch.roots_for_intent {
         finalize_newly_discovered_root(db, session, *is_new, workspace)?;
     }
@@ -347,10 +342,7 @@ where
         if reingest {
             db.rewind_source_cursor(&id)?;
         }
-        on_session(
-            &session,
-            is_new_by_id.get(&session.id).copied().unwrap_or(false),
-        );
+        on_session(&session);
         match ingest_session(db, &session) {
             Ok(messages) => total_messages += messages,
             Err(e) => {
@@ -388,7 +380,7 @@ fn process_retry_sessions<F>(
     failures: &mut Vec<String>,
 ) -> Result<i64>
 where
-    F: Fn(&Session, bool),
+    F: Fn(&Session),
 {
     let retry_intents = db.has_pending_launch_intents()?;
     let agent = scope.map(|source| source.agent);
@@ -408,7 +400,7 @@ where
         let Some(session) = db.get_session(&candidate.id)? else {
             continue;
         };
-        on_session(&session, false);
+        on_session(&session);
         match ingest_session(db, &session) {
             Ok(messages) => total_messages += messages,
             Err(e) => {
@@ -433,7 +425,7 @@ pub fn reconcile_all<F>(
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
-    F: Fn(&Session, bool),
+    F: Fn(&Session),
 {
     let report = reconcile_all_report(db, workspace, on_session)?;
     if !report.failures.is_empty() {
@@ -460,7 +452,7 @@ pub fn reconcile_all_report<F>(
     on_session: &F,
 ) -> Result<ReconcileReport>
 where
-    F: Fn(&Session, bool),
+    F: Fn(&Session),
 {
     let adapters = crate::adapters::all_adapters();
     let unchanged = unchanged_since_cursor(db)?;
@@ -550,7 +542,7 @@ pub fn reconcile_source<F>(
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
-    F: Fn(&Session, bool),
+    F: Fn(&Session),
 {
     let adapter = crate::adapters::adapter_for(source.agent);
     let unchanged = unchanged_since_cursor(db)?;
@@ -596,7 +588,7 @@ pub fn reingest_source<F>(
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
-    F: Fn(&Session, bool),
+    F: Fn(&Session),
 {
     let adapter = crate::adapters::adapter_for(source.agent);
     let roots = vec![PathBuf::from(&source.path)];
