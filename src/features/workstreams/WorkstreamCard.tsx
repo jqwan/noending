@@ -90,7 +90,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
       </article>
 
       {newSessionOpen && (
-        <NewSessionModal workstreamId={card.id} onClose={() => setNewSessionOpen(false)} />
+        <NewSessionModal workstreamId={card.id} onClose={() => setNewSessionOpen(false)} navigate={navigate} />
       )}
     </>
   );

@@ -41,10 +41,14 @@ pub const EVENT_OUTPUT_PREFIX: &str = "terminal-output://";
 pub const EVENT_EXIT_PREFIX: &str = "terminal-exit://";
 
 /// The facts a terminal subpage needs to decide what it is looking at.
+/// `session_id` is None for a NEW-session terminal: the Agent has been
+/// launched but its session file is not on disk yet. Ingestion binds it
+/// (`bind_discovered`) the moment a discovered session claims the launch's
+/// LaunchIntent.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalSummary {
     pub terminal_id: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub agent: Agent,
     pub cwd: Option<String>,
     pub created_at: String,
@@ -141,7 +145,7 @@ impl TerminalRegistry {
         let mut best: Option<TerminalSummary> = None;
         for record in records.values() {
             let Ok(record) = record.lock() else { continue };
-            if record.summary.session_id != session_id {
+            if record.summary.session_id.as_deref() != Some(session_id) {
                 continue;
             }
             best = match best {
@@ -171,10 +175,95 @@ impl TerminalRegistry {
                     let Ok(record) = record.lock() else {
                         return false;
                     };
-                    record.summary.session_id == session_id && record.summary.live
+                    record.summary.session_id.as_deref() == Some(session_id) && record.summary.live
                 })
             })
             .unwrap_or(false)
+    }
+
+    /// Every live terminal, newest first. The sessions board renders the
+    /// unbound ones as its 运行中 pseudo-rows and derives the "terminal is
+    /// running" fact for bound sessions from the rest.
+    pub fn list_live(&self) -> Vec<TerminalSummary> {
+        let Ok(records) = self.records.lock() else {
+            return Vec::new();
+        };
+        let mut live: Vec<TerminalSummary> = records
+            .values()
+            .filter_map(|record| {
+                let record = record.lock().ok()?;
+                record.summary.live.then(|| record.summary.clone())
+            })
+            .collect();
+        live.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        live
+    }
+
+    /// Attach `session_id` to an unbound terminal. A terminal already bound
+    /// (to any session) is left alone — binding happens once.
+    pub fn bind(&self, terminal_id: &str, session_id: &str) {
+        let Ok(records) = self.records.lock() else {
+            return;
+        };
+        let Some(record) = records.get(terminal_id).cloned() else {
+            return;
+        };
+        drop(records);
+        let Ok(mut record) = record.lock() else {
+            return;
+        };
+        if record.summary.session_id.is_none() {
+            record.summary.session_id = Some(session_id.to_string());
+        }
+    }
+
+    /// Ingestion's bind step: a discovered session that just claimed a
+    /// LaunchIntent is the session a NEW-session terminal was waiting for.
+    /// The intent carries the launch's agent + cwd — the same facts the
+    /// terminal was spawned with — so the pairing needs no new identity
+    /// machinery. Runs after every ingestion pass; a no-op when nothing
+    /// is waiting.
+    pub fn bind_discovered(&self, db: &crate::storage::Db) {
+        let unbound: Vec<(String, Agent, Option<String>)> = {
+            let Ok(records) = self.records.lock() else {
+                return;
+            };
+            records
+                .values()
+                .filter_map(|record| {
+                    let record = record.lock().ok()?;
+                    (record.summary.live && record.summary.session_id.is_none()).then(|| {
+                        (
+                            record.summary.terminal_id.clone(),
+                            record.summary.agent,
+                            record.summary.cwd.clone(),
+                        )
+                    })
+                })
+                .collect()
+        };
+        if unbound.is_empty() {
+            return;
+        }
+        for (terminal_id, agent, cwd) in unbound {
+            let Ok(intents) = db.list_launch_intents(&[crate::domain::launch_status::MATCHED], 50)
+            else {
+                return;
+            };
+            for intent in intents {
+                if intent.matched_session_id.is_none()
+                    || intent.agent != agent
+                    || intent.cwd.is_none()
+                    || intent.cwd != cwd
+                {
+                    continue;
+                }
+                if let Some(session_id) = intent.matched_session_id {
+                    self.bind(&terminal_id, &session_id);
+                }
+                break;
+            }
+        }
     }
 
     pub fn attach(&self, terminal_id: &str) -> Result<TerminalSnapshot> {
@@ -353,7 +442,9 @@ impl TerminalRegistry {
 /// so the dependency direction stays launcher → terminal.
 pub struct EmbeddedTarget<'a> {
     pub registry: &'a TerminalRegistry,
-    pub session_id: &'a str,
+    /// None for a NEW-session launch: the session does not exist yet; the
+    /// registry entry starts unbound and ingestion attaches it later.
+    pub session_id: Option<&'a str>,
     pub agent: Agent,
 }
 
@@ -375,7 +466,7 @@ pub fn spawn_embedded(
 
     let summary = TerminalSummary {
         terminal_id: terminal_id.clone(),
-        session_id: target.session_id.to_string(),
+        session_id: target.session_id.map(str::to_string),
         agent: target.agent,
         cwd: cmd.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         created_at: now(),
@@ -437,7 +528,7 @@ mod tests {
     fn target<'a>(registry: &'a TerminalRegistry, session: &'a str) -> EmbeddedTarget<'a> {
         EmbeddedTarget {
             registry,
-            session_id: session,
+            session_id: Some(session),
             agent: Agent::Codex,
         }
     }
@@ -566,5 +657,71 @@ mod tests {
                 .filter(|s| !s.summary.live)
         });
         assert!(!registry.has_live("s-live"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn an_unbound_new_terminal_binds_when_a_matched_intent_claims_a_session() {
+        let registry = registry();
+        let mut cmd = sh("sleep 30");
+        cmd.cwd = Some(std::path::PathBuf::from("/tmp"));
+        let outcome = spawn_embedded(
+            &cmd,
+            &EmbeddedTarget {
+                registry: &registry,
+                session_id: None,
+                agent: Agent::Codex,
+            },
+        )
+        .unwrap();
+        let id = outcome.terminal_id.clone().unwrap();
+
+        // Live, unbound, invisible to every session lookup.
+        assert!(
+            registry
+                .list_live()
+                .iter()
+                .any(|t| t.terminal_id == id && t.session_id.is_none()),
+            "the new-session terminal starts unbound"
+        );
+        assert!(registry.for_session("s-discovered").is_none());
+        assert!(!registry.has_live("s-discovered"));
+
+        // A discovered session claimed the launch's intent: the intent
+        // carries the same agent + cwd the terminal was spawned with, and
+        // bind_discovered pairs them.
+        let root =
+            std::env::temp_dir().join(format!("noending-term-bind-{}", crate::storage::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
+        let ts = crate::storage::now();
+        db.insert_launch_intent(&crate::domain::LaunchIntent {
+            id: "intent-1".into(),
+            launch_type: "new".into(),
+            agent: Agent::Codex,
+            owner_workstream_id: None,
+            cwd: Some("/tmp".into()),
+            process_id: None,
+            launched_at: ts.clone(),
+            matched_session_id: Some("s-discovered".into()),
+            status: crate::domain::launch_status::MATCHED.into(),
+            note: String::new(),
+            created_at: ts.clone(),
+            updated_at: ts,
+        })
+        .unwrap();
+
+        registry.bind_discovered(&db);
+
+        let bound = registry.for_session("s-discovered").expect("bound");
+        assert_eq!(bound.terminal_id, id);
+        assert!(registry.has_live("s-discovered"));
+        assert!(
+            !registry
+                .list_live()
+                .iter()
+                .any(|t| t.terminal_id == id && t.session_id.is_none()),
+            "the pseudo-row source dries up once bound"
+        );
+        registry.kill_all();
     }
 }

@@ -157,6 +157,54 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     assert!(!bundle_dir.exists(), "no context file may be written");
 }
 
+/// An embedded NEW launch goes through the same seam with an UNBOUND
+/// terminal: the LaunchResult carries the terminal id, the LaunchIntent is
+/// still committed for attribution, and the target's session_id is None —
+/// the registry entry starts unbound and ingestion binds it later.
+#[test]
+fn an_embedded_new_launch_spawns_unbound_and_still_commits_the_intent() {
+    let db = open_db("embedded-new");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("embedded-new");
+
+    let prepared = launcher
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            None,
+            Some("/tmp"),
+            &LaunchWorkspace::default(),
+        )
+        .expect("prepare");
+    let mut prepared = prepared;
+    prepared.embedded = true;
+
+    let result = launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &LaunchWorkspace::default(),
+            fake_spawn,
+            fake_open,
+            Some(&noending::launcher::EmbeddedSpawn {
+                registry: &noending::terminal::TerminalRegistry::new(None),
+                spawn: fake_embedded_spawn,
+            }),
+        )
+        .expect("embedded new launch must succeed");
+    assert_eq!(result.launched_via, "test-embedded-spawn");
+    assert_eq!(result.terminal_id.as_deref(), Some("term-test-1"));
+    assert!(
+        result.launch_intent_id.is_some(),
+        "attribution still rides the LaunchIntent"
+    );
+
+    let intents: Vec<LaunchIntent> = db.list_launch_intents(&[], 100).unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].status, noending::domain::launch_status::PENDING);
+}
+
+#[test]
 #[test]
 fn bookkeeping_failure_after_spawn_keeps_the_successful_launch_result() {
     let db = open_db("post-spawn-bookkeeping-failure");
@@ -556,7 +604,7 @@ fn fake_embedded_spawn(
     let _ = target.registry;
     Ok(LaunchOutcome {
         launched_via: "test-embedded-spawn".into(),
-        command_line: format!("embedded session={}", target.session_id),
+        command_line: format!("embedded session={:?}", target.session_id),
         pid: Some(77),
         terminal_id: Some("term-test-1".into()),
     })

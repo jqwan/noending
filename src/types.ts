@@ -720,7 +720,8 @@ export interface LaunchResult {
 /** terminal_for_session 的一行：该会话最新（live 优先）的内嵌终端。 */
 export interface TerminalSummary {
   terminal_id: string;
-  session_id: string;
+  /** 未绑定（内嵌新建、会话未被发现）时为 null；摄入绑定后有值。 */
+  session_id: string | null;
   agent: Agent;
   cwd: string | null;
   created_at: string;

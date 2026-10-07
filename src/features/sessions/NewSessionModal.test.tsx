@@ -95,6 +95,7 @@ vi.mock("../../api", () => ({
     prepareNewSession: vi.fn(),
     cancelPrepared: vi.fn().mockResolvedValue(undefined),
     launchPrepared: vi.fn(),
+    launchEmbeddedNew: vi.fn(),
     getWorkspaceSettings: vi.fn(),
     listRecentWorkspacePaths: vi.fn(),
     listWorkstreamPaths: vi.fn(),
@@ -316,5 +317,25 @@ describe("NewSessionModal working directory selection", () => {
     const optionTexts = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
     expect(optionTexts.some((t) => t?.includes("/tmp/workspace (NoEnding 默认工作区)"))).toBe(true);
   });
-});
+it("launches embedded and navigates to the standalone terminal view", async () => {
+  vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
+    launched_via: "内嵌终端",
+    command_line: "codex",
+    note: "已在内嵌终端启动。",
+    launch_intent_id: "intent-1",
+    terminal_id: "t-new-1",
+  });
+  const navigate = vi.fn();
+  const onClose = vi.fn();
 
+  render(<NewSessionModal onClose={onClose} navigate={navigate} />);
+  await screen.findByText("新建会话");
+  fireEvent.click(screen.getByRole("button", { name: "启动" }));
+
+  await waitFor(() =>
+    expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined),
+  );
+  expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new-1" });
+  expect(onClose).toHaveBeenCalled();
+});
+});

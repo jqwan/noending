@@ -15,9 +15,11 @@ import {
 } from "../../types";
 
 /**
- * 全局新建 Session。启动路径唯一：`prepareNewSession → launchPrepared`。Modal 一打开
- * 就 Prepare，所以预览显示的就是这次启动真正使用的解析结果（cwd 三级优先级在后端算）。
- * 点击启动时后端重算状态指纹，任何变化都以 stale 中止——绝不用没预览过的参数启动。
+ * 全局新建 Session：确认即内嵌直启（`launchEmbeddedNew`，prepare + 起一个未绑定
+ * 会话的内嵌终端一步完成），成功后带到独立终端视图；会话文件落盘被摄入发现后，
+ * LaunchIntent 匹配把终端绑定到会话，那个视图就地变成会话的终端子页。
+ * Modal 一打开仍先 Prepare——cwd 三级解析的预览事实（显示的就是这次启动真正
+ * 使用的目录）由它提供。
  *
  * `workstreamId` 是可选预置入参：省略或 `"none"` 即 standalone（0 个所属任务完全合法）。
  * 预置后用户仍可改。下拉读 Workstream 卡片投影：标题相同的靠主路径才能分清，而启动
@@ -29,6 +31,8 @@ export type NewSessionModalProps = {
   workstreamId?: string | null;
   /** 预置选中的 Agent；若指定则优先使用。未指定时读取全局默认或首个可用 CLI Agent。单次指定绝不修改全局设置。 */
   agent?: Agent | null;
+  /** 启动成功后带到独立终端视图（内嵌新建的唯一落点）。 */
+  navigate?: (r: import("../../app/routes").Route) => void;
 };
 
 const STANDALONE = "none";
@@ -52,6 +56,7 @@ export default function NewSessionModal({
   onClose,
   workstreamId,
   agent: initialAgent,
+  navigate,
 }: NewSessionModalProps) {
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [ownerWorkstreamId, setOwnerWorkstreamId] = useState(
@@ -222,7 +227,7 @@ export default function NewSessionModal({
     return api.prepareNewSession(selectedAgent, ownerId);
   }, [selectedAgent, ownerWorkstreamId, selectedCwd, defaultCwd]);
 
-  const { prepared, preparedRef, preparing, error, setError, prepare, release: releasePrepared } =
+  const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
 
   const handleWsChange = (next: string) => {
@@ -260,27 +265,29 @@ export default function NewSessionModal({
     onClose();
   };
 
-  /** 唯一启动路径：消费 PreparedLaunch，绝不复用（single-use capability）。 */
+  /** 唯一启动路径：内嵌直启（prepare 预览的 cwd/任务事实原样传给
+   *  launch_embedded_new，它内部重新 prepare + 强制 embedded）。返回的
+   *  terminal_id 把用户带到独立终端视图——会话被发现后那里就地变成会话。 */
   const start = async () => {
-    const current = preparedRef.current;
-    if (busy || !current) return;
-    // launchPrepared 自己消费这份令牌，这里只能松手不能再 cancel
+    if (busy) return;
     releasePrepared(true);
     setBusy(true);
     setError("");
     try {
-      const r = await api.launchPrepared(current.id);
+      const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
+      const r = await api.launchEmbeddedNew(
+        selectedAgent,
+        ownerId,
+        selectedCwd || undefined,
+      );
       announceLaunch("启动", r);
+      if (r.terminal_id && navigate) {
+        navigate({ view: "terminal", terminalId: r.terminal_id });
+      }
       onClose();
     } catch (e: unknown) {
       setBusy(false);
-      // 令牌已消费：重新 Prepare 一份，用户再次确认才真正启动。
-      const fresh = await prepare();
-      if (fresh) {
-        setError("状态已变化，启动计划已刷新，请再次确认。");
-      } else {
-        setError(`启动失败：${String(e)}`);
-      }
+      setError(`启动失败：${String(e)}`);
     }
   };
 

@@ -16,7 +16,7 @@ import SessionCards, {
 } from "./SessionTable";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import NewSessionModal from "./NewSessionModal";
-import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session } from "../../types";
+import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session, type TerminalSummary } from "../../types";
 import type { Route, SessionScope, ViewAction } from "../../app/routes";
 
 /**
@@ -58,6 +58,11 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [projectId, setProjectId] = useViewState("sessions.projectId", "all");
   const [wsFilter, setWsFilter] = useViewState("sessions.wsFilter", "all");
   const [viewMode, setViewMode] = useViewState<"cards" | "list">("sessions.viewMode", "cards");
+  /** 运行态筛选：全部 / 运行中 / 非运行中。「运行中」= 有活着的内嵌终端
+   *  （含未绑定伪行，它们本身就是运行中的展示形态）。 */
+  const [runningFilter, setRunningFilter] = useViewState<"all" | "running" | "notRunning">(
+    "sessions.runningFilter", "all",
+  );
   const [creating, setCreating] = useState(false);
   const [trashSessionId, setTrashSessionId] = useState<string | null>(null);
   const [trashBusy, setTrashBusy] = useState(false);
@@ -65,6 +70,24 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
   const [bulkPurgeBusy, setBulkPurgeBusy] = useState(false);
   /** 删除 Modal 的目标 Session（回收站行 / 恢复冲突提示都可能打开它）。 */
   const [purgeSessionId, setPurgeSessionId] = useState<string | null>(null);
+  /** 活着的内嵌终端（注册表事实）：未绑定的渲染为伪行，绑定的喂给运行态筛选。 */
+  const [liveTerminals, setLiveTerminals] = useState<TerminalSummary[]>([]);
+
+  useEffect(() => {
+    if (trashMode) return;
+    let live = true;
+    const pull = () => {
+      api.terminalList()
+        .then((ts) => { if (live) setLiveTerminals(ts); })
+        .catch(() => {});
+    };
+    pull();
+    const timer = window.setInterval(pull, 5000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [trashMode]);
 
   const refresh = useCallback(() => {
     setLoadFailed(false);
@@ -150,6 +173,15 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
     query.trim() !== "" || agent !== "all" || projectId !== "all"
     || wsFilter !== "all";
 
+  const unboundTerminals = useMemo(
+    () => liveTerminals.filter((t) => !t.session_id),
+    [liveTerminals],
+  );
+  const liveSessionIds = useMemo(
+    () => new Set(liveTerminals.map((t) => t.session_id).filter(Boolean) as string[]),
+    [liveTerminals],
+  );
+
   const shown = useMemo(() => {
     if (!sessions) return null;
     const q = query.trim().toLowerCase();
@@ -169,6 +201,11 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
         return wsFilter === "unassigned"
           ? s.owner_workstream_id === null
           : s.owner_workstream_id === wsFilter;
+      })
+      .filter((s) => {
+        if (runningFilter === "all") return true;
+        const running = liveSessionIds.has(s.id);
+        return runningFilter === "running" ? running : !running;
       })
       .filter((s) => {
         if (q === "") return true;
@@ -192,7 +229,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
           a.last_activity_at ?? a.started_at ?? "",
         ),
       );
-  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, projectNameById]);
+  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, runningFilter, liveSessionIds, projectNameById]);
 
   /** 行内「继续」：直接在会话格式对应的桌面应用里打开（无预览）；格式没有
    *  桌面路由时按钮本来就是灰的，这里的报错是兜底。 */
@@ -368,7 +405,12 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
                 {filtersActive ? `显示 ${shown.length} / 共 ${sessions?.length ?? 0} 条` : `共 ${shown.length} 条`}
               </span>
             )}
-            <div className="settings-seg icon-seg" role="group" aria-label="展示方式" style={{ marginLeft: "auto" }}>
+            <div className="settings-seg" role="group" aria-label="运行状态" style={{ marginLeft: "auto" }}>
+              <button className={runningFilter === "all" ? "on" : ""} aria-pressed={runningFilter === "all"} onClick={() => setRunningFilter("all")}>全部</button>
+              <button className={runningFilter === "running" ? "on" : ""} aria-pressed={runningFilter === "running"} onClick={() => setRunningFilter("running")}>运行中</button>
+              <button className={runningFilter === "notRunning" ? "on" : ""} aria-pressed={runningFilter === "notRunning"} onClick={() => setRunningFilter("notRunning")}>非运行中</button>
+            </div>
+            <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
               <button
                 className={viewMode === "cards" ? "on" : ""}
                 aria-pressed={viewMode === "cards"}
@@ -445,7 +487,9 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
               workstreamTitleById={workstreamTitleById}
               projectNameById={projectNameById}
               viewMode={viewMode}
+              unboundTerminals={runningFilter === "notRunning" ? [] : unboundTerminals}
               onOpen={(id) => navigate({ view: "session", sessionId: id })}
+              onOpenTerminal={(terminalId) => navigate({ view: "terminal", terminalId })}
               onResume={resume}
               onTrash={setTrashSessionId}
             />
@@ -542,7 +586,7 @@ export default function SessionsView({ navigate, scope, action, actionSeq }: {
         </Modal>
       )}
 
-      {creating && <NewSessionModal onClose={() => setCreating(false)} />}
+      {creating && <NewSessionModal onClose={() => setCreating(false)} navigate={navigate} />}
       {purgeSessionId && (
         <PermanentDeleteModal
           sessionId={purgeSessionId}

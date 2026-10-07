@@ -60,7 +60,7 @@ export default function HomeView({ navigate }: { navigate: (r: Route) => void })
         <WorkstreamFormModal onClose={() => setCreatingWs(false)} onCreated={refresh} />
       )}
       {creatingSession && (
-        <NewSessionModal onClose={() => setCreatingSession(false)} />
+        <NewSessionModal onClose={() => setCreatingSession(false)} navigate={navigate} />
       )}
     </>
   );

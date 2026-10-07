@@ -228,6 +228,18 @@ export const api = {
   continueSessionDesktop: (sessionId: string) =>
     invoke<{ uri: string; note: string }>("continue_session_desktop", { sessionId }),
 
+  /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
+   *  摄入发现后经 LaunchIntent 绑定）。返回携带 terminal_id。 */
+  launchEmbeddedNew: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string) =>
+    invoke<LaunchResult>("launch_embedded_new", {
+      agent,
+      ownerWorkstreamId,
+      cwd: cwd ?? null,
+    }),
+  /** 活着的内嵌终端（新→旧）：看板的运行中伪行与运行态筛选都读这里。 */
+  terminalList: () =>
+    invoke<import("./types").TerminalSummary[]>("terminal_list"),
+
   // 内嵌终端：终端子页的直启入口——prepare + embedded launch 一步完成（不走
   // 继续会话弹窗），之后通过 attach 协议接管。输出走
   // terminal-output://{id} / terminal-exit://{id} 事件。

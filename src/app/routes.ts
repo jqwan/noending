@@ -43,6 +43,9 @@ export type Route =
       initialAgent?: Agent;
       initialTotal?: number;
     }
+  /** 未绑定会话的独立终端视图：内嵌新建的直接落点。摄入发现会话并完成
+   *  绑定后，视图 replace 成该会话的终端子页。 */
+  | { view: "terminal"; terminalId: string }
   | { view: "agents"; agent?: Agent }
   | { view: "assistant"; scope?: AssistantScope }
   | { view: "projects" }

@@ -172,6 +172,17 @@ fn spawn_worker(app: AppHandle) {
             state.ingestion.next()
         } {
             let (discovered, messages, error) = run_scope(&app, &scope);
+            // A discovered session may have claimed a NEW launch's intent:
+            // attach its session_id to the unbound embedded terminal that
+            // launch spawned. No-op unless something is waiting.
+            {
+                let state = app.state::<AppState>();
+                let _ = super::with_db(&state, |db| {
+                    app.state::<crate::terminal::TerminalRegistry>()
+                        .bind_discovered(db);
+                    Ok(())
+                });
+            }
             {
                 let state = app.state::<AppState>();
                 state.ingestion.finish(

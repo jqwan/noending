@@ -76,6 +76,14 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
           goBack={goBack}
         />
       );
+    case "terminal":
+      return (
+        <SessionTerminalView
+          key={route.terminalId}
+          terminalId={route.terminalId}
+          navigate={navigate}
+        />
+      );
     case "assistant":
       return <AssistantView scope={route.scope} navigate={navigate} />;
     case "projects":

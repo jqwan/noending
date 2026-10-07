@@ -523,6 +523,7 @@ export default function WorkstreamDetailView({
             setNewSessionOpen(false);
             refresh();
           }}
+          navigate={navigate}
         />
       )}
 

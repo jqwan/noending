@@ -21,6 +21,7 @@ vi.mock("../../api", () => ({
     permanentlyDeleteSession: vi.fn(),
     getAgentStatus: vi.fn().mockResolvedValue({}),
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
+    terminalList: vi.fn().mockResolvedValue([]),
   },
 }));
 

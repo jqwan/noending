@@ -510,7 +510,25 @@ impl SessionLauncher {
 
             let cmd: AgentCommand =
                 adapter.build_new_command(&install, &runtime_opts, cwd_path.as_deref())?;
-            let outcome = spawn(&cmd)?;
+            // An embedded NEW launch spawns into NoEnding's own PTY with no
+            // session identity yet: the registry entry starts unbound and
+            // ingestion binds it when the discovered session claims the
+            // intent committed above. External spawns stay the default when
+            // no embedded surface is provided.
+            let outcome = if prepared.embedded {
+                let embedded =
+                    embedded.ok_or_else(|| other("内嵌终端服务不可用，请刷新预览后重试"))?;
+                (embedded.spawn)(
+                    &cmd,
+                    &crate::terminal::EmbeddedTarget {
+                        registry: embedded.registry,
+                        session_id: None,
+                        agent: prepared.agent,
+                    },
+                )?
+            } else {
+                spawn(&cmd)?
+            };
 
             // Record how the Agent was started. Guarded like every other write
             // to a waiting intent: this note describes an intent that is still
@@ -545,9 +563,7 @@ impl SessionLauncher {
                     "已直接启动；本次未选择所属任务。".into()
                 },
                 launch_intent_id: Some(intent.id),
-                // New launches never go to the embedded terminal (its
-                // "pending attribution" landing is future scope).
-                terminal_id: None,
+                terminal_id: outcome.terminal_id,
             })
         } else {
             let session_id = prepared
@@ -607,7 +623,7 @@ impl SessionLauncher {
                     &cmd,
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
-                        session_id,
+                        session_id: Some(session_id),
                         agent: session.agent,
                     },
                 )?

@@ -758,6 +758,56 @@ pub fn launch_embedded_resume(
     Ok(result)
 }
 
+/// The New-session modal's direct entry: prepare + launch an embedded NEW
+/// session in ONE step. The spawned terminal starts UNBOUND — the session
+/// does not exist until the TUI writes its file and ingestion discovers it,
+/// at which point the LaunchIntent match binds the terminal (bind_discovered)
+/// and the board's pseudo-row becomes a real session. A reconcile is enqueued
+/// right away so discovery happens as soon as the file lands.
+#[tauri::command]
+pub fn launch_embedded_new(
+    app: AppHandle,
+    state: State<AppState>,
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
+    agent: String,
+    owner_workstream_id: Option<String>,
+    cwd: Option<String>,
+) -> Result<crate::launcher::LaunchResult> {
+    let agent = agent_of(&agent)?;
+    let launcher = launcher_for(&app);
+    let workspace = launch_workspace(&app);
+    let mut prepared = with_db(&state, |db| {
+        launcher.prepare_new_in(
+            db,
+            agent,
+            owner_workstream_id.as_deref(),
+            cwd.as_deref(),
+            &workspace,
+        )
+    })?;
+    prepared.embedded = true;
+
+    let embedded = crate::launcher::EmbeddedSpawn {
+        registry: &terminal,
+        spawn: crate::terminal::spawn_embedded,
+    };
+    let result = with_db(&state, |db| {
+        launcher.launch_prepared_in(db, &prepared, &workspace, Some(&embedded))
+    })?;
+    ingestion::enqueue(&app, ingestion::IngestScope::ReconcileAll);
+    Ok(result)
+}
+
+/// Live embedded terminals, newest first. The sessions board renders the
+/// unbound ones as 运行中 pseudo-rows and derives "terminal is running"
+/// for bound sessions from the rest.
+#[tauri::command]
+pub fn terminal_list(
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
+) -> Result<Vec<crate::terminal::TerminalSummary>> {
+    Ok(terminal.list_live())
+}
+
 #[tauri::command]
 pub fn cancel_prepared(state: State<AppState>, prepared_id: String) -> Result<()> {
     let mut map = state

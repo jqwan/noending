@@ -1670,3 +1670,8 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
   flex: none;
   display: inline-flex;
 }
+
+/* 会话看板的运行中伪行/伪卡：可点击、与真实会话行视觉同族但有一道 accent 边。 */
+.terminal-pseudo { cursor: pointer; }
+.terminal-pseudo.session-list-row { border-left: 2px solid var(--accent, var(--text-accent)); }
+.terminal-pseudo.ws-card { border-left: 2px solid var(--accent, var(--text-accent)); }

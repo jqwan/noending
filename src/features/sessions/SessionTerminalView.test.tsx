@@ -450,3 +450,35 @@ it("shows the exit banner with the exit code for an exited terminal", async () =
   expect(screen.getByText(/退出码 7/)).toBeTruthy();
   expect(screen.getByText("再次启动")).toBeTruthy();
 });
+
+it("standalone mode attaches by terminal id and replaces to the session once bound", async () => {
+  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
+  let bound = false;
+  vi.mocked(api.terminalAttach).mockImplementation(() =>
+    Promise.resolve(snapshot({
+      terminal_id: "t-free",
+      session_id: bound ? "s-bound" : null,
+    })),
+  );
+  const navigate = vi.fn();
+
+  render(
+    <SessionTerminalView terminalId="t-free" navigate={navigate} />,
+  );
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  // 未绑定阶段：直接 attach，不起任何 launch。
+  expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
+  expect(api.terminalForSession).not.toHaveBeenCalled();
+
+  // 摄入绑定完成：轮询发现 session_id（1.5s 一次），replace 到会话终端子页。
+  bound = true;
+  await waitFor(
+    () =>
+      expect(navigate).toHaveBeenCalledWith({
+        view: "session",
+        sessionId: "s-bound",
+        entry: "terminal",
+      }),
+    { timeout: 4000 },
+  );
+});
