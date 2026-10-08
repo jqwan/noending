@@ -130,14 +130,6 @@ export default function PathListEditor({ entries, onChange }: PathListEditorProp
     onChange(entriesRef.current.filter((_, i) => i !== index));
   };
 
-  const makePrimary = (index: number) => {
-    if (index === 0) return;
-    const list = [...entriesRef.current];
-    const [moved] = list.splice(index, 1);
-    list.unshift(moved);
-    onChange(list);
-  };
-
   return (
     <div ref={editorRef} className="path-list-editor">
       {entries.length > 0 && (
@@ -152,20 +144,12 @@ export default function PathListEditor({ entries, onChange }: PathListEditorProp
             >
               <div className="grow" style={{ minWidth: 0 }}>
                 <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                  {i === 0 ? (
-                    <span className="badge accent" title="新建会话默认从这里启动，也决定项目归属">
-                      主路径
-                    </span>
-                  ) : (
-                    <span className="badge">第 {i + 1} 条</span>
-                  )}
+                  <span className="badge">第 {i + 1} 条</span>
                   <DraftRow raw={entry.raw} />
                 </div>
               </div>
               <div className="side row">
-                {i > 0 && <button type="button" className="btn small ghost" onClick={() => makePrimary(i)}>设为主要</button>}
                 <button type="button" className="btn small ghost icon-only" title="移除路径" aria-label={`移除 ${entry.raw}`} onClick={() => remove(i)}><Icon name="close" /></button>
-
               </div>
             </div>
           ))}

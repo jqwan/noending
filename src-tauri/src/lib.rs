@@ -54,7 +54,21 @@ pub fn run() {
             let layer = std::sync::Arc::new(workspace::wiring::WorkspaceLayer::new(&home));
             app.manage(layer.clone());
             let _ = workspace::session::register_workspace_attacher(layer.clone());
-            app.manage(workspace::workstream::PathService::new(layer));
+            app.manage(workspace::workstream::PathService::new(layer.clone()));
+
+            // Ensure the active default workspace is registered as a WorkspacePath
+            // and has its "NoEnding Workspace" Project established.
+            {
+                let default_ws = home.default_workspace_str();
+                let observation = layer.projection().observer().observe(&default_ws);
+                if let Err(e) = crate::workspace::project::ensure_workspace_path_outcome(
+                    &db,
+                    &observation,
+                    layer.projection().policy(),
+                ) {
+                    eprintln!("[noending] failed to ensure default workspace: {e}");
+                }
+            }
 
             // refresh + cache agent CLI detections (ExecutableResolver).
             // Snapshot semantics: a failed resolve REMOVES the cached row so
@@ -144,6 +158,7 @@ pub fn run() {
             commands::project::get_project_detail,
             commands::project::list_project_workstreams,
             commands::project::rename_project,
+            commands::project::add_project_path,
             commands::workspace::get_workspace_settings,
             commands::workspace::set_noending_home,
             commands::workstream::create_workstream,

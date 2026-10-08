@@ -32,7 +32,7 @@ export type WorkstreamEntry = "review" | "conflicts";
 export type SessionEntry = "conversation";
 
 export type Route =
-  | { view: "new-session"; workstreamId?: string; agent?: Agent }
+  | { view: "new-session"; workstreamId?: string; agent?: Agent; projectId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }

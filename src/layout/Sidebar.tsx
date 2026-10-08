@@ -121,10 +121,10 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
                   <button
                     className="pin-button terminal-close"
                     aria-label={`关闭终端：${title}`}
-                    title={`关闭这个内嵌终端${t.session_id ? "，回到它的会话" : ""}`}
+                    title="关闭终端"
                     onClick={() => void closeTerminal(t)}
                   >
-                    <Icon name="trash" />
+                    <Icon name="close" />
                   </button>
                 </div>
               );

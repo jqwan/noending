@@ -61,6 +61,12 @@ export interface WorkspacePath {
   last_seen_at: string;
 }
 
+export interface AddProjectPathResult {
+  path: WorkspacePath;
+  project_id: string;
+  project_name: string;
+}
+
 /** `list_workstream_paths` row: the entry plus the facts the UI shows beside it. */
 export interface WorkstreamPathRow extends WorkstreamPath {
   canonical_path: string;
@@ -585,11 +591,18 @@ export interface SessionWorkspacePath {
   project_name: string;
 }
 
+export interface SessionMessageStats {
+  user_messages: number;
+  assistant_messages: number;
+}
+
 /** `get_session_detail` — 逻辑会话详情。 */
 export interface SessionDetail {
   session: Session;
   /** Conversation：只含根源的 user/assistant 消息。 */
   messages: SessionMessage[];
+  /** 会话消息统计：用户消息与代理回复总数。 */
+  message_stats?: SessionMessageStats;
   /** 唯一的所属任务；`null` = 未归属任务。 */
   owner_workstream: Workstream | null;
   workspace_path: SessionWorkspacePath | null;

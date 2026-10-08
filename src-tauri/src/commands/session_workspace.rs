@@ -40,6 +40,8 @@ pub struct SessionDetail {
     pub session: Session,
     /// The Conversation: root user/assistant messages only.
     pub messages: Vec<SessionMessage>,
+    /// Message count statistics (user messages vs agent replies).
+    pub message_stats: SessionMessageStats,
     /// The one Workstream this Session belongs to, or `None`.
     pub owner_workstream: Option<Workstream>,
     /// Session Detail shows the WorkspacePath and the Project behind it,
@@ -100,6 +102,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             .ok_or_else(|| other("Session 不存在"))?;
         // 详情页预览只保留对话的骨架：用户消息 + 每轮的最终回复。
         let messages = db.recent_turn_messages(&session_id, DETAIL_MESSAGE_PREVIEW)?;
+        let message_stats = db.session_message_stats(&session_id)?;
         let adapter = crate::adapters::adapter_for(session.agent);
         let source_status = adapter.inspect_session_source(&session)?;
         // The two frontiers the detail page shows: messages ingested, and how
@@ -138,6 +141,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         Ok(SessionDetail {
             session,
             messages,
+            message_stats,
             owner_workstream,
             workspace_path: workspace_path.transpose()?,
             ingested_message_sequence,

@@ -4,17 +4,18 @@ import { api } from "../../api";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import SidebarLogo from "../../components/SidebarLogo";
+import { showToast } from "../../components/Toast";
 import type { Route } from "../../app/routes";
 import { announceLaunch } from "../launcher/LaunchResultModal";
 import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
+import { ellipsisPathMiddle } from "./SessionTable";
 import {
   AGENT_LABELS,
   type Agent,
   type AgentStatusEntry,
   type PreparedLaunch,
-  type RecentWorkspacePath,
+  type ProjectCardData,
   type WorkstreamCardData,
-  type WorkstreamPathRow,
 } from "../../types";
 
 /** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
@@ -23,34 +24,30 @@ export type NewSessionViewProps = {
   workstreamId?: string | null;
   /** 单次指定 Agent，不修改全局默认设置。 */
   agent?: Agent | null;
+  /** 预置选中的项目 ID；省略或 "none" = 默认项目 NoEnding Workspace。 */
+  projectId?: string | null;
   navigate: (r: Route) => void;
 };
 
 const STANDALONE = "none";
+const DEFAULT_PROJECT_ID = "default";
 
 /** 支持终端 CLI 启动的 Agent 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI Agent 不在此列） */
 const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
 
-/** 下拉选项里路径的紧凑形态：末段才是识别信息，整条路径留给 title。 */
-function pathTail(path: string): string {
-  const segs = path.split(/[\\/]/).filter(Boolean);
-  const tail = segs.slice(-2).join("/");
-  return segs.length > 2 ? `…/${tail}` : tail;
-}
-
-function workstreamLabel(w: WorkstreamCardData): string {
-  if (w.primary_path) return `${w.title} · ${pathTail(w.primary_path)}`;
-  return `${w.title} · 无工作路径`;
-}
-
 export default function NewSessionView({
   workstreamId,
   agent: initialAgent,
+  projectId: initialProjectId,
   navigate,
 }: NewSessionViewProps) {
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
+  const [projects, setProjects] = useState<ProjectCardData[]>([]);
   const [ownerWorkstreamId, setOwnerWorkstreamId] = useState(
     workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
+  );
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(
+    initialProjectId && initialProjectId !== "none" ? initialProjectId : DEFAULT_PROJECT_ID
   );
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(() => {
@@ -60,10 +57,6 @@ export default function NewSessionView({
     return "codex";
   });
   const [defaultWorkspace, setDefaultWorkspace] = useState<string>("");
-  const [recentPaths, setRecentPaths] = useState<RecentWorkspacePath[]>([]);
-  const [taskPaths, setTaskPaths] = useState<WorkstreamPathRow[]>([]);
-  const [selectedCwd, setSelectedCwd] = useState<string>("");
-  const [customPaths, setCustomPaths] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
@@ -80,7 +73,23 @@ export default function NewSessionView({
     api
       .listWorkstreamCards()
       .then((ws) => {
-        if (!cancelled) setWorkstreams(ws.filter((w) => w.visibility === "normal"));
+        if (!cancelled) {
+          const normal = ws.filter((w) => w.visibility === "normal");
+          setWorkstreams(normal);
+          if ((!initialProjectId || initialProjectId === "none" || initialProjectId === DEFAULT_PROJECT_ID) && workstreamId && workstreamId !== STANDALONE) {
+            const targetWs = normal.find((w) => w.id === workstreamId);
+            if (targetWs?.project_id) {
+              setSelectedProjectId(targetWs.project_id);
+            }
+          }
+        }
+      })
+      .catch(console.error);
+
+    api
+      .listProjectCards()
+      .then((cards) => {
+        if (!cancelled) setProjects(cards);
       })
       .catch(console.error);
 
@@ -88,6 +97,15 @@ export default function NewSessionView({
       .getAgentStatus()
       .then((status) => { if (!cancelled) setAgentStatus(status); })
       .catch(console.error);
+
+    api
+      .getWorkspaceSettings?.()
+      ?.then((s) => {
+        if (!cancelled && s?.default_workspace) {
+          setDefaultWorkspace(s.default_workspace);
+        }
+      })
+      ?.catch(console.error);
 
     if (!initialAgent) {
       api
@@ -100,52 +118,7 @@ export default function NewSessionView({
         .catch(console.error);
     }
     return () => { cancelled = true; };
-  }, [initialAgent]);
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getWorkspaceSettings?.()
-      ?.then((s) => {
-        if (!cancelled && s?.default_workspace) {
-          setDefaultWorkspace(s.default_workspace);
-        }
-      })
-      ?.catch(console.error);
-
-    api
-      .listRecentWorkspacePaths?.()
-      ?.then((rows) => {
-        if (!cancelled && rows) {
-          setRecentPaths(rows);
-        }
-      })
-      ?.catch(console.error);
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (ownerWorkstreamId === STANDALONE) {
-      setTaskPaths([]);
-      return;
-    }
-    let cancelled = false;
-    api
-      .listWorkstreamPaths?.(ownerWorkstreamId)
-      ?.then((rows) => {
-        if (!cancelled && rows) {
-          setTaskPaths(rows);
-        }
-      })
-      ?.catch(console.error);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [ownerWorkstreamId]);
+  }, [initialAgent, workstreamId, initialProjectId]);
 
   const cliAgents = agentStatus
     ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
@@ -153,74 +126,105 @@ export default function NewSessionView({
       )
     : CLI_AGENTS;
 
-  const isTask = ownerWorkstreamId !== STANDALONE;
+  const defaultProject = useMemo(() => {
+    return (
+      projects.find(
+        (p) =>
+          p.name === "NoEnding Workspace" ||
+          (defaultWorkspace && p.search_paths?.includes(defaultWorkspace))
+      ) ?? null
+    );
+  }, [projects, defaultWorkspace]);
 
-  // 默认工作目录：
-  // 1. 若来自任务：如果有工作路径，默认为主目录（第 0 条）；若无目录，默认为 NoEnding 默认工作区
-  // 2. 若直接开始（无任务）：默认为 NoEnding 默认工作区
-  const defaultCwd = useMemo(() => {
-    if (isTask) {
-      if (taskPaths.length > 0) {
-        return taskPaths[0].canonical_path;
-      }
-      return defaultWorkspace;
-    }
-    return defaultWorkspace;
-  }, [isTask, taskPaths, defaultWorkspace]);
+  const defaultProjectId = defaultProject?.id ?? DEFAULT_PROJECT_ID;
 
-  // 可选工作目录列表：
-  // 1. 若来自任务：为当前任务下的工作目录列表，没有目录时为 NoEnding 默认工作区
-  // 2. 若无任务：从已有工作目录进行选择（NoEnding 默认工作区置顶，配合最近/已知目录）
-  const cwdOptions = useMemo<{ value: string; label: string }[]>(() => {
-    if (isTask) {
-      if (taskPaths.length > 0) {
-        return taskPaths.map((p, idx) => ({
-          value: p.canonical_path,
-          label: idx === 0 ? `${p.canonical_path} (主目录)` : p.canonical_path,
-        }));
-      }
-      if (defaultWorkspace) {
-        return [
-          {
-            value: defaultWorkspace,
-            label: `${defaultWorkspace} (NoEnding 默认工作区)`,
-          },
-        ];
-      }
-      return [];
-    }
+  const isDefaultProject =
+    selectedProjectId === DEFAULT_PROJECT_ID ||
+    selectedProjectId === "none" ||
+    (defaultProject !== null && selectedProjectId === defaultProject.id);
 
-    const opts: { value: string; label: string }[] = [];
-    if (defaultWorkspace) {
-      opts.push({
-        value: defaultWorkspace,
-        label: `${defaultWorkspace} (NoEnding 默认工作区)`,
-      });
+  const selectedProject = useMemo(() => {
+    if (isDefaultProject) {
+      if (defaultProject) return defaultProject;
+      return {
+        id: defaultProjectId,
+        name: "NoEnding Workspace",
+        name_customized: false,
+        kind: "directory",
+        has_git_identity: false,
+        path_count: defaultWorkspace ? 1 : 0,
+        missing_path_count: 0,
+        primary_workstream_count: 0,
+        related_workstream_count: 0,
+        session_count: 0,
+        representative_paths: defaultWorkspace ? [defaultWorkspace] : [],
+        search_paths: defaultWorkspace ? [defaultWorkspace] : [],
+        last_activity_at: null,
+        updated_at: "",
+      } as ProjectCardData;
     }
-    for (const p of customPaths) {
-      if (p !== defaultWorkspace && !opts.some((o) => o.value === p)) {
-        opts.push({ value: p, label: p });
-      }
-    }
-    for (const r of recentPaths) {
-      if (r.path && r.path !== defaultWorkspace && !opts.some((o) => o.value === r.path)) {
-        opts.push({
-          value: r.path,
-          label: r.project_name ? `${r.path} (${r.project_name})` : r.path,
-        });
-      }
-    }
-    return opts;
-  }, [isTask, taskPaths, defaultWorkspace, customPaths, recentPaths]);
+    return projects.find((p) => p.id === selectedProjectId) ?? null;
+  }, [isDefaultProject, defaultProject, defaultProjectId, defaultWorkspace, projects, selectedProjectId]);
 
-  const effectiveCwd =
-    selectedCwd && cwdOptions.some((o) => o.value === selectedCwd)
-      ? selectedCwd
-      : defaultCwd;
+  const otherProjects = useMemo(() => {
+    return projects.filter(
+      (p) => p.id !== defaultProjectId && p.name !== "NoEnding Workspace"
+    );
+  }, [projects, defaultProjectId]);
 
-  const launchCwd = selectedCwd && selectedCwd !== defaultCwd && cwdOptions.some((o) => o.value === selectedCwd)
-    ? selectedCwd
-    : undefined;
+  const projectDirs: string[] = useMemo(() => {
+    if (!selectedProject) return defaultWorkspace ? [defaultWorkspace] : [];
+    const paths =
+      selectedProject.search_paths && selectedProject.search_paths.length > 0
+        ? selectedProject.search_paths
+        : selectedProject.representative_paths;
+    if (paths && paths.length > 0) return paths;
+    return defaultWorkspace ? [defaultWorkspace] : [];
+  }, [selectedProject, defaultWorkspace]);
+
+  const [selectedDirPath, setSelectedDirPath] = useState<string>("");
+  const [dirGitStates, setDirGitStates] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (projectDirs.length > 0 && !projectDirs.includes(selectedDirPath)) {
+      setSelectedDirPath(projectDirs[0]);
+    }
+  }, [projectDirs, selectedDirPath]);
+
+  useEffect(() => {
+    const target = selectedDirPath || projectDirs[0] || defaultWorkspace;
+    if (!target || dirGitStates[target] !== undefined) return;
+    if (!api.probeWorkspacePath) return;
+    let cancelled = false;
+    api
+      .probeWorkspacePath(target)
+      .then((probe) => {
+        if (!cancelled && probe) {
+          setDirGitStates((prev) => ({
+            ...prev,
+            [target]: probe.git_state === "detected",
+          }));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDirPath, projectDirs, defaultWorkspace, dirGitStates]);
+
+  // 新建会话的工作路径：由选中的项目目录决定；若为 NoEnding Workspace 默认项目且为独立会话，传 undefined 走后端默认解析
+  const launchCwd = useMemo(() => {
+    if (isDefaultProject) {
+      if (ownerWorkstreamId !== STANDALONE) {
+        return selectedDirPath || defaultWorkspace || undefined;
+      }
+      if (selectedDirPath && defaultWorkspace && selectedDirPath !== defaultWorkspace) {
+        return selectedDirPath;
+      }
+      return undefined;
+    }
+    return selectedDirPath || projectDirs[0] || undefined;
+  }, [isDefaultProject, ownerWorkstreamId, selectedDirPath, defaultWorkspace, projectDirs]);
 
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
     if (!selectedAgent) return null;
@@ -229,18 +233,58 @@ export default function NewSessionView({
       return api.prepareNewSession(selectedAgent, ownerId, launchCwd);
     }
     return api.prepareNewSession(selectedAgent, ownerId);
-  }, [selectedAgent, ownerWorkstreamId, launchCwd, selectedCwd, defaultCwd]);
+  }, [selectedAgent, ownerWorkstreamId, launchCwd]);
 
   const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
-  const displayedCwd = prepared?.cwd ?? effectiveCwd;
 
   const handleWsChange = (next: string) => {
     if (next === ownerWorkstreamId) return;
     releasePrepared();
-    setTaskPaths([]);
     setOwnerWorkstreamId(next);
-    setSelectedCwd("");
+    if (next === STANDALONE) {
+      setSelectedProjectId(defaultProjectId);
+    } else {
+      const ws = workstreams.find((w) => w.id === next);
+      setSelectedProjectId(ws?.project_id ?? defaultProjectId);
+    }
+  };
+
+  const handleProjectChange = (next: string) => {
+    if (next === selectedProjectId) return;
+    releasePrepared();
+    setSelectedProjectId(next);
+  };
+
+  const handleDirChange = (next: string) => {
+    if (next === selectedDirPath) return;
+    releasePrepared();
+    setSelectedDirPath(next);
+  };
+
+  const handleAddNewProject = async () => {
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "选择项目目录",
+      });
+      if (!picked) return;
+      const pickedPath = Array.isArray(picked) ? picked[0] : picked;
+      if (!pickedPath) return;
+
+      const res = await api.addProjectPath(pickedPath);
+      const fresh = await api.listProjectCards();
+      setProjects(fresh);
+      if (res.project_id) {
+        setSelectedProjectId(res.project_id);
+        setSelectedDirPath(res.path.canonical_path || pickedPath);
+      }
+      showToast(`已添加到项目「${res.project_name}」`);
+    } catch (e) {
+      console.error(e);
+      showToast(`添加项目失败：${String(e)}`);
+    }
   };
 
   const handleAgentChange = (next: Agent) => {
@@ -248,27 +292,6 @@ export default function NewSessionView({
     if (next === selectedAgent) return;
     releasePrepared();
     setSelectedAgent(next);
-  };
-
-  const handleCwdChange = async (val: string) => {
-    if (val === "__BROWSE__") {
-      try {
-        const picked = await open({ directory: true, multiple: false, title: "选择工作目录" });
-        if (typeof picked === "string" && picked.trim() !== "") {
-          const trimmed = picked.trim();
-          if (trimmed === selectedCwd) return;
-          setCustomPaths((prev) => [trimmed, ...prev.filter((p) => p !== trimmed)]);
-          releasePrepared();
-          setSelectedCwd(trimmed);
-        }
-      } catch (e) {
-        console.error("浏览目录失败:", e);
-      }
-      return;
-    }
-    if (val === selectedCwd) return;
-    releasePrepared();
-    setSelectedCwd(val);
   };
 
   const canSend = Boolean(message.trim() && selectedAgent && prepared && !preparing && !busy);
@@ -304,51 +327,103 @@ export default function NewSessionView({
     }
   };
 
+  const selectedWorkstream = workstreams.find((w) => w.id === ownerWorkstreamId);
+  const taskLabel =
+    ownerWorkstreamId === STANDALONE
+      ? "无所属任务"
+      : (selectedWorkstream?.title ?? "无所属任务");
+
+  const projectLabel = isDefaultProject
+    ? "NoEnding Workspace"
+    : (selectedProject?.name ?? "NoEnding Workspace");
+
+  const currentDir = selectedDirPath || projectDirs[0] || "";
+  const dirLabel = useMemo(() => {
+    if (!currentDir) return "默认工作目录";
+    return ellipsisPathMiddle(currentDir, 42);
+  }, [currentDir]);
+
+  const isGitDir = Boolean(
+    selectedProject?.has_git_identity ||
+    (currentDir && dirGitStates[currentDir])
+  );
+
+  const agentLabel = AGENT_LABELS[selectedAgent] ?? selectedAgent;
+
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
       <div className="new-session-content">
         <div className="new-session-heading">
-          <SidebarLogo size={34} />
-          <h1 id="new-session-title">开启新会话</h1>
+          <div className="new-session-heading-title">
+            <SidebarLogo size={36} />
+            <h1 id="new-session-title">开启新会话</h1>
+          </div>
+          <p className="new-session-subtitle">选择目标任务与执行项目，立即启动 Agent 展开工作</p>
         </div>
 
         <form onSubmit={(e) => { e.preventDefault(); void start(); }}>
           <div className="new-session-context">
             <label className="new-session-picker new-session-task">
               <Icon name="tasks" />
+              <span className="new-session-picker-label truncate">{taskLabel}</span>
+              <Icon name="chevronDown" />
               <select
                 aria-label="所属任务（可选）"
-                title="所属任务（可选）"
+                title={taskLabel}
                 value={ownerWorkstreamId}
                 onChange={(e) => handleWsChange(e.target.value)}
                 disabled={busy}
               >
                 <option value={STANDALONE}>无所属任务</option>
                 {workstreams.map((w) => (
-                  <option key={w.id} value={w.id}>{workstreamLabel(w)}</option>
+                  <option key={w.id} value={w.id}>{w.title}</option>
                 ))}
               </select>
             </label>
 
-            <label className="new-session-picker new-session-path">
+            <label className="new-session-picker new-session-project">
               <Icon name="folder" />
+              <span className="new-session-picker-label truncate">{projectLabel}</span>
+              <Icon name="chevronDown" />
               <select
-                aria-label="工作路径"
-                title={displayedCwd || "工作路径"}
-                value={displayedCwd}
-                onChange={(e) => void handleCwdChange(e.target.value)}
+                aria-label="所属项目"
+                title={projectLabel}
+                value={isDefaultProject ? defaultProjectId : selectedProjectId}
+                onChange={(e) => {
+                  if (e.target.value === "__new_project__") {
+                    void handleAddNewProject();
+                    return;
+                  }
+                  handleProjectChange(e.target.value);
+                }}
                 disabled={busy}
               >
-                {cwdOptions.length === 0 && !displayedCwd && (
-                  <option value="">{preparing ? "正在准备工作路径…" : "未设置工作路径"}</option>
-                )}
-                {displayedCwd && !cwdOptions.some((o) => o.value === displayedCwd) && (
-                  <option value={displayedCwd}>{displayedCwd} (本次工作路径)</option>
-                )}
-                {cwdOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                <option value={defaultProjectId}>NoEnding Workspace</option>
+                {otherProjects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
-                {!isTask && <option value="__BROWSE__">浏览其他目录…</option>}
+                <option value="__new_project__">+ 新项目</option>
+              </select>
+            </label>
+
+            <label className="new-session-picker new-session-dir">
+              <Icon name={isGitDir ? "git" : "folder"} />
+              <span className="new-session-picker-label truncate" title={currentDir || dirLabel}>
+                {dirLabel}
+              </span>
+              <Icon name="chevronDown" />
+              <select
+                aria-label="项目目录"
+                title={currentDir || dirLabel}
+                value={selectedDirPath}
+                onChange={(e) => handleDirChange(e.target.value)}
+                disabled={busy || projectDirs.length <= 1}
+              >
+                {projectDirs.map((dir) => (
+                  <option key={dir} value={dir}>
+                    {dir}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -372,9 +447,11 @@ export default function NewSessionView({
             <div className="new-session-composer-footer">
               <label className="new-session-picker new-session-agent">
                 <AgentIcon agent={selectedAgent} size={18} />
+                <span className="new-session-picker-label truncate">{agentLabel}</span>
+                <Icon name="chevronDown" />
                 <select
                   aria-label="Agent"
-                  title="Agent"
+                  title={agentLabel}
                   value={selectedAgent}
                   onChange={(e) => handleAgentChange(e.target.value as Agent)}
                   disabled={busy}
@@ -405,7 +482,7 @@ export default function NewSessionView({
 
           {prepared?.cwd_resolution?.fallback && (
             <p className="new-session-note" role="status">
-              {prepared.cwd_resolution.note || "本次没有从这条流程通常的目录启动"}
+              {prepared.cwd_resolution.note || "未从默认工作目录启动"}
             </p>
           )}
           {error && (

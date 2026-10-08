@@ -4,7 +4,7 @@ import type { Route } from "../../app/routes";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
 
 // 词表：active → 进行中，completed → 已完成。v0.2 折叠了 abandoned。
-const LIFECYCLE_LABELS: Record<string, string> = {
+export const LIFECYCLE_LABELS: Record<string, string> = {
   active: "进行中",
   completed: "已完成",
 };
@@ -52,7 +52,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent }: {
           {/* visibility=archived 就是回收站：它和 lifecycle 正交，
               所以这里单独一个徽标，而不是把 lifecycle 改成第三种值。 */}
           {card.visibility === "archived" && (
-            <span className="badge warn" title="在回收站里：工作路径、会话归属与 Context 都原样保留。进详情页可以恢复或永久删除。">回收站</span>
+            <span className="badge warn" title="已移入回收站">回收站</span>
           )}
         </div>
       </header>

@@ -108,7 +108,7 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
     {
         let mut st = conn.prepare(
             "SELECT project_id, canonical_path FROM workspace_paths
-             ORDER BY project_id, canonical_path",
+             ORDER BY project_id, CASE WHEN git_kind = 'main' THEN 0 ELSE 1 END, canonical_path",
         )?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
@@ -410,5 +410,47 @@ pub fn rename_project(state: State<AppState>, project_id: String, name: String) 
         // The search row carries the name, so it follows the rename.
         let _ = db.index_project(&project);
         Ok(project)
+    })
+}
+
+#[derive(Serialize)]
+pub struct AddProjectPathResult {
+    pub path: WorkspacePath,
+    pub project_id: String,
+    pub project_name: String,
+}
+
+/// 显式注册一个工作目录：若归属已有项目（如 Git 家族），则归属到该项目；
+/// 若为新目录，则以其创建新项目。
+#[tauri::command]
+pub fn add_project_path(
+    state: State<AppState>,
+    layer: State<'_, Arc<WorkspaceLayer>>,
+    path: String,
+) -> Result<AddProjectPathResult> {
+    let raw = path.trim();
+    if raw.is_empty() {
+        return Err(other("目录路径不能为空"));
+    }
+    let projection = layer.projection();
+    let observation = projection.observer().observe(raw);
+    let outcome = with_db(&state, |db| {
+        crate::workspace::project::ensure_workspace_path_outcome(
+            db,
+            &observation,
+            projection.policy(),
+        )
+    })?;
+    let (project_id, project_name) = with_db(&state, |db| {
+        let p = db.get_project(&outcome.path.project_id)?;
+        let name = p
+            .map(|proj| proj.name)
+            .unwrap_or_else(|| "未命名项目".to_string());
+        Ok((outcome.path.project_id.clone(), name))
+    })?;
+    Ok(AddProjectPathResult {
+        path: outcome.path,
+        project_id,
+        project_name,
     })
 }

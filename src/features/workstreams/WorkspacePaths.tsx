@@ -6,10 +6,9 @@ import type {
 } from "../../types";
 
 /**
- * 工作目录：一个 Workstream 的**有序**路径列表，position 0 就是主工作目录——
- * 角色完全由位置表达，没有第二个权威字段。
+ * 工作目录：一个 Workstream 的工作路径列表。
  *
- * 这一页同时展示三个事实：启动目录、Project 归属、增删路径只改这份配置（不删会话、
+ * 这一页同时展示：启动目录、Project 归属、增删路径只改这份配置（不删会话、
  * 不改已有会话的所属任务）。任何动作都要说清连带动了什么，失败留在原地说明原因。
  */
 
@@ -24,7 +23,7 @@ export function GitStateBadge({ state, kind }: {
         : kind === "linked" ? "Git worktree"
           : "Git 仓库";
     return (
-      <span className="badge" title={`由 Workspace Reconcile 观察到 Git 证据（${kind ?? "unknown"}）`}>
+      <span className="badge" title={`Git 关联（${kind ?? "未知"}）`}>
         {label}
       </span>
     );
@@ -33,7 +32,7 @@ export function GitStateBadge({ state, kind }: {
     return (
       <span
         className="badge warn"
-        title="Git 信息暂不可用，项目归属不变。"
+        title="Git 信息暂不可用"
       >
         Git 证据消失
       </span>
@@ -48,7 +47,7 @@ export function GitStateBadge({ state, kind }: {
 /** 存在性是观察，不是身份：目录暂时不在，路径条目仍然是合法的一条。 */
 export function MissingBadge() {
   return (
-    <span className="badge warn" title="本机上读不到这个目录。它仍然是这项任务的一条工作目录——身份由路径字符串决定，存在性只是观察。">
+    <span className="badge warn" title="目录不存在">
       目录不存在
     </span>
   );
@@ -77,7 +76,7 @@ export function PathText({
       role="button"
       tabIndex={0}
       className="mono path-link"
-      title={`${path} · 点击在文件管理器中打开`}
+      title={path}
       style={{ overflowWrap: "anywhere" }}
       onClick={(e) => {
         e.stopPropagation();
@@ -131,12 +130,6 @@ export default function WorkstreamPathList({
               <PathText path={p.canonical_path} max={72} />
             </div>
           </div>
-          {/* 顺序就是角色：第 1 条即主工作目录。 */}
-          {p.position === 0 && (
-            <span className="badge accent" title="新建会话默认从这里启动，也决定项目归属">
-              主目录
-            </span>
-          )}
         </div>
       ))}
     </section>

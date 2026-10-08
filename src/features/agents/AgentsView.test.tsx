@@ -214,8 +214,9 @@ describe("AgentsView", () => {
     expect(antigravityCard).toBeTruthy();
 
     // Antigravity formats have static badges, not toggle buttons
-    const staticBadges = antigravityCard!.querySelectorAll('[title="该会话格式固定通过此方式打开会话"]');
+    const staticBadges = antigravityCard!.querySelectorAll('.badge[title="打开方式"]');
     expect(staticBadges.length).toBe(2); // One for Desktop, one for CLI
+    expect(Array.from(staticBadges, (badge) => badge.textContent)).toEqual(["Desktop", "TUI"]);
 
     // Antigravity card has NO toggle switch
     expect(antigravityCard!.querySelector('[aria-label="打开方式切换"]')).toBeNull();
@@ -280,5 +281,21 @@ describe("AgentsView", () => {
     await waitFor(() => {
       expect(api.removeIngestSource).toHaveBeenCalledWith("src-user-1");
     });
+  });
+
+  it("toggles between card and list view", async () => {
+    const { container } = render(<AgentsView navigate={vi.fn()} />);
+    await screen.findByText("Claude Code");
+
+    expect(container.querySelector(".agents-grid")).toBeTruthy();
+    expect(container.querySelector(".agents-list")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
+    expect(container.querySelector(".agents-list")).toBeTruthy();
+    expect(container.querySelector(".agents-grid")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
+    expect(container.querySelector(".agents-grid")).toBeTruthy();
+    expect(container.querySelector(".agents-list")).toBeNull();
   });
 });

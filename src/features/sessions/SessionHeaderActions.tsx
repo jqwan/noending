@@ -1,27 +1,28 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import Icon from "../../components/Icon";
-import AgentIcon from "../../components/AgentIcon";
 import { capsOf } from "./sessionFormats";
-import { continueSessionDesktopWithToast, desktopContinueState, useAgentStatus } from "./continueDesktop";
+import {
+  continueSessionDesktopWithToast,
+  continueSessionTerminal,
+  desktopContinueState,
+  getSavedContinueMode,
+  setSavedContinueMode,
+  useAgentStatus,
+  type ContinueMode,
+} from "./continueDesktop";
 import type { Agent } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
- * 会话两个子页（概览 / 对话）共用的头部动作簇：移入回收站 / 增量同步 /
- * 内嵌终端 / 继续——与两段子页切换器并排，构成每个子页一致的右上角。
+ * 会话两个子页（概览 / 对话）共用的头部动作簇：移入回收站 / 增量同步 / 继续。
  *
- * 「内嵌终端」是先跳后启：已有活终端（含会话页校验匹配当场绑定的）直接
- * 跳到独立终端视图，没有才启动一次内嵌 Resume。按会话格式的静态能力出现
- * （sessionFormats 能力表，与后端 adapters 同源）——antigravity 的桌面存储
- * 没有 CLI，不出现终端按钮。
- *
- * 「继续」是 Agent 图标按钮，点击直接在会话格式对应的桌面应用里打开（无预览）。
- * 启用与否是格式事实：没有桌面路由的格式（claude_code / pi / antigravity_cli）
- * 置灰并说明原因，桌面应用未安装同样置灰；回收站中的会话整簇收起为一颗
- * 禁用的继续键——后端同样拒绝。
+ * 「继续」行为根据会话格式能力展现：
+ *   - 兼具桌面与终端能力（目前为 codex）：展示聚合分列按钮，可切换「在桌面应用中继续」与「在终端中继续」；
+ *   - 仅桌面能力（antigravity 桌面存储 / dsh / qoder / workbuddy / zcode）：仅显示桌面继续按钮；
+ *   - 仅终端能力（antigravity CLI 存储 / pi / claude_code）：仅显示终端继续按钮。
  */
 export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, trashed, navigate, onChanged }: {
   sessionId: string;
@@ -39,12 +40,33 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
   const [syncing, setSyncing] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [terminalBusy, setTerminalBusy] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [continueMode, setContinueMode] = useState<ContinueMode>(() => getSavedContinueMode());
+  const menuRef = useRef<HTMLDivElement>(null);
   const agentStatus = useAgentStatus();
 
-  const hasTerminal = capsOf(agent, sourceKind).terminal;
+  const caps = capsOf(agent, sourceKind);
+  const canTerminal = caps.terminal;
+  const canDesktop = caps.desktop;
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
 
   const { disabled: launchDisabled, title: launchTitle } = trashed
-    ? { disabled: true, title: "回收站中的会话不能继续；先恢复它。" }
+    ? { disabled: true, title: "回收站中的会话不可继续" }
     : desktopContinueState({ agent, source_kind: sourceKind ?? "" }, agentStatus?.[agent] ?? null);
 
   const handleLaunch = () => {
@@ -59,24 +81,10 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     if (terminalBusy) return;
     setTerminalBusy(true);
     try {
-      // 跳转携带身份种子：终端视图首帧即显示本会话的标题与图标，
-      // 会话详情入口即刻可点——不闪「新会话」。
-      const seed = {
-        initialTitle: title,
-        initialAgent: agent,
-        initialSessionId: sessionId,
-      };
-      const existing = await api.terminalForSession(sessionId);
-      if (existing) {
-        navigate({ view: "terminal", terminalId: existing.terminal_id, ...seed });
-        return;
-      }
-      await api.launchEmbeddedResume(sessionId);
-      const created = await api.terminalForSession(sessionId);
-      if (!created) throw new Error("启动已完成，但找不到内嵌终端记录");
-      navigate({ view: "terminal", terminalId: created.terminal_id, ...seed });
+      // 共享跳转携带身份种子：终端首帧即显示本会话，不闪「新会话」。
+      await continueSessionTerminal({ id: sessionId, title, agent }, navigate);
     } catch (e) {
-      showToast(`内嵌终端不可用：${String(e)}`);
+      showToast(`终端不可用：${String(e)}`);
     } finally {
       setTerminalBusy(false);
     }
@@ -87,7 +95,7 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     setSyncing(true);
     try {
       await api.refreshSession(sessionId);
-      showToast("已排队：正在增量同步该会话最新对话…");
+      showToast("正在同步最新对话…");
       onChanged();
     } catch (e) {
       showToast(`同步失败：${String(e)}`);
@@ -114,7 +122,7 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     // 回收站中的会话：后端拒绝继续——如实呈现为不可用。
     return (
       <button className="btn ghost icon-button" disabled aria-label="继续" title={launchTitle}>
-        <AgentIcon agent={agent} size={18} />
+        {canTerminal && !canDesktop ? <Icon name="terminal" /> : <Icon name="desktop" />}
       </button>
     );
   }
@@ -133,32 +141,119 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
       <button
         className="btn ghost icon-button"
         aria-label="增量同步"
-        title="增量同步：从磁盘同步该会话的最新对话"
+        title="同步最新对话"
         onClick={() => void handleSync()}
         disabled={syncing}
       >
         <Icon name="refresh" />
       </button>
-      {hasTerminal && (
+
+      {/* 聚合继续按钮 / 单独继续按钮：
+          - 兼具桌面与终端能力（codex）：聚合分列按钮，可在两者之间切换；
+          - 仅终端能力（claude_code / pi / antigravity_cli）：仅显示终端按钮；
+          - 仅桌面能力（antigravity_desktop / dsh / qoder / workbuddy / zcode）：仅显示桌面按钮。 */}
+      {canTerminal && canDesktop && (
+        <div className="continue-split-btn" ref={menuRef}>
+          {continueMode === "desktop" ? (
+            <button
+              className="continue-main-btn"
+              aria-label="在桌面应用中继续"
+              title={launchTitle}
+              onClick={handleLaunch}
+              disabled={launchDisabled || launching}
+            >
+              <Icon name="desktop" />
+            </button>
+          ) : (
+            <button
+              className="continue-main-btn"
+              aria-label="在终端中继续"
+              title="在终端中继续"
+              disabled={terminalBusy}
+              onClick={() => void openTerminal()}
+            >
+              <Icon name="terminal" />
+            </button>
+          )}
+          <span className="continue-divider" />
+          <button
+            className={`continue-dropdown-btn ${menuOpen ? "open" : ""}`}
+            aria-label="切换继续方式"
+            title="切换继续方式"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            <Icon name="chevronDown" />
+          </button>
+
+          {menuOpen && (
+            <div className="continue-split-menu">
+              <button
+                className="continue-menu-item"
+                disabled={launchDisabled || launching}
+                title={launchTitle}
+                onClick={() => {
+                  setContinueMode("desktop");
+                  setSavedContinueMode("desktop");
+                  setMenuOpen(false);
+                  handleLaunch();
+                }}
+              >
+                <Icon name="desktop" />
+                <span className="menu-label">在桌面应用中继续</span>
+                {continueMode === "desktop" && (
+                  <span className="menu-check">
+                    <Icon name="check" />
+                  </span>
+                )}
+              </button>
+              <button
+                className="continue-menu-item"
+                disabled={terminalBusy}
+                title="在终端中继续"
+                onClick={() => {
+                  setContinueMode("terminal");
+                  setSavedContinueMode("terminal");
+                  setMenuOpen(false);
+                  void openTerminal();
+                }}
+              >
+                <Icon name="terminal" />
+                <span className="menu-label">在终端中继续</span>
+                {continueMode === "terminal" && (
+                  <span className="menu-check">
+                    <Icon name="check" />
+                  </span>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {canTerminal && !canDesktop && (
         <button
           className="btn ghost icon-button"
-          aria-label="内嵌终端"
-          title="打开内嵌终端（已有活终端则直接跳转）"
+          aria-label="在终端中继续"
+          title="在终端中继续"
           disabled={terminalBusy}
           onClick={() => void openTerminal()}
         >
           <Icon name="terminal" />
         </button>
       )}
-      <button
-        className="btn ghost icon-button"
-        aria-label="继续"
-        title={launchTitle}
-        onClick={handleLaunch}
-        disabled={launchDisabled || launching}
-      >
-        <AgentIcon agent={agent} size={18} />
-      </button>
+
+      {!canTerminal && canDesktop && (
+        <button
+          className="btn ghost icon-button"
+          aria-label="在桌面应用中继续"
+          title={launchTitle}
+          onClick={handleLaunch}
+          disabled={launchDisabled || launching}
+        >
+          <Icon name="desktop" />
+        </button>
+      )}
 
       {confirmTrash && (
         <Modal title="移入回收站" onClose={() => { if (!trashBusy) setConfirmTrash(false); }}>

@@ -140,7 +140,7 @@ async function renderDetail(d: SessionDetail) {
   const navigate = vi.fn();
   const view = render(<SessionDetailView sessionId={d.session.id} navigate={navigate} goBack={vi.fn()} />);
   await screen.findByText("会话信息");
-  return { navigate, container: document.body, rerender: view.rerender };
+  return { navigate, container: document.body, rerender: view.rerender, unmount: view.unmount };
 }
 
 it("renders agent icon before session title and plain agent name under session info", async () => {
@@ -162,6 +162,17 @@ it("renders agent icon before session title and plain agent name under session i
   expect(aside?.querySelector(".agent-icon")).toBeNull();
 });
 
+it("renders session message stats in session info aside", async () => {
+  const d = detail(session("s1", { title: "测试统计会话" }), {
+    message_stats: { user_messages: 5, assistant_messages: 8 },
+  });
+  await renderDetail(d);
+
+  expect(screen.getByText("会话统计")).toBeTruthy();
+  expect(screen.getByText("用户消息 5")).toBeTruthy();
+  expect(screen.getByText("代理回复 8")).toBeTruthy();
+});
+
 // 执行信息
 
 it("reveals the source by clicking the path itself", async () => {
@@ -174,18 +185,36 @@ it("reveals the source by clicking the path itself", async () => {
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("me"));
 });
 
-it("hides the terminal entry for a missing root source but keeps desktop continue", async () => {
+it("renders aggregate continue button for codex session even if source is missing", async () => {
   await renderDetail(detail(session("me"), { source_status: "missing", can_resume: false }));
 
   screen.getByText("源会话已不存在");
-  // 终端入口按格式能力出现（这里是 codex，有 CLI），按钮在场但先跳后启的
-  // 启动路径会被后端门槛拒绝——入口本身不再做门槛置灰。
-  expect(screen.getByRole("button", { name: "内嵌终端" })).toBeTruthy();
-  // 桌面打开不读我们的源文件（应用读它自己的存储）：继续按钮照常可用。
-  const resume = screen.getByRole("button", { name: "继续" }) as HTMLButtonElement;
+  // 聚合按钮在场（codex 兼具终端与桌面能力）
+  expect(screen.getByRole("button", { name: "切换继续方式" })).toBeTruthy();
+  const resume = screen.getByRole("button", { name: "在桌面应用中继续" }) as HTMLButtonElement;
   expect(resume.disabled).toBe(false);
+
+  // 展开切换菜单能看到在终端中继续选项
+  fireEvent.click(screen.getByRole("button", { name: "切换继续方式" }));
+  expect(screen.getByRole("button", { name: "在终端中继续" })).toBeTruthy();
+
   // 源不在，路径退回纯文本：没有可点的定位入口，只有警告。
   expect(screen.queryByRole("button", { name: "/tmp/rollout.jsonl" })).toBeNull();
+});
+
+it("shows only terminal continue button for terminal-only formats and desktop for desktop-only", async () => {
+  // Claude Code: terminal only
+  const { unmount } = await renderDetail(detail(session("claude-1", { agent: "claude_code" })));
+  expect(screen.getByRole("button", { name: "在终端中继续" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "在桌面应用中继续" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "切换继续方式" })).toBeNull();
+  unmount();
+
+  // Antigravity Desktop: desktop only
+  await renderDetail(detail(session("ag-1", { agent: "antigravity", source_kind: "antigravity_desktop" })));
+  expect(screen.getByRole("button", { name: "在桌面应用中继续" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "在终端中继续" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "切换继续方式" })).toBeNull();
 });
 
 // 消息
@@ -198,7 +227,6 @@ it("previews the newest messages and links to the whole conversation", async () 
   }));
 
   screen.getByText("最近的一句话");
-  // 预览只是最后 10 条：说清还剩多少没显示，入口用当前会话总数。
   screen.getByText("以上是最近 1 条。");
   fireEvent.click(screen.getByRole("button", { name: "查看全部会话（共 420 条）" }));
   expect(navigate).toHaveBeenCalledWith({

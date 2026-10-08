@@ -1,5 +1,5 @@
 import Icon from "../../components/Icon";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -99,6 +99,25 @@ export default function ProjectDetail({ projectId, navigate }: {
   const detail = data;
   const project = detail?.project ?? null;
 
+  const sortedSessions = useMemo(() => {
+    if (!detail) return [];
+    return [...detail.sessions].sort((a, b) =>
+      (b.last_activity_at ?? b.started_at ?? "").localeCompare(
+        a.last_activity_at ?? a.started_at ?? "",
+      ),
+    );
+  }, [detail]);
+
+  const sortedWorkspacePaths = useMemo(() => {
+    if (!detail) return [];
+    return [...detail.workspace_paths].sort((a, b) => {
+      const aMain = a.git_kind === "main" ? 0 : 1;
+      const bMain = b.git_kind === "main" ? 0 : 1;
+      if (aMain !== bMain) return aMain - bMain;
+      return a.canonical_path.localeCompare(b.canonical_path);
+    });
+  }, [detail]);
+
   const commitRename = async () => {
     const next = nameInput.trim();
     if (project === null || renameBusyRef.current) return;
@@ -172,7 +191,6 @@ export default function ProjectDetail({ projectId, navigate }: {
     );
   }
 
-  const sessions = detail.sessions;
 
   return (
     <div className="main project-detail">
@@ -180,10 +198,6 @@ export default function ProjectDetail({ projectId, navigate }: {
         title={<span style={{ overflowWrap: "anywhere" }}>{project.name}</span>}
         actions={
           <>
-            <button className="btn ghost icon-button" aria-label="询问助手" title="询问助手"
-              onClick={() => navigate({ view: "assistant", scope: { type: "project", id: project.id } })}>
-              <Icon name="chat" />
-            </button>
             <button className="btn ghost icon-button" aria-label="刷新目录状态"
               title="刷新目录状态"
               disabled={refreshingWorkspace}
@@ -238,9 +252,19 @@ export default function ProjectDetail({ projectId, navigate }: {
       </section>
 
       <section className="rail-section">
-        <div className="section-label">会话</div>
+        <div className="rail-head">
+          <div className="section-label" style={{ margin: 0 }}>会话</div>
+          <button
+            className="btn ghost icon-button"
+            title="新建会话"
+            aria-label="新建会话"
+            onClick={() => navigate({ view: "new-session", projectId: project.id })}
+          >
+            <Icon name="plus" />
+          </button>
+        </div>
 
-        <SessionMiniList sessions={sessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
+        <SessionMiniList sessions={sortedSessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
       </section>
 
 
@@ -285,12 +309,12 @@ export default function ProjectDetail({ projectId, navigate }: {
       </section>
       <section className="rail-section">
         <div className="section-label">工作目录</div>
-        {detail.workspace_paths.length === 0 && (
+        {sortedWorkspacePaths.length === 0 && (
           <div className="l1-none">
             这个项目已经不再拥有任何目录 —— 它会在下一次整理时自动消失。
           </div>
         )}
-        {detail.workspace_paths.map((p) => (
+        {sortedWorkspacePaths.map((p) => (
           <div className="list-row" key={p.id} style={{ cursor: "default" }}>
             <div className="grow">
               {/* 不用 .title：它的 nowrap + 尾部省略会把路径末段吃掉，

@@ -19,13 +19,12 @@ function row(id: string, position: number): WorkstreamPathRow {
   };
 }
 
-it("shows the ordered paths and marks only the first as primary", () => {
+it("shows the paths without distinguishing primary directory", () => {
   render(<WorkstreamPathList paths={[row("main", 0), row("docs", 1)]} />);
   screen.getByText("工作目录");
   screen.getByText("/repo/main");
   screen.getByText("/repo/docs");
-  // 顺序就是角色：第 1 条即主工作目录，第 2 条没有徽标。
-  expect(screen.getAllByText("主目录")).toHaveLength(1);
+  expect(screen.queryByText("主目录")).toBeNull();
 });
 
 it("distinguishes 还没读到 from 真的没有工作目录", () => {
