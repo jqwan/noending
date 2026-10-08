@@ -60,17 +60,12 @@ export function AgentRow({
 const CWD_SOURCE_LABELS: Record<CwdSource, string> = {
   explicit: "你指定的目录",
   session_cwd: "会话上次的目录",
-  workstream_path: "任务的工作路径",
   default_workspace: "NoEnding 默认工作区",
   unresolved: "未解析",
 };
 
 export function cwdSourceLabel(resolution: CwdResolution): string {
-  const base = CWD_SOURCE_LABELS[resolution.source];
-  if (resolution.source === "workstream_path" && resolution.path_position) {
-    return `${base} · 第 ${resolution.path_position + 1} 条`;
-  }
-  return base;
+  return CWD_SOURCE_LABELS[resolution.source];
 }
 
 /**

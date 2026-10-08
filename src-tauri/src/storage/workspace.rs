@@ -195,7 +195,6 @@ pub fn reassign_workspace_path_project_conn(
         params![path_id, new_project_id, now()],
     )?;
     super::session_paths::refresh_sessions_project_for_path_conn(conn, path_id)?;
-    refresh_workstream_search_parents_conn(conn, &[path_id.to_string()])?;
     Ok(())
 }
 
@@ -517,48 +516,4 @@ pub fn retire_project_if_unowned(conn: &Connection, project_id: &str) -> Result<
         return Ok(false);
     }
     delete_zero_path_project_conn(conn, project_id)
-}
-
-/// A Workstream's search row is parented by its PRIMARY-path Project, so any
-/// change behind `path_ids` can move it. Done as one SQL statement pair, so there
-/// is no Rust-side round trip to get wrong.
-pub fn refresh_workstream_search_parents_conn(
-    conn: &Connection,
-    path_ids: &[String],
-) -> Result<()> {
-    if path_ids.is_empty() {
-        return Ok(());
-    }
-    // Distinct `?1..?n` indexes, one per path id: repeating `?1` makes the
-    // statement take ONE parameter while the caller supplies N, which rusqlite
-    // rejects (`InvalidParameterCount`).
-    let markers = (1..=path_ids.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let affected = format!(
-        "SELECT DISTINCT workstream_id FROM workstream_paths WHERE workspace_path_id IN ({markers})"
-    );
-    let args: Vec<&dyn rusqlite::types::ToSql> = path_ids
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-    conn.execute(
-        &format!("DELETE FROM search_index WHERE kind = 'workstream' AND ref_id IN ({affected})"),
-        rusqlite::params_from_iter(args.iter()),
-    )?;
-    conn.execute(
-        &format!(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-             SELECT 'workstream', w.id,
-                    (SELECT wp.project_id FROM workstream_paths wsp
-                       JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-                      WHERE wsp.workstream_id = w.id AND wsp.position = 0),
-                    w.title, w.description
-             FROM workstreams w
-             WHERE w.id IN ({affected})"
-        ),
-        rusqlite::params_from_iter(args.iter()),
-    )?;
-    Ok(())
 }

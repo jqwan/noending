@@ -266,15 +266,10 @@ pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<Con
             &[],
             "user",
         )?;
-        // the Project this activity belongs to is its position-0
-        // path's Project. The current projection is read from the primary
-        // path: the derived cache can name a Project deleted or
-        // merged away, which would reorder `list_projects` (ORDER BY
-        // updated_at) by a membership that no longer exists.
-        let (pid, _) =
-            crate::workspace::workstream::primary_project_for_workstream(db, &args.workstream_id)?;
-        if let Some(pid) = pid {
-            db.touch_project(&pid)?;
+        for project in
+            crate::workspace::workstream::projects_for_workstream(db, &args.workstream_id)?
+        {
+            db.touch_project(&project.id)?;
         }
         Ok(item)
     })
@@ -348,7 +343,7 @@ pub fn delete_context_item(state: State<AppState>, item_id: String) -> Result<()
 #[derive(Serialize)]
 pub struct WorkstreamContext {
     pub workstream: Workstream,
-    pub project_name: Option<String>,
+    pub projects: Vec<crate::workspace::workstream::WorkstreamProject>,
     pub core: Vec<crate::context::ContextSection>,
     pub items: Vec<(ContextItem, ContextItemRevision)>,
     /// Sessions that own this Workstream. At most one Workstream
@@ -377,13 +372,10 @@ pub fn get_workstream_context(
         let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
         let relations = db.item_relations_for_workstream(&workstream_id)?;
         let recent_changes = db.list_workstream_context_changes(&workstream_id, 20)?;
-        // the name shown beside a Workstream is its position-0 path's
-        // Project.
-        let (_, project_name) =
-            crate::workspace::workstream::primary_project_for_workstream(db, &workstream_id)?;
+        let projects = crate::workspace::workstream::projects_for_workstream(db, &workstream_id)?;
         Ok(WorkstreamContext {
             workstream,
-            project_name,
+            projects,
             core,
             items,
             sessions,

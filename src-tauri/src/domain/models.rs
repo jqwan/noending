@@ -110,9 +110,7 @@ pub struct GitIdentity {
 
 /// One entry of a Workstream's ordered working-path list.
 ///
-/// `position` is the whole role: 0 is the primary path, > 0 are secondary.
-/// There is deliberately no `is_primary` / `role` column — two authorities for
-/// one fact is how the old default cwd and Workstream project field drifted apart.
+/// `position` records display order only; paths have no primary/secondary roles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkstreamPath {
     pub id: Id,

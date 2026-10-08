@@ -319,3 +319,21 @@ fn the_read_side_guard_hides_rows_without_a_live_session() {
         "restore reindexes and the guard lets the live rows through: {hits:?}"
     );
 }
+
+#[test]
+fn task_search_backfill_does_not_assign_a_single_project_parent() {
+    let db = open_db("task-search-parent");
+    let task = support::workstream("multi-project-task".into(), "多项目任务");
+    db.upsert_workstream(&task).unwrap();
+    db.index_workstream(&task).unwrap();
+    db.write()
+        .execute(
+            "UPDATE search_index SET parent_id = 'some-project' WHERE kind = 'workstream'",
+            [],
+        )
+        .unwrap();
+    db.backfill_search_index().unwrap();
+    let results = noending::search::search(&db, "多项目任务", 10).unwrap();
+    let hit = results.iter().find(|hit| hit.ref_id == task.id).unwrap();
+    assert!(hit.parent_id.is_empty());
+}

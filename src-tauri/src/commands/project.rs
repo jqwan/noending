@@ -9,7 +9,7 @@
 //! ```text
 //! list_projects                          → every derived Project
 //! get_project_detail(project_id)         → frozen shape
-//! list_project_workstreams(project_id)   → 主关联 / 关联
+//! list_project_workstreams(project_id)   → 全部关联任务
 //! rename_project(project_id, name)       → the only user-editable Project fact
 //! ```
 //!
@@ -51,16 +51,13 @@ pub struct ProjectCardData {
     pub path_count: i64,
     /// Paths last observed as gone from disk; the card's "有目录缺失" signal.
     pub missing_path_count: i64,
-    /// Workstreams reaching this Project through their position-0 path (主关联).
-    pub primary_workstream_count: i64,
-    /// Workstreams with any path here but a position-0 elsewhere (关联).
-    pub related_workstream_count: i64,
+    /// Distinct tasks related through any working path.
+    pub workstream_count: i64,
     /// Sessions through the authoritative
     /// `workspace_path_id → workspace_paths.project_id` chain,
     /// Archived sessions are included.
     pub session_count: i64,
-    /// Up to two canonical paths in canonical order (: primary +
-    /// "另有 N 个目录").
+    /// Up to two representative paths for display.
     pub representative_paths: Vec<String>,
     /// Every canonical path of the project, canonical order. Review P2-1:
     /// the board's path search covers ALL paths, while
@@ -123,38 +120,17 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
         }
     }
 
-    // Workstream relation per project, folded in Rust from one ordered query:
-    // a workstream's FIRST (position-0) path names its 主关联 Project; every
-    // project it touches at all counts it as 关联 unless it is primary there.
-    let mut primary_ws: BTreeMap<String, i64> = BTreeMap::new();
-    let mut related_ws: BTreeMap<String, i64> = BTreeMap::new();
+    let mut workstream_count: BTreeMap<String, i64> = BTreeMap::new();
     {
         let mut st = conn.prepare(
-            "SELECT wsp.workstream_id, wsp.position, wp.project_id
-             FROM workstream_paths wsp
-             JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-             ORDER BY wsp.workstream_id, wsp.position",
+            "SELECT wp.project_id, COUNT(DISTINCT wsp.workstream_id)
+             FROM workstream_paths wsp JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
+             GROUP BY wp.project_id",
         )?;
-        let rows = st.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut current_ws: Option<String> = None;
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
-            let (ws_id, _position, project_id) = row?;
-            if current_ws.as_deref() != Some(ws_id.as_str()) {
-                // position-0 row of this workstream: its 主关联 Project.
-                *primary_ws.entry(project_id.clone()).or_insert(0) += 1;
-                current_ws = Some(ws_id);
-                seen.clear();
-            }
-            if seen.insert(project_id.clone()) {
-                *related_ws.entry(project_id).or_insert(0) += 1;
-            }
+            let (id, count) = row?;
+            workstream_count.insert(id, count);
         }
     }
 
@@ -215,12 +191,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
                 ),
                 path_count: *path_count.get(&p.id).unwrap_or(&0),
                 missing_path_count: *missing_count.get(&p.id).unwrap_or(&0),
-                primary_workstream_count: *primary_ws.get(&p.id).unwrap_or(&0),
-                related_workstream_count: {
-                    let related = *related_ws.get(&p.id).unwrap_or(&0);
-                    let primary = *primary_ws.get(&p.id).unwrap_or(&0);
-                    (related - primary).max(0)
-                },
+                workstream_count: *workstream_count.get(&p.id).unwrap_or(&0),
                 session_count: *session_count.get(&p.id).unwrap_or(&0),
                 representative_paths: representative.get(&p.id).cloned().unwrap_or_default(),
                 search_paths: search_paths.get(&p.id).cloned().unwrap_or_default(),
@@ -378,7 +349,7 @@ pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>> {
 }
 
 ///  — the frozen detail shape
-/// `{ project, kind, workspace_paths[], workstreams[{workstream, is_primary}], sessions[], remote_url }`.
+/// `{ project, kind, workspace_paths[], workstreams[{workstream}], sessions[], remote_url }`.
 /// Nothing here is read from a cached membership column: paths, Workstreams and
 /// Sessions all come through the registry.
 #[tauri::command]
@@ -393,8 +364,7 @@ pub fn get_project_detail(
     })
 }
 
-/// the Workstreams of one Project with the primary/related
-/// distinction Project Detail renders (position 0 is 主关联).
+/// All tasks associated with this Project through any working path.
 #[tauri::command]
 pub fn list_project_workstreams(
     state: State<AppState>,

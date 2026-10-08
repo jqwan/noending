@@ -13,7 +13,7 @@
 //!
 //! Working directory: every launch resolves
 //! its directory through `resolve_new_cwd` / `resolve_resume_cwd`, which read
-//! the ordered `WorkstreamPath` list and NoEnding Home's default workspace. The
+//! the explicit cwd and NoEnding Home's default workspace. The
 //! answer, including *which tier*
 //! produced it, is carried on the PreparedLaunch and hashed into its state
 //! fingerprint, so Preview-Launch Identity covers the directory as well as the
@@ -51,9 +51,6 @@ pub enum CwdSource {
     /// Resume: the Session's own recorded cwd, which stays authoritative
     /// whenever it is a real directory ("Sessions keep their own cwd").
     SessionCwd,
-    /// A selected Workstream's ordered `WorkstreamPath` list. Position 0
-    /// is primary; `path_position` says which entry was actually used.
-    WorkstreamPath,
     /// NoEnding Home's default workspace (`<home>/workspace`).
     DefaultWorkspace,
     /// Nothing resolved: the Agent starts in the terminal's own default
@@ -67,7 +64,6 @@ impl CwdSource {
         match self {
             Self::Explicit => "explicit",
             Self::SessionCwd => "session_cwd",
-            Self::WorkstreamPath => "workstream_path",
             Self::DefaultWorkspace => "default_workspace",
             Self::Unresolved => "unresolved",
         }
@@ -85,13 +81,8 @@ pub struct CwdResolution {
     pub source: CwdSource,
     pub cwd: Option<String>,
     /// True when the Agent will not start where this flow normally starts:
-    /// a resume that lost its Session directory, or a New Session that could
-    /// not use the Workstream's own primary path.
+    /// a resume that lost its Session directory.
     pub fallback: bool,
-    /// Which Workstream supplied the directory, when one did.
-    pub workstream_id: Option<String>,
-    /// Its position in that Workstream's ordered path list (0 = primary).
-    pub path_position: Option<i64>,
     /// Why a fallback happened, for the UI ("发生 fallback 必须在 UI 明确显示").
     pub note: Option<String>,
 }
@@ -125,16 +116,6 @@ impl CwdResolution {
         out.push(b'|');
         out.extend_from_slice(b"cwd_src:");
         out.extend_from_slice(self.source.as_str().as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(b"cwd_ws:");
-        if let Some(ws) = &self.workstream_id {
-            out.extend_from_slice(ws.as_bytes());
-        }
-        out.push(b'|');
-        out.extend_from_slice(b"cwd_pos:");
-        if let Some(pos) = self.path_position {
-            out.extend_from_slice(pos.to_string().as_bytes());
-        }
         out.push(b'|');
         out.extend_from_slice(if self.fallback {
             b"cwd_fb:1|"
@@ -255,8 +236,8 @@ impl SessionLauncher {
     /// does NOT write any file, and does NOT touch Context.
     ///
     /// `cwd` is the caller's explicit directory: when present it IS the launch
-    /// directory (tier 1) and nothing below it is consulted. Otherwise the
-    /// Owner Workstream's ordered paths decide, then the default workspace.
+    /// directory and nothing below it is consulted. Otherwise the
+    /// NoEnding default workspace is used.
     pub fn prepare_new_in(
         &self,
         db: &Db,
@@ -271,7 +252,7 @@ impl SessionLauncher {
             require_unarchived_owner(db, ws_id)?;
         }
 
-        let resolution = resolve_new_cwd(db, owner_workstream_id, cwd, workspace)?;
+        let resolution = resolve_new_cwd(cwd, workspace)?;
         let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
         let fingerprint = compute_state_fingerprint_in(
             db,
@@ -308,7 +289,7 @@ impl SessionLauncher {
     /// does NOT write any file.
     ///
     /// The Session's own cwd wins while it is a real directory; when it is gone
-    /// the launch falls back to the Owner Workstream's primary path and then to
+    /// the launch falls back to
     /// the default workspace, and the fallback is recorded in
     /// `cwd_resolution` instead of being absorbed.
     pub fn prepare_resume_in(
@@ -364,7 +345,7 @@ impl SessionLauncher {
         }
 
         let owner = session.owner_workstream_id.clone();
-        let resolution = resolve_resume_cwd(db, session_id, owner.as_deref(), workspace)?;
+        let resolution = resolve_resume_cwd(db, session_id, workspace)?;
         // The Continue route rides on the session's SOURCE FORMAT: it tells
         // whether the Agent's CLI can resume at all and how
         // (`AgentAdapter::continue_route`). A refusal is stated HERE, at
@@ -467,7 +448,7 @@ impl SessionLauncher {
         embedded: Option<&EmbeddedSpawn<'_>>,
     ) -> Result<LaunchResult> {
         // re-resolve the launch directory from the state that
-        // exists NOW (ordered Workstream paths, the Session's own cwd, the Home
+        // exists NOW (the Session's own cwd, the Home
         // default workspace) and hash it. A drift in any of those inputs lands
         // on a different fingerprint, so a plan whose directory moved is
         // refused here — the spawn below keeps using `prepared.cwd` verbatim.
@@ -735,11 +716,11 @@ pub fn compute_state_fingerprint(
 ) -> Result<String> {
     let resolution = if mode == "resume" {
         match session_id {
-            Some(sid) => resolve_resume_cwd(db, sid, owner_workstream_id, workspace)?,
+            Some(sid) => resolve_resume_cwd(db, sid, workspace)?,
             None => CwdResolution::default(),
         }
     } else {
-        resolve_new_cwd(db, owner_workstream_id, None, workspace)?
+        resolve_new_cwd(None, workspace)?
     };
     compute_state_fingerprint_in(
         db,
@@ -757,7 +738,7 @@ pub fn compute_state_fingerprint(
 /// * the delivery level and the Agent runtime override intent;
 /// * the Owner Workstream (or none): title / description / `updated_at`, its
 ///   active Context items with their current revisions, its open conflicts —
-///   and its **ordered path list**;
+///   and its Context inputs;
 /// * the resolved launch directory and the tier that produced it;
 /// * NoEnding Home's default workspace, which is not in the DB at all
 ///   (note 4);
@@ -765,12 +746,8 @@ pub fn compute_state_fingerprint(
 ///   its source cursor, its **`workspace_path_id`**, its Owner Workstream and
 ///   its delivery snapshots.
 ///
-/// Every added input is labelled and terminated by `|`, so a value
-/// cannot be re-read as a different field by shifting a boundary, and the path
-/// list is hashed **in list order** because position 0 is the fact the launch
-/// depends on. A WorkstreamPath mutation does not bump `workstreams.updated_at`
-/// so without `ws_paths:` here a reorder, an added path or a removed primary
-/// would leave a stale plan looking fresh.
+/// Every added input is labelled and terminated by `|`. Task directory display
+/// order is not a launch input; changing it does not invalidate a preview.
 pub fn compute_state_fingerprint_in(
     db: &Db,
     mode: &str,
@@ -821,11 +798,6 @@ pub fn compute_state_fingerprint_in(
             hasher.update(b"|");
             hasher.update(ws.updated_at.as_bytes());
             hasher.update(b"|");
-            // The ordered list itself is part of the fingerprint.
-            hasher.update(
-                crate::workspace::workstream::workstream_launch_paths(db, ws_id)?
-                    .fingerprint_input(),
-            );
         } else {
             hasher.update(b"exists:0:");
             hasher.update(b"|");
@@ -979,51 +951,6 @@ fn ensure_default_workspace(dir: &str) -> Result<()> {
     Ok(())
 }
 
-/// The `(cwd, source)` of 's WorkstreamPath tier: walk the Owner
-/// Workstream's ordered path list in position order and return the first
-/// usable directory.
-///
-/// Position 0 wins whenever it can (that is what "primary" means); a later
-/// position is only reached because the earlier ones are unusable, and it is
-/// reported with its position so the UI can say so. Returns `None` plus a note
-/// when the Workstream has paths but none of them are usable.
-fn first_workstream_path(
-    db: &Db,
-    owner_workstream_id: Option<&str>,
-) -> Result<(Option<CwdResolution>, Option<String>)> {
-    let Some(ws_id) = owner_workstream_id else {
-        return Ok((None, None));
-    };
-    let paths = crate::workspace::workstream::workstream_launch_paths(db, ws_id)?;
-    let mut blocked: Option<String> = None;
-    for (position, raw) in paths.ordered_paths.iter().enumerate() {
-        if !is_usable_directory(raw) {
-            if blocked.is_none() {
-                blocked = Some(raw.clone());
-            }
-            continue;
-        }
-        return Ok((
-            Some(CwdResolution {
-                source: CwdSource::WorkstreamPath,
-                cwd: Some(raw.clone()),
-                // Any entry after position 0 is a downgrade of the primary.
-                fallback: position > 0,
-                workstream_id: Some(ws_id.to_string()),
-                path_position: Some(position as i64),
-                note: (position > 0).then(|| {
-                    format!(
-                        "主工作路径不可用，改用该 Workstream 的第 {} 条工作路径",
-                        position + 1
-                    )
-                }),
-            }),
-            blocked,
-        ));
-    }
-    Ok((None, blocked))
-}
-
 /// tier 3 — the default workspace, or `None` when this launcher was not
 /// given one.
 fn default_workspace_resolution(workspace: &LaunchWorkspace) -> Result<Option<CwdResolution>> {
@@ -1042,45 +969,16 @@ fn default_workspace_resolution(workspace: &LaunchWorkspace) -> Result<Option<Cw
     }))
 }
 
-/// New Session launch directory, in priority order:
-///
-/// ```text
-/// explicit cwd  →  the Owner Workstream's ordered WorkstreamPaths
-///                  (first usable, in list order)
-///              →  NoEnding Home's default workspace
-///              →  Unresolved
-/// ```
-///
-/// A Workstream's ordered path list is the recorded answer to "where does this
-/// work happen"; an activity-derived Session cwd is never a launch tier.
-///
-/// A Workstream's path list is a launch convenience, never identity: the
-/// Workstream is still not a path, and Sessions keep their own cwd.
+/// New sessions use the explicitly selected directory or NoEnding's default.
+/// Task directory order never determines a launch directory.
 pub fn resolve_new_cwd(
-    db: &Db,
-    owner_workstream_id: Option<&str>,
     explicit: Option<&str>,
     workspace: &LaunchWorkspace,
 ) -> Result<CwdResolution> {
     if let Some(c) = explicit {
         return Ok(CwdResolution::explicit(expand_tilde(c)));
     }
-    let (from_paths, blocked) = first_workstream_path(db, owner_workstream_id)?;
-    if let Some(resolution) = from_paths {
-        return Ok(resolution);
-    }
-    let standalone = owner_workstream_id.is_none();
-    if let Some(mut resolution) = default_workspace_resolution(workspace)? {
-        // For a New Session *about a Workstream* the default workspace is a
-        // downgrade: the user expected to work in the Workstream's directory.
-        // A standalone Session has no expectation to downgrade from.
-        resolution.fallback = !standalone;
-        resolution.note = blocked.map(|lost| {
-            format!(
-                "Workstream 的工作路径 {} 当前不可用，改用 NoEnding 默认工作目录",
-                lost
-            )
-        });
+    if let Some(resolution) = default_workspace_resolution(workspace)? {
         return Ok(resolution);
     }
     Ok(CwdResolution {
@@ -1090,26 +988,12 @@ pub fn resolve_new_cwd(
     })
 }
 
-/// Resume launch directory:
-///
-/// ```text
-/// the Session's own cwd  →  the Owner Workstream's available path
-///                        →  NoEnding Home's default workspace
-/// ```
-///
-/// "Unavailable" here means missing, empty, or not a directory. Before v0.2 this
-/// chain did not exist: a Session whose cwd had gone simply handed `None` to the
-/// terminal, which on macOS means `$HOME` — a silent, and per
-/// forbidden, destination. Every step below the Session's own directory is
-/// reported in `cwd_resolution` and hashed into the fingerprint.
-///
-/// A missing Session row resolves to nothing rather than failing: the caller's
-/// fingerprint check reports the real news (the Session it previewed is gone)
-/// as staleness, not as an error from a helper.
+/// Resume uses the Session's own directory when usable, otherwise NoEnding's
+/// default workspace. A fallback is reported to the user. Task paths do not
+/// override the Session's directory, regardless of their display order.
 pub fn resolve_resume_cwd(
     db: &Db,
     session_id: &str,
-    owner_workstream_id: Option<&str>,
     workspace: &LaunchWorkspace,
 ) -> Result<CwdResolution> {
     let session = db.get_session(session_id)?;
@@ -1134,27 +1018,12 @@ pub fn resolve_resume_cwd(
         .clone()
         .filter(|c| !c.trim().is_empty())
         .unwrap_or_else(|| "(未记录)".into());
-    let (from_paths, blocked) = first_workstream_path(db, owner_workstream_id)?;
-    if let Some(mut resolution) = from_paths {
-        resolution.fallback = true;
-        resolution.note = Some(format!(
-            "原 Session 的工作目录 {} 当前不可用，改用其所归属任务的工作路径",
-            lost
-        ));
-        return Ok(resolution);
-    }
     if let Some(mut resolution) = default_workspace_resolution(workspace)? {
         resolution.fallback = true;
-        resolution.note = Some(match blocked {
-            Some(path) => format!(
-                "原 Session 的工作目录 {} 当前不可用，其 Workstream 的路径 {} 也不可用，改用 NoEnding 默认工作目录",
-                lost, path
-            ),
-            None => format!(
-                "原 Session 的工作目录 {} 当前不可用，改用 NoEnding 默认工作目录",
-                lost
-            ),
-        });
+        resolution.note = Some(format!(
+            "原 Session 的工作目录 {} 当前不可用，改用 NoEnding 默认工作目录",
+            lost
+        ));
         return Ok(resolution);
     }
     Ok(CwdResolution {
@@ -1181,14 +1050,14 @@ fn recompute_launch_cwd(
         let Some(sid) = prepared.session_id.as_deref() else {
             return Ok(CwdResolution::default());
         };
-        return resolve_resume_cwd(db, sid, prepared.owner_workstream_id.as_deref(), workspace);
+        return resolve_resume_cwd(db, sid, workspace);
     }
     if prepared.cwd_resolution.source == CwdSource::Explicit {
         // A directory the user named in the form is a literal, not a derivation:
         // there is nothing in the database for it to drift against.
         return Ok(prepared.cwd_resolution.clone());
     }
-    resolve_new_cwd(db, prepared.owner_workstream_id.as_deref(), None, workspace)
+    resolve_new_cwd(None, workspace)
 }
 
 // ---------------------------------------------------------------------------

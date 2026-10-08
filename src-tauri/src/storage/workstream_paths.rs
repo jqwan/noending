@@ -1,7 +1,6 @@
 //! WorkstreamPath persistence: the ordered working-path list.
 //!
-//! The ordering IS the role — position 0 is the primary path, so there is no
-//! `is_primary` column to drift. Invariant: `paths.is_empty() OR a row at
+//! Positions record display order only. Invariant: `paths.is_empty() OR a row at
 //! position 0 exists`; it holds only if every removal recompacts, so
 //! [`remove_workstream_path_conn`] is the only legal delete.
 //!
@@ -41,50 +40,9 @@ impl Db {
         let mapped = st.query_map(params![workstream_id], row_workstream_path)?;
         Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
     }
-
-    /// The launch directory for a New Session on this Workstream.
-    pub fn primary_workspace_path_id(&self, workstream_id: &str) -> Result<Option<String>> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT workspace_path_id FROM workstream_paths
-                  WHERE workstream_id = ?1 AND position = 0",
-                params![workstream_id],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
 }
 
-/// Full canonical row behind a Workstream's primary path, when it has one.
-pub fn primary_workspace_path(
-    conn: &Connection,
-    workstream_id: &str,
-) -> Result<Option<WorkspacePath>> {
-    Ok(conn
-        .query_row(
-            "SELECT wp.* FROM workstream_paths wsp
-               JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-              WHERE wsp.workstream_id = ?1 AND wsp.position = 0",
-            params![workstream_id],
-            |r| {
-                Ok(WorkspacePath {
-                    id: r.get("id")?,
-                    canonical_path: r.get("canonical_path")?,
-                    project_id: r.get("project_id")?,
-                    git_state: r.get("git_state")?,
-                    git_kind: r.get("git_kind")?,
-                    exists: r.get::<_, i64>("exists_on_disk")? != 0,
-                    first_seen_at: r.get("first_seen_at")?,
-                    last_seen_at: r.get("last_seen_at")?,
-                })
-            },
-        )
-        .optional()?)
-}
-
-/// Append at the end — an empty list yields position 0, which is why "become the
-/// primary path" needs no special case. Idempotent by
+/// Append at the end; an empty list starts at position 0. Idempotent by
 /// `(workstream_id, workspace_path_id)`: re-adding a path returns the existing
 /// row rather than failing or shifting positions under the caller.
 pub fn append_workstream_path_conn(
@@ -137,8 +95,7 @@ pub fn find_workstream_path_conn(
 }
 
 /// Delete the WorkstreamPath and renumber the survivors, in the caller's
-/// transaction. Deleting position 0 therefore promotes position 1: the user never
-/// has to pick a new primary path.
+/// transaction. Every removal recompacts the display positions.
 ///
 /// Touches the path list only — never a Session's cwd, workspace path or Owner.
 /// Those are independent facts: cwd is historical execution, the path list is
@@ -176,7 +133,7 @@ pub fn recompact_workstream_positions_conn(conn: &Connection, workstream_id: &st
     Ok(())
 }
 
-/// "Make this the primary path" is a reorder, not a role change. Takes the
+/// Reorder the display list. Takes the
 /// COMPLETE ordered list of workspace path ids and rewrites positions to match;
 /// an incomplete list is a caller bug, and silently keeping the old tail would let
 /// a UI race drop a user's path.
@@ -239,29 +196,7 @@ pub fn workstream_path_by_id_conn(
         .optional()?)
 }
 
-/// The list as canonical path strings, **in position order**. Ordering is the
-/// contract: this is the byte sequence the PreparedLaunch fingerprint hashes, so a
-/// reorder that moves position 0 changes the launch plan, and a sorted copy can
-/// never make two different orders look equal.
-pub fn ordered_canonical_paths_for_workstream(
-    conn: &Connection,
-    workstream_id: &str,
-) -> Result<Vec<String>> {
-    let mut st = conn.prepare(
-        "SELECT wp.canonical_path FROM workstream_paths wsp
-           JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-          WHERE wsp.workstream_id = ?1 ORDER BY wsp.position",
-    )?;
-    let mapped = st.query_map(params![workstream_id], |r| r.get::<_, String>(0))?;
-    Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
-/// Rewrite one Workstream's search row so its `parent_id` follows the CURRENT
-/// position-0 path. The generic
-/// [`super::workspace::refresh_workstream_search_parents_conn`] finds affected
-/// Workstreams *through* `workstream_paths`, which cannot work for a removal — by
-/// then the connecting row is gone. This one takes the Workstream id directly and
-/// is therefore usable on both sides of a mutation.
+/// Task search results have no single parent Project.
 pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM search_index WHERE kind = 'workstream' AND ref_id = ?1",
@@ -269,11 +204,7 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
     )?;
     conn.execute(
         "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-         SELECT 'workstream', w.id,
-                (SELECT wp.project_id FROM workstream_paths wsp
-                   JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-                  WHERE wsp.workstream_id = w.id AND wsp.position = 0),
-                w.title, w.description
+         SELECT 'workstream', w.id, '', w.title, w.description
          FROM workstreams w WHERE w.id = ?1",
         params![workstream_id],
     )?;
@@ -373,54 +304,35 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
     Ok(())
 }
 
-/// The Project projection for one Workstream: which Projects it appears
-/// in, and whether it appears there through its primary path.
-pub fn project_roles_for_workstream(
-    conn: &Connection,
-    workstream_id: &str,
-) -> Result<Vec<(String, bool)>> {
+/// Every Project reached through the task's paths, once per project.
+pub fn project_ids_for_workstream(conn: &Connection, workstream_id: &str) -> Result<Vec<String>> {
     let mut st = conn.prepare(
-        "SELECT wp.project_id,
-                MAX(CASE WHEN wsp.position = 0 THEN 1 ELSE 0 END) AS is_primary
-           FROM workstream_paths wsp
+        "SELECT DISTINCT wp.project_id FROM workstream_paths wsp
            JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-          WHERE wsp.workstream_id = ?1
-          GROUP BY wp.project_id
-          ORDER BY is_primary DESC, wp.project_id",
+          WHERE wsp.workstream_id = ?1 ORDER BY wp.project_id",
     )?;
-    let mapped = st.query_map(params![workstream_id], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
-    })?;
-    Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+    let rows = st.query_map(params![workstream_id], |r| r.get(0))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
-/// The Workstreams visible in one Project, with the primary/related
-/// distinction: any position counts as membership, position 0 is the primary.
-pub fn workstreams_for_project(
-    conn: &Connection,
-    project_id: &str,
-) -> Result<Vec<(Workstream, bool)>> {
+/// A task is related to a project through any of its paths.
+pub fn workstreams_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Workstream>> {
     let mut st = conn.prepare(
-        "SELECT w.*, MAX(CASE WHEN wsp.position = 0 THEN 1 ELSE 0 END) AS is_primary
-           FROM workstream_paths wsp
-           JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-           JOIN workstreams w ON w.id = wsp.workstream_id
-          WHERE wp.project_id = ?1
-          GROUP BY w.id
-          ORDER BY is_primary DESC, w.updated_at DESC",
+        "SELECT w.* FROM workstreams w
+          WHERE EXISTS (SELECT 1 FROM workstream_paths wsp
+            JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
+            WHERE wsp.workstream_id = w.id AND wp.project_id = ?1)
+          ORDER BY w.updated_at DESC, w.id",
     )?;
-    let mapped = st.query_map(params![project_id], |r| {
-        Ok((
-            Workstream {
-                id: r.get("id")?,
-                title: r.get("title")?,
-                description: r.get("description")?,
-                visibility: r.get("visibility")?,
-                created_at: r.get("created_at")?,
-                updated_at: r.get("updated_at")?,
-            },
-            r.get::<_, i64>("is_primary")? != 0,
-        ))
+    let rows = st.query_map(params![project_id], |r| {
+        Ok(Workstream {
+            id: r.get("id")?,
+            title: r.get("title")?,
+            description: r.get("description")?,
+            visibility: r.get("visibility")?,
+            created_at: r.get("created_at")?,
+            updated_at: r.get("updated_at")?,
+        })
     })?;
-    Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }

@@ -120,8 +120,7 @@ const preparedFixture = {
     source: "default_workspace",
     cwd: "/tmp/workspace",
     fallback: false,
-    workstream_id: null,
-    path_position: null,
+
     note: "使用默认工作路径",
   },
   runtime: { model: null, provider: null, effort: null },
@@ -179,8 +178,7 @@ describe("NewSessionView explicit agent resolution", () => {
         source: "default_workspace",
         cwd: "/tmp/workspace",
         fallback: false,
-        workstream_id: null,
-        path_position: null,
+
         note: "使用默认工作路径",
       },
       runtime: { model: null, provider: null, effort: null },
@@ -267,8 +265,7 @@ describe("NewSessionView task and project selection", () => {
       kind: "git" as const,
       path_count: 1,
       missing_path_count: 0,
-      primary_workstream_count: 1,
-      related_workstream_count: 0,
+      workstream_count: 1,
       session_count: 5,
       representative_paths: ["/repo/project-1"],
       search_paths: ["/repo/project-1"],
@@ -287,15 +284,14 @@ describe("NewSessionView task and project selection", () => {
         visibility: "normal",
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-01T00:00:00Z",
-        project_id: "p-1",
-        project_name: "Project 1",
+        projects: [{ id: "p-1", name: "Project 1" }],
         current_state: null,
         goal: null,
         last_activity_at: null,
         session_count: 1,
         latest_session: null,
         path_count: 1,
-        primary_path: "/repo/project-1",
+
       },
     ]);
     render(<NewSessionView navigate={vi.fn()} />);
@@ -347,8 +343,7 @@ describe("NewSessionView task and project selection", () => {
         kind: "git" as const,
         path_count: 2,
         missing_path_count: 0,
-        primary_workstream_count: 0,
-        related_workstream_count: 0,
+        workstream_count: 0,
         session_count: 0,
         representative_paths: ["/repo/main", "/repo/worktree-1"],
         search_paths: ["/repo/main", "/repo/worktree-1"],
@@ -415,15 +410,14 @@ describe("NewSessionView task and project selection", () => {
         visibility: "normal",
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-01T00:00:00Z",
-        project_id: "p-1",
-        project_name: "Project 1",
+        projects: [{ id: "p-1", name: "Project 1" }],
         current_state: null,
         goal: null,
         last_activity_at: null,
         session_count: 1,
         latest_session: null,
         path_count: 1,
-        primary_path: "/repo/project-1",
+
       },
     ]);
 
@@ -479,8 +473,7 @@ describe("NewSessionView task and project selection", () => {
         kind: "git" as const,
         path_count: 1,
         missing_path_count: 0,
-        primary_workstream_count: 0,
-        related_workstream_count: 0,
+        workstream_count: 0,
         session_count: 0,
         representative_paths: ["/repo/git"],
         search_paths: ["/repo/git"],
@@ -494,8 +487,7 @@ describe("NewSessionView task and project selection", () => {
         kind: "directory" as const,
         path_count: 1,
         missing_path_count: 0,
-        primary_workstream_count: 0,
-        related_workstream_count: 0,
+        workstream_count: 0,
         session_count: 0,
         representative_paths: ["/docs/normal"],
         search_paths: ["/docs/normal"],
@@ -559,8 +551,7 @@ describe("NewSessionView message composer", () => {
         kind: "git" as const,
         path_count: 1,
         missing_path_count: 0,
-        primary_workstream_count: 1,
-        related_workstream_count: 0,
+        workstream_count: 1,
         session_count: 5,
         representative_paths: ["/repo/existing-1"],
         search_paths: ["/repo/existing-1"],
@@ -624,4 +615,18 @@ it("does not prepare another launch if the user leaves while startup fails", asy
   unmount();
   await act(async () => { rejectLaunch("startup failed"); });
   expect(api.prepareNewSession).toHaveBeenCalledTimes(prepareCount);
+});
+
+it("does not designate the first project of a multi-project task as its default", async () => {
+  vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
+    id: "multi", title: "跨项目任务", description: "", visibility: "normal",
+    projects: [{ id: "p-1", name: "甲" }, { id: "p-2", name: "乙" }],
+    created_at: "", updated_at: "", current_state: null, goal: null,
+    last_activity_at: null, session_count: 0, latest_session: null, path_count: 2,
+  }]);
+  render(<NewSessionView workstreamId="multi" navigate={vi.fn()} />);
+  const task = await screen.findByLabelText("所属任务（可选）");
+  await waitFor(() => expect((task as HTMLSelectElement).value).toBe("multi"));
+  expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).not.toBe("p-1");
+  expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).not.toBe("p-2");
 });

@@ -99,8 +99,7 @@ pub fn list_workstreams(
 
 // ---------------- ordered workstream paths ----------------
 
-/// The ordered list with the physical facts behind each entry. Position 0 is the
-/// primary path; there is no separate role to read.
+/// The directory list in display order, with physical facts for each entry.
 #[tauri::command]
 pub fn list_workstream_paths(
     state: State<AppState>,
@@ -191,8 +190,7 @@ pub struct LatestSessionInfo {
 pub struct WorkstreamCardView {
     #[serde(flatten)]
     pub workstream: Workstream,
-    pub project_id: Option<String>,
-    pub project_name: Option<String>,
+    pub projects: Vec<workstream::WorkstreamProject>,
     /// L1 Current State text (content, falling back to its title).
     pub current_state: Option<String>,
     /// L1 Goal text — the card's last content fallback.
@@ -205,9 +203,6 @@ pub struct WorkstreamCardView {
     /// How many working paths the Workstream has. `0` is a normal state; the UI
     /// distinguishes "no path" from "a path in a Project we cannot name".
     pub path_count: i64,
-    /// The position-0 path's canonical spelling, so pickers and Session launch
-    /// dialogs can show WHERE a Workstream works without a second read.
-    pub primary_path: Option<String>,
 }
 
 pub(crate) fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
@@ -249,20 +244,12 @@ pub fn list_workstream_cards(state: State<AppState>) -> Result<Vec<WorkstreamCar
 /// Compose card views from the real sources (sessions, items, workstreams).
 /// Also the testable core of `list_workstream_cards`.
 pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
-    let project_names: std::collections::HashMap<String, String> = db
-        .list_projects()?
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
     let mut cards = Vec::new();
     for w in db.list_workstreams(None)? {
         let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
         let items_activity = db.workstream_items_last_update(&w.id)?;
         let paths = db.list_workstream_paths(&w.id)?;
-        let primary = paths
-            .first()
-            .and_then(|p| db.get_workspace_path(&p.workspace_path_id).ok().flatten());
-        let projected_project = primary.as_ref().map(|wp| wp.project_id.clone());
+        let projects = workstream::projects_for_workstream(db, &w.id)?;
         // "Last active" only follows real work signals (session activity,
         // context edits) — renames or metadata touches must not make a
         // Workstream look freshly active. Sorting still falls back to
@@ -272,15 +259,13 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
             last_activity_at = later_ts(&last_activity_at, candidate);
         }
         cards.push(WorkstreamCardView {
-            project_id: projected_project.clone(),
-            project_name: projected_project.and_then(|pid| project_names.get(&pid).cloned()),
+            projects,
             current_state: db.workstream_state_text(&w.id, "current_state")?,
             goal: db.workstream_state_text(&w.id, "goal")?,
             last_activity_at,
             session_count,
             latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),
             path_count: paths.len() as i64,
-            primary_path: primary.map(|wp| wp.canonical_path),
             workstream: w,
         });
     }

@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import WorkstreamCard from "./WorkstreamCard";
 import type { WorkstreamCardData } from "../../types";
 afterEach(cleanup);
-const card = { id: "w1", title: "优化看板", visibility: "normal", session_count: 1, latest_session: { id: "s1", agent: "codex" } } as WorkstreamCardData;
+const card = { id: "w1", projects: [], description: "", created_at: "", updated_at: "", current_state: null, goal: null, last_activity_at: null, path_count: 0, title: "优化看板", visibility: "normal", session_count: 1, latest_session: { id: "s1", agent: "codex" } } as WorkstreamCardData;
 it("keeps card navigation separate from the new-session action", () => {
   const navigate = vi.fn();
   render(<WorkstreamCard card={card} mode="full" navigate={navigate} defaultAgent="codex" />);

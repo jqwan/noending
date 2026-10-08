@@ -37,8 +37,7 @@ export interface ProjectCardData {
   kind: ProjectKind;
   path_count: number;
   missing_path_count: number;
-  primary_workstream_count: number;
-  related_workstream_count: number;
+  workstream_count: number;
   session_count: number;
   representative_paths: string[];
   /** 全部 canonical 路径（搜索面），与展示用的 representative_paths 分开。 */
@@ -128,7 +127,7 @@ export interface CreateWorkstreamReport {
   paths: CreatedPathOutcome[];
 }
 
-/** One entry of a Workstream's ordered working-path list; position 0 is primary. */
+/** One entry of a Workstream's working-path list; position is display order only. */
 export interface WorkstreamPath {
   id: string;
   workstream_id: string;
@@ -160,10 +159,14 @@ export interface ProjectDetailData {
   remote_url: string | null;
 }
 
-/** `is_primary` = the Workstream reaches the Project through its position-0 path. */
+/** A task associated with a Project through any working path. */
 export interface ProjectWorkstreamRow {
   workstream: Workstream;
-  is_primary: boolean;
+}
+
+export interface WorkstreamProject {
+  id: string;
+  name: string;
 }
 
 export interface Workstream {
@@ -183,14 +186,12 @@ export interface LatestSessionInfo {
 /** Card view for Home / Workstreams pages (backend: list_workstream_cards). */
 export interface WorkstreamCardData {
   id: string;
-  /** Position-0 path projection, not a user assignment. */
-  project_id: string | null;
+  projects: WorkstreamProject[];
   title: string;
   description: string;
   visibility: WorkstreamVisibility;
   created_at: string;
   updated_at: string;
-  project_name: string | null;
   current_state: string | null;
   goal: string | null;
   last_activity_at: string | null;
@@ -198,8 +199,6 @@ export interface WorkstreamCardData {
   latest_session: LatestSessionInfo | null;
   /** How many working paths the Workstream has. `0` is a normal state. */
   path_count: number;
-  /** The position-0 path's canonical spelling; null = 没有工作路径。 */
-  primary_path: string | null;
 }
 
 /** 逻辑会话：用户可感知、可 Resume 的主会话。身份是 `(agent, root_agent_session_id)`；
@@ -455,7 +454,7 @@ export interface ContextSourceDetail {
 
 export interface WorkstreamContext {
   workstream: Workstream;
-  project_name: string | null;
+  projects: WorkstreamProject[];
   core: ContextSection[];
   items: [ContextItem, ContextItemRevision][];
   /** owner_workstream_id == 当前 Workstream 的 Sessions（不再是 related）。 */
@@ -673,7 +672,6 @@ export interface SearchHit {
 export type CwdSource =
   | "explicit"
   | "session_cwd"
-  | "workstream_path"
   | "default_workspace"
   | "unresolved";
 
@@ -688,10 +686,6 @@ export interface CwdResolution {
   cwd: string | null;
   /** 不是这条流程通常的起点——必须以可见方式提示，不能静默。 */
   fallback: boolean;
-  /** 由哪个 Workstream 提供的目录（若有）。 */
-  workstream_id: string | null;
-  /** 它在该 Workstream 有序路径列表中的位置；0 = 主路径。 */
-  path_position: number | null;
   note: string | null;
 }
 

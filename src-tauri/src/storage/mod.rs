@@ -312,8 +312,7 @@ impl Db {
 
     /// Membership is derived from the path chain:
     /// `workstream_paths → workspace_paths.project_id`. Any position counts as
-    /// membership; `workspace::project` decides the primary/related distinction
-    /// from `position = 0` when it renders a Project page.
+    /// membership without primary/secondary roles.
     pub fn list_workstreams(&self, project_id: Option<&str>) -> Result<Vec<Workstream>> {
         let conn = self.read();
         let (sql, has_filter): (&str, bool) = if project_id.is_some() {
@@ -1856,22 +1855,10 @@ impl Db {
         Ok(())
     }
 
-    /// Search's `parent_id` for a Workstream is its **primary-path Project**
-    /// (`workstream_paths` at position 0 → `workspace_paths.project_id`), read
-    /// at index time. Any path-list mutation therefore has to re-index this row.
+    /// A task can belong to several projects, so it has no single search parent.
     pub fn index_workstream(&self, w: &Workstream) -> Result<()> {
         let conn = self.write();
-        unindex_conn(&conn, "workstream", &w.id);
-        conn.execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-             VALUES ('workstream', ?1,
-                     (SELECT wp.project_id FROM workstream_paths wsp
-                        JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-                       WHERE wsp.workstream_id = ?1 AND wsp.position = 0),
-                     ?2, ?3)",
-            params![w.id, w.title, w.description],
-        )?;
-        Ok(())
+        workstream_paths::reindex_workstream_search_conn(&conn, &w.id)
     }
 
     pub fn index_item(&self, item: &ContextItem, rev: &ContextItemRevision) -> Result<()> {
@@ -1952,6 +1939,11 @@ impl Db {
     /// Archived and unarchived sessions are indexed identically.
     pub fn backfill_search_index(&self) -> Result<()> {
         let conn = self.write();
+        // Tasks are roots in search; their multiple projects are read through paths.
+        conn.execute(
+            "UPDATE search_index SET parent_id = '' WHERE kind = 'workstream'",
+            [],
+        )?;
         conn.execute(
             "DELETE FROM search_index
              WHERE kind = 'message'

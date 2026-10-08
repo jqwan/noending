@@ -96,12 +96,12 @@ fn board_card_projection_counts_and_paths() {
         )
         .unwrap();
 
-    // ws-primary 的 position-0 落在 p-1 → 主关联；ws-related 的 position-0 在
-    // p-2、第二条路径在 p-1 → 对 p-1 是关联。
+    // Both tasks reach p-1 through their paths; path order makes no difference.
     workstream_with_path(&db, "ws-primary", "Primary", &a);
     workstream_with_path(&db, "ws-related", "Related", &other);
     db.tx(|tx| {
-        noending::storage::workstream_paths::append_workstream_path_conn(tx, "ws-related", &b)
+        noending::storage::workstream_paths::append_workstream_path_conn(tx, "ws-related", &b)?;
+        noending::storage::workstream_paths::append_workstream_path_conn(tx, "ws-related", &a)
     })
     .unwrap();
     session_at(&db, "s-live", &a, false);
@@ -113,13 +113,11 @@ fn board_card_projection_counts_and_paths() {
 
     assert_eq!(card.path_count, 3);
     assert_eq!(card.missing_path_count, 1, "gamma is observed missing");
-    assert_eq!(card.primary_workstream_count, 1);
-    assert_eq!(card.related_workstream_count, 1, "related excludes primary");
+    assert_eq!(card.workstream_count, 2);
     assert_eq!(card.session_count, 2, "archived sessions still count");
     assert_eq!(card.kind, ProjectKind::Directory);
     let other_card = cards.iter().find(|c| c.id == "p-2").unwrap();
-    assert_eq!(other_card.primary_workstream_count, 1);
-    assert_eq!(other_card.related_workstream_count, 0);
+    assert_eq!(other_card.workstream_count, 1);
 
     // Review P2-1 — representative stays a two-path display truncation while
     // search_paths carries the whole registry slice, canonical order.

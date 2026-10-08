@@ -38,8 +38,7 @@
 //! * `git_identities.id` is app-assigned (uuid), unlike `workspace_paths.id`
 //!   which is derived from the path.
 //! * WorkspacePath / Project mutations must re-index the affected search rows
-//!   (`index_project` / `unindex`, and the workstream rows whose primary-path
-//!   Project changed).
+//!   (`index_project` / `unindex` and Session projections).
 //!
 //! A merge only ever moves a *path-backed* Project's paths (one with no family
 //! identity of its own); a *git-backed* Project keeps its other paths when one of
@@ -58,9 +57,9 @@ use crate::storage::workspace::{
     adopt_git_identity_conn, delete_workspace_path_conn, ensure_git_identity_conn,
     get_project_conn, get_workspace_path_conn, insert_workspace_path_conn,
     list_workspace_paths_for_project_conn, project_by_git_id_conn,
-    reassign_workspace_path_project_conn, refresh_workstream_search_parents_conn,
-    retire_project_if_unowned, scan_workspace_paths_conn, set_project_name_conn,
-    touch_git_identity_conn, update_workspace_path_observation_conn, workspace_path_is_gcable,
+    reassign_workspace_path_project_conn, retire_project_if_unowned, scan_workspace_paths_conn,
+    set_project_name_conn, touch_git_identity_conn, update_workspace_path_observation_conn,
+    workspace_path_is_gcable,
 };
 use crate::storage::{new_id, now, upsert_project_conn, Db};
 use crate::workspace::identity::{
@@ -921,7 +920,6 @@ pub fn gc_unreferenced_workspace_paths_with_default_conn(
     active_default_workspace: Option<&str>,
 ) -> Result<GcOutcome> {
     let mut outcome = GcOutcome::default();
-    let mut affected: Vec<String> = Vec::new();
     for path_id in path_ids {
         let Some(path) = get_workspace_path_conn(conn, path_id)? else {
             continue; // already gone; a replay must not fail
@@ -937,15 +935,12 @@ pub fn gc_unreferenced_workspace_paths_with_default_conn(
         }
         let former = delete_workspace_path_conn(conn, path_id)?;
         outcome.deleted_paths.push(path_id.clone());
-        affected.push(path_id.clone());
         if let Some(project_id) = former {
             if retire_project_if_unowned(conn, &project_id)? {
                 push_unique(&mut outcome.deleted_projects, &project_id);
             }
         }
     }
-    // A deleted path took its Workstream's search parentage with it.
-    refresh_workstream_search_parents_conn(conn, &affected)?;
     Ok(outcome)
 }
 
@@ -1137,13 +1132,10 @@ fn reconcile_workspace_path_targets(
 
 // Read projections
 
-/// One Workstream as seen from a Project: `is_primary` means it reaches this
-/// Project through its position-0 path (the primary association, otherwise an
-/// association).
+/// One task associated with a Project through any working path.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectWorkstream {
     pub workstream: Workstream,
-    pub is_primary: bool,
 }
 
 /// The frozen Project detail shape.
@@ -1187,10 +1179,7 @@ pub fn project_detail(
     let workstreams =
         crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
             .into_iter()
-            .map(|(workstream, is_primary)| ProjectWorkstream {
-                workstream,
-                is_primary,
-            })
+            .map(|workstream| ProjectWorkstream { workstream })
             .collect();
     let mut sessions = Vec::new();
     for path in &workspace_paths {
@@ -1212,15 +1201,12 @@ pub fn project_detail(
     }))
 }
 
-/// The Workstreams of one Project with the primary / associated distinction.
+/// The tasks associated with one Project, once per task.
 pub fn project_workstreams(db: &Db, project_id: &str) -> Result<Vec<ProjectWorkstream>> {
     Ok(
         crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
             .into_iter()
-            .map(|(workstream, is_primary)| ProjectWorkstream {
-                workstream,
-                is_primary,
-            })
+            .map(|workstream| ProjectWorkstream { workstream })
             .collect(),
     )
 }

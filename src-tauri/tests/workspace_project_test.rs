@@ -749,10 +749,9 @@ fn merge_deletes_the_zero_path_project() {
         "a Workstream survives its Project; membership is its path list"
     );
     assert_eq!(
-        noending::storage::workstream_paths::project_roles_for_workstream(&db.read(), "w-1")
-            .unwrap(),
-        vec![(survivor.clone(), true)],
-        "and its primary path now projects onto the survivor"
+        noending::storage::workstream_paths::project_ids_for_workstream(&db.read(), "w-1").unwrap(),
+        vec![survivor.clone()],
+        "all associated paths now reach the survivor"
     );
     registry_is_consistent(&db).expect("consistent");
 }
@@ -1469,13 +1468,10 @@ fn project_detail_has_the_frozen_shape() {
         detail
             .workstreams
             .iter()
-            .map(|w| (w.workstream.id.clone(), w.is_primary))
-            .collect::<Vec<_>>(),
-        vec![
-            ("w-primary".to_string(), true),
-            ("w-related".to_string(), false)
-        ],
-        "membership is ANY path of the Project; position 0 is what makes a row 主关联"
+            .map(|w| w.workstream.id.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["w-primary".to_string(), "w-related".to_string()]),
+        "every associated path counts equally"
     );
     assert_eq!(
         noending::storage::workstream_paths::workstreams_for_project(
@@ -1484,9 +1480,9 @@ fn project_detail_has_the_frozen_shape() {
         )
         .unwrap()
         .into_iter()
-        .map(|(w, primary)| (w.id, primary))
+        .map(|w| w.id)
         .collect::<Vec<_>>(),
-        vec![("w-related".to_string(), true)]
+        vec!["w-related".to_string()]
     );
 
     // The shape is a contract with the frontend bridge: these keys, nothing else.
@@ -1518,11 +1514,7 @@ fn project_detail_has_the_frozen_shape() {
         .map(|k| k.as_str())
         .collect();
     workstream_keys.sort_unstable();
-    assert_eq!(workstream_keys, vec!["is_primary", "workstream"]);
-    assert_eq!(
-        value["workstreams"][0]["is_primary"],
-        serde_json::json!(true)
-    );
+    assert_eq!(workstream_keys, vec!["workstream"]);
 
     // A Project that does not exist is `None`, and the command maps that to an
     // error rather than an empty object.

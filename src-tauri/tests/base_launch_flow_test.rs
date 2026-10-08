@@ -340,8 +340,8 @@ fn prepared_launch_capability_is_single_use() {
 }
 
 /// The cwd the New Session form shows is the backend's resolution, not a
-/// frontend guess: the selected Workstream's primary `WorkstreamPath` is what
-/// `prepare_new` reports, together with the tier that produced it.
+/// frontend guess: the explicitly selected directory is what `prepare_new`
+/// reports, together with the tier that produced it.
 #[test]
 fn prepared_launch_reports_the_resolved_working_directory() {
     let db = open_db("prepared-cwd");
@@ -363,7 +363,7 @@ fn prepared_launch_reports_the_resolved_working_directory() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&primary),
             &LaunchWorkspace::default(),
         )
         .unwrap();
@@ -372,8 +372,7 @@ fn prepared_launch_reports_the_resolved_working_directory() {
         Some(primary.as_str()),
         "the form displays exactly what prepare resolved"
     );
-    assert_eq!(with_ws.cwd_resolution.source, CwdSource::WorkstreamPath);
-    assert_eq!(with_ws.cwd_resolution.path_position, Some(0));
+    assert_eq!(with_ws.cwd_resolution.source, CwdSource::Explicit);
     assert!(!with_ws.cwd_resolution.fallback);
 
     let standalone = launcher

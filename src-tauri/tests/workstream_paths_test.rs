@@ -1,6 +1,4 @@
-//! The ordered WorkstreamPath list: the list is the whole model, and "position 0
-//! is primary" is a property of the list rather than a second fact that could
-//! disagree with it.
+//! Workstream paths preserve display order without primary/secondary roles.
 //!
 //! The attacher is a scripted stand-in, because the real implementation must stay
 //! separate and the Workstream side must stay testable without Git
@@ -22,7 +20,7 @@ use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{now, Db};
 use noending::workspace::workstream::{
     add_workstream_path, create_workstream, list_workstream_path_views, remove_workstream_path,
-    reorder_workstream_paths, workstream_launch_paths, WorkstreamLaunchPaths,
+    reorder_workstream_paths,
 };
 use noending::workspace::{normalize_path, path_identity, WorkspaceAttaching};
 
@@ -204,20 +202,14 @@ fn empty_path_list_is_valid() {
 
     assert_eq!(w.visibility, workstream_visibility::NORMAL);
     assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
-    assert_eq!(db.primary_workspace_path_id(&w.id).unwrap(), None);
+    assert_eq!(first_display_path_id(&db, &w.id), None);
     // Zero paths is not an error for any reader either.
     assert!(list_workstream_path_views(&db, &w.id).unwrap().is_empty());
-    assert_eq!(
-        workstream_launch_paths(&db, &w.id).unwrap(),
-        WorkstreamLaunchPaths::default()
-    );
 }
 
-/// + `create_workstream(title, description, initial_path?)`: the
-/// path arrives as a raw string, is resolved by the attacher, and the one path a
-/// new Workstream has is its primary without anyone saying so.
+/// The initial path is resolved by the attacher and starts display position zero.
 #[test]
-fn first_path_becomes_primary_automatically() {
+fn initial_path_starts_at_display_position_zero() {
     let (_d, db) = temp_db();
     db.upsert_project(&support::project("p1".into(), "P1"))
         .unwrap();
@@ -231,14 +223,10 @@ fn first_path_becomes_primary_automatically() {
     assert_eq!(attacher.paths_tried(), vec!["/repo/main".to_string()]);
     assert_eq!(list(&db, &w.id), vec![(path_id_of("/repo/main"), 0)]);
     assert_eq!(
-        db.primary_workspace_path_id(&w.id).unwrap().as_deref(),
+        first_display_path_id(&db, &w.id).as_deref(),
         Some(path_id_of("/repo/main").as_str())
     );
     // …and it reached the real WorkspacePath row, not a dangling id.
-    assert_eq!(
-        workstream_launch_paths(&db, &w.id).unwrap().primary(),
-        Some(canonical("/repo/main").as_str())
-    );
 }
 
 /// A `None` from the attacher means "no path", never "no Workstream".
@@ -302,9 +290,9 @@ fn create_requires_a_title() {
 
 // append / order
 
-/// a second entry lands last and the primary does not move.
+/// a second entry lands last and the first does not move.
 #[test]
-fn append_is_secondary() {
+fn appended_paths_preserve_existing_display_order() {
     let (_d, db) = temp_db();
     db.upsert_project(&support::project("p1".into(), "P1"))
         .unwrap();
@@ -312,26 +300,23 @@ fn append_is_secondary() {
     let w = create_workstream(&db, &attacher, "Two paths", "", &["/repo/main".into()])
         .unwrap()
         .workstream;
-    let primary_before = ordered_path_ids(&db, &w.id)[0].clone();
+    let first_before = ordered_path_ids(&db, &w.id)[0].clone();
 
     let second = add_workstream_path(&db, &attacher, &w.id, "/repo/docs").unwrap();
     assert_eq!(second.position, 1);
     assert_eq!(positions(&db, &w.id), vec![0, 1]);
     assert_eq!(
         ordered_path_ids(&db, &w.id),
-        vec![primary_before.clone(), second.workspace_path_id.clone()],
-        "append goes last; it never pushes the primary aside"
+        vec![first_before.clone(), second.workspace_path_id.clone()],
+        "append goes last; it never pushes the first aside"
     );
-    assert_eq!(
-        db.primary_workspace_path_id(&w.id).unwrap(),
-        Some(primary_before)
-    );
+    assert_eq!(first_display_path_id(&db, &w.id), Some(first_before));
 }
 
 /// Appending to a Workstream with no paths at all gives position 0 — which is
-/// why "become the primary path" needs no branch in the append helper.
+/// why "become the first path" needs no branch in the append helper.
 #[test]
-fn appending_to_an_empty_list_makes_it_primary() {
+fn appending_to_an_empty_list_starts_at_zero() {
     let (_d, db) = temp_db();
     db.upsert_project(&support::project("p1".into(), "P1"))
         .unwrap();
@@ -343,14 +328,14 @@ fn appending_to_an_empty_list_makes_it_primary() {
     let row = add_workstream_path(&db, &attacher, &w.id, "/repo/late").unwrap();
     assert_eq!(row.position, 0);
     assert_eq!(
-        db.primary_workspace_path_id(&w.id).unwrap(),
+        first_display_path_id(&db, &w.id),
         Some(row.workspace_path_id)
     );
 }
 
-/// the promotion is automatic: nobody is asked to choose a new primary.
+/// the promotion is automatic: nobody is asked to choose a new first.
 #[test]
-fn removing_the_first_path_promotes_the_second() {
+fn removing_the_first_path_recompacts_display_positions() {
     let f = fixture();
     let w = &f.workstream;
     let before = f.db.list_workstream_paths(&w.id).unwrap();
@@ -364,9 +349,9 @@ fn removing_the_first_path_promotes_the_second() {
     assert_eq!(after[1].workspace_path_id, before[2].workspace_path_id);
     assert_eq!(positions(&f.db, &w.id), vec![0, 1]);
     assert_eq!(
-        f.db.primary_workspace_path_id(&w.id).unwrap(),
+        first_display_path_id(&f.db, &w.id),
         Some(before[1].workspace_path_id.clone()),
-        "the next entry IS the primary now"
+        "the next entry IS the first now"
     );
 }
 
@@ -390,14 +375,14 @@ fn removing_a_middle_path_recompacts() {
     );
     assert_eq!(positions(&f.db, &w.id), vec![0, 1]);
 
-    // Removing the tail last leaves an empty-but-legal list with no primary.
+    // Removing the tail last leaves an empty-but-legal list with no first.
     for row in f.db.list_workstream_paths(&w.id).unwrap() {
         remove_workstream_path(&f.db, &w.id, &row.id).unwrap();
     }
     assert!(f.db.list_workstream_paths(&w.id).unwrap().is_empty());
-    assert_eq!(f.db.primary_workspace_path_id(&w.id).unwrap(), None);
+    assert_eq!(first_display_path_id(&f.db, &w.id), None);
 
-    // …and a fresh append after that is primary again, not position 3.
+    // …and a fresh append after that is first again, not position 3.
     add_workstream_path(&f.db, &f.attacher, &w.id, "/repo/main").unwrap();
     assert_eq!(positions(&f.db, &w.id), vec![0]);
 }
@@ -432,10 +417,7 @@ fn reorder_is_deterministic() {
     let promoted = vec![before[1].clone(), rotated[0].clone(), rotated[1].clone()];
     let result = reorder_workstream_paths(&f.db, &w.id, &promoted).unwrap();
     assert_eq!(result[0].workspace_path_id, before[1]);
-    assert_eq!(
-        f.db.primary_workspace_path_id(&w.id).unwrap(),
-        Some(before[1].clone())
-    );
+    assert_eq!(first_display_path_id(&f.db, &w.id), Some(before[1].clone()));
 
     // An incomplete list is refused rather than silently keeping the old tail
     // (a UI race must not be able to drop a path the user chose).
@@ -495,18 +477,17 @@ fn duplicate_path_is_idempotent() {
     assert_eq!(list(&db, &w.id).len(), 1);
 }
 
-/// The two UNIQUE keys are what make "secondary without primary" unrepresentable
+/// The two UNIQUE keys are what make "later without first" unrepresentable
 ///: the policy does not have to remember a rule the schema can state.
 #[test]
-fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
+fn storage_keys_prevent_duplicate_paths_and_display_positions() {
     let f = fixture();
     let w = &f.workstream;
     let rows = f.db.list_workstream_paths(&w.id).unwrap();
     // A fourth, real WorkspacePath that is not in this Workstream's list yet.
     let spare = insert_workspace_path_conn(&f.db.write(), &canonical("/repo/spare"), "p1").unwrap();
 
-    // Two entries cannot both claim position 0 — that is the whole of 's
-    // "no primary + has secondary" impossibility.
+    // Display positions cannot collide within a task.
     let clash = f.db.write().execute(
         "INSERT INTO workstream_paths (id, workstream_id, workspace_path_id, position, created_at)
          VALUES ('dup-zero', ?1, ?2, 0, ?3)",
@@ -514,7 +495,7 @@ fn the_storage_keys_make_a_secondary_without_a_primary_unrepresentable() {
     );
     assert!(
         clash.unwrap_err().to_string().contains("UNIQUE"),
-        "UNIQUE(workstream_id, position) must refuse a second primary"
+        "UNIQUE(workstream_id, position) must refuse a duplicate display position"
     );
 
     // …and one path cannot be listed twice, even at a free position.
@@ -597,12 +578,12 @@ fn removing_a_path_leaves_sessions_and_their_owner_alone() {
     let f = fixture();
     let w = &f.workstream;
     let rows = f.db.list_workstream_paths(&w.id).unwrap();
-    let primary = &rows[0];
+    let first = &rows[0];
 
     let s = session(&f.db, "s-carried");
     f.db.set_session_owner(&s.id, Some(&w.id)).unwrap();
 
-    remove_workstream_path(&f.db, &w.id, &primary.id).unwrap();
+    remove_workstream_path(&f.db, &w.id, &first.id).unwrap();
 
     let after = f.db.get_session(&s.id).unwrap().expect("session survives");
     assert_eq!(
@@ -633,12 +614,11 @@ fn a_path_row_of_another_workstream_is_not_accepted() {
     assert_eq!(of_b.workstream_id, b.id);
 }
 
-/// + the search row and the card's Project columns follow the
-/// position-0 path, never the frozen `workstreams.project_id`.
+/// Cards include every related project; task search has no single project parent.
 #[test]
-fn the_primary_path_projection_moves_the_search_row_and_the_card() {
+fn every_project_is_projected_and_display_reordering_does_not_change_it() {
     let (_d, db) = temp_db();
-    for id in ["p_frozen", "p_real", "p_other"] {
+    for id in ["p_real", "p_other"] {
         db.upsert_project(&support::project(id.into(), id.to_uppercase()))
             .unwrap();
     }
@@ -648,40 +628,31 @@ fn the_primary_path_projection_moves_the_search_row_and_the_card() {
         ScriptedAttacher::for_projects(&[("/real/one", "p_real"), ("/other/two", "p_other")]);
     add_workstream_path(&db, &attacher, &w.id, "/real/one").unwrap();
     add_workstream_path(&db, &attacher, &w.id, "/other/two").unwrap();
-
-    let card = work_cards(&db, &w.id);
-    assert_eq!(card.project_id.as_deref(), Some("p_real"));
-    assert_eq!(card.project_name.as_deref(), Some("P_REAL"));
-    assert_eq!(card.path_count, 2);
-    assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_real"));
-
-    // Make the other path primary: the projection moves with the ordered list.
-    let rows = db.list_workstream_paths(&w.id).unwrap();
-    reorder_workstream_paths(
-        &db,
-        &w.id,
-        &[
-            rows[1].workspace_path_id.clone(),
-            rows[0].workspace_path_id.clone(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        work_cards(&db, &w.id).project_name.as_deref(),
-        Some("P_OTHER")
-    );
-    assert_eq!(search_parent(&db, &w.id).as_deref(), Some("p_other"));
-
-    // Removing every path returns the projection to "no Project" instead of
-    // falling back to the stale column.
+    let projects = |db: &Db| {
+        work_cards(db, &w.id)
+            .projects
+            .into_iter()
+            .map(|p| (p.id, p.name))
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        ("p_other".into(), "P_OTHER".into()),
+        ("p_real".into(), "P_REAL".into()),
+    ];
+    assert_eq!(projects(&db), expected);
+    assert_eq!(work_cards(&db, &w.id).path_count, 2);
+    assert_eq!(search_parent(&db, &w.id).as_deref(), Some(""));
+    let mut ids = ordered_path_ids(&db, &w.id);
+    ids.reverse();
+    reorder_workstream_paths(&db, &w.id, &ids).unwrap();
+    assert_eq!(projects(&db), expected);
+    assert_eq!(search_parent(&db, &w.id).as_deref(), Some(""));
     for row in db.list_workstream_paths(&w.id).unwrap() {
         remove_workstream_path(&db, &w.id, &row.id).unwrap();
     }
-    let card = work_cards(&db, &w.id);
-    assert_eq!(card.project_id, None);
-    assert_eq!(card.project_name, None);
-    assert_eq!(card.path_count, 0);
-    assert_eq!(search_parent(&db, &w.id), None);
+    assert!(projects(&db).is_empty());
+    assert_eq!(work_cards(&db, &w.id).path_count, 0);
+    assert_eq!(search_parent(&db, &w.id).as_deref(), Some(""));
 }
 
 fn work_cards(db: &Db, workstream_id: &str) -> noending::commands::workstream::WorkstreamCardView {
@@ -692,73 +663,20 @@ fn work_cards(db: &Db, workstream_id: &str) -> noending::commands::workstream::W
         .expect("card")
 }
 
-/// the list the launcher hashes is ordered, and ordering is what makes a
-/// reorder stale an unreconsumed PreparedLaunch.
+/// Reordering display positions keeps the same project associations.
 #[test]
-fn launch_path_fingerprint_is_order_sensitive() {
+fn display_order_does_not_change_project_membership() {
     let f = fixture();
-    let w = &f.workstream;
-
-    let forward = workstream_launch_paths(&f.db, &w.id).unwrap();
+    let before =
+        noending::workspace::workstream::projects_for_workstream(&f.db, &f.workstream.id).unwrap();
+    let mut ids = ordered_path_ids(&f.db, &f.workstream.id);
+    ids.reverse();
+    reorder_workstream_paths(&f.db, &f.workstream.id, &ids).unwrap();
+    let after =
+        noending::workspace::workstream::projects_for_workstream(&f.db, &f.workstream.id).unwrap();
     assert_eq!(
-        forward.ordered_paths,
-        vec![
-            canonical("/repo/main"),
-            canonical("/repo/docs"),
-            canonical("/repo/backend")
-        ],
-        "the list reaches the launcher in position order"
-    );
-    assert_eq!(
-        forward.primary(),
-        Some(canonical("/repo/main").as_str()),
-        "position 0 IS the launch directory"
-    );
-
-    let reversed = WorkstreamLaunchPaths {
-        ordered_paths: forward.ordered_paths.iter().rev().cloned().collect(),
-    };
-    assert_ne!(
-        forward.fingerprint_input(),
-        reversed.fingerprint_input(),
-        "a reorder that moves position 0 must invalidate the prepared launch"
-    );
-
-    // Swapping two NON-primary entries leaves position 0 alone…
-    let mut tail_swapped = forward.ordered_paths.clone();
-    tail_swapped.swap(1, 2);
-    let tail_swapped = WorkstreamLaunchPaths {
-        ordered_paths: tail_swapped,
-    };
-    assert_eq!(tail_swapped.primary(), forward.primary());
-    assert_ne!(
-        tail_swapped.fingerprint_input(),
-        forward.fingerprint_input(),
-        "the whole ordered list is stale input, not only its head"
-    );
-
-    // Every value is labelled and terminated, so a longer list can never collide
-    // with a shorter one by shifting a boundary.
-    assert_ne!(
-        WorkstreamLaunchPaths {
-            ordered_paths: vec!["/a".into(), "/b".into()]
-        }
-        .fingerprint_input(),
-        WorkstreamLaunchPaths {
-            ordered_paths: vec!["/a|/b".into()]
-        }
-        .fingerprint_input()
-    );
-    assert_eq!(
-        WorkstreamLaunchPaths::default().fingerprint_input(),
-        b"ws_paths:primary:|".to_vec()
-    );
-    assert_eq!(
-        WorkstreamLaunchPaths {
-            ordered_paths: vec!["/a".into()]
-        }
-        .fingerprint_input(),
-        b"ws_paths:/a|primary:/a|".to_vec()
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
     );
 }
 
@@ -824,11 +742,11 @@ fn initial_paths_keep_submission_order_and_report_each_entry() {
     assert_eq!(list(&db, &report.workstream.id).len(), 3);
 }
 
-/// The primary seat is "first ACCEPTED", not "first submitted": a refused
+/// The first seat is "first ACCEPTED", not "first submitted": a refused
 /// string must not leave a hole in the ordered list (positions are
 /// contiguous by construction).
 #[test]
-fn first_accepted_path_wins_the_primary_seat_even_after_rejections() {
+fn rejected_paths_do_not_consume_display_positions() {
     let (_dir, db) = temp_db();
     db.upsert_project(&support::project("p1".into(), "P1"))
         .unwrap();
@@ -859,7 +777,7 @@ fn first_accepted_path_wins_the_primary_seat_even_after_rejections() {
     );
     let accepted = &report.paths[1];
     assert!(accepted.accepted);
-    assert_eq!(accepted.position, Some(0), "first accepted IS primary");
+    assert_eq!(accepted.position, Some(0), "first accepted IS first");
     assert_eq!(accepted.project_name.as_deref(), Some("P1"));
     let rows = db.list_workstream_paths(&report.workstream.id).unwrap();
     assert_eq!(rows.len(), 1);
@@ -930,4 +848,11 @@ fn duplicates_inside_one_call_are_reported_not_attached() {
             .len(),
         1
     );
+}
+
+fn first_display_path_id(db: &Db, workstream_id: &str) -> Option<String> {
+    db.list_workstream_paths(workstream_id)
+        .unwrap()
+        .first()
+        .map(|p| p.workspace_path_id.clone())
 }

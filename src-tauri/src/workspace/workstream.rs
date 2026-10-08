@@ -1,9 +1,8 @@
 //! Workstream paths and archive state.
 //!
-//! `position = 0` IS the primary path (`UNIQUE(workstream_id, position)`), so
-//! "secondary without primary" is not representable. Removing an entry
-//! recompacts positions; reordering takes the FULL list, and "make this primary"
-//! is a reorder to index 0. Workstream→Project is a projection through the paths.
+//! Positions record display order only. Removing an entry
+//! recompacts positions; reordering takes the FULL list. Every path contributes
+//! equally to the task’s Project associations.
 //!
 //! Visibility (`normal | archived`) is the only task state.
 //! `archive` / `restore` only flip visibility, and permanent deletion is
@@ -16,8 +15,7 @@
 //! `launch_intents`, `workspace_paths`, and the Agents' raw source data. A
 //! Session survives via its `owner_workstream_id` `ON DELETE SET NULL`.
 //!
-//! Any path-list mutation changes the primary-path Project projection, so it must
-//! re-index the Workstream's search row. Removing a WorkstreamPath touches the
+//! Removing a WorkstreamPath touches the
 //! path list only — Session Owner, cwd, `workspace_path_id` and `project_id` are
 //! independent facts and stay put.
 //!
@@ -31,9 +29,9 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::workspace::{get_project_conn, get_workspace_path_conn};
 use crate::storage::workstream_paths::{
-    append_workstream_path_conn, ordered_canonical_paths_for_workstream, primary_workspace_path,
-    purge_workstream_data_conn, reindex_workstream_search_conn, remove_workstream_path_conn,
-    reorder_workstream_paths_conn, workstream_path_by_id_conn,
+    append_workstream_path_conn, project_ids_for_workstream, purge_workstream_data_conn,
+    reindex_workstream_search_conn, remove_workstream_path_conn, reorder_workstream_paths_conn,
+    workstream_path_by_id_conn,
 };
 use crate::storage::{new_id, now, Db};
 
@@ -70,7 +68,7 @@ pub struct CreatedPath {
     pub accepted: bool,
     /// The canonical spelling the path was attached under (accepted only).
     pub canonical_path: Option<String>,
-    /// Position in the Workstream's ordered list, 0 = primary (accepted only).
+    /// Display position in the Workstream's ordered list (accepted only).
     pub position: Option<i64>,
     /// Project the path projects onto (accepted only; derived, not chosen).
     pub project_name: Option<String>,
@@ -89,9 +87,8 @@ pub struct CreateWorkstreamReport {
 
 /// `create_workstream(title, description, initial_paths?)`.
 ///
-/// Accepted paths take consecutive positions in submission order — position 0
-/// IS the primary path by construction, so "first accepted wins the primary
-/// seat" needs no special case. A string the attacher refuses (`Ok(None)`:
+/// Accepted paths take consecutive display positions in submission order.
+/// A string the attacher refuses (`Ok(None)`:
 /// unresolvable, reserved, the Home itself) is reported, never
 /// guessed into a path (不能确定就不猜), and a Workstream whose strings
 /// all bounce is still created with zero paths.
@@ -229,13 +226,12 @@ pub fn add_workstream_path(
             other("该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录")
         })?;
         let row = append_workstream_path_conn(tx, workstream_id, &path_id)?;
-        reindex_workstream_search_conn(tx, workstream_id)?;
         Ok(row)
     })?;
     Ok(row)
 }
 
-/// Remove one entry and let the next move up to primary. Sessions are
+/// Remove one entry and recompact display positions. Sessions are
 /// not affected: this changes the Workstream's path list, never a Session's
 /// ownership.
 pub fn remove_workstream_path(
@@ -249,13 +245,11 @@ pub fn remove_workstream_path(
             return Err(other("该工作路径不属于此 Workstream"));
         }
         remove_workstream_path_conn(tx, workstream_id, workstream_path_id)?;
-        reindex_workstream_search_conn(tx, workstream_id)?;
         Ok(())
     })
 }
 
-/// Rewrite the order. Takes the COMPLETE list; "make this the primary
-/// path" is a reorder to index 0, never a role flag.
+/// Rewrite the display order. Takes the COMPLETE list.
 pub fn reorder_workstream_paths(
     db: &Db,
     workstream_id: &str,
@@ -264,7 +258,6 @@ pub fn reorder_workstream_paths(
     require_workstream(db, workstream_id)?;
     db.tx(|tx| {
         reorder_workstream_paths_conn(tx, workstream_id, ordered_workspace_path_ids)?;
-        reindex_workstream_search_conn(tx, workstream_id)?;
         Ok(())
     })?;
     db.list_workstream_paths(workstream_id)
@@ -357,70 +350,26 @@ pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()>
 
 // Projections
 
-/// The card / detail `project_id` + `project_name`, read through the
-/// position-0 path.
-///
-/// Both are `None` for a Workstream with no paths, which is a normal state and
-/// not an error.
-pub fn primary_project_for_workstream(
-    db: &Db,
-    workstream_id: &str,
-) -> Result<(Option<Id>, Option<String>)> {
-    let Some(wp) = primary_workspace_path(&db.read(), workstream_id)? else {
-        return Ok((None, None));
-    };
-    let name = db.get_project(&wp.project_id)?.map(|p| p.name);
-    Ok((Some(wp.project_id), name))
+/// A task's projects are derived from every associated path, without roles.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkstreamProject {
+    pub id: Id,
+    pub name: String,
 }
 
-/// The Workstream-side input to the PreparedLaunch state fingerprint, defined
-/// here so the stale rule and the data live together:
-///
-/// ```text
-/// hasher.update(workstream_launch_paths(db, ws_id)?.fingerprint_input());
-/// ```
-///
-/// `default_ws:` is NOT part of this type — the default workspace comes from
-/// `NoEndingHome`, which is not in the DB, so the caller passes it in
-/// separately.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkstreamLaunchPaths {
-    /// Canonical paths in list order. Order is semantics: never sort this.
-    pub ordered_paths: Vec<String>,
-}
-
-impl WorkstreamLaunchPaths {
-    /// Tier 2 — the launch directory, when this Workstream has one.
-    pub fn primary(&self) -> Option<&str> {
-        self.ordered_paths.first().map(String::as_str)
-    }
-
-    /// Tagged, delimited hash bytes.
-    ///
-    /// Every value is preceded by its label and followed by `|`, so no two
-    /// different states can produce the same stream by shifting a boundary, and
-    /// the list is written in list order because position 0 IS the fact the
-    /// launch depends on. A Workstream with zero paths contributes
-    /// `ws_paths:primary:|` — distinct from any non-empty list.
-    pub fn fingerprint_input(&self) -> Vec<u8> {
-        let mut out = b"ws_paths:".to_vec();
-        for p in &self.ordered_paths {
-            out.extend_from_slice(p.as_bytes());
-            out.push(b'|');
+pub fn projects_for_workstream(db: &Db, workstream_id: &str) -> Result<Vec<WorkstreamProject>> {
+    let ids = project_ids_for_workstream(&db.read(), workstream_id)?;
+    let mut projects = Vec::new();
+    for id in ids {
+        if let Some(project) = db.get_project(&id)? {
+            projects.push(WorkstreamProject {
+                id,
+                name: project.name,
+            });
         }
-        out.extend_from_slice(b"primary:");
-        if let Some(p) = self.primary() {
-            out.extend_from_slice(p.as_bytes());
-        }
-        out.push(b'|');
-        out
     }
-}
-
-pub fn workstream_launch_paths(db: &Db, workstream_id: &str) -> Result<WorkstreamLaunchPaths> {
-    Ok(WorkstreamLaunchPaths {
-        ordered_paths: ordered_canonical_paths_for_workstream(&db.read(), workstream_id)?,
-    })
+    projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    Ok(projects)
 }
 
 // Helpers

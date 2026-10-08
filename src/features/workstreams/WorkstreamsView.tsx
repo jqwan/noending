@@ -49,7 +49,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   const projectOptions = useMemo(() => {
     const projects = new Map<string, string>();
     for (const card of cards ?? []) {
-      if (card.project_id) projects.set(card.project_id, card.project_name ?? "未命名项目");
+      for (const project of card.projects) projects.set(project.id, project.name);
     }
     return [...projects.entries()].sort((a, b) => a[1].localeCompare(b[1], "zh-Hans"));
   }, [cards]);
@@ -62,7 +62,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
     const q = query.trim().toLowerCase();
     return cards
       .filter((c) => archivedMode ? c.visibility === "archived" : c.visibility === "normal")
-      .filter((c) => projectId === "all" || (projectId === "none" ? c.project_id === null : c.project_id === projectId))
+      .filter((c) => projectId === "all" || (projectId === "none" ? c.projects.length === 0 : c.projects.some((p) => p.id === projectId)))
       .filter((c) =>
         q === ""
           ? true
@@ -302,12 +302,12 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                         {c.visibility === "archived" && <span className="badge warn">已归档</span>}
                       </div>
                       <div className="task-list-meta">
-                        {c.project_name && (
-                          <span title={c.project_name} className="task-list-project">
+                        {c.projects.map((p) => (
+                          <span key={p.id} title={p.name} className="task-list-project">
                             <Icon name="folder" />
-                            <span>{c.project_name}</span>
+                            <span>{p.name}</span>
                           </span>
-                        )}
+                        ))}
                         <span>{c.session_count === 0 ? "暂无会话" : `${c.session_count} 个会话`}</span>
                         <span title={c.last_activity_at ?? c.updated_at}>
                           {timeAgo(c.last_activity_at ?? c.updated_at)}

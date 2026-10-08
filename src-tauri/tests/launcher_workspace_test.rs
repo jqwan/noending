@@ -31,7 +31,6 @@ use noending::storage::{new_id, now, Db};
 use noending::workspace::session::move_session_to_path_conn;
 use noending::workspace::workstream::{
     add_workstream_path, create_workstream, remove_workstream_path, reorder_workstream_paths,
-    workstream_launch_paths,
 };
 use noending::workspace::{normalize_path, path_identity, WorkspaceAttaching};
 
@@ -191,145 +190,52 @@ fn is_stale(err: &str) -> bool {
 
 // staleness of paths
 
-/// "reorder primary makes plan stale". Position 0 is the whole meaning of
-/// the ordered list, and reordering it changes no `updated_at` anywhere — the
-/// only thing that can catch it is the list itself being a fingerprint input.
+/// Display order cannot change the prepared launch directory or invalidate it.
 #[test]
-fn reordering_the_primary_makes_a_prepared_launch_stale() {
+fn display_reordering_keeps_the_prepared_directory_and_launch_valid() {
     let db = open_db("reorder");
     seed_installation(&db, Agent::Codex);
     let first = real_dir("reorder", "first");
     let second = real_dir("reorder", "second");
     let w = ws_with_paths(&db, "two paths", &[first.clone(), second.clone()]);
-    assert_eq!(
-        workstream_launch_paths(&db, &w).unwrap().ordered_paths,
-        vec![first.clone(), second.clone()]
-    );
-
     let launcher = launcher_in("reorder");
+    let workspace = LaunchWorkspace {
+        default_workspace: Some(real_dir("reorder", "default")),
+    };
     let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(w.as_str()),
-            None,
-            &LaunchWorkspace::default(),
-        )
+        .prepare_new_in(&db, Agent::Codex, Some(&w), None, &workspace)
         .unwrap();
-    assert_eq!(prepared.cwd.as_deref(), Some(first.as_str()));
-
-    // Same set, different order: `second` becomes primary.
+    assert_eq!(prepared.cwd, workspace.default_workspace);
     reorder_workstream_paths(&db, &w, &[path_id(&db, &second), path_id(&db, &first)]).unwrap();
-
-    let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
-        .expect_err("a reordered primary must not launch the old preview");
-    assert!(is_stale(&err.to_string()), "got: {err}");
-    assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM launch_intents"),
-        0,
-        "a refused launch never reaches the spawn step"
-    );
-
-    // Re-previewing under the new order works and follows the new primary.
-    let fresh = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(w.as_str()),
-            None,
-            &LaunchWorkspace::default(),
-        )
+    let result = launcher
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
         .unwrap();
-    assert_eq!(fresh.cwd.as_deref(), Some(second.as_str()));
-    let launched = launcher
-        .launch_prepared_with_in(
-            &db,
-            &fresh,
-            &LaunchWorkspace::default(),
-            fake_spawn,
-            fake_open,
-            None,
-        )
-        .expect("a preview made after the reorder is launchable");
-    assert!(
-        launched.command_line.ends_with(&second),
-        "the Agent must be started in the new primary path, got {}",
-        launched.command_line
-    );
+    assert!(result
+        .command_line
+        .ends_with(workspace.default_workspace.as_ref().unwrap()));
 }
 
-/// "remove primary makes plan stale" — and the same for any other entry:
-/// the list is hashed as a list, so an addition is a change too.
+/// Task path membership does not override the explicitly selected directory.
 #[test]
-fn removing_or_adding_a_workstream_path_makes_a_prepared_launch_stale() {
-    let db = open_db("remove");
+fn task_path_changes_do_not_override_an_explicit_directory_or_invalidate_it() {
+    let db = open_db("path-change");
     seed_installation(&db, Agent::Codex);
-    let primary = real_dir("remove", "primary");
-    let other = real_dir("remove", "other");
-    let w = ws_with_paths(&db, "paths", &[primary.clone(), other.clone()]);
-    let launcher = launcher_in("remove");
-
+    let first = real_dir("path-change", "first");
+    let other = real_dir("path-change", "other");
+    let explicit = real_dir("path-change", "explicit");
+    let w = ws_with_paths(&db, "paths", &[first]);
+    let launcher = launcher_in("path-change");
+    let workspace = LaunchWorkspace::default();
     let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(w.as_str()),
-            None,
-            &LaunchWorkspace::default(),
-        )
+        .prepare_new_in(&db, Agent::Codex, Some(&w), Some(&explicit), &workspace)
         .unwrap();
-    assert_eq!(prepared.cwd.as_deref(), Some(primary.as_str()));
-
-    // Removing the *non-primary* entry is also a state change: the launch did
-    // not use it; this Workstream's work locations cover it.
-    let rows = db.list_workstream_paths(&w).unwrap();
-    let other_row = rows
-        .iter()
-        .find(|r| r.workspace_path_id == path_id(&db, &other))
+    let row = db.list_workstream_paths(&w).unwrap().remove(0);
+    remove_workstream_path(&db, &w, &row.id).unwrap();
+    add_workstream_path(&db, &LexicalPaths, &w, &other).unwrap();
+    let result = launcher
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
         .unwrap();
-    remove_workstream_path(&db, &w, &other_row.id).unwrap();
-    let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
-        .expect_err("a removed path must invalidate the preview");
-    assert!(is_stale(&err.to_string()), "got: {err}");
-
-    // Re-previewed: only `primary` is left, and removing *it* must invalidate
-    // the plan as well.
-    let after_removal = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(w.as_str()),
-            None,
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-    assert_eq!(after_removal.cwd.as_deref(), Some(primary.as_str()));
-    let primary_row = db.list_workstream_paths(&w).unwrap().remove(0);
-    remove_workstream_path(&db, &w, &primary_row.id).unwrap();
-    let err = launcher
-        .launch_prepared_in(&db, &after_removal, &LaunchWorkspace::default(), None)
-        .expect_err("removing the primary path must invalidate the preview");
-    assert!(is_stale(&err.to_string()), "got: {err}");
-
-    // A Workstream with zero paths and no Home previewed here: nothing to launch.
-    let empty = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(w.as_str()),
-            None,
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-    assert_eq!(empty.cwd, None);
-    let owner = empty.owner_workstream_id.clone().expect("owner recorded");
-    add_workstream_path(&db, &LexicalPaths, &owner, &primary).unwrap();
-    let err = launcher
-        .launch_prepared_in(&db, &empty, &LaunchWorkspace::default(), None)
-        .expect_err("an added path must invalidate the preview too");
-    assert!(is_stale(&err.to_string()), "got: {err}");
+    assert!(result.command_line.ends_with(&explicit));
 }
 
 /// "default workspace change makes plan stale". The default workspace is a
@@ -481,16 +387,18 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
     let w = ws_with_paths(&db, "carries on", &[primary.clone()]);
     db.set_session_owner(&s.id, Some(&w)).unwrap();
 
+    let workspace = LaunchWorkspace {
+        default_workspace: Some(real_dir("resume-fallback", "default")),
+    };
     let launcher = launcher_in("resume-fallback");
-    let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
-        .unwrap();
+    let prepared = launcher.prepare_resume_in(&db, &s.id, &workspace).unwrap();
 
-    assert_eq!(prepared.cwd.as_deref(), Some(primary.as_str()));
+    assert_eq!(
+        prepared.cwd.as_deref(),
+        workspace.default_workspace.as_deref()
+    );
     let resolution = &prepared.cwd_resolution;
-    assert_eq!(resolution.source, CwdSource::WorkstreamPath);
-    assert_eq!(resolution.workstream_id.as_deref(), Some(w.as_str()));
-    assert_eq!(resolution.path_position, Some(0));
+    assert_eq!(resolution.source, CwdSource::DefaultWorkspace);
     assert!(
         resolution.fallback,
         "a resume that lost its directory is the case the UI must warn about"
@@ -503,16 +411,11 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
 
     // And the Agent really starts there — `prepared.cwd`, not a re-read value.
     let result = launcher
-        .launch_prepared_with_in(
-            &db,
-            &prepared,
-            &LaunchWorkspace::default(),
-            fake_spawn,
-            fake_open,
-            None,
-        )
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
         .expect("a fallback is a legitimate launch");
-    assert!(result.command_line.ends_with(&primary));
+    assert!(result
+        .command_line
+        .ends_with(workspace.default_workspace.as_ref().unwrap()));
 }
 
 /// The last resume tier: no Session directory, no usable Workstream path, so
@@ -525,7 +428,7 @@ fn a_resume_falls_back_to_the_default_workspace_and_says_so() {
     let s = session_row(&db, Some(&lost), None);
     let default_ws = real_dir("resume-default", "workspace");
 
-    let resolution = resolve_resume_cwd(&db, &s.id, None, &workspace(Some(&default_ws))).unwrap();
+    let resolution = resolve_resume_cwd(&db, &s.id, &workspace(Some(&default_ws))).unwrap();
     assert_eq!(resolution.cwd.as_deref(), Some(default_ws.as_str()));
     assert_eq!(resolution.source, CwdSource::DefaultWorkspace);
     assert!(resolution.fallback);
@@ -604,7 +507,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
             &db,
             Agent::Codex,
             Some(w.as_str()),
-            None,
+            Some(&primary),
             &LaunchWorkspace::default(),
         )
         .unwrap();
@@ -702,16 +605,12 @@ fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
         0,
         "a match must not invent a WorkstreamPath"
     );
+    assert!(db.list_workstream_paths(&w).unwrap().is_empty());
     assert!(
-        workstream_launch_paths(&db, &w)
+        noending::workspace::workstream::projects_for_workstream(&db, &w)
             .unwrap()
-            .ordered_paths
-            .is_empty(),
-        "the Workstream still has no launch paths"
+            .is_empty()
     );
-    let (project_id, _) =
-        noending::workspace::workstream::primary_project_for_workstream(&db, &w).unwrap();
-    assert_eq!(project_id, None, "no path means no primary Project");
     // Physical membership is independent of semantic ownership: the Project
     // still comes from the Session's own path.
     assert_eq!(matched.project_id.as_deref(), Some(PROJECT));
@@ -853,7 +752,7 @@ fn a_match_never_teaches_the_workstream_a_foreign_path() {
         "the shared fallback must not enter the Workstream's path list"
     );
     assert_eq!(
-        primary_titles(&db, &w),
+        display_paths(&db, &w),
         vec![own],
         "the one path it has is still the one the user added"
     );
@@ -869,7 +768,7 @@ fn path_count(db: &Db, workstream_id: &str) -> i64 {
         .unwrap()
 }
 
-fn primary_titles(db: &Db, workstream_id: &str) -> Vec<String> {
+fn display_paths(db: &Db, workstream_id: &str) -> Vec<String> {
     db.read()
         .prepare(
             "SELECT wp.canonical_path FROM workstream_paths p
@@ -983,7 +882,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
             &home,
             Some(w.clone()),
             None,
-            CwdSource::WorkstreamPath,
+            CwdSource::DefaultWorkspace,
             false,
         ),
         (&home, None, None, CwdSource::DefaultWorkspace, false),
@@ -992,7 +891,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
             Some(unmounted.clone()),
             None,
             CwdSource::DefaultWorkspace,
-            true,
+            false,
         ),
         (&no_home, None, None, CwdSource::Unresolved, false),
     ];

@@ -11,7 +11,7 @@ export function cardSummaryLine(card: WorkstreamCardData): string {
 /** 检索字段必须与 placeholder 声明的一致：命中一个页面上看不见的字段，
  *  等于给用户一个无法解释的结果。 */
 export function cardSearchFields(card: WorkstreamCardData): (string | null | undefined)[] {
-  return [card.title, card.description, card.project_name, card.current_state, card.goal];
+  return [card.title, card.description, ...card.projects.map((p) => p.name), card.current_state, card.goal];
 }
 
 export function searchFieldHint(): string {
@@ -48,7 +48,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent, onA
         </div>
       </header>
 
-      {card.project_name && <div className="task-project" title={card.project_name}><Icon name="folder" /><span className="truncate">{card.project_name}</span></div>}
+      {card.projects.map((p) => <div key={p.id} className="task-project" title={p.name}><Icon name="folder" /><span className="truncate">{p.name}</span></div>)}
       {body && <p className="ws-card-body" title={body}>{body}</p>}
 
       <footer className="ws-card-meta">

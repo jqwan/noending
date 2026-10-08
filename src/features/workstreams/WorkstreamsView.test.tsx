@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({ cards: [] as WorkstreamCardData[], refresh: vi
 vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, defaultAgent: "codex", refresh: state.refresh, loadError: "" }) }));
 vi.mock("../../api", () => ({ api: { archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
-const card = (id: string, visibility = "normal") => ({ id, title: id, visibility, session_count: 1, path_count: 0, created_at: "", updated_at: "" } as WorkstreamCardData);
+const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1, path_count: 0, created_at: "", updated_at: "", current_state: null, goal: null, last_activity_at: null, latest_session: null });
 beforeEach(() => { vi.clearAllMocks(); viewState.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
 afterEach(cleanup);
 
@@ -59,4 +59,25 @@ it("keeps card and list views available in both archive scopes", async () => {
   screen.getByRole("button", { name: "永久删除归档甲" });
   fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
   expect(container.querySelectorAll(".task-card")).toHaveLength(2);
+});
+
+it("shows and filters every related project in both board views", () => {
+  const multiple = { ...card("跨项目任务"), projects: [{ id: "p-a", name: "项目甲" }, { id: "p-b", name: "项目乙" }] };
+  state.cards = [multiple, card("无项目任务")];
+  render(<WorkstreamsView navigate={() => {}} actionSeq={0} />);
+  const projectFilter = screen.getByText("全部项目").closest("select")!;
+  fireEvent.change(projectFilter, { target: { value: "p-b" } });
+  expect(document.querySelectorAll(".task-card")).toHaveLength(1);
+  screen.getByRole("button", { name: "跨项目任务" });
+  expect(screen.queryByRole("button", { name: "无项目任务" })).toBeNull();
+  const task = document.querySelector(".task-card")!;
+  expect(task.textContent).toContain("项目甲");
+  expect(task.textContent).toContain("项目乙");
+  fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
+  const row = document.querySelector(".task-list-row")!;
+  expect(row.textContent).toContain("项目甲");
+  expect(row.textContent).toContain("项目乙");
+  fireEvent.change(projectFilter, { target: { value: "none" } });
+  screen.getByText("无项目任务");
+  expect(screen.queryByText("跨项目任务")).toBeNull();
 });

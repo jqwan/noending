@@ -83,21 +83,20 @@ function session(over: Partial<Session> = {}): Session {
 function workstreamCard(over: Partial<WorkstreamCardData> = {}): WorkstreamCardData {
   return {
     id: "ws-1",
-    project_id: "p-1",
+    projects: [{ id: "p-1", name: "项目A" }],
     title: "任务重构",
     description: "重构描述",
 
     visibility: "normal",
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-    project_name: "项目A",
     current_state: null,
     goal: null,
     last_activity_at: new Date().toISOString(),
     session_count: 1,
     latest_session: null,
     path_count: 1,
-    primary_path: "/repo/x",
+
     ...over,
   };
 }
@@ -110,8 +109,7 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
     kind: "directory" as const,
     path_count: 1,
     missing_path_count: 0,
-    primary_workstream_count: 1,
-    related_workstream_count: 0,
+    workstream_count: 1,
     session_count: 1,
     representative_paths: ["/repo/x"],
     search_paths: ["/repo/x"],

@@ -339,8 +339,8 @@ fn new_session_launch_intent_carries_the_chosen_owner() {
     .unwrap();
 
     assert_eq!(prepared.owner_workstream_id.as_deref(), Some(w.id.as_str()));
-    // with no explicit cwd the Owner's first usable path is the tier.
-    assert_eq!(prepared.cwd.as_deref(), Some(dir.as_str()));
+    // Task ownership does not imply a launch directory.
+    assert_eq!(prepared.cwd, None);
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn resume_uses_the_sessions_current_owner_and_needs_no_extra_argument() {
 }
 
 #[test]
-fn resume_falls_back_to_the_owners_path_when_the_session_cwd_is_gone() {
+fn resume_uses_the_default_workspace_even_when_its_task_has_a_usable_path() {
     let db = open_db("owner-resume-fallback");
     seed_project(&db, "p1");
     let paths = TempPaths::new(&db.dir, "p1");
@@ -403,7 +403,12 @@ fn resume_falls_back_to_the_owners_path_when_the_session_cwd_is_gone() {
     db.set_session_owner(&s.id, Some(&w.id)).unwrap();
 
     let workspace = LaunchWorkspace {
-        default_workspace: None,
+        default_workspace: Some(
+            db.dir
+                .join("default-workspace")
+                .to_string_lossy()
+                .into_owned(),
+        ),
     };
     let prepared = SessionLauncher {
         runtime_dir: db.dir.join("runtime"),
@@ -411,7 +416,7 @@ fn resume_falls_back_to_the_owners_path_when_the_session_cwd_is_gone() {
     .prepare_resume_in(&db, &s.id, &workspace)
     .unwrap();
 
-    assert_eq!(prepared.cwd.as_deref(), Some(dir.as_str()));
+    assert_eq!(prepared.cwd, workspace.default_workspace);
     assert!(prepared.cwd_resolution.fallback);
 }
 
@@ -422,7 +427,7 @@ fn ownerless_session_with_no_usable_cwd_resolves_to_unresolved() {
     let workspace = LaunchWorkspace {
         default_workspace: None,
     };
-    let resolution = noending::launcher::resolve_resume_cwd(&db, &s.id, None, &workspace).unwrap();
+    let resolution = noending::launcher::resolve_resume_cwd(&db, &s.id, &workspace).unwrap();
     assert_eq!(resolution.source, noending::launcher::CwdSource::Unresolved);
 }
 
@@ -631,8 +636,7 @@ fn mutations_outside_the_owner_are_skipped_not_written() {
 ///
 /// Sync runs without the DB lock, so the user can move the Session to another
 /// Workstream while it is in flight (sync's own owner CAS tolerates exactly
-/// that). Preparing against the pre-sync Owner would deliver Workstream A's
-/// directory and bundle to a Session that now belongs to B.
+/// that). The current Owner must be recorded without changing the directory.
 #[test]
 fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
     let db = open_db("owner-resume-fresh");
@@ -647,10 +651,8 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
         .unwrap()
         .workstream;
 
-    // The Session's own cwd is gone, so the OWNER decides the launch
-    // directory — the only way the result can be evidence of which Owner was
-    // used (tier 2). The ROOT SOURCE is present (real fixture file), so
-    // the resume gate passes.
+    // The Session cwd is gone; both owners must use the same default workspace.
+    // The source file is present, so the resume gate passes.
     let s = session(&db, Some("/gone/workspace"));
     db.set_session_owner(&s.id, Some(&a.id)).unwrap();
 
@@ -658,14 +660,19 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
         runtime_dir: db.dir.join("runtime"),
     };
     let workspace = LaunchWorkspace {
-        default_workspace: None,
+        default_workspace: Some(
+            db.dir
+                .join("default-workspace")
+                .to_string_lossy()
+                .into_owned(),
+        ),
     };
 
     let first = launcher
         .prepare_resume_from_current(&db, &s.id, &workspace)
         .unwrap();
     assert_eq!(first.owner_workstream_id.as_deref(), Some(a.id.as_str()));
-    assert_eq!(first.cwd.as_deref(), Some(dir_a.as_str()));
+    assert_eq!(first.cwd, workspace.default_workspace);
 
     // Ownership moves during the window in which sync would have been running.
     db.set_session_owner(&s.id, Some(&b.id)).unwrap();
@@ -676,14 +683,14 @@ fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
     assert_eq!(second.owner_workstream_id.as_deref(), Some(b.id.as_str()));
     assert_eq!(
         second.cwd.as_deref(),
-        Some(dir_b.as_str()),
-        "the cwd tier follows the CURRENT Owner"
+        workspace.default_workspace.as_deref(),
+        "changing Owner does not change the launch directory"
     );
 
     // And the end-to-end entry point (which syncs first) agrees.
     let full = launcher.prepare_resume_in(&db, &s.id, &workspace).unwrap();
     assert_eq!(full.owner_workstream_id.as_deref(), Some(b.id.as_str()));
-    assert_eq!(full.cwd.as_deref(), Some(dir_b.as_str()));
+    assert_eq!(full.cwd, workspace.default_workspace);
 }
 
 // first discovery, whichever door found the session

@@ -78,8 +78,8 @@ export default function NewSessionView({
           setWorkstreams(normal);
           if ((!initialProjectId || initialProjectId === "none" || initialProjectId === DEFAULT_PROJECT_ID) && workstreamId && workstreamId !== STANDALONE) {
             const targetWs = normal.find((w) => w.id === workstreamId);
-            if (targetWs?.project_id) {
-              setSelectedProjectId(targetWs.project_id);
+            if (targetWs?.projects.length === 1) {
+              setSelectedProjectId(targetWs.projects[0].id);
             }
           }
         }
@@ -153,8 +153,7 @@ export default function NewSessionView({
         kind: "chat_directory",
         path_count: defaultWorkspace ? 1 : 0,
         missing_path_count: 0,
-        primary_workstream_count: 0,
-        related_workstream_count: 0,
+        workstream_count: 0,
         session_count: 0,
         representative_paths: defaultWorkspace ? [defaultWorkspace] : [],
         search_paths: defaultWorkspace ? [defaultWorkspace] : [],
@@ -245,7 +244,11 @@ export default function NewSessionView({
       setSelectedProjectId(defaultProjectId);
     } else {
       const ws = workstreams.find((w) => w.id === next);
-      setSelectedProjectId(ws?.project_id ?? defaultProjectId);
+      if (ws?.projects.length === 1) {
+        setSelectedProjectId(ws.projects[0].id);
+      } else if (!ws?.projects.some((p) => p.id === selectedProjectId)) {
+        setSelectedProjectId(defaultProjectId);
+      }
     }
   };
 

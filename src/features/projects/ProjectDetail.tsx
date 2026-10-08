@@ -18,7 +18,7 @@ import type { Route } from "../../app/routes";
 
 /**
  * Project Detail：一次 `get_project_detail` 读到全部真相——它拥有的 WorkspacePaths、
- * 经由这些路径到达的 Workstreams（含主关联 / 关联），以及 cwd 落在这些路径上的
+ * 经由这些路径到达的 Workstreams，以及 cwd 落在这些路径上的
  * Sessions（走权威链，不走缓存列，M29）。
  * 用户在这页唯一能做的编辑是改名：其余事实都是派生的，手工新建 / 删除 / 移动都已退出产品 API。
  */
@@ -228,7 +228,7 @@ export default function ProjectDetail({ projectId, navigate }: {
         {detail.workstreams.length === 0 && (
           <div className="l1-none">还没有任务经由这些目录关联进来。</div>
         )}
-        {/* 不再分「主关联 / 关联」两组：关联方式不改变归属，列表只按后端给的顺序平铺。 */}
+        {/* 展示所有通过工作路径关联的任务。 */}
         {detail.workstreams.map(({ workstream: w }) => {
           // 与 Workstream 卡片同一条规则：摘要取 Agent 的 current_state，退回用户描述。
           const summary = cardSummaryLine(w as unknown as WorkstreamCardData);

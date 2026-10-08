@@ -71,8 +71,7 @@ fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
         Ok(SearchHit {
             kind: r.get(0)?,
             ref_id: r.get(1)?,
-            // FTS columns admit NULL: a Workstream with no primary path has no
-            // parent Project, and it still has to be findable.
+            // FTS columns admit NULL; roots do not have a parent.
             parent_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
             title: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
             snippet: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
