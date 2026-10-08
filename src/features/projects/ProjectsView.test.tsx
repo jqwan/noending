@@ -1,11 +1,10 @@
 import { viewState } from "../../hooks/useViewState";
-// Projects Board 契约：一次卡片查询、名称/路径搜索、缺失筛选，以及刷新期间卡片保持可见。
+// Projects Board 契约：一次卡片查询、名称/路径搜索、缺失筛选。
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectsView, { clearProjectCardsCache } from "./ProjectsView";
 import { api } from "../../api";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ProjectCardData } from "../../types";
 
@@ -13,19 +12,12 @@ vi.mock("../../api", () => ({
   api: {
     listProjectCards: vi.fn(),
     getProjectDetail: vi.fn(),
-    refreshWorkspaceProjects: vi.fn(),
-    refreshProjectWorkspace: vi.fn(),
     addProjectPath: vi.fn(),
   },
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue(null),
-}));
-
-// 组件挂载时订阅 workspace-reconcile-* 事件；测试环境没有 Tauri IPC。
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(() => Promise.resolve(() => {})),
 }));
 
 const navigate = vi.fn();
@@ -35,8 +27,6 @@ beforeEach(() => {
   viewState.clear();
   vi.mocked(api.listProjectCards).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
-  vi.mocked(api.refreshWorkspaceProjects).mockReset().mockResolvedValue({ started: true });
-  vi.mocked(listen).mockReset().mockResolvedValue(() => {});
 });
 
 afterEach(cleanup);
@@ -160,24 +150,6 @@ describe("Projects Board", () => {
     expect(chat.textContent).toContain("默认聊天目录项目");
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Normal Directory")).toBeNull();
-  });
-
-  it("project_refresh_keeps_existing_cards_while_running", async () => {
-    vi.mocked(api.listProjectCards).mockResolvedValue([card()]);
-    // 刷新永不返回：证明等待期间页面内容纹丝不动。
-    vi.mocked(api.refreshWorkspaceProjects).mockReturnValue(new Promise(() => {}));
-    render(<ProjectsView navigate={navigate} />);
-    await screen.findByText("NoEnding");
-
-    fireEvent.click(screen.getByRole("button", { name: "刷新工作区状态" }));
-
-    // 页头的是图标按钮：进度只能靠 aria-label 与 disabled 如实呈现。
-    expect(
-      (screen.getByRole("button", { name: "正在刷新工作区状态" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    expect(screen.getByText("NoEnding")).toBeTruthy();
-    // 卡片没有被清空重建：Board 数据仍在。
-    expect(screen.queryByText("加载中…")).toBeNull();
   });
 
   it("toggles between card and list view", async () => {

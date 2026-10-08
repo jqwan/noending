@@ -1,7 +1,6 @@
 import Icon from "../../components/Icon";
 import { useViewState, useViewScroll } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -63,7 +62,6 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   const [kindFilter, setKindFilter] = useViewState<ProjectKindFilter>("projects.kindFilter", "all");
   const [sort, setSort] = useViewState<SortKey>("projects.sort", "recent");
   const [viewMode, setViewMode] = useViewState<"cards" | "list">("projects.viewMode", "cards");
-  const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false);
 
   const refresh = useCallback(() => {
     api
@@ -81,47 +79,6 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   useEffect(refresh, [refresh]);
   // 单次卡片查询足够便宜，refresh 信号不再需要防抖。
   useRefreshSignal(refresh);
-
-  // 刷新在后台执行、事件回报：卡片整个期间保持可见，不清空、不进 Loading。
-  // 这里只负责恢复按钮与提示——数据读取走 AppShell 的 EVT_SYNCED 失效信号，
-  // 避免同一次刷新触发两次 listProjectCards。
-  useEffect(() => {
-    const unCompleted = listen("workspace-reconcile-completed", (e) => {
-      setWorkspaceRefreshing(false);
-      const p = e.payload as {
-        missing?: number;
-        deleted_paths?: number;
-        deleted_projects?: number;
-        discovered?: number;
-      };
-      const notes: string[] = [];
-      if ((p.missing ?? 0) > 0) notes.push(`${p.missing} 个目录变为不可用`);
-      if ((p.deleted_paths ?? 0) > 0) notes.push(`${p.deleted_paths} 个目录离开注册表`);
-      if ((p.deleted_projects ?? 0) > 0) notes.push(`${p.deleted_projects} 个项目自动整理`);
-      if ((p.discovered ?? 0) > 0) notes.push(`发现 ${p.discovered} 个新目录`);
-      showToast(
-        notes.length > 0 ? `工作区状态已刷新：${notes.join("，")}` : "工作区状态已刷新",
-      );
-    });
-    const unFailed = listen("workspace-reconcile-failed", (e) => {
-      setWorkspaceRefreshing(false);
-      showToast(`工作区刷新失败：${String((e.payload as { error?: string }).error ?? "")}`);
-    });
-    return () => {
-      unCompleted.then((f) => f());
-      unFailed.then((f) => f());
-    };
-  }, [refresh]);
-
-  const refreshWorkspace = useCallback(() => {
-    setWorkspaceRefreshing(true);
-    api
-      .refreshWorkspaceProjects()
-      .catch((e) => {
-        setWorkspaceRefreshing(false);
-        showToast(`工作区刷新失败：${String(e)}`);
-      });
-  }, []);
 
   const [addingProject, setAddingProject] = useState(false);
 
@@ -166,26 +123,15 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       <PageHeader
         title="项目"
         actions={
-          <>
-            <button
-              className="btn ghost icon-button"
-              disabled={workspaceRefreshing}
-              aria-label={workspaceRefreshing ? "正在刷新工作区状态" : "刷新工作区状态"}
-              title="重新检查工作目录的存在性与 Git 状态，并执行已有的整理规则。"
-              onClick={refreshWorkspace}
-            >
-              <Icon name="refresh" />
-            </button>
-            <button
-              className="btn ghost icon-button"
-              disabled={addingProject || workspaceRefreshing}
-              aria-label="新增项目"
-              title="新增项目"
-              onClick={handleAddProject}
-            >
-              <Icon name="plus" />
-            </button>
-          </>
+          <button
+            className="btn ghost icon-button"
+            disabled={addingProject}
+            aria-label="新增项目"
+            title="新增项目"
+            onClick={handleAddProject}
+          >
+            <Icon name="plus" />
+          </button>
         }
       />
 

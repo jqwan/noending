@@ -8,14 +8,9 @@ vi.mock("../../api", () => ({
   api: {
     getProjectDetail: vi.fn(),
     renameProject: vi.fn(),
-    refreshProjectWorkspace: vi.fn(),
     getAgentStatus: vi.fn(),
     continueSessionDesktop: vi.fn(),
   },
-}));
-
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(() => Promise.resolve(() => {})),
 }));
 
 const navigate = vi.fn();

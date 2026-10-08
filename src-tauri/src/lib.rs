@@ -20,7 +20,7 @@ pub mod workspace;
 
 use std::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub fn run() {
     tauri::Builder::default()
@@ -93,7 +93,6 @@ pub fn run() {
             app.manage(commands::AppState {
                 db: std::sync::Arc::new(db),
                 ingestion: Default::default(),
-                workspace_refresh_in_progress: std::sync::atomic::AtomicBool::new(false),
                 prepared_launches: Mutex::new(std::collections::HashMap::new()),
             });
 
@@ -135,13 +134,16 @@ pub fn run() {
                         &layer.projection(),
                         usize::MAX,
                     ) {
-                        Ok(report) => eprintln!(
-                            "[workspace] reconciled {} paths, {} moved, {} discovered, {} failed",
-                            report.scanned,
-                            report.moved_paths,
-                            report.discovered_paths.len(),
-                            report.failed.len(),
-                        ),
+                        Ok(report) => {
+                            let _ = handle.emit("workspace-reconcile-completed", ());
+                            eprintln!(
+                                "[workspace] reconciled {} paths, {} moved, {} discovered, {} failed",
+                                report.scanned,
+                                report.moved_paths,
+                                report.discovered_paths.len(),
+                                report.failed.len(),
+                            );
+                        }
                         Err(e) => eprintln!("[workspace] reconcile skipped: {e}"),
                     }
                 });
@@ -153,8 +155,6 @@ pub fn run() {
             // Projects are derived from WorkspacePaths; the UI gets read + rename.
             commands::project::list_projects,
             commands::project::list_project_cards,
-            commands::project::refresh_workspace_projects,
-            commands::project::refresh_project_workspace,
             commands::project::get_project_detail,
             commands::project::list_project_workstreams,
             commands::project::rename_project,

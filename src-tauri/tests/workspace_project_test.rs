@@ -415,7 +415,7 @@ fn new_git_path_creates_a_git_backed_project() {
 /// `git worktree list` reports registrations whether or not the directory is
 /// still on this machine. Adoption used to hardcode `false`, so the Projects
 /// page claimed "目录不存在" about worktrees that were sitting right there until
-/// some later sweep corrected the row. Both answers must come from the disk.
+/// some later sweep corrected the row. Missing registrations are not adopted.
 #[test]
 fn adopted_worktrees_report_the_existence_that_was_observed() {
     let (_d, db) = temp_db();
@@ -441,7 +441,11 @@ fn adopted_worktrees_report_the_existence_that_was_observed() {
     );
 
     let family = paths_of(&db, &row.project_id);
-    assert_eq!(family.len(), 3, "the list becomes WorkspacePaths");
+    assert_eq!(
+        family.len(),
+        2,
+        "only existing worktrees become WorkspacePaths"
+    );
 
     let by_path = |p: &std::path::Path| {
         family
@@ -454,9 +458,10 @@ fn adopted_worktrees_report_the_existence_that_was_observed() {
         "a worktree that is on disk must be adopted as existing"
     );
     assert!(
-        !by_path(&ghost).exists,
-        "a registration whose directory is gone stays a legal exists=false \
-         observation, it is not silently dropped or asserted present"
+        db.get_workspace_path(&path_id_of(&ghost.to_string_lossy()))
+            .unwrap()
+            .is_none(),
+        "stale Git registrations must not recreate removed directories"
     );
 }
 
@@ -1162,51 +1167,41 @@ fn reconcile_a_single_path_reapplies_the_whole_decision_table() {
 }
 
 #[test]
-fn reconcile_sweep_discovers_then_cleans_unreferenced_worktrees() {
+fn reconcile_sweep_keeps_existing_unreferenced_git_worktrees() {
     let (_d, db) = temp_db_locked();
+    let root = unique_dir("retained-worktrees");
+    let main = root.join("repo").to_string_lossy().into_owned();
+    let sibling = root.join("repo-feature").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
     let observer = Scripted::new();
     observer.set(
-        "/work/repo",
+        &main,
         repo(
-            "/work/repo",
-            "/work/repo/.git",
+            &main,
+            &format!("{main}/.git"),
             GitWorktreeKind::Main,
-            &["/work/repo", "/work/repo-feature"],
+            &[&main, &sibling],
         ),
     );
-    observer.set("/work/repo-feature", plain("/work/repo-feature", true));
+    observer.set(&sibling, plain(&sibling, true));
     let projection = ProjectProjection::new(&observer);
 
-    // Seed through the ordinary door: a plain directory, no Git knowledge yet.
-    {
-        ensure(&db, &plain("/work/repo", true));
-    }
-
-    // Pass 1: the sweep re-observes the registry, finds the family (an in-place
-    // upgrade of the seeded Project), and pulls the sibling worktree in.
+    // The seeded directory upgrades to a Git Project and discovers its sibling.
+    let seeded = ensure(&db, &plain(&main, true));
     let report = reconcile_workspace_paths(&db, &projection, 500).unwrap();
-    assert_eq!(report.scanned, 1, "only /work/repo was registered yet");
+    assert_eq!(report.scanned, 1);
     assert!(report.failed.is_empty(), "{:?}", report.failed);
-    assert_eq!(
-        report.discovered_paths,
-        vec![path_id_of("/work/repo-feature")],
-        "a discovered worktree becomes a WorkspacePath"
-    );
+    assert_eq!(report.discovered_paths, vec![path_id_of(&sibling)]);
+    assert!(report.outcome.deleted_paths.is_empty());
+    assert!(report.outcome.deleted_projects.is_empty());
+    assert_eq!(paths_of(&db, &seeded.project_id).len(), 2);
 
-    assert_eq!(
-        report.outcome.deleted_paths,
-        vec![path_id_of("/work/repo"), path_id_of("/work/repo-feature")]
-    );
-    assert_eq!(report.outcome.deleted_projects.len(), 1);
-    assert!(db
-        .get_workspace_path(&path_id_of("/work/repo"))
-        .unwrap()
-        .is_none());
-    assert!(db
-        .get_workspace_path(&path_id_of("/work/repo-feature"))
-        .unwrap()
-        .is_none());
-    assert!(db.list_projects().unwrap().is_empty());
+    // Both paths remain without task/session references; no repeat discoveries.
+    let repeated = reconcile_workspace_paths(&db, &projection, 500).unwrap();
+    assert!(repeated.discovered_paths.is_empty());
+    assert!(repeated.outcome.deleted_paths.is_empty());
+    assert!(repeated.outcome.deleted_projects.is_empty());
     registry_is_consistent(&db).expect("consistent after the sweep");
 }
 

@@ -26,9 +26,9 @@
 //!   owns at least one.
 //! * Deleting the last WorkspacePath deletes the Project — in FK order
 //!   `projects`, then `unindex("project", id)` after commit.
-//! * A WorkspacePath is physically GC'd as soon as it has 0 Session and 0
-//!   WorkstreamPath references; filesystem existence and Git state do not keep it
-//!   alive.
+//! * An unreferenced ordinary WorkspacePath can be GC'd even while it exists.
+//!   Paths owned by Git Projects are kept while their directories exist; missing
+//!   paths are removed only with 0 Session and 0 WorkstreamPath references.
 //! * `name_customized` wins over every automatic rename, and automatic naming
 //!   happens at Project creation only: no reconcile, worktree discovery or merge
 //!   renames an existing row (a merge may only carry a `name_customized` name
@@ -711,9 +711,9 @@ pub(crate) fn find_chat_bucket_project_conn(
 /// Nothing here may touch `workstream_paths` (discovering a WorkspacePath ≠
 /// adding a WorkstreamPath), and an existing row is left alone: we hold no
 /// observation of our own about a sibling, so we must not overwrite facts another
-/// call owns. A sibling therefore starts as `exists_on_disk = 0` — "learned about
-/// it, have not stood there" — and the next direct scan of that path confirms or
-/// GCs it.
+/// call owns. Only siblings present on disk are adopted: Git may still list a
+/// removed worktree, and registering it would undo the missing-path GC on every
+/// refresh. Existing missing rows with references are left for the direct scan.
 fn adopt_sibling_worktrees(
     conn: &Connection,
     path: &WorkspacePath,
@@ -740,6 +740,10 @@ fn adopt_sibling_worktrees(
         if get_workspace_path_conn(conn, &sibling_id)?.is_some() {
             continue;
         }
+        let exists = policy.exists_on_disk(&canonical);
+        if !exists {
+            continue;
+        }
         insert_workspace_path_conn(conn, &canonical, &path.project_id)?;
         update_workspace_path_observation_conn(
             conn,
@@ -749,7 +753,7 @@ fn adopt_sibling_worktrees(
             // hardcoded `false` here made the Projects page say "目录不存在"
             // about worktrees that were sitting right there until a later sweep
             // corrected the row.
-            policy.exists_on_disk(&canonical),
+            exists,
             git_state::DETECTED,
             // Git listed this worktree of the same family; whether it is the main
             // one is not derivable from a sibling list, and guessing would be a
@@ -898,9 +902,10 @@ pub fn reassign_workspace_path_conn(
 
 /// Physically remove candidate WorkspacePaths with no references.
 ///
-/// The candidate list is scoped by the caller's scan. Filesystem existence and
-/// Git state do not affect this decision; only Session and WorkstreamPath
-/// references do.
+/// The candidate list is scoped by the caller's scan. Session and WorkstreamPath
+/// references always protect a path. An existing directory also protects a path
+/// owned by a Git Project, even when its Git evidence is temporarily unavailable.
+/// Ordinary directories retain the reference-only GC rule.
 ///
 /// Deleting the last path of a Project deletes the Project, which is why
 /// this returns the Project ids it retired: their FTS rows go after the commit.
@@ -930,6 +935,11 @@ pub fn gc_unreferenced_workspace_paths_with_default_conn(
             }
         }
         if !workspace_path_is_gcable(conn, path_id)? {
+            continue;
+        }
+        if path.exists
+            && get_project_conn(conn, &path.project_id)?.is_some_and(|p| p.git_id.is_some())
+        {
             continue;
         }
         let former = delete_workspace_path_conn(conn, path_id)?;
@@ -1012,10 +1022,11 @@ impl ProjectProjection<'_> {
 ///
 /// * Ordered by `path_id` and capped by `limit`, so a restart cannot reshuffle the
 ///   pass and move `last_seen_at` across the whole table at once.
-/// * GC only ever considers paths THIS sweep observed as absent AND that no
-///   detected family still lists as a work tree (the sweep's three conditions),
-///   and even then only after the reference check — so a capped sweep can never
-///   mistake "not scanned yet" for "gone".
+/// * GC considers only scanned paths and newly discovered worktrees. Existing
+///   Git Project directories survive without references; missing ones require
+///   no Session or WorkstreamPath references before removal. A stale Git listing
+///   cannot recreate a missing sibling. Ordinary directories keep their existing
+///   reference-only GC rule.
 /// * Writes `workspace_paths` / `projects` / the derived Session cache and the FTS
 ///   parents, nothing else. It never writes `workstream_paths` and never
 ///   advances a cursor.

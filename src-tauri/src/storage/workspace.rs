@@ -204,8 +204,8 @@ pub fn reassign_workspace_path_project_conn(
     Ok(())
 }
 
-/// A WorkspacePath is kept only while something references it. Directory
-/// existence and Git state are observations, not retention conditions.
+/// Whether a WorkspacePath has no references. Project policy additionally
+/// protects existing Git directories and the active default workspace.
 pub fn workspace_path_is_gcable(conn: &Connection, path_id: &str) -> Result<bool> {
     let refs: i64 = conn.query_row(
         "SELECT (SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?1)

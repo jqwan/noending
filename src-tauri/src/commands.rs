@@ -30,9 +30,6 @@ pub struct AppState {
     pub db: std::sync::Arc<Db>,
     /// The one place background ingestion is queued. Never calls AI.
     pub ingestion: ingestion::IngestionCoordinator,
-    /// Guards against concurrent workspace reconciles (global AND targeted —
-    /// both mutate the same registry, so one flag serializes them).
-    pub workspace_refresh_in_progress: std::sync::atomic::AtomicBool,
     /// In-memory store for prepared launches awaiting user confirmation.
     pub prepared_launches:
         std::sync::Mutex<std::collections::HashMap<String, crate::launcher::PreparedLaunch>>,
