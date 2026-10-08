@@ -279,7 +279,7 @@ export default function SessionsView({ navigate, scope }: {
         actions={
           <>
             {/* 两个归档范围共用同一套卡片和列表。 */}
-            <div className="settings-seg archive-scope" role="group" aria-label="会话列表范围">
+            <div className="settings-seg icon-seg archive-scope" role="group" aria-label="会话列表范围">
               <button
                 className={archivedMode ? "" : "on"}
                 aria-pressed={!archivedMode}
@@ -287,7 +287,7 @@ export default function SessionsView({ navigate, scope }: {
                 title="未归档"
                 onClick={() => navigate({ view: "sessions", scope: "unarchived" })}
               >
-                <Icon name="chat" /> 未归档
+                <Icon name="chat" />
               </button>
               <button
                 className={archivedMode ? "on" : ""}
@@ -296,7 +296,7 @@ export default function SessionsView({ navigate, scope }: {
                 title="已归档"
                 onClick={() => navigate({ view: "sessions", scope: "archived" })}
               >
-                <Icon name="archive" /> 已归档
+                <Icon name="archive" />
               </button>
             </div>
             {archivedMode ? <button className="btn ghost danger" aria-label="删除全部" title="删除全部已归档会话" disabled={!sessions?.length || bulkPurgeBusy || unarchiveBusy || archiveBusy} onClick={() => setBulkPurgeOpen(true)}><Icon name="trash" /> 删除全部</button> : <button className="btn ghost icon-button" aria-label="新建会话" title="新建会话" onClick={() => navigate({ view: "new-session" })}>

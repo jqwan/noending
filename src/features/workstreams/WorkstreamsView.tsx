@@ -154,7 +154,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
         title="任务"
         actions={
           <>
-            <div className="settings-seg archive-scope" role="group" aria-label="任务列表范围">
+            <div className="settings-seg icon-seg archive-scope" role="group" aria-label="任务列表范围">
               <button
                 className={archivedMode ? "" : "on"}
                 aria-pressed={!archivedMode}
@@ -162,7 +162,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                 title="未归档"
                 onClick={() => navigate({ view: "workstreams", scope: "unarchived" })}
               >
-                <Icon name="tasks" /> 未归档
+                <Icon name="tasks" />
               </button>
               <button
                 className={archivedMode ? "on" : ""}
@@ -171,7 +171,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                 title="已归档"
                 onClick={() => navigate({ view: "workstreams", scope: "archived" })}
               >
-                <Icon name="archive" /> 已归档
+                <Icon name="archive" />
               </button>
             </div>
             {archivedMode ? <button className="btn ghost danger" aria-label="删除全部" title="删除全部已归档任务" disabled={archivedTasks.length === 0 || bulkPurgeBusy || Boolean(taskActionId)} onClick={() => setBulkPurgeOpen(true)}><Icon name="trash" /> 删除全部</button> : <button className="btn ghost icon-button" aria-label="新建任务" title="新建任务" onClick={() => setCreatingWs(true)}>

@@ -4,7 +4,7 @@ import { onEvent, EVT_TERMINALS, EVT_SYNCED, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import SidebarLogo from "../components/SidebarLogo";
 import AgentIcon from "../components/AgentIcon";
-import type { TerminalSummary, Session, WorkstreamCardData, ProjectCardData } from "../types";
+import { AGENT_LABELS, type Agent, type TerminalSummary, type Session, type WorkstreamCardData, type ProjectCardData } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 import { timeAgo } from "../components/common";
 import { useViewState } from "../hooks/useViewState";
@@ -12,13 +12,17 @@ import { disposeTerminal } from "../features/sessions/terminalCache";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
+export function sessionConversationTime(session: Session): number | null {
+  if (!session.last_conversation_at) return null;
+  const time = new Date(session.last_conversation_at).getTime();
+  return isNaN(time) ? null : time;
+}
+
 export function isSessionWithinSevenDays(session: Session, now = Date.now()): boolean {
   if (session.archived_at) return false;
-  const timeStr = session.last_conversation_at || session.last_activity_at;
-  if (!timeStr) return false;
-  const ts = new Date(timeStr).getTime();
-  if (isNaN(ts)) return false;
-  const diff = now - ts;
+  const time = sessionConversationTime(session);
+  if (time === null) return false;
+  const diff = now - time;
   return diff >= -60000 && diff <= SEVEN_DAYS_MS;
 }
 
@@ -31,7 +35,7 @@ export interface SidebarRecentGroup {
 
 export function groupRecentSessions(
   sessions: Session[],
-  groupBy: "workstream" | "project",
+  groupBy: "workstream" | "project" | "agent",
   workstreamMap: Map<string, WorkstreamCardData>,
   projectMap: Map<string, ProjectCardData>,
   now = Date.now(),
@@ -41,8 +45,7 @@ export function groupRecentSessions(
   const groupsMap = new Map<string, SidebarRecentGroup>();
 
   for (const s of recent) {
-    const timeStr = s.last_conversation_at || s.last_activity_at;
-    const time = timeStr ? new Date(timeStr).getTime() : 0;
+    const time = sessionConversationTime(s) ?? 0;
 
     let groupId: string;
     let groupTitle: string;
@@ -58,7 +61,7 @@ export function groupRecentSessions(
         groupId = "__unassigned_workstream__";
         groupTitle = "未归属任务";
       }
-    } else {
+    } else if (groupBy === "project") {
       if (s.project_id && projectMap.has(s.project_id)) {
         groupId = s.project_id;
         groupTitle = projectMap.get(s.project_id)!.name;
@@ -68,6 +71,19 @@ export function groupRecentSessions(
       } else {
         groupId = "__unassigned_project__";
         groupTitle = "未归属项目";
+      }
+    } else {
+      const rawAgent = s.agent as string;
+      const agentKey = rawAgent === "claude" ? "claude_code" : rawAgent;
+      if (agentKey && agentKey in AGENT_LABELS) {
+        groupId = agentKey;
+        groupTitle = AGENT_LABELS[agentKey as Agent];
+      } else if (agentKey) {
+        groupId = agentKey;
+        groupTitle = agentKey;
+      } else {
+        groupId = "__unknown_agent__";
+        groupTitle = "未知代理";
       }
     }
 
@@ -91,8 +107,8 @@ export function groupRecentSessions(
   // Sort sessions within each group by timestamp desc
   for (const group of groupsMap.values()) {
     group.sessions.sort((a, b) => {
-      const ta = new Date(a.last_conversation_at || a.last_activity_at || 0).getTime();
-      const tb = new Date(b.last_conversation_at || b.last_activity_at || 0).getTime();
+      const ta = sessionConversationTime(a) ?? 0;
+      const tb = sessionConversationTime(b) ?? 0;
       return tb - ta;
     });
   }
@@ -103,7 +119,7 @@ export function groupRecentSessions(
 
 /**
  * Sidebar：Brand→新会话、Search、工作区一级导航（Workstreams / Projects / Sessions /
- * Assistant）、运行中（含保留的已退出终端）、最近活动（最近 7 天有新消息的会话，按任务/项目归类）、
+ * Assistant）、运行中（含保留的已退出终端）、最近活动（最近 7 天有新消息的会话，按任务/项目/代理归类）、
  * 底部固定 Settings。
  */
 export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
@@ -116,7 +132,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
   const [sessions, setSessions] = useState<Session[]>([]);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [groupBy, setGroupBy] = useViewState<"workstream" | "project">("sidebar.recent.groupBy", "workstream");
+  const [groupBy, setGroupBy] = useViewState<"workstream" | "project" | "agent">("sidebar.recent.groupBy", "workstream");
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   const refreshSeq = useRef(0);
@@ -311,6 +327,18 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
               <Icon name="folder" />
               <span>项目</span>
             </button>
+            <button
+              type="button"
+              className={`sidebar-pill-btn ${groupBy === "agent" ? "active" : ""}`}
+              onClick={() => setGroupBy("agent")}
+              role="radio"
+              aria-checked={groupBy === "agent"}
+              aria-label="按代理归类"
+              title="按代理归类"
+            >
+              <Icon name="bot" />
+              <span>代理</span>
+            </button>
           </div>
         </div>
 
@@ -319,10 +347,13 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
         ) : (
           recentGroups.map((group) => {
             const isCollapsed = Boolean(collapsedGroups[group.id]);
+            const isKnownAgent = groupBy === "agent" && group.id in AGENT_LABELS;
             const iconName =
               groupBy === "workstream"
                 ? (isCollapsed ? "tasksCollapsed" : "tasks")
-                : (isCollapsed ? "folder" : "folderOpen");
+                : groupBy === "project"
+                ? (isCollapsed ? "folder" : "folderOpen")
+                : "bot";
 
             return (
               <div className="sidebar-recent-group" key={group.id}>
@@ -334,7 +365,11 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
                   title={`${group.title} (${group.sessions.length})`}
                 >
                   <span className="sidebar-group-icon">
-                    <Icon name={iconName} />
+                    {isKnownAgent ? (
+                      <AgentIcon agent={group.id as Agent} size={14} />
+                    ) : (
+                      <Icon name={iconName} />
+                    )}
                   </span>
                   <span className="sidebar-recent-group-title truncate">{group.title}</span>
                   <span className="sidebar-recent-count">{group.sessions.length}</span>
@@ -344,7 +379,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
                     {group.sessions.map((s) => {
                       const active = route.view === "session" && route.sessionId === s.id;
                       const title = sessionDisplayTitle(s.title);
-                      const timeStr = s.last_conversation_at || s.last_activity_at;
+                      const timeStr = s.last_conversation_at;
                       const tooltip = s.cwd ? `${title} · ${s.cwd}` : title;
                       return (
                         <button

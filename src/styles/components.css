@@ -1635,7 +1635,8 @@ button.btn.conversation-jump:active {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.task-list-actions {
+.task-list-actions,
+.project-list-actions {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1832,6 +1833,7 @@ button.icon-button.small .ui-icon {
   white-space: nowrap;
 }
 .board-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); align-items: stretch; gap: 16px; }
+.project-card,
 button.project-card { font: inherit; text-align: left; color: var(--text-primary); }
 .project-card .ws-card-head { flex-wrap: wrap; gap: 8px; }
 .project-card .ws-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }

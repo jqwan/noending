@@ -10,7 +10,7 @@ import { timeAgo, useRefreshSignal } from "../../components/common";
 import { PathText } from "../workstreams/WorkspacePaths";
 import type { Route } from "../../app/routes";
 import type { ProjectCardData, ProjectKind } from "../../types";
-import { projectKindLabels } from "./projectKind";
+import { projectKindLabels, isAgentDefaultProject } from "./projectKind";
 
 /**
  * Projects Board：Projects 是一等浏览页面——物理工作空间，由工作目录自动派生。
@@ -273,6 +273,19 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
                   </div>
                 )}
               </button>
+              <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
+                {!isAgentDefaultProject(c) && (
+                  <button
+                    type="button"
+                    className="btn small ghost icon-button"
+                    aria-label="新建会话"
+                    title="新建会话"
+                    onClick={() => navigate({ view: "new-session", projectId: c.id })}
+                  >
+                    <Icon name="plus" />
+                  </button>
+                )}
+              </div>
             </article>
           ))}
         </div>
@@ -288,9 +301,18 @@ function ProjectCard({ card, navigate }: {
 }) {
   const restPaths = Math.max(0, card.path_count - 1);
   return (
-    <button type="button"
+    <article
       className="ws-card full project-card"
+      tabIndex={0}
+      role="button"
       onClick={() => navigate({ view: "project", projectId: card.id })}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          navigate({ view: "project", projectId: card.id });
+        }
+      }}
     >
       <div className="ws-card-head">
         <div className="ws-card-title" title={card.name}><Icon name="folder" />{card.name}</div>
@@ -316,7 +338,22 @@ function ProjectCard({ card, navigate }: {
         <span title="与本项目有工作路径关联的任务"><Icon name="tasks" />{card.workstream_count}<span>任务</span></span>
         <span title="会话"><Icon name="chat" />{card.session_count}<span>会话</span></span>
       </div>
-      <div className="ws-card-meta muted small">{timeAgo(card.last_activity_at)}</div>
-    </button>
+      <div className="ws-card-meta">
+        <span className="muted small">{timeAgo(card.last_activity_at)}</span>
+        <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
+          {!isAgentDefaultProject(card) && (
+            <button
+              type="button"
+              className="btn small ghost icon-button"
+              aria-label="新建会话"
+              title="新建会话"
+              onClick={() => navigate({ view: "new-session", projectId: card.id })}
+            >
+              <Icon name="plus" />
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
   );
 }
