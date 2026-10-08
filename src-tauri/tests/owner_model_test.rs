@@ -257,11 +257,9 @@ fn matched_launch_intent_gives_the_discovered_session_that_owner() {
     let a = workstream(&db, "A");
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -294,11 +292,9 @@ fn matched_ownerless_intent_leaves_the_session_unowned() {
     let a = workstream(&db, "A");
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: None,
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -749,11 +745,9 @@ fn source_scoped_reconcile_retries_an_unchanged_ownerless_session_for_intent() {
 
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: "2026-09-22T21:17:07Z".into(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -801,11 +795,9 @@ fn a_failed_match_leaves_the_intent_pending() {
     let a = workstream(&db, "A");
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -842,11 +834,9 @@ fn a_deleted_workstream_cannot_leave_a_dangling_intent_owner() {
     let a = workstream(&db, "A");
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -953,11 +943,9 @@ fn a_launch_intent_is_consumed_exactly_once() {
     let a = workstream(&db, "A");
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -998,11 +986,9 @@ fn matching_refuses_a_foreign_agent_and_accepts_a_trashed_session() {
     let mk_intent = || {
         let intent = LaunchIntent {
             id: new_id(),
-            launch_type: "new".into(),
             agent: Agent::Codex,
             owner_workstream_id: Some(a.id.clone()),
             cwd: None,
-            process_id: None,
             launched_at: now(),
             matched_session_id: None,
             status: launch_status::PENDING.into(),
@@ -1054,11 +1040,9 @@ fn an_ownerless_session_can_still_claim_its_intent_later() {
     let a = workstream(&db, "A");
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -1092,11 +1076,9 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     let b = workstream(&db, "B");
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(a.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -1135,11 +1117,9 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     // lists, it does not freeze ownership.
     let second = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(b.id.clone()),
         cwd: None,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),

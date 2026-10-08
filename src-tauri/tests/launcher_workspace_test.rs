@@ -571,11 +571,9 @@ fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
         .id;
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(w.clone()),
         cwd: Some(dir.clone()),
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -636,11 +634,9 @@ fn concurrent_default_workspace_launches_stay_ambiguous() {
     let b = ws_with_paths(&db, "B", &[real_dir("m15", "b")]);
     let launch = |ws: &str| LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(ws.to_string()),
         cwd: Some(default_ws.clone()),
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -715,11 +711,9 @@ fn a_match_never_teaches_the_workstream_a_foreign_path() {
     let w = ws_with_paths(&db, "Laundering", &[own.clone()]);
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(w.clone()),
         cwd: Some(default_ws.clone()),
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -793,11 +787,9 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
     let selected = ws_with_paths(&db, "selected", &[real_dir("m15-tie", "p")]);
     let chosen = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(selected.clone()),
         cwd: Some(default_ws.clone()),
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -807,11 +799,9 @@ fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
     };
     let standalone = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: None,
         cwd: Some(default_ws.clone()),
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),

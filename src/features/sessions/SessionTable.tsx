@@ -47,8 +47,8 @@ export function sessionDisplayTitle(title: string | null | undefined): string {
 
 /**
  * Project 单元格。v0.2 里 Project 只有一条事实链：`workspace_path_id →
- * WorkspacePath.project_id`；`sessions.project_id` 只是缓存列——读到什么就说
- * 什么，缓存值弱化显示且不再冒充事实，缺目录时分别说「待解析」/「无工作目录」。
+ * WorkspacePath.project_id`；API 的 `session.project_id` 在读取时由该链派生。
+ * 缺目录时分别说「待解析」/「无工作目录」。
  */
 export interface ProjectCell {
   text: string;

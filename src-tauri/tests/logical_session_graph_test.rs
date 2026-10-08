@@ -616,11 +616,9 @@ fn launch_intents_match_roots_only() {
     db.upsert_workstream(&ws).unwrap();
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(ws.id.clone()),
         cwd: Some("/repo-a".into()),
-        process_id: None,
         // Within the match window of the fixture timestamps (both are now).
         launched_at: chrono_now(),
         matched_session_id: None,
@@ -690,11 +688,9 @@ fn unchanged_root_retries_a_pending_launch_intent() {
     db.upsert_workstream(&owner).unwrap();
     let intent = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(owner.id.clone()),
         cwd: Some("/repo-a".into()),
-        process_id: None,
         launched_at: chrono_now(),
         matched_session_id: None,
         status: "pending".into(),

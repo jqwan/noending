@@ -22,7 +22,6 @@ pub type Id = String;
 pub struct Project {
     pub id: Id,
     pub name: String,
-    pub description: String,
     /// References `git_identities.id`. UNIQUE across Projects when set.
     pub git_id: Option<Id>,
     /// A user renamed this Project: automatic naming must stop overwriting it,
@@ -288,10 +287,9 @@ impl Agent {
 /// - `workspace_path_id` is the authoritative link to the physical workspace,
 ///   set only when the source really has a cwd (the default workspace is a
 ///   *launch* convenience, never retrofitted onto historical Sessions).
-/// - `project_id` is a **derived cache** of
-///   `workspace_path_id → workspace_paths.project_id`, written by exactly two
-///   code paths (see `storage::session_paths`); a manual write is a domain
-///   violation.
+/// - `project_id` is a read projection of
+///   `workspace_path_id → workspace_paths.project_id`, computed by the query.
+///   No Project membership is stored on the Session row.
 #[derive(Debug, Clone, Serialize)]
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
@@ -441,7 +439,6 @@ pub struct SessionMessage {
     pub source_generation: i64,
     pub source_position: String,
     pub source_identity_hash: String,
-    pub raw_ref: String,
 }
 
 /// The fixed, system-derived Session Context structure. All four fields are
@@ -665,11 +662,9 @@ pub mod ingest_origin {
 #[derive(Debug, Clone, Serialize)]
 pub struct LaunchIntent {
     pub id: Id,
-    pub launch_type: String, // new | resume
     pub agent: Agent,
     pub owner_workstream_id: Option<Id>,
     pub cwd: Option<String>,
-    pub process_id: Option<u32>,
     pub launched_at: String,
     pub matched_session_id: Option<Id>,
     pub status: String, // pending | matched | ambiguous | expired | failed

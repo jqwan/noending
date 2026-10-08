@@ -225,11 +225,9 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     // forbids a fourth path column on it, and M6 forbids touching it at all.
     let intent = noending::domain::LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent: Agent::Codex,
         owner_workstream_id: Some(w.id.clone()),
         cwd: Some("/repo/docs".into()),
-        process_id: None,
         launched_at: now(),
         matched_session_id: Some(s.id.clone()),
         status: noending::domain::launch_status::MATCHED.into(),

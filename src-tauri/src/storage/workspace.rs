@@ -1,7 +1,7 @@
 //! WorkspacePath / GitIdentity / Project-row persistence.
 //!
 //! The *mechanical* operations every workspace layer shares: read a row, insert
-//! a row, move a row's Project, and keep the derived Session cache consistent
+//! a row, move a row's Project, and refresh the Session search projections
 //! when it moves. Policy — when to call them — lives in `workspace::project`, so
 //! nothing here re-reads the filesystem, runs Git, or decides ownership; it only
 //! applies it.
@@ -83,7 +83,6 @@ fn row_project_row(r: &Row) -> rusqlite::Result<Project> {
     Ok(Project {
         id: r.get("id")?,
         name: r.get("name")?,
-        description: r.get("description")?,
         git_id: r.get("git_id")?,
         name_customized: r.get::<_, i64>("name_customized")? != 0,
         created_at: r.get("created_at")?,
@@ -146,8 +145,8 @@ impl Db {
 /// `id` is derived from `canonical_path` by `workspace::path_identity`, so this
 /// is idempotent on both unique keys and safe to retry. An existing row is NEVER
 /// re-projected here: ownership changes go through
-/// [`reassign_workspace_path_project_conn`], which also repairs the derived
-/// Session cache — a silent re-projection would let two code paths disagree.
+/// [`reassign_workspace_path_project_conn`], which also refreshes Session search
+/// documents — a silent re-projection would leave those documents stale.
 pub fn insert_workspace_path_conn(
     conn: &Connection,
     canonical_path: &str,
@@ -182,8 +181,8 @@ pub fn update_workspace_path_observation_conn(
     Ok(())
 }
 
-/// Move a path to another Project and refresh every derived cache that reads
-/// through it, in one transaction. `git_id` on the *Project* side and the merge
+/// Move a path to another Project and refresh its Sessions' search documents
+/// in one transaction. `git_id` on the *Project* side and the merge
 /// choice are policy (`workspace::project`); this is the single mechanical door.
 pub fn reassign_workspace_path_project_conn(
     conn: &Connection,
@@ -194,7 +193,14 @@ pub fn reassign_workspace_path_project_conn(
         "UPDATE workspace_paths SET project_id = ?2, last_seen_at = ?3 WHERE id = ?1",
         params![path_id, new_project_id, now()],
     )?;
-    super::session_paths::refresh_sessions_project_for_path_conn(conn, path_id)?;
+    let ids = {
+        let mut st = conn.prepare("SELECT id FROM sessions WHERE workspace_path_id = ?1")?;
+        let rows = st.query_map(params![path_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        super::index_session_conn(conn, &id)?;
+    }
     Ok(())
 }
 
@@ -474,8 +480,8 @@ pub fn rename_project_conn(conn: &Connection, project_id: &str, name: &str) -> R
 
 /// Delete a Project that no longer owns any WorkspacePath.
 ///
-/// Sessions keep a nullable derived cache, so it is cleared before the Project
-/// goes. The FTS row is NOT dropped here: `unindex` belongs after the commit
+/// Sessions derive membership through paths, so a zero-path Project has no
+/// Session references to clear. The FTS row is NOT dropped here: `unindex` belongs after the commit
 /// (`ProjectionEffect::projects_deleted` carries the ids), and an un-committed
 /// delete must not leave search with a hole if this transaction rolls back.
 ///
@@ -491,21 +497,7 @@ pub fn delete_zero_path_project_conn(conn: &Connection, project_id: &str) -> Res
             "Project {project_id} 仍然拥有 WorkspacePath，不能删除"
         )));
     }
-    // The ids are collected first: clearing the cache below is exactly what would
-    // make the Project's name wrong in these Sessions' search documents, and
-    // afterwards `project_id` no longer names them.
-    let mut projections: Vec<String> = Vec::new();
-    {
-        let mut st = conn.prepare("SELECT id FROM sessions WHERE project_id = ?1")?;
-        for row in st.query_map(params![project_id], |r| r.get(0))? {
-            projections.push(row?);
-        }
-    }
-    super::session_paths::clear_sessions_project_for_project_conn(conn, project_id)?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
-    for session_id in &projections {
-        crate::storage::index_session_conn(conn, session_id)?;
-    }
     Ok(true)
 }
 

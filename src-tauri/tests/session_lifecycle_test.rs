@@ -167,11 +167,9 @@ fn context_frontier(db: &Db, session_id: &str) -> i64 {
 fn launch_intent(db: &Db, session_id: &str, agent: Agent) {
     db.insert_launch_intent(&LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent,
         owner_workstream_id: None,
         cwd: None,
-        process_id: Some(1),
         launched_at: now(),
         matched_session_id: Some(session_id.to_string()),
         status: "matched".into(),

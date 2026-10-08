@@ -37,6 +37,11 @@ pub use context_repo::{
 pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 pub use session_lifecycle::PermanentDeletionCounts;
 
+/// Session API projection: Project membership is read through the path, never stored.
+const SESSION_SELECT: &str = "SELECT sessions.*,
+    (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = sessions.workspace_path_id) AS project_id
+    FROM sessions";
+
 /// Two connections to one SQLite file so UI reads never queue behind writes:
 /// WAL allows one writer plus concurrent readers, every mutation goes through
 /// `writer` (serialized by its mutex), queries through `reader`. Callers never
@@ -155,11 +160,6 @@ fn upsert_logical_session_conn(
                title = COALESCE(?2, title, ?3),
                cwd = COALESCE(?4, cwd),
                workspace_path_id = COALESCE(?5, workspace_path_id),
-               project_id = COALESCE(
-                 (SELECT wp.project_id FROM workspace_paths wp
-                   WHERE wp.id = COALESCE(?5, workspace_path_id)),
-                 (SELECT wp.project_id FROM workspace_paths wp
-                   WHERE wp.id = workspace_path_id)),
                forked_from_session_id = COALESCE(forked_from_session_id, ?6),
                started_at = COALESCE(started_at, ?7),
                last_activity_at = ?8,
@@ -185,12 +185,10 @@ fn upsert_logical_session_conn(
     let id = new_id();
     conn.execute(
         "INSERT INTO sessions
-           (id, agent, root_agent_session_id, title, cwd, workspace_path_id, project_id,
+           (id, agent, root_agent_session_id, title, cwd, workspace_path_id,
             forked_from_session_id, started_at, last_activity_at,
             source_kind, source_path, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6,
-                 (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = ?6),
-                 ?7, ?8, ?9, ?10, ?11, ?12)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             id,
             agent.as_str(),
@@ -546,12 +544,11 @@ impl Db {
     /// trashed ones included. An owned Session has already matched.
     pub fn reconcile_retry_sessions(&self, agent: Option<Agent>) -> Result<Vec<Session>> {
         let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT s.* FROM sessions s
-             WHERE s.owner_workstream_id IS NULL
-               AND (?1 IS NULL OR s.agent = ?1)
-             ORDER BY COALESCE(s.last_conversation_at, s.last_activity_at, s.started_at) DESC",
-        )?;
+        let mut st = conn.prepare(&format!(
+            "{SESSION_SELECT}
+             WHERE owner_workstream_id IS NULL AND (?1 IS NULL OR agent = ?1)
+             ORDER BY COALESCE(last_conversation_at, last_activity_at, started_at) DESC"
+        ))?;
         let rows = st
             .query_map(params![agent.map(|a| a.as_str())], row_session)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -562,7 +559,7 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT * FROM sessions WHERE id = ?1",
+                &format!("{SESSION_SELECT} WHERE id = ?1"),
                 params![id],
                 row_session,
             )
@@ -579,25 +576,19 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT * FROM sessions WHERE agent = ?1 AND root_agent_session_id = ?2",
+                &format!("{SESSION_SELECT} WHERE agent = ?1 AND root_agent_session_id = ?2"),
                 params![agent.as_str(), root_agent_session_id],
                 row_session,
             )
             .optional()?)
     }
 
-    /// A `project_id` filter reads the **authoritative chain**
-    /// (`sessions.workspace_path_id → workspace_paths.project_id`), never the
-    /// `sessions.project_id` cache.
-    ///
-    /// The cache is derived for every row the app writes, but rows without a
-    /// resolvable path are not members of a Project. Listing follows the chain
-    /// so every view uses the same authority.
+    /// Project membership and the returned `project_id` both follow WorkspacePath.
     pub fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<Session>> {
         let conn = self.read();
         // Dynamic SQL: placeholders are appended together with the bind
         // values, so the numbering can never drift out of sync.
-        let mut sql = "SELECT * FROM sessions WHERE 1=1".to_string();
+        let mut sql = format!("{SESSION_SELECT} WHERE 1=1");
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         if let Some(p) = &filter.project_id {
             values.push(Box::new(p.clone()));
@@ -756,17 +747,12 @@ impl Db {
 
             let mut stored = Vec::with_capacity(messages.len());
             let mut current_ids: Vec<String> = Vec::with_capacity(messages.len());
-            let raw_path: String = tx.query_row(
-                "SELECT source_path FROM sessions WHERE id = ?1",
-                params![session_id],
-                |r| r.get(0),
-            )?;
             {
                 let mut ins = tx.prepare(
                     "INSERT INTO session_messages
                      (id, session_id, sequence, source_message_id, source_generation,
-                      source_position, source_identity_hash, ts, role, content, raw_ref)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                      source_position, source_identity_hash, ts, role, content)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                      ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
                 )?;
                 for m in messages {
@@ -782,7 +768,6 @@ impl Db {
                     );
                     prev_hash = hash.clone();
                     let id = new_id();
-                    let raw_ref = format!("{}#{}", raw_path, m.source_position);
                     let n = ins.execute(params![
                         id,
                         session_id,
@@ -794,7 +779,6 @@ impl Db {
                         m.ts,
                         m.role.as_str(),
                         m.content,
-                        raw_ref,
                     ])?;
                     if n > 0 {
                         current_ids.push(id.clone());
@@ -811,7 +795,6 @@ impl Db {
                             source_generation: source.generation,
                             source_position: m.source_position.clone(),
                             source_identity_hash: hash,
-                            raw_ref,
                         });
                         next_seq += 1;
                     } else {
@@ -1176,11 +1159,10 @@ impl Db {
     /// A Session appears in at most one Workstream's list.
     pub fn sessions_for_workstream(&self, workstream_id: &str) -> Result<Vec<Session>> {
         let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT * FROM sessions
-             WHERE owner_workstream_id = ?1
-             ORDER BY COALESCE(last_activity_at, started_at) DESC",
-        )?;
+        let mut st = conn.prepare(&format!(
+            "{SESSION_SELECT} WHERE owner_workstream_id = ?1
+             ORDER BY COALESCE(last_activity_at, started_at) DESC"
+        ))?;
         let rows = st
             .query_map(params![workstream_id], row_session)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1542,12 +1524,12 @@ impl Db {
         let conn = self.write();
         conn.execute(
             "INSERT INTO launch_intents
-             (id, launch_type, agent, owner_workstream_id, cwd, process_id, launched_at, matched_session_id, status, note, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             (id, agent, owner_workstream_id, cwd, launched_at, matched_session_id, status, note, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                i.id, i.launch_type, i.agent.as_str(),
+                i.id, i.agent.as_str(),
                 i.owner_workstream_id,
-                i.cwd, i.process_id.map(|p| p as i64),
+                i.cwd,
                 i.launched_at, i.matched_session_id, i.status, i.note, i.created_at, i.updated_at
             ],
         )?;
@@ -1568,7 +1550,7 @@ impl Db {
             format!(" WHERE status IN ({})", placeholders)
         };
         let sql = format!(
-            "SELECT id, launch_type, agent, owner_workstream_id, cwd, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
+            "SELECT *
              FROM launch_intents{} ORDER BY created_at DESC LIMIT {}",
             filter, limit
         );
@@ -1849,8 +1831,8 @@ impl Db {
         let conn = self.write();
         unindex_conn(&conn, "project", &p.id);
         conn.execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('project', ?1, '', ?2, ?3)",
-            params![p.id, p.name, p.description],
+            "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('project', ?1, '', ?2, '')",
+            params![p.id, p.name],
         )?;
         Ok(())
     }
@@ -2029,23 +2011,21 @@ impl Db {
 
 pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
     conn.execute(
-        "INSERT INTO projects (id, name, description, git_id, name_customized, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO projects (id, name, git_id, name_customized, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
            -- A customized name is user intent: no automatic rename (worktree
            -- discovery, Git upgrade, Project merge) may overwrite it.
            name = CASE WHEN name_customized = 1 THEN name ELSE ?2 END,
-           description = ?3,
            -- Git identity is never cleared *or re-targeted* by a whole-object
            -- write; the one legitimate writer is
            -- `workspace::project::adopt_git_identity_conn` (first-set-only).
-           git_id = COALESCE(git_id, ?4),
-           name_customized = MAX(name_customized, ?5),
-            updated_at = ?7",
+           git_id = COALESCE(git_id, ?3),
+           name_customized = MAX(name_customized, ?4),
+            updated_at = ?6",
         params![
             p.id,
             p.name,
-            p.description,
             p.git_id,
             p.name_customized as i64,
             p.created_at,
@@ -2157,7 +2137,7 @@ pub fn set_session_owner_conn(
 pub fn get_launch_intent_conn(conn: &Connection, id: &str) -> Result<Option<LaunchIntent>> {
     Ok(conn
         .query_row(
-            "SELECT id, launch_type, agent, owner_workstream_id, cwd, process_id, launched_at, matched_session_id, status, note, created_at, updated_at
+            "SELECT *
              FROM launch_intents WHERE id = ?1",
             params![id],
             row_launch_intent,
@@ -2248,7 +2228,7 @@ pub fn reindex_owned_sessions_conn(conn: &Connection, workstream_id: &str) -> Re
 pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
-        let mut st = conn.prepare("SELECT id FROM sessions WHERE project_id = ?1")?;
+        let mut st = conn.prepare("SELECT s.id FROM sessions s JOIN workspace_paths wp ON wp.id = s.workspace_path_id WHERE wp.project_id = ?1")?;
         for row in st.query_map(params![project_id], |r| r.get(0))? {
             ids.push(row?);
         }
@@ -2267,7 +2247,8 @@ pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Resu
         .query_row(
             "SELECT COALESCE(s.title, s.agent), COALESCE(p.name, ''), w.title, s.cwd
                FROM sessions s
-               LEFT JOIN projects p ON p.id = s.project_id
+               LEFT JOIN workspace_paths wp ON wp.id = s.workspace_path_id
+               LEFT JOIN projects p ON p.id = wp.project_id
                LEFT JOIN workstreams w ON w.id = s.owner_workstream_id
               WHERE s.id = ?1",
             params![session_id],
@@ -2914,7 +2895,6 @@ fn row_project(r: &Row) -> rusqlite::Result<Project> {
     Ok(Project {
         id: r.get("id")?,
         name: r.get("name")?,
-        description: r.get("description")?,
         git_id: r.get("git_id")?,
         name_customized: r.get::<_, i64>("name_customized")? != 0,
         created_at: r.get("created_at")?,
@@ -2981,7 +2961,6 @@ fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
         },
         content: r.get("content")?,
         turn_final: r.get::<_, i64>("turn_final")? != 0,
-        raw_ref: r.get("raw_ref")?,
     })
 }
 
@@ -3052,18 +3031,16 @@ fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
 
 fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
     Ok(LaunchIntent {
-        id: r.get(0)?,
-        launch_type: r.get(1)?,
-        agent: Agent::parse(&r.get::<_, String>(2)?).unwrap_or(Agent::Codex),
-        owner_workstream_id: r.get(3)?,
-        cwd: r.get(4)?,
-        process_id: r.get::<_, Option<i64>>(5)?.map(|p| p as u32),
-        launched_at: r.get(6)?,
-        matched_session_id: r.get(7)?,
-        status: r.get(8)?,
-        note: r.get(9)?,
-        created_at: r.get(10)?,
-        updated_at: r.get(10)?,
+        id: r.get("id")?,
+        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
+        owner_workstream_id: r.get("owner_workstream_id")?,
+        cwd: r.get("cwd")?,
+        launched_at: r.get("launched_at")?,
+        matched_session_id: r.get("matched_session_id")?,
+        status: r.get("status")?,
+        note: r.get("note")?,
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
     })
 }
 

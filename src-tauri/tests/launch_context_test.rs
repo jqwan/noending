@@ -38,7 +38,6 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
     let p = noending::domain::Project {
         id: new_id(),
         name: name.into(),
-        description: String::new(),
         git_id: None,
         name_customized: false,
         created_at: now(),
@@ -75,11 +74,9 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
 fn pending_intent(db: &Db, agent: Agent, owner: Option<&str>, cwd: Option<String>) -> LaunchIntent {
     let i = LaunchIntent {
         id: new_id(),
-        launch_type: "new".into(),
         agent,
         owner_workstream_id: owner.map(str::to_string),
         cwd,
-        process_id: None,
         launched_at: now(),
         matched_session_id: None,
         status: launch_status::PENDING.into(),
@@ -796,4 +793,24 @@ fn prepared_launch_lazy_ttl_cleanup() {
     let fresh_res = noending::commands::consume_prepared_launch(&map, &fresh_prepared.id);
     assert!(fresh_res.is_ok());
     assert_eq!(fresh_res.unwrap().id, fresh_prepared.id);
+}
+
+#[test]
+fn launch_intent_roundtrip_keeps_distinct_creation_and_update_times() {
+    let db = open_db("intent-timestamps");
+    let mut intent = pending_intent(&db, Agent::Codex, None, None);
+    intent.updated_at = "2026-10-08T12:34:56Z".into();
+    db.write()
+        .execute(
+            "UPDATE launch_intents SET updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![intent.id, intent.updated_at],
+        )
+        .unwrap();
+    for stored in [
+        db.get_launch_intent(&intent.id).unwrap().unwrap(),
+        db.list_launch_intents(&[], 10).unwrap().remove(0),
+    ] {
+        assert_eq!(stored.created_at, intent.created_at);
+        assert_eq!(stored.updated_at, intent.updated_at);
+    }
 }

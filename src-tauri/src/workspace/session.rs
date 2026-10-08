@@ -4,16 +4,14 @@
 //! Session.cwd  →  workspace_path_id  →  workspace_paths.project_id  →  Project
 //! ```
 //!
-//! `sessions.project_id` is a **derived cache** written in exactly two places:
-//! inside `upsert_session` (same statement as `workspace_path_id`, so cache and
-//! source cannot drift), and the batch refresh when a WorkspacePath changes
-//! Project. Any other `UPDATE sessions SET project_id` is a domain violation.
+//! Project membership is computed through WorkspacePath when reading a Session;
+//! there is no Session Project cache to keep in sync.
 //!
 //! Invariants: a Session with no cwd keeps `workspace_path_id = NULL` — never
 //! backfill with the default workspace, which would fabricate a fact the
 //! transcript does not contain. Event ingestion must not re-resolve a Project;
 //! discovery is authoritative for cwd. Setting an Owner writes only
-//! `owner_workstream_id`, leaving cwd / `workspace_path_id` / `project_id` untouched.
+//! `owner_workstream_id`, leaving cwd / `workspace_path_id` untouched.
 //!
 //! The WorkspacePath creator is [`WorkspaceAttaching`], injected so these rules
 //! stay testable with a scripted stand-in; [`register_workspace_attacher`] holds
@@ -87,9 +85,8 @@ pub fn resolve_session_path(
     attacher.ensure_path(conn, raw)
 }
 
-/// Move an existing Session row onto a WorkspacePath: the path and its derived
-/// Project cache are written in one statement. The Session's Owner Workstream is
-/// not involved.
+/// Move a Session onto a WorkspacePath. Project membership follows at read time;
+/// the Session's Owner Workstream is not involved.
 pub fn move_session_to_path_conn(
     conn: &Connection,
     session_id: &str,
@@ -98,8 +95,7 @@ pub fn move_session_to_path_conn(
     session_paths::attach_session_workspace_path_conn(conn, session_id, Some(workspace_path_id))
 }
 
-/// Move an existing Session row onto its cwd's WorkspacePath and
-/// recompute its cached Project in the same statement.
+/// Move an existing Session row onto its cwd's WorkspacePath.
 ///
 /// Returns whether the row actually moved. `Ok(false)` when the seam resolves to
 /// nothing: an attachment is only ever replaced by a better fact, never deleted

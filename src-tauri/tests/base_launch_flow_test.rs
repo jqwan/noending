@@ -148,7 +148,6 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     // The user's explicit (empty) selection is still durably recorded for reconcile.
     let intents: Vec<LaunchIntent> = db.list_launch_intents(&[], 100).unwrap();
     assert_eq!(intents.len(), 1, "one launch = one LaunchIntent");
-    assert_eq!(intents[0].launch_type, "new");
     assert!(
         intents[0].owner_workstream_id.is_none(),
         "standalone launch records no Owner, never a guessed one"

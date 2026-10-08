@@ -654,7 +654,6 @@ fn create_project_row(
         // Automatic: the basename, capitalized, and the exact default workspace
         // is "NoEnding Workspace". Never a guess about repositories or remotes.
         name: auto_project_name(canonical_path, policy.default_workspace().as_deref()),
-        description: String::new(),
         // Project lifecycle is not a Project concern; it is derived from paths.
         git_id: git_id.map(|g| g.to_string()),
         // App-named by construction; only `rename_project` may set this.
@@ -1156,9 +1155,8 @@ pub struct ProjectDetail {
 /// it owns, the Workstreams that reach it through any of them, and the Sessions
 /// whose cwd is one of them.
 ///
-/// Sessions come through their `workspace_path_id`, not through the
-/// `sessions.project_id` cache, so the detail page can never show a Session the
-/// path chain does not support.
+/// Sessions come through their `workspace_path_id`, the same membership chain
+/// used by Session list and detail projections.
 pub fn project_detail(
     db: &Db,
     project_id: &str,
@@ -1286,10 +1284,6 @@ pub fn registry_is_consistent(db: &Db) -> std::result::Result<(), String> {
             "workspace path id not derived from its canonical_path: {lying_id:?}"
         ));
     }
-    check(
-        "SELECT COUNT(*) FROM sessions s JOIN workspace_paths wp ON wp.id = s.workspace_path_id WHERE s.project_id IS NOT wp.project_id",
-        "session project cache out of sync with its path",
-    )?;
     Ok(())
 }
 
@@ -1365,7 +1359,6 @@ mod tests {
         let project = |id: &str, git: Option<&str>, customized: bool, created: &str| Project {
             id: id.into(),
             name: id.into(),
-            description: String::new(),
             git_id: git.map(Into::into),
             name_customized: customized,
             created_at: created.into(),

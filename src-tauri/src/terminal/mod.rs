@@ -1136,11 +1136,9 @@ mod tests {
         let ts = source.started_at.as_ref().unwrap();
         db.insert_launch_intent(&crate::domain::LaunchIntent {
             id: "intent-matched".into(),
-            launch_type: "new".into(),
             agent: Agent::Codex,
             owner_workstream_id: None,
             cwd: source.cwd.clone(),
-            process_id: None,
             launched_at: ts.clone(),
             matched_session_id: Some(source.id.clone()),
             status: crate::domain::launch_status::MATCHED.into(),

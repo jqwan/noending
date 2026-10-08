@@ -19,9 +19,7 @@ use noending::error::Result;
 use noending::ingestion::{ingest_session, reconcile_all, session_title_sources};
 use noending::launcher::LaunchWorkspace;
 use noending::lifecycle;
-use noending::storage::session_paths::{
-    attach_session_workspace_path_conn, refresh_sessions_project_for_path_conn,
-};
+use noending::storage::session_paths::attach_session_workspace_path_conn;
 use noending::storage::workspace::{
     insert_workspace_path_conn, reassign_workspace_path_project_conn,
 };
@@ -275,7 +273,7 @@ fn session_gets_a_derived_project() {
     );
     let after = stored(&db, &s.id);
     assert_eq!(after.project_id.as_deref(), Some("p-repo"));
-    // The cache agrees with its source, which is the whole invariant.
+    // The read projection agrees with its path.
     let wp = db
         .get_workspace_path(after.workspace_path_id.as_ref().unwrap())
         .unwrap()
@@ -288,8 +286,8 @@ fn session_gets_a_derived_project() {
 }
 
 #[test]
-fn an_explicit_attach_recomputes_the_cached_project_from_the_path() {
-    // The explicit re-attach door: a Session moves and the cache follows in the
+fn an_explicit_attach_derives_the_project_from_the_new_path() {
+    // The explicit re-attach door: a Session moves and its Project follows in the
     // same statement. Passing a Project to it is not an option, by design.
     let (_d, db) = temp_db("reattach");
     project(&db, "p1", "one");
@@ -413,10 +411,26 @@ fn changing_a_workspace_paths_project_refreshes_all_its_sessions() {
     // Only the Sessions behind that path moved; the third still reads p1 through
     // its own path. A refresh is a projection, not a rename-everything.
     assert_eq!(stored(&db, &c).project_id.as_deref(), Some("p1"));
+    let moved_hits = noending::search::search(&db, "two", 10).unwrap();
+    let moved_ids: std::collections::BTreeSet<_> = moved_hits
+        .iter()
+        .filter(|h| h.kind == "session")
+        .map(|h| h.ref_id.as_str())
+        .collect();
+    assert_eq!(moved_ids, [a.as_str(), b.as_str()].into_iter().collect());
+    let unchanged_hits = noending::search::search(&db, "one", 10).unwrap();
+    assert_eq!(
+        unchanged_hits
+            .iter()
+            .filter(|h| h.kind == "session")
+            .map(|h| h.ref_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![c.as_str()]
+    );
 }
 
 #[test]
-fn the_batch_refresh_is_alone_sufficient_and_idempotent() {
+fn project_membership_changes_without_refreshing_session_rows() {
     let (_d, db) = temp_db("refresh2");
     project(&db, "p1", "one");
     project(&db, "p2", "two");
@@ -445,19 +459,28 @@ fn the_batch_refresh_is_alone_sufficient_and_idempotent() {
     })
     .unwrap();
 
-    // The helper alone is enough: it re-reads the Project through the path
-    // instead of being told what the new value is.
-    let refreshed = db
-        .tx(|tx| refresh_sessions_project_for_path_conn(tx, &path))
-        .unwrap();
-    assert_eq!(refreshed, 1);
+    // No Session update or cache refresh is needed after a path's Project changes.
     assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
-    // Running it again cannot apply the change twice.
-    let again = db
-        .tx(|tx| refresh_sessions_project_for_path_conn(tx, &path))
-        .unwrap();
-    assert_eq!(again, 1);
-    assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
+    assert_eq!(
+        db.find_session_by_root_agent_id(Agent::Codex, "refresh-root")
+            .unwrap()
+            .unwrap()
+            .project_id
+            .as_deref(),
+        Some("p2")
+    );
+    assert_eq!(
+        db.reconcile_retry_sessions(None).unwrap()[0]
+            .project_id
+            .as_deref(),
+        Some("p2")
+    );
+    assert_eq!(
+        db.list_sessions_for_workspace_path(&path).unwrap()[0]
+            .project_id
+            .as_deref(),
+        Some("p2")
+    );
 }
 
 // 5. ordinary session ingestion does no Project work
@@ -583,11 +606,8 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
 }
 
 /// a Session is a member of a Project because its own path says so.
-/// The derived cache is a cache: a row still holding only a hand-attached
-/// label is not in that Project, and `list_sessions` must agree with
-/// `get_project_detail` instead of disagreeing with it.
 #[test]
-fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
+fn detaching_a_session_path_removes_project_membership_everywhere() {
     let (_d, db) = temp_db("cache-is-not-membership");
     project(&db, "p-repo", "Real");
     let raw = unique_dir("cache-authority-raw");
@@ -607,22 +627,13 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
         "/cache-authority/repo",
         "ghost prompt",
     );
-    // Make the second row look like what a hand-cached label produces: a row
-    // whose only Project fact is the label, with no resolvable path.
-    // `attach_session_workspace_path_conn(None)` is the door that clears both,
-    // so the label is re-written afterwards the way stale caches had it.
     db.tx(|tx| attach_session_workspace_path_conn(tx, &ghost.id, None))
         .unwrap();
-    db.write()
-        .execute(
-            "UPDATE sessions SET project_id = 'p-repo' WHERE id = ?1",
-            rusqlite::params![ghost.id],
-        )
-        .unwrap();
+    assert_eq!(stored(&db, &ghost.id).project_id, None);
     assert_eq!(
         stored(&db, &ghost.id).workspace_path_id,
         None,
-        "sanity: the ghost has no path, only the cached label"
+        "the detached Session has no path"
     );
 
     let in_project = db
@@ -636,12 +647,12 @@ fn a_session_with_only_the_cached_project_id_is_not_a_project_member() {
     assert_eq!(
         ids,
         vec![member.id.as_str()],
-        "the cached row must not be listed as a member the chain denies"
+        "the detached Session must not be listed as a Project member"
     );
     assert_eq!(
         stored(&db, &ghost.id).project_id.as_deref(),
-        Some("p-repo"),
-        "the stale cache value is left alone — this is a read-side fix, not a rewrite"
+        None,
+        "a detached Session has no derived Project membership"
     );
 }
 
@@ -751,7 +762,7 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
     assert_eq!(
         attached.project_id.as_deref(),
         Some("p1"),
-        "the derived Project cache moves in the same statement, not after it"
+        "the derived Project follows the directory attachment"
     );
     assert_eq!(
         stored(&db, &_stranger).workspace_path_id,

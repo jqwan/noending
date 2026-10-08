@@ -223,7 +223,7 @@ export default function SessionDetailView({
   const derivedProjectName = workspacePath && workspacePath.project_name.trim() !== ""
     ? workspacePath.project_name
     : null;
-  /** 这条会话「属于」哪个项目：派生链优先，退回会话行上缓存的 project_id。 */
+  /** 这条会话「属于」哪个项目：工作目录与 Session API 使用相同的项目派生链。 */
   const sessionProjectId = workspacePath?.project_id ?? session.project_id ?? null;
 
   /** 设置所属任务：只改 `sessions.owner_workstream_id`，不碰工作路径与 Project。 */

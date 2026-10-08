@@ -337,3 +337,23 @@ fn task_search_backfill_does_not_assign_a_single_project_parent() {
     let hit = results.iter().find(|hit| hit.ref_id == task.id).unwrap();
     assert!(hit.parent_id.is_empty());
 }
+
+/// Routing ids remain available on hits, but only title/body are searchable.
+#[test]
+fn search_indexes_content_without_tokenizing_routing_metadata() {
+    let db = open_db("metadata-unindexed");
+    db.write().execute(
+        "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
+         VALUES ('routingkindonly', 'routingrefonly', 'routingparentonly', 'Visible heading', 'Searchable prose')",
+        [],
+    ).unwrap();
+    for metadata in ["routingkindonly", "routingrefonly", "routingparentonly"] {
+        assert!(search(&db, metadata, 10).unwrap().is_empty());
+    }
+    for content in ["heading", "prose", "archable"] {
+        let hits = search(&db, content, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ref_id, "routingrefonly");
+        assert_eq!(hits[0].parent_id, "routingparentonly");
+    }
+}

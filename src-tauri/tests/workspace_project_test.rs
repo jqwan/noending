@@ -532,7 +532,7 @@ fn path_project_upgrades_to_git_project_without_changing_project_id() {
             .project_id
             .as_deref(),
         Some(project.id.as_str()),
-        "the derived cache still agrees with the path"
+        "the read projection agrees with the path"
     );
     // One-way and idempotent: replaying the upgrade is a no-op.
     ensure(
@@ -647,7 +647,7 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
             .project_id
             .as_deref(),
         Some(moved.project_id.as_str()),
-        "the derived cache followed its path in the same transaction"
+        "the read projection follows its path"
     );
     assert_eq!(
         db.get_session(&s_b.id)
@@ -677,11 +677,11 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
     assert_eq!(
         count_rows(
             &db,
-            "SELECT COUNT(*) FROM sessions WHERE project_id = ?1",
+            "SELECT COUNT(*) FROM sessions s JOIN workspace_paths wp ON wp.id = s.workspace_path_id WHERE wp.project_id = ?1",
             &a.project_id
         ),
         0,
-        "nothing still caches a Project that is gone"
+        "no Session projects onto a Project that is gone"
     );
     registry_is_consistent(&db).expect("holds at every committed moment");
 }
@@ -835,7 +835,7 @@ fn one_workspace_path_never_belongs_to_two_projects() {
         .unwrap();
     // The mechanical insert is idempotent on both unique keys and NEVER
     // re-projects an existing row: ownership changes go through the one door that
-    // also repairs the derived caches.
+    // also refreshes the search projections.
     let again = db
         .tx(|tx| insert_workspace_path_conn(tx, &canon("/shared/path/."), "p-other"))
         .unwrap();

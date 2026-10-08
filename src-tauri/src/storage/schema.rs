@@ -48,7 +48,8 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// member 维度。拓扑守卫与诊断页失去存在前提（不再存任何非根成员），一并退场。
 /// 删除数据库重建。
 /// v2 — Workstream has only archive state; Session trash becomes archived_at.
-pub const DATABASE_FORMAT_VERSION: i64 = 2;
+/// v3 — remove unused fields and the Session Project cache; slim FTS metadata.
+pub const DATABASE_FORMAT_VERSION: i64 = 3;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -209,14 +210,13 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
 /// writes. Verbatim source of truth — nothing else in the codebase creates
 /// schema.
 ///
-/// Fact tables and NoEnding-owned Context state are separated by intent:
-/// everything up to `ingest_sources` describes the Agent sources, everything
-/// from `session_contexts` on is state a database rebuild does NOT restore.
+/// Agent facts and rebuildable projections coexist with NoEnding-owned state.
+/// Tasks, ownership, archive state, Context history and settings must be
+/// preserved explicitly when replacing the database.
 const CURRENT_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      description TEXT NOT NULL DEFAULT '',
       git_id TEXT,
       name_customized INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
@@ -243,7 +243,6 @@ const CURRENT_SCHEMA: &str = r#"
       title TEXT,
       cwd TEXT,
       workspace_path_id TEXT,
-      project_id TEXT REFERENCES projects(id),
       -- Semantic ownership: at most one Owner Workstream per Session.
       -- Deleting the Workstream clears this, never the row.
       owner_workstream_id TEXT
@@ -300,12 +299,9 @@ const CURRENT_SCHEMA: &str = r#"
       -- assistant message). Derived from the projection at commit time, never
       -- ingested; an append that continues a turn demotes the old final.
       turn_final INTEGER NOT NULL DEFAULT 0,
-      raw_ref TEXT NOT NULL,
       UNIQUE(session_id, sequence),
       UNIQUE(session_id, source_identity_hash)
     );
-    CREATE INDEX IF NOT EXISTS idx_session_messages_session
-      ON session_messages(session_id, sequence);
     -- The CURRENT effective conversation: an ordered view over
     -- session_messages holding exactly one generation. A normal append adds
     -- to the tail; a source rewrite / truncate / reorder that changes the
@@ -415,11 +411,9 @@ const CURRENT_SCHEMA: &str = r#"
     );
     CREATE TABLE IF NOT EXISTS launch_intents (
       id TEXT PRIMARY KEY,
-      launch_type TEXT NOT NULL DEFAULT 'new',
       agent TEXT NOT NULL,
       owner_workstream_id TEXT REFERENCES workstreams(id) ON DELETE SET NULL,
       cwd TEXT,
-      process_id INTEGER,
       launched_at TEXT NOT NULL,
       matched_session_id TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
@@ -450,7 +444,9 @@ const CURRENT_SCHEMA: &str = r#"
       created_at TEXT NOT NULL,
       UNIQUE(agent, path)
     );
-    CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_workspace_path ON sessions(workspace_path_id);
+    CREATE INDEX IF NOT EXISTS idx_item_revisions_item ON context_item_revisions(item_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_conflicts_workstream ON context_conflicts(workstream_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
     CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
@@ -520,8 +516,6 @@ const CURRENT_SCHEMA: &str = r#"
       UNIQUE(workstream_id, position)
     );
     CREATE INDEX IF NOT EXISTS idx_workspace_paths_project ON workspace_paths(project_id);
-    CREATE INDEX IF NOT EXISTS idx_workspace_paths_canonical ON workspace_paths(canonical_path);
-    CREATE INDEX IF NOT EXISTS idx_workstream_paths_ws ON workstream_paths(workstream_id, position);
     CREATE INDEX IF NOT EXISTS idx_workstream_paths_path ON workstream_paths(workspace_path_id);
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
@@ -534,7 +528,7 @@ const CURRENT_SCHEMA: &str = r#"
     -- `-DSQLITE_ENABLE_FTS5` (libsqlite3-sys `bundled`), so a build that cannot
     -- create this table is a build whose search would silently return nothing.
     CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-      kind, ref_id, parent_id, title, body, tokenize = 'unicode61'
+      kind UNINDEXED, ref_id UNINDEXED, parent_id UNINDEXED, title, body, tokenize = 'unicode61'
     );
 "#;
 
@@ -583,17 +577,16 @@ mod tests {
             ("table", "workspace_paths"),
             ("table", "workstream_paths"),
             ("table", "search_index"),
-            ("index", "idx_sessions_project"),
+            ("index", "idx_sessions_workspace_path"),
+            ("index", "idx_item_revisions_item"),
+            ("index", "idx_conflicts_workstream"),
             ("index", "idx_items_workstream"),
             ("index", "idx_sessions_owner_workstream"),
-            ("index", "idx_session_messages_session"),
             ("index", "idx_projection_message"),
             ("index", "idx_intents_status"),
             ("index", "idx_workstream_frontiers_session"),
             ("index", "idx_conflict_events_conflict"),
             ("index", "idx_workspace_paths_project"),
-            ("index", "idx_workspace_paths_canonical"),
-            ("index", "idx_workstream_paths_ws"),
             ("index", "idx_workstream_paths_path"),
             ("index", "idx_projects_git_id"),
         ] {

@@ -49,7 +49,6 @@ function mockDetail(): ProjectDetailData {
     project: {
       id: "p1",
       name: "Test Project",
-      description: "",
       git_id: "git-1",
       name_customized: false,
       created_at: "2026-10-01T00:00:00Z",

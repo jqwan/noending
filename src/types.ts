@@ -20,7 +20,6 @@ export type ProjectKind = "git" | "directory" | "chat_directory";
 export interface Project {
   id: string;
   name: string;
-  description: string;
   /** Optional Git anchor (`git_identities.id`); `null` is a normal state. */
   git_id: string | null;
   /** The user renamed it — automatic naming must stop overwriting the name. */
@@ -210,7 +209,7 @@ export interface Session {
   root_agent_session_id: string;
   title: string | null;
   cwd: string | null;
-  /** Derived cache of `workspace_path_id → workspace_paths.project_id`. */
+  /** Read projection of `workspace_path_id → workspace_paths.project_id`; never stored. */
   project_id: string | null;
   /** Null for a Session with no cwd — v0.2 never fabricates a path. */
   workspace_path_id: string | null;
@@ -263,7 +262,6 @@ export interface SessionMessage {
   source_generation: number;
   source_position: string;
   source_identity_hash: string;
-  raw_ref: string;
 }
 
 /** Adapter 对源可用性的严格结论：任何异常都不等于 missing。 */

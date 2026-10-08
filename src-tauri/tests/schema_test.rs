@@ -17,8 +17,6 @@
 //! revision pair is `workstream_context_state` / `workstream_session_frontiers`.
 //! The retired objects must stay absent.
 //!
-//! `session_messages` carries `provider` / `model` (Assistant only, enforced by
-//! CHECK) — the one model provenance authority since the stats retirement.
 
 use noending::domain::{Agent, SessionMessageRole};
 use noending::domain::{ParsedSessionMessage, SourceCursorUpdate};
@@ -155,6 +153,11 @@ fn fresh_database_uses_current_format_generation() {
     for (table, column) in [
         ("sessions", "agent_session_id"),
         ("sessions", "raw_path"),
+        ("sessions", "project_id"),
+        ("projects", "description"),
+        ("session_messages", "raw_ref"),
+        ("launch_intents", "launch_type"),
+        ("launch_intents", "process_id"),
         ("sessions", "parent_agent_session_id"),
         ("projects", "archived"),
         ("workstreams", "project_id"),
@@ -170,6 +173,18 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
 
+    for index in [
+        "idx_session_messages_session",
+        "idx_workspace_paths_canonical",
+        "idx_workstream_paths_ws",
+        "idx_sessions_project",
+    ] {
+        assert!(
+            !object_exists(&db.read(), index),
+            "redundant/cache index remains: {index}"
+        );
+    }
+
     // The Logical Session model is the replacement: every table of the new
     // shape exists, and the session row carries the flattened source, cursor
     // and fact-frontier columns.
@@ -180,7 +195,9 @@ fn fresh_database_uses_current_format_generation() {
         "session_context_revisions",
         "workstream_context_state",
         "workstream_session_frontiers",
-        "idx_session_messages_session",
+        "idx_sessions_workspace_path",
+        "idx_item_revisions_item",
+        "idx_conflicts_workstream",
         "idx_projection_message",
     ] {
         assert!(
@@ -274,8 +291,8 @@ fn logical_session_schema_enforces_its_invariants() {
     let insert_message = |db: &Db, id: &str, sequence: i64, role: &str, hash: &str| {
         db.write().execute(
             "INSERT INTO session_messages
-               (id, session_id, sequence, source_identity_hash, role, content, raw_ref)
-             VALUES (?1, 's1', ?2, ?3, ?4, 'content', 'test#1')",
+               (id, session_id, sequence, source_identity_hash, role, content)
+             VALUES (?1, 's1', ?2, ?3, ?4, 'content')",
             rusqlite::params![id, sequence, hash, role],
         )
     };

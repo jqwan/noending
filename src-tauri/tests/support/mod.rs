@@ -13,7 +13,6 @@ pub fn project(id: Id, name: impl Into<String>) -> Project {
     Project {
         id,
         name: name.into(),
-        description: String::new(),
         git_id: None,
         name_customized: false,
         created_at: ts.clone(),

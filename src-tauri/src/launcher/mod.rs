@@ -478,11 +478,9 @@ impl SessionLauncher {
             }
             let intent = LaunchIntent {
                 id: new_id(),
-                launch_type: "new".into(),
                 agent: prepared.agent,
                 owner_workstream_id: prepared.owner_workstream_id.clone(),
                 cwd: prepared.cwd.clone(),
-                process_id: None,
                 launched_at: now(),
                 matched_session_id: None,
                 status: launch_status::PENDING.into(),

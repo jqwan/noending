@@ -117,7 +117,6 @@ function message(
     source_generation: 0,
     source_position: "",
     source_identity_hash: "",
-    raw_ref: "",
   };
 }
 
