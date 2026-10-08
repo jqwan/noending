@@ -181,31 +181,18 @@ impl TerminalRegistry {
         }
     }
 
-    /// What the terminal subpage should attach to for `session_id`:
-    /// a live terminal wins over a more recently created exited one —
-    /// the live one is where the conversation is still happening.
+    /// A Session's Continue entry only reuses live terminals. Exited terminals
+    /// remain attachable by id for scrollback and explicit reconnection.
     pub fn for_session(&self, session_id: &str) -> Option<TerminalSummary> {
         let records = self.records.lock().ok()?;
-        let mut best: Option<TerminalSummary> = None;
-        for record in records.values() {
-            let Ok(record) = record.lock() else { continue };
-            if record.summary.session_id.as_deref() != Some(session_id) {
-                continue;
-            }
-            best = match best {
-                None => Some(record.summary.clone()),
-                Some(prev) => {
-                    let live_wins = record.summary.live && !prev.live;
-                    let newer = record.summary.created_at > prev.created_at;
-                    if live_wins || (newer && prev.live == record.summary.live) {
-                        Some(record.summary.clone())
-                    } else {
-                        Some(prev)
-                    }
-                }
-            };
-        }
-        best
+        records
+            .values()
+            .filter_map(|record| {
+                let record = record.lock().ok()?;
+                (record.summary.live && record.summary.session_id.as_deref() == Some(session_id))
+                    .then(|| record.summary.clone())
+            })
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
     }
 
     /// Whether `session_id` has a terminal whose Agent is still running.
@@ -270,6 +257,62 @@ impl TerminalRegistry {
         Ok(ResumeReservation {
             registry: self,
             session_id: session_id.to_string(),
+        })
+    }
+
+    /// Restart exactly this terminal's current Session. Other terminals bound
+    /// to that Session are independent and stay alive. Keep the stopped record
+    /// until spawn succeeds, so failures retain scrollback and can be retried.
+    pub fn reserve_reconnect(
+        &self,
+        expected: &TerminalSummary,
+        session_id: &str,
+    ) -> Result<ResumeReservation<'_>> {
+        let (bridge, exit_code) = {
+            let mut reservations = self
+                .resume_reservations
+                .lock()
+                .map_err(|_| other("terminal reservation lock poisoned"))?;
+            if reservations.contains(session_id) {
+                return Err(other("该会话正在连接，请稍后重试"));
+            }
+            let records = self
+                .records
+                .lock()
+                .map_err(|_| other("terminal registry lock poisoned"))?;
+            let record = records
+                .get(&expected.terminal_id)
+                .ok_or_else(|| other("终端已关闭，无法重新连接"))?;
+            let mut record = record
+                .lock()
+                .map_err(|_| other("terminal record lock poisoned"))?;
+            if record.summary.session_id.as_deref() != Some(session_id)
+                || record.summary.identity_revision != expected.identity_revision
+            {
+                return Err(other("终端会话已切换，请重试重新连接"));
+            }
+            if record.summary.live {
+                record
+                    .killer
+                    .kill()
+                    .map_err(|e| other(format!("无法停止旧终端：{e}")))?;
+            }
+            record.summary.live = false;
+            record.writer = None;
+            reservations.insert(session_id.to_owned());
+            (record.identity_bridge.take(), record.summary.exit_code)
+        };
+        drop(bridge);
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                &format!("{EVENT_EXIT_PREFIX}{}", expected.terminal_id),
+                TerminalExit { exit_code },
+            );
+            let _ = app.emit(EVENT_CHANGED, ());
+        }
+        Ok(ResumeReservation {
+            registry: self,
+            session_id: session_id.to_owned(),
         })
     }
 
@@ -1250,6 +1293,58 @@ mod tests {
         assert!(registry.reserve_resume("same-session").is_err());
         drop(claim);
         assert!(registry.reserve_resume("same-session").is_ok());
+    }
+
+    #[test]
+    fn continue_ignores_exited_terminals_but_scrollback_stays_attachable() {
+        let registry = registry();
+        let id = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        {
+            let records = registry.records.lock().unwrap();
+            let mut record = records[&id].lock().unwrap();
+            record.summary.live = false;
+            record.scrollback.push(b"retained output");
+        }
+        assert!(registry.for_session("session").is_none());
+        let snapshot = registry.attach(&id).unwrap();
+        assert!(!snapshot.summary.live);
+        assert!(!snapshot.scrollback.is_empty());
+        assert!(registry.reserve_resume("session").is_ok());
+    }
+
+    #[test]
+    fn reconnect_reserves_and_stops_only_its_own_terminal_and_can_be_retried() {
+        let registry = registry();
+        let old = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        let other = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        let expected = registry.attach(&old).unwrap().summary;
+        let claim = registry.reserve_reconnect(&expected, "session").unwrap();
+        assert!(!registry.attach(&old).unwrap().summary.live);
+        assert!(registry.attach(&other).unwrap().summary.live);
+        assert_eq!(registry.for_session("session").unwrap().terminal_id, other);
+        assert!(registry.reserve_reconnect(&expected, "session").is_err());
+        assert!(registry.reserve_resume("session").is_err());
+        drop(claim);
+        // Failed spawn drops the claim, retaining the exited terminal for retry.
+        let retry = registry.reserve_reconnect(&expected, "session").unwrap();
+        drop(retry);
+        assert!(registry.attach(&old).is_ok());
+    }
+
+    #[test]
+    fn reconnect_refuses_a_stale_identity_without_stopping_the_new_session() {
+        let registry = registry();
+        let db = binding_db();
+        let a = ingested_native(&db, Agent::Codex, "native-a");
+        let b = ingested_native(&db, Agent::Codex, "native-b");
+        let id = identity_terminal(&registry, Agent::Codex, Some("native-a"), Some(&a.id));
+        let expected = registry.attach(&id).unwrap().summary;
+        registry.report_native_identity(&db, &id, &native_event("native-b"));
+        assert!(registry.reserve_reconnect(&expected, &a.id).is_err());
+        let current = registry.attach(&id).unwrap().summary;
+        assert!(current.live);
+        assert_eq!(current.session_id.as_deref(), Some(b.id.as_str()));
+        assert!(registry.reserve_resume(&a.id).is_ok());
     }
 
     #[test]

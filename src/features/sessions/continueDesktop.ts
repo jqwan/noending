@@ -79,14 +79,13 @@ export async function continueSessionTerminal(
     initialSessionId: session.id,
   };
   const existing = await api.terminalForSession(session.id);
-  if (existing) {
+  if (existing?.live) {
     navigate({ view: "terminal", terminalId: existing.terminal_id, ...seed });
     return;
   }
-  await api.launchEmbeddedResume(session.id);
-  const created = await api.terminalForSession(session.id);
-  if (!created) throw new Error("启动已完成，但找不到内嵌终端记录");
-  navigate({ view: "terminal", terminalId: created.terminal_id, ...seed });
+  const launched = await api.launchEmbeddedResume(session.id);
+  if (!launched.terminal_id) throw new Error("启动已完成，但找不到内嵌终端记录");
+  navigate({ view: "terminal", terminalId: launched.terminal_id, ...seed });
 }
 
 /** 在内嵌终端中恢复会话并捕获错误展示 Toast。 */

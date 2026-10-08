@@ -101,7 +101,10 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const boundSessionId = identity.sessionId;
   const boundTitle = identity.title;
   const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const reconnectingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const applyIdentity = useCallback((update: TerminalBound & { session_title?: string | null }, fromSnapshot = false) => {
     const current = identityRef.current;
@@ -118,19 +121,27 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     setIdentity(next);
   }, []);
 
-  /** 刷新：一次定向同步摄入（绑定→RefreshSession；未绑定→该 Agent 的来源
-   *  定向扫描，不节流——点击即事件）。摄入尾步的身份确认会把结果经
-   *  terminal-bound 推回来，入口与标题自动更新，无需手动重连。 */
-  const refreshTerminal = async () => {
-    if (refreshing) return;
-    setRefreshing(true);
+  /** 重新连接会按后端当前绑定身份恢复会话，并切换到新 PTY。 */
+  const reconnectTerminal = async () => {
+    if (reconnectingRef.current || !boundSessionId) return;
+    reconnectingRef.current = true;
+    setReconnecting(true);
     try {
-      await api.terminalRefresh(terminalId);
-      showToast(boundSessionId ? "正在同步最新对话…" : "正在同步会话…");
+      const result = await api.terminalReconnect(terminalId);
+      if (!result.terminal_id) throw new Error("找不到重新连接的终端");
+      // 旧实例已被后端替换，释放对应 xterm 与常驻监听。
+      const previous = liveTerminals.get(terminalId);
+      if (previous) {
+        previous.unlisteners.forEach((stop) => stop());
+        previous.term.dispose();
+        liveTerminals.delete(terminalId);
+      }
+      if (mountedRef.current) navigate({ view: "terminal", terminalId: result.terminal_id });
     } catch (e) {
-      showToast(`同步失败：${String(e)}`);
+      if (mountedRef.current) showToast(`重新连接失败：${String(e)}`);
     } finally {
-      setTimeout(() => setRefreshing(false), 500);
+      reconnectingRef.current = false;
+      if (mountedRef.current) setReconnecting(false);
     }
   };
 
@@ -474,10 +485,10 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           <>
             <button
               className="btn ghost icon-button"
-              aria-label="同步"
-              title={boundSessionId ? "同步最新对话" : "同步会话"}
-              disabled={refreshing}
-              onClick={() => void refreshTerminal()}
+              aria-label={reconnecting ? "正在重新连接" : "重新连接"}
+              title={boundSessionId ? "重新连接会话" : "绑定会话后可重新连接"}
+              disabled={reconnecting || !boundSessionId || state.kind === "loading"}
+              onClick={() => void reconnectTerminal()}
             >
               <Icon name="refresh" />
             </button>

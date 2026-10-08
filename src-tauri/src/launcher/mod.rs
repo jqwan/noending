@@ -215,6 +215,7 @@ pub struct LaunchResult {
 /// refused, never silently downgraded to an external window.
 pub struct EmbeddedSpawn<'a> {
     pub registry: &'a crate::terminal::TerminalRegistry,
+    pub reconnect: Option<&'a crate::terminal::TerminalSummary>,
     pub spawn: fn(
         &AgentCommand,
         &crate::terminal::EmbeddedTarget,
@@ -633,11 +634,15 @@ impl SessionLauncher {
                 // this resume, and hold the reservation through spawn and
                 // registry registration to exclude concurrent resumes.
                 embedded.registry.bind_discovered(db);
-                let _reservation = embedded
-                    .registry
-                    .reserve_resume(session_id)
-                    .map_err(other)?;
-                (embedded.spawn)(
+                let _reservation = if let Some(expected) = embedded.reconnect {
+                    embedded.registry.reserve_reconnect(expected, session_id)?
+                } else {
+                    embedded
+                        .registry
+                        .reserve_resume(session_id)
+                        .map_err(other)?
+                };
+                let outcome = (embedded.spawn)(
                     &cmd,
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
@@ -645,7 +650,11 @@ impl SessionLauncher {
                         root_agent_session_id: Some(&session.root_agent_session_id),
                         agent: session.agent,
                     },
-                )?
+                )?;
+                if let Some(expected) = embedded.reconnect {
+                    embedded.registry.close(&expected.terminal_id);
+                }
+                outcome
             } else {
                 spawn(&cmd)?
             };

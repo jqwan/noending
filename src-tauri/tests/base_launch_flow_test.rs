@@ -186,6 +186,7 @@ fn an_embedded_new_launch_spawns_unbound_and_still_commits_the_intent() {
             fake_spawn,
             fake_open,
             Some(&noending::launcher::EmbeddedSpawn {
+                reconnect: None,
                 registry: &noending::terminal::TerminalRegistry::new(None),
                 spawn: fake_embedded_spawn,
             }),
@@ -257,6 +258,7 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
                 fake_spawn,
                 fake_open,
                 Some(&noending::launcher::EmbeddedSpawn {
+                    reconnect: None,
                     registry: &registry,
                     spawn: capture_embedded_new_message,
                 }),
@@ -723,6 +725,7 @@ fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
 
     let registry = noending::terminal::TerminalRegistry::new(None);
     let embedded = noending::launcher::EmbeddedSpawn {
+        reconnect: None,
         registry: &registry,
         spawn: fake_embedded_spawn,
     };
@@ -775,6 +778,7 @@ fn an_embedded_resume_launch_refuses_an_existing_reservation_before_spawn() {
             fake_spawn,
             fake_open,
             Some(&noending::launcher::EmbeddedSpawn {
+                reconnect: None,
                 registry: &registry,
                 spawn: unexpected_embedded_spawn,
             }),
@@ -813,6 +817,7 @@ fn an_embedded_resume_launch_releases_its_reservation_after_spawn_failure() {
             fake_spawn,
             fake_open,
             Some(&noending::launcher::EmbeddedSpawn {
+                reconnect: None,
                 registry: &registry,
                 spawn: failed_embedded_spawn,
             }),
@@ -845,6 +850,7 @@ fn an_external_resume_does_not_consume_an_embedded_reservation() {
             fake_spawn,
             fake_open,
             Some(&noending::launcher::EmbeddedSpawn {
+                reconnect: None,
                 registry: &registry,
                 spawn: unexpected_embedded_spawn,
             }),
@@ -871,4 +877,148 @@ fn an_embedded_prepared_launch_without_a_surface_is_refused_not_downgraded() {
         .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
         .expect_err("embedded without a registry must refuse");
     assert!(err.to_string().contains("内嵌终端"));
+}
+
+#[cfg(unix)]
+fn reconnect_fixture(
+    registry: &noending::terminal::TerminalRegistry,
+    db: &Db,
+    sid: &str,
+) -> noending::terminal::TerminalSummary {
+    let session = db.get_session(sid).unwrap().unwrap();
+    let result = noending::terminal::spawn_embedded(
+        &AgentCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 30".into()],
+            cwd: None,
+        },
+        &noending::terminal::EmbeddedTarget {
+            registry,
+            session_id: Some(sid),
+            root_agent_session_id: Some(&session.root_agent_session_id),
+            agent: session.agent,
+        },
+    )
+    .unwrap();
+    registry
+        .attach(result.terminal_id.as_deref().unwrap())
+        .unwrap()
+        .summary
+}
+
+#[cfg(unix)]
+fn controlled_reconnect_spawn(
+    _cmd: &AgentCommand,
+    target: &noending::terminal::EmbeddedTarget,
+) -> Result<LaunchOutcome> {
+    assert!(target
+        .registry
+        .reserve_resume(target.session_id.unwrap())
+        .is_err());
+    noending::terminal::spawn_embedded(
+        &AgentCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 30".into()],
+            cwd: None,
+        },
+        target,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn reconnect_replaces_the_old_terminal_after_a_successful_spawn() {
+    let db = open_db("reconnect");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("reconnect");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "reconnect");
+    let registry = noending::terminal::TerminalRegistry::new(None);
+    let expected = reconnect_fixture(&registry, &db, &sid);
+    let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
+    prepared.embedded = true;
+    let result = launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace,
+            fake_spawn,
+            fake_open,
+            Some(&noending::launcher::EmbeddedSpawn {
+                registry: &registry,
+                reconnect: Some(&expected),
+                spawn: controlled_reconnect_spawn,
+            }),
+        )
+        .unwrap();
+    let new_id = result.terminal_id.as_deref().unwrap();
+    assert_ne!(new_id, expected.terminal_id);
+    assert!(registry.attach(&expected.terminal_id).is_err());
+    let current = registry.for_session(&sid).unwrap();
+    assert_eq!(current.terminal_id, new_id);
+    assert!(current.live);
+    assert_eq!(registry.list_live().len(), 1);
+    registry.kill_all();
+}
+
+#[cfg(unix)]
+#[test]
+fn reconnect_failure_keeps_the_stopped_terminal_and_releases_the_reservation() {
+    let db = open_db("reconnect-fail");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("reconnect-fail");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "reconnect-fail");
+    let registry = noending::terminal::TerminalRegistry::new(None);
+    let expected = reconnect_fixture(&registry, &db, &sid);
+    let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
+    prepared.embedded = true;
+    let result = launcher.launch_prepared_with_in(
+        &db,
+        &prepared,
+        &workspace,
+        fake_spawn,
+        fake_open,
+        Some(&noending::launcher::EmbeddedSpawn {
+            registry: &registry,
+            reconnect: Some(&expected),
+            spawn: failed_embedded_spawn,
+        }),
+    );
+    assert!(result.is_err());
+    assert!(!registry.attach(&expected.terminal_id).unwrap().summary.live);
+    assert!(registry.reserve_resume(&sid).is_ok());
+    assert!(registry.reserve_reconnect(&expected, &sid).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn reconnect_validates_archive_state_before_stopping_the_terminal() {
+    let db = open_db("reconnect-archived");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("reconnect-archived");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "reconnect-archived");
+    let registry = noending::terminal::TerminalRegistry::new(None);
+    let expected = reconnect_fixture(&registry, &db, &sid);
+    let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
+    prepared.embedded = true;
+    db.write()
+        .execute("UPDATE sessions SET archived_at='now' WHERE id=?1", [&sid])
+        .unwrap();
+    let result = launcher.launch_prepared_with_in(
+        &db,
+        &prepared,
+        &workspace,
+        fake_spawn,
+        fake_open,
+        Some(&noending::launcher::EmbeddedSpawn {
+            registry: &registry,
+            reconnect: Some(&expected),
+            spawn: unexpected_embedded_spawn,
+        }),
+    );
+    assert!(result.is_err());
+    assert!(registry.attach(&expected.terminal_id).unwrap().summary.live);
+    registry.kill_all();
 }

@@ -17,7 +17,7 @@ vi.mock("../../api", () => ({
     terminalForSession: vi.fn(),
     terminalAttach: vi.fn(),
     terminalInput: vi.fn().mockResolvedValue(undefined),
-    terminalRefresh: vi.fn().mockResolvedValue(undefined),
+    terminalReconnect: vi.fn(),
     terminalResize: vi.fn().mockResolvedValue(undefined),
     launchEmbeddedResume: vi.fn(),
     readClipboardForTerminal: vi.fn(),
@@ -121,7 +121,12 @@ class FakeResizeObserver {
 }
 (globalThis as { ResizeObserver?: unknown }).ResizeObserver = FakeResizeObserver;
 
+const { toastMock } = vi.hoisted(() => ({ toastMock: vi.fn() }));
+vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
+
+const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", launch_intent_id: null };
 beforeEach(() => {
+  vi.mocked(api.terminalReconnect).mockReset().mockResolvedValue(reconnected);
   vi.mocked(api.getSessionDetail).mockReset().mockResolvedValue(detail("会话"));
 });
 
@@ -221,12 +226,73 @@ it("an unbound terminal keeps the session-detail entry disabled; binding lights 
   expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s9" });
 });
 
-it("the refresh button runs one targeted sync for this terminal", async () => {
+it("reconnects an exited terminal and navigates to the new PTY", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false, exit_code: 0 }));
+  const navigate = vi.fn();
+  renderView(navigate);
+  await screen.findByText(/Agent 已退出/);
+  const old = FakeTerminal.last!;
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new" }));
+  expect(api.terminalReconnect).toHaveBeenCalledWith("t-1");
+  expect(old.disposed).toBe(true);
+});
+
+it("allows reconnecting a live but unresponsive TUI and prevents double clicks", async () => {
+  const pending = deferred<Awaited<ReturnType<typeof api.terminalReconnect>>>();
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalReconnect).mockReturnValue(pending.promise);
+  const navigate = vi.fn();
+  renderView(navigate);
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  const busy = screen.getByRole("button", { name: "正在重新连接" }) as HTMLButtonElement;
+  expect(busy.disabled).toBe(true);
+  fireEvent.click(busy);
+  expect(api.terminalReconnect).toHaveBeenCalledTimes(1);
+  await act(async () => pending.resolve(reconnected));
+  expect(navigate).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a failed reconnect retryable and retains the terminal output", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalReconnect).mockRejectedValueOnce(new Error("spawn failed"));
+  const navigate = vi.fn();
+  renderView(navigate);
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  const old = FakeTerminal.last!;
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  await waitFor(() => expect(toastMock).toHaveBeenCalledWith(expect.stringContaining("spawn failed")));
+  expect(navigate).not.toHaveBeenCalled();
+  expect(old.disposed).toBe(false);
+  expect((screen.getByRole("button", { name: "重新连接" }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new" }));
+});
+
+it("disables reconnect until the terminal has a verified Session", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_id: null }));
   renderView();
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
-  fireEvent.click(screen.getByRole("button", { name: "同步" }));
-  await waitFor(() => expect(api.terminalRefresh).toHaveBeenCalledWith("t-1"));
+  const reconnect = screen.getByRole("button", { name: "重新连接" }) as HTMLButtonElement;
+  expect(reconnect.disabled).toBe(true);
+  fireEvent.click(reconnect);
+  expect(api.terminalReconnect).not.toHaveBeenCalled();
+  await act(async () => pushIdentity("session-b", 2));
+  expect(reconnect.disabled).toBe(false);
+});
+
+it("does not navigate away from another page if reconnection finishes after unmount", async () => {
+  const pending = deferred<Awaited<ReturnType<typeof api.terminalReconnect>>>();
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalReconnect).mockReturnValue(pending.promise);
+  const navigate = vi.fn();
+  const view = renderView(navigate);
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  view.unmount();
+  await act(async () => pending.resolve(reconnected));
+  expect(navigate).not.toHaveBeenCalled();
 });
 
 it("the route seed renders the final header on the first frame — no 新会话 flash", async () => {

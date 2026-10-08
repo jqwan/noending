@@ -688,6 +688,7 @@ pub fn launch_prepared(
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     let embedded = crate::launcher::EmbeddedSpawn {
+        reconnect: None,
         registry: &terminal,
         spawn: crate::terminal::spawn_embedded,
     };
@@ -739,6 +740,7 @@ pub fn launch_embedded_resume(
     prepared.embedded = true;
 
     let embedded = crate::launcher::EmbeddedSpawn {
+        reconnect: None,
         registry: &terminal,
         spawn: crate::terminal::spawn_embedded,
     };
@@ -781,6 +783,7 @@ pub fn launch_embedded_new(
     prepared.initial_message = initial_message.filter(|message| !message.trim().is_empty());
 
     let embedded = crate::launcher::EmbeddedSpawn {
+        reconnect: None,
         registry: &terminal,
         spawn: crate::terminal::spawn_embedded,
     };
@@ -926,7 +929,7 @@ pub fn read_clipboard_for_terminal(app: AppHandle) -> Result<crate::commands::Cl
 // detach protocol the frontend terminal subpage speaks. The registry is the
 // source of truth — the subpage is a view, not a process owner.
 
-/// Jump to one of the Session's bound terminals, preferring a live one.
+/// Jump to one of the Session's live bound terminals.
 /// Native identities may associate multiple terminals with the same Session.
 #[tauri::command]
 pub fn terminal_for_session(
@@ -936,44 +939,38 @@ pub fn terminal_for_session(
     Ok(terminal.for_session(&session_id))
 }
 
-/// The terminal view's refresh button: one targeted sync, then the
-/// ingestion worker's post-pass bind step re-links whatever the pass
-/// surfaced. A bound terminal refreshes its session (RefreshSession, the
-/// session page's sync semantics); an unbound one walks its agent's own
-/// ingest sources with no throttle — the click IS the event — and the
-/// verified match binds when the pass finds the session. The terminal view
-/// needs no further wiring: terminal-bound / terminals-changed carry the
-/// result to it and the sidebar.
+/// Explicitly restart the Agent for the terminal's current, verified Session.
+/// Prepare validates archive/source/runtime state before touching the old PTY.
 #[tauri::command]
-pub fn terminal_refresh(
+pub fn terminal_reconnect(
     app: AppHandle,
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,
-) -> Result<()> {
-    let summary = terminal.attach(&terminal_id)?.summary;
-    if let Some(session_id) = &summary.session_id {
-        ingestion::enqueue(
-            &app,
-            ingestion::IngestScope::RefreshSession(session_id.clone()),
-        );
-        return Ok(());
-    }
-    let sources = with_db(&state, |db| {
-        Ok(db
-            .list_ingest_sources()?
-            .into_iter()
-            .filter(|s| s.enabled && s.agent == summary.agent)
-            .map(|s| s.id)
-            .collect::<Vec<_>>())
+) -> Result<crate::launcher::LaunchResult> {
+    let expected = terminal.attach(&terminal_id)?.summary;
+    let session_id = expected
+        .session_id
+        .as_deref()
+        .ok_or_else(|| other("终端尚未绑定会话，暂时无法重新连接"))?;
+    let launcher = launcher_for(&app);
+    let workspace = launch_workspace(&app);
+    let result = with_db(&state, |db| {
+        let mut prepared = launcher.prepare_resume_in(db, session_id, &workspace)?;
+        prepared.desktop_open = None;
+        prepared.embedded = true;
+        let embedded = crate::launcher::EmbeddedSpawn {
+            registry: &terminal,
+            reconnect: Some(&expected),
+            spawn: crate::terminal::spawn_embedded,
+        };
+        launcher.launch_prepared_in(db, &prepared, &workspace, Some(&embedded))
     })?;
-    if sources.is_empty() {
-        return Err(other("该 Agent 没有启用的会话来源，无法同步"));
-    }
-    for id in sources {
-        ingestion::enqueue(&app, ingestion::IngestScope::ReconcileSource(id));
-    }
-    Ok(())
+    ingestion::enqueue(
+        &app,
+        ingestion::IngestScope::RefreshSession(session_id.to_owned()),
+    );
+    Ok(result)
 }
 
 /// The sidebar 运行中 item's explicit close: kill the child and drop the

@@ -237,7 +237,7 @@ pub fn run() {
             commands::launch_embedded_new,
             commands::continue_session_desktop,
             commands::terminal_list,
-            commands::terminal_refresh,
+            commands::terminal_reconnect,
             commands::terminal_close,
             commands::read_clipboard_for_terminal,
             commands::terminal_for_session,

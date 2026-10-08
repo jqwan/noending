@@ -241,10 +241,9 @@ export const api = {
   /** 活着的内嵌终端（新→旧）：侧边栏「运行中」读这里；事件刷新，无轮询。 */
   terminalList: () =>
     invoke<import("./types").TerminalSummary[]>("terminal_list"),
-  /** 终端视图的刷新：已绑定同步该会话，未绑定定向扫该 Agent 的来源；
-   *  同步后的摄入尾步会做校验匹配并重连。 */
-  terminalRefresh: (terminalId: string) =>
-    invoke<void>("terminal_refresh", { terminalId }),
+  /** 重启此终端当前绑定会话的 Agent，返回新终端；失败保留旧终端以便重试。 */
+  terminalReconnect: (terminalId: string) =>
+    invoke<import("./types").LaunchResult>("terminal_reconnect", { terminalId }),
   /** 侧边栏「运行中」的显式关闭：杀进程并移除记录。 */
   terminalClose: (terminalId: string) =>
     invoke<import("./types").TerminalSummary>("terminal_close", { terminalId }),
