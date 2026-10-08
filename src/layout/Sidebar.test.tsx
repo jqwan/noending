@@ -124,52 +124,24 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
 }
 
 describe("Sidebar navigation", () => {
-  it("opens the new-session page from the navigation entry and brand", async () => {
+  it("opens new-session from the remaining entry and has no brand or workspace navigation", async () => {
     const navigate = renderSidebar();
     await waitFor(() => expect(api.terminalList).toHaveBeenCalled());
     const newSession = screen.getByRole("button", { name: "新会话" });
     expect(newSession.className).toContain("active");
     fireEvent.click(newSession);
-    fireEvent.click(screen.getByRole("button", { name: /NoEnding/ }));
-    expect(navigate).toHaveBeenNthCalledWith(1, { view: "new-session" });
-    expect(navigate).toHaveBeenNthCalledWith(2, { view: "new-session" });
-    expect(screen.queryByText("首页")).toBeNull();
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
+    expect(screen.queryByText("NoEnding")).toBeNull();
+    expect(screen.queryByText("工作区")).toBeNull();
+    expect(screen.queryByRole("button", { name: "项目" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
   });
 
-  it("sidebar_has_projects_navigation", async () => {
-    const navigate = renderSidebar({ view: "workstreams" });
-
-    const item = await screen.findByRole("button", { name: "项目" });
-    fireEvent.click(item);
-
-    await waitFor(() => {
-      expect(navigate).toHaveBeenCalledWith({ view: "projects" });
-    });
-  });
-
-  it("sidebar_has_agents_navigation", async () => {
-    const navigate = renderSidebar({ view: "workstreams" });
-
-    const item = await screen.findByRole("button", { name: "代理" });
-    fireEvent.click(item);
-
-    await waitFor(() => {
-      expect(navigate).toHaveBeenCalledWith({ view: "agents" });
-    });
-  });
-
-  it("sidebar_agents_is_active_when_route_is_agents", async () => {
-    renderSidebar({ view: "agents" });
-    const item = await screen.findByRole("button", { name: "代理" });
-    expect(item.className).toContain("active");
-  });
-
-  it("sidebar_settings_is_active_when_route_is_settings", () => {
-    const navigate = renderSidebar({ view: "settings" });
-    const settings = screen.getByRole("button", { name: /设置/ });
-    expect(settings.className).toContain("active");
-    fireEvent.click(settings);
-    expect(navigate).toHaveBeenCalledWith({ view: "settings" });
+  it("preserves the search entry", async () => {
+    const onSearch = vi.fn();
+    render(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} onSearch={onSearch} />);
+    fireEvent.click(await screen.findByRole("button", { name: /搜索/ }));
+    expect(onSearch).toHaveBeenCalledOnce();
   });
 });
 

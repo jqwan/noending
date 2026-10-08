@@ -45,20 +45,23 @@ pub fn create_workstream(
 /// this string were attached as a working path, and which Project it would
 /// project onto. Advisory only — the attacher decides at create time.
 #[tauri::command]
-pub fn probe_workspace_path(
-    state: State<AppState>,
+pub async fn probe_workspace_path(
+    state: State<'_, AppState>,
     layer: State<'_, std::sync::Arc<crate::workspace::wiring::WorkspaceLayer>>,
     path: String,
 ) -> Result<crate::workspace::probe::PathProbe> {
-    let projection = layer.projection();
-    with_db(&state, |db| {
+    let db = state.db.clone();
+    let layer = layer.inner().clone();
+    super::run_on_blocking_worker(move || {
+        let projection = layer.projection();
         crate::workspace::probe::probe_workspace_path(
-            db,
+            &db,
             projection.observer(),
             projection.policy(),
             &path,
         )
     })
+    .await?
 }
 
 /// The path picker's "recent / known directories" candidates, ranked by recent

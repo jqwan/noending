@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NewSessionView from "./NewSessionView";
 import { api } from "../../api";
 import { open } from "@tauri-apps/plugin-dialog";
+import type { PathProbe } from "../../types";
+
+const probeFixture: PathProbe = {raw: "/tmp/workspace", status: "ok", canonical_path: "/tmp/workspace", exists: true, git_state: "none", git_kind: null, project: null};
 
 const mockAgentStatus = {
   codex: {
@@ -130,6 +133,7 @@ const preparedFixture = {
 
 beforeEach(() => {
   vi.mocked(api.launchEmbeddedNew).mockReset();
+  vi.mocked(api.probeWorkspacePath).mockReset().mockResolvedValue(probeFixture);
   vi.mocked(api.cancelPrepared).mockClear();
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
@@ -256,6 +260,18 @@ describe("NewSessionView explicit agent resolution", () => {
   });
 });
 
+it("probes the effective default directory once while directory selection initializes", async () => {
+  let finishProbe!: (value: PathProbe) => void;
+  vi.mocked(api.probeWorkspacePath).mockImplementation(() => new Promise((resolve) => { finishProbe = resolve; }));
+  render(<NewSessionView navigate={vi.fn()} />);
+  await waitFor(() => {
+    expect((screen.getByLabelText("项目目录") as HTMLSelectElement).value).toBe("/tmp/workspace");
+    expect(api.probeWorkspacePath).toHaveBeenCalledTimes(1);
+  });
+  await act(async () => { finishProbe(probeFixture); });
+  expect(api.probeWorkspacePath).toHaveBeenCalledTimes(1);
+});
+
 describe("NewSessionView task and project selection", () => {
   const mockProjects = [
     {
@@ -368,6 +384,7 @@ describe("NewSessionView task and project selection", () => {
     await waitFor(() => {
       expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null, "/repo/project-1");
     });
+    expect(api.probeWorkspacePath).not.toHaveBeenCalledWith("/repo/project-1");
   });
 
   it("allows switching directory under a project with multiple paths", async () => {

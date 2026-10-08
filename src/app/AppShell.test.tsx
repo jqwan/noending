@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 vi.mock("../api", () => ({ api: { appForeground } }));
-vi.mock("../layout/Sidebar", () => ({ default: () => null }));
+vi.mock("../layout/Sidebar", () => ({ default: ({ hidden }: { hidden: boolean }) => <aside aria-label="会话侧边栏" hidden={hidden} /> }));
 vi.mock("./Router", () => ({ default: ({ route }: { route: Route }) => <output aria-label="当前页面">{route.view}</output> }));
 vi.mock("../components/Toast", () => ({ default: () => null }));
 vi.mock("../components/CommandPalette", () => ({ default: () => null }));
@@ -30,6 +30,22 @@ afterEach(cleanup);
 it("starts on the new-session page", () => {
   render(<AppShell />);
   expect(screen.getByLabelText("当前页面").textContent).toBe("new-session");
+});
+
+it("keeps icon navigation fixed and shows the session sidebar only in the session section", () => {
+  render(<AppShell />);
+  const rail = screen.getByRole("navigation", { name: "工作区导航" });
+  expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "项目" }));
+  expect(screen.getByLabelText("当前页面").textContent).toBe("projects");
+  expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
+  expect(screen.queryByRole("separator")).toBeNull();
+  expect(screen.queryByRole("button", { name: "收起侧边栏" })).toBeNull();
+  expect(screen.getByRole("navigation", { name: "工作区导航" })).toBe(rail);
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(screen.getByLabelText("当前页面").textContent).toBe("sessions");
+  expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
+  expect(screen.getByRole("separator")).toBeTruthy();
 });
 
 it("remembers keyboard resizing, clamps width, and resets on double click", () => {

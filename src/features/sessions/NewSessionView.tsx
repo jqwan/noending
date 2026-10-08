@@ -195,9 +195,10 @@ export default function NewSessionView({
     }
   }, [projectDirs, selectedDirPath]);
 
+  const probeTarget = selectedDirPath || projectDirs[0] || defaultWorkspace;
   useEffect(() => {
-    const target = selectedDirPath || projectDirs[0] || defaultWorkspace;
-    if (!target || dirGitStates[target] !== undefined) return;
+    const target = probeTarget;
+    if (!target || selectedProject?.kind === "git" || dirGitStates[target] !== undefined) return;
     if (!api.probeWorkspacePath) return;
     let cancelled = false;
     api
@@ -214,7 +215,7 @@ export default function NewSessionView({
     return () => {
       cancelled = true;
     };
-  }, [selectedDirPath, projectDirs, defaultWorkspace, dirGitStates]);
+  }, [probeTarget, selectedProject?.kind, dirGitStates]);
 
   // 新建会话的工作路径：由选中的项目目录决定；若为 NoEnding Workspace 默认项目且为独立会话，传 undefined 走后端默认解析
   const launchCwd = useMemo(() => {

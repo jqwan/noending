@@ -5,6 +5,7 @@
    --titlebar-gutter = 标题栏左侧被占掉的宽度（红黄绿 + 三个历史按钮 + 间距），
    侧栏收起时 .main 会顶到 x=0，标题行要照这个让开；侧栏展开时最小 200px，天然错开。 */
 .app {
+  --rail-width: 56px;
   --titlebar-height: 48px;
   --titlebar-gutter: 104px; /* 12 + 28*3 + 4*2 */
   display: flex;
@@ -34,6 +35,35 @@
   flex-direction: column;
 }
 .app-content > .main { flex: 1; min-height: 0; }
+.navigation-rail {
+  flex: none;
+  width: var(--rail-width);
+  margin-top: var(--titlebar-height);
+  padding: 10px 8px 12px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+}
+.navigation-rail-items { display: flex; flex-direction: column; gap: 8px; }
+.rail-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.rail-button .ui-icon { width: 19px; height: 19px; }
+.rail-button:hover { color: var(--text-primary); background: var(--bg-hover); }
+.rail-button.active { color: var(--accent); background: var(--bg-active); }
 .main, .sidebar-scroll { overscroll-behavior: none; }
 /* z-index 必须高于页面吸顶标题行（.page-head 也是 6，且在 DOM 里更靠后）：
    侧栏收起时两者会落在同一段横向空间里，同值会让标题行的背景盖住这三个按钮。 */
@@ -86,7 +116,7 @@
   overflow: hidden;
 
 }
-.sidebar.collapsed {
+.sidebar[hidden], .sidebar.collapsed {
   display: none;
   width: 0;
   min-width: 0;
@@ -96,7 +126,7 @@
 }
 .sidebar.collapsed > * { display: none; }
 .mac-titlebar .sidebar.collapsed { padding-top: 0; padding-bottom: 0; }
-.app.sidebar-collapsed .main { max-width: none; }
+.app.without-session-sidebar .main { max-width: none; }
 .sidebar .sidebar-scroll {
   flex: 1;
   overflow-y: auto;
@@ -104,25 +134,6 @@
   flex-direction: column;
   gap: 2px;
   min-height: 0;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 2px 10px 6px;
-  cursor: pointer;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  font-family: inherit;
-  color: var(--text-primary);
-  width: 100%;
-}
-.brand-name { font-weight: 600; font-size: 15px; letter-spacing: 0.1px; }
-.brand-tagline {
-  font-size: 11.5px;
-  color: var(--text-muted);
-  padding: 0 10px 14px;
 }
 .nav-item {
   display: flex;
@@ -247,7 +258,7 @@
   background: var(--bg-app);
 }
 /* 侧栏收起后内容顶到最左，标题行必须让开历史按钮那一段，否则标题压在按钮下面。 */
-.app.sidebar-collapsed .page-head { padding-left: calc(var(--titlebar-gutter) + 16px); }
+.app.without-session-sidebar .page-head { padding-left: calc(var(--titlebar-gutter) - var(--rail-width) + 16px); }
 .page-head .page-title {
   min-width: 0;
   margin: 0;
@@ -307,10 +318,9 @@
   margin: 0 0 8px;
 }
 
-.sidebar-resizer { position: absolute; top: var(--titlebar-height); bottom: 0; left: calc(var(--sidebar-width) - 3px); width: 6px; z-index: 8; cursor: col-resize; touch-action: none; }
+.sidebar-resizer { position: absolute; top: var(--titlebar-height); bottom: 0; left: calc(var(--rail-width) + var(--sidebar-width) - 3px); width: 6px; z-index: 8; cursor: col-resize; touch-action: none; }
 .sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: var(--accent-wash); }
 .nav-item { gap: 10px; min-height: 34px; }
-.brand { margin-bottom: 12px; }
 @media (max-width: 1100px) {
   .main { --main-gutter: 24px; padding-bottom: 40px; }
 }

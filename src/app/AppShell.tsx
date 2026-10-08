@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import Sidebar from "../layout/Sidebar";
+import NavigationRail, { isSessionRoute } from "../layout/NavigationRail";
 import Router from "./Router";
 import CommandPalette from "../components/CommandPalette";
 import ErrorBoundary from "../components/ErrorBoundary";
@@ -71,6 +72,7 @@ export default function AppShell() {
   const [actionSeq, setActionSeq] = useState(0);
   const seqRef = useRef(0);
   const route = navigation.entries[navigation.index];
+  const sessionSection = isSessionRoute(route);
   const isMac = /Macintosh|Mac OS X/.test(navigator.userAgent);
 
   useEffect(() => {
@@ -178,11 +180,11 @@ export default function AppShell() {
   }, []);
 
   return (
-    <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+    <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}${!sessionSection || sidebarCollapsed ? " without-session-sidebar" : ""}`}>
       <header className="app-titlebar">
         {isMac && <div className="window-drag-region" data-tauri-drag-region />}
         <div className="history-controls" aria-label="页面导航">
-          <button
+          {sessionSection && <button
             className="history-button"
             aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
             title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
@@ -192,7 +194,7 @@ export default function AppShell() {
               <rect x="3" y="4" width="12" height="10" rx="2.5" />
               <path d="M7 4v10" />
             </svg>
-          </button>
+          </button>}
           <button
             className="history-button"
             aria-label="返回上一页"
@@ -217,13 +219,15 @@ export default function AppShell() {
           </button>
         </div>
       </header>
+      <NavigationRail route={route} navigate={navigate} />
       <Sidebar
         route={route}
         navigate={navigate}
         onSearch={() => setPaletteOpen(true)}
         collapsed={sidebarCollapsed}
+        hidden={!sessionSection}
       />
-      {!sidebarCollapsed && <div
+      {sessionSection && !sidebarCollapsed && <div
         className="sidebar-resizer" role="separator" tabIndex={0}
         aria-label="侧边栏宽度" aria-orientation="vertical"
         aria-valuemin={200} aria-valuemax={360} aria-valuenow={sidebarWidth}
@@ -236,7 +240,8 @@ export default function AppShell() {
         onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); }}
         onPointerMove={(e) => {
           if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-            resizeSidebar(e.clientX - e.currentTarget.parentElement!.getBoundingClientRect().left);
+            const sidebar = e.currentTarget.parentElement!.querySelector(".sidebar")!;
+            resizeSidebar(e.clientX - sidebar.getBoundingClientRect().left);
           }
         }}
         onPointerUp={(e) => {
