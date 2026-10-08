@@ -1,20 +1,109 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { onEvent, EVT_TERMINALS, type Route } from "../app/routes";
+import { onEvent, EVT_TERMINALS, EVT_SYNCED, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import SidebarLogo from "../components/SidebarLogo";
 import AgentIcon from "../components/AgentIcon";
-import type { TerminalSummary } from "../types";
+import type { TerminalSummary, Session, WorkstreamCardData, ProjectCardData } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
+import { timeAgo } from "../components/common";
+import { useViewState } from "../hooks/useViewState";
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function isSessionWithinSevenDays(session: Session, now = Date.now()): boolean {
+  if (session.trashed_at) return false;
+  const timeStr = session.last_conversation_at || session.last_activity_at;
+  if (!timeStr) return false;
+  const ts = new Date(timeStr).getTime();
+  if (isNaN(ts)) return false;
+  const diff = now - ts;
+  return diff >= -60000 && diff <= SEVEN_DAYS_MS;
+}
+
+export interface SidebarRecentGroup {
+  id: string;
+  title: string;
+  latestTime: number;
+  sessions: Session[];
+}
+
+export function groupRecentSessions(
+  sessions: Session[],
+  groupBy: "workstream" | "project",
+  workstreamMap: Map<string, WorkstreamCardData>,
+  projectMap: Map<string, ProjectCardData>,
+  now = Date.now(),
+): SidebarRecentGroup[] {
+  const recent = sessions.filter((s) => isSessionWithinSevenDays(s, now));
+
+  const groupsMap = new Map<string, SidebarRecentGroup>();
+
+  for (const s of recent) {
+    const timeStr = s.last_conversation_at || s.last_activity_at;
+    const time = timeStr ? new Date(timeStr).getTime() : 0;
+
+    let groupId: string;
+    let groupTitle: string;
+
+    if (groupBy === "workstream") {
+      if (s.owner_workstream_id && workstreamMap.has(s.owner_workstream_id)) {
+        groupId = s.owner_workstream_id;
+        groupTitle = workstreamMap.get(s.owner_workstream_id)!.title;
+      } else if (s.owner_workstream_id) {
+        groupId = s.owner_workstream_id;
+        groupTitle = "未知任务";
+      } else {
+        groupId = "__unassigned_workstream__";
+        groupTitle = "未归属任务";
+      }
+    } else {
+      if (s.project_id && projectMap.has(s.project_id)) {
+        groupId = s.project_id;
+        groupTitle = projectMap.get(s.project_id)!.name;
+      } else if (s.project_id) {
+        groupId = s.project_id;
+        groupTitle = "未知项目";
+      } else {
+        groupId = "__unassigned_project__";
+        groupTitle = "未归属项目";
+      }
+    }
+
+    let group = groupsMap.get(groupId);
+    if (!group) {
+      group = {
+        id: groupId,
+        title: groupTitle,
+        latestTime: time,
+        sessions: [],
+      };
+      groupsMap.set(groupId, group);
+    } else {
+      if (time > group.latestTime) {
+        group.latestTime = time;
+      }
+    }
+    group.sessions.push(s);
+  }
+
+  // Sort sessions within each group by timestamp desc
+  for (const group of groupsMap.values()) {
+    group.sessions.sort((a, b) => {
+      const ta = new Date(a.last_conversation_at || a.last_activity_at || 0).getTime();
+      const tb = new Date(b.last_conversation_at || b.last_activity_at || 0).getTime();
+      return tb - ta;
+    });
+  }
+
+  // Sort groups by latest session timestamp desc
+  return Array.from(groupsMap.values()).sort((a, b) => b.latestTime - a.latestTime);
+}
 
 /**
  * Sidebar：Brand→新会话、Search、工作区一级导航（Workstreams / Projects / Sessions /
- * Assistant）、运行中（活内嵌终端，点击进入终端视图交互）、底部固定 Settings。
- * Project 不逐个铺在导航上，整体进入 Projects Board。
- *
- * 「运行中」取代了旧的最近任务列表：跑着的会话终端才是此刻真正需要的入口，
- * 未绑定的显示「新会话」，绑定后显示会话名。数据是 registry 运行时事实，
- * 只在 spawn / exit / bind（terminals-changed 事件）时重取，无轮询。
+ * Assistant）、运行中（活内嵌终端）、最近活动（最近 7 天有新消息的会话，按任务/项目归类）、
+ * 底部固定 Settings。
  */
 export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
   route: Route;
@@ -23,11 +112,30 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
   collapsed?: boolean;
 }) {
   const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
+  const [projects, setProjects] = useState<ProjectCardData[]>([]);
+  const [groupBy, setGroupBy] = useViewState<"workstream" | "project">("sidebar.recent.groupBy", "workstream");
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
-  const refresh = useCallback(() => {
+  const refreshTerminals = useCallback(() => {
     api
       .terminalList()
       .then(setTerminals)
+      .catch(console.error);
+  }, []);
+
+  const refreshRecent = useCallback(() => {
+    Promise.all([
+      api.listSessions(),
+      api.listWorkstreamCards(),
+      api.listProjectCards(),
+    ])
+      .then(([sList, wsList, prjList]) => {
+        setSessions(sList);
+        setWorkstreams(wsList);
+        setProjects(prjList);
+      })
       .catch(console.error);
   }, []);
 
@@ -45,8 +153,11 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
     }
   };
 
-  useEffect(refresh, [refresh]);
-  useEffect(() => onEvent(EVT_TERMINALS, refresh), [refresh]);
+  useEffect(refreshTerminals, [refreshTerminals]);
+  useEffect(refreshRecent, [refreshRecent]);
+  useEffect(() => onEvent(EVT_TERMINALS, refreshTerminals), [refreshTerminals]);
+  useEffect(() => onEvent(EVT_TERMINALS, refreshRecent), [refreshRecent]);
+  useEffect(() => onEvent(EVT_SYNCED, refreshRecent), [refreshRecent]);
 
   const workspaceActive = (v: "workstreams" | "projects" | "sessions" | "agents" | "assistant") => {
     if (route.view === v) return "active";
@@ -58,13 +169,39 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
     return "";
   };
 
+  const workstreamMap = useMemo(() => {
+    const map = new Map<string, WorkstreamCardData>();
+    for (const ws of workstreams) {
+      map.set(ws.id, ws);
+    }
+    return map;
+  }, [workstreams]);
+
+  const projectMap = useMemo(() => {
+    const map = new Map<string, ProjectCardData>();
+    for (const p of projects) {
+      map.set(p.id, p);
+    }
+    return map;
+  }, [projects]);
+
+  const recentGroups = useMemo(() => {
+    return groupRecentSessions(sessions, groupBy, workstreamMap, projectMap);
+  }, [sessions, groupBy, workstreamMap, projectMap]);
+
+  const toggleGroup = (groupId: string) => {
+    setCollapsedGroups((prev) => ({
+      ...prev,
+      [groupId]: !prev[groupId],
+    }));
+  };
+
   return (
     <div className={`sidebar${collapsed ? " collapsed" : ""}`}>
       <button className="brand" onClick={() => navigate({ view: "new-session" })} title="新会话">
         <SidebarLogo size={22} />
         <span className="brand-name">NoEnding</span>
       </button>
-
 
       <div className="sidebar-scroll">
         <button className={`nav-item ${route.view === "new-session" ? "active" : ""}`} onClick={() => navigate({ view: "new-session" })}>
@@ -130,6 +267,90 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
               );
             })}
           </>
+        )}
+
+        {/* 最近活动 */}
+        <div className="nav-section">最近活动</div>
+        <div className="sidebar-recent-switcher">
+          <div className="sidebar-pill-seg" role="radiogroup" aria-label="最近活动归类方式">
+            <button
+              type="button"
+              className={`sidebar-pill-btn ${groupBy === "workstream" ? "active" : ""}`}
+              onClick={() => setGroupBy("workstream")}
+              role="radio"
+              aria-checked={groupBy === "workstream"}
+              aria-label="按任务归类"
+              title="按任务归类"
+            >
+              <Icon name="tasks" />
+              <span>任务</span>
+            </button>
+            <button
+              type="button"
+              className={`sidebar-pill-btn ${groupBy === "project" ? "active" : ""}`}
+              onClick={() => setGroupBy("project")}
+              role="radio"
+              aria-checked={groupBy === "project"}
+              aria-label="按项目归类"
+              title="按项目归类"
+            >
+              <Icon name="folder" />
+              <span>项目</span>
+            </button>
+          </div>
+        </div>
+
+        {recentGroups.length === 0 ? (
+          <div className="sidebar-recent-empty">最近 7 天无新消息</div>
+        ) : (
+          recentGroups.map((group) => {
+            const isCollapsed = Boolean(collapsedGroups[group.id]);
+            const iconName =
+              groupBy === "workstream"
+                ? (isCollapsed ? "tasksCollapsed" : "tasks")
+                : (isCollapsed ? "folder" : "folderOpen");
+
+            return (
+              <div className="sidebar-recent-group" key={group.id}>
+                <button
+                  type="button"
+                  className={`sidebar-recent-group-header ${isCollapsed ? "collapsed" : ""}`}
+                  onClick={() => toggleGroup(group.id)}
+                  aria-expanded={!isCollapsed}
+                  title={`${group.title} (${group.sessions.length})`}
+                >
+                  <span className="sidebar-group-icon">
+                    <Icon name={iconName} />
+                  </span>
+                  <span className="sidebar-recent-group-title truncate">{group.title}</span>
+                  <span className="sidebar-recent-count">{group.sessions.length}</span>
+                </button>
+                {!isCollapsed && (
+                  <div className="sidebar-recent-group-items">
+                    {group.sessions.map((s) => {
+                      const active = route.view === "session" && route.sessionId === s.id;
+                      const title = sessionDisplayTitle(s.title);
+                      const timeStr = s.last_conversation_at || s.last_activity_at;
+                      const tooltip = s.cwd ? `${title} · ${s.cwd}` : title;
+                      return (
+                        <button
+                          key={s.id}
+                          type="button"
+                          className={`nav-item sidebar-recent-item ${active ? "active" : ""}`}
+                          title={tooltip}
+                          onClick={() => navigate({ view: "session", sessionId: s.id })}
+                        >
+                          <AgentIcon agent={s.agent} size={14} />
+                          <span className="truncate" style={{ flex: 1 }}>{title}</span>
+                          {timeStr && <span className="sidebar-recent-time">{timeAgo(timeStr)}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 

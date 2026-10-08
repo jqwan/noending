@@ -5,20 +5,26 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
-import { EVT_TERMINALS } from "../app/routes";
+import { EVT_TERMINALS, EVT_SYNCED } from "../app/routes";
 import type { Route } from "../app/routes";
-import type { TerminalSummary } from "../types";
+import type { TerminalSummary, Session, WorkstreamCardData, ProjectCardData } from "../types";
 
 vi.mock("../api", () => ({
   api: {
     terminalList: vi.fn(),
     terminalClose: vi.fn(),
+    listSessions: vi.fn(),
+    listWorkstreamCards: vi.fn(),
+    listProjectCards: vi.fn(),
   },
 }));
 
 beforeEach(() => {
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.terminalClose).mockReset().mockResolvedValue(undefined);
+  vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
 });
 
 afterEach(cleanup);
@@ -42,6 +48,78 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
   };
 }
 
+function session(over: Partial<Session> = {}): Session {
+  return {
+    id: "s-1",
+    agent: "codex",
+    root_agent_session_id: "agent-1",
+    title: "修复侧栏问题",
+    cwd: "/repo/x",
+    project_id: "p-1",
+    workspace_path_id: "wp-1",
+    owner_workstream_id: "ws-1",
+    forked_from_session_id: null,
+    started_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+    last_activity_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+    last_conversation_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+    trashed_at: null,
+    source_kind: "file",
+    source_path: "/path/to/source",
+    metadata: {},
+    source_file_identity: "file-id",
+    source_generation: 1,
+    source_byte_offset: 100,
+    source_last_seen_size: 100,
+    source_mtime: Date.now(),
+    source_prefix_hash: "prefix-hash",
+    source_tail_hash: "tail-hash",
+    fact_generation: 1,
+    latest_message_seq: 1,
+    ...over,
+  };
+}
+
+function workstreamCard(over: Partial<WorkstreamCardData> = {}): WorkstreamCardData {
+  return {
+    id: "ws-1",
+    project_id: "p-1",
+    title: "任务重构",
+    description: "重构描述",
+    lifecycle: "active",
+    visibility: "normal",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    project_name: "项目A",
+    current_state: null,
+    goal: null,
+    last_activity_at: new Date().toISOString(),
+    session_count: 1,
+    latest_session: null,
+    path_count: 1,
+    primary_path: "/repo/x",
+    ...over,
+  };
+}
+
+function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
+  return {
+    id: "p-1",
+    name: "项目A",
+    name_customized: false,
+    has_git_identity: false,
+    path_count: 1,
+    missing_path_count: 0,
+    primary_workstream_count: 1,
+    related_workstream_count: 0,
+    session_count: 1,
+    representative_paths: ["/repo/x"],
+    search_paths: ["/repo/x"],
+    last_activity_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    ...over,
+  };
+}
+
 describe("Sidebar navigation", () => {
   it("opens the new-session page from the navigation entry and brand", async () => {
     const navigate = renderSidebar();
@@ -58,7 +136,7 @@ describe("Sidebar navigation", () => {
   it("sidebar_has_projects_navigation", async () => {
     const navigate = renderSidebar({ view: "workstreams" });
 
-    const item = await screen.findByText("项目");
+    const item = await screen.findByRole("button", { name: "项目" });
     fireEvent.click(item);
 
     await waitFor(() => {
@@ -153,5 +231,181 @@ describe("Sidebar 运行中终端", () => {
     window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
     window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
     await waitFor(() => expect(api.terminalList).toHaveBeenCalledTimes(3));
+  });
+});
+
+describe("Sidebar 最近活动", () => {
+  it("renders empty state when there are no sessions within the last 7 days", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-old",
+        title: "较旧的会话",
+        last_conversation_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+      }),
+    ]);
+
+    renderSidebar();
+    expect(await screen.findByText("最近 7 天无新消息")).toBeTruthy();
+    expect(screen.queryByText("较旧的会话")).toBeNull();
+  });
+
+  it("filters sessions to last 7 days and excludes trashed sessions", async () => {
+    const activeRecent = session({
+      id: "s-recent",
+      title: "近期活跃会话",
+      last_conversation_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const oldSession = session({
+      id: "s-old",
+      title: "过期会话",
+      last_conversation_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const trashedSession = session({
+      id: "s-trash",
+      title: "已删除会话",
+      last_conversation_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
+      trashed_at: new Date().toISOString(),
+    });
+
+    vi.mocked(api.listSessions).mockResolvedValue([activeRecent, oldSession, trashedSession]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "测试任务" }),
+    ]);
+
+    renderSidebar();
+    expect(await screen.findByText("近期活跃会话")).toBeTruthy();
+    expect(screen.queryByText("过期会话")).toBeNull();
+    expect(screen.queryByText("已删除会话")).toBeNull();
+  });
+
+  it("groups by workstream by default and navigates to session detail on click", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-1",
+        title: "修复侧栏问题",
+        owner_workstream_id: "ws-1",
+        last_conversation_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    ]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "侧栏任务" }),
+    ]);
+
+    const navigate = renderSidebar();
+    expect(await screen.findByText("侧栏任务")).toBeTruthy();
+    const sessionItem = screen.getByText("修复侧栏问题");
+    expect(sessionItem).toBeTruthy();
+
+    fireEvent.click(sessionItem);
+    expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s-1" });
+  });
+
+  it("toggles group collapse when group header is clicked", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-1",
+        title: "可折叠会话",
+        owner_workstream_id: "ws-1",
+      }),
+    ]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "折叠测试任务" }),
+    ]);
+
+    renderSidebar();
+    const groupHeader = await screen.findByRole("button", { name: /折叠测试任务/ });
+    expect(screen.getByText("可折叠会话")).toBeTruthy();
+    expect(groupHeader.className).not.toContain("collapsed");
+    // 展开状态下使用 tasks 图标（包含第二行 checkmark: M3 10l1 1 2-2）
+    expect(groupHeader.innerHTML).toContain("M3 10l1 1 2-2");
+
+    // 点击收起
+    fireEvent.click(groupHeader);
+    expect(screen.queryByText("可折叠会话")).toBeNull();
+    expect(groupHeader.className).toContain("collapsed");
+    // 收起状态下使用 tasksCollapsed 图标（包含折叠行 M4 10h11）
+    expect(groupHeader.innerHTML).toContain("M4 10h11");
+
+    // 再次点击展开
+    fireEvent.click(groupHeader);
+    expect(screen.getByText("可折叠会话")).toBeTruthy();
+    expect(groupHeader.className).not.toContain("collapsed");
+  });
+
+  it("switches grouping between workstream and project", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-1",
+        title: "切换测试会话",
+        owner_workstream_id: "ws-1",
+        project_id: "p-1",
+      }),
+    ]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "按任务分组名" }),
+    ]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "p-1", name: "按项目分组名" }),
+    ]);
+
+    renderSidebar();
+
+    // 默认按任务归类，切换按钮使用 tasks 图标
+    expect(await screen.findByText("按任务分组名")).toBeTruthy();
+    expect(screen.queryByText("按项目分组名")).toBeNull();
+    const taskToggle = screen.getByRole("radio", { name: "按任务归类" });
+    expect(taskToggle.innerHTML).toContain("M3 5l1 1 2-2");
+
+    // 切换至按项目归类，切换按钮使用 folder 图标
+    const projectToggle = screen.getByRole("radio", { name: "按项目归类" });
+    expect(projectToggle.innerHTML).toContain("M2 5V3h5l2 2h7v10H2Z");
+    fireEvent.click(projectToggle);
+
+    const projectGroupHeader = await screen.findByRole("button", { name: /按项目分组名/ });
+    expect(projectGroupHeader).toBeTruthy();
+    // 展开状态下使用 folderOpen 图标
+    expect(projectGroupHeader.innerHTML).toContain("M1.5 7.5h13");
+    expect(screen.queryByText("按任务分组名")).toBeNull();
+
+    // 收起项目分组
+    fireEvent.click(projectGroupHeader);
+    expect(projectGroupHeader.className).toContain("collapsed");
+    // 收起状态下使用闭合 folder 图标
+    expect(projectGroupHeader.innerHTML).toContain("M2 5V3h5l2 2h7v10H2Z");
+
+    // 切回按任务归类
+    fireEvent.click(taskToggle);
+
+    expect(await screen.findByText("按任务分组名")).toBeTruthy();
+  });
+
+  it("handles unassigned workstream and unassigned project groups", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-orphan",
+        title: "孤立会话",
+        owner_workstream_id: null,
+        project_id: null,
+      }),
+    ]);
+
+    renderSidebar();
+
+    // 任务维度：未归属任务
+    expect(await screen.findByText("未归属任务")).toBeTruthy();
+
+    // 项目维度：未归属项目
+    const projectToggle = screen.getByRole("radio", { name: "按项目归类" });
+    fireEvent.click(projectToggle);
+
+    expect(await screen.findByText("未归属项目")).toBeTruthy();
+  });
+
+  it("refetches recent sessions on EVT_SYNCED event", async () => {
+    renderSidebar();
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new CustomEvent(EVT_SYNCED));
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
   });
 });
