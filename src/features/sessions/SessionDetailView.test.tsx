@@ -13,7 +13,7 @@ import type {
 } from "../../types";
 
 // 只覆盖重构后的详情页：源会话状态、fork 链接、
-// 回收站横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
+// 已归档横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
     getAgentStatus: vi.fn().mockResolvedValue({}),
@@ -37,7 +37,7 @@ vi.mock("../../api", () => ({
     }),
     listProjects: vi.fn().mockResolvedValue([]),
     listWorkstreams: vi.fn().mockResolvedValue([]),
-    trashSession: vi.fn(),
+    archiveSession: vi.fn(),
     restoreSession: vi.fn(),
     setSessionOwnerWorkstream: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
@@ -68,7 +68,7 @@ function session(id: string, over: Partial<Session> = {}): Session {
     started_at: null,
     last_activity_at: null,
     last_conversation_at: null,
-    trashed_at: null,
+    archived_at: null,
         source_kind: "codex_rollout",
         source_path: "/tmp/rollout.jsonl",
         metadata: {},
@@ -91,7 +91,6 @@ function workstream(id: string, title: string): Workstream {
     id,
     title,
     description: "",
-    lifecycle: "active",
     visibility: "normal",
     created_at: "2026-09-21T00:00:00+00:00",
     updated_at: "2026-09-21T00:00:00+00:00",
@@ -244,7 +243,7 @@ it("shows no fork field for a session that is not a fork", async () => {
   expect(screen.queryByText(/分叉自/)).toBeNull();
 });
 
-// 回收站横幅
+// 已归档横幅
 
 function preview(over: Partial<LocalDeletePreview> = {}): LocalDeletePreview {
   return {
@@ -261,8 +260,8 @@ function preview(over: Partial<LocalDeletePreview> = {}): LocalDeletePreview {
   };
 }
 
-function trashedDetail(over: Partial<SessionDetail> = {}): SessionDetail {
-  return detail(session("me", { trashed_at: "2026-09-24T00:00:00+00:00" }), {
+function archivedDetail(over: Partial<SessionDetail> = {}): SessionDetail {
+  return detail(session("me", { archived_at: "2026-09-24T00:00:00+00:00" }), {
     can_resume: false,
     ...over,
   });
@@ -272,8 +271,8 @@ it("offers the same 删除 entry whatever the root source state", async () => {
   // Trash is the only gate: the source verdict never renames or hides the entry.
   for (const source_status of ["missing", "present"] as const) {
     cleanup();
-    await renderDetail(trashedDetail({ source_status }));
-    screen.getByRole("button", { name: "删除…" });
+    await renderDetail(archivedDetail({ source_status }));
+    screen.getByRole("button", { name: "永久删除…" });
     expect(screen.queryByText(/重新入库…/)).toBeNull();
     expect(screen.queryByText(/删除不可用/)).toBeNull();
   }
@@ -285,9 +284,9 @@ it("checks the root source before confirming and says the copy will be rebuilt",
   vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
     preview({ root_source_status: "present" }),
   );
-  await renderDetail(trashedDetail({ source_status: "present" }));
+  await renderDetail(archivedDetail({ source_status: "present" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "删除…" }));
+  fireEvent.click(screen.getByRole("button", { name: "永久删除…" }));
 
   await screen.findByText(/Root 源会话仍然存在/);
   screen.getByText(/下一次同步会从它重新同步/);
@@ -304,9 +303,9 @@ it("says the local data is unrecoverable when the root source is gone", async ()
   vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
     preview({ root_source_status: "missing" }),
   );
-  await renderDetail(trashedDetail({ source_status: "missing" }));
+  await renderDetail(archivedDetail({ source_status: "missing" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "删除…" }));
+  fireEvent.click(screen.getByRole("button", { name: "永久删除…" }));
 
   await screen.findByText(/本地数据删除后无法找回/);
   expect(screen.queryByText(/Root 源会话仍然存在/)).toBeNull();
@@ -564,4 +563,14 @@ it("renders copy icon buttons next to field labels and copies values on click", 
   await waitFor(() => expect(writeText).toHaveBeenCalledWith("/path/to/source.jsonl"));
 
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+});
+
+it("allows archived sessions to sync and generate summaries while blocking continue", async () => {
+  vi.mocked(api.updateSessionContext).mockResolvedValue({ status: "updated" } as never);
+  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
+  await renderDetail(archivedDetail({ messages: [message("me", 1, "user", "归档后依然可生成摘要")] }));
+  screen.getByRole("button", { name: "增量同步" });
+  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
+  expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(true);
 });

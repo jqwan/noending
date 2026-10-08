@@ -11,7 +11,6 @@ import {
   type Workstream,
   type WorkstreamContext as WorkstreamContextData,
   type WorkstreamContextView,
-  type WorkstreamLifecycle,
   type WorkstreamPathRow,
   type WorkstreamReviewSummary,
   type WorkstreamReviewWindow,
@@ -72,7 +71,7 @@ export default function WorkstreamDetailView({
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [actionError, setActionError] = useState("");
-  const [confirmTrash, setConfirmTrash] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [purgeConfirmText, setPurgeConfirmText] = useState("");
   const busyRef = useRef(false);
@@ -113,7 +112,7 @@ export default function WorkstreamDetailView({
     setPathsError("");
     setMenuOpen(false);
     setEditing(false);
-    setConfirmTrash(false);
+    setConfirmArchive(false);
     setConfirmPurge(false);
     setActionError("");
 
@@ -249,7 +248,7 @@ export default function WorkstreamDetailView({
   const { workstream, sessions } = ctx;
 
   /** 一条命令返回新 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
-   *  留着旧的 lifecycle / visibility，下一次整对象保存会被后端拒绝。 */
+   *  留着旧的 visibility，下一次整对象保存会被后端拒绝。 */
   const adopt = (next: Workstream) => setCtx((c) => {
     const nextCtx = c ? { ...c, workstream: next } : c;
     if (nextCtx) {
@@ -261,33 +260,14 @@ export default function WorkstreamDetailView({
     return nextCtx;
   });
 
-  /** lifecycle 只是分类，无行为差异，随时可切；它不碰路径、会话归属、visibility 或 Context。 */
-  const setLifecycle = async (next: WorkstreamLifecycle) => {
-    if (busyRef.current || workstream.lifecycle === next) return;
-    busyRef.current = true;
-    setBusy(true);
-    setActionError("");
-    try {
-      adopt(await api.setWorkstreamLifecycle(workstream.id, next));
-      refresh();
-    } catch (e) {
-      console.error(e);
-      setActionError(`修改状态失败：${String(e)}`);
-      refresh();
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  };
-
   /**
-   * 归档与恢复是两个单向命令：`archive_workstream` 只进回收站，
+   * 归档与恢复是两个单向命令：`archive_workstream` 只进已归档，
    * `restore_workstream` 只出来——不是一枚翻转开关（那会造出双权威）。
    * 失败留在原地说明原因，成功才跳走。
    */
-  const moveToTrash = async () => {
+  const archiveTask = async () => {
     setMenuOpen(false);
-    setConfirmTrash(false);
+    setConfirmArchive(false);
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
@@ -297,7 +277,7 @@ export default function WorkstreamDetailView({
       goBack({ view: "workstreams" });
     } catch (e) {
       console.error(e);
-      setActionError(`移入回收站失败：${String(e)}`);
+      setActionError(`归档失败：${String(e)}`);
       refresh();
     } finally {
       busyRef.current = false;
@@ -324,7 +304,7 @@ export default function WorkstreamDetailView({
     }
   };
 
-  /** 唯一不可逆的动作，且后端只接受从回收站出发。 */
+  /** 唯一不可逆的动作，且后端只接受从已归档出发。 */
   const purge = async () => {
     setConfirmPurge(false);
     if (busyRef.current) return;
@@ -385,10 +365,10 @@ export default function WorkstreamDetailView({
               <Icon name="edit" />
             </button>
             {!archived && (
-              <button className="btn ghost icon-button" aria-label="移入回收站"
-                title="移入回收站：只是不再出现在列表里，路径、会话归属与 Context 都原样保留，随时可以恢复。"
-                onClick={() => setConfirmTrash(true)}>
-                <Icon name="trash" />
+              <button className="btn ghost icon-button" aria-label="归档"
+                title="归档：保留路径、会话与 Context，归档后不能新建会话。"
+                onClick={() => setConfirmArchive(true)}>
+                <Icon name="archive" />
               </button>
             )}
             {archived && (
@@ -400,7 +380,7 @@ export default function WorkstreamDetailView({
                 {menuOpen && (
                   <div className="menu-pop">
                     <button className="menu-item" onClick={restore}>
-                      从回收站恢复
+                      取消归档
                     </button>
                     <button className="menu-item"
                       title="不可撤销：会删除这条任务名下的 Context、冲突记录与审阅状态。会话与它们的事件历史保留。"
@@ -463,19 +443,7 @@ export default function WorkstreamDetailView({
         <aside className="task-detail-aside">
         <section className="rail-section">
           <div className="section-label">状态</div>
-          <div className="row" style={{ gap: 8 }}>
-            <button className={`btn small ${workstream.lifecycle === "active" ? "primary" : ""}`}
-              disabled={busy || workstream.lifecycle === "active"}
-              onClick={() => setLifecycle("active")}>
-              进行中
-            </button>
-            <button className={`btn small ${workstream.lifecycle === "completed" ? "primary" : ""}`}
-              disabled={busy || workstream.lifecycle === "completed"}
-              onClick={() => setLifecycle("completed")}>
-              已完成
-            </button>
-            {archived && <span className="badge warn">在回收站中</span>}
-          </div>
+          <span className="badge">{archived ? "已归档" : "未归档"}</span>
           <div className="small muted" style={{ marginTop: 6 }}>
             创建于 {formatDate(workstream.created_at)} · 最近更新 {timeAgo(workstream.updated_at)}
           </div>
@@ -523,19 +491,19 @@ export default function WorkstreamDetailView({
         />
       )}
 
-      {confirmTrash && (
-        <Modal title="移入回收站" onClose={() => setConfirmTrash(false)}>
+      {confirmArchive && (
+        <Modal title="归档" onClose={() => setConfirmArchive(false)}>
           <p style={{ margin: "0 0 8px", maxWidth: "72ch" }}>
-            <b>{workstream.title}</b> 会离开正常列表，出现在任务页的「回收站」筛选里。
+            <b>{workstream.title}</b> 会移至任务页的「已归档」，归档后不能用于新建会话。
           </p>
           <p className="small muted" style={{ marginBottom: 8 }}>
-            路径、会话归属和上下文都会保留，可从回收站恢复。
+            路径、会话归属和上下文都会保留，可取消归档。
           </p>
 
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setConfirmTrash(false)} disabled={busy}>取消</button>
-            <button className="btn primary" onClick={moveToTrash} disabled={busy}>
-              {busy ? "处理中…" : "移入回收站"}
+            <button className="btn" onClick={() => setConfirmArchive(false)} disabled={busy}>取消</button>
+            <button className="btn primary" onClick={archiveTask} disabled={busy}>
+              {busy ? "处理中…" : "归档"}
             </button>
           </div>
         </Modal>
@@ -556,7 +524,7 @@ export default function WorkstreamDetailView({
             换句话说：Project 与 Session 都不会因为删掉一项任务而受影响。
           </p>
           <p className="small muted" style={{ marginBottom: 12 }}>
-            只有已经在回收站里的任务才能被永久删除 —— 这是刻意留的缓冲。
+            只有已经在已归档的任务才能被永久删除 —— 这是刻意留的缓冲。
           </p>
           <label className="field"><span>输入这项任务的标题以确认</span>
             <input type="text" value={purgeConfirmText} autoFocus

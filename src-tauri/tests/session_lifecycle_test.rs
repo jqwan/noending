@@ -210,7 +210,7 @@ fn context_item_pointing_at(
 // lifecycle trash / restore
 
 #[test]
-fn trash_keeps_every_fact_and_never_touches_the_source() {
+fn archive_keeps_every_fact_and_never_touches_the_source() {
     let db = open_db("trash-freezes");
     let dir = TempDir::new("trash-freezes-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
@@ -221,12 +221,12 @@ fn trash_keeps_every_fact_and_never_touches_the_source() {
     set_context_frontier(&db, &s.id, 1);
 
     let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
-    let trashed = lifecycle::trash_session(&db, &s.id).unwrap();
+    let trashed = lifecycle::archive_session(&db, &s.id).unwrap();
     assert!(
-        trashed.trashed_at.is_some(),
+        trashed.archived_at.is_some(),
         "the flip is visible on the row"
     );
-    assert!(trashed.is_trashed());
+    assert!(trashed.is_archived());
 
     // The Agent source is untouched — NoEnding never deletes it.
     assert!(
@@ -259,7 +259,7 @@ fn trash_keeps_every_fact_and_never_touches_the_source() {
 }
 
 #[test]
-fn trash_is_hidden_from_list_projections_and_cards() {
+fn archive_filters_board_but_preserves_task_projections() {
     let db = open_db("list-scope");
     let dir = TempDir::new("list-scope-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
@@ -274,33 +274,38 @@ fn trash_is_hidden_from_list_projections_and_cards() {
         .unwrap()
     };
     use noending::domain::SessionListScope as Scope;
-    assert!(active(&db, Scope::Active).iter().any(|x| x.id == s.id));
+    assert!(active(&db, Scope::Unarchived).iter().any(|x| x.id == s.id));
 
     let (count_before, latest_before, _) = db.workstream_session_stats(&ws.id).unwrap();
     assert_eq!(count_before, 1);
     assert!(latest_before.is_some());
 
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
 
     assert!(
-        !active(&db, Scope::Active).iter().any(|x| x.id == s.id),
+        !active(&db, Scope::Unarchived).iter().any(|x| x.id == s.id),
         "trash hidden from the default list"
     );
-    let trash = active(&db, Scope::Trash);
+    let trash = active(&db, Scope::Archived);
     assert!(trash.iter().any(|x| x.id == s.id));
     let all = active(&db, Scope::All);
     assert!(all.iter().any(|x| x.id == s.id));
 
     // Workstream cards no longer count the trashed session.
     let (count_after, latest_after, _) = db.workstream_session_stats(&ws.id).unwrap();
-    assert_eq!(count_after, 0);
-    assert!(latest_after.is_none());
+    assert_eq!(count_after, count_before);
+    assert_eq!(latest_after, latest_before);
+    assert!(db
+        .sessions_for_workstream(&ws.id)
+        .unwrap()
+        .iter()
+        .any(|row| row.id == s.id));
 }
 
 /// Trash does not stop a commit: an in-flight batch that lands after a Trash
 /// stores its messages, stats and cursor move like any other.
 #[test]
-fn inflight_ingest_commits_after_trash() {
+fn inflight_ingest_commits_after_archive() {
     let db = open_db("inflight-guard");
     let dir = TempDir::new("inflight-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
@@ -308,7 +313,7 @@ fn inflight_ingest_commits_after_trash() {
     let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
     // T1: the user trashes while the next batch is in flight…
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
 
     // …T2: the staged batch commits anyway — the source is the authority.
     let stored = commit_message(&db, &s.id, "second round message", 200);
@@ -329,7 +334,7 @@ fn inflight_ingest_commits_after_trash() {
 /// Restore keeps the same id/Owner/messages/cursors/frontier and
 /// reindexes the conversation.
 #[test]
-fn restore_keeps_identity_data_and_reindexes() {
+fn unarchive_keeps_identity_data_and_search() {
     let db = open_db("restore-keeps");
     let dir = TempDir::new("restore-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
@@ -339,12 +344,12 @@ fn restore_keeps_identity_data_and_reindexes() {
     set_context_frontier(&db, &s.id, 1);
     let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
     let restored = lifecycle::restore_session(&db, &s.id).unwrap();
 
     // : Trash → Restore keeps the same identity and every fact.
     assert_eq!(restored.id, s.id);
-    assert!(restored.trashed_at.is_none());
+    assert!(restored.archived_at.is_none());
     assert_eq!(restored.owner_workstream_id, Some(ws.id));
     let messages = db.get_messages(&s.id, None, 100).unwrap();
     assert_eq!(
@@ -373,11 +378,11 @@ fn restore_keeps_identity_data_and_reindexes() {
 /// Resume is refused for a trashed session; the launcher gate is the
 /// single funnel every resume entry goes through.
 #[test]
-fn trashed_session_cannot_resume() {
+fn archived_session_cannot_resume() {
     let db = open_db("no-resume");
     let dir = TempDir::new("no-resume-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
 
     let launcher = noending::launcher::SessionLauncher {
         runtime_dir: unique_dir("no-resume-runtime"),
@@ -388,7 +393,7 @@ fn trashed_session_cannot_resume() {
     let err = launcher
         .prepare_resume_in(&db, &s.id, &workspace)
         .unwrap_err();
-    assert!(err.to_string().contains("回收站"), "unexpected: {err}");
+    assert!(err.to_string().contains("已归档"), "unexpected: {err}");
 }
 
 /// An ACTIVE session with a freshly Missing root must NOT be purgeable —
@@ -409,7 +414,7 @@ fn active_session_is_never_purgeable_even_when_root_is_missing() {
     );
 
     let err = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap_err();
-    assert!(err.to_string().contains("回收站"), "unexpected: {err}");
+    assert!(err.to_string().contains("已归档"), "unexpected: {err}");
     assert!(
         lifecycle::permanently_delete_session(&db, &s.id).is_err(),
         "an active session is never purgeable"
@@ -423,7 +428,7 @@ fn active_session_is_never_purgeable_even_when_root_is_missing() {
 /// deterministic Unavailable fixture is a DIRECTORY at the source path —
 /// `inspect_file_source` answers Unavailable for a non-regular file.)
 #[test]
-fn trashed_session_is_purgeable_whatever_the_root_source_says() {
+fn archived_session_is_purgeable_whatever_the_root_source_says() {
     for (tag, kind, expected) in [
         ("present", SourceKind::File, SourceAvailability::Present),
         (
@@ -436,7 +441,7 @@ fn trashed_session_is_purgeable_whatever_the_root_source_says() {
         let dir = TempDir::new(&format!("purge-{tag}-src"));
         let s = seeded_session(&db, &dir, kind);
         let source_path = PathBuf::from(&s.source_path);
-        lifecycle::trash_session(&db, &s.id).unwrap();
+        lifecycle::archive_session(&db, &s.id).unwrap();
 
         let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
         assert_eq!(preview.root_source_status, expected, "{tag}");
@@ -496,7 +501,7 @@ fn permanent_delete_purges_local_rows_only() {
     let (other_item, _) = context_item_pointing_at(&db, &ws.id, &other.id);
 
     // Trashed + root missing → purge allowed.
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
     std::fs::remove_file(&source_file).unwrap();
 
     let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
@@ -626,7 +631,7 @@ fn a_reappearing_source_does_not_block_the_purge() {
     let s = seeded_session(&db, &dir, SourceKind::File);
     let source_file = PathBuf::from(&s.source_path);
 
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
     std::fs::remove_file(&source_file).unwrap();
     let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
     assert_eq!(preview.root_source_status, SourceAvailability::Missing);
@@ -659,7 +664,7 @@ fn the_purge_never_touches_other_files_on_disk() {
     let sibling_file = dir.path().join("sibling.jsonl");
     std::fs::write(&sibling_file, "unrelated transcript\n").unwrap();
 
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
     std::fs::remove_file(&root_file).unwrap();
 
     let result = lifecycle::permanently_delete_session(&db, &s.id).unwrap();
@@ -687,7 +692,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     let ws = workstream(&db, "WS");
     set_owner(&db, &s.id, &ws.id);
 
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
     lifecycle::permanently_delete_session(&db, &s.id).unwrap();
 
     assert!(
@@ -730,7 +735,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
 /// sessions are ever filled in, so the recycle bin cannot leak back into
 /// search after a restart.
 #[test]
-fn startup_backfill_skips_trashed_sessions() {
+fn startup_backfill_includes_archived_sessions() {
     let db = open_db("backfill-trashed");
     let dir_a = TempDir::new("backfill-a-src");
     let dir_b = TempDir::new("backfill-b-src");
@@ -739,8 +744,8 @@ fn startup_backfill_skips_trashed_sessions() {
     let active_stored = commit_message(&db, &active.id, "unique active marker goals", 100);
     let trashed_stored = commit_message(&db, &trashed.id, "unique trashed marker goals", 100);
 
-    lifecycle::trash_session(&db, &trashed.id).unwrap();
-    // 模拟重启：startup backfill 不得把回收站加回来。
+    lifecycle::archive_session(&db, &trashed.id).unwrap();
+    // 模拟重启：startup backfill 不得把已归档加回来。
     db.backfill_search_index().unwrap();
 
     let hits = search::search(&db, "goals", 20).unwrap();
@@ -750,10 +755,9 @@ fn startup_backfill_skips_trashed_sessions() {
         "the active session stays searchable"
     );
     assert!(
-        !hits
-            .iter()
+        hits.iter()
             .any(|h| h.kind == "message" && h.ref_id == trashed_stored[0].id),
-        "the trashed session must not be re-indexed by the startup backfill"
+        "the archived session remains searchable after startup backfill"
     );
 
     // Restore 之后回到索引 —— 生命周期与索引同进退。

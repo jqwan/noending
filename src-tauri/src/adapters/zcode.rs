@@ -657,7 +657,7 @@ mod tests {
             started_at: None,
             last_activity_at: None,
             last_conversation_at: None,
-            trashed_at: None,
+            archived_at: None,
             source_kind: "zcode_store_record".into(),
             source_path: db.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),

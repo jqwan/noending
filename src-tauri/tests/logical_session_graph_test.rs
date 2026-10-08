@@ -473,7 +473,7 @@ fn trash_does_not_freeze_discovery() {
         .unwrap()
         .unwrap()
         .source_cursor();
-    noending::lifecycle::trash_session(&db, &session.id).unwrap();
+    noending::lifecycle::archive_session(&db, &session.id).unwrap();
 
     write_rollout(
         &root_dir,
@@ -496,7 +496,7 @@ fn trash_does_not_freeze_discovery() {
     // The recycle bin is a filter, not a freeze: the trashed Session keeps
     // following its source while it sits there.
     let current = db.get_session(&session.id).unwrap().unwrap();
-    assert!(current.is_trashed(), "discovery never Restores a Session");
+    assert!(current.is_archived(), "discovery never Restores a Session");
     assert_eq!(current.cwd.as_deref(), Some("/repo-after-restore"));
     assert!(current.last_activity_at > session.last_activity_at);
     assert!(
@@ -591,7 +591,6 @@ fn support_workstream(id: &str) -> noending::domain::Workstream {
         id: id.into(),
         title: "所属任务".into(),
         description: String::new(),
-        lifecycle: "active".into(),
         visibility: "normal".into(),
         created_at: now(),
         updated_at: now(),
@@ -981,7 +980,7 @@ fn every_adapter_inspects_sources_without_panicking() {
             started_at: None,
             last_activity_at: None,
             last_conversation_at: None,
-            trashed_at: None,
+            archived_at: None,
             source_kind: "test".into(),
             source_path: "/tmp/definitely-not-here".into(),
             metadata: serde_json::json!({}),

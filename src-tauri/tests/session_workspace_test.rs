@@ -351,7 +351,7 @@ fn workspace_path_move_follows_a_trashed_session() {
         .tx(|tx| move_session_to_path_conn(tx, &session_id, &first))
         .unwrap());
     db.tx(|tx| {
-        noending::storage::session_lifecycle::trash_session_conn(
+        noending::storage::session_lifecycle::archive_session_conn(
             tx,
             &session_id,
             &noending::storage::now(),
@@ -845,7 +845,7 @@ fn the_detail_ingredients_come_from_storage_queries() {
     let session = stored(&db, &s);
     let status = lifecycle::root_source_status(&db, &session).unwrap();
     assert_eq!(status, Some(noending::domain::SourceAvailability::Present));
-    assert!(!session.is_trashed());
+    assert!(!session.is_archived());
 }
 
 /// A stats delta so the commit above reads like the observation batch it is.
@@ -870,7 +870,7 @@ fn the_source_verdict_follows_the_file_on_disk() {
         started_at: None,
         last_activity_at: None,
         last_conversation_at: None,
-        trashed_at: None,
+        archived_at: None,
         source_kind: "test".into(),
         source_path: path.to_string_lossy().to_string(),
         metadata: serde_json::json!({}),

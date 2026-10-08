@@ -1,6 +1,6 @@
 //! Workstream commands and the card projection.
 //!
-//! The ordered path list, lifecycle and recycle bin land here.
+//! The ordered path list, archive state land here.
 //! `workstream_cards` is the Home/Sidebar projection, and
 //! `commands.rs` re-exports it so existing tests keep their path.
 //!
@@ -149,20 +149,9 @@ pub fn reorder_workstream_paths(
     })
 }
 
-// ---------------- lifecycle and the recycle bin ----------------
+// ---------------- archive state ----------------
 
-#[tauri::command]
-pub fn set_workstream_lifecycle(
-    state: State<AppState>,
-    workstream_id: String,
-    lifecycle: String,
-) -> Result<Workstream> {
-    with_db(&state, |db| {
-        workstream::set_workstream_lifecycle(db, &workstream_id, &lifecycle)
-    })
-}
-
-/// Move into the recycle bin. Absolute: archiving an archived Workstream is a
+/// Archive the task. Absolute: archiving an archived Workstream is a
 /// no-op, never a restore (the old toggle lost that distinction).
 #[tauri::command]
 pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Result<Workstream> {

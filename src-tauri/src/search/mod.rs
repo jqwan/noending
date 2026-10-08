@@ -20,20 +20,12 @@ pub struct SearchHit {
     pub rank: f64,
 }
 
-/// Review P1-1 — the read-side lifecycle authority: a Session's own document
-/// (`kind = 'session'`, `ref_id` is the session id) and its message rows
-/// surface only while that session is active. Belt and braces beside the
-/// write-side guards (trash unindex + guarded backfill): a stale row left
-/// behind by an interrupted write must not surface a trashed session in search.
-const ACTIVE_MESSAGE_GUARD: &str = "(
+/// Archived sessions remain searchable. Only deleted sessions are excluded.
+const EXISTING_SESSION_GUARD: &str = "(
     search_index.kind NOT IN ('message', 'session')
     OR EXISTS (
-        SELECT 1 FROM sessions s
-         WHERE s.id = CASE search_index.kind
-                        WHEN 'message' THEN search_index.parent_id
-                        ELSE search_index.ref_id
-                      END
-           AND s.trashed_at IS NULL))";
+        SELECT 1 FROM sessions s WHERE s.id = CASE search_index.kind
+          WHEN 'message' THEN search_index.parent_id ELSE search_index.ref_id END))";
 
 /// Only the current conversation projection is searchable. Message rows stay
 /// append-only for provenance, so this predicate excludes facts retired by a
@@ -69,7 +61,7 @@ fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
                snippet(search_index, 4, '「', '」', '…', 12),
                bm25(search_index)
                FROM search_index WHERE search_index MATCH ?1
-               AND {ACTIVE_MESSAGE_GUARD}
+               AND {EXISTING_SESSION_GUARD}
                AND {CURRENT_MESSAGE_GUARD}
                ORDER BY bm25(search_index) LIMIT ?2"
     );
@@ -102,7 +94,7 @@ fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let sql = format!(
         "SELECT kind, ref_id, parent_id, title, body FROM search_index
                WHERE (title LIKE ?1 ESCAPE '!' OR body LIKE ?1 ESCAPE '!')
-               AND {ACTIVE_MESSAGE_GUARD}
+               AND {EXISTING_SESSION_GUARD}
                AND {CURRENT_MESSAGE_GUARD}
                LIMIT ?2"
     );

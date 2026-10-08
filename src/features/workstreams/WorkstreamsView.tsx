@@ -4,7 +4,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import Icon from "../../components/Icon";
-import { Modal, openPath, timeAgo } from "../../components/common";
+import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import WorkstreamCard, { cardSearchFields, searchFieldHint } from "./WorkstreamCard";
 import WorkstreamFormModal from "./WorkstreamFormModal";
@@ -13,12 +13,6 @@ import type { WorkstreamCardData } from "../../types";
 import type { Route, ViewAction, WorkstreamScope } from "../../app/routes";
 
 type SortKey = "recent" | "created" | "name";
-/**
- * 筛选按两个正交维度表达：lifecycle（进行中 / 已完成）与 visibility（normal /
- * archived）。回收站就是 archived，它不是第三种状态、也不改变 lifecycle，所以
- * 「回收站」只能按 visibility 判，不能把「非进行中」统统算成已归档。
- */
-type LifecycleFilter = "all" | "active" | "completed";
 type PresenceFilter = "all" | "assigned" | "unassigned";
 
 const SORTERS: Record<SortKey, (a: WorkstreamCardData, b: WorkstreamCardData) => number> = {
@@ -38,12 +32,11 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   const { cards, defaultAgent, refresh, loadError } = useWorkstreamCards();
   const [query, setQuery] = useViewState("workstreams.query", "");
   const [sort, setSort] = useViewState<SortKey>("workstreams.sort", "recent");
-  const [lifecycle, setLifecycle] = useViewState<LifecycleFilter>("workstreams.lifecycle", "active");
   const [projectId, setProjectId] = useViewState("workstreams.projectId", "all");
   const [sessionFilter, setSessionFilter] = useViewState<PresenceFilter>("workstreams.sessionFilter", "all");
   const [pathFilter, setPathFilter] = useViewState<PresenceFilter>("workstreams.pathFilter", "all");
   const [creatingWs, setCreatingWs] = useState(false);
-  const trashMode = scope === "trash";
+  const archivedMode = scope === "archived";
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
   const [bulkPurgeBusy, setBulkPurgeBusy] = useState(false);
   const [taskActionId, setTaskActionId] = useState<string | null>(null);
@@ -64,18 +57,17 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   }, [cards]);
 
   const filtersActive =
-    query.trim() !== "" || lifecycle !== "active" || projectId !== "all"
+    query.trim() !== "" || projectId !== "all"
     || sessionFilter !== "all" || pathFilter !== "all";
 
   const list = useMemo(() => {
     if (!cards) return null;
-    const q = trashMode ? "" : query.trim().toLowerCase();
+    const q = query.trim().toLowerCase();
     return cards
-      .filter((c) => trashMode ? c.visibility === "archived" : c.visibility === "normal")
-      .filter((c) => trashMode || lifecycle === "all" || c.lifecycle === lifecycle)
-      .filter((c) => trashMode || projectId === "all" || (projectId === "none" ? c.project_id === null : c.project_id === projectId))
-      .filter((c) => trashMode || sessionFilter === "all" || (sessionFilter === "assigned" ? c.session_count > 0 : c.session_count === 0))
-      .filter((c) => trashMode || pathFilter === "all" || (pathFilter === "assigned" ? c.path_count > 0 : c.path_count === 0))
+      .filter((c) => archivedMode ? c.visibility === "archived" : c.visibility === "normal")
+      .filter((c) => projectId === "all" || (projectId === "none" ? c.project_id === null : c.project_id === projectId))
+      .filter((c) => sessionFilter === "all" || (sessionFilter === "assigned" ? c.session_count > 0 : c.session_count === 0))
+      .filter((c) => pathFilter === "all" || (pathFilter === "assigned" ? c.path_count > 0 : c.path_count === 0))
       .filter((c) =>
         q === ""
           ? true
@@ -84,11 +76,24 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
               .some((s) => s!.toLowerCase().includes(q)),
       )
       .sort(SORTERS[sort]);
-  }, [cards, query, sort, lifecycle, projectId, sessionFilter, pathFilter, trashMode]);
+  }, [cards, query, sort, projectId, sessionFilter, pathFilter, archivedMode]);
+
+  const archivedTasks = cards?.filter((c) => c.visibility === "archived") ?? [];
+
+  const archiveTask = async (task: WorkstreamCardData) => {
+    if (taskActionId) return;
+    setTaskActionId(task.id);
+    try {
+      await api.archiveWorkstream(task.id);
+      showToast(`已归档「${task.title}」`);
+      refresh();
+    } catch (e) { showToast(`归档失败：${String(e)}`); }
+    finally { setTaskActionId(null); }
+  };
 
   const bulkPurge = async () => {
-    if (!trashMode || !list || list.length === 0 || bulkPurgeBusy) return;
-    const targets = [...list];
+    if (!archivedMode || archivedTasks.length === 0 || bulkPurgeBusy) return;
+    const targets = [...archivedTasks];
     let deleted = 0;
     let failed = 0;
     setBulkPurgeBusy(true);
@@ -107,7 +112,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
     showToast(
       failed === 0
         ? `已永久删除 ${deleted} 个任务`
-        : `已永久删除 ${deleted} 个任务，${failed} 个仍保留在回收站`,
+        : `已永久删除 ${deleted} 个任务，${failed} 个仍保留在已归档`,
     );
   };
 
@@ -143,7 +148,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
 
   const clearFilters = () => {
     setQuery("");
-    setLifecycle("active");
     setProjectId("all");
     setSessionFilter("all");
     setPathFilter("all");
@@ -157,35 +161,34 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
         title="任务"
         actions={
           <>
-            <div className="settings-seg" role="group" aria-label="任务列表范围">
+            <div className="settings-seg archive-scope" role="group" aria-label="任务列表范围">
               <button
-                className={trashMode ? "" : "on"}
-                aria-pressed={!trashMode}
-                aria-label="任务列表"
-                title="任务列表"
-                onClick={() => navigate({ view: "workstreams", scope: "active" })}
+                className={archivedMode ? "" : "on"}
+                aria-pressed={!archivedMode}
+                aria-label="未归档"
+                title="未归档"
+                onClick={() => navigate({ view: "workstreams", scope: "unarchived" })}
               >
-                <Icon name="tasks" />
+                <Icon name="tasks" /> 未归档
               </button>
               <button
-                className={trashMode ? "on" : ""}
-                aria-pressed={trashMode}
-                aria-label="回收站"
-                title="回收站"
-                onClick={() => navigate({ view: "workstreams", scope: "trash" })}
+                className={archivedMode ? "on" : ""}
+                aria-pressed={archivedMode}
+                aria-label="已归档"
+                title="已归档"
+                onClick={() => navigate({ view: "workstreams", scope: "archived" })}
               >
-                <Icon name="archive" />
+                <Icon name="archive" /> 已归档
               </button>
             </div>
-            <button className="btn ghost icon-button" aria-label="新建任务" title="新建任务" onClick={() => setCreatingWs(true)}>
+            {archivedMode ? <button className="btn ghost danger" aria-label="删除全部" title="删除全部已归档任务" disabled={archivedTasks.length === 0 || bulkPurgeBusy || Boolean(taskActionId)} onClick={() => setBulkPurgeOpen(true)}><Icon name="trash" /> 删除全部</button> : <button className="btn ghost icon-button" aria-label="新建任务" title="新建任务" onClick={() => setCreatingWs(true)}>
               <Icon name="plus" />
-            </button>
+            </button>}
           </>
         }
       />
 
-      {!trashMode && (
-        <>
+      <>
           <div className="board-toolbar">
           <input
             type="text"
@@ -197,14 +200,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           />
 
           <div className="toolbar ws-controls">
-            <label className="ws-control">
-              <span className="muted small">状态</span>
-              <select value={lifecycle} onChange={(e) => setLifecycle(e.target.value as LifecycleFilter)}>
-                <option value="all">全部状态</option>
-                <option value="active">进行中</option>
-                <option value="completed">已完成</option>
-              </select>
-            </label>
             <label className="ws-control">
               <span className="muted small">项目</span>
               <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
@@ -240,7 +235,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             {filtersActive && <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>}
             {list && (
               <span className="muted small">
-                {filtersActive ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === "normal").length ?? 0} 个` : `共 ${list.length} 个任务`}
+                {filtersActive ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 个` : `共 ${list.length} 个任务`}
               </span>
             )}
           </div>
@@ -261,71 +256,30 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                 query
                   ? "没有匹配的任务。"
                   : !filtersActive
-                    ? "还没有进行中的任务。"
+                    ? (archivedMode ? "还没有已归档的任务。" : "还没有未归档的任务。")
                     : "没有符合当前筛选条件的任务。"
               }
               hint={
                 filtersActive
                   ? "调整或清除筛选条件即可看到全部任务。"
-                  : "创建任务，开始工作。"
+                  : (archivedMode ? "归档的任务会显示在这里，可以取消归档或永久删除。" : "创建任务，开始工作。")
               }
               actions={
                 filtersActive ? (
                   <button className="btn small" onClick={clearFilters}>清除筛选</button>
-                ) : (
+                ) : !archivedMode ? (
                   <button className="btn small" onClick={() => setCreatingWs(true)}>+ 新建任务</button>
-                )
+                ) : undefined
               }
             />
           )}
 
           <div className="ws-grid board-grid">
             {list?.map((c) => (
-              <WorkstreamCard key={c.id} card={c} mode="full" navigate={navigate} defaultAgent={defaultAgent} />
+              <WorkstreamCard key={c.id} card={c} mode="full" navigate={navigate} defaultAgent={defaultAgent} onArchive={archiveTask} onRestore={restoreTask} onDelete={setPurgeTarget} busy={Boolean(taskActionId) || bulkPurgeBusy} />
             ))}
           </div>
-        </>
-      )}
-
-      {trashMode && (
-        <>
-          <div className="muted small" style={{ margin: "4px 0 14px", maxWidth: "72ch" }}>
-            回收站里的任务不出现在任务列表以及新建和继续入口中。工作路径、会话
-            归属与 Context 都原样保留；打开任务详情后可以恢复或永久删除。
-          </div>
-          {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
-          {list === null && !loadError && (
-            <div className="ws-grid board-grid" role="status">
-              <div className="skeleton card" style={{ minHeight: 140 }} />
-              <div className="skeleton card" style={{ minHeight: 140 }} />
-              <div className="skeleton card" style={{ minHeight: 140 }} />
-            </div>
-          )}
-          {list !== null && list.length === 0 && (
-            <EmptyState
-              title="回收站是空的。"
-              hint="移入回收站的任务会留在这里，可以随时恢复，也可以在任务详情中永久删除。"
-            />
-          )}
-          {list !== null && list.length > 0 && (
-            <>
-              <div className="session-trash-actions">
-                <span className="muted small">共 {list.length} 个任务</span>
-                <button className="btn small danger" onClick={() => setBulkPurgeOpen(true)}>
-                  全部永久删除
-                </button>
-              </div>
-              <TrashWorkstreamTable
-                tasks={list}
-                onOpen={(id) => navigate({ view: "workstream", workstreamId: id })}
-                onRestore={restoreTask}
-                onPurge={setPurgeTarget}
-                busyId={taskActionId}
-              />
-            </>
-          )}
-        </>
-      )}
+      </>
 
       {purgeTarget && (
         <Modal title="永久删除这项任务？" onClose={() => { if (!taskActionId) setPurgeTarget(null); }}>
@@ -342,24 +296,24 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
         </Modal>
       )}
 
-      {trashMode && bulkPurgeOpen && list && list.length > 0 && (
+      {archivedMode && bulkPurgeOpen && archivedTasks.length > 0 && (
         <Modal
-          title="全部永久删除"
+          title="删除全部"
           onClose={() => { if (!bulkPurgeBusy) setBulkPurgeOpen(false); }}
         >
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            确定要永久删除回收站中的 <b>{list.length} 个任务</b> 吗？
+            确定要永久删除已归档的 <b>{archivedTasks.length} 个任务</b> 吗？
           </p>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
             此操作不可撤销，任务的 Context、审阅状态和关联数据将被清理。
           </div>
           <p className="small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
-            工作路径、项目、会话及会话事件历史会保留。某个任务删除失败时，其他任务仍会继续处理，失败的任务会留在回收站。
+            工作路径、项目、会话及会话事件历史会保留。某个任务删除失败时，其他任务仍会继续处理，失败的任务会留在已归档。
           </p>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>
             <button className="btn danger" onClick={bulkPurge} disabled={bulkPurgeBusy}>
-              {bulkPurgeBusy ? "删除中…" : "全部永久删除"}
+              {bulkPurgeBusy ? "删除中…" : "删除全部"}
             </button>
           </div>
         </Modal>
@@ -372,80 +326,5 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
         />
       )}
     </div>
-  );
-}
-
-function TrashWorkstreamTable({ tasks, onOpen, onRestore, onPurge, busyId }: {
-  tasks: WorkstreamCardData[];
-  onOpen: (workstreamId: string) => void;
-  onRestore: (task: WorkstreamCardData) => void;
-  onPurge: (task: WorkstreamCardData) => void;
-  busyId: string | null;
-}) {
-  const rows = [...tasks].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-
-  return (
-    <table className="session-table workstream-trash-table">
-      <thead>
-        <tr>
-          <th>任务</th>
-          <th style={{ width: 170 }}>项目</th>
-          <th style={{ width: 80 }}>会话</th>
-          <th>主工作路径</th>
-          <th style={{ width: 160 }}>最近更新</th>
-          <th style={{ width: 170 }}>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((task) => (
-          <tr key={task.id} onClick={() => onOpen(task.id)}>
-            <td className="cell-title" title={task.title}>
-              <div style={{ whiteSpace: "normal" }}>{task.title}</div>
-              {task.description && (
-                <div className="muted small" style={{ whiteSpace: "normal" }}>{task.description}</div>
-              )}
-            </td>
-            <td title={task.project_name ?? undefined}>{task.project_name ?? "未归属项目"}</td>
-            <td>{task.session_count}</td>
-            <td className={task.primary_path ? "mono" : "muted"} title={task.primary_path ?? undefined}>
-              {task.primary_path ? (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  className="path-link"
-                  title={`${task.primary_path} · 点击在文件管理器中打开`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void openPath(task.primary_path!);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      void openPath(task.primary_path!);
-                    }
-                  }}
-                >
-                  {task.primary_path}
-                </span>
-              ) : (
-                "未设置"
-              )}
-            </td>
-            <td>{timeAgo(task.updated_at)}</td>
-            <td onClick={(e) => e.stopPropagation()}>
-              <div className="row" style={{ gap: 6 }}>
-                <button className="btn small" onClick={() => onRestore(task)} disabled={Boolean(busyId)}>
-                  恢复
-                </button>
-                <button className="btn small danger" onClick={() => onPurge(task)} disabled={Boolean(busyId)}>
-                  永久删除
-                </button>
-              </div>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
   );
 }

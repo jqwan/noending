@@ -56,10 +56,10 @@ export default function SessionDetailView({
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const currentSessionId = useRef(sessionId);
-  // 回收站动作（Session Lifecycle & Deletion）：执行中的 busy、
-  // 以及从详情页直接发起的删除 Modal。移入回收站的确认与执行在
+  // 已归档动作（Session Lifecycle & Deletion）：执行中的 busy、
+  // 以及从详情页直接发起的删除 Modal。归档的确认与执行在
   // SessionHeaderActions（三个子页共用）。
-  const [trashBusy, setTrashBusy] = useState(false);
+  const [archiveBusy, setArchiveBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
   /**
    * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字；
@@ -199,13 +199,13 @@ export default function SessionDetailView({
   const title = sessionDisplayTitle(session.title);
   const untitled = title === UNTITLED_SESSION;
   const cwd = (session.cwd ?? "").trim();
-  /** 单一生命周期权威：null = 正常，时间戳 = 在回收站。 */
-  const trashed = session.trashed_at !== null;
+  /** 单一生命周期权威：null = 正常，时间戳 = 在已归档。 */
+  const archived = session.archived_at !== null;
 
-  /** 从回收站恢复：trashed_at 清空后本页就地回到正常形态。 */
+  /** 从已归档恢复：archived_at 清空后本页就地回到正常形态。 */
   const doRestore = async () => {
-    if (trashBusy) return;
-    setTrashBusy(true);
+    if (archiveBusy) return;
+    setArchiveBusy(true);
     try {
       await api.restoreSession(sessionId);
       showToast("已恢复");
@@ -214,7 +214,7 @@ export default function SessionDetailView({
       console.error(e);
       showToast(String(e));
     } finally {
-      setTrashBusy(false);
+      setArchiveBusy(false);
     }
   };
   /** 派生链自带的路径与 Project。 */
@@ -237,10 +237,9 @@ export default function SessionDetailView({
   const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
 
   /** 按钮只在真的有内容可更新时出现：需要已读到 Context、有消息，且无摘要或有增量。
-      回收站中的会话在后端冻结了上下文提取，所以这里也不给入口。 */
+      归档不影响摘要更新。 */
   const canUpdateSummary =
-    !trashed
-    && sessionCtx !== null
+    sessionCtx !== null
     && messages.length > 0
     && (sessionCtx.fields === null || sessionCtx.pending);
 
@@ -280,7 +279,7 @@ export default function SessionDetailView({
               agent={session.agent}
               sourceKind={session.source_kind}
               title={title}
-              trashed={trashed}
+              archived={archived}
               navigate={navigate}
               onChanged={refresh}
             />
@@ -288,20 +287,20 @@ export default function SessionDetailView({
         )}
       />
 
-      {/* 回收站横幅：Trash 是唯一门槛，恢复与删除都可用；删除的结果由弹窗读源状态后说明。 */}
-      {trashed && (
-        <div className="session-trash-banner">
+      {/* 已归档横幅：Trash 是唯一门槛，恢复与删除都可用；删除的结果由弹窗读源状态后说明。 */}
+      {archived && (
+        <div className="session-archive-banner">
           <div style={{ minWidth: 0 }}>
-            <b>该会话在回收站中</b>
+            <b>该会话已归档</b>
             <div className="small muted" style={{ marginTop: 2 }}>
-              移入回收站：{formatDateTime(session.trashed_at)}。它已从常用列表中移除，
-              上下文提取在此冻结；Agent 原始会话不会被删除，随时可以恢复。
+              归档：{formatDateTime(session.archived_at)}。
+              归档后不能通过 NoEnding 继续，消息同步与摘要更新保持可用，随时可以取消归档。
             </div>
           </div>
           <div className="row" style={{ flex: "none", gap: 8 }}>
-            <button className="btn small" disabled={trashBusy} onClick={doRestore}>恢复</button>
-            <button className="btn small" disabled={trashBusy} onClick={() => setPurgeOpen(true)}>
-              删除…
+            <button className="btn small" disabled={archiveBusy} onClick={doRestore}><Icon name="unarchive" /> 取消归档</button>
+            <button className="btn small" disabled={archiveBusy} onClick={() => setPurgeOpen(true)}>
+              <Icon name="trash" /> 永久删除…
             </button>
           </div>
         </div>
@@ -465,10 +464,10 @@ export default function SessionDetailView({
         <span>{agentDisplayLabel(session.agent)}</span>
       </div>
       {/* 消息条数在下面的统计里有，这里只留状态徽标；两个都没有就不摆空行。 */}
-      {(untitled || trashed) && (
+      {(untitled || archived) && (
         <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
           {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
-          {trashed && <span className="badge warn">回收站</span>}
+          {archived && <span className="badge warn">已归档</span>}
         </div>
       )}
 
@@ -640,8 +639,8 @@ export default function SessionDetailView({
                 onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id })}
               >
                 分叉自：{sessionDisplayTitle(detail.forked_from.title)}
-                {detail.forked_from.trashed_at !== null && (
-                  <span className="badge warn" style={{ marginLeft: 6 }}>回收站</span>
+                {detail.forked_from.archived_at !== null && (
+                  <span className="badge warn" style={{ marginLeft: 6 }}>已归档</span>
                 )}
               </button>
             ) : (
@@ -660,8 +659,8 @@ export default function SessionDetailView({
       </aside>
       </div>
 
-      {/* 危险操作：删除只在正常状态下出现；回收站里的动作在顶部横幅。
-          移入回收站的确认弹窗在 SessionHeaderActions 里。 */}
+      {/* 危险操作：删除只在正常状态下出现；已归档的动作在顶部横幅。
+          归档的确认弹窗在 SessionHeaderActions 里。 */}
       {purgeOpen && (
         <PermanentDeleteModal
           sessionId={sessionId}
@@ -799,7 +798,7 @@ function OwnerPickerModal({ currentOwnerId, projectId, onClose, onSubmit }: {
     ])
       .then(([all, inProject]) => {
         if (!active) return;
-        setTasks(all.filter((w) => w.visibility === "normal"));
+        setTasks(all);
         setProjectTaskIds(inProject.map((w) => w.id));
       })
       .catch(() => { if (active) setError(true); });

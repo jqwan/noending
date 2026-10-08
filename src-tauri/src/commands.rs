@@ -371,8 +371,7 @@ pub fn get_workstream_context(
             .ok_or_else(|| other("Workstream 不存在"))?;
         let core = crate::context::resolve_core_context(db, &workstream_id)?;
         let items = db.items_for_workstream(&workstream_id, true)?;
-        // the Workstream context view is a default projection: trashed
-        // Sessions are not shown here (the query filters them out).
+        // Task membership and Context inputs include both archive states.
         let sessions = db.sessions_for_workstream(&workstream_id)?;
         let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
         let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
@@ -669,8 +668,8 @@ pub fn continue_session_desktop(
         let session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        if session.is_trashed() {
-            return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+        if session.is_archived() {
+            return Err(other("会话已在已归档，无法继续；请先恢复会话"));
         }
         Ok(crate::adapters::adapter_for(session.agent).desktop_resume_route(&session))
     })?;
@@ -761,7 +760,7 @@ pub fn launch_embedded_resume(
 /// The New-session page's direct entry: prepare + launch an embedded NEW
 /// session in ONE step. The spawned terminal starts UNBOUND — the session
 /// does not exist until the TUI writes its file and ingestion discovers it,
-/// at which point native ID or unique first-message evidence binds the terminal
+/// at which point an exact native identity binds the terminal
 /// and the board's pseudo-row becomes a real session. A reconcile is enqueued
 /// right away so discovery happens as soon as the file lands.
 #[tauri::command]
@@ -935,10 +934,8 @@ pub fn read_clipboard_for_terminal(app: AppHandle) -> Result<crate::commands::Cl
 // detach protocol the frontend terminal subpage speaks. The registry is the
 // source of truth — the subpage is a view, not a process owner.
 
-/// The session page's terminal entry: jump to the session's bound terminal
-/// (prespecified-id discovery or the ingestion worker's verified match) or
-/// report none — the caller launches a fresh embedded Resume terminal. No
-/// matching happens here; matching belongs to ingestion.
+/// Jump to one of the Session's bound terminals, preferring a live one.
+/// Native identities may associate multiple terminals with the same Session.
 #[tauri::command]
 pub fn terminal_for_session(
     terminal: State<'_, crate::terminal::TerminalRegistry>,
@@ -988,25 +985,33 @@ pub fn terminal_refresh(
 }
 
 /// The sidebar 运行中 item's explicit close: kill the child and drop the
-/// record outright. The frontend navigates away when the closed terminal
-/// was on screen (it already holds the summary it clicked).
+/// record outright. Return its current identity so a switch while the close
+/// request was pending cannot navigate back to an obsolete Session.
 #[tauri::command]
 pub fn terminal_close(
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,
-) -> Result<()> {
+) -> Result<crate::terminal::TerminalSummary> {
     terminal
         .close(&terminal_id)
-        .ok_or_else(|| other("终端不存在或已关闭"))?;
-    Ok(())
+        .ok_or_else(|| other("终端不存在或已关闭"))
 }
 
 #[tauri::command]
 pub fn terminal_attach(
-    state: State<'_, crate::terminal::TerminalRegistry>,
+    state: State<AppState>,
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,
 ) -> Result<crate::terminal::TerminalSnapshot> {
-    state.attach(&terminal_id)
+    let mut snapshot = terminal.attach(&terminal_id)?;
+    if let Some(session_id) = &snapshot.summary.session_id {
+        snapshot.summary.session_title = with_db(&state, |db| {
+            Ok(db
+                .get_session(session_id)?
+                .and_then(|session| session.title))
+        })?;
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]

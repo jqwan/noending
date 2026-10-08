@@ -8,6 +8,7 @@ import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from 
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { httpsRemoteUrl } from "./remoteUrl";
+import { projectKindLabels } from "./projectKind";
 import { cardSummaryLine } from "../workstreams/WorkstreamCard";
 import {
   type ProjectDetailData,
@@ -155,7 +156,7 @@ export default function ProjectDetail({ projectId, navigate }: {
           {gone && (
             <p className="muted small">
               项目没有归档、也没有「删除」这个操作：当它拥有的最后一个工作目录
-              被移除、被别的项目认领，或者在本机上再也找不到时，它就自动消失了。
+              不再被任务或会话引用并被清理，或被别的项目认领时，它就自动消失了。
               它下面的任务与会话不会被删除 —— 项目从来不是它们的生命周期所有者。
             </p>
           )}
@@ -228,8 +229,7 @@ export default function ProjectDetail({ projectId, navigate }: {
                 {summary && <div className="meta">{summary}</div>}
               </div>
               <div className="side">
-                {w.visibility === "archived" && <span className="badge warn" title="已移入回收站；项目与它只是投影关系">回收站</span>}
-                {w.lifecycle === "completed" && <span className="badge">已完成</span>}
+                {w.visibility === "archived" && <span className="badge warn" title="已归档；项目与它只是投影关系">已归档</span>}
                 <span>{timeAgo(w.updated_at)}</span>
               </div>
             </div>
@@ -250,8 +250,8 @@ export default function ProjectDetail({ projectId, navigate }: {
       <section className="rail-section" style={{ marginTop: 26 }}>
         <div className="section-label">属性</div>
         <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span className={`badge ${project.git_id ? "accent" : ""}`}>
-            {project.git_id ? "Git 项目" : "目录项目"}
+          <span className={`badge ${detail.kind === "git" ? "accent" : ""}`}>
+            {projectKindLabels[detail.kind]}
           </span>
           {project.name_customized && <span className="small muted">自定义名称</span>}
         </div>

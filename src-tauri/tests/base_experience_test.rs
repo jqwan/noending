@@ -90,7 +90,6 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
         id: new_id(),
         title: title.into(),
         description: String::new(),
-        lifecycle: "active".into(),
         visibility: "normal".into(),
         created_at: now(),
         updated_at: now(),
@@ -367,7 +366,7 @@ fn trashed_session_still_ingests_its_source() {
     assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
     let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
-    lifecycle::trash_session(&db, &s.id).unwrap();
+    lifecycle::archive_session(&db, &s.id).unwrap();
     write_transcript(&dir, 3);
 
     assert_eq!(

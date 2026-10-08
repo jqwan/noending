@@ -548,7 +548,7 @@ export default function SessionConversationView({
                 agent={currentAgent}
                 sourceKind={cachedDetail?.session.source_kind}
                 title={displayTitle}
-                trashed={!!cachedDetail?.session.trashed_at}
+                archived={!!cachedDetail?.session.archived_at}
                 navigate={navigate}
                 onChanged={reload}
               />

@@ -22,8 +22,8 @@ export type LegacySettingsSection = "agents" | "sources";
  * 不引入第二套 pending/event 桥。
  */
 export type ViewAction = "new";
-export type SessionScope = "active" | "trash";
-export type WorkstreamScope = "active" | "trash";
+export type SessionScope = "unarchived" | "archived";
+export type WorkstreamScope = "unarchived" | "archived";
 
 export type WorkstreamEntry = "review" | "conflicts";
 

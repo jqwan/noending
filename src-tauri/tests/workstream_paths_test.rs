@@ -16,7 +16,7 @@ mod support;
 use rusqlite::{params, Connection};
 
 use noending::commands::workstream_cards;
-use noending::domain::{workstream_lifecycle, workstream_visibility, Agent, Session, Workstream};
+use noending::domain::{workstream_visibility, Agent, Session, Workstream};
 use noending::error::{other, Result};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{now, Db};
@@ -202,7 +202,6 @@ fn empty_path_list_is_valid() {
         .unwrap()
         .workstream;
 
-    assert_eq!(w.lifecycle, workstream_lifecycle::ACTIVE);
     assert_eq!(w.visibility, workstream_visibility::NORMAL);
     assert!(db.list_workstream_paths(&w.id).unwrap().is_empty());
     assert_eq!(db.primary_workspace_path_id(&w.id).unwrap(), None);

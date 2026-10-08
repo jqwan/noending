@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { onEvent, EVT_TERMINALS, type Route } from "../app/routes";
 import Icon from "../components/Icon";
@@ -23,11 +23,17 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
   collapsed?: boolean;
 }) {
   const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
+  const refreshSeq = useRef(0);
+  const currentRoute = useRef(route);
+  currentRoute.current = route;
 
   const refresh = useCallback(() => {
+    const seq = ++refreshSeq.current;
     api
       .terminalList()
-      .then(setTerminals)
+      .then((next) => {
+        if (seq === refreshSeq.current) setTerminals(next);
+      })
       .catch(console.error);
   }, []);
 
@@ -35,9 +41,10 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
    *  这个终端 → 跳回它的会话（未绑定则回会话看板），不让用户停在尸体上。 */
   const closeTerminal = async (t: TerminalSummary) => {
     try {
-      await api.terminalClose(t.terminal_id);
-      if (route.view === "terminal" && route.terminalId === t.terminal_id) {
-        if (t.session_id) navigate({ view: "session", sessionId: t.session_id });
+      const closed = await api.terminalClose(t.terminal_id);
+      const displayed = currentRoute.current;
+      if (displayed.view === "terminal" && displayed.terminalId === t.terminal_id) {
+        if (closed.session_id) navigate({ view: "session", sessionId: closed.session_id });
         else navigate({ view: "sessions" });
       }
     } catch (e) {
@@ -45,7 +52,10 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
     }
   };
 
-  useEffect(refresh, [refresh]);
+  useEffect(() => {
+    refresh();
+    return () => { ++refreshSeq.current; };
+  }, [refresh]);
   useEffect(() => onEvent(EVT_TERMINALS, refresh), [refresh]);
 
   const workspaceActive = (v: "workstreams" | "projects" | "sessions" | "agents" | "assistant") => {
@@ -105,7 +115,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
             <div className="nav-section">运行中</div>
             {terminals.map((t) => {
               const active = route.view === "terminal" && route.terminalId === t.terminal_id;
-              const title = t.session_title
+              const title = t.session_id && t.session_title
                 ? sessionDisplayTitle(t.session_title)
                 : "新会话";
               return (
@@ -124,7 +134,7 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
                     title={`关闭这个内嵌终端${t.session_id ? "，回到它的会话" : ""}`}
                     onClick={() => void closeTerminal(t)}
                   >
-                    <Icon name="trash" />
+                    <Icon name="close" />
                   </button>
                 </div>
               );

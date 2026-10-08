@@ -43,7 +43,7 @@ function session(id: string): Session {
     started_at: null,
     last_activity_at: null,
     last_conversation_at: null,
-    trashed_at: null,
+    archived_at: null,
         source_kind: "codex_rollout",
         source_path: "/tmp/rollout.jsonl",
         metadata: {},

@@ -199,7 +199,7 @@
   padding: 0 var(--main-gutter) 48px;
   max-width: 1280px;
 }
-/* 看板页有紧贴页头的搜索/筛选区，不留这段间距（用户觉得 20px 太大）。回收站模式下
+/* 看板页有紧贴页头的搜索/筛选区，不留这段间距（用户觉得 20px 太大）。归档模式下
    没有这条工具栏，:has 不成立，间距自动回到 20px。 */
 .main:has(> .board-toolbar) { --head-gap: 0px; }
 /* 没有页头的页面（加载中 / 错误态 / Assistant）自己让出标题栏那条的高度，
@@ -274,6 +274,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.page-head .actions .settings-seg.archive-scope button {
+  width: auto;
+  padding: 0 10px;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }

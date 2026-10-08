@@ -415,7 +415,6 @@ pub fn workstreams_for_project(
                 id: r.get("id")?,
                 title: r.get("title")?,
                 description: r.get("description")?,
-                lifecycle: r.get("lifecycle")?,
                 visibility: r.get("visibility")?,
                 created_at: r.get("created_at")?,
                 updated_at: r.get("updated_at")?,

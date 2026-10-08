@@ -40,7 +40,7 @@ function card(over: Partial<ProjectCardData> = {}): ProjectCardData {
     id: "p-1",
     name: "NoEnding",
     name_customized: false,
-    has_git_identity: true,
+    kind: "git",
     path_count: 2,
     missing_path_count: 0,
     primary_workstream_count: 2,
@@ -70,7 +70,7 @@ describe("Projects Board", () => {
       card({
         id: "p-2",
         name: "My App",
-        has_git_identity: false,
+        kind: "directory",
         representative_paths: ["/Users/me/dev/my-app"],
         search_paths: ["/Users/me/dev/my-app"],
       }),
@@ -128,10 +128,11 @@ describe("Projects Board", () => {
     expect(screen.queryByText("Healthy")).toBeNull();
   });
 
-  it("kind_filter_separates_git_projects_from_normal_directories", async () => {
+  it("kind_filter_separates_git_single_directories_and_default_chats", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      card({ id: "p-1", name: "Git Project", has_git_identity: true }),
-      card({ id: "p-2", name: "Normal Directory", has_git_identity: false }),
+      card({ id: "p-1", name: "Git Project", kind: "git" }),
+      card({ id: "p-2", name: "Normal Directory", kind: "directory" }),
+      card({ id: "p-3", name: "Renamed Chats", kind: "chat_directory" }),
     ]);
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("Normal Directory");
@@ -141,6 +142,18 @@ describe("Projects Board", () => {
     });
 
     expect(screen.getByText("Git Project")).toBeTruthy();
+    expect(screen.queryByText("Normal Directory")).toBeNull();
+    expect(screen.queryByText("Renamed Chats")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "directory" } });
+    expect(screen.getByText("Normal Directory")).toBeTruthy();
+    expect(screen.queryByText("Git Project")).toBeNull();
+    expect(screen.queryByText("Renamed Chats")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "chat_directory" } });
+    const chat = screen.getByRole("button", { name: /Renamed Chats/ });
+    expect(chat.textContent).toContain("默认聊天目录项目");
+    expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Normal Directory")).toBeNull();
   });
 

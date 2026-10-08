@@ -47,7 +47,8 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// 根源、一份游标、一个事实前沿，全部并入 `sessions` 的列；消息表随之去掉
 /// member 维度。拓扑守卫与诊断页失去存在前提（不再存任何非根成员），一并退场。
 /// 删除数据库重建。
-pub const DATABASE_FORMAT_VERSION: i64 = 1;
+/// v2 — Workstream has only archive state; Session trash becomes archived_at.
+pub const DATABASE_FORMAT_VERSION: i64 = 2;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -225,7 +226,6 @@ const CURRENT_SCHEMA: &str = r#"
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
-      lifecycle TEXT NOT NULL DEFAULT 'active',
       visibility TEXT NOT NULL DEFAULT 'normal',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -255,11 +255,9 @@ const CURRENT_SCHEMA: &str = r#"
       started_at TEXT,
       last_activity_at TEXT,
       last_conversation_at TEXT,
-      -- lifecycle: NULL = Normal, NOT NULL = Trash (RFC3339). Trash is a FILTER:
-      -- it hides the Session and freezes its Context extraction, nothing else —
-      -- ingestion, Owner and every other fact keep following the source. It is
-      -- also the only gate on the permanent local purge.
-      trashed_at TEXT,
+      -- NULL = unarchived, timestamp = archived. Blocks NoEnding resume and
+      -- enables permanent local deletion; ingestion/search/Context stay live.
+      archived_at TEXT,
       -- The ROOT source: format descriptor, path (reveal in UI) and the
       -- adapter's non-conversation structural facts (thread_source, …).
       source_kind TEXT NOT NULL,
@@ -383,7 +381,7 @@ const CURRENT_SCHEMA: &str = r#"
     -- The Workstream side of the two-level revision scheme.
     -- context_revision guards all ContextItem writes (manual + AI);
     -- input_revision marks manual Context edits / Owner-set / title /
-    -- description / Trash-Restore that need re-synthesis; AI records the
+    -- description changes that need re-synthesis; AI records the
     -- input_revision it consumed so its own success does not leave the
     -- Workstream "pending" again. Created as (0, 1, 0) so the first explicit
     -- generation is allowed.

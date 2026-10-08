@@ -1,12 +1,11 @@
-//! WorkstreamPaths, lifecycle and the recycle bin.
+//! Workstream paths and archive state.
 //!
 //! `position = 0` IS the primary path (`UNIQUE(workstream_id, position)`), so
 //! "secondary without primary" is not representable. Removing an entry
 //! recompacts positions; reordering takes the FULL list, and "make this primary"
 //! is a reorder to index 0. Workstream→Project is a projection through the paths.
 //!
-//! Lifecycle (`active | completed`) is a label with no behavior attached.
-//! Visibility (`normal | archived`) is separate: `archived` IS the recycle bin,
+//! Visibility (`normal | archived`) is the only task state.
 //! `archive` / `restore` only flip visibility, and permanent deletion is
 //! reachable only from `archived`.
 //!
@@ -114,7 +113,6 @@ pub fn create_workstream(
         id: new_id(),
         title: title.trim().to_string(),
         description: description.trim().to_string(),
-        lifecycle: workstream_lifecycle::ACTIVE.into(),
         visibility: workstream_visibility::NORMAL.into(),
         created_at: now(),
         updated_at: now(),
@@ -294,33 +292,10 @@ pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<Wo
     Ok(views)
 }
 
-// Lifecycle & trash
+// Archive state
 
-/// `active | completed` and nothing else. Other vocabularies (`open`,
-/// `abandoned`) are not normalized here: silently accepting one would leave the
-/// stored value outside the closed set, so a caller still writing it is a bug
-/// worth surfacing.
-///
-/// Both values are a label only — no behavior differs, and switching must not
-/// touch paths, visibility or Context.
-pub fn set_workstream_lifecycle(
-    db: &Db,
-    workstream_id: &str,
-    lifecycle: &str,
-) -> Result<Workstream> {
-    if lifecycle != workstream_lifecycle::ACTIVE && lifecycle != workstream_lifecycle::COMPLETED {
-        return Err(other("Workstream 生命周期只有 active 与 completed"));
-    }
-    let mut w = require_workstream(db, workstream_id)?;
-    w.lifecycle = lifecycle.into();
-    w.updated_at = now();
-    db.upsert_workstream(&w)?;
-    Ok(w)
-}
-
-/// Move to the recycle bin. `archived` IS the trash: paths, lifecycle,
-/// Context and configuration all survive, and `updated_at` is the
-/// only other thing that moves.
+/// Archive preserves paths, Context, configuration and owned sessions.
+/// Archived tasks cannot create sessions.
 ///
 /// Absolute, not a toggle: a retry or double click must not quietly
 /// un-archive the Workstream.
@@ -328,9 +303,7 @@ pub fn archive_workstream(db: &Db, workstream_id: &str) -> Result<Workstream> {
     set_visibility(db, workstream_id, workstream_visibility::ARCHIVED)
 }
 
-/// Leave the recycle bin. Only visibility returns, and the lifecycle the user
-/// had before archiving is therefore still there — "restore the previous state"
-/// needs no stored snapshot.
+/// Unarchive without changing task data or associations.
 pub fn restore_workstream(db: &Db, workstream_id: &str) -> Result<Workstream> {
     set_visibility(db, workstream_id, workstream_visibility::NORMAL)
 }
@@ -346,14 +319,11 @@ fn set_visibility(db: &Db, workstream_id: &str, visibility: &str) -> Result<Work
 /// The rules for the whole-object write (`update_workstream`), which the
 /// detail page still uses to save a title or a description.
 ///
-/// `lifecycle` and `visibility` may not travel through it: they have commands of
+/// `visibility` may not travel through it: it has commands of
 /// their own, and a stale object from another screen silently reverting an
 /// archive is exactly the double-authority failure this rule exists to remove.
 pub fn apply_whole_object_edit(db: &Db, payload: &Workstream) -> Result<Workstream> {
     let current = require_workstream(db, &payload.id)?;
-    if payload.lifecycle != current.lifecycle {
-        return Err(other("生命周期请用 set_workstream_lifecycle 修改"));
-    }
     if payload.visibility != current.visibility {
         return Err(other(
             "归档与恢复请用 archive_workstream / restore_workstream",
@@ -376,7 +346,7 @@ pub fn apply_whole_object_edit(db: &Db, payload: &Workstream) -> Result<Workstre
 pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()> {
     let w = require_workstream(db, workstream_id)?;
     if w.visibility != workstream_visibility::ARCHIVED {
-        return Err(other("只能永久删除回收站（已归档）中的 Workstream"));
+        return Err(other("只能永久删除已归档（已归档）中的 Workstream"));
     }
     db.tx(|tx| purge_workstream_data_conn(tx, workstream_id))?;
     // The FTS rows are gone with the transaction; `unindex` is the same write

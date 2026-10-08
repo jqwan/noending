@@ -25,13 +25,15 @@
 //!
 //! ## Calling git
 //!
+//! * Only the observed directory may supply repository evidence. Set a discovery
+//!   ceiling at its parent so a plain subdirectory never inherits a repository.
 //! * Resolve the binary through `platform::exec_resolver::resolve_executable`,
 //!   never `Command::new("git")`.
 //! * Run through `platform::exec_runner::run(..)` with the workspace path as an
 //!   explicit `cwd`, plus `GIT_OPTIONAL_LOCKS=0` and `GIT_TERMINAL_PROMPT=0`.
-//! * Only two commands are allowed:
+//! * Only these read-only commands are allowed:
 //!   `git rev-parse --git-common-dir` (with `--show-toplevel` for the Home check)
-//!   and `git worktree list --porcelain`.
+//!   `git worktree list --porcelain`, and `git config --get-regexp` for remotes.
 //! * Every failure mode — no binary, timeout, non-zero exit, `dubious ownership`
 //!   — collapses to `None` / `Unavailable`. It must never surface as a user
 //!   visible error, because `AppError` serializes to a bare string and the UI
@@ -247,7 +249,7 @@ impl GitAccess {
         self.program.is_some()
     }
 
-    /// Ask git about `dir`. The two allowed read-only commands, no more.
+    /// Ask git about this directory, never an enclosing repository.
     pub fn probe(&self, dir: &Path) -> GitProbe {
         let Some(program) = self.program.as_deref() else {
             return GitProbe::nothing(GitProbeState::Unavailable);
@@ -259,12 +261,18 @@ impl GitAccess {
             return GitProbe::nothing(GitProbeState::NotARepository);
         }
 
+        let ceiling = dir.parent().map(|p| p.to_string_lossy().into_owned());
+        let mut env = GIT_ENV.to_vec();
+        if let Some(parent) = ceiling.as_deref() {
+            env.push(("GIT_CEILING_DIRECTORIES", parent));
+        }
+
         let rev = match exec_runner::run_with_env(
             program,
             &["rev-parse", "--git-common-dir", "--show-toplevel"],
             Some(dir),
             self.timeout_secs,
-            &GIT_ENV,
+            &env,
         ) {
             Ok(out) => out,
             Err(_) => return GitProbe::nothing(GitProbeState::Unavailable),
@@ -297,7 +305,7 @@ impl GitAccess {
             &["worktree", "list", "--porcelain"],
             Some(dir),
             self.timeout_secs,
-            &GIT_ENV,
+            &env,
         ) {
             Ok(out) if out.success => parse_worktree_list(&out.stdout),
             _ => Vec::new(),
@@ -311,7 +319,7 @@ impl GitAccess {
             &["config", "--get-regexp", r"^remote\..*\.url$"],
             Some(dir),
             self.timeout_secs,
-            &GIT_ENV,
+            &env,
         ) {
             Ok(out) if out.success => parse_remote_config(&out.stdout),
             _ => Vec::new(),
@@ -579,7 +587,18 @@ impl WorkspaceResolver {
         let path = PathBuf::from(&canonical);
         let exists = path.is_dir();
         let git = if exists {
-            classify_git(&self.ctx, &canonical, &self.ctx.git.probe(&path))
+            // Git reports physical roots. Resolve aliases for the Git question
+            // only, so a symlink to a repository still counts as that repository
+            // while WorkspacePath identity keeps the user's lexical spelling.
+            let git_path = std::fs::canonicalize(&path)
+                .ok()
+                .and_then(|p| self.ctx.canonicalize(&p.to_string_lossy()))
+                .unwrap_or_else(|| canonical.clone());
+            classify_git(
+                &self.ctx,
+                &git_path,
+                &self.ctx.git.probe(Path::new(&git_path)),
+            )
         } else {
             // A missing directory is a legal observation; there is
             // simply nothing to detect in it, and no child process to ask.
@@ -608,7 +627,7 @@ impl WorkspaceObserving for WorkspaceResolver {
 }
 
 /// Pure half of Git detection: raw git output in, [`GitDetection`] out, with the
-/// Home exclusions applied. No filesystem, no process — this is what makes
+/// directory-root and Home exclusions applied. No filesystem, no process — this makes
 /// the dotfiles-swallowing-the-Home case testable without a repository.
 pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> GitDetection {
     match probe.state {
@@ -631,6 +650,14 @@ pub fn classify_git(ctx: &ResolverContext, observed: &str, probe: &GitProbe) -> 
                 .or_else(|| {
                     parent_of(&common_dir).and_then(|p| ctx.canonicalize_from(&p, observed))
                 });
+
+            // Defense in depth for injected probes and explicit Git environment
+            // overrides: evidence rooted at an ancestor is never this path's Git
+            // identity. Bare repositories have no toplevel; their common dir is
+            // the observed directory itself.
+            if !ctx.same_location(toplevel.as_deref().unwrap_or(&common_dir), observed) {
+                return GitDetection::None;
+            }
 
             // A repository rooted at the user's Home is not evidence.
             if let Some(home) = ctx.user_home_canonical() {
@@ -1063,7 +1090,7 @@ bare
     #[test]
     fn git_output_is_resolved_against_the_observed_path() {
         let c = ctx();
-        let probe = detected_probe(".git", Some("/Users/me/repo"));
+        let probe = detected_probe(".git", Some("/Users/me/repo/sub/dir"));
         match classify_git(&c, "/Users/me/repo/sub/dir", &probe) {
             GitDetection::Detected { common_dir, .. } => {
                 assert_eq!(common_dir, "/Users/me/repo/sub/dir/.git")
@@ -1098,6 +1125,35 @@ bare
             ),
             GitDetection::None
         );
+    }
+
+    #[test]
+    fn ancestor_git_evidence_is_rejected_on_unix_and_windows() {
+        assert_eq!(
+            classify_git(
+                &ctx(),
+                "/work/repo/subdir",
+                &detected_probe("/work/repo/.git", Some("/work/repo")),
+            ),
+            GitDetection::None
+        );
+        let windows = ResolverContext {
+            style: Some(PathStyle::Windows),
+            ..ResolverContext::inert()
+        };
+        let probe = detected_probe("C:/Work/Repo/.git", Some("C:/Work/Repo"));
+        assert_eq!(
+            classify_git(&windows, r"c:\work\repo\child", &probe),
+            GitDetection::None
+        );
+        assert!(matches!(
+            classify_git(&windows, r"c:\work\repo", &probe),
+            GitDetection::Detected { .. }
+        ));
+        assert!(matches!(
+            classify_git(&ctx(), "/work/bare.git", &detected_probe(".", None)),
+            GitDetection::Detected { .. }
+        ));
     }
 
     /// Missing `.git` — the resolver's raw answer is `None`, and only the

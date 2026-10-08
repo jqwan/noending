@@ -10,7 +10,7 @@ import type { Agent } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
- * 会话两个子页（概览 / 对话）共用的头部动作簇：移入回收站 / 增量同步 /
+ * 会话两个子页（概览 / 对话）共用的头部动作簇：归档 / 增量同步 /
  * 内嵌终端 / 继续——与两段子页切换器并排，构成每个子页一致的右上角。
  *
  * 「内嵌终端」是先跳后启：已有活终端（含会话页校验匹配当场绑定的）直接
@@ -20,22 +20,21 @@ import type { Route } from "../../app/routes";
  *
  * 「继续」是 Agent 图标按钮，点击直接在会话格式对应的桌面应用里打开（无预览）。
  * 启用与否是格式事实：没有桌面路由的格式（claude_code / pi / antigravity_cli）
- * 置灰并说明原因，桌面应用未安装同样置灰；回收站中的会话整簇收起为一颗
- * 禁用的继续键——后端同样拒绝。
+ * 置灰并说明原因。已归档会话禁用终端和桌面继续，仍可增量同步。
  */
-export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, trashed, navigate, onChanged }: {
+export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, archived, navigate, onChanged }: {
   sessionId: string;
   agent: Agent;
   /** 会话的 source_kind（antigravity 靠它区分两个存储）；未读到时按 agent 兜底。 */
   sourceKind: string | undefined;
   title: string;
-  trashed: boolean;
+  archived: boolean;
   navigate: (r: Route) => void;
-  /** 回收站 / 同步完成后由页面刷新数据。 */
+  /** 已归档 / 同步完成后由页面刷新数据。 */
   onChanged: () => void;
 }) {
-  const [confirmTrash, setConfirmTrash] = useState(false);
-  const [trashBusy, setTrashBusy] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [archiveBusy, setArchiveBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [terminalBusy, setTerminalBusy] = useState(false);
@@ -43,8 +42,8 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
 
   const hasTerminal = capsOf(agent, sourceKind).terminal;
 
-  const { disabled: launchDisabled, title: launchTitle } = trashed
-    ? { disabled: true, title: "回收站中的会话不能继续；先恢复它。" }
+  const { disabled: launchDisabled, title: launchTitle } = archived
+    ? { disabled: true, title: "已归档的会话不能继续；先恢复它。" }
     : desktopContinueState({ agent, source_kind: sourceKind ?? "" }, agentStatus?.[agent] ?? null);
 
   const handleLaunch = () => {
@@ -96,40 +95,31 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     }
   };
 
-  const doTrash = async () => {
-    setTrashBusy(true);
+  const doArchive = async () => {
+    setArchiveBusy(true);
     try {
-      await api.trashSession(sessionId);
-      showToast("已移入回收站");
-      setConfirmTrash(false);
+      await api.archiveSession(sessionId);
+      showToast("已归档");
+      setConfirmArchive(false);
       onChanged();
     } catch (e) {
-      showToast(`移入回收站失败：${String(e)}`);
+      showToast(`归档失败：${String(e)}`);
     } finally {
-      setTrashBusy(false);
+      setArchiveBusy(false);
     }
   };
 
-  if (trashed) {
-    // 回收站中的会话：后端拒绝继续——如实呈现为不可用。
-    return (
-      <button className="btn ghost icon-button" disabled aria-label="继续" title={launchTitle}>
-        <AgentIcon agent={agent} size={18} />
-      </button>
-    );
-  }
-
   return (
     <>
-      <button
+      {!archived && <button
         className="btn ghost icon-button"
-        aria-label="移入回收站"
-        title="移入回收站"
-        onClick={() => setConfirmTrash(true)}
-        disabled={trashBusy}
+        aria-label="归档"
+        title="归档"
+        onClick={() => setConfirmArchive(true)}
+        disabled={archiveBusy}
       >
-        <Icon name="trash" />
-      </button>
+        <Icon name="archive" />
+      </button>}
       <button
         className="btn ghost icon-button"
         aria-label="增量同步"
@@ -144,7 +134,7 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
           className="btn ghost icon-button"
           aria-label="内嵌终端"
           title="打开内嵌终端（已有活终端则直接跳转）"
-          disabled={terminalBusy}
+          disabled={terminalBusy || archived}
           onClick={() => void openTerminal()}
         >
           <Icon name="terminal" />
@@ -160,25 +150,25 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
         <AgentIcon agent={agent} size={18} />
       </button>
 
-      {confirmTrash && (
-        <Modal title="移入回收站" onClose={() => { if (!trashBusy) setConfirmTrash(false); }}>
+      {confirmArchive && (
+        <Modal title="归档" onClose={() => { if (!archiveBusy) setConfirmArchive(false); }}>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            <b>{title}</b> 会从 Sessions 列表、搜索与继续入口中消失，出现在 Sessions 页的「回收站」里。
+            <b>{title}</b> 会移至「已归档」，归档后不能通过 NoEnding 继续。消息同步、搜索和摘要更新保持可用。
           </p>
           {/* 要求把两个概念摆在同一处明确区分：「从任务移除」只改这条会话的
-              所属任务（详情页的「更改 / 选择」），这里是全局回收站。 */}
+              所属任务（详情页的「更改 / 选择」），这里是全局已归档。 */}
           <div className="card hairline" style={{ marginBottom: 12 }}>
             <p style={{ margin: "0 0 6px" }}>
               <b>从任务移除</b> = 只修改这条会话的所属任务，会话本身留在列表里。
             </p>
             <p style={{ margin: 0 }}>
-              <b>移入回收站</b> = 在 NoEnding 中全局隐藏该 Session。Agent 原始会话不会被删除。
+              <b>归档</b> = 将会话移至「已归档」。Agent 原始会话不会被删除。
             </p>
           </div>
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setConfirmTrash(false)} disabled={trashBusy}>取消</button>
-            <button className="btn primary" onClick={doTrash} disabled={trashBusy}>
-              {trashBusy ? "处理中…" : "移入回收站"}
+            <button className="btn" onClick={() => setConfirmArchive(false)} disabled={archiveBusy}>取消</button>
+            <button className="btn primary" onClick={doArchive} disabled={archiveBusy}>
+              {archiveBusy ? "处理中…" : "归档"}
             </button>
           </div>
         </Modal>

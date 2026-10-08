@@ -164,6 +164,61 @@ fn probe_of_a_registered_path_predicts_its_existing_project() {
     assert_eq!(probe.git_state.as_deref(), Some("none"));
 }
 
+#[test]
+fn default_chat_path_probe_predicts_the_same_bucket_as_attachment_without_writing() {
+    use noending::workspace::project::ProjectProjection;
+    use noending::workspace::WorkspaceAttaching;
+
+    let (_dir, db) = temp_db();
+    let home = NoEndingHome::new("/app/noending", None).unwrap();
+    let policy = HomePolicy::new(&home);
+    let resolver = WorkspaceResolver::new(ResolverContext::inert());
+    let first = home
+        .default_workspace
+        .join("chat-a")
+        .to_string_lossy()
+        .to_string();
+    let second = home
+        .default_workspace
+        .join("chat-b")
+        .to_string_lossy()
+        .to_string();
+    let hint = probe_workspace_path(&db, &resolver, &policy, &first)
+        .unwrap()
+        .project
+        .unwrap();
+    assert_eq!(hint.name.as_deref(), Some("NoEnding Workspace"));
+    assert!(!hint.known);
+    assert!(
+        db.list_projects().unwrap().is_empty(),
+        "probing never creates a project"
+    );
+
+    let projection = ProjectProjection::with_policy(&resolver, &policy);
+    let path_id = db
+        .tx(|tx| projection.ensure_path(tx, &first))
+        .unwrap()
+        .unwrap();
+    let project_id = db.get_workspace_path(&path_id).unwrap().unwrap().project_id;
+    let hint = probe_workspace_path(&db, &resolver, &policy, &second)
+        .unwrap()
+        .project
+        .unwrap();
+    assert!(hint.known);
+    assert_eq!(hint.id.as_deref(), Some(project_id.as_str()));
+    let second_id = db
+        .tx(|tx| projection.ensure_path(tx, &second))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.get_workspace_path(&second_id)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        project_id
+    );
+}
+
 // recent list
 
 /// The picker's candidates: known paths keep their Project, unknown Session

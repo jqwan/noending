@@ -17,7 +17,6 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
         id: new_id(),
         title: title.into(),
         description: String::new(),
-        lifecycle: "active".into(),
         visibility: "normal".into(),
         created_at: now(),
         updated_at: now(),

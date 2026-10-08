@@ -65,7 +65,7 @@ export const api = {
     invoke<RecentWorkspacePath[]>("list_recent_workspace_paths", { limit }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
 
-  // Workstream paths, lifecycle, recycle bin
+  // Workstream paths and archive state
   listWorkstreamPaths: (workstreamId: string) =>
     invoke<WorkstreamPathRow[]>("list_workstream_paths", { workstreamId }),
   addWorkstreamPath: (workstreamId: string, path: string) =>
@@ -75,9 +75,7 @@ export const api = {
   /** `orderedWorkspacePathIds` must be the complete current list. */
   reorderWorkstreamPaths: (workstreamId: string, orderedWorkspacePathIds: string[]) =>
     invoke<WorkstreamPath[]>("reorder_workstream_paths", { workstreamId, orderedWorkspacePathIds }),
-  setWorkstreamLifecycle: (workstreamId: string, lifecycle: "active" | "completed") =>
-    invoke<Workstream>("set_workstream_lifecycle", { workstreamId, lifecycle }),
-  /** Archive is absolute in v0.2: it only moves the card into the recycle bin. */
+  /** Archive blocks new sessions and preserves task data. */
   archiveWorkstream: (workstreamId: string) =>
     invoke<Workstream>("archive_workstream", { workstreamId }),
   restoreWorkstream: (workstreamId: string) =>
@@ -135,7 +133,7 @@ export const api = {
       includeClosed: includeClosed ?? false,
     }),
 
-  listSessions: (projectId?: string, agent?: Agent, scope?: "active" | "trash" | "all") =>
+  listSessions: (projectId?: string, agent?: Agent, scope?: "unarchived" | "archived" | "all") =>
     invoke<Session[]>("list_sessions", {
       projectId: projectId ?? null,
       agent: agent ?? null,
@@ -143,12 +141,12 @@ export const api = {
     }),
   // Session Lifecycle: UI 只提交 session id。没有删除 job，也不删来源：
   // NoEnding 不删 Agent 自有的源；permanent delete 是本地清除。
-  trashSession: (sessionId: string) => invoke<Session>("trash_session", { sessionId }),
+  archiveSession: (sessionId: string) => invoke<Session>("archive_session", { sessionId }),
   restoreSession: (sessionId: string) => invoke<Session>("restore_session", { sessionId }),
   /** 无状态预览：fresh root source verdict + counts，没有 job。 */
   getSessionLocalDeletePreview: (sessionId: string) =>
     invoke<LocalDeletePreview>("get_session_local_delete_preview", { sessionId }),
-  /** 执行本地清除：trashed + fresh root missing 才允许。 */
+  /** 仅已归档的会话可永久删除；不删除 Agent 源文件。 */
   permanentlyDeleteSession: (sessionId: string) =>
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
@@ -246,7 +244,7 @@ export const api = {
     invoke<void>("terminal_refresh", { terminalId }),
   /** 侧边栏「运行中」的显式关闭：杀进程并移除记录。 */
   terminalClose: (terminalId: string) =>
-    invoke<void>("terminal_close", { terminalId }),
+    invoke<import("./types").TerminalSummary>("terminal_close", { terminalId }),
 
   // 内嵌终端：终端子页的直启入口——prepare + embedded launch 一步完成（不走
   // 继续会话弹窗），之后通过 attach 协议接管。输出走

@@ -25,7 +25,7 @@
 //!   listing. Produces `WorkspaceObservation`, never writes.
 //! * [`project`]    — `ensure_workspace_path` and every Project-ownership rule
 //!   (auto-create, upgrade, merge, reassign, zero-path deletion).
-//! * [`workstream`] — the ordered WorkstreamPath list, lifecycle and recycle bin.
+//! * [`workstream`] — the ordered WorkstreamPath list, archive state.
 //! * [`session`]    — Session→WorkspacePath attach and the derived Project cache.
 //!
 //! ## Rules this layer must never break

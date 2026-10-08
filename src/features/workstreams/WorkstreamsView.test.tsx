@@ -1,0 +1,44 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import WorkstreamsView from "./WorkstreamsView";
+import { api } from "../../api";
+import { viewState } from "../../hooks/useViewState";
+import type { WorkstreamCardData } from "../../types";
+
+const state = vi.hoisted(() => ({ cards: [] as WorkstreamCardData[], refresh: vi.fn() }));
+vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, defaultAgent: "codex", refresh: state.refresh, loadError: "" }) }));
+vi.mock("../../api", () => ({ api: { archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
+vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
+const card = (id: string, visibility = "normal") => ({ id, title: id, visibility, session_count: 1, path_count: 0, created_at: "", updated_at: "" } as WorkstreamCardData);
+beforeEach(() => { vi.clearAllMocks(); viewState.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
+afterEach(cleanup);
+
+it("uses the same searchable cards for both scopes with the correct toolbar actions", () => {
+  const navigate = vi.fn();
+  const { rerender } = render(<WorkstreamsView navigate={navigate} actionSeq={0} />);
+  screen.getByRole("button", { name: "新建任务" });
+  expect(screen.queryByRole("button", { name: "删除全部" })).toBeNull();
+  expect(screen.queryByText("进行中")).toBeNull();
+  screen.getByRole("button", { name: "普通任务" });
+  rerender(<WorkstreamsView navigate={navigate} scope="archived" actionSeq={0} />);
+  screen.getByRole("button", { name: "删除全部" });
+  expect(screen.queryByRole("button", { name: "新建任务" })).toBeNull();
+  expect(document.querySelectorAll(".task-card")).toHaveLength(2);
+  fireEvent.change(screen.getByRole("textbox", { name: "搜索任务" }), { target: { value: "甲" } });
+  expect(document.querySelectorAll(".task-card")).toHaveLength(1);
+  screen.getByRole("button", { name: "永久删除归档甲" });
+});
+
+it("delete all covers archived tasks even when the board is filtered", async () => {
+  vi.mocked(api.deleteWorkstreamPermanently).mockResolvedValue(undefined);
+  render(<WorkstreamsView navigate={() => {}} scope="archived" actionSeq={0} />);
+  fireEvent.change(screen.getByRole("textbox", { name: "搜索任务" }), { target: { value: "甲" } });
+  fireEvent.click(screen.getByRole("button", { name: "删除全部" }));
+  const dialog = screen.getByRole("dialog");
+  expect(dialog.textContent).toContain("2 个任务");
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除全部" }));
+  await waitFor(() => expect(api.deleteWorkstreamPermanently).toHaveBeenCalledTimes(2));
+  expect(api.deleteWorkstreamPermanently).toHaveBeenCalledWith("归档甲");
+  expect(api.deleteWorkstreamPermanently).toHaveBeenCalledWith("归档乙");
+  expect(api.deleteWorkstreamPermanently).not.toHaveBeenCalledWith("普通任务");
+});

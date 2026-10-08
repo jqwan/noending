@@ -3,7 +3,7 @@ import type { Route, SessionEntry } from "../../app/routes";
 
 /**
  * 会话页右上角的两段子页切换：概览（详情事实）/ 对话（整屏阅读）。
- * 与会话看板的「会话列表/回收站」同一交互语言：settings-seg 分段控件、
+ * 与会话看板的「会话列表/已归档」同一交互语言：settings-seg 分段控件、
  * 图标按钮、navigate 驱动、无本地状态。
  *
  * 终端不在这里——它是一等独立视图（view:"terminal"），入口是

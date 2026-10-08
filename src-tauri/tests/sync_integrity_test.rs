@@ -596,35 +596,29 @@ fn mutation_outside_the_owner_is_skipped_not_written() {
     );
 }
 
-/// A trashed Session refuses an explicit summary update outright (the guard
-/// runs before any model call), and nothing is written.
+/// Archiving changes neither task input revisions nor the no-message update
+/// path. Nonempty archived updates are covered by the Context service mock.
 #[test]
-fn trashed_session_refuses_explicit_update() {
-    let db = open_db("trash-reject");
-    let (s, stored) = session_with_messages(
-        &db,
-        "trash-reject-root",
-        &["我们决定使用 PostgreSQL 作为主数据库，不再使用 SQLite 存储业务数据"],
-    );
-    let ws = ws_row(&db, "ws-trash", "trashed routing");
+fn archived_empty_session_keeps_context_update_behavior() {
+    let db = open_db("archive-update");
+    let (s, _) = session_with_messages(&db, "archive-update-root", &[]);
+    let ws = ws_row(&db, "ws-archive", "archived routing");
     db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
-
-    noending::lifecycle::trash_session(&db, &s.id).unwrap();
-
+    let before = db.get_workstream_context_state(&ws.id).unwrap();
+    noending::lifecycle::archive_session(&db, &s.id).unwrap();
+    let after = db.get_workstream_context_state(&ws.id).unwrap();
+    assert_eq!(before.input_revision, after.input_revision);
+    assert_eq!(before.context_revision, after.context_revision);
     let home_dir =
         std::env::temp_dir().join(format!("noending-integrity-context-home-{}", new_id()));
     let home =
         noending::workspace::home::NoEndingHome::new(home_dir.to_str().unwrap(), None).unwrap();
-    let outcome = noending::context::update_session(&db, &s.id, Some(&home));
-    assert!(
-        outcome.is_err(),
-        "a trashed session refuses an explicit summary update"
-    );
+    let outcome = noending::context::update_session(&db, &s.id, Some(&home)).unwrap();
     assert_eq!(
-        db.message_count(&s.id).unwrap(),
-        stored.len() as i64,
-        "the messages themselves were never deleted"
+        outcome.status,
+        noending::domain::ContextUpdateStatus::NoChange
     );
+    assert_eq!(db.message_count(&s.id).unwrap(), 0);
     assert!(db.get_session_context(&s.id).unwrap().is_none());
     assert!(db.items_for_workstream(&ws.id, true).unwrap().is_empty());
 }

@@ -12,9 +12,10 @@ import type { Agent, AgentStatusEntry } from "../../types";
 
 /** 「继续」按钮的可用性与说明。格式判别只需要 agent 与 source_kind。 */
 export function desktopContinueState(
-  session: { agent: Agent; source_kind?: string | null },
+  session: { agent: Agent; source_kind?: string | null; archived_at?: string | null },
   status: AgentStatusEntry | null | undefined,
 ): { disabled: boolean; title: string } {
+  if (session.archived_at) return { disabled: true, title: "已归档的会话不能继续，请先取消归档" };
   const caps = capsOf(session.agent, session.source_kind);
   const desktopAbsent = caps.desktop && status != null && !status.desktop_app_present;
   return {

@@ -87,7 +87,7 @@ export default function AssistantView({ scope, navigate }: {
 
   useEffect(() => {
     api.assistantConfigGet().then(setCfg).catch(console.error);
-    api.listWorkstreamCards().then((cs) => setWorkstreams(cs.filter((c) => c.lifecycle === "active" && c.visibility === "normal"))).catch(console.error);
+    api.listWorkstreamCards().then((cs) => setWorkstreams(cs)).catch(console.error);
     api.listProjects().then(setProjects).catch(console.error);
     api.getAgentStatus()
       .then((s) => setTuiAgents((Object.keys(AGENT_LABELS) as Agent[]).filter((a) => s[a]?.terminal_cli)))

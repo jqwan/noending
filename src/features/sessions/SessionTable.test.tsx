@@ -14,18 +14,18 @@ afterEach(cleanup);
 const session = { id: "s1", title: "修复布局", agent: "codex", cwd: "/test/project", started_at: "2026-09-21T00:00:00Z" } as Session;
 it("opens details separately from resume and trash actions", () => {
   const open = vi.fn(); const resume = vi.fn(); const trash = vi.fn();
-  render(<SessionCards sessions={[session]} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={open} onResume={resume} onTrash={trash} />);
+  render(<SessionCards sessions={[session]} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={open} onResume={resume} onArchive={trash} />);
   // 行内「继续」= Agent 图标按钮；可用性由格式能力 + 桌面端在场决定。
   fireEvent.click(screen.getByLabelText("继续修复布局"));
   expect(resume).toHaveBeenCalledWith("s1");
-  fireEvent.click(screen.getByLabelText("将修复布局移入回收站"));
+  fireEvent.click(screen.getByLabelText("将修复布局归档"));
   expect(trash).toHaveBeenCalledWith("s1");
   expect(open).not.toHaveBeenCalled();
   fireEvent.click(screen.getByText("修复布局"));
   expect(open).toHaveBeenCalledWith("s1");
 });
 it("limits initial rows and reveals more without losing sessions", () => {
-  render(<SessionCards sessions={Array.from({ length: 101 }, (_, i) => ({ ...session, id: String(i), title: `会话${i}` }))} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={() => {}} onResume={() => {}} onTrash={() => {}} />);
+  render(<SessionCards sessions={Array.from({ length: 101 }, (_, i) => ({ ...session, id: String(i), title: `会话${i}` }))} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
   expect(screen.queryByText("会话100")).toBeNull();
   fireEvent.click(screen.getByText("显示更多（剩余 1）"));
   expect(screen.getByText("会话100")).toBeTruthy();
@@ -38,7 +38,7 @@ it("shows the single owner workstream and marks the unowned case", () => {
     ]}
     workstreamTitleById={new Map([["w1", "会话重构"]])}
     projectNameById={new Map()}
-    onOpen={() => {}} onResume={() => {}} onTrash={() => {}} />);
+    onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
 
   // 一行最多一个任务：标题只有一个，没有「+N」这种多任务计数。
   screen.getByText("会话重构");
@@ -54,7 +54,7 @@ it("renders agent icon before session title and plain agent label in meta", () =
       projectNameById={new Map()}
       onOpen={() => {}}
       onResume={() => {}}
-      onTrash={() => {}}
+      onArchive={() => {}}
     />
   );
 
@@ -77,7 +77,7 @@ it("renders card view by default and list view when viewMode is list", () => {
       projectNameById={new Map()}
       onOpen={() => {}}
       onResume={() => {}}
-      onTrash={() => {}}
+      onArchive={() => {}}
     />
   );
 
@@ -94,7 +94,7 @@ it("renders card view by default and list view when viewMode is list", () => {
       viewMode="list"
       onOpen={() => {}}
       onResume={() => {}}
-      onTrash={() => {}}
+      onArchive={() => {}}
     />
   );
   expect(document.querySelector(".session-card")).toBeNull();

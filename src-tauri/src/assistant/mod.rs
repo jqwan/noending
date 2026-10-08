@@ -81,10 +81,10 @@ fn build_domain_snapshot(db: &Db, query: &str) -> Result<String> {
     snap.push_str("== Workstreams ==\n");
     for w in db.list_workstreams(None)?.into_iter().take(20) {
         snap.push_str(&format!(
-            "- id={} | {} | lifecycle={} | {}\n",
+            "- id={} | {} | visibility={} | {}\n",
             w.id,
             w.title,
-            w.lifecycle,
+            w.visibility,
             if w.description.is_empty() {
                 ""
             } else {

@@ -15,7 +15,7 @@ vi.mock("../../api", () => ({
     listProjects: vi.fn(),
     listWorkstreams: vi.fn(),
     listIngestSources: vi.fn(),
-    trashSession: vi.fn(),
+    archiveSession: vi.fn(),
     restoreSession: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
     permanentlyDeleteSession: vi.fn(),
@@ -46,7 +46,7 @@ function session(over: Partial<Session> = {}): Session {
     started_at: "2026-09-01T00:00:00Z",
     last_activity_at: "2026-09-02T00:00:00Z",
     last_conversation_at: "2026-09-02T00:00:00Z",
-    trashed_at: null,
+    archived_at: null,
         source_kind: "codex_rollout",
         source_path: "/tmp/rollout.jsonl",
         metadata: {},
@@ -78,7 +78,7 @@ beforeEach(() => {
   vi.mocked(api.listSessions).mockReset();
   vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);
   vi.mocked(api.listWorkstreams).mockReset().mockResolvedValue([
-    { id: "w1", title: "会话与 Workstream 重构", description: "", lifecycle: "active", visibility: "normal", created_at: "", updated_at: "" },
+    { id: "w1", title: "会话与 Workstream 重构", description: "", visibility: "normal", created_at: "", updated_at: "" },
   ] as never);
   vi.mocked(api.listIngestSources).mockReset().mockResolvedValue([{ id: "src", agent: "codex", path: "/p", enabled: true, origin: "default", created_at: "" }] as never);
   vi.mocked(listen).mockReset().mockResolvedValue(() => {});
@@ -118,4 +118,19 @@ it("opens the new-session page from the toolbar and empty-state action", async (
   expect(navigate).toHaveBeenCalledTimes(2);
   expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("shows archived sessions in the same cards and filters, with continue disabled", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([session({ title: "归档会话", archived_at: "2026-10-08", owner_workstream_id: "w1" })]);
+  render(<SessionsView navigate={navigate} scope="archived" />);
+  await screen.findByText("归档会话");
+  expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "archived");
+  expect(document.querySelectorAll(".session-card")).toHaveLength(1);
+  expect((screen.getByRole("button", { name: "继续归档会话" }) as HTMLButtonElement).disabled).toBe(true);
+  screen.getByRole("button", { name: "取消归档归档会话" });
+  screen.getByRole("button", { name: "永久删除归档会话" });
+  screen.getByRole("button", { name: "删除全部" });
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
+  fireEvent.change(screen.getByRole("textbox", { name: "搜索会话" }), { target: { value: "不匹配" } });
+  expect(screen.queryByText("归档会话")).toBeNull();
 });

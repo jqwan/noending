@@ -7,7 +7,7 @@ import type { Route } from "../../app/routes";
 
 /**
  * 项目详情与任务详情共用的会话迷你列表：整行点击进会话详情，行内无动作
- * （继续 / 回收站在会话页头部）。展示与交互两处逐字节一致——Agent 图标 +
+ * （继续 / 已归档在会话页头部）。展示与交互两处逐字节一致——Agent 图标 +
  * 标题一行，右侧相对时间；默认 12 条，「查看全部 / 收起」展开。
  */
 export default function SessionMiniList({ sessions, emptyText, navigate }: {

@@ -22,7 +22,7 @@ vi.mock("../api", () => ({
     launchEmbeddedResume: vi.fn().mockRejectedValue(new Error("no terminal")),
     getSessionMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, tail_ordinal: 0, remaining: 0 }),
     getSessionDetail: vi.fn().mockResolvedValue({
-      session: { agent: "codex", source_kind: "codex", trashed_at: null, title: "T" },
+      session: { agent: "codex", source_kind: "codex", archived_at: null, title: "T" },
       messages: [],
       owner_workstream: null,
       workspace_path: null,
@@ -36,7 +36,7 @@ vi.mock("../api", () => ({
     listWorkstreams: vi.fn().mockResolvedValue([]),
     getWorkspaceSettings: vi.fn().mockResolvedValue({ default_workspace: "" }),
     revealSessionSource: vi.fn(),
-    trashSession: vi.fn(),
+    archiveSession: vi.fn(),
     restoreSession: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
     permanentlyDeleteSession: vi.fn(),

@@ -13,8 +13,8 @@ use std::sync::Mutex;
 mod support;
 
 use noending::domain::{
-    git_state, Agent, GitDetection, GitWorktreeKind, Project, Session, WorkspaceObservation,
-    WorkspacePath,
+    git_state, Agent, GitDetection, GitWorktreeKind, Project, ProjectKind, Session,
+    WorkspaceObservation, WorkspacePath,
 };
 use noending::storage::workspace::{
     delete_zero_path_project_conn, insert_workspace_path_conn, rename_project_conn,
@@ -1262,6 +1262,114 @@ fn default_workspace_project_is_named_noending_workspace() {
 }
 
 #[test]
+fn default_workspace_chat_directories_share_a_project_and_derive_kind_after_rename() {
+    let (_d, db) = temp_db();
+    let home = Home::new(
+        "/app/noending",
+        &["/app/noending/data"],
+        Some("/app/noending/workspace"),
+    );
+    // The first observed path may be a conversation subdirectory, not the root.
+    let a =
+        ensure_workspace_path(&db, &plain("/app/noending/workspace/chat-a", true), &home).unwrap();
+    let b =
+        ensure_workspace_path(&db, &plain("/app/noending/workspace/chat-b", true), &home).unwrap();
+    let root = ensure_workspace_path(&db, &plain("/app/noending/workspace", true), &home).unwrap();
+    assert_eq!(a.project_id, b.project_id);
+    assert_eq!(a.project_id, root.project_id);
+    assert_eq!(project_of(&db, &a).name, "NoEnding Workspace");
+    let outside = ensure_workspace_path(
+        &db,
+        &plain("/app/noending/workspace-backup/chat-a", true),
+        &home,
+    )
+    .unwrap();
+    assert_ne!(a.project_id, outside.project_id);
+    let ordinary = project_detail(&db, &outside.project_id, &home)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ordinary.kind, ProjectKind::Directory);
+
+    db.tx(|tx| rename_project_conn(tx, &a.project_id, "我的默认聊天"))
+        .unwrap();
+    let detail = project_detail(&db, &a.project_id, &home).unwrap().unwrap();
+    assert_eq!(detail.project.name, "我的默认聊天");
+    assert_eq!(detail.kind, ProjectKind::ChatDirectory);
+    let cards = noending::commands::project::project_cards(&db, &home).unwrap();
+    assert_eq!(
+        cards.iter().find(|c| c.id == a.project_id).unwrap().kind,
+        detail.kind
+    );
+    assert_eq!(detail.workspace_paths.len(), 3);
+}
+
+#[test]
+fn git_in_one_chat_directory_does_not_absorb_other_chats() {
+    for existing_family in [false, true] {
+        let (_d, db) = temp_db();
+        let home = Home::new("/app/noending", &[], Some("/app/noending/workspace"));
+        let a =
+            ensure_workspace_path(&db, &plain("/app/noending/workspace/a", true), &home).unwrap();
+        let b =
+            ensure_workspace_path(&db, &plain("/app/noending/workspace/b", true), &home).unwrap();
+        assert_eq!(a.project_id, b.project_id);
+        let existing = existing_family.then(|| {
+            ensure_workspace_path(
+                &db,
+                &repo("/work/main", "/work/main/.git", GitWorktreeKind::Main, &[]),
+                &home,
+            )
+            .unwrap()
+        });
+        let upgraded = ensure_workspace_path(
+            &db,
+            &repo(
+                "/app/noending/workspace/a",
+                "/work/main/.git",
+                GitWorktreeKind::Linked,
+                &[],
+            ),
+            &home,
+        )
+        .unwrap();
+        assert_ne!(upgraded.project_id, b.project_id);
+        if let Some(existing) = existing {
+            assert_eq!(upgraded.project_id, existing.project_id);
+        }
+        assert_eq!(
+            db.get_workspace_path(&b.id).unwrap().unwrap().project_id,
+            b.project_id
+        );
+        let chat = project_detail(&db, &b.project_id, &home).unwrap().unwrap();
+        let git = project_detail(&db, &upgraded.project_id, &home)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chat.kind, ProjectKind::ChatDirectory);
+        assert_eq!(chat.workspace_paths.len(), 1);
+        assert_eq!(git.kind, ProjectKind::Git);
+        registry_is_consistent(&db).unwrap();
+    }
+}
+
+#[test]
+fn all_agent_chat_roots_are_classified_without_using_project_names() {
+    let (_d, db) = temp_db();
+    for rel in [
+        "Documents/Qoder/chat-a",
+        "Workbuddy/chat-b",
+        "Documents/Codex/chat-c",
+    ] {
+        let path = ensure(&db, &plain(&home_path(rel), true));
+        db.tx(|tx| rename_project_conn(tx, &path.project_id, "用户改过的名字"))
+            .unwrap();
+        let detail = project_detail(&db, &path.project_id, &UnrestrictedWorkspace)
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.kind, ProjectKind::ChatDirectory);
+    }
+}
+
+#[test]
 fn user_rename_is_customized_and_automatic_naming_stops() {
     let (_d, db) = temp_db();
     let path = ensure(&db, &plain("/work/alpha", true));
@@ -1336,7 +1444,7 @@ fn project_detail_has_the_frozen_shape() {
     add_ws_path(&db, "w-related", &sibling.id);
     add_ws_path(&db, "w-related", &path.id);
 
-    let detail = project_detail(&db, &path.project_id)
+    let detail = project_detail(&db, &path.project_id, &UnrestrictedWorkspace)
         .unwrap()
         .expect("detail");
     assert_eq!(detail.project.id, path.project_id);
@@ -1395,6 +1503,7 @@ fn project_detail_has_the_frozen_shape() {
     assert_eq!(
         keys,
         vec![
+            "kind",
             "project",
             "remote_url",
             "sessions",
@@ -1417,7 +1526,9 @@ fn project_detail_has_the_frozen_shape() {
 
     // A Project that does not exist is `None`, and the command maps that to an
     // error rather than an empty object.
-    assert!(project_detail(&db, "p-never").unwrap().is_none());
+    assert!(project_detail(&db, "p-never", &UnrestrictedWorkspace)
+        .unwrap()
+        .is_none());
     registry_is_consistent(&db).expect("consistent");
 }
 
@@ -1840,7 +1951,7 @@ fn refresh_does_not_touch_session_history() {
         before
     );
     let s = { db.get_session(&s_hist.id).unwrap().expect("session intact") };
-    assert!(s.trashed_at.is_none());
+    assert!(s.archived_at.is_none());
     assert_eq!(s.workspace_path_id.as_deref(), Some(wp.id.as_str()));
 }
 
@@ -1901,7 +2012,9 @@ fn a_project_detail_surfaces_the_repository_remote() {
     let path = ensure_workspace_path(&db, &observation, &UnrestrictedWorkspace).expect("ensure");
     let project = db.get_project(&path.project_id).unwrap().expect("project");
 
-    let detail = project_detail(&db, &project.id).unwrap().expect("detail");
+    let detail = project_detail(&db, &project.id, &UnrestrictedWorkspace)
+        .unwrap()
+        .expect("detail");
     assert_eq!(
         detail.remote_url.as_deref(),
         Some("https://example.com/me/repo.git"),
@@ -1930,7 +2043,9 @@ fn a_project_detail_surfaces_the_repository_remote() {
     };
     let moved = WorkspaceObservation { git, ..observation };
     ensure_workspace_path(&db, &moved, &UnrestrictedWorkspace).expect("re-ensure");
-    let detail = project_detail(&db, &project.id).unwrap().expect("detail");
+    let detail = project_detail(&db, &project.id, &UnrestrictedWorkspace)
+        .unwrap()
+        .expect("detail");
     assert_eq!(
         detail.remote_url.as_deref(),
         Some("https://example.com/up/repo.git"),

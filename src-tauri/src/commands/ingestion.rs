@@ -172,9 +172,8 @@ fn spawn_worker(app: AppHandle) {
             state.ingestion.next()
         } {
             let (discovered, messages, error) = run_scope(&app, &scope);
-            // 绑定收尾：预指定 id（claude / pi）按精确身份认领未绑定终端。
-            // codex / agy 不参与——内容证据活不过 TUI 的重绘流，它们的终端
-            // 保持未绑定，入口在侧边栏。
+            // Resolve pending terminals only by their prespecified or
+            // Agent-reported native identity after source ingestion.
             {
                 let state = app.state::<AppState>();
                 let _ = super::with_db(&state, |db| {

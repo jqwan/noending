@@ -11,12 +11,11 @@ export type Agent =
   | "zcode"
   | "antigravity";
 
-/** v0.2 folded `abandoned` into `completed` and renamed `open` to `active`. */
-export type WorkstreamLifecycle = "active" | "completed";
-/** `archived` is the recycle bin; there is no other non-normal state. */
+/** Task archive state; there is no active/completed classification. */
 export type WorkstreamVisibility = "normal" | "archived";
 /** `missing` = used to be Git-backed; it never detaches the path from its Project. */
 export type WorkspaceGitState = "none" | "detected" | "missing";
+export type ProjectKind = "git" | "directory" | "chat_directory";
 
 export interface Project {
   id: string;
@@ -35,7 +34,7 @@ export interface ProjectCardData {
   id: string;
   name: string;
   name_customized: boolean;
-  has_git_identity: boolean;
+  kind: ProjectKind;
   path_count: number;
   missing_path_count: number;
   primary_workstream_count: number;
@@ -146,6 +145,7 @@ export interface WorkspaceSettings {
 /** Project detail (backend: get_project_detail). */
 export interface ProjectDetailData {
   project: Project;
+  kind: ProjectKind;
   workspace_paths: WorkspacePath[];
   workstreams: ProjectWorkstreamRow[];
   sessions: Session[];
@@ -164,7 +164,6 @@ export interface Workstream {
   id: string;
   title: string;
   description: string;
-  lifecycle: WorkstreamLifecycle;
   visibility: WorkstreamVisibility;
   created_at: string;
   updated_at: string;
@@ -182,7 +181,6 @@ export interface WorkstreamCardData {
   project_id: string | null;
   title: string;
   description: string;
-  lifecycle: WorkstreamLifecycle;
   visibility: WorkstreamVisibility;
   created_at: string;
   updated_at: string;
@@ -224,8 +222,8 @@ export interface Session {
   last_activity_at: string | null;
   /** 会话最后一条真实用户/Assistant 消息时间。 */
   last_conversation_at: string | null;
-  /** Single lifecycle authority: null = Normal, timestamp = 回收站. */
-  trashed_at: string | null;
+  /** Single lifecycle authority: null = Normal, timestamp = 已归档. */
+  archived_at: string | null;
   /** 根源：格式描述与路径（详情页可定位）。 */
   source_kind: string;
   source_path: string;
@@ -505,7 +503,6 @@ export interface WorkstreamContextView {
   workstream_id: string;
   title: string;
   description: string;
-  lifecycle: string;
   sections: WorkstreamContextSection[];
   context_revision: number;
   input_revision: number;
@@ -722,9 +719,10 @@ export interface LaunchResult {
 /** terminal_list / terminal_for_session 的一行：一个内嵌终端的运行时事实。 */
 export interface TerminalSummary {
   terminal_id: string;
-  /** 未绑定时为 null。绑定只有两种精确来源：预指定 session id（claude/pi）
-   *  在摄入发现时精确匹配；codex/agy 由会话页终端入口校验匹配后当场绑定。 */
+  /** 当前原生会话尚未被摄入或身份未知时为 null。 */
   session_id: string | null;
+  /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
+  identity_revision: number;
   agent: Agent;
   cwd: string | null;
   created_at: string;
@@ -732,6 +730,14 @@ export interface TerminalSummary {
   exit_code: number | null;
   /** 绑定会话的显示标题（terminal_list 查库补齐）；未绑定为 null。 */
   session_title: string | null;
+}
+
+/** 终端的当前原生身份发生变化；旧版本事件不能覆盖新身份。 */
+export interface TerminalBound {
+  terminal_id: string;
+  session_id: string | null;
+  identity_revision: number;
+  cwd?: string | null;
 }
 
 /** terminal_attach 的回答：元数据 + 当前 scrollback 快照（base64）+ 几何。 */

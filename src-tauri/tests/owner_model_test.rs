@@ -100,7 +100,6 @@ fn workstream(db: &Db, title: &str) -> Workstream {
         id: new_id(),
         title: title.into(),
         description: String::new(),
-        lifecycle: "active".into(),
         visibility: "normal".into(),
         created_at: now(),
         updated_at: now(),
@@ -190,10 +189,10 @@ fn trash_and_restore_preserve_the_owner() {
     let s = session(&db, None);
     db.set_session_owner(&s.id, Some(&a.id)).unwrap();
 
-    noending::lifecycle::trash_session(&db, &s.id).unwrap();
+    noending::lifecycle::archive_session(&db, &s.id).unwrap();
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
-    // Trashed Sessions are inactive: they leave the Workstream's list.
-    assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
+    // Archived Sessions retain their task association and remain visible there.
+    assert_eq!(db.sessions_for_workstream(&a.id).unwrap().len(), 1);
 
     noending::lifecycle::restore_session(&db, &s.id).unwrap();
     assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
@@ -906,7 +905,7 @@ fn preparation_matches_current_owner_tracks_the_row() {
     assert!(preparation_matches_current_owner(&db, &s.id, Some(&b.id)).unwrap());
 
     // A trashed Session matches nothing, and neither does a missing one.
-    noending::lifecycle::trash_session(&db, &s.id).unwrap();
+    noending::lifecycle::archive_session(&db, &s.id).unwrap();
     assert!(!preparation_matches_current_owner(&db, &s.id, Some(&b.id)).unwrap());
     assert!(!preparation_matches_current_owner(&db, "no-such-session", None).unwrap());
 }
@@ -929,8 +928,8 @@ fn new_preparation_refuses_a_workstream_that_no_longer_exists() {
     .prepare_new_in(&db, Agent::Codex, Some(&a.id), None, &workspace)
     .unwrap_err();
     assert!(
-        err.to_string().contains("Workstream"),
-        "the error must name the missing Workstream, got {err}"
+        err.to_string().contains("任务"),
+        "the error must name the missing task, got {err}"
     );
 }
 
@@ -1022,7 +1021,7 @@ fn matching_refuses_a_foreign_agent_and_accepts_a_trashed_session() {
     // A trashed Session claims its Owner as any other Session would.
     let trashed = mk_intent();
     let s = session(&db, None);
-    noending::lifecycle::trash_session(&db, &s.id).unwrap();
+    noending::lifecycle::archive_session(&db, &s.id).unwrap();
     apply_match(&db, &trashed.id, &s, &LaunchWorkspace::default()).unwrap();
     assert_eq!(
         db.get_launch_intent(&trashed.id).unwrap().unwrap().status,
@@ -1143,7 +1142,7 @@ fn the_intent_retry_is_scoped_to_ownerless_sessions_with_waiting_intents() {
     };
     db.insert_launch_intent(&second).unwrap();
     let trashed = session(&db, None);
-    noending::lifecycle::trash_session(&db, &trashed.id).unwrap();
+    noending::lifecycle::archive_session(&db, &trashed.id).unwrap();
     finalize_newly_discovered_root(&db, &trashed, true, &LaunchWorkspace::default()).unwrap();
     assert_eq!(owner_of(&db, &trashed.id).as_deref(), Some(b.id.as_str()));
     assert_eq!(
@@ -1224,4 +1223,34 @@ fn session_search_documents_follow_workstream_and_project_renames() {
         "a deleted Workstream's title must not stay findable through its Sessions"
     );
     assert!(hits_session("ProjY"), "the rest of the document survives");
+}
+
+#[test]
+fn archived_task_refuses_new_preparation_but_unarchive_allows_it() {
+    let db = open_db("prepare-new-archived");
+    let task = workstream(&db, "archive gate");
+    archive_workstream(&db, &task.id).unwrap();
+    let launcher = SessionLauncher {
+        runtime_dir: db.dir.join("runtime"),
+    };
+    let error = launcher
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            Some(&task.id),
+            None,
+            &LaunchWorkspace::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("已归档"));
+    noending::workspace::workstream::restore_workstream(&db, &task.id).unwrap();
+    assert!(launcher
+        .prepare_new_in(
+            &db,
+            Agent::Codex,
+            Some(&task.id),
+            None,
+            &LaunchWorkspace::default()
+        )
+        .is_ok());
 }

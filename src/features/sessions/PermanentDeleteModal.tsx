@@ -6,7 +6,7 @@ import { agentDisplayLabel, sessionDisplayTitle } from "./SessionTable";
 import type { LocalDeletePreview, SourceAvailability } from "../../types";
 
 /**
- * 回收站里的「删除」确认弹窗：打开即读预览（新鲜结论 + 计数），确认后执行
+ * 已归档的「删除」确认弹窗：打开即读预览（新鲜结论 + 计数），确认后执行
  * `permanently_delete_session`。动作名统一叫「删除」，源状态只决定确认前的那句结果说明——
  * 源还在就说明会重新入库，源没了就说明无法找回。
  */

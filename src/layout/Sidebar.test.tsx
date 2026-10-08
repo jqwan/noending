@@ -1,7 +1,7 @@
 // Sidebar 契约：一等导航 + 「运行中」终端列表（registry 运行时事实，事件刷新）。
 // 旧的最近任务/固定列表已由运行终端取代。
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
@@ -18,7 +18,7 @@ vi.mock("../api", () => ({
 
 beforeEach(() => {
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
-  vi.mocked(api.terminalClose).mockReset().mockResolvedValue(undefined);
+  vi.mocked(api.terminalClose).mockReset().mockImplementation(async (terminalId) => terminal({ terminal_id: terminalId }));
 });
 
 afterEach(cleanup);
@@ -32,6 +32,7 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
   return {
     terminal_id: "t-1",
     session_id: null,
+    identity_revision: 0,
     agent: "codex",
     cwd: "/repo/x",
     created_at: new Date().toISOString(),
@@ -128,6 +129,7 @@ describe("Sidebar 运行中终端", () => {
     vi.mocked(api.terminalList).mockResolvedValue([
       terminal({ terminal_id: "t-2", session_id: "s1", session_title: "修复布局" }),
     ]);
+    vi.mocked(api.terminalClose).mockResolvedValue(terminal({ terminal_id: "t-2", session_id: "s1", identity_revision: 1 }));
     const navigate = renderSidebar({ view: "terminal", terminalId: "t-2" });
     expect(await screen.findByText("修复布局")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "关闭终端：修复布局" }));
@@ -153,5 +155,63 @@ describe("Sidebar 运行中终端", () => {
     window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
     window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
     await waitFor(() => expect(api.terminalList).toHaveBeenCalledTimes(3));
+  });
+
+  it("keeps each terminal visible when several terminals share a session", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ terminal_id: "t-1", session_id: "s1", session_title: "同一个会话", identity_revision: 1 }),
+      terminal({ terminal_id: "t-2", session_id: "s1", session_title: "同一个会话", identity_revision: 1 }),
+    ]);
+    const navigate = renderSidebar();
+    const rows = await screen.findAllByText("同一个会话");
+    expect(rows).toHaveLength(2);
+    rows.forEach((row) => fireEvent.click(row));
+    expect(navigate).toHaveBeenNthCalledWith(1, { view: "terminal", terminalId: "t-1" });
+    expect(navigate).toHaveBeenNthCalledWith(2, { view: "terminal", terminalId: "t-2" });
+  });
+
+  it("ignores an old list response after a newer identity refresh", async () => {
+    let resolveOld!: (rows: TerminalSummary[]) => void;
+    vi.mocked(api.terminalList)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce([terminal({ session_id: "b", session_title: "会话 B", identity_revision: 2 })]);
+    renderSidebar();
+    await waitFor(() => expect(api.terminalList).toHaveBeenCalledTimes(1));
+    act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
+    await screen.findByText("会话 B");
+    await act(async () => { resolveOld([terminal({ session_id: "a", session_title: "旧会话 A", identity_revision: 1 })]); });
+    expect(screen.getByText("会话 B")).toBeTruthy();
+    expect(screen.queryByText("旧会话 A")).toBeNull();
+  });
+
+  it("navigates using the identity returned by close instead of the displayed row", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "a", session_title: "会话 A", identity_revision: 1 })]);
+    vi.mocked(api.terminalClose).mockResolvedValue(terminal({ session_id: "b", session_title: "会话 B", identity_revision: 2 }));
+    const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
+    await screen.findByText("会话 A");
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：会话 A" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "b" }));
+  });
+
+  it("returns to the sessions board when close reports a pending identity", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "a", session_title: "会话 A", identity_revision: 1 })]);
+    vi.mocked(api.terminalClose).mockResolvedValue(terminal({ session_id: null, identity_revision: 2 }));
+    const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
+    await screen.findByText("会话 A");
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：会话 A" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "sessions" }));
+  });
+
+  it("does not navigate after the user leaves while close is pending", async () => {
+    let finishClose!: (summary: TerminalSummary) => void;
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "a", session_title: "会话 A", identity_revision: 1 })]);
+    vi.mocked(api.terminalClose).mockReturnValue(new Promise((resolve) => { finishClose = resolve; }));
+    const navigate = vi.fn();
+    const view = render(<Sidebar route={{ view: "terminal", terminalId: "t-1" }} navigate={navigate} onSearch={() => {}} />);
+    await screen.findByText("会话 A");
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端：会话 A" }));
+    view.rerender(<Sidebar route={{ view: "new-session" }} navigate={navigate} onSearch={() => {}} />);
+    await act(async () => { finishClose(terminal({ session_id: "b", identity_revision: 2 })); });
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

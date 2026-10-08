@@ -21,7 +21,9 @@ use crate::storage::workspace::{
 };
 use crate::storage::Db;
 use crate::workspace::identity::auto_project_name;
-use crate::workspace::project::{resolve_common_dir, WorkspacePolicy};
+use crate::workspace::project::{
+    chat_bucket_label, find_chat_bucket_project_conn, resolve_common_dir, WorkspacePolicy,
+};
 use crate::workspace::resolver::{
     exists_on_disk, is_observable, ProbeRejection, WorkspaceObserving,
 };
@@ -125,6 +127,11 @@ pub fn probe_workspace_path(
                 known: true,
             },
             None => {
+                let bucket_label = if matches!(observation.git, GitDetection::Detected { .. }) {
+                    None
+                } else {
+                    chat_bucket_label(&observation.canonical_path, policy)
+                };
                 let family_project = match &observation.git {
                     GitDetection::Detected { common_dir, .. } => {
                         let common = resolve_common_dir(&observation.canonical_path, common_dir);
@@ -138,7 +145,10 @@ pub fn probe_workspace_path(
                                 })
                         }
                     }
-                    _ => None,
+                    _ => match bucket_label {
+                        Some(label) => find_chat_bucket_project_conn(&conn, label)?,
+                        None => None,
+                    },
                 };
                 match family_project {
                     // An identity without a Project cannot happen through (the
@@ -151,10 +161,12 @@ pub fn probe_workspace_path(
                     },
                     None => ProjectHint {
                         id: None,
-                        name: Some(auto_project_name(
-                            &observation.canonical_path,
-                            policy.default_workspace().as_deref(),
-                        )),
+                        name: Some(bucket_label.map(str::to_owned).unwrap_or_else(|| {
+                            auto_project_name(
+                                &observation.canonical_path,
+                                policy.default_workspace().as_deref(),
+                            )
+                        })),
                         known: false,
                     },
                 }

@@ -2,10 +2,11 @@
 //! plus the review P2-1 contract: search_paths covers EVERY workspace path
 //! while representative_paths stays a display-only truncation.
 
-use noending::domain::{Agent, Workstream};
+use noending::domain::{Agent, ProjectKind, Workstream};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::normalize_path;
+use noending::workspace::project::UnrestrictedWorkspace;
 mod support;
 
 fn temp_db() -> (std::path::PathBuf, Db) {
@@ -29,7 +30,6 @@ fn workstream_with_path(db: &Db, id: &str, title: &str, workspace_path_id: &str)
         id: id.into(),
         title: title.into(),
         description: String::new(),
-        lifecycle: "active".into(),
         visibility: "normal".into(),
         created_at: now(),
         updated_at: now(),
@@ -57,10 +57,10 @@ fn session_at(db: &Db, id: &str, path_id: &str, trashed: bool) {
         )
         .unwrap();
     if trashed {
-        // 发现路径不写生命周期列；回收站状态要显式落库。
+        // 发现路径不写生命周期列；已归档状态要显式落库。
         db.write()
             .execute(
-                "UPDATE sessions SET trashed_at = ?1 WHERE id = ?2",
+                "UPDATE sessions SET archived_at = ?1 WHERE id = ?2",
                 [now(), sid],
             )
             .unwrap();
@@ -107,7 +107,7 @@ fn board_card_projection_counts_and_paths() {
     session_at(&db, "s-live", &a, false);
     session_at(&db, "s-trashed", &a, true);
 
-    let cards = noending::commands::project::project_cards(&db).unwrap();
+    let cards = noending::commands::project::project_cards(&db, &UnrestrictedWorkspace).unwrap();
     assert_eq!(cards.len(), 2);
     let card = cards.iter().find(|c| c.id == "p-1").unwrap();
 
@@ -115,8 +115,8 @@ fn board_card_projection_counts_and_paths() {
     assert_eq!(card.missing_path_count, 1, "gamma is observed missing");
     assert_eq!(card.primary_workstream_count, 1);
     assert_eq!(card.related_workstream_count, 1, "related excludes primary");
-    assert_eq!(card.session_count, 1, "trashed sessions never count");
-    assert!(!card.has_git_identity);
+    assert_eq!(card.session_count, 2, "archived sessions still count");
+    assert_eq!(card.kind, ProjectKind::Directory);
     let other_card = cards.iter().find(|c| c.id == "p-2").unwrap();
     assert_eq!(other_card.primary_workstream_count, 1);
     assert_eq!(other_card.related_workstream_count, 0);

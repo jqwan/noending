@@ -357,7 +357,7 @@
 .activity-row:first-of-type { border-top: 0; }
 .activity-row .when { color: var(--text-muted); flex: none; width: 44px; font-family: var(--mono); font-size: 11px; }
 
-/* ---------- Sessions cards and trash table ---------- */
+/* ---------- Session cards and lists ---------- */
 .session-grid {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
 }
@@ -681,8 +681,8 @@ button.btn.conversation-jump:active {
   display: block;
 }
 
-/* ---------- Session trash / permanent delete (Session Lifecycle & Deletion) ---------- */
-.session-trash-banner {
+/* ---------- Session archive / permanent delete ---------- */
+.session-archive-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -692,13 +692,6 @@ button.btn.conversation-jump:active {
   border-radius: var(--radius-md);
   padding: 12px 16px;
   margin-top: 20px;
-}
-.session-trash-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 0 10px;
 }
 /* 删除预览里的「将删除」清单（会话与任务共用）。 */
 .purge-list { margin: 6px 0 0; padding-left: 18px; }

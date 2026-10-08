@@ -317,7 +317,6 @@ fn real_codex_assistant_chat_roundtrip() {
         id: "ws-chat-1".into(),
         title: "NoEnding 品牌".into(),
         description: "整理品牌视觉与文案".into(),
-        lifecycle: "active".into(),
         visibility: "normal".into(),
         created_at: String::new(),
         updated_at: String::new(),

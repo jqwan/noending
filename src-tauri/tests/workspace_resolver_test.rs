@@ -140,24 +140,100 @@ fn a_plain_repository_is_detected() {
     assert_eq!(kind, GitWorktreeKind::Main);
     assert_eq!(worktrees.len(), 1, "one checkout");
 
-    // A subdirectory reports the repository it is inside, and is not itself a
-    // worktree — `Unknown` rather than a guessed `Main`.
+    // A plain subdirectory does not inherit the ancestor's Git identity.
     let subdir = repo.join("src-tauri").join("src");
     std::fs::create_dir_all(&subdir).unwrap();
     let sub = resolver.observe(&subdir.to_string_lossy());
-    let GitDetection::Detected {
-        common_dir: sub_common,
-        toplevel: sub_toplevel,
-        kind: sub_kind,
-        ..
-    } = sub.git
-    else {
-        panic!("expected detection in a subdir, got {:?}", sub.git);
-    };
-    assert_eq!(sub_common, common_dir, "same Git family");
-    assert_eq!(sub_toplevel.as_deref(), toplevel.as_deref());
-    assert_eq!(sub_kind, GitWorktreeKind::Main);
+    assert!(is_observable(&sub));
+    assert_eq!(sub.git, GitDetection::None);
+    assert_eq!(
+        GitAccess::auto().probe(&subdir).state,
+        GitProbeState::NotARepository,
+        "the Git subprocess itself must stop before searching ancestors"
+    );
 
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn nested_plain_directories_derive_independent_projects_and_upgrade_in_place() {
+    let Some(program) = git() else {
+        eprintln!("skip: git not found");
+        return;
+    };
+    use noending::storage::Db;
+    use noending::workspace::project::{ensure_workspace_path, UnrestrictedWorkspace};
+
+    let root = scratch("nested-projects");
+    let parent = root.join("parent");
+    init_repo(&program, &parent);
+    let child = parent.join("child");
+    let sibling = parent.join("sibling");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+    let db = Db::open(&root.join("test.db")).unwrap();
+    let resolver = resolver_for(None, ReservedPaths::default());
+    let attach = |path: &Path| {
+        ensure_workspace_path(
+            &db,
+            &resolver.observe(&path.to_string_lossy()),
+            &UnrestrictedWorkspace,
+        )
+        .unwrap()
+    };
+    let main = attach(&parent);
+    let plain = attach(&child);
+    let other = attach(&sibling);
+    assert_ne!(main.project_id, plain.project_id);
+    assert_ne!(plain.project_id, other.project_id);
+    assert_eq!(db.list_projects().unwrap().len(), 3);
+    assert!(db
+        .get_project(&plain.project_id)
+        .unwrap()
+        .unwrap()
+        .git_id
+        .is_none());
+    assert_eq!(attach(&child).project_id, plain.project_id);
+
+    // Only the child's own git init supplies identity; it does not join its
+    // parent's repository, and its existing Project id survives the upgrade.
+    init_repo(&program, &child);
+    let upgraded = attach(&child);
+    assert_eq!(upgraded.project_id, plain.project_id);
+    let child_project = db.get_project(&plain.project_id).unwrap().unwrap();
+    let parent_project = db.get_project(&main.project_id).unwrap().unwrap();
+    assert!(child_project.git_id.is_some());
+    assert_ne!(child_project.git_id, parent_project.git_id);
+    assert_eq!(attach(&sibling).project_id, other.project_id);
+    assert_eq!(db.list_projects().unwrap().len(), 3);
+    drop(db);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinks_preserve_path_identity_and_only_detect_git_at_the_directory_root() {
+    let Some(program) = git() else {
+        eprintln!("skip: git not found");
+        return;
+    };
+    let root = scratch("symlink");
+    let repo = root.join("repo");
+    init_repo(&program, &repo);
+    std::fs::create_dir_all(repo.join("child")).unwrap();
+    let alias = root.join("alias");
+    std::os::unix::fs::symlink(&repo, &alias).unwrap();
+    let resolver = resolver_for(None, ReservedPaths::default());
+    let observed = resolver.observe(&alias.to_string_lossy());
+    assert_eq!(
+        observed.path_id,
+        identity::path_identity(&alias.to_string_lossy())
+    );
+    assert!(matches!(observed.git, GitDetection::Detected { .. }));
+    assert_eq!(
+        resolver.observe(&alias.join("child").to_string_lossy()).git,
+        GitDetection::None
+    );
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -220,6 +296,22 @@ fn a_linked_worktree_is_detected_as_linked() {
         GitDetection::Detected { kind, .. } => assert_eq!(*kind, GitWorktreeKind::Main),
         other => panic!("{other:?}"),
     }
+
+    // Root-only detection still aggregates the actual linked worktree with
+    // its repository; a plain directory inside that worktree stays independent.
+    use noending::storage::Db;
+    use noending::workspace::project::{ensure_workspace_path, UnrestrictedWorkspace};
+    let db = Db::open(&root.join("test.db")).unwrap();
+    let main_path = ensure_workspace_path(&db, &main_obs, &UnrestrictedWorkspace).unwrap();
+    let linked_path = ensure_workspace_path(&db, &obs, &UnrestrictedWorkspace).unwrap();
+    assert_eq!(main_path.project_id, linked_path.project_id);
+    let child = linked.join("plain-child");
+    std::fs::create_dir_all(&child).unwrap();
+    let child_obs = resolver.observe(&child.to_string_lossy());
+    assert_eq!(child_obs.git, GitDetection::None);
+    let child_path = ensure_workspace_path(&db, &child_obs, &UnrestrictedWorkspace).unwrap();
+    assert_ne!(child_path.project_id, linked_path.project_id);
+    drop(db);
 
     std::fs::remove_dir_all(&root).ok();
 }

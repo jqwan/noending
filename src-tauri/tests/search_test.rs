@@ -194,7 +194,7 @@ fn a_session_is_searchable_by_its_document() {
 /// Lifecycle × search (doc): trashing unindexes the session's
 /// messages and its own document; restoring reindexes the same durable rows.
 #[test]
-fn trash_hides_a_session_and_restore_brings_it_back() {
+fn archive_keeps_session_and_messages_searchable() {
     let db = open_db("lifecycle");
     let (_session, stored) = support::seed_conversation(
         &db,
@@ -215,19 +215,19 @@ fn trash_hides_a_session_and_restore_brings_it_back() {
         "searchable before trash"
     );
 
-    lifecycle::trash_session(&db, &_session.id).unwrap();
+    lifecycle::archive_session(&db, &_session.id).unwrap();
     let hits = search(&db, "sqlite", 20).unwrap();
     assert!(
-        !hits
-            .iter()
+        hits.iter()
             .any(|h| h.kind == "message" && h.ref_id == stored[0].id),
-        "trash unindexes the messages: {hits:?}"
+        "archive keeps messages searchable: {hits:?}"
     );
+    let documents = search(&db, "codex", 20).unwrap();
     assert!(
-        !hits
+        documents
             .iter()
             .any(|h| h.kind == "session" && h.ref_id == _session.id),
-        "trash unindexes the session document too: {hits:?}"
+        "archive keeps the session document searchable: {documents:?}"
     );
 
     lifecycle::restore_session(&db, &_session.id).unwrap();
@@ -267,7 +267,7 @@ fn the_read_side_guard_hides_rows_without_a_live_session() {
 
     // The session goes to the trash: the write side unindexes, and even a
     // row that re-appears afterwards stays hidden while the trash holds.
-    lifecycle::trash_session(&db, &session.id).unwrap();
+    lifecycle::archive_session(&db, &session.id).unwrap();
     db.write()
         .execute(
             "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
@@ -289,10 +289,9 @@ fn the_read_side_guard_hides_rows_without_a_live_session() {
         "a stale message row of a trashed session must never surface: {hits:?}"
     );
     assert!(
-        !hits
-            .iter()
+        hits.iter()
             .any(|h| h.kind == "session" && h.ref_id == session.id),
-        "a stale session row of a trashed session must never surface: {hits:?}"
+        "an archived session document remains searchable: {hits:?}"
     );
 
     // A row whose session is GONE entirely (purged, crashed mid-write) is

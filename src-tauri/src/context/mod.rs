@@ -22,8 +22,8 @@ use serde::Serialize;
 
 use crate::domain::WorkstreamSessionFrontier;
 use crate::domain::{
-    workstream_visibility, ContextItem, ContextItemRevision, ContextUpdateError,
-    ContextUpdateStatus, Session, SessionContextFields, SessionContextRecord, SessionMessage,
+    ContextItem, ContextItemRevision, ContextUpdateError, ContextUpdateStatus, Session,
+    SessionContextFields, SessionContextRecord, SessionMessage,
 };
 use crate::error::{other, AppError, Result};
 use crate::storage::context_repo::{
@@ -101,7 +101,6 @@ pub struct WorkstreamContextView {
     pub workstream_id: String,
     pub title: String,
     pub description: String,
-    pub lifecycle: String,
     pub sections: Vec<ContextSection>,
     pub context_revision: i64,
     pub input_revision: i64,
@@ -153,7 +152,6 @@ pub fn workstream_context_view(db: &Db, workstream_id: &str) -> Result<Workstrea
         workstream_id: ws.id.clone(),
         title: ws.title.clone(),
         description: ws.description.clone(),
-        lifecycle: ws.lifecycle.clone(),
         sections,
         context_revision: state.context_revision,
         input_revision: state.input_revision,
@@ -297,14 +295,6 @@ fn update_session_inner(
         operation.fail_with("snapshot", "session_missing", "找不到要更新的会话。");
         other("会话不存在")
     })?;
-    if session.trashed_at.is_some() {
-        operation.fail_with(
-            "snapshot",
-            "session_trashed",
-            "会话已移入回收站，恢复后才能更新摘要。",
-        );
-        return Err(other("会话已移入回收站，暂不可更新摘要"));
-    }
 
     let existing = db.get_session_context(session_id)?;
     let ingest = db.get_session_ingest_state(session_id)?;
@@ -558,14 +548,6 @@ fn update_workstream_inner(
         );
         other("Workstream 不存在")
     })?;
-    if ws.visibility == workstream_visibility::ARCHIVED {
-        operation.fail_with(
-            "snapshot",
-            "workstream_archived",
-            "已归档的 Workstream 只读，请先恢复后再更新状态。",
-        );
-        return Err(other("已归档的 Workstream 只读，恢复后才能更新状态"));
-    }
 
     let state = db.get_workstream_context_state(workstream_id)?;
     let items = db.items_for_workstream(workstream_id, false)?;
@@ -1095,7 +1077,6 @@ mod tests {
             id: "workstream-context-test".into(),
             title: "Context test".into(),
             description: String::new(),
-            lifecycle: "active".into(),
             visibility: "normal".into(),
             created_at: crate::storage::now(),
             updated_at: crate::storage::now(),
@@ -1116,7 +1097,7 @@ mod tests {
             started_at: None,
             last_activity_at: None,
             last_conversation_at: None,
-            trashed_at: None,
+            archived_at: None,
             source_kind: String::new(),
             source_path: String::new(),
             metadata: serde_json::json!({}),
@@ -1518,40 +1499,37 @@ mod tests {
     }
 
     #[test]
-    fn service_target_state_errors_keep_recovery_instructions() {
+    fn service_archived_session_and_task_keep_context_updates() {
         let fixture = ServiceFixture::new();
         let home = fixture.home();
         let session_id = fixture.add_session(1, 80);
+        crate::lifecycle::archive_session(fixture.db(), &session_id).unwrap();
+        let mut runner =
+            |_: &CliExtractor, _: &str, _: &std::path::Path| Ok(valid_output(&session_id));
+        let outcome =
+            update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner)
+                .unwrap();
+        assert_eq!(outcome.status, ContextUpdateStatus::Updated);
+        let ws = fixture.add_workstream("service-archived");
+        crate::workspace::workstream::archive_workstream(fixture.db(), &ws.id).unwrap();
+        let pending_session = fixture.add_session(1, 80);
+        crate::lifecycle::archive_session(fixture.db(), &pending_session).unwrap();
         fixture
             .db()
-            .tx(|tx| {
-                tx.execute(
-                    "UPDATE sessions SET trashed_at = ?1 WHERE id = ?2",
-                    rusqlite::params![crate::storage::now(), session_id],
-                )?;
-                Ok(())
-            })
+            .set_session_owner(&pending_session, Some(&ws.id))
             .unwrap();
-        let mut runner = |_: &CliExtractor, _: &str, _: &std::path::Path| {
-            unreachable!("trashed session cannot invoke the CLI")
-        };
-        let result =
-            update_session_with_runner(fixture.db(), &session_id, Some(&home), &mut runner);
-        assert_eq!(failure_code(result), "session_trashed");
-        assert!(log_records(&home)[0]["message"]
-            .as_str()
+        let mut runner =
+            |_: &CliExtractor, _: &str, _: &std::path::Path| Ok(valid_output(&pending_session));
+        let outcome =
+            update_workstream_with_runner(fixture.db(), &ws.id, Some(&home), &mut runner).unwrap();
+        assert_eq!(outcome.status, ContextUpdateStatus::Updated);
+        assert!(outcome.updated_sessions.contains(&pending_session));
+        assert!(fixture
+            .db()
+            .workstream_frontiers(&ws.id)
             .unwrap()
-            .contains("恢复"));
-
-        let archived = fixture.add_workstream("service-archived");
-        let mut archived = archived;
-        archived.visibility = workstream_visibility::ARCHIVED.into();
-        fixture.db().upsert_workstream(&archived).unwrap();
-        let result =
-            update_workstream_with_runner(fixture.db(), &archived.id, Some(&home), &mut runner);
-        assert_eq!(failure_code(result), "workstream_archived");
-        let records = log_records(&home);
-        assert!(records[1]["message"].as_str().unwrap().contains("恢复"));
+            .iter()
+            .any(|f| f.session_id == pending_session));
     }
 
     #[test]

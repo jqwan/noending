@@ -569,7 +569,7 @@ mod tests {
             started_at: None,
             last_activity_at: None,
             last_conversation_at: None,
-            trashed_at: None,
+            archived_at: None,
             source_kind: "claude_code_transcript".into(),
             source_path: path.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),

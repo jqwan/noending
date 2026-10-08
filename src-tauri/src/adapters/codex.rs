@@ -687,7 +687,7 @@ mod rollout_tests {
             started_at: None,
             last_activity_at: None,
             last_conversation_at: None,
-            trashed_at: None,
+            archived_at: None,
             source_kind: "codex_rollout".into(),
             source_path: path.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),

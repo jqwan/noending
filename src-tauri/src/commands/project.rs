@@ -27,8 +27,8 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::Db;
 use crate::workspace::project::{
-    project_detail, project_workstreams, reconcile_workspace_path_ids, ProjectDetail,
-    ProjectWorkstream,
+    project_detail, project_kind, project_workstreams, reconcile_workspace_path_ids, ProjectDetail,
+    ProjectWorkstream, WorkspacePolicy,
 };
 use crate::workspace::wiring::WorkspaceLayer;
 
@@ -47,8 +47,7 @@ pub struct ProjectCardData {
     pub id: String,
     pub name: String,
     pub name_customized: bool,
-    /// The Project's family badge (Git 家族). The raw `git_id` stays internal.
-    pub has_git_identity: bool,
+    pub kind: ProjectKind,
     pub path_count: i64,
     /// Paths last observed as gone from disk; the card's "有目录缺失" signal.
     pub missing_path_count: i64,
@@ -58,7 +57,7 @@ pub struct ProjectCardData {
     pub related_workstream_count: i64,
     /// Sessions through the authoritative
     /// `workspace_path_id → workspace_paths.project_id` chain,
-    /// trashed sessions excluded (Trash lifecycle).
+    /// Archived sessions are included.
     pub session_count: i64,
     /// Up to two canonical paths in canonical order (: primary +
     /// "另有 N 个目录").
@@ -74,7 +73,7 @@ pub struct ProjectCardData {
 
 /// Compose the whole Board in one call. Also the testable core of
 /// `list_project_cards`, mirroring `workstream_cards`.
-pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
+pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<ProjectCardData>> {
     let projects = db.list_projects()?;
     let conn = db.read();
 
@@ -160,7 +159,7 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
     }
 
     // Session reach + activity through the authoritative chain,
-    // trashed sessions excluded (Trash lifecycle:).
+    // Archived sessions are included.
     let mut session_count: BTreeMap<String, i64> = BTreeMap::new();
     let mut session_activity: BTreeMap<String, Option<String>> = BTreeMap::new();
     {
@@ -168,7 +167,6 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
             "SELECT wp.project_id, COUNT(*), MAX(COALESCE(s.last_activity_at, s.started_at))
              FROM sessions s
              JOIN workspace_paths wp ON wp.id = s.workspace_path_id
-             WHERE s.trashed_at IS NULL
              GROUP BY wp.project_id",
         )?;
         let rows = st.query_map([], |r| {
@@ -210,7 +208,11 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
             let session_activity = session_activity.get(&p.id).cloned().flatten();
             let workstream_activity = workstream_activity.get(&p.id).cloned().flatten();
             ProjectCardData {
-                has_git_identity: p.git_id.is_some(),
+                kind: project_kind(
+                    &p,
+                    search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),
+                    policy,
+                ),
                 path_count: *path_count.get(&p.id).unwrap_or(&0),
                 missing_path_count: *missing_count.get(&p.id).unwrap_or(&0),
                 primary_workstream_count: *primary_ws.get(&p.id).unwrap_or(&0),
@@ -234,8 +236,11 @@ pub fn project_cards(db: &Db) -> Result<Vec<ProjectCardData>> {
 }
 
 #[tauri::command]
-pub fn list_project_cards(state: State<AppState>) -> Result<Vec<ProjectCardData>> {
-    with_db(&state, project_cards)
+pub fn list_project_cards(
+    state: State<AppState>,
+    layer: State<'_, Arc<WorkspaceLayer>>,
+) -> Result<Vec<ProjectCardData>> {
+    with_db(&state, |db| project_cards(db, layer.projection().policy()))
 }
 
 // ---------------- Workspace refresh ----------------
@@ -373,13 +378,17 @@ pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>> {
 }
 
 ///  — the frozen detail shape
-/// `{ project, workspace_paths[], workstreams[{workstream, is_primary}], sessions[] }`.
+/// `{ project, kind, workspace_paths[], workstreams[{workstream, is_primary}], sessions[], remote_url }`.
 /// Nothing here is read from a cached membership column: paths, Workstreams and
 /// Sessions all come through the registry.
 #[tauri::command]
-pub fn get_project_detail(state: State<AppState>, project_id: String) -> Result<ProjectDetail> {
+pub fn get_project_detail(
+    state: State<AppState>,
+    layer: State<'_, Arc<WorkspaceLayer>>,
+    project_id: String,
+) -> Result<ProjectDetail> {
     with_db(&state, |db| {
-        project_detail(db, &project_id)?
+        project_detail(db, &project_id, layer.projection().policy())?
             .ok_or_else(|| other(format!("Project {project_id} 不存在")))
     })
 }

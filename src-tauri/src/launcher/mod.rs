@@ -268,9 +268,7 @@ impl SessionLauncher {
         // A Workstream is the Owner (or there is none): an Owner that was
         // deleted mid-flight leaves nothing to launch against.
         if let Some(ws_id) = owner_workstream_id {
-            if db.get_workstream(ws_id)?.is_none() {
-                return Err(other("所选 Workstream 已不存在，请重新选择所属任务"));
-            }
+            require_unarchived_owner(db, ws_id)?;
         }
 
         let resolution = resolve_new_cwd(db, owner_workstream_id, cwd, workspace)?;
@@ -325,8 +323,8 @@ impl SessionLauncher {
         // a trashed session is inactive and must not resume. All resume
         // entries (command layer, Assistant, one-shot launch) funnel through
         // here, so this is the single prepare-side gate.
-        if session.is_trashed() {
-            return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+        if session.is_archived() {
+            return Err(other("会话已在已归档，无法继续；请先恢复会话"));
         }
         // Resume targets `sessions.root_agent_session_id` through the
         // ROOT member's source; a source the adapter cannot confirm present is
@@ -361,8 +359,8 @@ impl SessionLauncher {
         let session = db
             .get_session(session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        if session.is_trashed() {
-            return Err(other("会话已在回收站，无法继续；请先恢复会话"));
+        if session.is_archived() {
+            return Err(other("会话已在已归档，无法继续；请先恢复会话"));
         }
 
         let owner = session.owner_workstream_id.clone();
@@ -494,6 +492,9 @@ impl SessionLauncher {
         let runtime_opts = prepared.runtime.exec_options();
 
         if prepared.mode == "new" {
+            if let Some(owner) = prepared.owner_workstream_id.as_deref() {
+                require_unarchived_owner(db, owner)?;
+            }
             let intent = LaunchIntent {
                 id: new_id(),
                 launch_type: "new".into(),
@@ -518,8 +519,8 @@ impl SessionLauncher {
             // a UUID generated HERE, before spawn: the session file is born
             // with a known identity and the embedded terminal binds to the
             // discovered session by exact match. codex / agy generate their
-            // own ids, so the registry keeps the first message as additional
-            // evidence for binding after discovery.
+            // own ids, so they remain unbound until a trustworthy native
+            // identity is available; discovery never guesses from messages.
             let mut runtime_opts = prepared.runtime.exec_options();
             let expected_root_session_id =
                 adapter.supports_prespecified_session_id().then(|| new_id());
@@ -540,8 +541,8 @@ impl SessionLauncher {
             });
             // An embedded NEW launch spawns into NoEnding's own PTY with no
             // session identity yet: the registry entry starts unbound and
-            // binds when discovery supplies unique matching evidence
-            // (by exact prespecified id where available). External
+            // binds when discovery supplies the same native identity
+            // (prespecified or reported by the Agent). External
             // spawns stay the default when no embedded surface is provided.
             let outcome = if prepared.embedded {
                 let embedded =
@@ -551,8 +552,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: None,
-                        expected_root_session_id: expected_root_session_id.as_deref(),
-                        initial_message: prepared.initial_message.as_deref(),
+                        root_agent_session_id: expected_root_session_id.as_deref(),
                         agent: prepared.agent,
                     },
                 )?
@@ -606,9 +606,9 @@ impl SessionLauncher {
             // belt and braces beside the fingerprint term: a trashed
             // session never launches, even if every other input managed to
             // match a stale-but-legal fingerprint.
-            if session.is_trashed() {
+            if session.is_archived() {
                 return Err(other(
-                    "Prepared launch is stale: 会话已移入回收站，无法继续。请恢复会话后重新预览。",
+                    "Prepared launch is stale: 会话已归档，无法继续。请恢复会话后重新预览。",
                 ));
             }
 
@@ -663,8 +663,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: Some(session_id),
-                        expected_root_session_id: None,
-                        initial_message: None,
+                        root_agent_session_id: Some(&session.root_agent_session_id),
                         agent: session.agent,
                     },
                 )?
@@ -876,10 +875,10 @@ pub fn compute_state_fingerprint_in(
                 // the lifecycle state is part of the launch state: a
                 // Prepare → Trash → launch_prepared sequence must fail as
                 // stale even when nothing else about the row moved.
-                if s.is_trashed() {
-                    hasher.update(b"session_trashed:1:");
+                if s.is_archived() {
+                    hasher.update(b"session_archived:1:");
                 } else {
-                    hasher.update(b"session_trashed:0:");
+                    hasher.update(b"session_archived:0:");
                 }
                 if let Some(la) = &s.last_activity_at {
                     hasher.update(la.as_bytes());
@@ -1437,7 +1436,7 @@ pub fn preparation_matches_current_owner(
 ) -> Result<bool> {
     Ok(db
         .get_session(session_id)?
-        .map(|s| !s.is_trashed() && s.owner_workstream_id.as_deref() == owner)
+        .map(|s| !s.is_archived() && s.owner_workstream_id.as_deref() == owner)
         .unwrap_or(false))
 }
 
@@ -1474,4 +1473,14 @@ pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
         }
     }
     Ok(expired)
+}
+
+fn require_unarchived_owner(db: &Db, owner: &str) -> Result<()> {
+    let task = db
+        .get_workstream(owner)?
+        .ok_or_else(|| other("所选任务已不存在，请重新选择所属任务"))?;
+    if task.visibility == crate::domain::workstream_visibility::ARCHIVED {
+        return Err(other("已归档的任务不能新建会话，请先取消归档"));
+    }
+    Ok(())
 }

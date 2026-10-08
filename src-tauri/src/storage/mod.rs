@@ -23,7 +23,6 @@ pub mod context_repo;
 pub mod schema;
 pub mod session_lifecycle;
 pub mod session_paths;
-mod terminal_binding;
 pub mod workspace;
 pub mod workstream_paths;
 
@@ -37,7 +36,6 @@ pub use context_repo::{
 
 pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 pub use session_lifecycle::PermanentDeletionCounts;
-pub(crate) use terminal_binding::TerminalBindingCandidate;
 
 /// Two connections to one SQLite file so UI reads never queue behind writes:
 /// WAL allows one writer plus concurrent readers, every mutation goes through
@@ -345,8 +343,8 @@ impl Db {
 
     /// Card stats for one Workstream: (session_count, latest session as
     /// (id, agent), that session's activity timestamp). Only Sessions that OWN
-    /// this Workstream count, so a Session is never counted twice; trashed
-    /// Sessions count for nothing.
+    /// this Workstream count, so a Session is never counted twice. Archived
+    /// sessions are included.
     pub fn workstream_session_stats(
         &self,
         workstream_id: &str,
@@ -354,7 +352,7 @@ impl Db {
         let conn = self.read();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sessions
-             WHERE owner_workstream_id = ?1 AND trashed_at IS NULL",
+             WHERE owner_workstream_id = ?1",
             params![workstream_id],
             |r| r.get(0),
         )?;
@@ -362,7 +360,7 @@ impl Db {
             .query_row(
                 "SELECT id, agent, COALESCE(last_activity_at, started_at) AS act
                  FROM sessions
-                 WHERE owner_workstream_id = ?1 AND trashed_at IS NULL
+                 WHERE owner_workstream_id = ?1
                  ORDER BY act DESC
                  LIMIT 1",
                 params![workstream_id],
@@ -572,53 +570,6 @@ impl Db {
             .optional()?)
     }
 
-    /// The session's recent user messages (oldest → newest, up to `limit`).
-    /// The verified terminal match's evidence set: a live unbound terminal
-    /// may claim a session only if every one of these is visible in its
-    /// scrollback. Empty while the session has no user turn yet.
-    pub fn recent_user_messages(
-        &self,
-        session_id: &str,
-        limit: i64,
-    ) -> Result<Vec<(String, Option<String>)>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT content, ts FROM session_messages
-             WHERE session_id = ?1 AND role = 'user'
-             ORDER BY sequence DESC LIMIT ?2",
-        )?;
-        let mut rows = st
-            .query_map(params![session_id, limit], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        rows.reverse();
-        Ok(rows)
-    }
-
-    /// Recent sessions for one agent working in one directory, newest first.
-    /// The ingestion-side terminal match's candidate pool: a live unbound
-    /// terminal only ever relates to sessions born in its own cwd, and the
-    /// matcher's ordering check discards anything older than the terminal.
-    pub fn list_recent_sessions_by_agent_cwd(
-        &self,
-        agent: Agent,
-        cwd: &str,
-        limit: i64,
-    ) -> Result<Vec<Session>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT * FROM sessions
-             WHERE agent = ?1 AND cwd = ?2 AND trashed_at IS NULL
-             ORDER BY COALESCE(last_activity_at, started_at) DESC
-             LIMIT ?3",
-        )?;
-        let rows = st
-            .query_map(params![agent.as_str(), cwd, limit], row_session)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     /// The Logical Session for a root Resume identity. This is THE
     /// session lookup for LaunchIntent matching and Resume.
     pub fn find_session_by_root_agent_id(
@@ -663,8 +614,8 @@ impl Db {
             sql.push_str(&format!(" AND agent = ?{}", values.len()));
         }
         match filter.scope {
-            SessionListScope::Active => sql.push_str(" AND trashed_at IS NULL"),
-            SessionListScope::Trash => sql.push_str(" AND trashed_at IS NOT NULL"),
+            SessionListScope::Unarchived => sql.push_str(" AND archived_at IS NULL"),
+            SessionListScope::Archived => sql.push_str(" AND archived_at IS NOT NULL"),
             SessionListScope::All => {}
         }
         sql.push_str(
@@ -1174,13 +1125,13 @@ impl Db {
         set_session_owner_conn(&conn, session_id, workstream_id)
     }
 
-    /// Active Sessions that own `workstream_id`, most recent activity first.
+    /// Sessions owned by `workstream_id`, including archived sessions.
     /// A Session appears in at most one Workstream's list.
     pub fn sessions_for_workstream(&self, workstream_id: &str) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(
             "SELECT * FROM sessions
-             WHERE owner_workstream_id = ?1 AND trashed_at IS NULL
+             WHERE owner_workstream_id = ?1
              ORDER BY COALESCE(last_activity_at, started_at) DESC",
         )?;
         let rows = st
@@ -1936,7 +1887,7 @@ impl Db {
              SELECT 'message', ?1, ?2, '', ?3
              WHERE EXISTS (
                SELECT 1 FROM session_message_projection p
-               JOIN sessions s ON s.id = p.session_id AND s.trashed_at IS NULL
+               JOIN sessions s ON s.id = p.session_id
                WHERE p.session_id = ?2 AND p.session_message_id = ?1
              )",
         )?;
@@ -1950,10 +1901,7 @@ impl Db {
     /// ingestion-time indexing was skipped, and Session documents no write has
     /// touched yet. Idempotent.
     ///
-    /// Only ACTIVE sessions are indexed: an unguarded run would re-index
-    /// everything a Trash unindexed, leaking the recycle bin back into search on
-    /// every startup. `session_lifecycle::unindex_session_conn` and this WHERE
-    /// clause are two halves of one lifecycle invariant.
+    /// Archived and unarchived sessions are indexed identically.
     pub fn backfill_search_index(&self) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -1961,7 +1909,7 @@ impl Db {
              WHERE kind = 'message'
                AND NOT EXISTS (
                  SELECT 1 FROM session_message_projection p
-                 JOIN sessions s ON s.id = p.session_id AND s.trashed_at IS NULL
+                 JOIN sessions s ON s.id = p.session_id
                  WHERE p.session_id = search_index.parent_id
                    AND p.session_message_id = search_index.ref_id
                )",
@@ -1972,7 +1920,7 @@ impl Db {
              SELECT 'message', m.id, m.session_id, '', m.content
              FROM session_message_projection p
              JOIN session_messages m ON m.id = p.session_message_id
-             WHERE p.session_id IN (SELECT id FROM sessions WHERE trashed_at IS NULL)
+             WHERE p.session_id IN (SELECT id FROM sessions)
                AND m.id NOT IN (
                    SELECT ref_id FROM search_index WHERE kind = 'message')",
             [],
@@ -1983,8 +1931,7 @@ impl Db {
         let ids: Vec<String> = {
             let mut st = conn.prepare(
                 "SELECT id FROM sessions
-                  WHERE trashed_at IS NULL
-                    AND id NOT IN (SELECT ref_id FROM search_index WHERE kind = 'session')",
+                  WHERE id NOT IN (SELECT ref_id FROM search_index WHERE kind = 'session')",
             )?;
             let mapped = st.query_map([], |r| r.get::<_, String>(0))?;
             mapped.collect::<std::result::Result<Vec<_>, _>>()?
@@ -2080,11 +2027,18 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
         )
         .optional()?;
     conn.execute(
-        "INSERT INTO workstreams (id, title, description, lifecycle, visibility, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO workstreams (id, title, description, visibility, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
-           title = ?2, description = ?3, lifecycle = ?4, visibility = ?5, updated_at = ?7",
-        params![w.id, w.title, w.description, w.lifecycle, w.visibility, w.created_at, w.updated_at],
+           title = ?2, description = ?3, visibility = ?4, updated_at = ?6",
+        params![
+            w.id,
+            w.title,
+            w.description,
+            w.visibility,
+            w.created_at,
+            w.updated_at
+        ],
     )?;
     // The two-level revision state: a Workstream starts as (0, 1, 0) so its
     // first explicit generation is allowed, and any title / description
@@ -2933,7 +2887,6 @@ fn row_workstream(r: &Row) -> rusqlite::Result<Workstream> {
         id: r.get("id")?,
         title: r.get("title")?,
         description: r.get("description")?,
-        lifecycle: r.get("lifecycle")?,
         visibility: r.get("visibility")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
@@ -2954,7 +2907,7 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
         started_at: r.get("started_at")?,
         last_activity_at: r.get("last_activity_at")?,
         last_conversation_at: r.get("last_conversation_at")?,
-        trashed_at: r.get("trashed_at")?,
+        archived_at: r.get("archived_at")?,
         source_kind: r.get("source_kind")?,
         source_path: r.get("source_path")?,
         metadata: serde_json::from_str(&r.get::<_, String>("metadata")?).unwrap_or_default(),
@@ -3089,8 +3042,7 @@ pub struct AssistantMessageRow {
 pub struct SessionFilter {
     pub project_id: Option<String>,
     pub agent: Option<Agent>,
-    /// Defaults to Active: trashed Sessions are hidden from every default
-    /// projection. The recycle bin passes Trash explicitly.
+    /// Board scope defaults to unarchived; association queries include both.
     pub scope: SessionListScope,
 }
 

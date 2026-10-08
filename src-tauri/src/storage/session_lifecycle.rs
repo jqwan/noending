@@ -1,5 +1,5 @@
-//! Session lifecycle storage: the SQL behind Trash / Restore, permanent local
-//! purge, and the FTS unindex / reindex both of them use.
+//! Session lifecycle storage: the SQL behind Archive / Restore, permanent local
+//! purge, and the search cleanup used only by permanent deletion.
 //!
 //! There is no deletion job, no crash recovery and no filesystem step: NoEnding
 //! never deletes an Agent-owned source, so a purge is one SQLite transaction.
@@ -11,55 +11,32 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::Result;
 
-// Trash / Restore
+// Archive / Restore
 
-/// The single lifecycle transition Normal → Trash. The `trashed_at IS NULL`
-/// guard makes trash idempotent and makes a trash racing a restore commit
-/// exactly one transition. `Ok(false)` = session missing or already trashed.
-pub fn trash_session_conn(conn: &Connection, session_id: &str, ts: &str) -> Result<bool> {
+/// The single lifecycle transition Normal → Archive. The `archived_at IS NULL`
+/// guard makes archive idempotent and makes an archive racing an unarchive commit
+/// exactly one transition. `Ok(false)` = session missing or already archived.
+pub fn archive_session_conn(conn: &Connection, session_id: &str, ts: &str) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE sessions SET trashed_at = ?2 WHERE id = ?1 AND trashed_at IS NULL",
+        "UPDATE sessions SET archived_at = ?2 WHERE id = ?1 AND archived_at IS NULL",
         params![session_id, ts],
     )?;
-    if n > 0 {
-        // Trashing removes a Session from its Workstream's live inputs.
-        bump_owner_input_revision_conn(conn, session_id)?;
-    }
     Ok(n > 0)
 }
 
-/// Trash → Normal: same Session id; Owner, members, messages, cursors and the
+/// Archive → Normal: same Session id; Owner, members, messages, cursors and the
 /// Context frontier were never touched, so the next reconcile simply resumes.
 pub fn restore_session_conn(conn: &Connection, session_id: &str) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE sessions SET trashed_at = NULL WHERE id = ?1 AND trashed_at IS NOT NULL",
+        "UPDATE sessions SET archived_at = NULL WHERE id = ?1 AND archived_at IS NOT NULL",
         params![session_id],
     )?;
-    if n > 0 {
-        bump_owner_input_revision_conn(conn, session_id)?;
-    }
     Ok(n > 0)
 }
 
-/// Trash / Restore is an input change for the Session's Owner Workstream.
-fn bump_owner_input_revision_conn(conn: &Connection, session_id: &str) -> Result<()> {
-    let owner: Option<String> = conn
-        .query_row(
-            "SELECT COALESCE(owner_workstream_id, '') FROM sessions WHERE id = ?1",
-            params![session_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .filter(|s: &String| !s.is_empty());
-    if let Some(ws) = owner {
-        crate::storage::bump_input_revision_conn(conn, &ws)?;
-    }
-    Ok(())
-}
-
 /// Commit-time guard: the session must still exist, or the rows a caller
-/// prepared have nowhere to land. Trash is NOT part of it (see
-/// `sessions.trashed_at`); only a permanent purge removes the row.
+/// prepared have nowhere to land. Archive is NOT part of it (see
+/// `sessions.archived_at`); only a permanent purge removes the row.
 pub fn session_exists_conn(conn: &Connection, session_id: &str) -> Result<bool> {
     let exists: Option<i64> = conn
         .query_row(
@@ -73,40 +50,18 @@ pub fn session_exists_conn(conn: &Connection, session_id: &str) -> Result<bool> 
 
 // FTS
 
-/// Drop a trashed / deleted session's message rows from the FTS index. Message
+/// Drop a permanently deleted session's message rows from the FTS index. Message
 /// rows carry `parent_id = session_id`, so one delete covers the session.
 ///
-/// Errors PROPAGATE: inside the lifecycle transaction a failed index write rolls
-/// the lifecycle flip back, so "trashed" and "unindexed" commit atomically.
+/// Errors propagate so permanent deletion and search cleanup commit atomically.
 pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM search_index WHERE kind = 'message' AND parent_id = ?1",
         params![session_id],
     )?;
-    // The Session's own document goes with it (Trash and permanent
-    // deletion both route through here; a Restore rebuilds it).
+    // Permanent deletion removes the Session document too.
     conn.execute(
         "DELETE FROM search_index WHERE kind = 'session' AND ref_id = ?1",
-        params![session_id],
-    )?;
-    Ok(())
-}
-
-/// Rebuild the FTS rows of a restored session from the durable message store,
-/// mirroring `backfill_search_index`'s row shape. Errors propagate like
-/// [`unindex_session_conn`].
-pub fn reindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM search_index WHERE kind = 'message' AND parent_id = ?1",
-        params![session_id],
-    )?;
-    crate::storage::index_session_conn(conn, session_id)?;
-    conn.execute(
-        "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-         SELECT 'message', m.id, m.session_id, '', m.content
-         FROM session_message_projection p
-         JOIN session_messages m ON m.id = p.session_message_id
-         WHERE p.session_id = ?1",
         params![session_id],
     )?;
     Ok(())
@@ -309,7 +264,7 @@ pub fn redact_session_provenance_conn(tx: &Transaction, session_id: &str) -> Res
 // Permanent local purge
 
 /// The whole NoEnding LOCAL purge in ONE transaction, in the fixed order.
-/// Callers have already required Trash. Returns the number of redacted
+/// Callers have already required Archive. Returns the number of redacted
 /// revisions. Never touches Workstreams, WorkstreamPaths, WorkspacePaths,
 /// Projects, surviving Context content, or the Agent's side.
 pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usize> {

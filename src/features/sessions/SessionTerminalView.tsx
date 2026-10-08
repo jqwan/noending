@@ -11,7 +11,7 @@ import Icon from "../../components/Icon";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { sessionDisplayTitle } from "./SessionTable";
-import type { Agent, TerminalSnapshot } from "../../types";
+import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
@@ -19,11 +19,9 @@ import type { Route } from "../../app/routes";
  * registry），本组件只是 attach/detach 客户端——切走再切回（remount）进程
  * 照跑，xterm 实例按 terminal_id 常驻，重挂零重建。
  *
- * 会话身份由后端绑定，只有两种精确来源：预指定 session id（claude / pi）
- * 在摄入发现时精确匹配；codex / agy 由会话页的终端入口做校验匹配（cwd +
- * 首条消息内容 + 发送时间）后当场绑定。绑定事实经 `terminal-bound` 事件
- * 推送进来，点亮右上角的会话详情入口——没绑定就没有这个入口，因为没发
- * 过消息（或 CLI 自造 id 尚未被认领）的会话根本不存在。
+ * 当前会话身份由后端从 Agent 的原生会话 ID 确认。CLI 内切换会话时，
+ * `terminal-bound` 推送新版身份（尚未摄入时为 null），视图随之更新标题与
+ * 详情入口。身份版本阻止迟到快照或详情请求把界面退回旧会话。
  *
  * 已知的产品边界：关闭 NoEnding 会结束后端里的内嵌 Agent（后端 RunEvent::Exit
  * 统一收割）。
@@ -45,8 +43,14 @@ type TerminalState =
   | { kind: "error"; message: string }
   | { kind: "ready"; snapshot: TerminalSnapshot; exited: boolean };
 
-/** 注册表 bind() 的广播事件（terminal/mod.rs），payload 带 terminal_id + session_id。 */
+/** 注册表的身份广播：绑定、切换与 pending 清空都走同一个版本化通道。 */
 const EVENT_BOUND = "terminal-bound";
+
+type BoundIdentity = {
+  revision: number;
+  sessionId: string | null;
+  title: string | null;
+};
 
 /**
  * 常驻 xterm 实例，按 terminal_id 键控（VS Code 同款）。切走视图只让 DOM
@@ -79,7 +83,7 @@ export function resetLiveTerminalsForTests(): void {
 export default function SessionTerminalView({ terminalId, initialTitle, initialAgent, initialSessionId, navigate }: {
   /** 独立终端路由：内嵌新建与「先跳后启」的共同落点。 */
   terminalId: string;
-  /** 会话页跳转带来的身份种子：首帧即终帧，标题不闪、入口即刻可点。 */
+  /** 会话页跳转带来的首帧占位；随后由版本化后端身份替换。 */
   initialTitle?: string;
   initialAgent?: Agent;
   initialSessionId?: string;
@@ -87,14 +91,35 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
 }) {
   const [state, setState] = useState<TerminalState>({ kind: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // 绑定事实：路由种子（会话页跳转）优先，attach 快照与 terminal-bound
-  // 事件随后确认。没绑定时会话详情入口置灰。
-  const [boundSessionId, setBoundSessionId] = useState<string | null>(initialSessionId ?? null);
-  const [boundTitle, setBoundTitle] = useState<string | null>(initialTitle ?? null);
+  // 路由种子只填首帧；任何权威快照/事件（包括 null）都会替换它。
+  const [identity, setIdentity] = useState<BoundIdentity>({
+    revision: -1,
+    sessionId: initialSessionId ?? null,
+    title: initialTitle ?? null,
+  });
+  const identityRef = useRef(identity);
+  const boundSessionId = identity.sessionId;
+  const boundTitle = identity.title;
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
+  const applyIdentity = useCallback((update: TerminalBound & { session_title?: string | null }, fromSnapshot = false) => {
+    const current = identityRef.current;
+    if (update.identity_revision < current.revision) return;
+    // 同版本广播是重复通知；同版本快照可补齐权威标题，但不能改变身份。
+    if (update.identity_revision === current.revision && (!fromSnapshot || update.session_id !== current.sessionId)) return;
+    let title: string | null = null;
+    if (update.session_id) {
+      if (update.session_title != null) title = sessionDisplayTitle(update.session_title);
+      else if (update.identity_revision === current.revision) title = current.title;
+    }
+    const next = { revision: update.identity_revision, sessionId: update.session_id, title };
+    identityRef.current = next;
+    setIdentity(next);
+  }, []);
+
   /** 刷新：一次定向同步摄入（绑定→RefreshSession；未绑定→该 Agent 的来源
-   *  定向扫描，不节流——点击即事件）。摄入尾步的校验匹配会把结果经
+   *  定向扫描，不节流——点击即事件）。摄入尾步的身份确认会把结果经
    *  terminal-bound 推回来，入口与标题自动更新，无需手动重连。 */
   const refreshTerminal = async () => {
     if (refreshing) return;
@@ -109,50 +134,53 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     }
   };
 
-  /** 进入即用：按 terminalId 直接 attach——终端在新建弹窗确认或「先跳后启」
+  /** 进入即用：按 terminalId 直接 attach——终端在新会话发送或「先跳后启」
    *  启动时就已存在，本视图从不负责 spawn。 */
-  const bootstrap = useCallback(() => {
+  const bootstrap = () => setConnectionAttempt((attempt) => attempt + 1);
+
+  // 先完成订阅再读取快照：订阅窗口里的切换事件靠 revision 赢过旧快照。
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
     setState({ kind: "loading" });
-    api.terminalAttach(terminalId)
-      .then((snapshot) => {
-        if (snapshot.session_id) setBoundSessionId(snapshot.session_id);
+    void listen<TerminalBound>(EVENT_BOUND, (e) => {
+      if (active && e.payload.terminal_id === terminalId) applyIdentity(e.payload);
+    })
+      .then(async (stop) => {
+        if (!active) { stop(); return; }
+        unlisten = stop;
+        const snapshot = await api.terminalAttach(terminalId);
+        if (!active) return;
+        applyIdentity(snapshot, true);
         setState({ kind: "ready", snapshot, exited: !snapshot.live });
       })
       .catch((error) => {
-        setState({ kind: "error", message: String(error) });
+        if (active) setState({ kind: "error", message: String(error) });
       });
-  }, [terminalId]);
-
-  useEffect(() => {
-    bootstrap();
-  }, [bootstrap]);
-
-  // 绑定事实的推送通道：注册表 bind()（预指定 id 精确匹配，或会话页的
-  // 校验匹配）一发事件这里就点亮入口。挂载期间没等到绑定的情形，由重新
-  // 挂载时 attach 快照里的身份兜底——两个方向都闭环，无轮询。
-  useEffect(() => {
-    const un = listen<{ terminal_id: string; session_id: string }>(EVENT_BOUND, (e) => {
-      if (e.payload.terminal_id === terminalId) setBoundSessionId(e.payload.session_id);
-    });
     return () => {
-      void un.then((f) => f()).catch(() => {});
+      active = false;
+      unlisten?.();
     };
-  }, [terminalId]);
+  }, [terminalId, connectionAttempt, applyIdentity]);
 
-  // 绑定后把标题换成会话本名（种子只是首帧占位，权威仍是详情）；读失败
-  // 保持当前标题，终端本身不受影响。
+  // 事件不带标题时读取当前会话详情；版本检查同时防住 A→B→A 的迟到请求。
   useEffect(() => {
-    if (!boundSessionId) return;
+    if (!identity.sessionId || identity.revision < 0 || identity.title !== null) return;
+    const { sessionId, revision } = identity;
     let live = true;
-    api.getSessionDetail(boundSessionId)
+    api.getSessionDetail(sessionId)
       .then((d) => {
-        if (live) setBoundTitle(sessionDisplayTitle(d.session.title));
+        const current = identityRef.current;
+        if (!live || current.revision !== revision || current.sessionId !== sessionId || current.title !== null) return;
+        const next = { ...current, title: sessionDisplayTitle(d.session.title) };
+        identityRef.current = next;
+        setIdentity(next);
       })
       .catch(() => {});
     return () => {
       live = false;
     };
-  }, [boundSessionId]);
+  }, [identity.sessionId, identity.revision]);
 
   // xterm 生命周期：实例按 terminal_id 常驻（liveTerminals），本 effect 只做
   // 两件事——首次创建（open + 监听 + 回放一次 scrollback），或重挂（把存活的

@@ -38,8 +38,8 @@ export default function CommandPalette({ onClose, navigate }: {
 
   useEffect(() => {
     inputRef.current?.focus();
-    api.listWorkstreams().then((ws) => setWorkstreams(ws.filter((w) => w.visibility === "normal"))).catch(() => {});
-    api.listSessions().then((s) => setSessions(s.slice(0, 25))).catch(() => {});
+    api.listWorkstreams().then((ws) => setWorkstreams(ws)).catch(() => {});
+    api.listSessions(undefined, undefined, "all").then((s) => setSessions(s.slice(0, 25))).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -76,6 +76,7 @@ export default function CommandPalette({ onClose, navigate }: {
         : h.kind === "item" ? { view: "workstream", workstreamId: h.parent_id }
         // 消息命中：打开它所在的会话，ref_id 是消息 id，parent_id 才是会话 id。
         : h.kind === "message" ? { view: "session", sessionId: h.parent_id }
+        : h.kind === "session" ? { view: "session", sessionId: h.ref_id }
         : h.kind === "project" ? { view: "project", projectId: h.ref_id }
         : { view: "sessions" };
       out.push({

@@ -1,4 +1,4 @@
-//! Session lifecycle orchestration: Trash, Restore and permanent LOCAL delete
+//! Session lifecycle orchestration: Archive, Restore and permanent LOCAL delete
 //!.
 //!
 //! Division of labor, mirroring the architecture boundaries:
@@ -12,7 +12,7 @@
 //!   NoEnding never deletes Agent-owned session sources.
 //!   ```
 //!
-//! Permanent delete is a NoEnding-LOCAL purge and nothing else: Trash is the
+//! Permanent delete is a NoEnding-LOCAL purge and nothing else: Archive is the
 //! only gate, one SQLite transaction, no Agent file ever touched. The root
 //! source's verdict is COPY, not a gate — NoEnding never deletes an Agent
 //! source, so a source that is still there just gets re-ingested as a new
@@ -48,42 +48,24 @@ pub struct PermanentDeleteResult {
     pub redacted_revisions: usize,
 }
 
-/// Normal → Trash. Reversible; never touches the Agent source.
-///
-/// The FTS unindex commits INSIDE the same transaction as the lifecycle flip:
-/// a crash can no longer leave a trashed session searchable —
-/// there is no post-commit window and no reliance on eventual self-heal.
-pub fn trash_session(db: &Db, session_id: &str) -> Result<Session> {
-    let changed = db.tx(|tx| {
-        let changed =
-            session_lifecycle::trash_session_conn(tx, session_id, &crate::storage::now())?;
-        if changed {
-            // a trashed session leaves the search index, atomically
-            // with the flip that hides it — an index failure rolls BOTH back.
-            session_lifecycle::unindex_session_conn(tx, session_id)?;
-        }
-        Ok(changed)
-    })?;
+/// Archive without changing messages, Context, search or the Agent source.
+pub fn archive_session(db: &Db, session_id: &str) -> Result<Session> {
+    let changed = db
+        .tx(|tx| session_lifecycle::archive_session_conn(tx, session_id, &crate::storage::now()))?;
     if !changed {
-        return Err(other("Session 不存在或已在回收站"));
+        return Err(other("会话不存在或已经归档"));
     }
     db.get_session(session_id)?
         .ok_or_else(|| other("Session 不存在"))
 }
 
-/// Trash → Normal: same Session id; Owner, members, messages,
+/// Archive → Normal: same Session id; Owner, members, messages,
 /// cursors and the Context frontier were never touched. The next reconcile
-/// simply resumes (and re-indexes the restored conversation).
+/// simply continues. Search and Context were never disabled.
 pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {
-    let restored = db.tx(|tx| {
-        let restored = session_lifecycle::restore_session_conn(tx, session_id)?;
-        if restored {
-            session_lifecycle::reindex_session_conn(tx, session_id)?;
-        }
-        Ok(restored)
-    })?;
+    let restored = db.tx(|tx| session_lifecycle::restore_session_conn(tx, session_id))?;
     if !restored {
-        return Err(other("Session 不存在或不在回收站"));
+        return Err(other("会话不存在或尚未归档"));
     }
     db.get_session(session_id)?
         .ok_or_else(|| other("Session 不存在"))
@@ -96,13 +78,13 @@ pub fn root_source_status(_db: &Db, session: &Session) -> Result<Option<SourceAv
     ))
 }
 
-/// The only gate on a local purge: the Session must exist and be trashed.
-fn require_trashed(db: &Db, session_id: &str) -> Result<Session> {
+/// The only gate on a local purge: the Session must exist and be archived.
+fn require_archived(db: &Db, session_id: &str) -> Result<Session> {
     let session = db
         .get_session(session_id)?
         .ok_or_else(|| other("Session 不存在"))?;
-    if !session.is_trashed() {
-        return Err(other("只有回收站中的会话才能永久删除"));
+    if !session.is_archived() {
+        return Err(other("只有已归档的会话才能永久删除"));
     }
     Ok(session)
 }
@@ -110,7 +92,7 @@ fn require_trashed(db: &Db, session_id: &str) -> Result<Session> {
 /// Stateless preview of the local deletion: what would go, plus the fresh
 /// ROOT source verdict the dialog's copy is built from.
 pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<LocalDeletePreview> {
-    let session = require_trashed(db, session_id)?;
+    let session = require_archived(db, session_id)?;
     let status = root_source_status(db, &session)?;
     let counts = PermanentDeletionCounts::collect(&db.read(), session_id)?;
     Ok(LocalDeletePreview {
@@ -126,7 +108,7 @@ pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<Loc
 /// Execute the permanent LOCAL deletion: ONE SQLite transaction that redacts
 /// provenance and deletes every session-owned row ('s fixed order).
 pub fn permanently_delete_session(db: &Db, session_id: &str) -> Result<PermanentDeleteResult> {
-    let session = require_trashed(db, session_id)?;
+    let session = require_archived(db, session_id)?;
     let redacted = db.tx(|tx| session_lifecycle::purge_session_data_conn(tx, &session.id))?;
     Ok(PermanentDeleteResult {
         purged: true,

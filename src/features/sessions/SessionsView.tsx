@@ -3,15 +3,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
-import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import { Modal, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionCards, {
   agentDisplayLabel,
-  cwdDisplayLabel,
-  ellipsisTail,
-  formatDateTime,
   sessionDisplayTitle,
 } from "./SessionTable";
 import PermanentDeleteModal from "./PermanentDeleteModal";
@@ -21,17 +17,17 @@ import type { Route, SessionScope } from "../../app/routes";
 /**
  * Sessions = 执行记录页：第二天回来还能一眼找到并继续任意一次 Agent 会话，不承担
  * Workstream 浏览。搜索与筛选在前端做，规模大了再转后端。
- * 回收站不是第三种筛选，而是换一个数据面（scope=trash），行渲染与动作都专属。
+ * 未归档和已归档使用相同的筛选与展示，归档只改变继续和删除动作。
  */
 let cachedNormalSessions: Session[] | null = null;
-let cachedTrashSessions: Session[] | null = null;
+let cachedArchivedSessions: Session[] | null = null;
 let cachedProjects: Project[] = [];
 let cachedSources: IngestSource[] | null = null;
 let cachedWorkstreamTitleById = new Map<string, string>();
 
 export function clearSessionsCache() {
   cachedNormalSessions = null;
-  cachedTrashSessions = null;
+  cachedArchivedSessions = null;
   cachedProjects = [];
   cachedSources = null;
   cachedWorkstreamTitleById = new Map();
@@ -41,8 +37,8 @@ export default function SessionsView({ navigate, scope }: {
   navigate: (r: Route) => void;
   scope?: SessionScope;
 }) {
-  const [trashMode, setTrashMode] = useState(scope === "trash");
-  const [sessions, setSessions] = useState<Session[] | null>(() => trashMode ? cachedTrashSessions : cachedNormalSessions);
+  const [archivedMode, setArchivedMode] = useState(scope === "archived");
+  const [sessions, setSessions] = useState<Session[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
   const [projects, setProjects] = useState<Project[]>(cachedProjects);
   /** Workstream id → 标题：`session.owner_workstream_id` 只有一个 id，名字在这里解析。 */
   const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(cachedWorkstreamTitleById);
@@ -55,18 +51,19 @@ export default function SessionsView({ navigate, scope }: {
   const [projectId, setProjectId] = useViewState("sessions.projectId", "all");
   const [wsFilter, setWsFilter] = useViewState("sessions.wsFilter", "all");
   const [viewMode, setViewMode] = useViewState<"cards" | "list">("sessions.viewMode", "cards");
-  const [trashSessionId, setTrashSessionId] = useState<string | null>(null);
-  const [trashBusy, setTrashBusy] = useState(false);
+  const [archiveSessionId, setArchiveSessionId] = useState<string | null>(null);
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [unarchiveBusy, setUnarchiveBusy] = useState(false);
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
   const [bulkPurgeBusy, setBulkPurgeBusy] = useState(false);
-  /** 删除 Modal 的目标 Session（回收站行 / 恢复冲突提示都可能打开它）。 */
+  /** 删除 Modal 的目标 Session（已归档行 / 恢复冲突提示都可能打开它）。 */
   const [purgeSessionId, setPurgeSessionId] = useState<string | null>(null);
   const refresh = useCallback(() => {
     setLoadFailed(false);
     let cancelled = false;
     // 来源列表独立加载：它只为普通模式的空状态分类服务，读失败不该让整张表
-    // 变成"读取失败"；回收站模式压根用不到它，不发请求。
-    if (!trashMode) {
+    // 变成"读取失败"；已归档模式压根用不到它，不发请求。
+    if (!archivedMode) {
       api.listIngestSources()
         .then((ss) => {
           if (!cancelled) {
@@ -82,26 +79,22 @@ export default function SessionsView({ navigate, scope }: {
           }
         });
     }
-    // 两个数据面各自的后端 scope：普通 = active，
-    // 回收站 = trash。projects / workstreams 只服务普通模式的筛选列，回收站行不显示它们。
-    const trashList = () => api.listSessions(undefined, undefined, "trash");
+    // 两个归档范围共用项目与任务筛选。
+    const archivedList = () => api.listSessions(undefined, undefined, "archived");
     Promise.all([
-      trashMode ? trashList() : api.listSessions(),
-      trashMode ? Promise.resolve(null) : api.listProjects(),
-      trashMode ? Promise.resolve(null) : api.listWorkstreams(),
+      archivedMode ? archivedList() : api.listSessions(),
+      api.listProjects(),
+      api.listWorkstreams(),
     ])
       .then(([ss, ps, ws]) => {
         if (cancelled) return;
-        if (!trashMode) {
-          const wsMap = new Map((ws ?? []).map((w) => [w.id, w.title]));
-          setWorkstreamTitleById(wsMap);
-          cachedWorkstreamTitleById = wsMap;
-          setProjects(ps ?? []);
-          cachedProjects = ps ?? [];
-          cachedNormalSessions = ss;
-        } else {
-          cachedTrashSessions = ss;
-        }
+        const wsMap = new Map((ws ?? []).map((w) => [w.id, w.title]));
+        setWorkstreamTitleById(wsMap);
+        cachedWorkstreamTitleById = wsMap;
+        setProjects(ps ?? []);
+        cachedProjects = ps ?? [];
+        if (!archivedMode) cachedNormalSessions = ss;
+        else cachedArchivedSessions = ss;
         setSessions(ss);
         setLoadFailed(false);
       })
@@ -111,13 +104,13 @@ export default function SessionsView({ navigate, scope }: {
         setLoadFailed(true);
       });
     return () => { cancelled = true; };
-  }, [trashMode]);
+  }, [archivedMode]);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
   useEffect(() => {
-    const isTrash = scope === "trash";
-    setTrashMode(isTrash);
-    setSessions(isTrash ? cachedTrashSessions : cachedNormalSessions);
+    const isArchived = scope === "archived";
+    setArchivedMode(isArchived);
+    setSessions(isArchived ? cachedArchivedSessions : cachedNormalSessions);
   }, [scope]);
 
   const projectNameById = useMemo(
@@ -192,27 +185,28 @@ export default function SessionsView({ navigate, scope }: {
       .catch((e) => showToast(`打开失败：${String(e)}`));
   };
 
-  const trashTarget = sessions?.find((s) => s.id === trashSessionId) ?? null;
-  const trash = async () => {
-    if (!trashTarget || trashBusy) return;
-    setTrashBusy(true);
+  const archiveTarget = sessions?.find((s) => s.id === archiveSessionId) ?? null;
+  const archive = async () => {
+    if (!archiveTarget || archiveBusy) return;
+    setArchiveBusy(true);
     try {
-      await api.trashSession(trashTarget.id);
-      showToast("已移入回收站");
-      setTrashSessionId(null);
-      cachedTrashSessions = null;
+      await api.archiveSession(archiveTarget.id);
+      showToast("已归档");
+      setArchiveSessionId(null);
+      cachedNormalSessions = null;
+      cachedArchivedSessions = null;
       refresh();
     } catch (e) {
       console.error(e);
-      showToast(`移入回收站失败：${String(e)}`);
+      showToast(`归档失败：${String(e)}`);
     } finally {
-      setTrashBusy(false);
+      setArchiveBusy(false);
     }
   };
 
-  /** 全部删除：Trash 是唯一门槛，逐个执行；源仍存在的会话下次同步会重新入库。 */
+  /** 删除全部已归档会话；源仍存在的会话下次同步会重新入库。 */
   const bulkPurge = async () => {
-    if (!trashMode || !sessions || sessions.length === 0 || bulkPurgeBusy) return;
+    if (!archivedMode || !sessions || sessions.length === 0 || bulkPurgeBusy) return;
     const targets = [...sessions];
     let purged = 0;
     let failed = 0;
@@ -229,7 +223,7 @@ export default function SessionsView({ navigate, scope }: {
     setBulkPurgeBusy(false);
     setBulkPurgeOpen(false);
     cachedNormalSessions = null;
-    cachedTrashSessions = null;
+    cachedArchivedSessions = null;
     refresh();
     showToast(
       failed === 0
@@ -239,16 +233,19 @@ export default function SessionsView({ navigate, scope }: {
   };
 
   /** 恢复失败要把后端的拒绝原因原样给出。 */
-  const restoreFromTrash = async (s: Session) => {
+  const unarchive = async (s: Session) => {
+    if (unarchiveBusy || bulkPurgeBusy) return;
+    setUnarchiveBusy(true);
     try {
       await api.restoreSession(s.id);
       showToast(`已恢复「${sessionDisplayTitle(s.title)}」`);
       cachedNormalSessions = null;
+      cachedArchivedSessions = null;
       refresh();
     } catch (e) {
       console.error(e);
       showToast(String(e));
-    }
+    } finally { setUnarchiveBusy(false); }
   };
 
   const clearFilters = () => {
@@ -268,7 +265,7 @@ export default function SessionsView({ navigate, scope }: {
 
   const loadFailedState = (
     <EmptyState
-      title={trashMode ? "读取回收站失败。" : "读取会话失败。"}
+      title={archivedMode ? "读取已归档失败。" : "读取会话失败。"}
       actions={<button className="btn small" onClick={refresh}>重试</button>}
     />
   );
@@ -281,37 +278,35 @@ export default function SessionsView({ navigate, scope }: {
         title="会话"
         actions={
           <>
-            {/* 回收站开关：同一页面的两个数据面，用分段控件而非筛选器——
-                两边行为（列、动作）不同，不是同一张表的条件过滤。 */}
-            <div className="settings-seg" role="group" aria-label="会话列表范围">
+            {/* 两个归档范围共用同一套卡片和列表。 */}
+            <div className="settings-seg archive-scope" role="group" aria-label="会话列表范围">
               <button
-                className={trashMode ? "" : "on"}
-                aria-pressed={!trashMode}
-                aria-label="会话列表"
-                title="会话列表"
-                onClick={() => navigate({ view: "sessions", scope: "active" })}
+                className={archivedMode ? "" : "on"}
+                aria-pressed={!archivedMode}
+                aria-label="未归档"
+                title="未归档"
+                onClick={() => navigate({ view: "sessions", scope: "unarchived" })}
               >
-                <Icon name="chat" />
+                <Icon name="chat" /> 未归档
               </button>
               <button
-                className={trashMode ? "on" : ""}
-                aria-pressed={trashMode}
-                aria-label="回收站"
-                title="回收站"
-                onClick={() => navigate({ view: "sessions", scope: "trash" })}
+                className={archivedMode ? "on" : ""}
+                aria-pressed={archivedMode}
+                aria-label="已归档"
+                title="已归档"
+                onClick={() => navigate({ view: "sessions", scope: "archived" })}
               >
-                <Icon name="archive" />
+                <Icon name="archive" /> 已归档
               </button>
             </div>
-            <button className="btn ghost icon-button" aria-label="新建会话" title="新建会话" onClick={() => navigate({ view: "new-session" })}>
+            {archivedMode ? <button className="btn ghost danger" aria-label="删除全部" title="删除全部已归档会话" disabled={!sessions?.length || bulkPurgeBusy || unarchiveBusy || archiveBusy} onClick={() => setBulkPurgeOpen(true)}><Icon name="trash" /> 删除全部</button> : <button className="btn ghost icon-button" aria-label="新建会话" title="新建会话" onClick={() => navigate({ view: "new-session" })}>
               <Icon name="plus" />
-            </button>
+            </button>}
           </>
         }
       />
 
-      {!trashMode && (
-        <>
+      <>
           <div className="board-toolbar">
           <input
             type="text"
@@ -408,16 +403,16 @@ export default function SessionsView({ navigate, scope }: {
           {loadFailed && loadFailedState}
           {shown !== null && shown.length === 0 && (sessions?.length ?? 0) === 0 && !loadFailed && (
             <EmptyState
-              title={emptyTitle}
-              hint={emptyHint}
-              actions={
+              title={archivedMode ? "还没有已归档的会话" : emptyTitle}
+              hint={archivedMode ? "归档的会话会显示在这里，可以取消归档或永久删除。" : emptyHint}
+              actions={!archivedMode ? (
                 <>
                   <button className="btn small" onClick={() => navigate({ view: "agents" })}>
                     配置会话来源
                   </button>
                   <button className="btn small" onClick={() => navigate({ view: "new-session" })}>新建会话</button>
                 </>
-              }
+              ) : undefined}
             />
           )}
           {shown !== null && shown.length === 0 && (sessions?.length ?? 0) > 0 && (
@@ -437,84 +432,41 @@ export default function SessionsView({ navigate, scope }: {
               viewMode={viewMode}
               onOpen={(id) => navigate({ view: "session", sessionId: id })}
               onResume={resume}
-              onTrash={setTrashSessionId}
+              onArchive={setArchiveSessionId}
+              onRestore={(id) => { const target = sessions?.find((s) => s.id === id); if (target) void unarchive(target); }}
+              onDelete={setPurgeSessionId}
+              busy={bulkPurgeBusy || unarchiveBusy || archiveBusy}
             />
           )}
-        </>
-      )}
+      </>
 
-      {trashMode && (
-        <>
-          <div className="muted small" style={{ margin: "4px 0 14px", maxWidth: "72ch" }}>
-            回收站里的会话不出现在会话列表、搜索与继续入口中，上下文提取也已冻结。
-            Agent 原始会话始终保留；「删除」只清理 NoEnding 的本地数据，所以源仍存在的会话
-            会在后续同步中作为新会话重新入库。
-          </div>
-
-          {sessions === null && !loadFailed && (
-            <div className="session-list" aria-busy="true">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="skeleton"
-                  style={{ height: 68, borderRadius: "var(--radius-md)", marginBottom: 8 }}
-                />
-              ))}
-            </div>
-          )}
-          {loadFailed && loadFailedState}
-          {sessions !== null && sessions.length === 0 && !loadFailed && (
-            <EmptyState
-              title="回收站是空的。"
-              hint="「移入回收站」的会话会留在这里：可以随时恢复，也可以在这里删除本地数据。"
-            />
-          )}
-          {sessions !== null && sessions.length > 0 && (
-            <>
-              <div className="session-trash-actions">
-                <span className="muted small">共 {sessions.length} 个会话</span>
-                <button className="btn small danger" onClick={() => setBulkPurgeOpen(true)}>
-                  全部删除
-                </button>
-              </div>
-              <TrashSessionTable
-                sessions={sessions}
-                onOpen={(id) => navigate({ view: "session", sessionId: id })}
-                onRestore={restoreFromTrash}
-                onPurge={(s) => setPurgeSessionId(s.id)}
-              />
-            </>
-          )}
-        </>
-      )}
-
-      {trashTarget && (
+      {archiveTarget && (
         <Modal
-          title="移入回收站"
-          onClose={() => { if (!trashBusy) setTrashSessionId(null); }}
+          title="归档"
+          onClose={() => { if (!archiveBusy) setArchiveSessionId(null); }}
         >
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            <b>{sessionDisplayTitle(trashTarget.title)}</b> 会从会话列表、搜索与继续入口中消失，出现在回收站里。
+            <b>{sessionDisplayTitle(archiveTarget.title)}</b> 会移至「已归档」，归档后不能通过 NoEnding 继续。搜索、同步和摘要更新保持可用。
           </p>
           <div className="card hairline" style={{ marginBottom: 12 }}>
-            <p style={{ margin: 0 }}>Agent 原始会话不会被删除，之后可以从回收站恢复。</p>
+            <p style={{ margin: 0 }}>Agent 原始会话不会被删除，之后可以从已归档恢复。</p>
           </div>
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setTrashSessionId(null)} disabled={trashBusy}>取消</button>
-            <button className="btn primary" onClick={trash} disabled={trashBusy}>
-              {trashBusy ? "处理中…" : "移入回收站"}
+            <button className="btn" onClick={() => setArchiveSessionId(null)} disabled={archiveBusy}>取消</button>
+            <button className="btn primary" onClick={archive} disabled={archiveBusy}>
+              {archiveBusy ? "处理中…" : "归档"}
             </button>
           </div>
         </Modal>
       )}
 
-      {trashMode && bulkPurgeOpen && sessions && sessions.length > 0 && (
+      {archivedMode && bulkPurgeOpen && sessions && sessions.length > 0 && (
         <Modal
-          title="全部删除"
+          title="删除全部"
           onClose={() => { if (!bulkPurgeBusy) setBulkPurgeOpen(false); }}
         >
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            确定要删除回收站中的 <b>{sessions.length} 个会话</b> 的本地数据吗？
+            确定要删除已归档的 <b>{sessions.length} 个会话</b> 的本地数据吗？
           </p>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
             只删除 NoEnding 本地数据，不会删除 Agent 数据。
@@ -526,7 +478,7 @@ export default function SessionsView({ navigate, scope }: {
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>
             <button className="btn danger" onClick={bulkPurge} disabled={bulkPurgeBusy}>
-              {bulkPurgeBusy ? "删除中…" : "全部删除"}
+              {bulkPurgeBusy ? "删除中…" : "删除全部"}
             </button>
           </div>
         </Modal>
@@ -536,77 +488,9 @@ export default function SessionsView({ navigate, scope }: {
         <PermanentDeleteModal
           sessionId={purgeSessionId}
           onClose={() => { setPurgeSessionId(null); refresh(); }}
-          onDeleted={() => { setPurgeSessionId(null); refresh(); }}
+          onDeleted={() => { cachedNormalSessions = null; cachedArchivedSessions = null; setPurgeSessionId(null); refresh(); }}
         />
       )}
     </div>
-  );
-}
-
-/** 回收站表格：行是 Agent、标题、工作目录、移入时间、恢复 / 删除五段。
- *  不做筛选与搜索（回收站规模小），点行仍可进详情页。 */
-function TrashSessionTable({ sessions, onOpen, onRestore, onPurge }: {
-  sessions: Session[];
-  onOpen: (sessionId: string) => void;
-  onRestore: (s: Session) => void;
-  onPurge: (s: Session) => void;
-}) {
-  const rows = [...sessions].sort((a, b) =>
-    (b.trashed_at ?? "").localeCompare(a.trashed_at ?? ""));
-
-  return (
-    <table className="session-table">
-      <thead>
-        <tr>
-          <th style={{ width: 110 }}>Agent</th>
-          <th>会话</th>
-          <th style={{ width: 210 }}>移入回收站</th>
-          <th style={{ width: 150 }}>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((s) => {
-          const title = sessionDisplayTitle(s.title);
-          const cwd = (s.cwd ?? "").trim();
-          return (
-            <tr
-              key={s.id}
-              onClick={() => onOpen(s.id)}
-              title={`打开会话：${title}`}
-            >
-              <td className="cell-agent">
-                <span className="cell-agent-content">
-                  {agentDisplayLabel(s.agent)}
-                </span>
-              </td>
-              <td className="cell-title" title={title}>
-                <div style={{ whiteSpace: "normal" }}>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <AgentIcon agent={s.agent} size={15} />
-                    <span>{ellipsisTail(title, 40)}</span>
-                  </div>
-                  {cwd ? (
-                    <div>
-                      <span className="muted small mono" title={cwd}>
-                        {cwdDisplayLabel(cwd, 30)}
-                      </span>
-                    </div>
-                  ) : null}
-                </div>
-              </td>
-              <td title={s.trashed_at ?? undefined}>
-                移入回收站：{formatDateTime(s.trashed_at)}
-              </td>
-              <td onClick={(e) => e.stopPropagation()}>
-                <div className="row" style={{ gap: 6 }}>
-                  <button className="btn small" onClick={() => onRestore(s)}>恢复</button>
-                  <button className="btn small" onClick={() => onPurge(s)}>删除…</button>
-                </div>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
   );
 }

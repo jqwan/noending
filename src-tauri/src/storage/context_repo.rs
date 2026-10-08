@@ -404,7 +404,7 @@ pub fn bump_context_revision_conn(conn: &Connection, workstream_id: &str) -> Res
 
 /// Bump `input_revision` — called by paths that change what the Workstream
 /// needs to RE-SYNTHESISE from: manual Context edits, Owner set, title /
-/// description change, Session Trash / Restore.
+/// description change or Session ownership change.
 pub fn bump_input_revision_conn(conn: &Connection, workstream_id: &str) -> Result<i64> {
     ensure_workstream_state_conn(conn, workstream_id)?;
     conn.execute(

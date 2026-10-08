@@ -114,6 +114,17 @@ fn fresh_database_uses_current_format_generation() {
     assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
     assert_eq!(user_version(&db.read()), DATABASE_FORMAT_VERSION);
 
+    let conn = db.read();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('workstreams') WHERE name = 'lifecycle'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "tasks have only archive state");
+    drop(conn);
+
     // the old-generation tables are gone, not carried
     // forward: one conversation store, one session-owned cursor, and no
     // deletion job machinery (NoEnding never deletes an Agent-owned source).
@@ -214,8 +225,8 @@ fn fresh_database_uses_current_format_generation() {
             "fork provenance must be sessions(id) ON DELETE SET NULL"
         );
         assert!(
-            has_column(&conn, "sessions", "trashed_at"),
-            "sessions.trashed_at is the single lifecycle authority"
+            has_column(&conn, "sessions", "archived_at"),
+            "sessions.archived_at is the single lifecycle authority"
         );
         assert!(
             has_column(&conn, "sessions", "owner_workstream_id"),

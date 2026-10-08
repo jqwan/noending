@@ -230,7 +230,10 @@ export default function SessionCards({
   viewMode = "cards",
   onOpen,
   onResume,
-  onTrash,
+  onArchive,
+  onRestore,
+  onDelete,
+  busy = false,
 }: {
   sessions: Session[];
   /** Workstream id → 标题；用于给 `owner_workstream_id` 一个可读名字。 */
@@ -239,7 +242,10 @@ export default function SessionCards({
   viewMode?: "cards" | "list";
   onOpen: (sessionId: string) => void;
   onResume: (sessionId: string) => void;
-  onTrash: (sessionId: string) => void;
+  onArchive: (sessionId: string) => void;
+  onRestore?: (sessionId: string) => void;
+  onDelete?: (sessionId: string) => void;
+  busy?: boolean;
 }) {
   const [visibleCount, setVisibleCount] = useViewState("sessions.visibleCount", 100);
   // 「继续」按钮的可用性需要桌面端在场事实：读一次 agent 状态。
@@ -283,14 +289,10 @@ export default function SessionCards({
             </button>
             <div className="session-list-actions">
               <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} />
-              <button
-                className="btn small ghost icon-button"
-                title="移入回收站"
-                aria-label={`将${sessionDisplayTitle(s.title)}移入回收站`}
-                onClick={() => onTrash(s.id)}
-              >
-                <Icon name="trash" />
-              </button>
+              {s.archived_at ? <>
+                <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
+                <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
+              </> : <button className="btn small ghost icon-button" disabled={busy} title="归档" aria-label={`将${sessionDisplayTitle(s.title)}归档`} onClick={() => onArchive(s.id)}><Icon name="archive" /></button>}
             </div>
           </article>
         ))}
@@ -361,14 +363,10 @@ export default function SessionCards({
             </span>
             <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
               <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} />
-              <button
-                className="btn small ghost icon-button"
-                title="移入回收站"
-                aria-label={`将${sessionDisplayTitle(s.title)}移入回收站`}
-                onClick={() => onTrash(s.id)}
-              >
-                <Icon name="trash" />
-              </button>
+              {s.archived_at ? <>
+                <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
+                <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
+              </> : <button className="btn small ghost icon-button" disabled={busy} title="归档" aria-label={`将${sessionDisplayTitle(s.title)}归档`} onClick={() => onArchive(s.id)}><Icon name="archive" /></button>}
             </div>
           </footer>
         </article>

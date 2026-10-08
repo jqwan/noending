@@ -70,7 +70,7 @@ pub struct SessionWorkspacePath {
     pub project_name: String,
 }
 
-// scope: active (default) | trash | all —; the recycle bin passes "trash".
+// Board scope: unarchived (default) | archived | all.
 #[tauri::command]
 pub fn list_sessions(
     state: State<AppState>,
@@ -113,7 +113,7 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             Some(id) => db.get_workstream(id)?,
             None => None,
         };
-        let can_resume = !session.is_trashed() && source_status == SourceAvailability::Present;
+        let can_resume = !session.is_archived() && source_status == SourceAvailability::Present;
         let workspace_path = match session.workspace_path_id.as_deref() {
             Some(id) => db.get_workspace_path(id)?.map(|wp| {
                 Ok::<_, crate::error::AppError>(SessionWorkspacePath {

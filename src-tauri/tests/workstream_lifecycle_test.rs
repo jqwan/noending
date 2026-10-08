@@ -1,6 +1,5 @@
 //! Workstream lifecycle and the recycle bin.
 //!
-//! `lifecycle` (`active | completed`) is a label with no behaviour.
 //! `visibility = archived` IS the recycle bin. Permanent deletion is the only
 //! destructive door, it opens only from the bin, and what it destroys is the
 //! Workstream and the rows only it owned — never a Session.
@@ -10,14 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod support;
 
 use noending::domain::{
-    workstream_lifecycle, workstream_visibility, Agent, ContextConflict, Session,
-    SessionMessageRole, Workstream,
+    workstream_visibility, Agent, ContextConflict, Session, SessionMessageRole, Workstream,
 };
 use noending::error::Result;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::workstream::{
     add_workstream_path, apply_whole_object_edit, archive_workstream, create_workstream,
-    delete_workstream_permanently, restore_workstream, set_workstream_lifecycle,
+    delete_workstream_permanently, restore_workstream,
 };
 use noending::workspace::{normalize_path, WorkspaceAttaching};
 use rusqlite::{params, Connection};
@@ -95,82 +93,11 @@ fn count(db: &Db, sql: &str, arg: &str) -> i64 {
         .unwrap()
 }
 
-// lifecycle
-
-/// must-test — the label is a label: switching it changes the label.
-#[test]
-fn active_to_completed_changes_nothing_else() {
-    let (_d, db) = temp_db();
-    let w = workstream(&db, "w-label");
-    let s = session(&db, "s-label");
-    set_owner(&db, &s.id, &w.id);
-    let item = noending::sync::create_item(
-        &db,
-        &w.id,
-        "goal",
-        "目标",
-        "把列表做成唯一权威",
-        "user_explicit",
-        "manual",
-        &[],
-        "user",
-    )
-    .unwrap();
-    let before = Snapshot::take(&db, &w.id);
-
-    let after = set_workstream_lifecycle(&db, &w.id, workstream_lifecycle::COMPLETED).unwrap();
-    assert_eq!(after.lifecycle, workstream_lifecycle::COMPLETED);
-    // The label is the only field allowed to differ.
-    let mut expected = before.clone();
-    expected.lifecycle = workstream_lifecycle::COMPLETED.into();
-    let completed = Snapshot::take(&db, &w.id);
-    assert_eq!(completed, expected, "only the label moved");
-    assert_eq!(completed.visibility, workstream_visibility::NORMAL);
-    assert_eq!(completed.context_items, 1);
-    assert_eq!(completed.revisions, 1);
-
-    // …and back again, with the same quietness.
-    set_workstream_lifecycle(&db, &w.id, workstream_lifecycle::ACTIVE).unwrap();
-    let mut back = completed.clone();
-    back.lifecycle = workstream_lifecycle::ACTIVE.into();
-    let now_snapshot = Snapshot::take(&db, &w.id);
-    assert_eq!(now_snapshot, back);
-    assert_eq!(now_snapshot.created_at, before.created_at);
-    assert_eq!(
-        db.get_item(&item.id).unwrap().unwrap().authority,
-        "user_explicit",
-        "a label switch may not demote user authority"
-    );
-}
-
-/// the vocabulary is `active | completed` and nothing else. `open` and
-/// `abandoned` are outside that closed set; a caller still writing one is a bug,
-/// and silently accepting it would put a value no reader understands in the
-/// column.
-#[test]
-fn lifecycle_rejects_the_retired_vocabulary() {
-    let (_d, db) = temp_db();
-    let w = workstream(&db, "w-vocab");
-    for retired in ["open", "abandoned", "", "ACTIVE"] {
-        let err = set_workstream_lifecycle(&db, &w.id, retired).unwrap_err();
-        assert!(err.to_string().contains("active"), "{retired:?} → {err}");
-    }
-    assert_eq!(
-        db.get_workstream(&w.id).unwrap().unwrap().lifecycle,
-        workstream_lifecycle::ACTIVE
-    );
-    assert!(
-        set_workstream_lifecycle(&db, "no-such-workstream", workstream_lifecycle::COMPLETED)
-            .is_err()
-    );
-}
-
 /// archived IS the bin: everything the user built is still there.
 #[test]
-fn archive_preserves_lifecycle_paths_and_ownership() {
+fn archive_preserves_paths_context_and_ownership() {
     let (_d, db) = temp_db();
     let w = workstream(&db, "w-arch");
-    set_workstream_lifecycle(&db, &w.id, workstream_lifecycle::COMPLETED).unwrap();
     let s = session(&db, "s-arch");
     set_owner(&db, &s.id, &w.id);
     add_workstream_path(&db, &FixedAttacher, &w.id, "/repo/docs").unwrap();
@@ -179,7 +106,7 @@ fn archive_preserves_lifecycle_paths_and_ownership() {
         &w.id,
         "current_state",
         "状态",
-        "在回收站里也要在",
+        "在已归档列表中也要在",
         "user_edit",
         "manual",
         &[],
@@ -190,8 +117,6 @@ fn archive_preserves_lifecycle_paths_and_ownership() {
 
     let archived = archive_workstream(&db, &w.id).unwrap();
     assert_eq!(archived.visibility, workstream_visibility::ARCHIVED);
-    // lifecycle survives the trip, which is why restore needs no snapshot
-    assert_eq!(archived.lifecycle, workstream_lifecycle::COMPLETED);
 
     let after = Snapshot::take(&db, &w.id);
     assert_eq!(after.paths, before.paths);
@@ -208,33 +133,18 @@ fn archive_preserves_lifecycle_paths_and_ownership() {
     assert_eq!(db.get_session(&s.id).unwrap().unwrap().id, s.id);
 }
 
-/// restore flips visibility back and nothing else, so the lifecycle the
-/// user had set before archiving is still the one they get.
+/// Unarchiving restores the same task and all its associations.
 #[test]
-fn restore_returns_the_previous_lifecycle() {
+fn restore_preserves_task_data() {
     let (_d, db) = temp_db();
     let w = workstream(&db, "w-restore");
-    for (i, lifecycle) in [
-        workstream_lifecycle::ACTIVE,
-        workstream_lifecycle::COMPLETED,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        set_workstream_lifecycle(&db, &w.id, lifecycle).unwrap();
-        // A distinct root identity per turn: upsert keys on it, so reusing one
-        // would update the first row instead of making a second Session.
-        let s = session(&db, &format!("s-restore-{i}"));
-        set_owner(&db, &s.id, &w.id);
-        let before = Snapshot::take(&db, &w.id);
-
-        archive_workstream(&db, &w.id).unwrap();
-        let restored = restore_workstream(&db, &w.id).unwrap();
-
-        assert_eq!(restored.visibility, workstream_visibility::NORMAL);
-        assert_eq!(restored.lifecycle, lifecycle, "round-tripped untouched");
-        assert_eq!(Snapshot::take(&db, &w.id), before);
-    }
+    let s = session(&db, "s-restore");
+    set_owner(&db, &s.id, &w.id);
+    let before = Snapshot::take(&db, &w.id);
+    archive_workstream(&db, &w.id).unwrap();
+    let restored = restore_workstream(&db, &w.id).unwrap();
+    assert_eq!(restored.visibility, workstream_visibility::NORMAL);
+    assert_eq!(Snapshot::take(&db, &w.id), before);
 }
 
 /// Archive and restore are absolute, not toggles: the retired
@@ -269,7 +179,7 @@ fn permanent_delete_is_refused_until_archived() {
     let w = workstream(&db, "w-alive");
 
     let err = delete_workstream_permanently(&db, &w.id).unwrap_err();
-    assert!(err.to_string().contains("回收站"), "{err}");
+    assert!(err.to_string().contains("已归档"), "{err}");
     // Refused means NOTHING was deleted: not the row, not its path, not its data.
     assert!(db.get_workstream(&w.id).unwrap().is_some());
     assert_eq!(
@@ -602,7 +512,7 @@ fn created_archived_and_purged_leaves_no_trace_of_itself() {
 /// retire a Workstream nobody had asked about. Title and description still
 /// travel; the two state fields and the two frozen columns do not.
 #[test]
-fn whole_object_write_cannot_change_lifecycle_or_visibility() {
+fn whole_object_write_cannot_change_archive_state() {
     let (_d, db) = temp_db();
     let w = workstream(&db, "w-edit");
     let mut stale = db.get_workstream(&w.id).unwrap().unwrap();
@@ -623,14 +533,6 @@ fn whole_object_write_cannot_change_lifecycle_or_visibility() {
         workstream_visibility::ARCHIVED
     );
 
-    // Nor can it change the lifecycle by hand.
-    let mut stale = db.get_workstream(&w.id).unwrap().unwrap();
-    stale.lifecycle = workstream_lifecycle::COMPLETED.into();
-    assert!(apply_whole_object_edit(&db, &stale)
-        .unwrap_err()
-        .to_string()
-        .contains("set_workstream_lifecycle"));
-
     // A write of a row that does not exist is refused instead of creating one.
     let ghost = support::workstream("w-ghost".into(), "ghost");
     assert!(apply_whole_object_edit(&db, &ghost).is_err());
@@ -641,7 +543,6 @@ fn whole_object_write_cannot_change_lifecycle_or_visibility() {
 /// itself, not domain state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Snapshot {
-    lifecycle: String,
     visibility: String,
     title: String,
     description: String,
@@ -666,7 +567,6 @@ impl Snapshot {
             created_at: w.created_at,
             title: w.title,
             description: w.description,
-            lifecycle: w.lifecycle,
             visibility: w.visibility,
             paths: db
                 .list_workstream_paths(workstream_id)

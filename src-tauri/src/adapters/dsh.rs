@@ -683,7 +683,7 @@ mod tests {
             started_at: None,
             last_activity_at: None,
             last_conversation_at: None,
-            trashed_at: None,
+            archived_at: None,
             source_kind: "dsh_zstd_transcript".into(),
             source_path: path.to_string_lossy().to_string(),
             metadata: serde_json::json!({}),
@@ -926,7 +926,7 @@ mod tests {
         let root = unique_dir("dsh-envelope");
         let lines = [
             r#"{"type":"session","version":2,"id":"sess-e","createdAt":1788969915099,"cwd":"/tmp/proj"}"#,
-            r###"{"type":"user/message","seq":8,"time":1788969927000,"data":{"content":[{"type":"text","text":"## Task context\ntask title: 回收站中的任务及会话打开逻辑"}],"role":"user"}}"###,
+            r###"{"type":"user/message","seq":8,"time":1788969927000,"data":{"content":[{"type":"text","text":"## Task context\ntask title: 已归档的任务及会话打开逻辑"}],"role":"user"}}"###,
         ];
         session_dir(&root, "sess-e", "session.v2.jsonl.zstd", &lines);
 

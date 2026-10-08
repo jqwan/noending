@@ -9,7 +9,8 @@ import { showToast } from "../../components/Toast";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import { PathText } from "../workstreams/WorkspacePaths";
 import type { Route } from "../../app/routes";
-import type { ProjectCardData } from "../../types";
+import type { ProjectCardData, ProjectKind } from "../../types";
+import { projectKindLabels } from "./projectKind";
 
 /**
  * Projects Board：Projects 是一等浏览页面——物理工作空间，由工作目录自动派生。
@@ -18,7 +19,7 @@ import type { ProjectCardData } from "../../types";
  * git_id、内部 identity）属于 Detail。这里没有创建入口：Project 是派生的。
  */
 type FilterKey = "all" | "ok" | "missing";
-type ProjectKindFilter = "all" | "git" | "directory";
+type ProjectKindFilter = "all" | ProjectKind;
 type SortKey = "recent" | "name" | "paths";
 
 const FILTERS: Record<FilterKey, (c: ProjectCardData) => boolean> = {
@@ -124,7 +125,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
     if (cards === null) return null;
     return cards
       .filter(FILTERS[filter])
-      .filter((c) => kindFilter === "all" || (kindFilter === "git" ? c.has_git_identity : !c.has_git_identity))
+      .filter((c) => kindFilter === "all" || c.kind === kindFilter)
       .filter((c) => cardMatches(c, query))
       .sort(SORTERS[sort]);
   }, [cards, query, filter, kindFilter, sort]);
@@ -175,8 +176,9 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
             onChange={(e) => setKindFilter(e.target.value as ProjectKindFilter)}
           >
             <option value="all">全部类型</option>
-            <option value="git">Git 家族</option>
-            <option value="directory">普通目录</option>
+            {Object.entries(projectKindLabels).map(([kind, label]) => (
+              <option key={kind} value={kind}>{label}</option>
+            ))}
           </select>
         </label>
         <label className="ws-control">
@@ -240,7 +242,7 @@ function ProjectCard({ card, navigate }: {
       <div className="ws-card-head">
         <div className="ws-card-title" title={card.name}><Icon name="folder" />{card.name}</div>
         <div className="ws-card-side">
-          {card.has_git_identity && <span className="badge">Git</span>}
+          <span className="badge">{projectKindLabels[card.kind]}</span>
           {card.missing_path_count > 0 && (
             <span className="badge warn">{card.missing_path_count} 个目录缺失</span>
           )}

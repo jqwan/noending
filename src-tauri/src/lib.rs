@@ -156,7 +156,6 @@ pub fn run() {
             commands::workstream::add_workstream_path,
             commands::workstream::remove_workstream_path,
             commands::workstream::reorder_workstream_paths,
-            commands::workstream::set_workstream_lifecycle,
             commands::workstream::archive_workstream,
             commands::workstream::restore_workstream,
             commands::workstream::delete_workstream_permanently,
@@ -198,7 +197,7 @@ pub fn run() {
             commands::session_workspace::set_session_owner_workstream,
             // Session Lifecycle: Trash / Restore and the
             // stateless permanent LOCAL deletion. The UI submits ids only.
-            commands::session_lifecycle::trash_session,
+            commands::session_lifecycle::archive_session,
             commands::session_lifecycle::restore_session,
             commands::session_lifecycle::get_session_local_delete_preview,
             commands::session_lifecycle::permanently_delete_session,

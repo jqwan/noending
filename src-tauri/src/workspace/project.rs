@@ -12,9 +12,11 @@
 //!
 //! * known path, no Git now → keep Project + `git_id`; `detected → missing`
 //! * new path, no Git → create a path-backed Project (`git_id = NULL`)
+//!   (default chat directories instead join their app's shared Project)
 //! * new path, Git `G` known to Project B → join B
 //! * new path, Git `G` unrecognized → create `git_identities` row + git-backed Project
 //! * known path upgrades to `G` → adopt in place, or merge into `G`'s Project
+//!   (a shared chat Project moves only the path that supplied Git evidence)
 //! * known path reports a different `G2` → reassign only this path; retire the old Project if empty
 //!
 //! Hard rules:
@@ -48,7 +50,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::domain::{
-    git_state, GitDetection, GitWorktreeKind, Project, Session, WorkspaceObservation,
+    git_state, GitDetection, GitWorktreeKind, Project, ProjectKind, Session, WorkspaceObservation,
     WorkspacePath, Workstream,
 };
 use crate::error::{other, Result};
@@ -62,8 +64,8 @@ use crate::storage::workspace::{
 };
 use crate::storage::{new_id, now, upsert_project_conn, Db};
 use crate::workspace::identity::{
-    auto_project_name, normalize_path, normalize_path_with, path_identity, same_location,
-    NormalizeOpts,
+    auto_project_name, is_within, normalize_path, normalize_path_with, path_identity,
+    same_location, NormalizeOpts,
 };
 use crate::workspace::resolver::WorkspaceObserving;
 use crate::workspace::WorkspaceAttaching;
@@ -80,8 +82,8 @@ pub trait WorkspacePolicy {
         let _ = canonical_path;
         false
     }
-    /// The current default workspace, used ONLY for automatic naming: exactly
-    /// that path is called "NoEnding Workspace".
+    /// The current default workspace. Git-free paths in this tree share the
+    /// "NoEnding Workspace" chat-directory Project.
     fn default_workspace(&self) -> Option<String> {
         None
     }
@@ -98,6 +100,33 @@ pub trait WorkspacePolicy {
 /// any caller that has not resolved one): nothing is reserved and no path gets
 /// the special name.
 pub struct UnrestrictedWorkspace;
+
+/// App-created chat directories share a Project per root. Git evidence always
+/// takes priority; callers apply this only after ruling out a Git identity.
+pub fn chat_bucket_label(canonical: &str, policy: &dyn WorkspacePolicy) -> Option<&'static str> {
+    if policy
+        .default_workspace()
+        .is_some_and(|root| is_within(canonical, &root))
+    {
+        Some("NoEnding Workspace")
+    } else {
+        crate::platform::paths::app_chat_bucket_of(canonical)
+    }
+}
+
+pub fn project_kind(
+    project: &Project,
+    paths: &[String],
+    policy: &dyn WorkspacePolicy,
+) -> ProjectKind {
+    if project.git_id.is_some() {
+        ProjectKind::Git
+    } else if paths.iter().any(|p| chat_bucket_label(p, policy).is_some()) {
+        ProjectKind::ChatDirectory
+    } else {
+        ProjectKind::Directory
+    }
+}
 
 impl WorkspacePolicy for UnrestrictedWorkspace {
     fn exists_on_disk(&self, canonical_path: &str) -> bool {
@@ -293,7 +322,7 @@ pub fn ensure_workspace_path_conn(
                 None => {
                     // A chat scratch directory joins its Agent's ONE bucket;
                     // everything else becomes its own path-backed Project.
-                    match crate::platform::paths::app_chat_bucket_of(&canonical) {
+                    match chat_bucket_label(&canonical, policy) {
                         Some(label) => {
                             app_chat_bucket_project(conn, label, &canonical, policy, &mut effect)?
                                 .id
@@ -315,6 +344,24 @@ pub fn ensure_workspace_path_conn(
                 // a Project or starting a new one.
                 None => {}
                 Some(f) => {
+                    // A chat bucket can own unrelated conversation directories.
+                    // Git appearing in one of them must not carry the others into
+                    // that repository. A single-directory Project still upgrades
+                    // in place, preserving its id and customized name.
+                    let can_upgrade = if mine.git_id.is_none() {
+                        let paths = list_workspace_paths_for_project_conn(conn, &mine.id)?;
+                        paths.len() == 1
+                            || project_kind(
+                                &mine,
+                                &paths
+                                    .into_iter()
+                                    .map(|p| p.canonical_path)
+                                    .collect::<Vec<_>>(),
+                                policy,
+                            ) != ProjectKind::ChatDirectory
+                    } else {
+                        false
+                    };
                     match project_by_git_id_conn(conn, &f.git_id)? {
                         Some(owner) if owner.id == mine.id => {
                             // Already the family's Project; an upgrade may still be
@@ -326,7 +373,7 @@ pub fn ensure_workspace_path_conn(
                             }
                         }
                         Some(owner) => {
-                            if mine.git_id.is_none() {
+                            if can_upgrade {
                                 // This path is the first family evidence its
                                 // (identity-less) Project ever had, and the family
                                 // already has a Project: the two are one thing, so
@@ -336,10 +383,9 @@ pub fn ensure_workspace_path_conn(
                                 effect.delete(&merged.loser);
                                 effect.touch(&merged.survivor);
                             } else {
-                                // A different family under a path that already
-                                // belongs to a git-backed Project is a strong
-                                // identity change: only this path moves. Its
-                                // siblings keep their own family's Project.
+                                // A different Git family or a shared chat bucket:
+                                // only this path moves; its siblings keep their
+                                // existing Project.
                                 if owner.id != row.project_id {
                                     reassign_workspace_path_project_conn(conn, &id, &owner.id)?;
                                 }
@@ -349,7 +395,7 @@ pub fn ensure_workspace_path_conn(
                             }
                         }
                         None => {
-                            if mine.git_id.is_none() {
+                            if can_upgrade {
                                 // First branch: adopt in place. `Project.id`
                                 // does not move, so no Session or audit
                                 // reference has to be repaired.
@@ -635,6 +681,18 @@ fn app_chat_bucket_project(
     policy: &dyn WorkspacePolicy,
     effect: &mut ProjectionEffect,
 ) -> Result<Project> {
+    if let Some(existing) = find_chat_bucket_project_conn(conn, label)? {
+        return Ok(existing);
+    }
+    let fresh = create_project_row(conn, seed_path, None, policy, effect)?;
+    set_project_name_conn(conn, &fresh.id, label, false)?;
+    Ok(fresh)
+}
+
+pub(crate) fn find_chat_bucket_project_conn(
+    conn: &Connection,
+    label: &str,
+) -> Result<Option<Project>> {
     let existing: Option<String> = conn
         .query_row(
             "SELECT id FROM projects
@@ -645,12 +703,9 @@ fn app_chat_bucket_project(
         )
         .optional()?;
     if let Some(id) = existing {
-        return get_project_conn(conn, &id)?
-            .ok_or_else(|| other(format!("chat bucket project {id} 在匹配后消失")));
+        return get_project_conn(conn, &id);
     }
-    let fresh = create_project_row(conn, seed_path, None, policy, effect)?;
-    set_project_name_conn(conn, &fresh.id, label, false)?;
-    Ok(fresh)
+    Ok(None)
 }
 
 /// A Git family's worktree list becomes WorkspacePaths, and only that.
@@ -1066,6 +1121,7 @@ pub struct ProjectWorkstream {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectDetail {
     pub project: Project,
+    pub kind: ProjectKind,
     pub workspace_paths: Vec<WorkspacePath>,
     pub workstreams: Vec<ProjectWorkstream>,
     pub sessions: Vec<Session>,
@@ -1082,11 +1138,23 @@ pub struct ProjectDetail {
 /// Sessions come through their `workspace_path_id`, not through the
 /// `sessions.project_id` cache, so the detail page can never show a Session the
 /// path chain does not support.
-pub fn project_detail(db: &Db, project_id: &str) -> Result<Option<ProjectDetail>> {
+pub fn project_detail(
+    db: &Db,
+    project_id: &str,
+    policy: &dyn WorkspacePolicy,
+) -> Result<Option<ProjectDetail>> {
     let Some(project) = db.get_project(project_id)? else {
         return Ok(None);
     };
     let workspace_paths = db.list_workspace_paths_for_project(project_id)?;
+    let kind = project_kind(
+        &project,
+        &workspace_paths
+            .iter()
+            .map(|p| p.canonical_path.clone())
+            .collect::<Vec<_>>(),
+        policy,
+    );
     let workstreams =
         crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
             .into_iter()
@@ -1107,6 +1175,7 @@ pub fn project_detail(db: &Db, project_id: &str) -> Result<Option<ProjectDetail>
     };
     Ok(Some(ProjectDetail {
         project,
+        kind,
         workspace_paths,
         workstreams,
         sessions,

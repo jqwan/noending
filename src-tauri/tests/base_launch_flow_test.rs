@@ -211,9 +211,8 @@ fn capture_embedded_new_message(
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
-    assert_eq!(target.initial_message, Some(FIRST_MESSAGE));
     assert_eq!(
-        target.expected_root_session_id.is_some(),
+        target.root_agent_session_id.is_some(),
         matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
     );
     assert_eq!(cmd.args.last().map(String::as_str), Some(FIRST_MESSAGE));
@@ -623,7 +622,7 @@ fn antigravity_routes_by_source_format() {
         started_at: None,
         last_activity_at: None,
         last_conversation_at: None,
-        trashed_at: None,
+        archived_at: None,
         source_kind: kind.into(),
         source_path: path.into(),
         metadata: serde_json::json!({}),
@@ -667,8 +666,8 @@ fn fake_embedded_spawn(
     _cmd: &AgentCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
-    assert!(target.initial_message.is_none());
     if let Some(session_id) = target.session_id {
+        assert!(target.root_agent_session_id.is_some());
         assert!(
             target.registry.reserve_resume(session_id).is_err(),
             "the launcher must hold the resume reservation throughout spawn"

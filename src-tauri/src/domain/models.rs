@@ -32,6 +32,16 @@ pub struct Project {
     pub updated_at: String,
 }
 
+/// Derived from a Project's Git anchor and working paths; never persisted or
+/// inferred from its user-editable name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectKind {
+    Git,
+    Directory,
+    ChatDirectory,
+}
+
 /// One observed physical working path — the bridge between the filesystem and
 /// every Project fact in the system.
 ///
@@ -174,23 +184,14 @@ pub struct Workstream {
     pub id: Id,
     pub title: String,
     pub description: String,
-    pub lifecycle: String,  // active | completed
     pub visibility: String, // normal | archived
     pub created_at: String,
     pub updated_at: String,
 }
 
-pub mod workstream_lifecycle {
-    /// Basic status classification. No behavioral difference from `COMPLETED`,
-    /// and the user may switch freely.
-    pub const ACTIVE: &str = "active";
-    pub const COMPLETED: &str = "completed";
-}
-
 pub mod workstream_visibility {
     pub const NORMAL: &str = "normal";
-    /// The recycle bin. Restoring flips back to `normal` and nothing else —
-    /// which is why lifecycle and paths survive a round trip.
+    /// Archived tasks cannot be used to create sessions; other data stays live.
     pub const ARCHIVED: &str = "archived";
 }
 
@@ -318,12 +319,12 @@ pub struct Session {
     pub last_activity_at: Option<String>,
     /// Last real user/assistant message time of the conversation.
     pub last_conversation_at: Option<String>,
-    /// Session lifecycle authority. `None` = Normal; `Some(ts)` = Trash. This
+    /// Archive authority. `None` = unarchived; `Some(ts)` = archived. This
     /// is the single lifecycle authority — there is no separate visibility
-    /// flag. Trashing is reversible (Restore keeps the same Session id) and
+    /// flag. Archiving is reversible (unarchiving keeps the same Session id) and
     /// never touches the Agent source; permanent deletion removes the row
     /// entirely.
-    pub trashed_at: Option<String>,
+    pub archived_at: Option<String>,
     // ---- The root source (flattened from the former session_members row) ----
     /// Adapter-owned descriptor of the source shape (`rollout_file`,
     /// `transcript_file`, sqlite store kinds, …).
@@ -358,9 +359,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// In the recycle bin — `sessions.trashed_at` states what that gates.
-    pub fn is_trashed(&self) -> bool {
-        self.trashed_at.is_some()
+    /// Archived sessions cannot continue through NoEnding.
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some()
     }
 
     /// The read cursor a fresh delta read continues from, in the session's
@@ -483,7 +484,7 @@ pub struct WorkstreamContextState {
     /// Guard for every ContextItem write (manual + AI).
     pub context_revision: i64,
     /// Marks manual Context edits / Owner-set / title / description /
-    /// Trash-Restore that require re-synthesis.
+    /// ownership changes that require re-synthesis.
     pub input_revision: i64,
     /// The `input_revision` the last successful AI update consumed. A
     /// Workstream is pending when `input_revision > consumed_input_revision`.
@@ -590,31 +591,29 @@ impl ParsedSessionMessage {
     }
 }
 
-/// Listing scope for Sessions. Default projections (Sessions page,
-/// Project / Workstream / Home) show Active only; the recycle bin queries
-/// Trash directly from the DB, not through FTS.
+/// Session board scope defaults to unarchived; task/project associations include both.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListScope {
     #[default]
-    Active,
-    Trash,
+    Unarchived,
+    Archived,
     All,
 }
 
 impl SessionListScope {
     pub fn as_str(&self) -> &'static str {
         match self {
-            SessionListScope::Active => "active",
-            SessionListScope::Trash => "trash",
+            SessionListScope::Unarchived => "unarchived",
+            SessionListScope::Archived => "archived",
             SessionListScope::All => "all",
         }
     }
 
     pub fn parse(s: &str) -> SessionListScope {
         match s {
-            "trash" => SessionListScope::Trash,
+            "archived" => SessionListScope::Archived,
             "all" => SessionListScope::All,
-            _ => SessionListScope::Active,
+            _ => SessionListScope::Unarchived,
         }
     }
 }
