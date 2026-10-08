@@ -151,13 +151,14 @@ describe("Projects Board", () => {
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
     fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "directory" } });
-    expect(screen.getByText("Normal Directory")).toBeTruthy();
+    const normal = screen.getByRole("button", { name: /Normal Directory/ });
+    expect(normal.textContent).toContain("普通项目");
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
     fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "chat_directory" } });
     const chat = screen.getByRole("button", { name: /Renamed Chats/ });
-    expect(chat.textContent).toContain("默认聊天目录项目");
+    expect(chat.textContent).toContain("默认项目");
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Normal Directory")).toBeNull();
   });
@@ -232,5 +233,47 @@ describe("Projects Board", () => {
     await vi.waitFor(() => {
       expect(api.addProjectPath).toHaveBeenCalledWith("/Users/me/code/new-project");
     });
+  });
+
+  it("navigates to new-session with projectId when clicking plus button on card", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([card({ id: "p-123" })]);
+    render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("NoEnding");
+
+    const newSessionBtn = screen.getByRole("button", { name: "新建会话" });
+    fireEvent.click(newSessionBtn);
+
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p-123" });
+    expect(navigate).not.toHaveBeenCalledWith({ view: "project", projectId: "p-123" });
+  });
+
+  it("navigates to new-session with projectId when clicking plus button in list view", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([card({ id: "p-456" })]);
+    render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("NoEnding");
+
+    fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
+    const newSessionBtn = screen.getByRole("button", { name: "新建会话" });
+    fireEvent.click(newSessionBtn);
+
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p-456" });
+  });
+
+  it("does not render plus button for other agent default projects in card and list view", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      card({ id: "p-agent", name: "Codex", kind: "chat_directory" }),
+      card({ id: "p-noending", name: "NoEnding Workspace", kind: "chat_directory" }),
+    ]);
+    render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("Codex");
+
+    // In card view: only NoEnding Workspace has the button
+    const buttons = screen.getAllByRole("button", { name: "新建会话" });
+    expect(buttons).toHaveLength(1);
+
+    // In list view: only NoEnding Workspace has the button
+    fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
+    const listButtons = screen.getAllByRole("button", { name: "新建会话" });
+    expect(listButtons).toHaveLength(1);
   });
 });

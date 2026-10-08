@@ -8,7 +8,7 @@ import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from 
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { httpsRemoteUrl } from "./remoteUrl";
-import { projectKindLabels } from "./projectKind";
+import { projectKindLabels, isAgentDefaultProject } from "./projectKind";
 import { cardSummaryLine } from "../workstreams/WorkstreamCard";
 import {
   type ProjectDetailData,
@@ -254,14 +254,16 @@ export default function ProjectDetail({ projectId, navigate }: {
       <section className="rail-section">
         <div className="rail-head">
           <div className="section-label" style={{ margin: 0 }}>会话</div>
-          <button
-            className="btn ghost icon-button"
-            title="新建会话"
-            aria-label="新建会话"
-            onClick={() => navigate({ view: "new-session", projectId: project.id })}
-          >
-            <Icon name="plus" />
-          </button>
+          {!isAgentDefaultProject({ ...detail.project, kind: detail.kind }) && (
+            <button
+              className="btn ghost icon-button"
+              title="新建会话"
+              aria-label="新建会话"
+              onClick={() => navigate({ view: "new-session", projectId: project.id })}
+            >
+              <Icon name="plus" />
+            </button>
+          )}
         </div>
 
         <SessionMiniList sessions={sortedSessions} emptyText="这个项目下还没有会话。" navigate={navigate} />

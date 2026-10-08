@@ -9,6 +9,7 @@ import type {
   Workstream,
   WorkstreamPathRow,
 } from "../../types";
+import { isAgentDefaultProject } from "../projects/projectKind";
 
 /** 任务表单弹窗：新建与编辑共用，统一按项目维度关联（支持关联多个项目）。 */
 
@@ -525,6 +526,7 @@ export default function WorkstreamFormModal({
                 (p) =>
                   !selectedProjectIds.includes(p.id) &&
                   !isDefaultProj(p.id) &&
+                  !isAgentDefaultProject(p, defaultProjectId) &&
                   p.name !== "NoEnding Workspace"
               )
               .map((p) => (

@@ -19,6 +19,10 @@ it("uses the same searchable cards for both scopes with the correct toolbar acti
   screen.getByRole("button", { name: "新建任务" });
   expect(screen.queryByRole("button", { name: "删除全部" })).toBeNull();
   expect(screen.queryByText("进行中")).toBeNull();
+  const unarchivedBtn = screen.getByRole("button", { name: "未归档" });
+  const archivedBtn = screen.getByRole("button", { name: "已归档" });
+  expect(unarchivedBtn.textContent).toBe("");
+  expect(archivedBtn.textContent).toBe("");
   screen.getByRole("button", { name: "普通任务" });
   rerender(<WorkstreamsView navigate={navigate} scope="archived" actionSeq={0} />);
   screen.getByRole("button", { name: "删除全部" });

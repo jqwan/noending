@@ -17,6 +17,8 @@ import {
   type ProjectCardData,
   type WorkstreamCardData,
 } from "../../types";
+import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
+import { isAgentDefaultProject } from "../projects/projectKind";
 
 /** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
 export type NewSessionViewProps = {
@@ -59,6 +61,7 @@ export default function NewSessionView({
   const [defaultWorkspace, setDefaultWorkspace] = useState<string>("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showNewWorkstreamModal, setShowNewWorkstreamModal] = useState(false);
   const mounted = useRef(true);
   const launching = useRef(false);
   const agentChanged = useRef(false);
@@ -166,7 +169,10 @@ export default function NewSessionView({
 
   const otherProjects = useMemo(() => {
     return projects.filter(
-      (p) => p.id !== defaultProjectId && p.name !== "NoEnding Workspace"
+      (p) =>
+        p.id !== defaultProjectId &&
+        p.name !== "NoEnding Workspace" &&
+        !isAgentDefaultProject(p, defaultProjectId)
     );
   }, [projects, defaultProjectId]);
 
@@ -373,13 +379,20 @@ export default function NewSessionView({
                 aria-label="所属任务（可选）"
                 title={taskLabel}
                 value={ownerWorkstreamId}
-                onChange={(e) => handleWsChange(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value === "__new_workstream__") {
+                    setShowNewWorkstreamModal(true);
+                    return;
+                  }
+                  handleWsChange(e.target.value);
+                }}
                 disabled={busy}
               >
                 <option value={STANDALONE}>无所属任务</option>
                 {workstreams.map((w) => (
                   <option key={w.id} value={w.id}>{w.title}</option>
                 ))}
+                <option value="__new_workstream__">+ 新任务</option>
               </select>
             </label>
 
@@ -498,6 +511,41 @@ export default function NewSessionView({
           <p className="new-session-hint">Enter 发送 · Shift + Enter 换行</p>
         </form>
       </div>
+
+      {showNewWorkstreamModal && (
+        <WorkstreamFormModal
+          onClose={() => setShowNewWorkstreamModal(false)}
+          onCreated={async (newWs) => {
+            const cards = await api.listWorkstreamCards().catch(() => null);
+            if (cards) {
+              setWorkstreams(cards);
+            } else {
+              setWorkstreams((prev) => [
+                {
+                  id: newWs.id,
+                  projects: [],
+                  title: newWs.title,
+                  description: newWs.description,
+                  visibility: newWs.visibility,
+                  created_at: newWs.created_at,
+                  updated_at: newWs.updated_at,
+                  current_state: null,
+                  goal: null,
+                  last_activity_at: null,
+                  session_count: 0,
+                  latest_session: null,
+                  path_count: 0,
+                },
+                ...prev,
+              ]);
+            }
+            releasePrepared();
+            setOwnerWorkstreamId(newWs.id);
+            setShowNewWorkstreamModal(false);
+          }}
+          initialProjectId={!isDefaultProject ? selectedProjectId : undefined}
+        />
+      )}
     </main>
   );
 }

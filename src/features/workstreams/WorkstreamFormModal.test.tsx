@@ -230,6 +230,22 @@ describe("WorkstreamFormModal project selection", () => {
     expect(onCreated).not.toHaveBeenCalled();
   });
 
+  it("excludes other agent default projects from the project dropdown list", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard("p-normal", "普通单目录项目", ["/repo/normal"]),
+      { ...projectCard("p-codex", "Codex", ["/repo/codex"]), kind: "chat_directory" },
+      { ...projectCard("p-noending", "NoEnding Workspace", ["/repo/noending"]), kind: "chat_directory" },
+    ]);
+
+    render(<WorkstreamFormModal onClose={vi.fn()} />);
+
+    const select = await screen.findByRole("combobox", { name: "关联项目选择" });
+    const optionTexts = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
+
+    expect(optionTexts).toContain("普通单目录项目");
+    expect(optionTexts).not.toContain("Codex");
+  });
+
   it("says per path what did not land instead of silently dropping it", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValueOnce([
       projectCard("p1", "Main", ["/repo/main", "/repo/ghost"]),

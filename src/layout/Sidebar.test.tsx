@@ -53,6 +53,7 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
 }
 
 function session(over: Partial<Session> = {}): Session {
+  const baseTime = over.last_conversation_at ?? over.last_activity_at ?? new Date(Date.now() - 3600 * 1000).toISOString();
   return {
     id: "s-1",
     agent: "codex",
@@ -63,9 +64,9 @@ function session(over: Partial<Session> = {}): Session {
     workspace_path_id: "wp-1",
     owner_workstream_id: "ws-1",
     forked_from_session_id: null,
-    started_at: new Date(Date.now() - 3600 * 1000).toISOString(),
-    last_activity_at: new Date(Date.now() - 3600 * 1000).toISOString(),
-    last_conversation_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+    started_at: baseTime,
+    last_activity_at: baseTime,
+    last_conversation_at: baseTime,
     archived_at: null,
     source_kind: "file",
     source_path: "/path/to/source",
@@ -149,7 +150,7 @@ describe("Sidebar navigation", () => {
   it("sidebar_has_agents_navigation", async () => {
     const navigate = renderSidebar({ view: "workstreams" });
 
-    const item = await screen.findByText("代理");
+    const item = await screen.findByRole("button", { name: "代理" });
     fireEvent.click(item);
 
     await waitFor(() => {
@@ -159,7 +160,7 @@ describe("Sidebar navigation", () => {
 
   it("sidebar_agents_is_active_when_route_is_agents", async () => {
     renderSidebar({ view: "agents" });
-    const item = await screen.findByText("代理");
+    const item = await screen.findByRole("button", { name: "代理" });
     expect(item.className).toContain("active");
   });
 
@@ -506,5 +507,77 @@ describe("Sidebar 最近活动", () => {
 
     window.dispatchEvent(new CustomEvent(EVT_SYNCED));
     await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
+  });
+
+  it("switches grouping to agent and groups sessions by agent with agent icons", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-1",
+        title: "第一条会话",
+        agent: "claude_code",
+      }),
+      session({
+        id: "s-2",
+        title: "第二条会话",
+        agent: "codex",
+      }),
+    ]);
+
+    renderSidebar();
+
+    const agentToggle = screen.getByRole("radio", { name: "按代理归类" });
+    expect(agentToggle).toBeTruthy();
+    expect(agentToggle.innerHTML).toContain("M9 2v2M4 6a2");
+
+    fireEvent.click(agentToggle);
+
+    expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Codex/ })).toBeTruthy();
+    expect(screen.getByText("第一条会话")).toBeTruthy();
+    expect(screen.getByText("第二条会话")).toBeTruthy();
+
+    const claudeGroupHeader = screen.getByRole("button", { name: /Claude Code/ });
+    fireEvent.click(claudeGroupHeader);
+    expect(claudeGroupHeader.className).toContain("collapsed");
+    expect(screen.queryByText("第一条会话")).toBeNull();
+    expect(screen.getByText("第二条会话")).toBeTruthy();
+  });
+
+  it("determines recent sessions strictly by last_conversation_at, ignoring last_activity_at", async () => {
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-claude-recent-conv",
+        title: "近7天有新消息的会话",
+        agent: "claude_code",
+        last_conversation_at: twoDaysAgo,
+      }),
+      session({
+        id: "s-claude-old-conv",
+        title: "仅有文件活动但无新消息的会话",
+        agent: "claude_code",
+        last_conversation_at: tenDaysAgo,
+        last_activity_at: twoDaysAgo,
+      }),
+      session({
+        id: "s-claude-no-conv",
+        title: "从未有对话的会话",
+        agent: "claude_code",
+        last_conversation_at: null,
+        last_activity_at: twoDaysAgo,
+      }),
+    ]);
+
+    renderSidebar();
+
+    const agentToggle = screen.getByRole("radio", { name: "按代理归类" });
+    fireEvent.click(agentToggle);
+
+    expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
+    expect(screen.getByText("近7天有新消息的会话")).toBeTruthy();
+    expect(screen.queryByText("仅有文件活动但无新消息的会话")).toBeNull();
+    expect(screen.queryByText("从未有对话的会话")).toBeNull();
   });
 });

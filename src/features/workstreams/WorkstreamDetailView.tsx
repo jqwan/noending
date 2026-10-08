@@ -468,11 +468,6 @@ export default function WorkstreamDetailView({
               onClick={() => navigate({ view: "project", projectId: p.id })}>
               <div className="grow">
                 <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名项目"}</div>
-                {p.count > 0 && (
-                  <div className="meta">
-                    {p.count} 条路径
-                  </div>
-                )}
               </div>
             </div>
           ))}

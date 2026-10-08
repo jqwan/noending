@@ -269,18 +269,12 @@
 .page-head .actions button.icon-button,
 .page-head .actions .settings-seg button {
   width: 28px;
+  height: 28px;
   min-height: 28px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-
-.page-head .actions .settings-seg.archive-scope button {
-  width: auto;
-  padding: 0 10px;
-  gap: 6px;
-  white-space: nowrap;
 }
 
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }

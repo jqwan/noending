@@ -299,7 +299,43 @@ describe("NewSessionView task and project selection", () => {
     const taskSelect = (await screen.findByLabelText("所属任务（可选）")) as HTMLSelectElement;
     const options = Array.from(taskSelect.querySelectorAll("option")).map((o) => o.textContent);
     expect(options).toContain("我的功能开发");
+    expect(options).toContain("+ 新任务");
     expect(options.some((t) => t?.includes("/repo/project-1"))).toBe(false);
+  });
+
+  it("renders + 新任务 in task options and selecting it opens the new task modal", async () => {
+    render(<NewSessionView navigate={vi.fn()} />);
+
+    const taskSelect = (await screen.findByLabelText("所属任务（可选）")) as HTMLSelectElement;
+    fireEvent.change(taskSelect, { target: { value: "__new_workstream__" } });
+
+    expect(await screen.findByRole("heading", { name: "新建任务" })).toBeTruthy();
+  });
+
+  it("excludes other agent default projects from the project dropdown", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      ...mockProjects,
+      {
+        id: "p-codex",
+        name: "Codex",
+        name_customized: false,
+        kind: "chat_directory" as const,
+        path_count: 1,
+        missing_path_count: 0,
+        workstream_count: 0,
+        session_count: 0,
+        representative_paths: ["/Documents/Codex"],
+        search_paths: ["/Documents/Codex"],
+        last_activity_at: null,
+        updated_at: "2026-10-01T00:00:00Z",
+      },
+    ]);
+    render(<NewSessionView navigate={vi.fn()} />);
+
+    const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
+    const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toContain("Project 1");
+    expect(options).not.toContain("Codex");
   });
 
   it("in standalone mode, defaults to NoEnding Workspace and lists discovered projects and + 新项目", async () => {
