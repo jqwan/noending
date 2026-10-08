@@ -1,11 +1,16 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
+import Icon from "../../components/Icon";
 import { Modal, openPath, submitsOnEnter } from "../../components/common";
-import PathListEditor, { type PathEntryDraft } from "./PathListEditor";
-import type { CreateWorkstreamReport, Workstream, WorkstreamPathRow } from "../../types";
+import type {
+  CreateWorkstreamReport,
+  ProjectCardData,
+  Workstream,
+  WorkstreamPathRow,
+} from "../../types";
 
-/** 任务表单弹窗：新建与编辑共用，传 `workstream` 即编辑模式。
- *  Project 由工作目录派生，用户既不能挑也不能造；被拒绝的路径逐条说破，不静默丢掉。 */
+/** 任务表单弹窗：新建与编辑共用，统一按项目维度关联（支持关联多个项目）。 */
 
 type PathOutcome = CreateWorkstreamReport["paths"][number];
 
@@ -33,6 +38,7 @@ export default function WorkstreamFormModal({
   onSaved,
   workstream,
   paths,
+  initialProjectId,
 }: {
   onClose: () => void;
   /** 创建成功后回调（含「路径没全接受、用户已知情」的收尾）。 */
@@ -43,6 +49,8 @@ export default function WorkstreamFormModal({
   workstream?: Workstream;
   /** 编辑模式下当前任务的有序工作目录；创建模式不传。 */
   paths?: WorkstreamPathRow[];
+  /** 可选：新建模式下初始选中的项目 ID。 */
+  initialProjectId?: string;
 }) {
   const editing = workstream !== undefined;
   // 取打开那一刻的快照，不跟着后台刷新的 props 走：否则别处刚附上的路径会被
@@ -50,19 +58,196 @@ export default function WorkstreamFormModal({
   const [existing] = useState<WorkstreamPathRow[]>(() => paths ?? []);
   const [title, setTitle] = useState(workstream?.title ?? "");
   const [desc, setDesc] = useState(workstream?.description ?? "");
-  // 草稿行是只读展示，用户只能新增 / 移除 / 换序，改不了已有条目的拼写。
-  const [entries, setEntries] = useState<PathEntryDraft[]>(
-    () => existing.map((p) => ({ raw: p.canonical_path })),
-  );
+
+  // 项目选择状态：支持关联多个项目
+  const [projects, setProjects] = useState<ProjectCardData[]>([]);
+  const [defaultWorkspace, setDefaultWorkspace] = useState<string>("");
+  const [newProjects, setNewProjects] = useState<
+    Array<{ id: string; name: string; paths: string[] }>
+  >([]);
+
+  const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>(() => {
+    if (editing) {
+      const ids: string[] = [];
+      for (const p of paths ?? []) {
+        const pid =
+          p.project_id ||
+          (p.project_name === "NoEnding Workspace" ? "default" : "") ||
+          (p.canonical_path ? `path:${p.canonical_path}` : "");
+        if (pid && !ids.includes(pid)) {
+          ids.push(pid);
+        }
+      }
+      return ids;
+    }
+    return [initialProjectId && initialProjectId !== "none" ? initialProjectId : "default"];
+  });
+  const [browsingProject, setBrowsingProject] = useState(false);
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [report, setReport] = useState<PathReport | null>(null);
   const busyRef = useRef(false);
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listProjectCards()
+      .then((cards) => {
+        if (!cancelled) setProjects(cards);
+      })
+      .catch(console.error);
+    api
+      .getWorkspaceSettings?.()
+      ?.then((s) => {
+        if (!cancelled && s?.default_workspace) setDefaultWorkspace(s.default_workspace);
+      })
+      ?.catch(console.error);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const defaultProject = projects.find(
+    (p) =>
+      p.name === "NoEnding Workspace" ||
+      (defaultWorkspace && p.search_paths?.includes(defaultWorkspace))
+  );
+  const defaultProjectId = defaultProject?.id ?? "default";
+
+  const isDefaultProj = useCallback(
+    (pid: string) => pid === "default" || pid === defaultProjectId || pid === defaultProject?.id,
+    [defaultProjectId, defaultProject]
+  );
+
+  const getProjectPaths = useCallback(
+    (pid: string): string[] => {
+      if (isDefaultProj(pid)) {
+        if (defaultProject?.search_paths?.length) return defaultProject.search_paths;
+        if (defaultProject?.representative_paths?.length) return defaultProject.representative_paths;
+        if (defaultWorkspace) return [defaultWorkspace];
+        const fromExisting = existing
+          .filter(
+            (p) =>
+              p.project_name === "NoEnding Workspace" ||
+              (defaultWorkspace && p.canonical_path === defaultWorkspace)
+          )
+          .map((p) => p.canonical_path);
+        if (fromExisting.length > 0) return fromExisting;
+        return [];
+      }
+      const fromProjects = projects.find((p) => p.id === pid);
+      if (fromProjects?.search_paths?.length) return fromProjects.search_paths;
+      if (fromProjects?.representative_paths?.length) return fromProjects.representative_paths;
+      const fromNew = newProjects.find((p) => p.id === pid);
+      if (fromNew?.paths?.length) return fromNew.paths;
+      const fromExisting = existing
+        .filter((p) => p.project_id === pid || `path:${p.canonical_path}` === pid)
+        .map((p) => p.canonical_path);
+      if (fromExisting.length > 0) return fromExisting;
+      return [];
+    },
+    [isDefaultProj, defaultProject, defaultWorkspace, projects, newProjects, existing]
+  );
+
+  const selectedProjectPaths = useMemo(() => {
+    const result: string[] = [];
+    for (const pid of selectedProjectIds) {
+      for (const p of getProjectPaths(pid)) {
+        if (!result.includes(p)) {
+          result.push(p);
+        }
+      }
+    }
+    return result;
+  }, [selectedProjectIds, getProjectPaths]);
+
+  const handleAddProject = (pid: string) => {
+    setSelectedProjectIds((prev) => {
+      if (isDefaultProj(pid)) {
+        if (prev.some(isDefaultProj)) return prev;
+        return [...prev, pid];
+      }
+      if (prev.includes(pid)) return prev;
+      return [...prev, pid];
+    });
+  };
+
+  const handleRemoveProject = (pid: string) => {
+    setSelectedProjectIds((prev) => {
+      if (isDefaultProj(pid)) {
+        return prev.filter((id) => !isDefaultProj(id));
+      }
+      return prev.filter((id) => id !== pid);
+    });
+  };
+
+  const handleAddNewProject = async () => {
+    setBrowsingProject(true);
+    setError("");
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "选择项目目录",
+      });
+      if (!picked) return;
+      const pickedPath = Array.isArray(picked) ? picked[0] : picked;
+      if (!pickedPath) return;
+
+      const probe = await api.probeWorkspacePath(pickedPath);
+      if (probe) {
+        if (probe.status === "reserved") {
+          setError("该目录为 NoEnding 自留目录，不能作为项目目录");
+          return;
+        }
+        if (probe.status === "home") {
+          setError("不能是用户主目录本身");
+          return;
+        }
+        if (probe.status === "unresolvable") {
+          setError("无法解析为绝对路径");
+          return;
+        }
+      }
+
+      if (probe?.project?.known && probe.project.id) {
+        // 若选择的目录被归为一个已有项目，就加入关联项目
+        const existingId = probe.project.id;
+        handleAddProject(existingId);
+        if (!projects.some((p) => p.id === existingId)) {
+          const fresh = await api.listProjectCards();
+          setProjects(fresh);
+        }
+      } else {
+        // 以这个目录生成项目并加入关联项目
+        const projName =
+          probe?.project?.name ||
+          pickedPath.split(/[\\/]/).filter(Boolean).pop() ||
+          "新项目";
+        const canonicalPath = probe?.canonical_path || pickedPath;
+        const newId = `new:${canonicalPath}`;
+        setNewProjects((prev) => {
+          const filtered = prev.filter((p) => p.id !== newId);
+          return [
+            ...filtered,
+            { id: newId, name: projName, paths: [canonicalPath] },
+          ];
+        });
+        handleAddProject(newId);
+      }
+    } catch (e) {
+      console.error(e);
+      setError(`选择项目目录失败：${String(e)}`);
+    } finally {
+      setBrowsingProject(false);
+    }
+  };
+
   const titleTrimmed = title.trim();
   const descTrimmed = desc.trim();
   const existingRaws = existing.map((p) => p.canonical_path);
-  const draftRaws = entries.map((e) => e.raw.trim()).filter((raw) => raw !== "");
+  const draftRaws = selectedProjectPaths;
   const pathsUntouched =
     draftRaws.length === existingRaws.length &&
     draftRaws.every((raw, i) => raw === existingRaws[i]);
@@ -82,10 +267,11 @@ export default function WorkstreamFormModal({
     setBusy(true);
     setError("");
     try {
+      const pathsToSubmit = selectedProjectPaths;
       const r = await api.createWorkstream(
         titleTrimmed,
         desc,
-        entries.map((e) => e.raw),
+        pathsToSubmit,
       );
       if (r.paths.some((p) => !p.accepted)) {
         setReport({ outcome: "created", workstream: r.workstream, paths: r.paths });
@@ -254,14 +440,118 @@ export default function WorkstreamFormModal({
 
   return (
     <Modal title={editing ? "编辑任务" : "新建任务"} onClose={onClose}>
-      <label className="field"><span>标题</span>
-        <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus
+      <label className="field">
+        <span>标题</span>
+        <input
+          type="text"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          autoFocus
           placeholder="例如：接口设计 / 行程规划 / 预算整理"
-          onKeyDown={(e) => submitsOnEnter(e) && submit()} /></label>
-      <label className="field"><span>描述（可选）</span>
-        <textarea value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
-      <div className="field"><span>工作目录（可选，可多条）</span>
-        <PathListEditor entries={entries} onChange={setEntries} /></div>
+          onKeyDown={(e) => submitsOnEnter(e) && submit()}
+        />
+      </label>
+      <label className="field">
+        <span>描述（可选）</span>
+        <textarea
+          value={desc}
+          onChange={(e) => setDesc(e.target.value)}
+          placeholder="简要记录任务目标、注意事项或范围…"
+          rows={3}
+        />
+      </label>
+      <div className="field">
+        <span style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+          关联项目（可选，可多选）
+        </span>
+
+        {selectedProjectIds.length > 0 ? (
+          <div className="workstream-project-chips">
+            {selectedProjectIds.map((pid) => {
+              const isDefault = isDefaultProj(pid);
+              const proj = isDefault
+                ? defaultProject
+                : projects.find((p) => p.id === pid) ?? newProjects.find((p) => p.id === pid);
+              const name = isDefault
+                ? "NoEnding Workspace"
+                : proj?.name ??
+                  existing.find((p) => p.project_id === pid || `path:${p.canonical_path}` === pid)?.project_name ??
+                  existing.find((p) => `path:${p.canonical_path}` === pid)?.canonical_path ??
+                  pid;
+              return (
+                <div key={pid} className="workstream-project-chip">
+                  <Icon name="folder" />
+                  <span className="truncate" title={name}>
+                    {name}
+                  </span>
+                  <button
+                    type="button"
+                    className="workstream-project-chip-remove"
+                    aria-label={`移除项目 ${name}`}
+                    title={`移除项目 ${name}`}
+                    onClick={() => handleRemoveProject(pid)}
+                    disabled={busy || browsingProject}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="small muted" style={{ marginBottom: 8 }}>
+            暂未关联任何项目
+          </div>
+        )}
+
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <select
+            style={{ flex: 1, minWidth: 0 }}
+            value=""
+            onChange={(e) => {
+              if (e.target.value) {
+                handleAddProject(e.target.value);
+              }
+            }}
+            disabled={busy || browsingProject}
+            aria-label="关联项目选择"
+          >
+            <option value="">+ 添加关联项目…</option>
+            {!selectedProjectIds.some(isDefaultProj) && (
+              <option value={defaultProjectId}>NoEnding Workspace</option>
+            )}
+            {projects
+              .filter(
+                (p) =>
+                  !selectedProjectIds.includes(p.id) &&
+                  !isDefaultProj(p.id) &&
+                  p.name !== "NoEnding Workspace"
+              )
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            {newProjects
+              .filter((p) => !selectedProjectIds.includes(p.id))
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+          </select>
+          <button
+            type="button"
+            className="btn small"
+            style={{ flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 4 }}
+            onClick={handleAddNewProject}
+            disabled={busy || browsingProject}
+          >
+            <Icon name="plus" />
+            <span>{browsingProject ? "选择中…" : "新增项目"}</span>
+          </button>
+        </div>
+      </div>
       {editing && dropping.length > 0 && (
         <div className="badge warn" style={{ display: "block", marginBottom: 10, overflowWrap: "anywhere" }}>
           保存后会从当前任务移除 {dropping.length} 条工作目录。不会删除会话，也不会修改已有会话的所属任务。
@@ -270,7 +560,7 @@ export default function WorkstreamFormModal({
       {error && (
         <div className="badge warn" style={{ marginBottom: 10, overflowWrap: "anywhere" }}>{error}</div>
       )}
-      <div className="row" style={{ justifyContent: "flex-end" }}>
+      <div className="row" style={{ justifyContent: "flex-end", marginTop: 18, gap: 10 }}>
         <button className="btn" onClick={onClose} disabled={busy}>取消</button>
         <button className="btn primary" disabled={busy || !dirty} onClick={submit}>
           {busy

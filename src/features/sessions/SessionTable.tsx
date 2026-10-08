@@ -1,10 +1,16 @@
 import { useViewState } from "../../hooks/useViewState";
 import Icon from "../../components/Icon";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type Agent, type AgentStatusEntry, type Session } from "../../types";
-import { desktopContinueState, useAgentStatus } from "./continueDesktop";
+import {
+  continueSessionTerminalWithToast,
+  desktopContinueState,
+  resolveSessionContinueMode,
+  useAgentStatus,
+} from "./continueDesktop";
+import type { Route } from "../../app/routes";
 
 /* 展示层 helper —— SessionCards 与 SessionDetailView 共用。只做「怎么显示得下、
  * 看得懂」：截断与中文占位，不改领域字段；完整值永远可达，所以截断不损失
@@ -58,30 +64,30 @@ export function projectCellFor(
   if (session.workspace_path_id) {
     const name = session.project_id ? projectNameById.get(session.project_id) ?? null : null;
     return name
-      ? { text: name, hint: `由工作目录自动派生 · ${name}`, dim: false }
+      ? { text: name, hint: `工作目录派生 · ${name}`, dim: false }
       : {
         text: PROJECT_PENDING,
-        hint: "工作路径已经登记，但对应的项目名称还没读到（正在加载，或项目刚刚变化）。",
+        hint: "项目信息加载中",
         dim: true,
       };
   }
   if (session.project_id) {
     const name = projectNameById.get(session.project_id);
     return {
-      text: name ?? "未验证的项目",
-      hint: "会话行上缓存的 project_id；这条会话没有可解析的工作路径，项目已经不由它决定。",
+      text: name ?? "未验证项目",
+      hint: "未关联有效工作路径",
       dim: true,
     };
   }
   return (session.cwd ?? "").trim() === ""
     ? {
       text: PROJECT_NO_PATH,
-      hint: "原始记录里没有工作目录，所以没有可派生的项目。",
+      hint: "无工作目录记录",
       dim: true,
     }
     : {
       text: PROJECT_PENDING,
-      hint: "工作目录还没有被登记成工作路径，NoEnding 会在下次目录同步后自动补上。",
+      hint: "未登记为工作路径",
       dim: true,
     };
 }
@@ -234,6 +240,8 @@ export default function SessionCards({
   onRestore,
   onDelete,
   busy = false,
+  onTerminalResume,
+  navigate,
 }: {
   sessions: Session[];
   /** Workstream id → 标题；用于给 `owner_workstream_id` 一个可读名字。 */
@@ -246,6 +254,8 @@ export default function SessionCards({
   onRestore?: (sessionId: string) => void;
   onDelete?: (sessionId: string) => void;
   busy?: boolean;
+  onTerminalResume?: (session: Session) => void;
+  navigate?: (r: Route) => void;
 }) {
   const [visibleCount, setVisibleCount] = useViewState("sessions.visibleCount", 100);
   // 「继续」按钮的可用性需要桌面端在场事实：读一次 agent 状态。
@@ -288,7 +298,7 @@ export default function SessionCards({
               )}
             </button>
             <div className="session-list-actions">
-              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} />
+              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} />
               {s.archived_at ? <>
                 <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
                 <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
@@ -330,7 +340,7 @@ export default function SessionCards({
                 <span className="card-title-link">{sessionDisplayTitle(s.title)}</span>
               </h3>
             </div>
-            <span className="badge session-list-meta" title={`执行 Agent: ${agentDisplayLabel(s.agent)}`}>
+            <span className="badge session-list-meta" title={agentDisplayLabel(s.agent)}>
               {agentDisplayLabel(s.agent)}
             </span>
           </header>
@@ -362,7 +372,7 @@ export default function SessionCards({
               {timeAgo(s.last_activity_at ?? s.started_at)}
             </span>
             <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} />
+              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} />
               {s.archived_at ? <>
                 <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
                 <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
@@ -382,24 +392,71 @@ export default function SessionCards({
   );
 }
 
-/** 行内「继续」：Agent 图标按钮，点击直接在会话格式对应的桌面应用里打开。
- *  格式没有桌面路由（claude_code / pi / antigravity_cli）或桌面应用未装时
- *  置灰并说明原因——能力跟格式走，不跟 agent 走。 */
-function SessionResumeButton({ session, agentStatus, onResume }: {
+/** 行内「继续」：图标按钮，与会话详情页右上角的继续会话按钮保持一致（桌面/终端），
+ *  以聚合按钮的默认设置展示（非聚合分列）。
+ *  - 兼具桌面与终端能力（codex）：按聚合按钮设置显示为桌面或终端图标；
+ *  - 仅终端能力（claude_code / pi / antigravity_cli）：显示终端图标；
+ *  - 仅桌面能力（antigravity_desktop / dsh / qoder / workbuddy / zcode）：显示桌面图标；
+ *  - 点击时在对应桌面应用或内嵌终端中继续。 */
+export function SessionResumeButton({
+  session,
+  agentStatus,
+  onResume,
+  onTerminalResume,
+  navigate,
+}: {
   session: Session;
   agentStatus: Record<string, AgentStatusEntry> | null;
   onResume: (sessionId: string) => void;
+  onTerminalResume?: (session: Session) => void;
+  navigate?: (r: Route) => void;
 }) {
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const mode = resolveSessionContinueMode(session);
+
+  if (mode === "terminal") {
+    const handleTerminal = async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (terminalBusy || session.archived_at) return;
+      if (onTerminalResume) {
+        onTerminalResume(session);
+        return;
+      }
+      if (!navigate) return;
+      setTerminalBusy(true);
+      try {
+        await continueSessionTerminalWithToast(session, navigate);
+      } finally {
+        setTerminalBusy(false);
+      }
+    };
+
+    return (
+      <button
+        className="btn small ghost icon-button"
+        title={session.archived_at ? "已归档的会话不能继续，请先取消归档" : "在终端中继续"}
+        aria-label={`在终端中继续${sessionDisplayTitle(session.title)}`}
+        disabled={Boolean(session.archived_at) || terminalBusy || (!onTerminalResume && !navigate)}
+        onClick={handleTerminal}
+      >
+        <Icon name="terminal" />
+      </button>
+    );
+  }
+
   const { disabled, title } = desktopContinueState(session, agentStatus?.[session.agent] ?? null);
   return (
     <button
       className="btn small ghost icon-button"
       title={title}
-      aria-label={`继续${sessionDisplayTitle(session.title)}`}
+      aria-label={`在桌面应用中继续${sessionDisplayTitle(session.title)}`}
       disabled={disabled}
-      onClick={() => onResume(session.id)}
+      onClick={(e) => {
+        e.stopPropagation();
+        onResume(session.id);
+      }}
     >
-      <AgentIcon agent={session.agent} size={16} />
+      <Icon name="desktop" />
     </button>
   );
 }

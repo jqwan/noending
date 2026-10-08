@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useViewState } from "../../hooks/useViewState";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import { onEvent, EVT_SYNCED, type Route } from "../../app/routes";
@@ -89,7 +90,7 @@ function SourceRow({
             userSelect: "all",
             color: "var(--text-primary)",
           }}
-          title={`${src.path} · 点击在文件管理器中打开`}
+          title={src.path}
           onClick={() => void openPath(src.path)}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -118,7 +119,7 @@ function SourceRow({
           disabled={running}
           onClick={() => onScan(src.id)}
           aria-label="增量同步"
-          title="增量同步：仅读取自上次停下后的新增内容"
+          title="增量同步"
         >
           <Icon name="refresh" />
         </button>
@@ -129,7 +130,7 @@ function SourceRow({
             disabled={running}
             onClick={() => onRemove(src)}
             aria-label="移除此自定义目录"
-            title="移除此自定义目录"
+            title="移除目录"
           >
             <Icon name="trash" />
           </button>
@@ -140,7 +141,7 @@ function SourceRow({
           </span>
         )}
         {!src.exists && (
-          <span className="badge warn" title="该目录当前在磁盘上不存在">
+          <span className="badge warn" title="目录不存在">
             目录不存在
           </span>
         )}
@@ -151,7 +152,7 @@ function SourceRow({
         className="btn small ghost agent-reingest-btn"
         disabled={running}
         onClick={() => onReingest(src)}
-        title="全量同步：从头完整读取该来源的全部文件，校准可能遗漏或变动的记录"
+        title="全量同步"
       >
         全量同步
       </button>
@@ -174,6 +175,7 @@ export default function AgentsView({
   const [reingestTarget, setReingestTarget] = useState<IngestSource | null>(null);
   const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [viewMode, setViewMode] = useViewState<"cards" | "list">("agents.viewMode", "cards");
 
   const clearMessages = () => setError("");
 
@@ -226,14 +228,14 @@ export default function AgentsView({
 
   const copyPath = async (p: string) => {
     const ok = await copyToClipboard(p);
-    showToast(ok ? "已复制到剪贴板" : "复制失败，请手动选择文字复制");
+    showToast(ok ? "已复制" : "复制失败");
   };
 
   const handleRemoveSource = async (src: IngestSource) => {
     clearMessages();
     try {
       await api.removeIngestSource(src.id);
-      showToast("已移除来源目录。");
+      showToast("已移除来源目录");
       await reloadSources();
     } catch (e) {
       setError(String(e));
@@ -246,7 +248,7 @@ export default function AgentsView({
     setRunning(true);
     try {
       await api.reconcileSource(srcId);
-      showToast("已排队：正在增量同步该来源。");
+      showToast("正在增量同步…");
       await reloadStatus();
     } catch (e) {
       setRunning(false);
@@ -262,7 +264,7 @@ export default function AgentsView({
     setRunning(true);
     try {
       await api.reingestSource(target.id);
-      showToast("已排队：正在全量同步该来源。");
+      showToast("正在全量同步…");
       await reloadStatus();
     } catch (e) {
       setRunning(false);
@@ -275,7 +277,7 @@ export default function AgentsView({
     setRunning(true);
     try {
       await api.reconcileAll();
-      showToast("已排队：正在增量同步全部已启用来源。");
+      showToast("正在增量同步…");
       await reloadStatus();
     } catch (e) {
       setRunning(false);
@@ -297,7 +299,7 @@ export default function AgentsView({
       if (!targetPath) return;
 
       await api.addIngestSource(agent, targetPath);
-      showToast("已添加并启用来源目录。");
+      showToast("已添加来源目录");
       await reloadSources();
     } catch (e) {
       setError(String(e));
@@ -370,7 +372,7 @@ export default function AgentsView({
               className="btn primary"
               disabled={running || sources.length === 0}
               onClick={handleScanAll}
-              title="增量同步：从每个会话上次停下的位置继续"
+              title="增量同步"
             >
               增量同步全部来源
             </button>
@@ -449,11 +451,32 @@ export default function AgentsView({
               </button>
             )}
           </div>
+
+          <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+            <button
+              className={viewMode === "cards" ? "on" : ""}
+              aria-pressed={viewMode === "cards"}
+              aria-label="卡片视图"
+              title="卡片视图"
+              onClick={() => setViewMode("cards")}
+            >
+              <Icon name="grid" />
+            </button>
+            <button
+              className={viewMode === "list" ? "on" : ""}
+              aria-pressed={viewMode === "list"}
+              aria-label="列表视图"
+              title="列表视图"
+              onClick={() => setViewMode("list")}
+            >
+              <Icon name="list" />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Agent 卡片网格 */}
-      <div className="agents-grid">
+      {/* Agent 展示 */}
+      <div className={viewMode === "cards" ? "agents-grid" : "agents-list"}>
         {visibleAgents.map((agent) => {
           const entry = agentStatus?.[agent];
           const isInitialTarget = initialAgent === agent;
@@ -469,7 +492,7 @@ export default function AgentsView({
             <div
               key={agent}
               id={`agent-card-${agent}`}
-              className="agent-card"
+              className={`agent-card ${viewMode === "list" ? "agent-list-item" : ""}`}
               style={{
                 borderColor: isInitialTarget ? "var(--accent)" : undefined,
               }}
@@ -477,13 +500,13 @@ export default function AgentsView({
               {/* 卡片头部：身份与能力胶囊 */}
               <div className="agent-card-header">
                 <div className="agent-identity">
-                  <AgentIcon agent={agent} size={26} />
+                  <AgentIcon agent={agent} size={viewMode === "list" ? 22 : 26} />
                   <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <span className="agent-title">{AGENT_LABELS[agent]}</span>
                     {hasCli && (
                       <span
                         className={`badge ${entry?.detected ? "accent" : ""}`}
-                        title={entry?.detected ? "已检测到 TUI 运行环境" : "未检测到 TUI"}
+                        title={entry?.detected ? "TUI 已就绪" : "未检测到 TUI"}
                       >
                         TUI
                       </span>
@@ -497,12 +520,17 @@ export default function AgentsView({
                       </span>
                     )}
                     {!hasCli && !hasDesktop && (
-                      <span className="badge" title="仅进行历史会话同步">
+                      <span className="badge" title="仅同步历史会话">
                         仅同步
                       </span>
                     )}
                   </div>
                 </div>
+                {viewMode === "list" && (
+                  <span className="muted small">
+                    {agentSources.length === 0 ? "未配置目录" : `${agentSources.length} 个来源目录`}
+                  </span>
+                )}
               </div>
 
               {/* 会话存储格式与来源目录列表 */}
@@ -532,7 +560,7 @@ export default function AgentsView({
                           }}
                         >
                           <span style={{ fontSize: 13, fontWeight: 600 }}>{fmt.label}</span>
-                          <span className="badge" title="该会话格式固定通过此方式打开会话">
+                          <span className="badge" title="打开方式">
                             {fmt.methods[0] === "terminal" ? "TUI" : "Desktop"}
                             {fmt.methods[0] === "desktop" && entry != null && !entry.desktop_app_present ? " · 未安装" : ""}
                           </span>

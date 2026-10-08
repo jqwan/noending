@@ -126,7 +126,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     setRefreshing(true);
     try {
       await api.terminalRefresh(terminalId);
-      showToast(boundSessionId ? "已排队：正在同步该会话…" : "已排队：正在同步并尝试关联会话…");
+      showToast(boundSessionId ? "正在同步最新对话…" : "正在同步会话…");
     } catch (e) {
       showToast(`同步失败：${String(e)}`);
     } finally {
@@ -475,7 +475,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
             <button
               className="btn ghost icon-button"
               aria-label="同步"
-              title={boundSessionId ? "增量同步：从磁盘同步该会话的最新对话" : "同步并尝试关联会话"}
+              title={boundSessionId ? "同步最新对话" : "同步会话"}
               disabled={refreshing}
               onClick={() => void refreshTerminal()}
             >
@@ -484,7 +484,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
             <button
               className="btn ghost icon-button"
               aria-label="会话详情"
-              title={boundSessionId ? "打开会话详情" : "会话与终端绑定后可打开会话详情"}
+              title="会话详情"
               disabled={!boundSessionId}
               onClick={() => {
                 if (boundSessionId) navigate({ view: "session", sessionId: boundSessionId });
@@ -510,14 +510,13 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         <>
           {snapshot.live && !boundSessionId && (
             <div className="terminal-exit-banner" role="status">
-              Agent 正在运行。会话与终端绑定后，右上角会出现会话详情入口。
+              Agent 运行中。绑定会话后可查看详情。
             </div>
           )}
           {exited && (
             <div className="terminal-exit-banner" role="status">
-              这个终端里的 Agent 已退出
-              {snapshot.exit_code !== null && <>（退出码 {snapshot.exit_code}）</>}
-              。对话记录会随摄入出现在会话页。
+              Agent 已退出
+              {snapshot.exit_code !== null && <>（退出码 {snapshot.exit_code}）</>}。
             </div>
           )}
           <div className="terminal-body">

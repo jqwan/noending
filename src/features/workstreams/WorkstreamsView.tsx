@@ -4,16 +4,15 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import Icon from "../../components/Icon";
-import { Modal } from "../../components/common";
+import { Modal, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import WorkstreamCard, { cardSearchFields, searchFieldHint } from "./WorkstreamCard";
+import WorkstreamCard, { cardSearchFields, cardSummaryLine, searchFieldHint } from "./WorkstreamCard";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import { useWorkstreamCards } from "./useWorkstreamCards";
-import type { WorkstreamCardData } from "../../types";
+import { AGENT_LABELS, type WorkstreamCardData } from "../../types";
 import type { Route, ViewAction, WorkstreamScope } from "../../app/routes";
 
 type SortKey = "recent" | "created" | "name";
-type PresenceFilter = "all" | "assigned" | "unassigned";
 
 const SORTERS: Record<SortKey, (a: WorkstreamCardData, b: WorkstreamCardData) => number> = {
   recent: (a, b) =>
@@ -33,8 +32,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   const [query, setQuery] = useViewState("workstreams.query", "");
   const [sort, setSort] = useViewState<SortKey>("workstreams.sort", "recent");
   const [projectId, setProjectId] = useViewState("workstreams.projectId", "all");
-  const [sessionFilter, setSessionFilter] = useViewState<PresenceFilter>("workstreams.sessionFilter", "all");
-  const [pathFilter, setPathFilter] = useViewState<PresenceFilter>("workstreams.pathFilter", "all");
+  const [viewMode, setViewMode] = useViewState<"cards" | "list">("workstreams.viewMode", "cards");
   const [creatingWs, setCreatingWs] = useState(false);
   const archivedMode = scope === "archived";
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);
@@ -57,8 +55,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   }, [cards]);
 
   const filtersActive =
-    query.trim() !== "" || projectId !== "all"
-    || sessionFilter !== "all" || pathFilter !== "all";
+    query.trim() !== "" || projectId !== "all";
 
   const list = useMemo(() => {
     if (!cards) return null;
@@ -66,8 +63,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
     return cards
       .filter((c) => archivedMode ? c.visibility === "archived" : c.visibility === "normal")
       .filter((c) => projectId === "all" || (projectId === "none" ? c.project_id === null : c.project_id === projectId))
-      .filter((c) => sessionFilter === "all" || (sessionFilter === "assigned" ? c.session_count > 0 : c.session_count === 0))
-      .filter((c) => pathFilter === "all" || (pathFilter === "assigned" ? c.path_count > 0 : c.path_count === 0))
       .filter((c) =>
         q === ""
           ? true
@@ -76,7 +71,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
               .some((s) => s!.toLowerCase().includes(q)),
       )
       .sort(SORTERS[sort]);
-  }, [cards, query, sort, projectId, sessionFilter, pathFilter, archivedMode]);
+  }, [cards, query, sort, projectId, archivedMode]);
 
   const archivedTasks = cards?.filter((c) => c.visibility === "archived") ?? [];
 
@@ -149,8 +144,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   const clearFilters = () => {
     setQuery("");
     setProjectId("all");
-    setSessionFilter("all");
-    setPathFilter("all");
   };
 
   const scrollRef = useViewScroll("workstreams.scroll", cards !== null);
@@ -209,22 +202,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
               </select>
             </label>
             <label className="ws-control">
-              <span className="muted small">会话关联</span>
-              <select value={sessionFilter} onChange={(e) => setSessionFilter(e.target.value as PresenceFilter)}>
-                <option value="all">全部</option>
-                <option value="assigned">有会话</option>
-                <option value="unassigned">无会话</option>
-              </select>
-            </label>
-            <label className="ws-control">
-              <span className="muted small">工作路径</span>
-              <select value={pathFilter} onChange={(e) => setPathFilter(e.target.value as PresenceFilter)}>
-                <option value="all">全部</option>
-                <option value="assigned">有工作路径</option>
-                <option value="unassigned">无工作路径</option>
-              </select>
-            </label>
-            <label className="ws-control">
               <span className="muted small">排序</span>
               <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
                 <option value="recent">最近活动 ↓</option>
@@ -238,17 +215,45 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                 {filtersActive ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 个` : `共 ${list.length} 个任务`}
               </span>
             )}
+            <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+              <button
+                className={viewMode === "cards" ? "on" : ""}
+                aria-pressed={viewMode === "cards"}
+                aria-label="卡片视图"
+                title="卡片视图"
+                onClick={() => setViewMode("cards")}
+              >
+                <Icon name="grid" />
+              </button>
+              <button
+                className={viewMode === "list" ? "on" : ""}
+                aria-pressed={viewMode === "list"}
+                aria-label="列表视图"
+                title="列表视图"
+                onClick={() => setViewMode("list")}
+              >
+                <Icon name="list" />
+              </button>
+            </div>
           </div>
 
           </div>
 
           {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
           {list === null && !loadError && (
-            <div className="ws-grid board-grid" role="status">
-              <div className="skeleton card" style={{ minHeight: 140 }} />
-              <div className="skeleton card" style={{ minHeight: 140 }} />
-              <div className="skeleton card" style={{ minHeight: 140 }} />
-            </div>
+            viewMode === "cards" ? (
+              <div className="ws-grid board-grid" role="status">
+                <div className="skeleton card" style={{ minHeight: 140 }} />
+                <div className="skeleton card" style={{ minHeight: 140 }} />
+                <div className="skeleton card" style={{ minHeight: 140 }} />
+              </div>
+            ) : (
+              <div className="task-list" aria-busy="true">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="skeleton" style={{ height: 64, borderRadius: "var(--radius-md)", marginBottom: 8 }} />
+                ))}
+              </div>
+            )
           )}
           {list !== null && list.length === 0 && (
             <EmptyState
@@ -274,11 +279,67 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             />
           )}
 
-          <div className="ws-grid board-grid">
-            {list?.map((c) => (
-              <WorkstreamCard key={c.id} card={c} mode="full" navigate={navigate} defaultAgent={defaultAgent} onArchive={archiveTask} onRestore={restoreTask} onDelete={setPurgeTarget} busy={Boolean(taskActionId) || bulkPurgeBusy} />
-            ))}
-          </div>
+          {viewMode === "cards" ? (
+            <div className="ws-grid board-grid">
+              {list?.map((c) => (
+                <WorkstreamCard key={c.id} card={c} mode="full" navigate={navigate} defaultAgent={defaultAgent} onArchive={archiveTask} onRestore={restoreTask} onDelete={setPurgeTarget} busy={Boolean(taskActionId) || bulkPurgeBusy} />
+              ))}
+            </div>
+          ) : (
+            <div className="task-list">
+              {list?.map((c) => {
+                const summary = cardSummaryLine(c);
+                return (
+                  <article className="task-list-row" key={`list-${c.id}`}>
+                    <button
+                      type="button"
+                      className="task-open"
+                      onClick={() => navigate({ view: "workstream", workstreamId: c.id })}
+                    >
+                      <div className="task-list-title" title={c.title}>
+                        <Icon name="tasks" />
+                        <span>{c.title}</span>
+                        {c.visibility === "archived" && <span className="badge warn">已归档</span>}
+                      </div>
+                      <div className="task-list-meta">
+                        {c.project_name && (
+                          <span title={c.project_name} className="task-list-project">
+                            <Icon name="folder" />
+                            <span>{c.project_name}</span>
+                          </span>
+                        )}
+                        <span>{c.session_count === 0 ? "暂无会话" : `${c.session_count} 个会话`}</span>
+                        <span title={c.last_activity_at ?? c.updated_at}>
+                          {timeAgo(c.last_activity_at ?? c.updated_at)}
+                        </span>
+                      </div>
+                      {summary && (
+                        <div className="task-list-summary" title={summary}>
+                          {summary}
+                        </div>
+                      )}
+                    </button>
+                    {(
+                      <div className="task-list-actions" onClick={(e) => e.stopPropagation()}>
+                        {c.visibility !== "archived" && <button
+                          className="btn small ws-btn ghost icon-button"
+                          aria-label="新建会话"
+                          title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}
+                          onClick={() => navigate({ view: "new-session", workstreamId: c.id })}
+                        >
+                          <Icon name="plus" />
+                        </button>}
+                        {c.visibility === "archived" ? <>
+                          <button className="btn small ghost icon-button" aria-label={`取消归档${c.title}`} title="取消归档" disabled={Boolean(taskActionId) || bulkPurgeBusy} onClick={() => void restoreTask(c)}><Icon name="unarchive" /></button>
+                          <button className="btn small ghost icon-button danger" aria-label={`永久删除${c.title}`} title="永久删除" disabled={Boolean(taskActionId) || bulkPurgeBusy} onClick={() => setPurgeTarget(c)}><Icon name="trash" /></button>
+                        </> : <button className="btn small ghost icon-button" aria-label={`归档${c.title}`} title="归档" disabled={Boolean(taskActionId) || bulkPurgeBusy} onClick={() => void archiveTask(c)}><Icon name="archive" /></button>}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          )}
       </>
 
       {purgeTarget && (

@@ -62,7 +62,8 @@ pub fn list_workspace_paths_for_project_conn(
 ) -> Result<Vec<WorkspacePath>> {
     let mut st = conn.prepare(&format!(
         "SELECT {WORKSPACE_PATH_COLUMNS} FROM workspace_paths
-          WHERE project_id = ?1 ORDER BY canonical_path"
+          WHERE project_id = ?1
+          ORDER BY CASE WHEN git_kind = 'main' THEN 0 ELSE 1 END, canonical_path"
     ))?;
     let mapped = st.query_map(params![project_id], row_workspace_path)?;
     Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)

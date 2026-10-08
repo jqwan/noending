@@ -27,6 +27,7 @@ vi.mock("../../api", () => ({
     reorderWorkstreamPaths: vi.fn(),
     probeWorkspacePath: vi.fn().mockResolvedValue(null),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
+    listProjectCards: vi.fn().mockResolvedValue([]),
     // 挂载时读取的 Review 面板（SinceLastReview）默认空窗。
     getWorkstreamReviewWindow: vi.fn().mockResolvedValue({
       state: { workstream_id: "w1", frontier: { through_at: "", boundary_change_ids: [] }, reviewed_at: "" },
@@ -170,9 +171,9 @@ it("opens the 新建任务 form, prefilled with the current task", async () => {
   const dialog = screen.getByRole("dialog", { name: "编辑任务" });
   screen.getByDisplayValue("接口设计");
   screen.getByDisplayValue("整理 API 设计");
-  within(dialog).getByText("/repo/main");
+  within(dialog).getByText("Main");
   screen.getByRole("button", { name: "保存" });
-  screen.getByRole("button", { name: "新增目录" });
+  screen.getByRole("button", { name: "新增项目" });
 });
 
 it("shows 更新状态 with the pending-session count and calls the explicit update", async () => {
@@ -197,7 +198,7 @@ it("shows 更新状态 with the pending-session count and calls the explicit upd
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
 
-  screen.getByText(/有 2 个相关 Session 有新内容/);
+  screen.getByText("2 个会话有新内容待并入。");
   fireEvent.click(screen.getByRole("button", { name: "更新状态" }));
   await waitFor(() => expect(api.updateWorkstreamContext).toHaveBeenCalledWith("w1"));
 });

@@ -181,7 +181,7 @@ export default function SessionsView({ navigate, scope }: {
    *  桌面路由时按钮本来就是灰的，这里的报错是兜底。 */
   const resume = (sessionId: string) => {
     api.continueSessionDesktop(sessionId)
-      .then((open) => showToast(open.note || "已在桌面应用中打开该会话。"))
+      .then((open) => showToast(open.note || "已在桌面应用中打开"))
       .catch((e) => showToast(`打开失败：${String(e)}`));
   };
 
@@ -227,7 +227,7 @@ export default function SessionsView({ navigate, scope }: {
     refresh();
     showToast(
       failed === 0
-        ? `已删除 ${purged} 个会话的本地数据；源仍存在的会在后续同步重新入库`
+        ? `已删除 ${purged} 个会话`
         : `已删除 ${purged} 个会话，${failed} 个失败`,
     );
   };
@@ -342,7 +342,6 @@ export default function SessionsView({ navigate, scope }: {
               >
                 <option value="all">全部项目</option>
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                <option value="none">无项目</option>
               </select>
             </label>
             {filtersActive && (
@@ -436,6 +435,7 @@ export default function SessionsView({ navigate, scope }: {
               onRestore={(id) => { const target = sessions?.find((s) => s.id === id); if (target) void unarchive(target); }}
               onDelete={setPurgeSessionId}
               busy={bulkPurgeBusy || unarchiveBusy || archiveBusy}
+              navigate={navigate}
             />
           )}
       </>

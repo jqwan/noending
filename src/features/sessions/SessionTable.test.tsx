@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionCards from "./SessionTable";
 import type { Session } from "../../types";
@@ -15,8 +15,11 @@ const session = { id: "s1", title: "修复布局", agent: "codex", cwd: "/test/p
 it("opens details separately from resume and trash actions", () => {
   const open = vi.fn(); const resume = vi.fn(); const trash = vi.fn();
   render(<SessionCards sessions={[session]} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={open} onResume={resume} onArchive={trash} />);
-  // 行内「继续」= Agent 图标按钮；可用性由格式能力 + 桌面端在场决定。
-  fireEvent.click(screen.getByLabelText("继续修复布局"));
+  // 行内「继续」= 图标按钮（与聚合按钮默认设置一致）；统一显示桌面图标，可用性由格式能力 + 桌面端在场决定。
+  const continueBtn = screen.getByLabelText("在桌面应用中继续修复布局");
+  expect(continueBtn.querySelector(".ui-icon")).toBeTruthy();
+  expect(continueBtn.querySelector(".agent-icon")).toBeNull();
+  fireEvent.click(continueBtn);
   expect(resume).toHaveBeenCalledWith("s1");
   fireEvent.click(screen.getByLabelText("将修复布局归档"));
   expect(trash).toHaveBeenCalledWith("s1");
@@ -99,4 +102,66 @@ it("renders card view by default and list view when viewMode is list", () => {
   );
   expect(document.querySelector(".session-card")).toBeNull();
   expect(document.querySelector(".session-list-row")).toBeTruthy();
+});
+
+it("shows terminal continue button when continue mode is terminal or format is terminal only", () => {
+  const onTerminalResume = vi.fn();
+  localStorage.setItem("noending.continue_mode", "terminal");
+  const { rerender } = render(
+    <SessionCards
+      sessions={[session]}
+      workstreamTitleById={new Map()}
+      projectNameById={new Map()}
+      onOpen={() => {}}
+      onResume={() => {}}
+      onArchive={() => {}}
+      onTerminalResume={onTerminalResume}
+    />
+  );
+  // codex 在 terminal 模式下展示终端继续按钮
+  const terminalBtn = screen.getByLabelText("在终端中继续修复布局");
+  expect(terminalBtn.querySelector(".ui-icon")).toBeTruthy();
+  fireEvent.click(terminalBtn);
+  expect(onTerminalResume).toHaveBeenCalledWith(session);
+
+  // 切回 desktop 模式，但 claude_code 属于仅终端格式，仍然展示终端继续按钮
+  localStorage.setItem("noending.continue_mode", "desktop");
+  const claudeSession = { ...session, id: "claude-1", agent: "claude_code" } as Session;
+  rerender(
+    <SessionCards
+      sessions={[claudeSession]}
+      workstreamTitleById={new Map()}
+      projectNameById={new Map()}
+      onOpen={() => {}}
+      onResume={() => {}}
+      onArchive={() => {}}
+      onTerminalResume={onTerminalResume}
+    />
+  );
+  expect(screen.getByLabelText("在终端中继续修复布局")).toBeTruthy();
+  localStorage.removeItem("noending.continue_mode");
+});
+
+it("disables archived session continuation in both card and list terminal modes", async () => {
+  localStorage.setItem("noending.continue_mode", "terminal");
+  const resume = vi.fn();
+  const terminalResume = vi.fn();
+  const archived = { ...session, archived_at: "2026-10-08T00:00:00Z" };
+  const props = {
+    sessions: [archived], workstreamTitleById: new Map(), projectNameById: new Map(),
+    onOpen: vi.fn(), onResume: resume, onArchive: vi.fn(), onTerminalResume: terminalResume,
+  };
+  let rerender!: ReturnType<typeof render>["rerender"];
+  await act(async () => { ({ rerender } = render(<SessionCards {...props} />)); });
+  const assertBlocked = () => {
+    const button = screen.getByRole("button", { name: "在终端中继续修复布局" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(button);
+    expect(terminalResume).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+  };
+  assertBlocked();
+  rerender(<SessionCards {...props} viewMode="list" />);
+  assertBlocked();
+  localStorage.removeItem("noending.continue_mode");
 });

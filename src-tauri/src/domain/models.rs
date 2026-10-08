@@ -411,6 +411,13 @@ impl SessionMessageRole {
     }
 }
 
+/// Message count statistics by role for a Session.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SessionMessageStats {
+    pub user_messages: i64,
+    pub assistant_messages: i64,
+}
+
 /// One user-visible conversation turn of the root source — the ONLY
 /// conversation store NoEnding keeps. Thinking, tool traffic, system /
 /// developer prompts, compaction summaries and child/side transcripts never

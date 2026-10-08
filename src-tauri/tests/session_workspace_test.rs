@@ -902,3 +902,24 @@ fn the_source_verdict_follows_the_file_on_disk() {
         noending::domain::SourceAvailability::Unavailable
     );
 }
+
+#[test]
+fn session_message_stats_reports_counts_by_role() {
+    let (_, db) = temp_db("msg-stats");
+    project(&db, "p-repo", "repo");
+    let stats_empty = db.session_message_stats("non-existent").unwrap();
+    assert_eq!(stats_empty.user_messages, 0);
+    assert_eq!(stats_empty.assistant_messages, 0);
+
+    let s = discover_via_reconcile(
+        &db,
+        &unique_dir("ingest-stats"),
+        "rollout-2026-09-13-stats.jsonl",
+        "stats-1",
+        "/repo/app",
+        "hello",
+    );
+    let stats = db.session_message_stats(&s.id).unwrap();
+    assert_eq!(stats.user_messages, 1);
+    assert_eq!(stats.assistant_messages, 0);
+}

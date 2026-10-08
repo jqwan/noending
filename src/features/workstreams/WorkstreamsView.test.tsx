@@ -42,3 +42,21 @@ it("delete all covers archived tasks even when the board is filtered", async () 
   expect(api.deleteWorkstreamPermanently).toHaveBeenCalledWith("归档乙");
   expect(api.deleteWorkstreamPermanently).not.toHaveBeenCalledWith("普通任务");
 });
+
+it("keeps card and list views available in both archive scopes", async () => {
+  const navigate = vi.fn();
+  const { container, rerender } = render(<WorkstreamsView navigate={navigate} actionSeq={0} />);
+  expect(container.querySelector(".task-card")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
+  expect(container.querySelector(".task-list-row")).toBeTruthy();
+  expect(container.querySelector(".task-card")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "归档普通任务" }));
+  await waitFor(() => expect(api.archiveWorkstream).toHaveBeenCalledWith("普通任务"));
+  rerender(<WorkstreamsView navigate={navigate} scope="archived" actionSeq={0} />);
+  expect(container.querySelectorAll(".task-list-row")).toHaveLength(2);
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
+  screen.getByRole("button", { name: "取消归档归档甲" });
+  screen.getByRole("button", { name: "永久删除归档甲" });
+  fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
+  expect(container.querySelectorAll(".task-card")).toHaveLength(2);
+});

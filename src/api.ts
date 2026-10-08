@@ -5,6 +5,7 @@ import type {
   IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
   Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow,
+  AddProjectPathResult,
   RecentWorkspacePath, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
   ReviewFrontier, SearchHit, Session, SessionContextView, SessionDetail,
@@ -33,6 +34,8 @@ export const api = {
     invoke<ProjectWorkstreamRow[]>("list_project_workstreams", { projectId }),
   renameProject: (projectId: string, name: string) =>
     invoke<Project>("rename_project", { projectId, name }),
+  addProjectPath: (path: string) =>
+    invoke<AddProjectPathResult>("add_project_path", { path }),
 
   getWorkspaceSettings: () => invoke<WorkspaceSettings>("get_workspace_settings"),
   /** Open the active Home's Context extraction diagnostics folder. */

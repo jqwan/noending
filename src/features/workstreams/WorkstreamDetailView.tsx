@@ -197,10 +197,10 @@ export default function WorkstreamDetailView({
       const out = await api.updateWorkstreamContext(workstreamId);
       showToast(
         out.status === "no_change"
-          ? "没有相关变化，状态保持不变"
+          ? "状态无变化"
           : out.remaining_pending > 0
-            ? `已更新状态（还有 ${out.remaining_pending} 个 Session 待更新）`
-            : "已更新状态与相关 Session 摘要",
+            ? `已更新状态（待更新 ${out.remaining_pending}）`
+            : "已更新状态",
       );
       refresh();
     } catch (e) {
@@ -220,7 +220,7 @@ export default function WorkstreamDetailView({
         .map((s) => `${KIND_LABELS[s.kind] ?? s.kind}：${s.title}\n${s.content}`.trim())
         .join("\n\n");
     const ok = await copyToClipboard(text);
-    showToast(ok ? "已复制当前 Context" : "复制失败，请手动选中文字复制");
+    showToast(ok ? "已复制 Context" : "复制失败");
   };
 
   // 同 SessionDetailView：加载态也要渲染 PageHeader，否则整条标题栏会先消失再补回来。
@@ -338,20 +338,18 @@ export default function WorkstreamDetailView({
   };
 
   const archived = workstream.visibility === "archived";
-  // 一个 Workstream 可以因为不同路径同时出现在多个 Project 里；
-  // 经由 position 0 那条路径到达的才是「主关联」。
+  // 一个 Workstream 可以关联多个 Project
   const projectRows = (() => {
-    const byId = new Map<string, { id: string; name: string | null; primary: boolean; count: number }>();
+    const byId = new Map<string, { id: string; name: string | null; count: number }>();
     for (const p of paths ?? []) {
       const seen = byId.get(p.project_id);
       byId.set(p.project_id, {
         id: p.project_id,
         name: p.project_name ?? seen?.name ?? null,
-        primary: (seen?.primary ?? false) || p.position === 0,
         count: (seen?.count ?? 0) + 1,
       });
     }
-    return [...byId.values()].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
+    return [...byId.values()];
   })();
 
   return (
@@ -383,7 +381,7 @@ export default function WorkstreamDetailView({
                       取消归档
                     </button>
                     <button className="menu-item"
-                      title="不可撤销：会删除这条任务名下的 Context、冲突记录与审阅状态。会话与它们的事件历史保留。"
+                      title="永久删除（不可撤销）"
                       onClick={() => { setMenuOpen(false); setPurgeConfirmText(""); setConfirmPurge(true); }}>
                       永久删除…
                     </button>
@@ -470,10 +468,11 @@ export default function WorkstreamDetailView({
               onClick={() => navigate({ view: "project", projectId: p.id })}>
               <div className="grow">
                 <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名项目"}</div>
-                <div className="meta">
-                  {p.primary ? "主项目" : "关联项目"}
-                  {p.count > 1 ? ` · ${p.count} 条路径` : ""}
-                </div>
+                {p.count > 0 && (
+                  <div className="meta">
+                    {p.count} 条路径
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -682,13 +681,12 @@ function IntelligenceSections({
             {ctxState.pending ? (
               <div className="small muted" style={{ marginTop: 4 }}>
                 {ctxState.pending_sessions > 0
-                  ? `有 ${ctxState.pending_sessions} 个相关 Session 有新内容。`
-                  : "有相关变化尚未并入。"}
-                点击「更新状态」会同时更新它们的摘要与本任务状态。
+                  ? `${ctxState.pending_sessions} 个会话有新内容待并入。`
+                  : "有新内容待并入。"}
               </div>
             ) : (
               <div className="small muted" style={{ marginTop: 4 }}>
-                已是最新（revision {ctxState.context_revision}）。
+                已是最新（rev {ctxState.context_revision}）。
               </div>
             )}
             {ctxUpdateError && (
@@ -697,7 +695,7 @@ function IntelligenceSections({
                 {ctxUpdateError.operationId && (
                   <button className="btn small ghost" onClick={async () => {
                     const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError));
-                    showToast(ok ? "已复制错误详情" : "复制失败，请手动复制错误详情");
+                    showToast(ok ? "已复制错误详情" : "复制失败");
                   }}>复制错误详情</button>
                 )}
               </div>

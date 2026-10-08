@@ -196,7 +196,7 @@ export default function AppShell() {
           <button
             className="history-button"
             aria-label="返回上一页"
-            title="返回上一页（⌥← / ⌘[）"
+            title="返回上一页"
             disabled={navigation.index === 0}
             onClick={() => goBack()}
           >
@@ -207,7 +207,7 @@ export default function AppShell() {
           <button
             className="history-button"
             aria-label="前进到下一页"
-            title="前进到下一页（⌥→ / ⌘]）"
+            title="前进到下一页"
             disabled={navigation.index >= navigation.entries.length - 1}
             onClick={goForward}
           >

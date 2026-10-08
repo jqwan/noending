@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NewSessionView from "./NewSessionView";
 import { api } from "../../api";
+import { open } from "@tauri-apps/plugin-dialog";
 
 const mockAgentStatus = {
   codex: {
@@ -89,6 +90,7 @@ const mockAgentStatus = {
 vi.mock("../../api", () => ({
   api: {
     listWorkstreamCards: vi.fn(),
+    listProjectCards: vi.fn(),
     getAgentStatus: vi.fn(),
     getDefaultAgent: vi.fn(),
     setDefaultAgent: vi.fn(),
@@ -99,7 +101,13 @@ vi.mock("../../api", () => ({
     getWorkspaceSettings: vi.fn(),
     listRecentWorkspacePaths: vi.fn(),
     listWorkstreamPaths: vi.fn(),
+    addProjectPath: vi.fn(),
+    probeWorkspacePath: vi.fn().mockResolvedValue(null),
   },
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn().mockResolvedValue(null),
 }));
 
 const preparedFixture = {
@@ -125,6 +133,7 @@ beforeEach(() => {
   vi.mocked(api.launchEmbeddedNew).mockReset();
   vi.mocked(api.cancelPrepared).mockClear();
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
   vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue("codex");
   vi.mocked(api.setDefaultAgent).mockReset().mockResolvedValue(undefined);
@@ -249,98 +258,198 @@ describe("NewSessionView explicit agent resolution", () => {
   });
 });
 
-describe("NewSessionView working directory selection", () => {
-  it("in standalone mode, defaults to NoEnding default workspace and lists existing working directories", async () => {
-    render(<NewSessionView navigate={vi.fn()} />);
+describe("NewSessionView task and project selection", () => {
+  const mockProjects = [
+    {
+      id: "p-1",
+      name: "Project 1",
+      name_customized: false,
+      kind: "git" as const,
+      path_count: 1,
+      missing_path_count: 0,
+      primary_workstream_count: 1,
+      related_workstream_count: 0,
+      session_count: 5,
+      representative_paths: ["/repo/project-1"],
+      search_paths: ["/repo/project-1"],
+      last_activity_at: null,
+      updated_at: "2026-10-01T00:00:00Z",
+    },
+  ];
 
-    const select = await screen.findByLabelText("工作路径") as HTMLSelectElement;
-
-    await waitFor(() => {
-      expect(select.value).toBe("/tmp/workspace");
-    });
-
-    const optionTexts = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
-    expect(optionTexts.some((t) => t?.includes("/tmp/workspace (NoEnding 默认工作区)"))).toBe(true);
-    expect(optionTexts.some((t) => t?.includes("/repo/existing-1 (Project 1)"))).toBe(true);
-    expect(optionTexts.some((t) => t?.includes("浏览其他目录…"))).toBe(true);
-  });
-
-  it("in standalone mode, allows choosing another existing working directory and calls prepareNewSession with it", async () => {
-    render(<NewSessionView navigate={vi.fn()} />);
-
-    const select = await screen.findByLabelText("工作路径");
-    fireEvent.change(select, { target: { value: "/repo/existing-1" } });
-
-    await waitFor(() => {
-      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null, "/repo/existing-1");
-    });
-  });
-
-  it("when created from a task with paths, lists task working directories, defaults to primary path, and allows switching", async () => {
-    vi.mocked(api.prepareNewSession).mockImplementation(async (_agent, _ownerId, cwd) => ({
-      ...preparedFixture,
-      cwd: cwd ?? "/repo/task-primary",
-    }));
-    vi.mocked(api.listWorkstreamPaths).mockResolvedValue([
+  it("renders task options containing only task title without directory", async () => {
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
       {
-        id: "wp-1",
-        workstream_id: "ws-1",
-        workspace_path_id: "p-1",
-        canonical_path: "/repo/task-primary",
-        position: 0,
-        project_id: "prj-1",
-        project_name: "Task Project",
-        exists: true,
-        created_at: "2026-09-21T00:00:00Z",
+        id: "ws-1",
+        title: "我的功能开发",
+        description: "",
+
+        visibility: "normal",
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+        project_id: "p-1",
+        project_name: "Project 1",
+        current_state: null,
+        goal: null,
+        last_activity_at: null,
+        session_count: 1,
+        latest_session: null,
+        path_count: 1,
+        primary_path: "/repo/project-1",
       },
+    ]);
+    render(<NewSessionView navigate={vi.fn()} />);
+
+    const taskSelect = (await screen.findByLabelText("所属任务（可选）")) as HTMLSelectElement;
+    const options = Array.from(taskSelect.querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toContain("我的功能开发");
+    expect(options.some((t) => t?.includes("/repo/project-1"))).toBe(false);
+  });
+
+  it("in standalone mode, defaults to NoEnding Workspace and lists discovered projects and + 新项目", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
+    render(<NewSessionView navigate={vi.fn()} />);
+
+    const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
+
+    await waitFor(() => {
+      expect(projectSelect.value).toBe("default");
+    });
+
+    const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toContain("NoEnding Workspace");
+    expect(options).toContain("Project 1");
+    expect(options).toContain("+ 新项目");
+
+    // Also renders directory picker
+    const dirSelect = (await screen.findByLabelText("项目目录")) as HTMLSelectElement;
+    expect(dirSelect.value).toBe("/tmp/workspace");
+  });
+
+  it("when choosing a project, sets working directory to project's first workspace path and calls prepareNewSession with it", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
+    render(<NewSessionView navigate={vi.fn()} />);
+
+    const projectSelect = await screen.findByLabelText("所属项目");
+    fireEvent.change(projectSelect, { target: { value: "p-1" } });
+
+    await waitFor(() => {
+      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null, "/repo/project-1");
+    });
+  });
+
+  it("allows switching directory under a project with multiple paths", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
       {
-        id: "wp-2",
-        workstream_id: "ws-1",
-        workspace_path_id: "p-2",
-        canonical_path: "/repo/task-secondary",
-        position: 1,
-        project_id: "prj-1",
-        project_name: "Task Project",
+        id: "p-multi",
+        name: "Multi Project",
+        name_customized: false,
+        kind: "git" as const,
+        path_count: 2,
+        missing_path_count: 0,
+        primary_workstream_count: 0,
+        related_workstream_count: 0,
+        session_count: 0,
+        representative_paths: ["/repo/main", "/repo/worktree-1"],
+        search_paths: ["/repo/main", "/repo/worktree-1"],
+        last_activity_at: null,
+        updated_at: "2026-10-01T00:00:00Z",
+      },
+    ]);
+    render(<NewSessionView navigate={vi.fn()} />);
+
+    const projectSelect = await screen.findByLabelText("所属项目");
+    fireEvent.change(projectSelect, { target: { value: "p-multi" } });
+
+    const dirSelect = (await screen.findByLabelText("项目目录")) as HTMLSelectElement;
+    await waitFor(() => {
+      expect(dirSelect.value).toBe("/repo/main");
+    });
+
+    fireEvent.change(dirSelect, { target: { value: "/repo/worktree-1" } });
+
+    await waitFor(() => {
+      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null, "/repo/worktree-1");
+    });
+  });
+
+  it("selecting + 新项目 triggers folder dialog and registers project", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
+    vi.mocked(open).mockResolvedValueOnce("/new/picked/repo");
+    vi.mocked(api.addProjectPath).mockResolvedValueOnce({
+      path: {
+        id: "wp-new",
+        canonical_path: "/new/picked/repo",
+        project_id: "p-new",
+        git_state: "detected",
+        git_kind: "repo",
         exists: true,
-        created_at: "2026-09-21T00:00:00Z",
+        first_seen_at: "2026-10-01T00:00:00Z",
+        last_seen_at: "2026-10-01T00:00:00Z",
+      },
+      project_id: "p-new",
+      project_name: "picked",
+    });
+
+    render(<NewSessionView navigate={vi.fn()} />);
+    const projectSelect = await screen.findByLabelText("所属项目");
+
+    await act(async () => {
+      fireEvent.change(projectSelect, { target: { value: "__new_project__" } });
+    });
+
+    await waitFor(() => {
+      expect(open).toHaveBeenCalled();
+      expect(api.addProjectPath).toHaveBeenCalledWith("/new/picked/repo");
+    });
+  });
+
+  it("when created from a task with project, defaults to that project and its first workspace path", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      {
+        id: "ws-1",
+        title: "我的功能开发",
+        description: "",
+
+        visibility: "normal",
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+        project_id: "p-1",
+        project_name: "Project 1",
+        current_state: null,
+        goal: null,
+        last_activity_at: null,
+        session_count: 1,
+        latest_session: null,
+        path_count: 1,
+        primary_path: "/repo/project-1",
       },
     ]);
 
     render(<NewSessionView workstreamId="ws-1" navigate={vi.fn()} />);
 
-    const select = await screen.findByLabelText("工作路径") as HTMLSelectElement;
+    const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
 
     await waitFor(() => {
-      expect(select.value).toBe("/repo/task-primary");
-    });
-
-    const optionTexts = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
-    expect(optionTexts.some((t) => t?.includes("/repo/task-primary (主目录)"))).toBe(true);
-    expect(optionTexts.some((t) => t?.includes("/repo/task-secondary"))).toBe(true);
-    expect(optionTexts.some((t) => t?.includes("浏览其他目录…"))).toBe(false);
-
-    fireEvent.change(select, { target: { value: "/repo/task-secondary" } });
-
-    await waitFor(() => {
-      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", "ws-1", "/repo/task-secondary");
+      expect(projectSelect.value).toBe("p-1");
+      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", "ws-1", "/repo/project-1");
     });
   });
 
-  it("when created from a task with NO paths, defaults to NoEnding default workspace", async () => {
-    vi.mocked(api.listWorkstreamPaths).mockResolvedValue([]);
+  it("when created with projectId, defaults to that project", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
 
-    render(<NewSessionView workstreamId="ws-empty" navigate={vi.fn()} />);
+    render(<NewSessionView projectId="p-1" navigate={vi.fn()} />);
 
-    const select = await screen.findByLabelText("工作路径") as HTMLSelectElement;
+    const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
 
     await waitFor(() => {
-      expect(select.value).toBe("/tmp/workspace");
+      expect(projectSelect.value).toBe("p-1");
     });
-
-    const optionTexts = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
-    expect(optionTexts.some((t) => t?.includes("/tmp/workspace (NoEnding 默认工作区)"))).toBe(true);
   });
-it("launches embedded and navigates to the standalone terminal view", async () => {
+
+  it("launches embedded and navigates to the standalone terminal view", async () => {
   vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
     launched_via: "内嵌终端",
     command_line: "codex",
@@ -360,6 +469,54 @@ it("launches embedded and navigates to the standalone terminal view", async () =
   );
   expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new-1" });
 });
+
+  it("renders git icon for git directory and folder icon for normal directory", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      {
+        id: "p-git",
+        name: "Git Project",
+        name_customized: false,
+        kind: "git" as const,
+        path_count: 1,
+        missing_path_count: 0,
+        primary_workstream_count: 0,
+        related_workstream_count: 0,
+        session_count: 0,
+        representative_paths: ["/repo/git"],
+        search_paths: ["/repo/git"],
+        last_activity_at: null,
+        updated_at: "2026-10-01T00:00:00Z",
+      },
+      {
+        id: "p-normal",
+        name: "Normal Project",
+        name_customized: false,
+        kind: "directory" as const,
+        path_count: 1,
+        missing_path_count: 0,
+        primary_workstream_count: 0,
+        related_workstream_count: 0,
+        session_count: 0,
+        representative_paths: ["/docs/normal"],
+        search_paths: ["/docs/normal"],
+        last_activity_at: null,
+        updated_at: "2026-10-01T00:00:00Z",
+      },
+    ]);
+
+    const { container } = render(<NewSessionView projectId="p-git" navigate={vi.fn()} />);
+    await screen.findByDisplayValue("Git Project");
+    const dirPicker = container.querySelector(".new-session-dir");
+    const gitSvg = dirPicker?.querySelector("svg path");
+    expect(gitSvg?.getAttribute("d")).toContain("M5 3a1.5");
+
+    const projectSelect = screen.getByRole("combobox", { name: "所属项目" });
+    fireEvent.change(projectSelect, { target: { value: "p-normal" } });
+    await screen.findByDisplayValue("Normal Project");
+
+    const folderSvg = dirPicker?.querySelector("svg path");
+    expect(folderSvg?.getAttribute("d")).toBe("M2 5V3h5l2 2h7v10H2Z");
+  });
 });
 
 
@@ -394,14 +551,31 @@ describe("NewSessionView message composer", () => {
   });
 
   it("keeps the message and selections after a failed launch and allows retry", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      {
+        id: "p-1",
+        name: "Project 1",
+        name_customized: false,
+        kind: "git" as const,
+        path_count: 1,
+        missing_path_count: 0,
+        primary_workstream_count: 1,
+        related_workstream_count: 0,
+        session_count: 5,
+        representative_paths: ["/repo/existing-1"],
+        search_paths: ["/repo/existing-1"],
+        last_activity_at: null,
+        updated_at: "2026-10-01T00:00:00Z",
+      },
+    ]);
     vi.mocked(api.launchEmbeddedNew).mockRejectedValueOnce("CLI unavailable").mockResolvedValue({
       launched_via: "内嵌终端", command_line: "claude", note: "已启动", launch_intent_id: null, terminal_id: "t-retry",
     });
     const navigate = vi.fn();
     render(<NewSessionView navigate={navigate} />);
-    await screen.findByRole("option", { name: "/repo/existing-1 (Project 1)" });
+    await screen.findByRole("option", { name: "Project 1" });
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "claude_code" } });
-    fireEvent.change(screen.getByLabelText("工作路径"), { target: { value: "/repo/existing-1" } });
+    fireEvent.change(screen.getByLabelText("所属项目"), { target: { value: "p-1" } });
     const input = screen.getByRole("textbox", { name: "首条消息" }) as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "  第一行\n第二行  " } });
     const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
@@ -410,7 +584,7 @@ describe("NewSessionView message composer", () => {
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "启动失败：CLI unavailable重试");
     expect(input.value).toBe("  第一行\n第二行  ");
     expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code");
-    expect((screen.getByLabelText("工作路径") as HTMLSelectElement).value).toBe("/repo/existing-1");
+    expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("p-1");
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-retry" }));
     expect(api.launchEmbeddedNew).toHaveBeenLastCalledWith("claude_code", null, "/repo/existing-1", "  第一行\n第二行  ");
@@ -429,15 +603,10 @@ it("shows the resolved fallback directory and uses the same default-path intent 
     launched_via: "内嵌终端", command_line: "codex", note: "已启动", launch_intent_id: null, terminal_id: "t-fallback",
   });
   render(<NewSessionView navigate={vi.fn()} />);
-  const directory = screen.getByLabelText("工作路径") as HTMLSelectElement;
-  await waitFor(() => expect(directory.value).toBe("/repo/fallback"));
-  expect(screen.getByRole("status").textContent).toBe("主目录不可用，使用备用目录");
-  fireEvent.change(directory, { target: { value: "/tmp/workspace" } });
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("主目录不可用，使用备用目录"));
   fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始任务" } });
   const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
   await waitFor(() => expect(send.disabled).toBe(false));
-  fireEvent.change(directory, { target: { value: "/tmp/workspace" } });
-  expect(send.disabled).toBe(false);
   fireEvent.click(send);
   await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined, "开始任务"));
 });

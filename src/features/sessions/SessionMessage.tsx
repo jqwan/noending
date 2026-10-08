@@ -77,7 +77,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
           className={`body${md ? " md-body" : ""}${readable ? " clickable" : ""}${clamped ? " is-clamped" : ""}`}
           role={readable ? "button" : undefined}
           tabIndex={readable ? 0 : undefined}
-          title={readable ? "点击查看完整消息" : undefined}
+          title={readable ? "查看完整消息" : undefined}
           onClick={readable ? (e) => {
             // 正文要能拖选复制：点在自己选中的文字上不算「点开」，
             // 否则一次划选就会弹出弹窗。
@@ -115,7 +115,7 @@ function MessageModal({ who, stamp, text, previewable, onClose }: {
 
   const copyAll = async () => {
     const ok = await copyToClipboard(text);
-    showToast(ok ? "已复制全文" : "复制失败，请手动选中文字复制");
+    showToast(ok ? "已复制" : "复制失败");
   };
 
   return (

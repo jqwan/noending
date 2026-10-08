@@ -1098,6 +1098,54 @@ impl Db {
         self.ingested_message_sequence(session_id)
     }
 
+    /// Message counts by role for a Session (user messages vs assistant replies).
+    pub fn session_message_stats(&self, session_id: &str) -> Result<SessionMessageStats> {
+        let conn = self.read();
+        let mut st = conn.prepare(
+            "SELECT m.role, COUNT(*)
+             FROM session_message_projection p
+             JOIN session_messages m ON m.id = p.session_message_id
+             WHERE p.session_id = ?1
+             GROUP BY m.role",
+        )?;
+        let mut stats = SessionMessageStats::default();
+        let rows = st.query_map(params![session_id], |r| {
+            let role: String = r.get(0)?;
+            let count: i64 = r.get(1)?;
+            Ok((role, count))
+        })?;
+        for row in rows {
+            let (role, count) = row?;
+            match role.as_str() {
+                "user" => stats.user_messages = count,
+                "assistant" => stats.assistant_messages = count,
+                _ => {}
+            }
+        }
+        if stats.user_messages == 0 && stats.assistant_messages == 0 {
+            let mut st = conn.prepare(
+                "SELECT role, COUNT(*)
+                 FROM session_messages
+                 WHERE session_id = ?1
+                 GROUP BY role",
+            )?;
+            let rows = st.query_map(params![session_id], |r| {
+                let role: String = r.get(0)?;
+                let count: i64 = r.get(1)?;
+                Ok((role, count))
+            })?;
+            for row in rows {
+                let (role, count) = row?;
+                match role.as_str() {
+                    "user" => stats.user_messages = count,
+                    "assistant" => stats.assistant_messages = count,
+                    _ => {}
+                }
+            }
+        }
+        Ok(stats)
+    }
+
     /// Resolve a stable provenance reference (`session-message:<id>`) to its
     /// message.
     pub fn get_message_by_ref(&self, source_ref: &str) -> Result<Option<SessionMessage>> {

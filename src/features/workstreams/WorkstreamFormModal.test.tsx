@@ -1,9 +1,16 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import type { CreateWorkstreamReport, Workstream, WorkstreamPath, WorkstreamPathRow } from "../../types";
+import type {
+  CreateWorkstreamReport,
+  PathProbe,
+  ProjectCardData,
+  Workstream,
+  WorkstreamPath,
+  WorkstreamPathRow,
+} from "../../types";
 
 vi.mock("../../api", () => ({
   api: {
@@ -15,14 +22,21 @@ vi.mock("../../api", () => ({
     reorderWorkstreamPaths: vi.fn(),
     // PathListEditor / WorkspacePathField 的探测与快选；这里不关心结果，
     // 只要调用安全落地。
-    probeWorkspacePath: vi.fn().mockResolvedValue(null),
+    probeWorkspacePath: vi.fn().mockResolvedValue(null as unknown as PathProbe),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
+    listProjectCards: vi.fn().mockResolvedValue([]),
   },
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue(null),
 }));
+
+beforeEach(() => {
+  vi.mocked(api.listProjectCards).mockResolvedValue([]);
+  vi.mocked(api.probeWorkspacePath).mockResolvedValue(null as unknown as PathProbe);
+  vi.mocked(open).mockResolvedValue(null);
+});
 
 afterEach(() => {
   cleanup();
@@ -44,13 +58,22 @@ function report(id: string, paths: CreateWorkstreamReport["paths"]): CreateWorks
   return { workstream: workstream(id), paths };
 }
 
-const ADD_PLACEHOLDER = "/path/to/目录 — 回车或点「添加」加入列表";
-
-async function addPath(value: string) {
-  vi.mocked(open).mockResolvedValueOnce(value);
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "新增目录" }));
-  });
+function projectCard(id: string, name: string, paths: string[]): ProjectCardData {
+  return {
+    id,
+    name,
+    name_customized: false,
+    kind: "directory" as const,
+    path_count: paths.length,
+    missing_path_count: 0,
+    primary_workstream_count: 0,
+    related_workstream_count: 0,
+    session_count: 0,
+    representative_paths: paths.slice(0, 2),
+    search_paths: paths,
+    last_activity_at: null,
+    updated_at: "2026-09-21T00:00:00+00:00",
+  };
 }
 
 async function submit() {
@@ -64,50 +87,156 @@ async function submit() {
   });
 }
 
-describe("WorkstreamFormModal path list", () => {
-  it("collects several paths in order, first one flagged as primary", async () => {
+describe("WorkstreamFormModal project selection", () => {
+  it("renders project selection with 'NoEnding Workspace' and no directory picker by default", async () => {
     render(<WorkstreamFormModal onClose={vi.fn()} />);
-    await addPath("/repo/main");
-    await addPath("/repo/docs");
-
-    screen.getByText("主路径");
-    screen.getByText("第 2 条");
-    screen.getByText("/repo/main");
-    screen.getByText("/repo/docs");
+    expect(screen.getByText("NoEnding Workspace")).toBeTruthy();
+    expect(screen.queryByText("主项目")).toBeNull();
+    expect(screen.getByRole("combobox", { name: "关联项目选择" })).toBeTruthy();
+    expect(screen.queryByText("工作目录（可选，可多条）")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新增目录" })).toBeNull();
+    expect(screen.queryByText(/默认关联该项目下的所有工作目录/)).toBeNull();
   });
 
-  it("submits every entry and reports the full list to the backend", async () => {
-    vi.mocked(api.createWorkstream).mockResolvedValue(
-      report("w1", [
-        { raw: "/repo/main", accepted: true, canonical_path: "/repo/main", position: 0, project_name: "Main", reason: null },
-        { raw: "/repo/docs", accepted: true, canonical_path: "/repo/docs", position: 1, project_name: "Docs", reason: null },
-      ])
-    );
+  it("submits empty paths when created with default 'NoEnding Workspace' without paths", async () => {
+    vi.mocked(api.createWorkstream).mockResolvedValue(report("w1", []));
     const onCreated = vi.fn();
     render(<WorkstreamFormModal onClose={vi.fn()} onCreated={onCreated} />);
-    await addPath("/repo/main");
-    await addPath("/repo/docs");
     await submit();
 
-    await waitFor(() =>
-      expect(api.createWorkstream).toHaveBeenCalledWith("新流", "", ["/repo/main", "/repo/docs"])
-    );
+    await waitFor(() => expect(api.createWorkstream).toHaveBeenCalledWith("新流", "", []));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: "w1" })));
   });
 
-  it("does not create while the title is being composed by an IME", () => {
+  it("selects an existing project and submits all directories under it without showing prompt or directory picker", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p1", "项目 A", ["/repo/main", "/repo/worktree-1"]),
+    ]);
+    vi.mocked(api.createWorkstream).mockResolvedValue(report("w2", []));
+
+    render(<WorkstreamFormModal onClose={vi.fn()} />);
+    await screen.findByRole("option", { name: "项目 A" });
+
+    // 移除默认项目，添加项目 A
+    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Workspace" }));
+    const select = screen.getByRole("combobox", { name: "关联项目选择" });
+    fireEvent.change(select, { target: { value: "p1" } });
+
+    expect(screen.queryByText(/默认关联该项目下的所有工作目录/)).toBeNull();
+    expect(screen.queryByText("工作目录（可选，可多条）")).toBeNull();
+
+    await submit();
+    await waitFor(() =>
+      expect(api.createWorkstream).toHaveBeenCalledWith("新流", "", ["/repo/main", "/repo/worktree-1"]),
+    );
+  });
+
+  it("supports associating multiple projects", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p1", "项目 A", ["/repo/a1", "/repo/a2"]),
+      projectCard("p2", "项目 B", ["/repo/b1"]),
+    ]);
+    vi.mocked(api.createWorkstream).mockResolvedValue(report("w-multi", []));
+
+    render(<WorkstreamFormModal onClose={vi.fn()} />);
+    await screen.findByRole("option", { name: "项目 A" });
+
+    // 移除默认项目，添加项目 A 和项目 B
+    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Workspace" }));
+    const select = screen.getByRole("combobox", { name: "关联项目选择" });
+    fireEvent.change(select, { target: { value: "p1" } });
+    fireEvent.change(select, { target: { value: "p2" } });
+
+    expect(screen.getByText("项目 A")).toBeTruthy();
+    expect(screen.getByText("项目 B")).toBeTruthy();
+
+    await submit();
+    await waitFor(() =>
+      expect(api.createWorkstream).toHaveBeenCalledWith("新流", "", ["/repo/a1", "/repo/a2", "/repo/b1"]),
+    );
+  });
+
+  it("automatically selects the existing project when picked directory belongs to it", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p1", "项目 A", ["/repo/main", "/repo/worktree-1"]),
+    ]);
+    vi.mocked(open).mockResolvedValueOnce("/repo/main/sub");
+    vi.mocked(api.probeWorkspacePath).mockResolvedValueOnce({
+      raw: "/repo/main/sub",
+      status: "ok",
+      canonical_path: "/repo/main/sub",
+      exists: true,
+      git_state: "detected",
+      git_kind: "worktree",
+      project: { id: "p1", name: "项目 A", known: true },
+    });
+    vi.mocked(api.createWorkstream).mockResolvedValue(report("w3", []));
+
+    render(<WorkstreamFormModal onClose={vi.fn()} />);
+    await screen.findByRole("option", { name: "项目 A" });
+
+    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Workspace" }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "新增项目" }));
+    });
+
+    expect(screen.getByText("项目 A")).toBeTruthy();
+    expect(screen.queryByText(/默认关联该项目下的所有工作目录/)).toBeNull();
+
+    await submit();
+    await waitFor(() =>
+      expect(api.createWorkstream).toHaveBeenCalledWith("新流", "", ["/repo/main", "/repo/worktree-1"]),
+    );
+  });
+
+  it("adds a new project option and selects it when picked directory is new", async () => {
+    vi.mocked(open).mockResolvedValueOnce("/new/custom/repo");
+    vi.mocked(api.probeWorkspacePath).mockResolvedValueOnce({
+      raw: "/new/custom/repo",
+      status: "ok",
+      canonical_path: "/canonical/custom/repo",
+      exists: true,
+      git_state: "detected",
+      git_kind: "repo",
+      project: { id: null, name: "repo", known: false },
+    });
+    vi.mocked(api.createWorkstream).mockResolvedValue(report("w4", []));
+
+    render(<WorkstreamFormModal onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Workspace" }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "新增项目" }));
+    });
+
+    expect(screen.getByText("repo")).toBeTruthy();
+    expect(screen.queryByText(/默认关联该项目下的所有工作目录/)).toBeNull();
+
+    await submit();
+    await waitFor(() =>
+      expect(api.createWorkstream).toHaveBeenCalledWith("新流", "", ["/canonical/custom/repo"]),
+    );
+  });
+
+  it("does not create while the title is being composed by an IME", async () => {
     const onCreated = vi.fn();
     render(<WorkstreamFormModal onClose={vi.fn()} onCreated={onCreated} />);
     const title = screen.getByPlaceholderText("例如：接口设计 / 行程规划 / 预算整理");
-    fireEvent.change(title, { target: { value: "回车" } });
-    fireEvent.keyDown(title, { key: "Enter", keyCode: 229 });
+    await act(async () => {
+      fireEvent.change(title, { target: { value: "回车" } });
+      fireEvent.keyDown(title, { key: "Enter", keyCode: 229 });
+    });
     expect(api.createWorkstream).not.toHaveBeenCalled();
     expect(onCreated).not.toHaveBeenCalled();
   });
 
   it("says per path what did not land instead of silently dropping it", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p1", "Main", ["/repo/main", "/repo/ghost"]),
+    ]);
     vi.mocked(api.createWorkstream).mockResolvedValue(
-      report("w2", [
+      report("w5", [
         { raw: "/repo/main", accepted: true, canonical_path: "/repo/main", position: 0, project_name: "Main", reason: null },
         {
           raw: "/repo/ghost",
@@ -117,13 +246,17 @@ describe("WorkstreamFormModal path list", () => {
           project_name: null,
           reason: "该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录",
         },
-      ])
+      ]),
     );
     const onCreated = vi.fn();
     const onClose = vi.fn();
     render(<WorkstreamFormModal onClose={onClose} onCreated={onCreated} />);
-    await addPath("/repo/main");
-    await addPath("/repo/ghost");
+    await screen.findByRole("option", { name: "Main" });
+
+    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Workspace" }));
+    const select = screen.getByRole("combobox", { name: "关联项目选择" });
+    fireEvent.change(select, { target: { value: "p1" } });
+
     await submit();
 
     // 结果面板逐条说破，而不是静默跳走。
@@ -134,13 +267,16 @@ describe("WorkstreamFormModal path list", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "知道了" }));
     });
-    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: "w2" }));
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: "w5" }));
     expect(onClose).toHaveBeenCalled();
   });
 
   it("keeps the zero-path outcome honest when every path was refused", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p1", "Ghost", ["/repo/ghost"]),
+    ]);
     vi.mocked(api.createWorkstream).mockResolvedValue(
-      report("w3", [
+      report("w6", [
         {
           raw: "/repo/ghost",
           accepted: false,
@@ -149,11 +285,16 @@ describe("WorkstreamFormModal path list", () => {
           project_name: null,
           reason: "该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录",
         },
-      ])
+      ]),
     );
     const onCreated = vi.fn();
     render(<WorkstreamFormModal onClose={vi.fn()} onCreated={onCreated} />);
-    await addPath("/repo/ghost");
+    await screen.findByRole("option", { name: "Ghost" });
+
+    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Workspace" }));
+    const select = screen.getByRole("combobox", { name: "关联项目选择" });
+    fireEvent.change(select, { target: { value: "p1" } });
+
     await submit();
 
     await screen.findByText("任务已创建（没有工作目录）");
@@ -162,53 +303,6 @@ describe("WorkstreamFormModal path list", () => {
     });
     expect(onCreated).toHaveBeenCalled();
   });
-
-  it("refuses a duplicate path in the list instead of adding it twice", async () => {
-    render(<WorkstreamFormModal onClose={vi.fn()} />);
-    await addPath("/repo/main");
-    await addPath("/repo/main");
-    expect(await screen.findAllByText("/repo/main")).toHaveLength(1);
-    screen.getByText("这条路径已经在列表里了。");
-  });
-});
-
-it("adds picked folders immediately and submits the chosen primary first", async () => {
-  vi.mocked(open).mockResolvedValueOnce(["/repo/main", "/repo/docs"]);
-  vi.mocked(api.createWorkstream).mockResolvedValue(report("picked", []));
-  render(<WorkstreamFormModal onClose={vi.fn()} />);
-  expect(screen.queryByPlaceholderText(ADD_PLACEHOLDER)).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "新增目录" }));
-  await screen.findByText("/repo/docs");
-  fireEvent.click(screen.getAllByRole("button", { name: "设为主要" })[0]);
-  await submit();
-  expect(api.createWorkstream).toHaveBeenCalledWith("新流", "", ["/repo/docs", "/repo/main"]);
-});
-
-it("removes a picked path without opening its menu", async () => {
-  vi.mocked(open).mockResolvedValueOnce("/repo/main");
-  render(<WorkstreamFormModal onClose={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: "新增目录" }));
-  await screen.findByText("/repo/main");
-  fireEvent.click(screen.getByRole("button", { name: "移除 /repo/main" }));
-  expect(screen.queryByText("/repo/main")).toBeNull();
-});
-
-it("shows only directory paths and adds the selection without closing the task", async () => {
-  vi.mocked(api.listRecentWorkspacePaths).mockResolvedValueOnce([
-    { path: "/repo/docs", known: true, exists: true, project_name: "Docs", git_state: null, git_kind: null, last_used_at: null },
-    { path: "/repo/main", known: true, exists: true, project_name: "Main", git_state: null, git_kind: null, last_used_at: null },
-  ]);
-  const close = vi.fn();
-  render(<WorkstreamFormModal onClose={close} />);
-  fireEvent.click(screen.getByRole("button", { name: "选择已有目录" }));
-  await screen.findByText("/repo/docs");
-  expect(screen.queryByRole("textbox", { name: "搜索已有目录" })).toBeNull();
-  expect(screen.queryByText("Docs")).toBeNull();
-  fireEvent.click(screen.getByRole("checkbox", { name: "/repo/docs" }));
-  fireEvent.click(screen.getByRole("button", { name: "添加 (1)" }));
-  expect(screen.queryByRole("dialog", { name: "选择已有目录" })).toBeNull();
-  screen.getByText("/repo/docs");
-  expect(close).not.toHaveBeenCalled();
 });
 
 describe("WorkstreamFormModal edit mode", () => {
@@ -223,7 +317,13 @@ describe("WorkstreamFormModal edit mode", () => {
     };
   }
 
-  function row(id: string, position: number, canonicalPath: string): WorkstreamPathRow {
+  function row(
+    id: string,
+    position: number,
+    canonicalPath: string,
+    projectId = "p1",
+    projectName = "Project 1",
+  ): WorkstreamPathRow {
     return {
       id,
       workstream_id: "w1",
@@ -231,13 +331,16 @@ describe("WorkstreamFormModal edit mode", () => {
       position,
       created_at: "",
       canonical_path: canonicalPath,
-      project_id: "p",
-      project_name: "Project",
+      project_id: projectId,
+      project_name: projectName,
       exists: true,
     };
   }
 
-  const rows = [row("main", 0, "/repo/main"), row("docs", 1, "/repo/docs")];
+  const rows = [
+    row("main", 0, "/repo/main", "p1", "Project 1"),
+    row("docs", 1, "/repo/docs", "p2", "Project 2"),
+  ];
 
   /** 后端解析新加路径的 identity：只有用户新加的草稿才会走到这里。 */
   function resolveByPath(map: Record<string, string>) {
@@ -261,21 +364,25 @@ describe("WorkstreamFormModal edit mode", () => {
 
   const saveButton = () => screen.getByRole("button", { name: "保存" }) as HTMLButtonElement;
 
-  it("prefills the current task and keeps 保存 disabled until something changes", () => {
+  it("prefills the current task and keeps 保存 disabled until something changes", async () => {
     renderEdit();
     screen.getByDisplayValue("接口设计");
     screen.getByDisplayValue("整理 API 设计");
-    screen.getByText("/repo/main");
-    screen.getByText("/repo/docs");
+    screen.getByText("Project 1");
+    screen.getByText("Project 2");
     expect(saveButton().disabled).toBe(true);
 
-    fireEvent.change(screen.getByDisplayValue("接口设计"), { target: { value: "接口设计 v2" } });
+    await act(async () => {
+      fireEvent.change(screen.getByDisplayValue("接口设计"), { target: { value: "接口设计 v2" } });
+    });
     expect(saveButton().disabled).toBe(false);
   });
 
   it("saves 标题/描述 as a whole object and leaves an untouched path list alone", async () => {
     const { onSaved, onClose } = renderEdit();
-    fireEvent.change(screen.getByDisplayValue("接口设计"), { target: { value: "接口设计 v2" } });
+    await act(async () => {
+      fireEvent.change(screen.getByDisplayValue("接口设计"), { target: { value: "接口设计 v2" } });
+    });
     await act(async () => {
       fireEvent.click(saveButton());
     });
@@ -290,12 +397,14 @@ describe("WorkstreamFormModal edit mode", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("says what a dropped path means, then removes it and reorders the rest", async () => {
+  it("says what a dropped project means, then removes its paths and reorders the rest", async () => {
     const { onSaved } = renderEdit();
     expect(screen.queryByText(/保存后会从当前任务移除/)).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "移除 /repo/docs" }));
-    // 删路径不再牵连 Session —— 只说移除目录，并说明不改会话归属。
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "移除项目 Project 2" }));
+    });
+    // 删项目下路径不再牵连 Session —— 只说移除目录，并说明不改会话归属。
     screen.getByText(/保存后会从当前任务移除 1 条工作目录/);
     screen.getByText(/不会删除会话，也不会修改已有会话的所属任务/);
 
@@ -309,15 +418,19 @@ describe("WorkstreamFormModal edit mode", () => {
     expect(onSaved).toHaveBeenCalledOnce();
   });
 
-  it("only sends the newly added path to the backend and keeps the draft order", async () => {
-    vi.mocked(open).mockResolvedValueOnce("/repo/api");
+  it("only sends the newly added project paths to the backend and keeps the draft order", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p3", "Project 3", ["/repo/api"]),
+    ]);
     resolveByPath({ "/repo/api": "p-new" });
     const { onSaved } = renderEdit();
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "新增目录" }));
+    await screen.findByRole("option", { name: "Project 3" });
+    fireEvent.change(screen.getByRole("combobox", { name: "关联项目选择" }), {
+      target: { value: "p3" },
     });
-    await screen.findByText("/repo/api");
+    screen.getByText("Project 3");
+
     await act(async () => {
       fireEvent.click(saveButton());
     });
@@ -330,7 +443,9 @@ describe("WorkstreamFormModal edit mode", () => {
   });
 
   it("reports a path the backend refused instead of silently dropping it", async () => {
-    vi.mocked(open).mockResolvedValueOnce("/reserved/nope");
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p3", "Project 3", ["/reserved/nope"]),
+    ]);
     vi.mocked(api.addWorkstreamPath).mockImplementation(
       async (_workstreamId: string, path: string): Promise<WorkstreamPath> => {
         if (path === "/reserved/nope") throw new Error("需要一个可解析的绝对路径");
@@ -345,10 +460,11 @@ describe("WorkstreamFormModal edit mode", () => {
     );
     const { onSaved } = renderEdit();
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "新增目录" }));
+    await screen.findByRole("option", { name: "Project 3" });
+    fireEvent.change(screen.getByRole("combobox", { name: "关联项目选择" }), {
+      target: { value: "p3" },
     });
-    await screen.findByText("/reserved/nope");
+
     await act(async () => {
       fireEvent.click(saveButton());
     });
@@ -363,14 +479,17 @@ describe("WorkstreamFormModal edit mode", () => {
 
   it("reports two spellings of one directory instead of keeping a duplicate", async () => {
     // 后端把 "/repo/main/" 解析回已有的 p-main：前端不替它决定这是不是同一条。
-    vi.mocked(open).mockResolvedValueOnce("/repo/main/");
+    vi.mocked(api.listProjectCards).mockResolvedValueOnce([
+      projectCard("p3", "Project 3", ["/repo/main/"]),
+    ]);
     resolveByPath({ "/repo/main/": "p-main" });
     const { onSaved } = renderEdit();
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "新增目录" }));
+    await screen.findByRole("option", { name: "Project 3" });
+    fireEvent.change(screen.getByRole("combobox", { name: "关联项目选择" }), {
+      target: { value: "p3" },
     });
-    await screen.findByText("/repo/main/");
+
     await act(async () => {
       fireEvent.click(saveButton());
     });
@@ -384,4 +503,3 @@ describe("WorkstreamFormModal edit mode", () => {
     expect(onSaved).toHaveBeenCalledOnce();
   });
 });
-

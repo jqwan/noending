@@ -2052,3 +2052,24 @@ fn a_project_detail_surfaces_the_repository_remote() {
         "a removed origin falls back to the first remaining remote"
     );
 }
+
+#[test]
+fn project_workspace_paths_order_main_worktree_first() {
+    let (_d, db) = temp_db();
+    let main_obs = repo("/work/z_main", "/work/.git", GitWorktreeKind::Main, &[]);
+    let linked_obs = repo("/work/a_linked", "/work/.git", GitWorktreeKind::Linked, &[]);
+
+    let p_main = ensure(&db, &main_obs);
+    let p_linked = ensure(&db, &linked_obs);
+    assert_eq!(p_main.project_id, p_linked.project_id);
+
+    let paths = db
+        .list_workspace_paths_for_project(&p_main.project_id)
+        .unwrap();
+    assert_eq!(paths.len(), 2);
+    // Despite "/work/a_linked" being lexicographically smaller, the main worktree is first
+    assert_eq!(paths[0].git_kind.as_deref(), Some("main"));
+    assert_eq!(paths[0].canonical_path, canon("/work/z_main"));
+    assert_eq!(paths[1].git_kind.as_deref(), Some("linked"));
+    assert_eq!(paths[1].canonical_path, canon("/work/a_linked"));
+}

@@ -193,7 +193,7 @@ export default function SessionDetailView({
   const copyContext = async () => {
     if (!sessionCtx?.fields) return;
     const ok = await copyToClipboard(sessionContextText(sessionCtx.fields));
-    showToast(ok ? "已复制 Context" : "复制失败，请手动选中文字复制");
+    showToast(ok ? "已复制 Context" : "复制失败");
   };
 
   const title = sessionDisplayTitle(session.title);
@@ -235,12 +235,13 @@ export default function SessionDetailView({
 
   /** Conversation：只有 root 的 user/assistant prose。 */
   const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
+  const hasMessages = messages.length > 0 || detail.ingested_message_sequence > 0;
 
   /** 按钮只在真的有内容可更新时出现：需要已读到 Context、有消息，且无摘要或有增量。
       归档不影响摘要更新。 */
   const canUpdateSummary =
     sessionCtx !== null
-    && messages.length > 0
+    && hasMessages
     && (sessionCtx.fields === null || sessionCtx.pending);
 
   /** 源会话：会话自己的源文件 + 详情加载时的新鲜结论。 */
@@ -253,7 +254,7 @@ export default function SessionDetailView({
     try {
       await api.revealSessionSource(sessionId);
     } catch (e) {
-      showToast(`定位源会话失败：${String(e)}`);
+      showToast(`定位失败：${String(e)}`);
     }
   };
 
@@ -306,7 +307,7 @@ export default function SessionDetailView({
         </div>
       )}
 
-      {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（所属任务、消息）。 */}
+      {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（所属任务、Context）。 */}
       <div className="task-detail-layout">
       <div className="task-detail-main">
       <div className="row between" style={{ marginBottom: 8 }}>
@@ -360,7 +361,7 @@ export default function SessionDetailView({
           <button
             className="btn small ghost"
             disabled={!sessionCtx?.fields}
-            title={sessionCtx?.fields ? "复制当前摘要" : "还没有摘要"}
+            title={sessionCtx?.fields ? "复制摘要" : "暂无摘要"}
             onClick={copyContext}
           >
             复制
@@ -374,7 +375,7 @@ export default function SessionDetailView({
       </div>
       {sessionCtx?.pending && (
         <div className="small muted" style={{ marginTop: 4 }}>
-          有新消息尚未并入摘要{sessionCtx.fields === null ? "，点击「生成摘要」" : "，点击「更新摘要」"}。
+          有新消息待并入摘要。
         </div>
       )}
       {ctxReadError && (
@@ -388,7 +389,7 @@ export default function SessionDetailView({
           {ctxError.operationId && (
             <button className="btn small ghost" onClick={async () => {
               const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxError));
-              showToast(ok ? "已复制错误详情" : "复制失败，请手动复制错误详情");
+              showToast(ok ? "已复制错误详情" : "复制失败");
             }}>复制错误详情</button>
           )}
         </div>
@@ -410,12 +411,11 @@ export default function SessionDetailView({
         </div>
       ) : (
         <div className="l1-none" style={{ marginTop: 8 }}>
-          {messages.length === 0 ? "还没有摘要；先同步消息后即可生成。" : "还没有摘要。"}
+          {!hasMessages ? "暂无消息" : "暂无摘要"}
         </div>
       )}
 
-      {/* 详情只预览最近 10 条：整段会话在「查看全部会话」里按需向前翻页读。
-          条数用 ingested_message_sequence（当前会话总数），而不是这里的条数。 */}
+      {/* 消息 */}
       <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
         <div className="section-label" style={{ margin: 0 }}>会话消息</div>
         {detail.ingested_message_sequence > 0 && (
@@ -486,6 +486,16 @@ export default function SessionDetailView({
             </span>
           ) : <span className="muted">未知</span>}
         </Field>
+        <Field
+          label="会话统计"
+          copyValue={`用户消息 ${detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}  代理回复 ${detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}`}
+          copyTitle="复制会话统计"
+        >
+          <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+            <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
+            <span>代理回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
+          </span>
+        </Field>
         <Field label="项目">
           {workspacePath ? (
             derivedProjectName ? (
@@ -500,7 +510,7 @@ export default function SessionDetailView({
 
               </span>
             ) : (
-                  <span className="muted small">这条工作路径所属的项目记录暂时读不到。</span>
+                  <span className="muted small">项目信息暂不可用</span>
             )
           ) : session.project_id ? (
             <span className="muted small" style={{ wordBreak: "break-word" }}>
@@ -509,11 +519,7 @@ export default function SessionDetailView({
               {projectIdOnlyCell.hint}
             </span>
           ) : (
-            <span className="muted small">
-              {cwd === ""
-                ? "没有记录过工作目录，所以没有项目。"
-                : "工作路径还没有登记，所以暂时没有项目。"}
-            </span>
+            <span className="muted small">无关联项目</span>
           )}
         </Field>
         <Field
@@ -526,7 +532,7 @@ export default function SessionDetailView({
               <button
                 type="button"
                 className="link mono"
-                title={`${workspacePath.canonical_path} · 点击在文件管理器中打开`}
+                title={workspacePath.canonical_path}
                 style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
                 onClick={() => void openPath(workspacePath.canonical_path)}
               >
@@ -538,7 +544,7 @@ export default function SessionDetailView({
                   <button
                     type="button"
                     className="link mono"
-                    title={`${cwd} · 点击在文件管理器中打开`}
+                    title={cwd}
                     style={{ textAlign: "left", wordBreak: "break-all" }}
                     onClick={() => void openPath(cwd)}
                   >
@@ -550,7 +556,7 @@ export default function SessionDetailView({
                 <div style={{ marginTop: 4 }}>
                   <span
                     className="badge warn"
-                    title="最近一次目录检查时在磁盘上找不到这个目录。工作路径的身份由路径本身决定，不靠目录存在与否；目录回来时仍然对上同一条工作路径。"
+                    title="磁盘中未找到该目录"
                   >
                     目录不存在
                   </span>
@@ -562,18 +568,18 @@ export default function SessionDetailView({
               <button
                 type="button"
                 className="link mono"
-                title={`${cwd} · 点击在文件管理器中打开`}
+                title={cwd}
                 style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
                 onClick={() => void openPath(cwd)}
               >
                 {cwd}
               </button>
               <div className="muted small" style={{ marginTop: 4 }}>
-                这个目录还没有被登记成工作路径 —— NoEnding 会在下一次目录同步后自动补上，不需要手工操作。
+                未登记为工作路径
               </div>
             </>
           ) : (
-            <span className="muted">{NO_CWD}（该会话的原始记录里没有目录信息）</span>
+            <span className="muted">{NO_CWD}（无目录记录）</span>
           )}
         </Field>
         {/* 源会话：会话自己的源文件。
@@ -587,7 +593,7 @@ export default function SessionDetailView({
           {canRevealSource ? (
             <button
               className="link mono"
-              title={`${session.source_path} · Agent 保存的源会话 · 点击在文件管理器中显示`}
+              title={session.source_path}
               style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
               onClick={() => void revealSource()}
             >
@@ -596,7 +602,7 @@ export default function SessionDetailView({
           ) : (
             <span
               className="mono"
-              title={`${session.source_path} · Agent 保存的源会话`}
+              title={session.source_path}
               style={{ minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
             >
               {session.source_path}
@@ -621,7 +627,7 @@ export default function SessionDetailView({
         >
           <div
             className="mono"
-            title="Root 成员在 Agent 侧的会话身份；Resume 与 LaunchIntent 匹配的唯一依据"
+            title="原始会话 ID"
             style={{ wordBreak: "break-all", userSelect: "all" }}
           >
             {session.root_agent_session_id}
@@ -705,7 +711,7 @@ function Field({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
-    showToast(ok ? "已复制到剪贴板" : "复制失败，请手动选中文字复制");
+    showToast(ok ? "已复制" : "复制失败");
   };
 
   return (

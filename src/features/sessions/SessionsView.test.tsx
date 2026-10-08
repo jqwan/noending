@@ -126,7 +126,7 @@ it("shows archived sessions in the same cards and filters, with continue disable
   await screen.findByText("归档会话");
   expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "archived");
   expect(document.querySelectorAll(".session-card")).toHaveLength(1);
-  expect((screen.getByRole("button", { name: "继续归档会话" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "在桌面应用中继续归档会话" }) as HTMLButtonElement).disabled).toBe(true);
   screen.getByRole("button", { name: "取消归档归档会话" });
   screen.getByRole("button", { name: "永久删除归档会话" });
   screen.getByRole("button", { name: "删除全部" });

@@ -1,11 +1,12 @@
 import { viewState } from "../../hooks/useViewState";
 // Projects Board 契约：一次卡片查询、名称/路径搜索、缺失筛选，以及刷新期间卡片保持可见。
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectsView, { clearProjectCardsCache } from "./ProjectsView";
 import { api } from "../../api";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { ProjectCardData } from "../../types";
 
 vi.mock("../../api", () => ({
@@ -14,7 +15,12 @@ vi.mock("../../api", () => ({
     getProjectDetail: vi.fn(),
     refreshWorkspaceProjects: vi.fn(),
     refreshProjectWorkspace: vi.fn(),
+    addProjectPath: vi.fn(),
   },
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn().mockResolvedValue(null),
 }));
 
 // 组件挂载时订阅 workspace-reconcile-* 事件；测试环境没有 Tauri IPC。
@@ -173,5 +179,59 @@ describe("Projects Board", () => {
     expect(screen.getByText("NoEnding")).toBeTruthy();
     // 卡片没有被清空重建：Board 数据仍在。
     expect(screen.queryByText("加载中…")).toBeNull();
+  });
+
+  it("toggles between card and list view", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([card()]);
+    const { container } = render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("NoEnding");
+
+    expect(container.querySelector(".board-grid")).toBeTruthy();
+    expect(container.querySelector(".project-list")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
+    expect(container.querySelector(".project-list")).toBeTruthy();
+    expect(container.querySelector(".board-grid")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
+    expect(container.querySelector(".board-grid")).toBeTruthy();
+    expect(container.querySelector(".project-list")).toBeNull();
+  });
+
+  it("add_project_button_opens_picker_and_calls_add_project_path", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([card()]);
+    vi.mocked(open).mockResolvedValueOnce("/Users/me/code/new-project");
+    vi.mocked(api.addProjectPath).mockResolvedValueOnce({
+      path: {
+        id: "p-new",
+        canonical_path: "/Users/me/code/new-project",
+        project_id: "proj-new",
+        git_state: "detected",
+        git_kind: "repo",
+        exists: true,
+        first_seen_at: "",
+        last_seen_at: "",
+      },
+      project_id: "proj-new",
+      project_name: "new-project",
+    });
+
+    render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("NoEnding");
+
+    const addBtn = screen.getByRole("button", { name: "新增项目" });
+    await act(async () => {
+      fireEvent.click(addBtn);
+    });
+
+    expect(open).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+      title: "选择项目目录",
+    });
+
+    await vi.waitFor(() => {
+      expect(api.addProjectPath).toHaveBeenCalledWith("/Users/me/code/new-project");
+    });
   });
 });

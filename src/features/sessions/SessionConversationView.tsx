@@ -380,7 +380,7 @@ export default function SessionConversationView({
     try {
       const page = await api.getSessionMessages(sessionId, { beforeOrdinal: before, limit: PAGE_SIZE });
       if (page.generation !== generationRef.current) {
-        showToast("这个会话已被改写，已回到最新");
+        showToast("会话已更新，已回到最新");
         await loadTail();
         return;
       }
@@ -409,7 +409,7 @@ export default function SessionConversationView({
     try {
       const page = await api.getSessionMessages(sessionId, { afterOrdinal: last.ordinal, limit: PAGE_SIZE });
       if (page.generation !== generationRef.current) {
-        showToast("这个会话已被改写，已回到最新");
+        showToast("会话已更新，已回到最新");
         await loadTail();
         return;
       }
@@ -441,7 +441,7 @@ export default function SessionConversationView({
         limit: JUMP_PAGE,
       });
       if (page.generation !== generationRef.current) {
-        showToast("这个会话已被改写，已回到最新");
+        showToast("会话已更新，已回到最新");
         await loadTail();
         return;
       }
@@ -642,7 +642,7 @@ function TurnBlock({ turn, finalTs, expansion, agent, onToggle }: {
         type="button"
         className={`turn-toggle${open ? " open" : ""}`}
         aria-expanded={open}
-        title={open ? "收起这一轮的中间回复" : "展开这一轮的中间回复"}
+        title={open ? "收起回复" : "展开回复"}
         onClick={onToggle}
       >
         <Icon name="chevronRight" />
@@ -655,7 +655,7 @@ function TurnBlock({ turn, finalTs, expansion, agent, onToggle }: {
           ))}
           {expansion.truncated && (
             <div className="turn-truncated muted small">
-              这一轮的中间回复太多，只显示了前 {expansion.messages.length} 条。
+              中间回复过多，只显示了前 {expansion.messages.length} 条。
             </div>
           )}
         </div>

@@ -910,11 +910,27 @@ pub fn gc_unreferenced_workspace_paths_conn(
     conn: &Connection,
     path_ids: &[String],
 ) -> Result<GcOutcome> {
+    gc_unreferenced_workspace_paths_with_default_conn(conn, path_ids, None)
+}
+
+/// Physically remove candidate WorkspacePaths with no references,
+/// protecting the active default workspace from removal.
+pub fn gc_unreferenced_workspace_paths_with_default_conn(
+    conn: &Connection,
+    path_ids: &[String],
+    active_default_workspace: Option<&str>,
+) -> Result<GcOutcome> {
     let mut outcome = GcOutcome::default();
     let mut affected: Vec<String> = Vec::new();
     for path_id in path_ids {
-        if get_workspace_path_conn(conn, path_id)?.is_none() {
+        let Some(path) = get_workspace_path_conn(conn, path_id)? else {
             continue; // already gone; a replay must not fail
+        };
+        // 固化当前默认工作目录，不能被移除
+        if let Some(dw) = active_default_workspace {
+            if same_location(&path.canonical_path, dw) {
+                continue;
+            }
         }
         if !workspace_path_is_gcable(conn, path_id)? {
             continue;
@@ -933,13 +949,24 @@ pub fn gc_unreferenced_workspace_paths_conn(
     Ok(outcome)
 }
 
-/// The `Db`-scoped GC.
-pub fn gc_unreferenced_workspace_paths(db: &Db, path_ids: &[String]) -> Result<GcOutcome> {
-    let outcome = db.tx(|tx| gc_unreferenced_workspace_paths_conn(tx, path_ids))?;
+/// The `Db`-scoped GC with optional active default workspace protection.
+pub fn gc_unreferenced_workspace_paths_with_default(
+    db: &Db,
+    path_ids: &[String],
+    active_default_workspace: Option<&str>,
+) -> Result<GcOutcome> {
+    let outcome = db.tx(|tx| {
+        gc_unreferenced_workspace_paths_with_default_conn(tx, path_ids, active_default_workspace)
+    })?;
     for id in &outcome.deleted_projects {
         db.unindex("project", id);
     }
     Ok(outcome)
+}
+
+/// The `Db`-scoped GC.
+pub fn gc_unreferenced_workspace_paths(db: &Db, path_ids: &[String]) -> Result<GcOutcome> {
+    gc_unreferenced_workspace_paths_with_default(db, path_ids, None)
 }
 
 /// Compatibility wrapper for callers that already provide a disappeared-path
@@ -1101,7 +1128,9 @@ fn reconcile_workspace_path_targets(
         progress(report.scanned, targets.len());
     }
 
-    let gc = gc_unreferenced_workspace_paths(db, &candidate_ids)?;
+    let default_ws = projection.policy().default_workspace();
+    let gc =
+        gc_unreferenced_workspace_paths_with_default(db, &candidate_ids, default_ws.as_deref())?;
     report.outcome = gc;
     Ok(report)
 }

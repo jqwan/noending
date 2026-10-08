@@ -1,14 +1,15 @@
 import { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { sessionDisplayTitle, UNTITLED_SESSION } from "./SessionTable";
+import { sessionDisplayTitle, UNTITLED_SESSION, SessionResumeButton } from "./SessionTable";
+import { continueSessionDesktopWithToast, useAgentStatus } from "./continueDesktop";
 import { AGENT_LABELS, type Session } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
- * 项目详情与任务详情共用的会话迷你列表：整行点击进会话详情，行内无动作
- * （继续 / 已归档在会话页头部）。展示与交互两处逐字节一致——Agent 图标 +
- * 标题一行，右侧相对时间；默认 12 条，「查看全部 / 收起」展开。
+ * 项目详情与任务详情共用的会话迷你列表：整行点击进会话详情。
+ * 展示与交互两处逐字节一致——Agent 图标 + 标题一行，右侧相对时间与继续会话按钮；
+ * 默认 12 条，「查看全部 / 收起」展开。
  */
 export default function SessionMiniList({ sessions, emptyText, navigate }: {
   sessions: Session[];
@@ -16,6 +17,7 @@ export default function SessionMiniList({ sessions, emptyText, navigate }: {
   navigate: (r: Route) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
+  const agentStatus = useAgentStatus();
 
   return (
     <>
@@ -30,6 +32,14 @@ export default function SessionMiniList({ sessions, emptyText, navigate }: {
           </div>
           <div className="side">
             <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
+            <span onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex" }}>
+              <SessionResumeButton
+                session={s}
+                agentStatus={agentStatus}
+                onResume={continueSessionDesktopWithToast}
+                navigate={navigate}
+              />
+            </span>
           </div>
         </div>
       ))}

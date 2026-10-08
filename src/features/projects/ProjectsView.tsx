@@ -2,6 +2,7 @@ import Icon from "../../components/Icon";
 import { useViewState, useViewScroll } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
@@ -61,6 +62,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   const [filter, setFilter] = useViewState<FilterKey>("projects.filter", "all");
   const [kindFilter, setKindFilter] = useViewState<ProjectKindFilter>("projects.kindFilter", "all");
   const [sort, setSort] = useViewState<SortKey>("projects.sort", "recent");
+  const [viewMode, setViewMode] = useViewState<"cards" | "list">("projects.viewMode", "cards");
   const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false);
 
   const refresh = useCallback(() => {
@@ -121,6 +123,33 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       });
   }, []);
 
+  const [addingProject, setAddingProject] = useState(false);
+
+  const handleAddProject = async () => {
+    if (addingProject) return;
+    setAddingProject(true);
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "选择项目目录",
+      });
+      if (!picked) return;
+      const pickedPath = Array.isArray(picked) ? picked[0] : picked;
+      if (!pickedPath) return;
+
+      const res = await api.addProjectPath(pickedPath);
+      clearProjectCardsCache();
+      refresh();
+      showToast(`已添加到项目「${res.project_name}」`);
+    } catch (e) {
+      console.error(e);
+      showToast(`添加项目失败：${String(e)}`);
+    } finally {
+      setAddingProject(false);
+    }
+  };
+
   const list = useMemo(() => {
     if (cards === null) return null;
     return cards
@@ -137,15 +166,26 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       <PageHeader
         title="项目"
         actions={
-          <button
-            className="btn ghost icon-button"
-            disabled={workspaceRefreshing}
-            aria-label={workspaceRefreshing ? "正在刷新工作区状态" : "刷新工作区状态"}
-            title="重新检查工作目录的存在性与 Git 状态，并执行已有的整理规则。"
-            onClick={refreshWorkspace}
-          >
-            <Icon name="refresh" />
-          </button>
+          <>
+            <button
+              className="btn ghost icon-button"
+              disabled={workspaceRefreshing}
+              aria-label={workspaceRefreshing ? "正在刷新工作区状态" : "刷新工作区状态"}
+              title="重新检查工作目录的存在性与 Git 状态，并执行已有的整理规则。"
+              onClick={refreshWorkspace}
+            >
+              <Icon name="refresh" />
+            </button>
+            <button
+              className="btn ghost icon-button"
+              disabled={addingProject || workspaceRefreshing}
+              aria-label="新增项目"
+              title="新增项目"
+              onClick={handleAddProject}
+            >
+              <Icon name="plus" />
+            </button>
+          </>
         }
       />
 
@@ -191,16 +231,44 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
         </label>
         {(query || filter !== "all" || kindFilter !== "all") && <button className="btn small ghost" onClick={() => { setQuery(""); setFilter("all"); setKindFilter("all"); }}>清除筛选</button>}
         {list && <span className="muted small">{list.length} 个项目</span>}
+        <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+          <button
+            className={viewMode === "cards" ? "on" : ""}
+            aria-pressed={viewMode === "cards"}
+            aria-label="卡片视图"
+            title="卡片视图"
+            onClick={() => setViewMode("cards")}
+          >
+            <Icon name="grid" />
+          </button>
+          <button
+            className={viewMode === "list" ? "on" : ""}
+            aria-pressed={viewMode === "list"}
+            aria-label="列表视图"
+            title="列表视图"
+            onClick={() => setViewMode("list")}
+          >
+            <Icon name="list" />
+          </button>
+        </div>
       </div>
 
       </div>
 
       {list === null && listError === "" && (
-        <div className="board-grid" role="status">
-          <div className="skeleton card" style={{ minHeight: 140 }} />
-          <div className="skeleton card" style={{ minHeight: 140 }} />
-          <div className="skeleton card" style={{ minHeight: 140 }} />
-        </div>
+        viewMode === "cards" ? (
+          <div className="board-grid" role="status">
+            <div className="skeleton card" style={{ minHeight: 140 }} />
+            <div className="skeleton card" style={{ minHeight: 140 }} />
+            <div className="skeleton card" style={{ minHeight: 140 }} />
+          </div>
+        ) : (
+          <div className="project-list" aria-busy="true">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="skeleton" style={{ height: 64, borderRadius: "var(--radius-md)", marginBottom: 8 }} />
+            ))}
+          </div>
+        )
       )}
       {listError !== "" && (
         <div className="card hairline" style={{ padding: 14 }}>
@@ -221,9 +289,48 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
         />
       )}
 
-      <div className="ws-grid board-grid">
-        {list?.map((c) => <ProjectCard key={c.id} card={c} navigate={navigate} />)}
-      </div>
+      {viewMode === "cards" ? (
+        <div className="ws-grid board-grid">
+          {list?.map((c) => <ProjectCard key={c.id} card={c} navigate={navigate} />)}
+        </div>
+      ) : (
+        <div className="project-list">
+          {list?.map((c) => (
+            <article className="project-list-row" key={`list-${c.id}`}>
+              <button
+                type="button"
+                className="project-open"
+                onClick={() => navigate({ view: "project", projectId: c.id })}
+              >
+                <div className="project-list-title" title={c.name}>
+                  <Icon name="folder" />
+                  <span>{c.name}</span>
+                  <span className="badge">{projectKindLabels[c.kind]}</span>
+                  {c.missing_path_count > 0 && (
+                    <span className="badge warn">{c.missing_path_count} 个目录缺失</span>
+                  )}
+                </div>
+                <div className="project-list-meta">
+                  <span>{c.path_count} 目录</span>
+                  <span>{c.primary_workstream_count + c.related_workstream_count} 任务</span>
+                  <span>{c.session_count} 会话</span>
+                  <span title={c.last_activity_at ?? undefined}>{timeAgo(c.last_activity_at)}</span>
+                </div>
+                {c.representative_paths.length > 0 && (
+                  <div className="project-list-path mono" title={c.representative_paths[0]}>
+                    {c.representative_paths[0]}
+                    {c.path_count > 1 && (
+                      <span className="muted" style={{ marginLeft: 6 }}>
+                        另有 {c.path_count - 1} 个目录
+                      </span>
+                    )}
+                  </div>
+                )}
+              </button>
+            </article>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

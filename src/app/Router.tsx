@@ -23,10 +23,11 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
     case "new-session":
       return (
         <NewSessionView
-          key={`${route.workstreamId ?? ""}:${route.agent ?? ""}`}
+          key={`${route.workstreamId ?? ""}:${route.agent ?? ""}:${route.projectId ?? ""}`}
           navigate={navigate}
           workstreamId={route.workstreamId}
           agent={route.agent}
+          projectId={route.projectId}
         />
       );
     case "workstreams":
