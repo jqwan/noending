@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionTerminalView, { resetLiveTerminalsForTests } from "./SessionTerminalView";
+import { disposeTerminal, liveTerminals } from "./terminalCache";
 import { api } from "../../api";
 import type { TerminalBound, TerminalSnapshot } from "../../types";
 import { listen } from "@tauri-apps/api/event";
@@ -236,6 +237,24 @@ it("reconnects an exited terminal and navigates to the new PTY", async () => {
   await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new" }));
   expect(api.terminalReconnect).toHaveBeenCalledWith("t-1");
   expect(old.disposed).toBe(true);
+});
+
+it("retains an exited terminal across page changes until manual removal disposes its cache", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false, exit_code: 0 }));
+  const view = renderView();
+  await screen.findByText(/Agent 已退出/);
+  const old = FakeTerminal.last!;
+  view.unmount();
+  expect(old.disposed).toBe(false);
+  renderView();
+  await screen.findByText(/Agent 已退出/);
+  expect(FakeTerminal.last).toBe(old);
+  disposeTerminal("t-1");
+  await act(async () => {});
+  expect(old.disposed).toBe(true);
+  expect(liveTerminals.has("t-1")).toBe(false);
+  expect(eventHandlers.has("terminal-output://t-1")).toBe(false);
+  expect(eventHandlers.has("terminal-exit://t-1")).toBe(false);
 });
 
 it("allows reconnecting a live but unresponsive TUI and prevents double clicks", async () => {

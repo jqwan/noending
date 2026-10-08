@@ -324,6 +324,8 @@
 .truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-task { display: flex; align-items: center; }
 .sidebar-task .nav-item { min-width: 0; flex: 1; }
+.sidebar-task .nav-item.terminal-exited { color: var(--text-muted); }
+.sidebar-task .terminal-exited .agent-icon { filter: grayscale(1); opacity: 0.45; }
 .pin-button { display: flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
 .pin-button:hover, .pin-button[aria-pressed="true"] { background: var(--bg-hover); color: var(--text-primary); }
 /* 运行中终端的关闭按钮：悬浮整行才现身，平时不占视觉。 */

@@ -794,15 +794,15 @@ pub fn launch_embedded_new(
     Ok(result)
 }
 
-/// Live embedded terminals, newest first, each bound session's display title
-/// joined in (a DB lookup the registry itself never does). Consumers refresh
-/// on `terminals-changed` — never on a timer.
+/// Retained embedded terminals (including exited), newest first, with each
+/// bound session's display title joined in (a DB lookup the registry never
+/// does). Consumers refresh on `terminals-changed` — never on a timer.
 #[tauri::command]
 pub fn terminal_list(
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
 ) -> Result<Vec<crate::terminal::TerminalSummary>> {
-    let mut summaries = terminal.list_live();
+    let mut summaries = terminal.list();
     if summaries.iter().any(|t| t.session_id.is_some()) {
         with_db(&state, |db| {
             for t in &mut summaries {

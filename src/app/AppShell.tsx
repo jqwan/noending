@@ -165,7 +165,7 @@ export default function AppShell() {
     // Projects Experience v0.2 工作区刷新完成后同样扇出刷新信号，
     // Sidebar 最近列表等自行 invalidate。
     const un2 = listen("workspace-reconcile-completed", () => emitSynced());
-    // 活终端集合变化（spawn / exit / bind，terminal/mod.rs）→ Sidebar 的
+    // 终端集合或状态变化（spawn / exit / bind / close）→ Sidebar 的
     // 「运行中」列表自行重取；terminal-bound 有 payload，由终端视图直听。
     const un3 = listen("terminals-changed", () => {
       window.dispatchEvent(new CustomEvent(EVT_TERMINALS));

@@ -40,7 +40,7 @@ const INITIAL_ROWS: u16 = 24;
 
 pub const EVENT_OUTPUT_PREFIX: &str = "terminal-output://";
 pub const EVENT_EXIT_PREFIX: &str = "terminal-exit://";
-/// List-level fact: the set of live terminals changed (spawn / exit / bind).
+/// List-level fact: terminal records or their state changed (spawn / exit / bind / close).
 /// Sidebar and any terminal-list consumer refetch once per event — no polling.
 pub const EVENT_CHANGED: &str = "terminals-changed";
 /// Identity fact: a terminal acquired, changed or cleared its Session binding.
@@ -212,22 +212,21 @@ impl TerminalRegistry {
             .unwrap_or(false)
     }
 
-    /// Every live terminal, newest first. The sessions board renders the
-    /// unbound ones as its 运行中 pseudo-rows and derives the "terminal is
-    /// running" fact for bound sessions from the rest.
-    pub fn list_live(&self) -> Vec<TerminalSummary> {
+    /// Every retained terminal, newest first. Exited terminals stay visible
+    /// until the user removes or reconnects them.
+    pub fn list(&self) -> Vec<TerminalSummary> {
         let Ok(records) = self.records.lock() else {
             return Vec::new();
         };
-        let mut live: Vec<TerminalSummary> = records
+        let mut summaries: Vec<TerminalSummary> = records
             .values()
             .filter_map(|record| {
                 let record = record.lock().ok()?;
-                record.summary.live.then(|| record.summary.clone())
+                Some(record.summary.clone())
             })
             .collect();
-        live.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        live
+        summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        summaries
     }
 
     /// Atomically reject both a live Resume and another pending spawn.
@@ -482,7 +481,7 @@ impl TerminalRegistry {
             (record.summary.clone(), record.identity_bridge.take())
         };
         drop(bridge);
-        // The live set shrank (the record is gone outright).
+        // The retained set shrank (the record is gone outright).
         if let Some(app) = &self.app {
             let _ = app.emit(EVENT_CHANGED, ());
         }
@@ -933,7 +932,7 @@ mod tests {
             assert_eq!(summary.session_id.as_deref(), Some(session.id.as_str()));
             assert_eq!(summary.identity_revision, 1);
         }
-        assert_eq!(registry.list_live().len(), 2);
+        assert_eq!(registry.list().len(), 2);
         assert!(registry
             .resume_reservations
             .lock()
@@ -976,7 +975,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .list_live()
+                .list()
                 .iter()
                 .filter(|t| t.session_id.as_deref() == Some(b.id.as_str()))
                 .count(),
@@ -1259,7 +1258,7 @@ mod tests {
             .is_none());
         registry.bind_discovered(&db);
         assert!(registry.attach(&terminal).is_err());
-        assert!(registry.list_live().is_empty());
+        assert!(registry.list().is_empty());
         assert!(registry.for_session(&session.id).is_none());
     }
 
@@ -1306,10 +1305,41 @@ mod tests {
             record.scrollback.push(b"retained output");
         }
         assert!(registry.for_session("session").is_none());
+        let listed = registry.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].terminal_id, id);
+        assert!(!listed[0].live);
         let snapshot = registry.attach(&id).unwrap();
         assert!(!snapshot.summary.live);
         assert!(!snapshot.scrollback.is_empty());
         assert!(registry.reserve_resume("session").is_ok());
+        registry.close(&id).unwrap();
+        assert!(registry.list().is_empty());
+        assert!(registry.attach(&id).is_err());
+    }
+
+    #[test]
+    fn retained_terminal_list_includes_live_and_exited_in_creation_order() {
+        let registry = registry();
+        let older = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        let newer = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        {
+            let records = registry.records.lock().unwrap();
+            records[&older].lock().unwrap().summary.created_at = "2026-10-08T00:00:00Z".into();
+            let mut record = records[&newer].lock().unwrap();
+            record.summary.created_at = "2026-10-08T01:00:00Z".into();
+            record.summary.live = false;
+        }
+        let listed = registry.list();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].terminal_id, newer);
+        assert!(!listed[0].live);
+        assert_eq!(listed[1].terminal_id, older);
+        assert!(listed[1].live);
+        assert_eq!(registry.for_session("session").unwrap().terminal_id, older);
+        registry.close(&newer).unwrap();
+        assert_eq!(registry.list().len(), 1);
+        assert!(registry.has_live("session"));
     }
 
     #[test]
@@ -1566,7 +1596,7 @@ mod tests {
         // 记录整体移除：不进运行列表、查不到会话、attach 拒绝——显式关闭
         // 的终端没有回放价值，下一次 Resume 起的是全新终端。
         assert!(!registry.has_live("s-live"));
-        assert!(registry.list_live().iter().all(|t| t.terminal_id != id));
+        assert!(registry.list().iter().all(|t| t.terminal_id != id));
         assert!(registry.for_session("s-live").is_none());
         assert!(registry.attach(&id).is_err());
         assert!(registry.close(&id).is_none(), "closing twice is a no-op");

@@ -8,6 +8,7 @@ import type { TerminalSummary, Session, WorkstreamCardData, ProjectCardData } fr
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 import { timeAgo } from "../components/common";
 import { useViewState } from "../hooks/useViewState";
+import { disposeTerminal } from "../features/sessions/terminalCache";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -102,7 +103,7 @@ export function groupRecentSessions(
 
 /**
  * Sidebar：Brand→新会话、Search、工作区一级导航（Workstreams / Projects / Sessions /
- * Assistant）、运行中（活内嵌终端）、最近活动（最近 7 天有新消息的会话，按任务/项目归类）、
+ * Assistant）、运行中（含保留的已退出终端）、最近活动（最近 7 天有新消息的会话，按任务/项目归类）、
  * 底部固定 Settings。
  */
 export default function Sidebar({ route, navigate, onSearch, collapsed = false }: {
@@ -151,6 +152,8 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
   const closeTerminal = async (t: TerminalSummary) => {
     try {
       const closed = await api.terminalClose(t.terminal_id);
+      disposeTerminal(t.terminal_id);
+      setTerminals((current) => current.filter((item) => item.terminal_id !== t.terminal_id));
       const displayed = currentRoute.current;
       if (displayed.view === "terminal" && displayed.terminalId === t.terminal_id) {
         if (closed.session_id) navigate({ view: "session", sessionId: closed.session_id });
@@ -259,8 +262,8 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
               return (
                 <div className="sidebar-task" key={t.terminal_id}>
                   <button
-                    className={`nav-item ${active ? "active" : ""}`}
-                    title={t.cwd ? `${title} · ${t.cwd}` : title}
+                    className={`nav-item ${active ? "active" : ""}${t.live ? "" : " terminal-exited"}`}
+                    title={`${t.cwd ? `${title} · ${t.cwd}` : title}${t.live ? "" : " · 已退出"}`}
                     onClick={() => navigate({ view: "terminal", terminalId: t.terminal_id })}
                   >
                     <AgentIcon agent={t.agent} size={15} />
@@ -268,8 +271,8 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false }
                   </button>
                   <button
                     className="pin-button terminal-close"
-                    aria-label={`关闭终端：${title}`}
-                    title="关闭终端"
+                    aria-label={`${t.live ? "关闭" : "移除"}终端：${title}`}
+                    title={t.live ? "关闭终端" : "移除终端"}
                     onClick={() => void closeTerminal(t)}
                   >
                     <Icon name="close" />

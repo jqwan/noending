@@ -60,7 +60,7 @@ export type Route =
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */
 export const EVT_SYNCED = "noending:sync";
 
-/** 活终端集合变化（spawn / exit / bind）的全局刷新信号。后端 registry
+/** 终端集合或状态变化（spawn / exit / bind / close）的全局刷新信号。后端 registry
  *  发 Tauri 事件 `terminals-changed`，AppShell 桥接成 window 事件。 */
 export const EVT_TERMINALS = "noending:terminals";
 

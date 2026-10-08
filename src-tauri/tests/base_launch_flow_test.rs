@@ -957,7 +957,7 @@ fn reconnect_replaces_the_old_terminal_after_a_successful_spawn() {
     let current = registry.for_session(&sid).unwrap();
     assert_eq!(current.terminal_id, new_id);
     assert!(current.live);
-    assert_eq!(registry.list_live().len(), 1);
+    assert_eq!(registry.list().len(), 1);
     registry.kill_all();
 }
 

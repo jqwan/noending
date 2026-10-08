@@ -238,7 +238,7 @@ export const api = {
       cwd: cwd ?? null,
       initialMessage: initialMessage ?? null,
     }),
-  /** 活着的内嵌终端（新→旧）：侧边栏「运行中」读这里；事件刷新，无轮询。 */
+  /** 保留的内嵌终端（含已退出，新→旧）：侧边栏读这里；手动关闭才移除。 */
   terminalList: () =>
     invoke<import("./types").TerminalSummary[]>("terminal_list"),
   /** 重启此终端当前绑定会话的 Agent，返回新终端；失败保留旧终端以便重试。 */

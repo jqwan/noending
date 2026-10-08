@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
+import { disposeTerminal } from "../features/sessions/terminalCache";
 import { EVT_TERMINALS, EVT_SYNCED } from "../app/routes";
 import type { Route } from "../app/routes";
 import type { TerminalSummary, Session, WorkstreamCardData, ProjectCardData } from "../types";
@@ -18,8 +19,10 @@ vi.mock("../api", () => ({
     listProjectCards: vi.fn(),
   },
 }));
+vi.mock("../features/sessions/terminalCache", () => ({ disposeTerminal: vi.fn() }));
 
 beforeEach(() => {
+  vi.mocked(disposeTerminal).mockClear();
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.terminalClose).mockReset().mockImplementation(async (terminalId) => terminal({ terminal_id: terminalId }));
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
@@ -170,6 +173,44 @@ describe("Sidebar navigation", () => {
 });
 
 describe("Sidebar 运行中终端", () => {
+  it("keeps exited terminals visible and clickable with a muted icon and title", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ live: false, exit_code: 0, session_id: "s1", session_title: "已结束的会话" }),
+    ]);
+    const navigate = renderSidebar();
+    const row = await screen.findByRole("button", { name: "已结束的会话" });
+    expect(screen.getByText("运行中")).toBeTruthy();
+    expect(row.className).toContain("terminal-exited");
+    expect(row.title).toContain("已退出");
+    expect(row.querySelector(".agent-icon")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /重新连接/ })).toBeNull();
+    fireEvent.click(row);
+    expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-1" });
+  });
+
+  it("mutes a terminal after its exit event without removing its sidebar entry", async () => {
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({})]);
+    renderSidebar();
+    expect((await screen.findByTitle("新会话 · /repo/x")).className).not.toContain("terminal-exited");
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ live: false, exit_code: 0 })]);
+    act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINALS)));
+    const row = await screen.findByTitle("新会话 · /repo/x · 已退出");
+    expect(row.className).toContain("terminal-exited");
+    expect(screen.getByRole("button", { name: "移除终端：新会话" })).toBeTruthy();
+  });
+
+  it("manually removing an exited terminal clears its entry and frontend cache", async () => {
+    const exited = terminal({ live: false, session_id: "s1", session_title: "旧会话" });
+    vi.mocked(api.terminalList).mockResolvedValue([exited]);
+    vi.mocked(api.terminalClose).mockResolvedValue(exited);
+    const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
+    fireEvent.click(await screen.findByRole("button", { name: "移除终端：旧会话" }));
+    await waitFor(() => expect(disposeTerminal).toHaveBeenCalledWith("t-1"));
+    expect(api.terminalClose).toHaveBeenCalledWith("t-1");
+    expect(screen.queryByText("旧会话")).toBeNull();
+    expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s1" });
+  });
+
   it("hides the section when no terminal is running", async () => {
     renderSidebar();
     await waitFor(() => expect(api.terminalList).toHaveBeenCalled());

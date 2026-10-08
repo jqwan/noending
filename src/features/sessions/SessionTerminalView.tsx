@@ -13,6 +13,7 @@ import { showToast } from "../../components/Toast";
 import { sessionDisplayTitle } from "./SessionTable";
 import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
 import type { Route } from "../../app/routes";
+import { liveTerminals, disposeTerminal } from "./terminalCache";
 
 /**
  * 内嵌终端视图（一等独立路由）。PTY 与 scrollback 都归后端（terminal
@@ -52,32 +53,9 @@ type BoundIdentity = {
   title: string | null;
 };
 
-/**
- * 常驻 xterm 实例，按 terminal_id 键控（VS Code 同款）。切走视图只让 DOM
- * 节点脱离文档，Terminal / scrollback / 尺寸 / 监听全部存活，detach 期间的
- * PTY 输出持续写入同一个实例；切回只需把节点搬回新容器——不做 scrollback
- * 重放。重放是布局错乱的根源：字节流里的光标定位/清屏序列绑定产生时的终端
- * 尺寸，重放视口稍有出入（挂载瞬间的 fit 抖动、resize 竞态）就渲染错乱，
- * 还会把错误尺寸发给 PTY 触发 TUI 重绘错位、滑不动。实例常驻后整类问题
- * 不存在。注册表随会话数量有界。
- */
-type LiveTerminal = {
-  term: Terminal;
-  fit: FitAddon;
-  unlisteners: (() => void)[];
-  exited: boolean;
-  /** 组件挂载期间注册；exit 事件经它把横幅翻转到当前挂载的视图上。 */
-  onExit: (() => void) | null;
-};
-const liveTerminals = new Map<string, LiveTerminal>();
-
 /** 测试钩子：模块级注册表会跨用例存活。 */
 export function resetLiveTerminalsForTests(): void {
-  for (const entry of liveTerminals.values()) {
-    entry.unlisteners.forEach((u) => u());
-    entry.term.dispose();
-  }
-  liveTerminals.clear();
+  for (const id of liveTerminals.keys()) disposeTerminal(id);
 }
 
 export default function SessionTerminalView({ terminalId, initialTitle, initialAgent, initialSessionId, navigate }: {
@@ -130,12 +108,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const result = await api.terminalReconnect(terminalId);
       if (!result.terminal_id) throw new Error("找不到重新连接的终端");
       // 旧实例已被后端替换，释放对应 xterm 与常驻监听。
-      const previous = liveTerminals.get(terminalId);
-      if (previous) {
-        previous.unlisteners.forEach((stop) => stop());
-        previous.term.dispose();
-        liveTerminals.delete(terminalId);
-      }
+      disposeTerminal(terminalId);
       if (mountedRef.current) navigate({ view: "terminal", terminalId: result.terminal_id });
     } catch (e) {
       if (mountedRef.current) showToast(`重新连接失败：${String(e)}`);
