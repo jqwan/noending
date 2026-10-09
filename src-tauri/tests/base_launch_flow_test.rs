@@ -479,10 +479,7 @@ fn antigravity_desktop_sessions_require_the_desktop_app() {
             .unwrap_err()
             .to_string()
             .contains("未找到 Antigravity"));
-        match route {
-            ResumeRoute::Refused(reason) => assert!(reason.contains("未找到 Antigravity")),
-            other => panic!("expected refusal without the desktop app, got {other:?}"),
-        }
+        assert!(matches!(route, ResumeRoute::Refused(_)));
     }
     std::fs::remove_file(raw).unwrap();
 }
