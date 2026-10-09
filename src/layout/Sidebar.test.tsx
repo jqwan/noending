@@ -165,6 +165,7 @@ describe("Sidebar unified sessions", () => {
     renderSidebar();
     await screen.findByRole("button", { name: "终端 · 已退出：旧会话" });
     expect(screen.getByText("旧会话")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "0 个运行中终端，1 个已退出终端" })).toBeTruthy();
     expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "all");
   });
 
@@ -194,8 +195,8 @@ describe("Sidebar unified sessions", () => {
     expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
   });
 
-  it("sidebar continue actions reuse the preferred retained terminal and open desktop independently", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s1", title: "共享会话" })]);
+  it("sidebar prefers terminal capability and reuses the selected instance independently of aggregate status", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s1", title: "共享会话" }), session({ id: "desktop", title: "桌面会话", agent: "workbuddy" })]);
     vi.mocked(api.terminalList).mockResolvedValue([
       terminal({ terminal_id: "live", session_id: "s1" }),
       terminal({ terminal_id: "exited", session_id: "s1", live: false }),
@@ -205,9 +206,11 @@ describe("Sidebar unified sessions", () => {
     fireEvent.click(await screen.findByRole("button", { name: "终端 · 已退出：共享会话" }));
     expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "exited", initialSessionId: "s1", initialTitle: "共享会话" }));
     expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "在桌面应用中继续：共享会话" })).toBeNull();
+    expect(screen.getByRole("img", { name: "1 个运行中终端，1 个已退出终端" })).toBeTruthy();
     navigate.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续：共享会话" }));
-    await waitFor(() => expect(api.continueSessionDesktop).toHaveBeenCalledWith("s1"));
+    fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续：桌面会话" }));
+    await waitFor(() => expect(api.continueSessionDesktop).toHaveBeenCalledWith("desktop"));
     expect(navigate).not.toHaveBeenCalled();
   });
 
@@ -224,7 +227,7 @@ describe("Sidebar unified sessions", () => {
     expect(screen.queryByRole("button", { name: "在桌面应用中继续：待继续" })).toBeNull();
     expect(screen.queryByRole("button", { name: "在终端中继续：桌面会话" })).toBeNull();
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "在终端中继续：已归档" }).disabled).toBe(true);
-    expect(screen.getByRole<HTMLButtonElement>("button", { name: "在桌面应用中继续：已归档" }).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "在桌面应用中继续：已归档" })).toBeNull();
   });
 
   it("ignores an old terminal list response after a newer identity refresh", async () => {

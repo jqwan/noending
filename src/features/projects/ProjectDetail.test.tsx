@@ -141,8 +141,10 @@ describe("ProjectDetail", () => {
     expect(pathRows[1].textContent).toContain("/a/linked/worktree");
   });
 
-  it("renders continue session button on session rows and stops row navigation", async () => {
-    vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
+  it("renders desktop continue for desktop-only session rows and stops row navigation", async () => {
+    const d = mockDetail();
+    d.sessions[0].agent = "workbuddy";
+    vi.mocked(api.getProjectDetail).mockResolvedValue(d);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
     await screen.findByText("Session 1");

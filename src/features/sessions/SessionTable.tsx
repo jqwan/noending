@@ -392,12 +392,7 @@ export default function SessionCards({
   );
 }
 
-/** 行内「继续」：图标按钮，与会话详情页右上角的继续会话按钮保持一致（桌面/终端），
- *  以聚合按钮的默认设置展示（非聚合分列）。
- *  - 兼具桌面与终端能力（codex）：按聚合按钮设置显示为桌面或终端图标；
- *  - 仅终端能力（claude_code / pi / antigravity_cli）：显示终端图标；
- *  - 仅桌面能力（antigravity_desktop / dsh / qoder / workbuddy / zcode）：显示桌面图标；
- *  - 点击时在对应桌面应用或内嵌终端中继续。 */
+/** Single inline continue action: terminal-capable formats use terminal, otherwise desktop. */
 export function SessionResumeButton({
   session,
   agentStatus,
