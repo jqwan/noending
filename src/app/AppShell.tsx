@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
@@ -73,6 +73,13 @@ export default function AppShell() {
   const seqRef = useRef(0);
   const route = navigation.entries[navigation.index];
   const sessionSection = isSessionRoute(route);
+  const lastSessionRoute = useRef<Route>(route);
+  const currentRoute = useRef(route);
+  const sessionRoute = sessionSection ? route : lastSessionRoute.current;
+  useLayoutEffect(() => {
+    currentRoute.current = route;
+    if (isSessionRoute(route)) lastSessionRoute.current = withoutAction(route);
+  }, [route]);
   const isMac = /Macintosh|Mac OS X/.test(navigator.userAgent);
 
   useEffect(() => {
@@ -113,6 +120,13 @@ export default function AppShell() {
     });
     if ("action" in r && r.action) setActionSeq(++seqRef.current);
   }, []);
+
+  // An async launch can finish after switching sections. Remember its result
+  // for the session section without pulling the user away from another page.
+  const navigateSession = useCallback((target: Route) => {
+    if (isSessionRoute(currentRoute.current)) navigate(target);
+    else if (isSessionRoute(target)) lastSessionRoute.current = withoutAction(normalizeRoute(target));
+  }, [navigate]);
 
   const goBack = useCallback((fallback?: Route) => {
     setNavigation((current) => {
@@ -184,17 +198,6 @@ export default function AppShell() {
       <header className="app-titlebar">
         {isMac && <div className="window-drag-region" data-tauri-drag-region />}
         <div className="history-controls" aria-label="页面导航">
-          {sessionSection && <button
-            className="history-button"
-            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            onClick={() => setSidebarCollapsed((value) => !value)}
-          >
-            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
-              <rect x="3" y="4" width="12" height="10" rx="2.5" />
-              <path d="M7 4v10" />
-            </svg>
-          </button>}
           <button
             className="history-button"
             aria-label="返回上一页"
@@ -217,13 +220,24 @@ export default function AppShell() {
               <path d="M4 9h10M9 4l5 5-5 5" />
             </svg>
           </button>
+          {sessionSection && <button
+            className="history-button"
+            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            onClick={() => setSidebarCollapsed((value) => !value)}
+          >
+            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
+              <rect x="3" y="4" width="12" height="10" rx="2.5" />
+              <path d="M7 4v10" />
+            </svg>
+          </button>}
         </div>
       </header>
-      <NavigationRail route={route} navigate={navigate} />
+      <NavigationRail route={route} navigate={navigate}
+        onSessions={() => navigate(lastSessionRoute.current)} onSearch={() => setPaletteOpen(true)} />
       <Sidebar
         route={route}
         navigate={navigate}
-        onSearch={() => setPaletteOpen(true)}
         collapsed={sidebarCollapsed}
         hidden={!sessionSection}
       />
@@ -251,9 +265,14 @@ export default function AppShell() {
       <div className="app-content">
         {/* 兜底只包内容区：页面（含它自己的弹窗）渲染抛错时侧栏与标题栏还在，
             用户能直接切走；resetKey 让路由一换就复位。 */}
-        <ErrorBoundary resetKey={JSON.stringify(withoutAction(route))}>
+        <div className="session-content" hidden={!sessionSection}>
+          <ErrorBoundary resetKey={JSON.stringify(withoutAction(sessionRoute))}>
+            <Router route={sessionRoute} navigate={navigateSession} goBack={goBack} actionSeq={actionSeq} />
+          </ErrorBoundary>
+        </div>
+        {!sessionSection && <ErrorBoundary resetKey={JSON.stringify(withoutAction(route))}>
           <Router route={route} navigate={navigate} goBack={goBack} actionSeq={actionSeq} />
-        </ErrorBoundary>
+        </ErrorBoundary>}
       </div>
       {paletteOpen && (
         <CommandPalette onClose={() => setPaletteOpen(false)} navigate={navigate} />

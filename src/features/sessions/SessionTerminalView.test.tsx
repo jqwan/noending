@@ -123,7 +123,9 @@ vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class {} }));
 
 // jsdom 没有 ResizeObserver。
 class FakeResizeObserver {
-  observe() {}
+  static observed: { target: HTMLElement; notify: () => void }[] = [];
+  constructor(private notify: () => void) {}
+  observe(target: HTMLElement) { FakeResizeObserver.observed.push({ target, notify: this.notify }); }
   disconnect() {}
   unobserve() {}
 }
@@ -143,6 +145,7 @@ afterEach(() => {
   resetLiveTerminalsForTests();
   vi.clearAllMocks();
   FakeTerminal.last = null;
+  FakeResizeObserver.observed = [];
   delete document.documentElement.dataset.theme;
 });
 
@@ -184,6 +187,23 @@ function renderView(navigate?: ReturnType<typeof vi.fn>) {
     <SessionTerminalView terminalId="t-1" navigate={navigate ?? vi.fn()} />,
   );
 }
+
+it("preserves PTY dimensions while hidden and resizes again when shown", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  renderView();
+  await waitFor(() => expect(FakeResizeObserver.observed).toHaveLength(1));
+  const { target, notify } = FakeResizeObserver.observed[0];
+  let visible = false;
+  Object.defineProperties(target, {
+    clientWidth: { get: () => visible ? 800 : 0 },
+    clientHeight: { get: () => visible ? 600 : 0 },
+  });
+  act(notify);
+  expect(api.terminalResize).not.toHaveBeenCalled();
+  visible = true;
+  act(notify);
+  expect(api.terminalResize).toHaveBeenCalledWith("t-1", 80, 24);
+});
 
 it("updates a detached cached terminal's theme without restarting or replaying it", async () => {
   document.documentElement.dataset.theme = "light";

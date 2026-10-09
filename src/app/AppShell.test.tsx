@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import AppShell from "./AppShell";
 import type { Route } from "./routes";
+import { useState } from "react";
 
 const focusListener = vi.hoisted(() => ({
   callback: undefined as undefined | ((event: { payload: boolean }) => void),
@@ -19,20 +20,32 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("../api", () => ({ api: { appForeground } }));
 vi.mock("../layout/Sidebar", () => ({ default: ({ hidden }: { hidden: boolean }) => <aside aria-label="会话侧边栏" hidden={hidden} /> }));
-vi.mock("./Router", () => ({ default: ({ route }: { route: Route }) => <output aria-label="当前页面">{route.view}</output> }));
+const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
+vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navigate: (route: Route) => void }) => {
+  const [draft, setDraft] = useState("");
+  if (["new-session", "sessions", "session", "terminal"].includes(route.view)) sessionNavigation.navigate = navigate;
+  return <>
+    <output aria-label="当前页面">{route.view}</output>
+    <output aria-label="页面参数">{JSON.stringify(route)}</output>
+    {route.view === "new-session" && <input aria-label="会话草稿" value={draft} onChange={e => setDraft(e.target.value)} />}
+  </>;
+} }));
 vi.mock("../components/Toast", () => ({ default: () => null }));
-vi.mock("../components/CommandPalette", () => ({ default: () => null }));
+vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }: { navigate: (route: Route) => void; onClose: () => void }) => <div role="dialog" aria-label="全局搜索">
+  <button onClick={() => { navigate({ view: "search", query: "test" }); onClose(); }}>查看搜索结果</button>
+</div> }));
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => {
   localStorage.clear();
   appForeground.mockClear();
+  sessionNavigation.navigate = undefined;
 });
 afterEach(cleanup);
 
 it("starts on the new-session page", () => {
   render(<AppShell />);
-  expect(screen.getByLabelText("当前页面").textContent).toBe("new-session");
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
 });
 
 it("keeps icon navigation fixed and shows the session sidebar only in the session section", () => {
@@ -40,15 +53,52 @@ it("keeps icon navigation fixed and shows the session sidebar only in the sessio
   const rail = screen.getByRole("navigation", { name: "工作区导航" });
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "项目" }));
-  expect(screen.getByLabelText("当前页面").textContent).toBe("projects");
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
   expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
   expect(screen.queryByRole("separator")).toBeNull();
   expect(screen.queryByRole("button", { name: "收起侧边栏" })).toBeNull();
   expect(screen.getByRole("navigation", { name: "工作区导航" })).toBe(rail);
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
-  expect(screen.getByLabelText("当前页面").textContent).toBe("sessions");
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   expect(screen.getByRole("separator")).toBeTruthy();
+});
+
+it("preserves the session page's unsent state while switching sections or viewing global search", () => {
+  render(<AppShell />);
+  fireEvent.change(screen.getByRole("textbox", { name: "会话草稿" }), { target: { value: "未发送的消息" } });
+  fireEvent.click(screen.getByRole("button", { name: "任务" }));
+  fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+  expect(screen.getByRole("dialog", { name: "全局搜索" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "查看搜索结果" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("search");
+  expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect((screen.getByRole("textbox", { name: "会话草稿" }) as HTMLInputElement).value).toBe("未发送的消息");
+});
+
+it.each([
+  { view: "terminal", terminalId: "t-7" },
+  { view: "session", sessionId: "s-4", entry: "conversation" },
+  { view: "sessions", scope: "archived" },
+] as Route[])("restores the last session page and parameters across history navigation: %j", (route) => {
+  render(<AppShell />);
+  act(() => sessionNavigation.navigate!(route));
+  fireEvent.click(screen.getByRole("button", { name: "项目" }));
+  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
+});
+
+it("remembers a background launch result without changing the current section", () => {
+  render(<AppShell />);
+  const finishLaunch = sessionNavigation.navigate!;
+  fireEvent.click(screen.getByRole("button", { name: "代理" }));
+  act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "t-created" });
 });
 
 it("remembers keyboard resizing, clamps width, and resets on double click", () => {

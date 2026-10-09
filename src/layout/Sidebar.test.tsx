@@ -34,7 +34,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 function renderSidebar(route: Route = { view: "new-session" }, navigate = vi.fn()) {
-  render(<Sidebar route={route} navigate={navigate} onSearch={() => {}} />);
+  render(<Sidebar route={route} navigate={navigate} />);
   return navigate;
 }
 
@@ -134,11 +134,10 @@ describe("Sidebar navigation", () => {
     expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
   });
 
-  it("preserves the search entry", async () => {
-    const onSearch = vi.fn();
-    render(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} onSearch={onSearch} />);
-    fireEvent.click(await screen.findByRole("button", { name: /搜索/ }));
-    expect(onSearch).toHaveBeenCalledOnce();
+  it("opens the sessions board from the session sidebar", async () => {
+    const navigate = renderSidebar();
+    fireEvent.click(await screen.findByRole("button", { name: "会话看板" }));
+    expect(navigate).toHaveBeenCalledWith({ view: "sessions" });
   });
 });
 
@@ -294,10 +293,10 @@ describe("Sidebar 运行中终端", () => {
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "a", session_title: "会话 A", identity_revision: 1 })]);
     vi.mocked(api.terminalClose).mockReturnValue(new Promise((resolve) => { finishClose = resolve; }));
     const navigate = vi.fn();
-    const view = render(<Sidebar route={{ view: "terminal", terminalId: "t-1" }} navigate={navigate} onSearch={() => {}} />);
+    const view = render(<Sidebar route={{ view: "terminal", terminalId: "t-1" }} navigate={navigate} />);
     await screen.findByText("会话 A");
     fireEvent.click(screen.getByRole("button", { name: "关闭终端：会话 A" }));
-    view.rerender(<Sidebar route={{ view: "new-session" }} navigate={navigate} onSearch={() => {}} />);
+    view.rerender(<Sidebar route={{ view: "new-session" }} navigate={navigate} />);
     await act(async () => { finishClose(terminal({ session_id: "b", identity_revision: 2 })); });
     expect(navigate).not.toHaveBeenCalled();
   });

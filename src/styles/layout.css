@@ -35,6 +35,9 @@
   flex-direction: column;
 }
 .app-content > .main { flex: 1; min-height: 0; }
+.session-content { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
+.session-content[hidden] { display: none; }
+.session-content > .main { flex: 1; min-height: 0; }
 .navigation-rail {
   flex: none;
   width: var(--rail-width);

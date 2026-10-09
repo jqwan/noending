@@ -117,13 +117,12 @@ export function groupRecentSessions(
 }
 
 /**
- * 会话侧边栏：新会话、搜索、运行中（含保留的已退出终端）、最近活动。
+ * 会话侧边栏：新会话、会话看板、运行中（含保留的已退出终端）、最近活动。
  * 工作区导航由最左侧固定图标栏提供；切换工作区时保留本栏的数据与分组状态。
  */
-export default function Sidebar({ route, navigate, onSearch, collapsed = false, hidden = false }: {
+export default function Sidebar({ route, navigate, collapsed = false, hidden = false }: {
   route: Route;
   navigate: (r: Route) => void;
-  onSearch: () => void;
   collapsed?: boolean;
   hidden?: boolean;
 }) {
@@ -221,10 +220,8 @@ export default function Sidebar({ route, navigate, onSearch, collapsed = false, 
         <button className={`nav-item ${route.view === "new-session" ? "active" : ""}`} onClick={() => navigate({ view: "new-session" })}>
           <Icon name="plus" />新会话
         </button>
-        <button className="nav-item" onClick={onSearch}>
-          <Icon name="search" />搜索
-          <span style={{ flex: 1 }} />
-          <span className="kbd">{/Macintosh|Mac OS X/.test(navigator.userAgent) ? "⌘K" : "Ctrl K"}</span>
+        <button className={`nav-item ${route.view === "sessions" ? "active" : ""}`} onClick={() => navigate({ view: "sessions" })}>
+          <Icon name="grid" />会话看板
         </button>
 
         {terminals.length > 0 && (

@@ -418,6 +418,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     };
 
     const observer = new ResizeObserver(() => {
+      // The session section stays mounted while another section is visible.
+      // Never resize its PTY to the dimensions of a hidden container.
+      if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
       try {
         live.fit.fit();
         // 尺寸没变就不打扰 PTY：多余的 resize 会触发 TUI 无谓重绘。
@@ -430,6 +433,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     });
     observer.observe(container);
     requestAnimationFrame(() => {
+      if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
       try {
         live.fit.fit();
       } catch {
