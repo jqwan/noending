@@ -1,9 +1,21 @@
 import { waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
-import type { Terminal } from "@xterm/xterm";
+import { afterAll, afterEach, expect, it, vi } from "vitest";
+import { Terminal } from "@xterm/xterm";
 import { observeTerminalTheme, readTerminalTheme } from "./terminalTheme";
 
+// These tests exercise the real escape parser without opening a renderer.
+const canvas = vi.hoisted(() => vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null));
+afterAll(() => canvas.mockRestore());
+
+const terminals: Terminal[] = [];
+function terminal() {
+  const term = new Terminal();
+  terminals.push(term);
+  return term;
+}
+
 afterEach(() => {
+  terminals.splice(0).forEach((term) => term.dispose());
   delete document.documentElement.dataset.theme;
   document.documentElement.removeAttribute("style");
   vi.unstubAllGlobals();
@@ -15,6 +27,66 @@ function systemTheme(dark: boolean) {
   vi.stubGlobal("matchMedia", vi.fn(() => media));
   return media;
 }
+
+function write(term: Terminal, data: string) {
+  return new Promise<void>((resolve) => term.write(data, resolve));
+}
+
+it("answers native appearance queries and preserves other terminal mode handling", async () => {
+  document.documentElement.dataset.theme = "light";
+  const term = terminal();
+  const replies: string[] = [];
+  const stop = observeTerminalTheme(term, (data) => replies.push(data));
+  try {
+    await write(term, "\x1b[?2031$p\x1b[?996n\x1b[?2031;2004h\x1b[?2031$p");
+    expect(replies).toEqual(["\x1b[?2031;2$y", "\x1b[?997;2n", "\x1b[?2031;1$y"]);
+    expect(term.modes.bracketedPasteMode).toBe(true);
+    replies.length = 0;
+    await write(term, "\x1b[?2031;2004l\x1b[?2031$p\x1b[?6n");
+    expect(replies).toEqual(["\x1b[?2031;2$y"]);
+    expect(term.modes.bracketedPasteMode).toBe(false);
+    document.documentElement.dataset.theme = "dark";
+    await write(term, "\x1b[?996n");
+    expect(replies[replies.length - 1]).toBe("\x1b[?997;1n");
+  } finally {
+    stop();
+  }
+});
+
+it("reports palette changes only to subscribed applications, until reset or disposed", async () => {
+  document.documentElement.dataset.theme = "light";
+  const media = systemTheme(false);
+  const term = terminal();
+  const replies: string[] = [];
+  const stop = observeTerminalTheme(term, (data) => replies.push(data));
+  try {
+    document.documentElement.dataset.theme = "dark";
+    await waitFor(() => expect(term.options.theme?.background).toBe("#141413"));
+    expect(replies).toEqual([]);
+    await write(term, "\x1b[?2031h");
+    document.documentElement.dataset.theme = "light";
+    await waitFor(() => expect(replies).toEqual(["\x1b[?997;2n"]));
+    media.dispatchEvent(new Event("change"));
+    expect(replies).toEqual(["\x1b[?997;2n"]);
+    document.documentElement.dataset.theme = "dark";
+    await waitFor(() => expect(replies).toEqual(["\x1b[?997;2n", "\x1b[?997;1n"]));
+    await write(term, "\x1b[?2031l");
+    document.documentElement.dataset.theme = "light";
+    await waitFor(() => expect(term.options.theme?.background).toBe("#ffffff"));
+    expect(replies).toHaveLength(2);
+    await write(term, "\x1b[?2031h\x1bc\x1b[?2031$p");
+    expect(replies[replies.length - 1]).toBe("\x1b[?2031;2$y");
+    document.documentElement.dataset.theme = "dark";
+    await waitFor(() => expect(term.options.theme?.background).toBe("#141413"));
+    expect(replies).toHaveLength(3);
+  } finally {
+    stop();
+  }
+  await write(term, "\x1b[?2031$p\x1b[?996n");
+  document.documentElement.dataset.theme = "light";
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  expect(replies).toHaveLength(3);
+});
 
 
 it("uses the app's resolved surface, text and selection tokens", () => {
@@ -32,8 +104,8 @@ it("uses the app's resolved surface, text and selection tokens", () => {
 
 it("updates existing terminals on app changes and stops observing when disposed", async () => {
   document.documentElement.dataset.theme = "light";
-  const term = { options: {} } as Terminal;
-  const stop = observeTerminalTheme(term);
+  const term = terminal();
+  const stop = observeTerminalTheme(term, vi.fn());
   try {
     expect(term.options.theme?.background).toBe("#ffffff");
     document.documentElement.dataset.theme = "dark";
@@ -49,8 +121,8 @@ it("updates existing terminals on app changes and stops observing when disposed"
 
 it("follows system changes only while the app uses the system theme", async () => {
   const media = systemTheme(false);
-  const term = { options: {} } as Terminal;
-  const stop = observeTerminalTheme(term);
+  const term = terminal();
+  const stop = observeTerminalTheme(term, vi.fn());
   try {
     expect(term.options.theme?.background).toBe("#ffffff");
     const light = term.options.theme;

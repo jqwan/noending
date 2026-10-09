@@ -185,8 +185,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         fontSize: 12.5,
         cursorBlink: true,
         scrollback: 5000,
+        minimumContrastRatio: 4.5,
       });
-      const stopTheme = observeTerminalTheme(term);
+      const stopTheme = observeTerminalTheme(term, (data) => {
+        if (!snapshot.live || liveTerminals.get(id)?.exited) return;
+        void api.terminalInput(id, data).catch(() => {});
+      });
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(container);

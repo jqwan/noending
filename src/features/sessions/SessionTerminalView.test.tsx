@@ -51,6 +51,10 @@ const { FakeTerminal } = vi.hoisted(() => {
     cols = 80;
     rows = 24;
     options: import("@xterm/xterm").ITerminalOptions = {};
+    parser = {
+      registerCsiHandler: () => ({ dispose() {} }),
+      registerEscHandler: () => ({ dispose() {} }),
+    };
     constructor(_opts?: unknown) {
       FakeTerminal.last = this;
     }

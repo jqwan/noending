@@ -17,10 +17,15 @@ const palettes = {
   },
 };
 
+function isDarkTheme(): boolean {
+  const root = document.documentElement;
+  return root.dataset.theme === "dark" ||
+    (root.dataset.theme !== "light" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+}
+
 export function readTerminalTheme(): ITheme {
   const root = document.documentElement;
-  const dark = root.dataset.theme === "dark" ||
-    (root.dataset.theme !== "light" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+  const dark = isDarkTheme();
   const style = getComputedStyle(root);
   const token = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback;
   const background = token("--bg-app", dark ? "#141413" : "#ffffff");
@@ -38,14 +43,51 @@ export function readTerminalTheme(): ITheme {
 }
 
 /** Lives with the cached xterm, including while its view is detached. */
-export function observeTerminalTheme(term: Terminal): () => void {
-  const update = () => { term.options.theme = readTerminalTheme(); };
+export function observeTerminalTheme(term: Terminal, respond: (data: string) => void): () => void {
+  // xterm 6.0 answers OSC color queries, but lacks DEC mode 2031. Advertise
+  // and implement it so native auto themes can re-query colors and redraw.
+  // https://contour-terminal.org/vt-extensions/color-palette-update-notifications/
+  let reporting = false;
+  let previous = "";
+  const report = () => respond(`\x1b[?997;${isDarkTheme() ? 1 : 2}n`);
+  const handlers = [
+    term.parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, (params) => {
+      if (params.length !== 1 || params[0] !== 2031) return false;
+      respond(`\x1b[?2031;${reporting ? 1 : 2}$y`);
+      return true;
+    }),
+    term.parser.registerCsiHandler({ prefix: "?", final: "n" }, (params) => {
+      if (params.length !== 1 || params[0] !== 996) return false;
+      report();
+      return true;
+    }),
+    ...(["h", "l"] as const).map((final) =>
+      term.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
+        if (!params.includes(2031)) return false;
+        reporting = final === "h";
+        // Let xterm handle any other modes in the same sequence.
+        return params.every((param) => param === 2031);
+      })
+    ),
+    term.parser.registerEscHandler({ final: "c" }, () => {
+      reporting = false;
+      return false;
+    }),
+  ];
+  const update = () => {
+    const theme = readTerminalTheme();
+    const palette = JSON.stringify(theme);
+    term.options.theme = theme;
+    if (reporting && previous !== palette) report();
+    previous = palette;
+  };
   update();
   const observer = new MutationObserver(update);
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   const media = window.matchMedia?.("(prefers-color-scheme: dark)");
   media?.addEventListener("change", update);
   return () => {
+    handlers.forEach((handler) => handler.dispose());
     observer.disconnect();
     media?.removeEventListener("change", update);
   };
