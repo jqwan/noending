@@ -2107,6 +2107,8 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dirs 5.0.1",
+ "objc2",
+ "objc2-foundation",
  "png 0.18.1",
  "portable-pty",
  "rusqlite",

@@ -2,6 +2,8 @@ pub mod exec_resolver;
 pub mod exec_runner;
 pub mod launcher;
 pub mod paths;
+#[cfg(target_os = "macos")]
+pub mod webview;
 
 use serde::Serialize;
 

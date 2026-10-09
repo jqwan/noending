@@ -34,6 +34,10 @@ base64 = "0.23.1"
 arboard = "3.6.1"
 png = "0.18.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+
 [profile.release]
 lto = true
 strip = true

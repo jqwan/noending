@@ -26,6 +26,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                platform::webview::prefer_native_refresh_rate(&window);
+            }
+
             // NoEnding Home first, always before the database opens:
             // it resolves $NOENDING_HOME → bootstrap.current_home → ~/.noending,
             // applies any pending relocation, and creates data/ runtime/ logs/
