@@ -15,6 +15,7 @@ import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
 import type { Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
+import { connectTerminalInput } from "./terminalInput";
 
 /**
  * 内嵌终端视图（一等独立路由）。PTY 与 scrollback 都归后端（terminal
@@ -365,7 +366,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       term.write(decodeBase64(snapshot.scrollback));
 
       // 输入通道随实例常驻：detach 期间没有 UI 焦点自然无输入，无需重建。
-      term.onData((data) => {
+      const stopInput = connectTerminalInput(term, (data) => {
         const liveNow = liveTerminals.get(id);
         if (!liveNow || liveNow.exited) return;
         api.terminalInput(id, data).catch(() => {
@@ -388,7 +389,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       entry = {
         term,
         fit,
-        unlisteners: [stopTheme, ...unlisteners.map((p) => () => {
+        unlisteners: [stopTheme, stopInput, ...unlisteners.map((p) => () => {
           void p.then((u) => u()).catch(() => {});
         })],
         exited: !snapshot.live,

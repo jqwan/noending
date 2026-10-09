@@ -50,6 +50,8 @@ const { FakeTerminal } = vi.hoisted(() => {
     disposed = false;
     cols = 80;
     rows = 24;
+    modes = { mouseTrackingMode: "none" };
+    buffer = { active: { type: "normal" } };
     options: import("@xterm/xterm").ITerminalOptions = {};
     parser = {
       registerCsiHandler: () => ({ dispose() {} }),
