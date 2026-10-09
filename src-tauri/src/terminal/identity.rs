@@ -421,6 +421,9 @@ fn consume_claude_event(
 }
 
 fn read_envelope(stream: &mut TcpStream) -> Result<Envelope> {
+    // accept() can inherit the listener's nonblocking flag. A notification
+    // may span multiple packets, so read it with a bounded blocking timeout.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     let mut bytes = Vec::new();
     stream.take(MAX_EVENT_BYTES + 1).read_to_end(&mut bytes)?;
@@ -591,6 +594,47 @@ mod tests {
             args: vec!["--".into(), "first user prompt\n$(literal)".into()],
             cwd: None,
         }
+    }
+
+    #[test]
+    fn fragmented_identity_notification_waits_for_the_complete_payload() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        // macOS and Windows can inherit the listener's nonblocking mode.
+        // Force that mode so the same transport contract is tested everywhere.
+        server.set_nonblocking(true).unwrap();
+        let payload = serde_json::to_vec(&Envelope {
+            token: "token".into(),
+            terminal_id: "terminal".into(),
+            event: NativeIdentityEvent {
+                native_id: "native".into(),
+                cwd: None,
+                source_path: None,
+                source: Some("resume".into()),
+            },
+            active_record: None,
+        })
+        .unwrap();
+        let split = payload.len() / 2;
+        client.write_all(&payload[..split]).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender.send(read_envelope(&mut server)).unwrap();
+        });
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        client.write_all(&payload[split..]).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let envelope = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.event.native_id, "native");
+        worker.join().unwrap();
     }
 
     #[test]
