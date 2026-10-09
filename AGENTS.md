@@ -51,7 +51,7 @@ Key areas:
 
 * Keep changes small and scoped.
 * Follow the existing module boundaries and reuse existing APIs where practical.
-* Add regression tests for schema or behavior changes.
+* Add or extend regression tests for schema or behavior changes using the rules below.
 * No database migrations: `storage/schema.rs` is the only schema source, and a
   breaking change bumps `DATABASE_FORMAT_VERSION` and rebuilds the local
   database. Never add an old-format compatibility branch.
@@ -60,6 +60,19 @@ Key areas:
 For domain-specific behavior, inspect the current code, tests, and relevant documentation before making changes.
 
 Documents under `docs/` may include current design, implementation plans, or historical records. Do not assume every document is an active specification.
+
+## Test design
+
+* Test observable behavior, public contracts, data integrity or external protocols;
+  changed code and coverage numbers alone do not justify a test.
+* Exercise the actual scenario and assert independent expected results; avoid
+  self-comparisons, vacuous checks and assertions that mirror the implementation.
+* Extend existing coverage before adding tests. Merge equivalent cases, but keep
+  distinct behavioral, platform and protocol boundaries.
+* Avoid pinning incidental copy, icons, pixels or private structure; test UI
+  details when they affect meaning, navigation or action availability.
+* Isolate mocks, caches and persistent state. Declare external prerequisites;
+  missing prerequisites must never silently pass without executing checks.
 
 ## Verify
 
