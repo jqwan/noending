@@ -427,7 +427,7 @@ fn standalone_prepared_launch_reports_the_default_workspace() {
 /// the Desktop variant from `continue_route`, so Antigravity's IDE store (no
 /// override of its own) still opens the desktop app instead of refusing.
 #[test]
-fn antigravity_desktop_sessions_open_the_desktop_app() {
+fn antigravity_desktop_sessions_require_the_desktop_app() {
     let db = open_db("agy-desktop-open");
     let launcher = launcher_in("agy-desktop-open");
     let workspace = LaunchWorkspace::default();
@@ -461,20 +461,30 @@ fn antigravity_desktop_sessions_open_the_desktop_app() {
         )
         .unwrap();
 
-    let prepared = launcher
-        .prepare_resume_in(&db, &sid, &workspace)
-        .expect("prepare");
+    let prepared = launcher.prepare_resume_in(&db, &sid, &workspace);
     let adapter = noending::adapters::adapter_for(Agent::Antigravity);
     let session = db.get_session(&sid).unwrap().unwrap();
-    match adapter.desktop_resume_route(&session) {
-        noending::adapters::ResumeRoute::Desktop(open) => {
-            assert_eq!(open.uri, "antigravity://");
+    let route = adapter.desktop_resume_route(&session);
+    if noending::platform::paths::app_bundle_present("Antigravity") {
+        let prepared = prepared.expect("prepare with the desktop app present");
+        assert_eq!(prepared.desktop_open.unwrap().uri, "antigravity://");
+        match route {
+            ResumeRoute::Desktop(open) => assert_eq!(open.uri, "antigravity://"),
+            other => panic!("expected the desktop route, got {other:?}"),
         }
-        other => panic!("expected the desktop route, got {other:?}"),
+    } else {
+        // CI need not have this third-party app installed. Its absence must
+        // refuse both entry points rather than falling back to the CLI store.
+        assert!(prepared
+            .unwrap_err()
+            .to_string()
+            .contains("未找到 Antigravity"));
+        match route {
+            ResumeRoute::Refused(reason) => assert!(reason.contains("未找到 Antigravity")),
+            other => panic!("expected refusal without the desktop app, got {other:?}"),
+        }
     }
-    // prepare itself stays a terminal-route plan (embedded rides it); the
-    // desktop answer lives on the adapter, consumed by continue_session_desktop.
-    let _ = prepared;
+    std::fs::remove_file(raw).unwrap();
 }
 
 #[test]
