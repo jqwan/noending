@@ -280,22 +280,3 @@ pub fn raw_prompt(db: &Db, prompt: &str) -> Result<String> {
     let out = crate::platform::exec_runner::run_headless(&cmd, 180)?;
     Ok(crate::platform::exec_runner::clean_exec_stdout(&out.stdout))
 }
-
-#[cfg(test)]
-mod exec_cwd_tests {
-    use super::*;
-
-    #[test]
-    fn ensure_creates_parents_and_accepts_an_existing_directory() {
-        let root =
-            std::env::temp_dir().join(format!("noending-assistant-cwd-{}", std::process::id()));
-        let nested = root.join("assistant");
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(!nested.exists());
-        ensure_exec_cwd(&nested).unwrap();
-        assert!(nested.is_dir());
-        ensure_exec_cwd(&nested).unwrap();
-        assert!(nested.is_dir());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-}

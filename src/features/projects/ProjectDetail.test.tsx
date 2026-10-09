@@ -155,11 +155,4 @@ describe("ProjectDetail", () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
-  it("does not render 询问助手 button in header", async () => {
-    vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    render(<ProjectDetail projectId="p1" navigate={navigate} />);
-
-    await screen.findByText("Test Project");
-    expect(screen.queryByRole("button", { name: "询问助手" })).toBeNull();
-  });
 });

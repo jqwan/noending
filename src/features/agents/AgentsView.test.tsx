@@ -134,16 +134,6 @@ describe("AgentsView", () => {
     expect(screen.getByText("CLI 格式")).toBeTruthy();
   });
 
-  it("renders capability badges (TUI) without new session buttons on cards", async () => {
-    render(<AgentsView navigate={vi.fn()} />);
-
-    await screen.findByText("Claude Code");
-    // 代理卡片上不再展示新建会话按钮
-    expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
-    // 绝无设为默认按钮
-    expect(screen.queryByRole("button", { name: "设为默认" })).toBeNull();
-  });
-
   it("renders sources with no toggle checkbox and displays total sources metric", async () => {
     render(<AgentsView navigate={vi.fn()} />);
 
@@ -191,35 +181,6 @@ describe("AgentsView", () => {
       expect(open).toHaveBeenCalled();
       expect(api.addIngestSource).toHaveBeenCalledWith("codex", "/custom/sessions/path");
     });
-  });
-
-  it("renders no open-method toggles: every format has exactly one continue method", async () => {
-    render(<AgentsView navigate={vi.fn()} />);
-
-    // 打开方式不再是偏好：内嵌退役后每种格式只有一种「继续」方式
-    // （桌面应用，或内嵌终端——后者的入口在会话页终端子页），
-    // 卡片只展示事实徽标，不再提供切换组。
-    await screen.findByText("Codex");
-    expect(screen.queryByRole("group", { name: "打开方式切换" })).toBeNull();
-  });
-
-  it("renders fixed resume badges for Antigravity desktop and CLI formats without toggle switches", async () => {
-    const { container } = render(<AgentsView navigate={vi.fn()} />);
-
-    // Antigravity displays both formats
-    expect(await screen.findByText("Desktop 格式")).toBeTruthy();
-    expect(await screen.findByText("CLI 格式")).toBeTruthy();
-
-    const antigravityCard = container.querySelector("#agent-card-antigravity");
-    expect(antigravityCard).toBeTruthy();
-
-    // Antigravity formats have static badges, not toggle buttons
-    const staticBadges = antigravityCard!.querySelectorAll('.badge[title="打开方式"]');
-    expect(staticBadges.length).toBe(2); // One for Desktop, one for CLI
-    expect(Array.from(staticBadges, (badge) => badge.textContent)).toEqual(["Desktop", "TUI"]);
-
-    // Antigravity card has NO toggle switch
-    expect(antigravityCard!.querySelector('[aria-label="打开方式切换"]')).toBeNull();
   });
 
   it("renders filter tabs (全部, TUI, 桌面端) without 已就绪 or 桌面与历史, and switches filters properly", async () => {

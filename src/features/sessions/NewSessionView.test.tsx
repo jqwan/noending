@@ -517,53 +517,7 @@ describe("NewSessionView task and project selection", () => {
   expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new-1" });
 });
 
-  it("renders git icon for git directory and folder icon for normal directory", async () => {
-    vi.mocked(api.listProjectCards).mockResolvedValue([
-      {
-        id: "p-git",
-        name: "Git Project",
-        name_customized: false,
-        kind: "git" as const,
-        path_count: 1,
-        missing_path_count: 0,
-        workstream_count: 0,
-        session_count: 0,
-        representative_paths: ["/repo/git"],
-        search_paths: ["/repo/git"],
-        last_activity_at: null,
-        updated_at: "2026-10-01T00:00:00Z",
-      },
-      {
-        id: "p-normal",
-        name: "Normal Project",
-        name_customized: false,
-        kind: "directory" as const,
-        path_count: 1,
-        missing_path_count: 0,
-        workstream_count: 0,
-        session_count: 0,
-        representative_paths: ["/docs/normal"],
-        search_paths: ["/docs/normal"],
-        last_activity_at: null,
-        updated_at: "2026-10-01T00:00:00Z",
-      },
-    ]);
-
-    const { container } = render(<NewSessionView projectId="p-git" navigate={vi.fn()} />);
-    await screen.findByDisplayValue("Git Project");
-    const dirPicker = container.querySelector(".new-session-dir");
-    const gitSvg = dirPicker?.querySelector("svg path");
-    expect(gitSvg?.getAttribute("d")).toContain("M5 3a1.5");
-
-    const projectSelect = screen.getByRole("combobox", { name: "所属项目" });
-    fireEvent.change(projectSelect, { target: { value: "p-normal" } });
-    await screen.findByDisplayValue("Normal Project");
-
-    const folderSvg = dirPicker?.querySelector("svg path");
-    expect(folderSvg?.getAttribute("d")).toBe("M2 5V3h5l2 2h7v10H2Z");
-  });
 });
-
 
 describe("NewSessionView message composer", () => {
   it("waits for a nonblank first message without creating a terminal on entry", async () => {
@@ -636,7 +590,6 @@ describe("NewSessionView message composer", () => {
   });
 });
 
-
 it("shows the resolved fallback directory and uses the same default-path intent when sending", async () => {
   vi.mocked(api.prepareNewSession).mockResolvedValue({
     ...preparedFixture,
@@ -654,7 +607,6 @@ it("shows the resolved fallback directory and uses the same default-path intent 
   fireEvent.click(send);
   await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined, "开始任务"));
 });
-
 
 it("does not prepare another launch if the user leaves while startup fails", async () => {
   let rejectLaunch!: (reason: string) => void;

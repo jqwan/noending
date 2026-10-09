@@ -17,21 +17,15 @@ function renderTabs(entry: "conversation" | undefined) {
   return { navigate, view };
 }
 
-it("shows both segments and navigates on click", () => {
-  const { navigate } = renderTabs(undefined);
-
-  expect(screen.getByTitle("概览")).toBeTruthy();
-  expect(screen.getByTitle("对话")).toBeTruthy();
-  expect(screen.queryByTitle("终端")).toBeNull();
+it("navigates between overview and conversation and updates the active segment", () => {
+  const { navigate, view } = renderTabs(undefined);
+  expect(screen.getByRole("button", { name: "概览" }).getAttribute("aria-pressed")).toBe("true");
 
   fireEvent.click(screen.getByTitle("对话"));
   expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s1", entry: "conversation" });
+  view.rerender(<SessionSubpageTabs sessionId="s1" entry="conversation" navigate={navigate} />);
+  expect(screen.getByRole("button", { name: "对话" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "概览" }).getAttribute("aria-pressed")).toBe("false");
   fireEvent.click(screen.getByTitle("概览"));
   expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s1", entry: undefined });
-});
-
-it("marks the active segment", () => {
-  const { view } = renderTabs("conversation");
-  const active = view.container.querySelector(".settings-seg button.on");
-  expect(active?.getAttribute("title")).toBe("对话");
 });

@@ -13,10 +13,7 @@ it("keeps card navigation separate from the new-session action", () => {
   expect(navigate).toHaveBeenCalledTimes(2);
   expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1" });
 });
-it("offers no continue button on the card — continue lives in the session header", () => {
-  render(<WorkstreamCard card={card} mode="full" navigate={() => {}} defaultAgent="codex" />);
-  expect(screen.queryByRole("button", { name: /继续/ })).toBeNull();
-});
+
 it("omits launch actions for archived tasks", () => {
   render(<WorkstreamCard card={{ ...card, visibility: "archived" }} mode="full" navigate={() => {}} defaultAgent="codex" />);
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();

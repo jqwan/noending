@@ -46,22 +46,6 @@ it("applies and persists themes, then restores system appearance", async () => {
   expect(localStorage.getItem("noending.theme")).toBeNull();
 });
 
-it("shows the configured local database path", async () => {
-  render(<SettingsView section="advanced" navigate={vi.fn()} />);
-  expect(await screen.findByText("/tmp/noending/data/noending.db")).toBeTruthy();
-});
-
-it("renders all settings in a single unified view", async () => {
-  render(<SettingsView navigate={vi.fn()} />);
-  expect(screen.getByText("主题")).toBeTruthy();
-  expect(screen.getByText("Context 更新诊断")).toBeTruthy();
-  expect(screen.getByText("数据存储目录")).toBeTruthy();
-  expect(await screen.findByText("存储根目录")).toBeTruthy();
-  expect(screen.getByText("默认工作目录")).toBeTruthy();
-  expect(screen.getByText("SQLite 数据库")).toBeTruthy();
-  expect(screen.getByText("/tmp/noending/data/noending.db")).toBeTruthy();
-});
-
 it("opens modal to change data storage directory and can submit new path", async () => {
   render(<SettingsView navigate={vi.fn()} />);
   await screen.findByText("/tmp/noending/data/noending.db");

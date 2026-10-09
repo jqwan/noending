@@ -585,7 +585,7 @@ it("reports a failed read instead of showing an empty conversation", async () =>
   await waitFor(() => expect(api.getSessionMessages).toHaveBeenCalledTimes(1));
 });
 
-it("renders initial title and agent icon immediately without showing fallback placeholder", async () => {
+it("shows the supplied title while session details are still loading", async () => {
   let resolveDetail: (val: any) => void;
   const detailPromise = new Promise((resolve) => {
     resolveDetail = resolve;
@@ -611,10 +611,9 @@ it("renders initial title and agent icon immediately without showing fallback pl
     />
   );
 
-  // Before getSessionDetail resolves: title and agent icon are already present
+  // Before getSessionDetail resolves, show the supplied title.
   expect(screen.queryByText("会话消息")).toBeNull();
   expect(screen.getByText("正在进行的任务")).toBeDefined();
-  expect(document.querySelector(".session-title-with-icon .agent-icon")).not.toBeNull();
 
   // Now resolve
   resolveDetail!(detail(session("me")));

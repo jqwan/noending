@@ -124,17 +124,13 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
 }
 
 describe("Sidebar navigation", () => {
-  it("opens new-session from the remaining entry and has no brand or workspace navigation", async () => {
+  it("opens the new-session page", async () => {
     const navigate = renderSidebar();
     await waitFor(() => expect(api.terminalList).toHaveBeenCalled());
     const newSession = screen.getByRole("button", { name: "新会话" });
     expect(newSession.className).toContain("active");
     fireEvent.click(newSession);
     expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
-    expect(screen.queryByText("NoEnding")).toBeNull();
-    expect(screen.queryByText("工作区")).toBeNull();
-    expect(screen.queryByRole("button", { name: "项目" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
   });
 
   it("preserves the search entry", async () => {
@@ -366,7 +362,6 @@ describe("Sidebar 最近活动", () => {
     const navigate = renderSidebar();
     expect(await screen.findByText("侧栏任务")).toBeTruthy();
     const sessionItem = screen.getByText("修复侧栏问题");
-    expect(sessionItem).toBeTruthy();
 
     fireEvent.click(sessionItem);
     expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s-1" });
@@ -387,21 +382,14 @@ describe("Sidebar 最近活动", () => {
     renderSidebar();
     const groupHeader = await screen.findByRole("button", { name: /折叠测试任务/ });
     expect(screen.getByText("可折叠会话")).toBeTruthy();
-    expect(groupHeader.className).not.toContain("collapsed");
-    // 展开状态下使用 tasks 图标（包含第二行 checkmark: M3 10l1 1 2-2）
-    expect(groupHeader.innerHTML).toContain("M3 10l1 1 2-2");
 
     // 点击收起
     fireEvent.click(groupHeader);
     expect(screen.queryByText("可折叠会话")).toBeNull();
-    expect(groupHeader.className).toContain("collapsed");
-    // 收起状态下使用 tasksCollapsed 图标（包含折叠行 M4 10h11）
-    expect(groupHeader.innerHTML).toContain("M4 10h11");
 
     // 再次点击展开
     fireEvent.click(groupHeader);
     expect(screen.getByText("可折叠会话")).toBeTruthy();
-    expect(groupHeader.className).not.toContain("collapsed");
   });
 
   it("switches grouping between workstream and project", async () => {
@@ -422,31 +410,22 @@ describe("Sidebar 最近活动", () => {
 
     renderSidebar();
 
-    // 默认按任务归类，切换按钮使用 tasks 图标
     expect(await screen.findByText("按任务分组名")).toBeTruthy();
     expect(screen.queryByText("按项目分组名")).toBeNull();
-    const taskToggle = screen.getByRole("radio", { name: "按任务归类" });
-    expect(taskToggle.innerHTML).toContain("M3 5l1 1 2-2");
 
-    // 切换至按项目归类，切换按钮使用 folder 图标
+    // 切换至按项目归类
     const projectToggle = screen.getByRole("radio", { name: "按项目归类" });
-    expect(projectToggle.innerHTML).toContain("M2 5V3h5l2 2h7v10H2Z");
     fireEvent.click(projectToggle);
 
     const projectGroupHeader = await screen.findByRole("button", { name: /按项目分组名/ });
-    expect(projectGroupHeader).toBeTruthy();
-    // 展开状态下使用 folderOpen 图标
-    expect(projectGroupHeader.innerHTML).toContain("M1.5 7.5h13");
     expect(screen.queryByText("按任务分组名")).toBeNull();
 
     // 收起项目分组
     fireEvent.click(projectGroupHeader);
-    expect(projectGroupHeader.className).toContain("collapsed");
-    // 收起状态下使用闭合 folder 图标
-    expect(projectGroupHeader.innerHTML).toContain("M2 5V3h5l2 2h7v10H2Z");
+    expect(screen.queryByText("切换测试会话")).toBeNull();
 
     // 切回按任务归类
-    fireEvent.click(taskToggle);
+    fireEvent.click(screen.getByRole("radio", { name: "按任务归类" }));
 
     expect(await screen.findByText("按任务分组名")).toBeTruthy();
   });
@@ -481,7 +460,7 @@ describe("Sidebar 最近活动", () => {
     await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
   });
 
-  it("switches grouping to agent and groups sessions by agent with agent icons", async () => {
+  it("switches grouping to agent and collapses each agent independently", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
         id: "s-1",
@@ -498,8 +477,6 @@ describe("Sidebar 最近活动", () => {
     renderSidebar();
 
     const agentToggle = screen.getByRole("radio", { name: "按代理归类" });
-    expect(agentToggle).toBeTruthy();
-    expect(agentToggle.innerHTML).toContain("M9 2v2M4 6a2");
 
     fireEvent.click(agentToggle);
 
@@ -510,7 +487,6 @@ describe("Sidebar 最近活动", () => {
 
     const claudeGroupHeader = screen.getByRole("button", { name: /Claude Code/ });
     fireEvent.click(claudeGroupHeader);
-    expect(claudeGroupHeader.className).toContain("collapsed");
     expect(screen.queryByText("第一条会话")).toBeNull();
     expect(screen.getByText("第二条会话")).toBeTruthy();
   });

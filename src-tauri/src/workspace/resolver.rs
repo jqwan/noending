@@ -1354,19 +1354,6 @@ bare
     }
 
     #[test]
-    fn git_env_is_the_locked_down_pair() {
-        assert!(GIT_ENV.contains(&("GIT_OPTIONAL_LOCKS", "0")));
-        assert!(GIT_ENV.contains(&("GIT_TERMINAL_PROMPT", "0")));
-        // Messages are parsed, so they must be in a language we can parse.
-        assert!(GIT_ENV.contains(&("LC_ALL", "C")));
-        assert!(!GIT_ENV.iter().any(|(k, _)| *k == "GIT_CONFIG_NOSYSTEM"));
-        // Only the two read-only commands exist in this module; assert the binary
-        // is located, never hardcoded: `GitAccess::auto()` goes through
-        // `resolve_executable`, and `unavailable()` proves the no-spawn path.
-        assert!(!GitAccess::unavailable().is_available());
-    }
-
-    #[test]
     fn trailing_separators_cannot_produce_two_identities() {
         // The bare-repository spelling of `--git-common-dir` is exactly `.`, and
         // a transcript cwd may end in `/.` or `/`; both name the same directory

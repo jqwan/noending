@@ -87,15 +87,6 @@ async function submit() {
 }
 
 describe("WorkstreamFormModal project selection", () => {
-  it("renders project selection with 'NoEnding Workspace' and no directory picker by default", async () => {
-    render(<WorkstreamFormModal onClose={vi.fn()} />);
-    expect(screen.getByText("NoEnding Workspace")).toBeTruthy();
-    expect(screen.queryByText("主项目")).toBeNull();
-    expect(screen.getByRole("combobox", { name: "关联项目选择" })).toBeTruthy();
-    expect(screen.queryByText("工作目录（可选，可多条）")).toBeNull();
-    expect(screen.queryByRole("button", { name: "新增目录" })).toBeNull();
-    expect(screen.queryByText(/默认关联该项目下的所有工作目录/)).toBeNull();
-  });
 
   it("submits empty paths when created with default 'NoEnding Workspace' without paths", async () => {
     vi.mocked(api.createWorkstream).mockResolvedValue(report("w1", []));

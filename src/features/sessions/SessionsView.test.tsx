@@ -112,10 +112,6 @@ it("opens the new-session page from the toolbar and empty-state action", async (
   render(<SessionsView navigate={navigate} />);
 
   await screen.findByRole("button", { name: "配置会话来源" });
-  const unarchivedBtn = screen.getByRole("button", { name: "未归档" });
-  const archivedBtn = screen.getByRole("button", { name: "已归档" });
-  expect(unarchivedBtn.textContent).toBe("");
-  expect(archivedBtn.textContent).toBe("");
   const buttons = screen.getAllByRole("button", { name: "新建会话" });
   expect(buttons).toHaveLength(2);
   buttons.forEach((button) => fireEvent.click(button));

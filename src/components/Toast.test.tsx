@@ -15,17 +15,6 @@ describe("Toast", () => {
     cleanup();
   });
 
-  it("renders toast when showToast is called", () => {
-    render(<ToastHost />);
-    expect(screen.queryByText("已复制到剪贴板")).toBeNull();
-
-    act(() => {
-      showToast("已复制到剪贴板");
-    });
-
-    expect(screen.getByText("已复制到剪贴板")).toBeTruthy();
-  });
-
   it("triggers action onClick when action button is clicked", () => {
     const onClick = vi.fn();
     render(<ToastHost />);

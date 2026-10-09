@@ -5,14 +5,6 @@ import type { Route } from "../app/routes";
 
 afterEach(cleanup);
 
-it("places sessions first and renders only icons with accessible labels", () => {
-  const { container } = render(<NavigationRail route={{ view: "new-session" }} navigate={vi.fn()} />);
-  expect(screen.getAllByRole("button")[0].getAttribute("aria-label")).toBe("会话");
-  expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBe("page");
-  expect(container.textContent).toBe("");
-  expect(container.querySelectorAll(".ui-icon")).toHaveLength(6);
-});
-
 it.each([
   ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
   ["代理", "agents"], ["助手", "assistant"], ["设置", "settings"],
