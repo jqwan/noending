@@ -23,6 +23,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 const navigate = vi.fn();
 
 beforeEach(() => {
+  navigate.mockReset();
+  vi.mocked(open).mockReset().mockResolvedValue(null);
+  vi.mocked(api.addProjectPath).mockReset();
   clearProjectCardsCache();
   viewState.clear();
   vi.mocked(api.listProjectCards).mockReset();

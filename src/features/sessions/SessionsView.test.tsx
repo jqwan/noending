@@ -1,7 +1,7 @@
 // Sessions 页的 Workstream 筛选口径：筛选直接看
 // `session.owner_workstream_id`，未归属看 null。不存在"关联任务"这一层。
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SessionsView, { clearSessionsCache } from "./SessionsView";
 import { api } from "../../api";
@@ -92,7 +92,7 @@ describe("Sessions 页按所属任务筛选", () => {
       session({ id: "owned", title: "有归属", owner_workstream_id: "w1" }),
       session({ id: "free", title: "没归属", owner_workstream_id: null }),
     ]);
-    render(<SessionsView navigate={navigate} />);
+    await act(async () => { render(<SessionsView navigate={navigate} />); });
 
     await screen.findByText("全部任务");
     // 选中一个真实任务后，只剩 owner_workstream_id 等于它的那一条。

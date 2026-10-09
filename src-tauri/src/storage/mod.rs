@@ -480,9 +480,7 @@ impl Db {
         started_at: Option<&str>,
         last_activity_at: Option<&str>,
     ) -> Result<(String, bool)> {
-        let conn = self.write();
-        upsert_logical_session_conn(
-            &conn,
+        self.upsert_logical_session(
             agent,
             root_agent_session_id,
             None,
@@ -522,22 +520,23 @@ impl Db {
         source_path: &str,
         metadata: &serde_json::Value,
     ) -> Result<(String, bool)> {
-        let conn = self.write();
-        upsert_logical_session_conn(
-            &conn,
-            agent,
-            root_agent_session_id,
-            native_title,
-            title,
-            cwd,
-            workspace_path_id,
-            forked_from_session_id,
-            started_at,
-            last_activity_at,
-            source_kind,
-            source_path,
-            metadata,
-        )
+        self.tx(|tx| {
+            upsert_logical_session_conn(
+                tx,
+                agent,
+                root_agent_session_id,
+                native_title,
+                title,
+                cwd,
+                workspace_path_id,
+                forked_from_session_id,
+                started_at,
+                last_activity_at,
+                source_kind,
+                source_path,
+                metadata,
+            )
+        })
     }
 
     /// Sessions that may still owe a LaunchIntent match: ownerless Sessions,

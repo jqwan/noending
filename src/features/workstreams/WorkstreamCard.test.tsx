@@ -14,11 +14,6 @@ it("keeps card navigation separate from the new-session action", () => {
   expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1" });
 });
 
-it("omits launch actions for archived tasks", () => {
-  render(<WorkstreamCard card={{ ...card, visibility: "archived" }} mode="full" navigate={() => {}} defaultAgent="codex" />);
-  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
-  expect(screen.getByText("已归档")).toBeTruthy();
-});
 
 it("archives without navigating, and offers unarchive/delete only on archived cards", () => {
   const navigate = vi.fn(); const archive = vi.fn(); const restore = vi.fn(); const remove = vi.fn();
@@ -30,6 +25,7 @@ it("archives without navigating, and offers unarchive/delete only on archived ca
   expect(screen.queryByRole("button", { name: /永久删除/ })).toBeNull();
   const archived = { ...card, visibility: "archived" as const };
   rerender(<WorkstreamCard card={archived} {...props} />);
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "取消归档优化看板" }));
   fireEvent.click(screen.getByRole("button", { name: "永久删除优化看板" }));
   expect(restore).toHaveBeenCalledWith(archived);

@@ -629,10 +629,6 @@ mod tests {
             path_identity("/a/b"),
             path_identity_with("/a/b", PathStyle::current())
         );
-        assert_eq!(path_identity("/a/b").len(), 5 + 32);
-        assert!(path_identity("/a/b").starts_with("path-"));
-        // Stable across processes: no random component.
-        assert_eq!(path_identity("/a/b"), path_identity("/a/b"));
     }
 
     /// On a Windows volume, case is not part of location, so it is

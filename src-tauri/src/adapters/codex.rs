@@ -888,11 +888,11 @@ mod rollout_tests {
 
     // Root conversation vs execution observations
 
-    /// Only root user/assistant prose becomes messages; tool traffic contributes
-    /// activity counts, while thinking and compression markers are filtered.
+    /// Only root user/assistant prose becomes messages; tool traffic, thinking
+    /// and compression markers are filtered.
     /// Two visible assistant prose segments around a tool call are BOTH kept.
     #[test]
-    fn the_root_read_keeps_prose_and_counts_the_machine_traffic() {
+    fn the_root_read_keeps_prose_and_filters_machine_traffic() {
         let dir = temp_dir("root-read");
         let path = write_rollout(
             &dir,

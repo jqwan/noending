@@ -198,8 +198,7 @@ it("updates a detached cached terminal's theme without restarting or replaying i
   expect(api.terminalReconnect).not.toHaveBeenCalled();
 });
 
-it("attaches directly when the session already has an embedded terminal", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
+it("attaches by terminal ID, replays scrollback and forwards input", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ scrollback: btoa("hello-pty") }));
 
   renderView();
@@ -214,12 +213,16 @@ it("attaches directly when the session already has an embedded terminal", async 
 });
 
 it("an attach failure shows the message with a retry", async () => {
-  vi.mocked(api.terminalAttach).mockRejectedValue(new Error("终端不存在或已随应用重启失效"));
+  vi.mocked(api.terminalAttach).mockReset().mockRejectedValueOnce(new Error("终端不存在或已随应用重启失效")).mockResolvedValue(snapshot({ scrollback: btoa("retried output") }));
 
   renderView();
   await screen.findByText(/内嵌终端不可用/);
   expect(screen.getByText(/终端不存在或已随应用重启失效/)).toBeTruthy();
-  expect(screen.getByText("重试")).toBeTruthy();
+  fireEvent.click(screen.getByText("重试"));
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  expect(api.terminalAttach).toHaveBeenCalledTimes(2);
+  expect(new TextDecoder().decode(FakeTerminal.last!.written[0] as Uint8Array)).toBe("retried output");
+  expect(screen.queryByText(/内嵌终端不可用/)).toBeNull();
 });
 
 it("an unbound terminal keeps the session-detail entry disabled; binding lights it up", async () => {
@@ -495,7 +498,6 @@ it("keeps details disabled when an old title request resolves during pending", a
 });
 
 it("paste keys intercept native event and deliver text as typed keystrokes", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
   vi.mocked(api.readClipboardForTerminal).mockResolvedValue({ text: "pasted text", image_path: null });
 
@@ -511,7 +513,6 @@ it("paste keys intercept native event and deliver text as typed keystrokes", asy
 });
 
 it("an image paste forwards ^V to claude code instead of a path", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   // agent 取自快照（权威）：即使组件的 agent props 为空也能正确分流。
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ agent: "claude_code" }));
   vi.mocked(api.readClipboardForTerminal).mockResolvedValue({
@@ -531,7 +532,6 @@ it("an image paste forwards ^V to claude code instead of a path", async () => {
 });
 
 it("the browser default paste is cancelled and event pastes die at capture", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
   vi.mocked(api.readClipboardForTerminal).mockResolvedValue({ text: "x", image_path: null });
 
@@ -555,7 +555,6 @@ it("the browser default paste is cancelled and event pastes die at capture", asy
 });
 
 it("an image-only paste path is delivered as typed text", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
   vi.mocked(api.readClipboardForTerminal).mockResolvedValue({
     text: null,
@@ -574,7 +573,6 @@ it("an image-only paste path is delivered as typed text", async () => {
 });
 
 it("copy with a selection goes through the shared clipboard helper", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
 
   copyMock.mockResolvedValue(true);
@@ -588,7 +586,6 @@ it("copy with a selection goes through the shared clipboard helper", async () =>
 });
 
 it("remounting reuses the live instance instead of rebuilding and replaying", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ scrollback: btoa("first") }));
 
   const view = renderView();
@@ -601,7 +598,6 @@ it("remounting reuses the live instance instead of rebuilding and replaying", as
   // 切走（unmount）→ 切回（remount）：实例与 DOM 节点存活。
   view.unmount();
   expect(element.isConnected).toBe(false);
-  view.rerender = undefined as never; // noop guard (rerender not used)
   const second = renderView();
   await waitFor(() => expect(element.isConnected).toBe(true));
   // 同一个实例：没有第二个 Terminal 被构造。
@@ -614,7 +610,6 @@ it("remounting reuses the live instance instead of rebuilding and replaying", as
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
 it("IME direct-commit punctuation is delivered from the input payload", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
 
   renderView();
@@ -630,7 +625,6 @@ it("IME direct-commit punctuation is delivered from the input payload", async ()
 });
 
 it("first direct-commit arms on the bare Shift keydown (probe log sequence)", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
 
   renderView();
@@ -649,7 +643,6 @@ it("first direct-commit arms on the bare Shift keydown (probe log sequence)", as
 });
 
 it("armed input events die at capture so xterm's input path never fires", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
 
   renderView();
@@ -669,7 +662,6 @@ it("armed input events die at capture so xterm's input path never fires", async 
 });
 
 it("a re-dispatched identical payload for one insertion is delivered once", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
 
   renderView();
@@ -701,7 +693,6 @@ it("a re-dispatched identical payload for one insertion is delivered once", asyn
 });
 
 it("the diff shim deducts what xterm already delivered — no double send", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
 
   renderView();
@@ -722,7 +713,6 @@ it("the diff shim deducts what xterm already delivered — no double send", asyn
 });
 
 it("the diff shim ignores non-IME typing and mid-composition states", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
 
   renderView();

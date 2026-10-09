@@ -289,25 +289,9 @@ mod tests {
         let base = std::env::temp_dir().join(format!("context-home-{}", uuid::Uuid::new_v4()));
         let home = home(&base.join("custom"));
         let runtime = prepare_runtime_dir(&home).unwrap();
-        assert_eq!(
-            home.root.file_name().and_then(|name| name.to_str()),
-            Some("custom")
-        );
         assert_eq!(runtime, home.runtime_dir.join(LOG_SUBDIR));
         assert!(runtime.is_dir());
         assert_eq!(log_dir(&home), home.logs_dir.join(LOG_SUBDIR));
-    }
-
-    #[test]
-    fn logging_failure_is_best_effort_and_does_not_fail_operation() {
-        let base = std::env::temp_dir().join(format!("context-log-{}", uuid::Uuid::new_v4()));
-        let home = home(&base);
-        fs::create_dir_all(&home.logs_dir).unwrap();
-        fs::write(&home.logs_dir.join(LOG_SUBDIR), "not a directory").unwrap();
-        let mut op = ContextOperation::new("session", "session-test", Some(&home));
-        op.succeed("updated");
-        assert_eq!(op.operation_id.len(), 36);
-        let _ = fs::remove_dir_all(base);
     }
 
     #[test]

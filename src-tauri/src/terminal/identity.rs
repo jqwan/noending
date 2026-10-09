@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_injection_preserves_the_prompt_and_user_configuration() {
+    fn identity_injection_preserves_original_arguments_and_cleans_up_resources() {
         for agent in [Agent::ClaudeCode, Agent::Codex, Agent::Pi] {
             let original = command();
             let prepared = prepare(&original, agent, "terminal").unwrap().unwrap();

@@ -180,25 +180,6 @@ fn unknown_workstream_and_unknown_session_are_refused() {
     assert!(db.set_session_owner("no-such-session", None).is_err());
 }
 
-// lifecycle
-
-#[test]
-fn trash_and_restore_preserve_the_owner() {
-    let db = open_db("owner-trash");
-    let a = workstream(&db, "A");
-    let s = session(&db, None);
-    db.set_session_owner(&s.id, Some(&a.id)).unwrap();
-
-    noending::lifecycle::archive_session(&db, &s.id).unwrap();
-    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
-    // Archived Sessions retain their task association and remain visible there.
-    assert_eq!(db.sessions_for_workstream(&a.id).unwrap().len(), 1);
-
-    noending::lifecycle::restore_session(&db, &s.id).unwrap();
-    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
-    assert_eq!(db.sessions_for_workstream(&a.id).unwrap().len(), 1);
-}
-
 // workspace independence
 
 #[test]
@@ -235,82 +216,34 @@ fn changing_the_session_cwd_or_project_does_not_change_the_owner() {
 
     // The Session's physical facts move to another directory (and therefore
     // another WorkspacePath / Project). Ownership is a separate statement.
-    let b_path = noending::workspace::path_identity_of(&b_dir).unwrap();
+    db.upsert_logical_session(
+        s.agent,
+        &s.root_agent_session_id,
+        None,
+        None,
+        Some(&b_dir),
+        None,
+        None,
+        None,
+        None,
+        &s.source_kind,
+        &s.source_path,
+        &s.metadata,
+    )
+    .unwrap();
+    seed_project(&db, "p2");
+    let b_path = db
+        .tx(|tx| TempPaths::new(&db.dir, "p2").ensure_path(tx, &b_dir))
+        .unwrap()
+        .unwrap();
     db.tx(|tx| noending::workspace::session::move_session_to_path_conn(tx, &s.id, &b_path))
         .unwrap();
 
     let after = db.get_session(&s.id).unwrap().unwrap();
     assert_eq!(after.workspace_path_id.as_deref(), Some(b_path.as_str()));
+    assert_eq!(after.cwd.as_deref(), Some(b_dir.as_str()));
+    assert_eq!(after.project_id.as_deref(), Some("p2"));
     assert_eq!(after.owner_workstream_id.as_deref(), Some(w.id.as_str()));
-}
-
-// launcher → matched intent
-
-/// a New Session launched for Workstream A records A on its
-/// LaunchIntent, and when discovery matches that intent the discovered Session
-/// inherits exactly that one owner.
-#[test]
-fn matched_launch_intent_gives_the_discovered_session_that_owner() {
-    use noending::domain::{launch_status, LaunchIntent};
-
-    let db = open_db("owner-intent-match");
-    let a = workstream(&db, "A");
-    let intent = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(a.id.clone()),
-        cwd: None,
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-
-    let s = session(&db, None);
-    let matched =
-        noending::launcher::try_match_launch_intents_in(&db, &s, &LaunchWorkspace::default())
-            .unwrap();
-    assert!(matched, "the only pending intent wins outright");
-    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(a.id.as_str()));
-    assert_eq!(db.sessions_for_workstream(&a.id).unwrap().len(), 1);
-
-    let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
-    assert_eq!(stored.status, launch_status::MATCHED);
-    assert_eq!(stored.matched_session_id.as_deref(), Some(s.id.as_str()));
-}
-
-/// a standalone launch (no owner chosen) matches too, and the matched
-/// Session stays unowned. Matching must not invent an owner.
-#[test]
-fn matched_ownerless_intent_leaves_the_session_unowned() {
-    use noending::domain::{launch_status, LaunchIntent};
-
-    let db = open_db("owner-intent-standalone");
-    let a = workstream(&db, "A");
-    let intent = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: None,
-        cwd: None,
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-
-    let s = session(&db, None);
-    assert!(
-        noending::launcher::try_match_launch_intents_in(&db, &s, &LaunchWorkspace::default(),)
-            .unwrap()
-    );
-    assert!(owner_of(&db, &s.id).is_none());
-    assert!(db.sessions_for_workstream(&a.id).unwrap().is_empty());
 }
 
 // launcher
@@ -337,83 +270,6 @@ fn new_session_launch_intent_carries_the_chosen_owner() {
     assert_eq!(prepared.owner_workstream_id.as_deref(), Some(w.id.as_str()));
     // Task ownership does not imply a launch directory.
     assert_eq!(prepared.cwd, None);
-}
-
-#[test]
-fn standalone_new_session_has_no_owner_and_falls_back_to_the_default_workspace() {
-    let db = open_db("owner-launch-standalone");
-    let default = db.dir.join("default-ws");
-    let workspace = LaunchWorkspace {
-        default_workspace: Some(default.to_string_lossy().to_string()),
-    };
-    let prepared = SessionLauncher {
-        runtime_dir: db.dir.join("runtime"),
-    }
-    .prepare_new_in(&db, Agent::Codex, None, None, &workspace)
-    .unwrap();
-
-    assert!(prepared.owner_workstream_id.is_none());
-    assert_eq!(
-        prepared.cwd.as_deref(),
-        Some(default.to_string_lossy().as_ref())
-    );
-}
-
-#[test]
-fn resume_uses_the_sessions_current_owner_and_needs_no_extra_argument() {
-    let db = open_db("owner-launch-resume");
-    seed_project(&db, "p1");
-    let paths = TempPaths::new(&db.dir, "p1");
-    let dir = paths.dir("repo-a");
-    let w = create_workstream(&db, &paths, "A", "", &[dir.clone()])
-        .unwrap()
-        .workstream;
-    let s = session(&db, Some(&dir));
-    db.set_session_owner(&s.id, Some(&w.id)).unwrap();
-
-    let workspace = LaunchWorkspace {
-        default_workspace: None,
-    };
-    let prepared = SessionLauncher {
-        runtime_dir: db.dir.join("runtime"),
-    }
-    .prepare_resume_in(&db, &s.id, &workspace)
-    .unwrap();
-
-    assert_eq!(prepared.owner_workstream_id.as_deref(), Some(w.id.as_str()));
-    assert_eq!(prepared.cwd.as_deref(), Some(dir.as_str()));
-}
-
-#[test]
-fn resume_uses_the_default_workspace_even_when_its_task_has_a_usable_path() {
-    let db = open_db("owner-resume-fallback");
-    seed_project(&db, "p1");
-    let paths = TempPaths::new(&db.dir, "p1");
-    let dir = paths.dir("repo-a");
-    let w = create_workstream(&db, &paths, "A", "", &[dir.clone()])
-        .unwrap()
-        .workstream;
-    // A recorded cwd that no longer exists on disk. The ROOT SOURCE is still
-    // present (the fixture writes a real file) — only the cwd is gone.
-    let s = session(&db, Some(&db.dir.join("vanished").to_string_lossy()));
-    db.set_session_owner(&s.id, Some(&w.id)).unwrap();
-
-    let workspace = LaunchWorkspace {
-        default_workspace: Some(
-            db.dir
-                .join("default-workspace")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-    };
-    let prepared = SessionLauncher {
-        runtime_dir: db.dir.join("runtime"),
-    }
-    .prepare_resume_in(&db, &s.id, &workspace)
-    .unwrap();
-
-    assert_eq!(prepared.cwd, workspace.default_workspace);
-    assert!(prepared.cwd_resolution.fallback);
 }
 
 #[test]

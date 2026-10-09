@@ -656,7 +656,6 @@ mod tests {
         assert!(is_resolved_title(Some("custom")));
         assert!(!is_resolved_title(Some("provisional")));
         assert!(!is_resolved_title(None));
-        let _ = SessionTitles::open_at(None);
     }
 
     /// Assistant rows carrying a model code (including the synthesized

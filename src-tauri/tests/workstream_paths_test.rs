@@ -663,23 +663,6 @@ fn work_cards(db: &Db, workstream_id: &str) -> noending::commands::workstream::W
         .expect("card")
 }
 
-/// Reordering display positions keeps the same project associations.
-#[test]
-fn display_order_does_not_change_project_membership() {
-    let f = fixture();
-    let before =
-        noending::workspace::workstream::projects_for_workstream(&f.db, &f.workstream.id).unwrap();
-    let mut ids = ordered_path_ids(&f.db, &f.workstream.id);
-    ids.reverse();
-    reorder_workstream_paths(&f.db, &f.workstream.id, &ids).unwrap();
-    let after =
-        noending::workspace::workstream::projects_for_workstream(&f.db, &f.workstream.id).unwrap();
-    assert_eq!(
-        serde_json::to_value(before).unwrap(),
-        serde_json::to_value(after).unwrap()
-    );
-}
-
 /// The view the detail page reads: the list plus the physical facts behind it.
 #[test]
 fn path_views_carry_the_facts_the_detail_page_needs() {

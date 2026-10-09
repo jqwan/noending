@@ -611,6 +611,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
 
     // Overrides are per Agent: another Agent's configuration is not this
     // launch's state.
+    let codex_fingerprint = fingerprint_of(&db);
     noending::agent_runtime::set_runtime_overrides(
         &db,
         Agent::Pi,
@@ -623,15 +624,8 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
     .unwrap();
     assert_eq!(
         fingerprint_of(&db),
-        launcher::compute_state_fingerprint(
-            &db,
-            "new",
-            None,
-            prepared.owner_workstream_id.as_deref(),
-            Agent::Codex,
-            &LaunchWorkspace::default()
-        )
-        .unwrap()
+        codex_fingerprint,
+        "another Agent's override must not invalidate this launch"
     );
 }
 

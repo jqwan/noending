@@ -10,11 +10,19 @@ vi.mock("../../api", () => ({
   },
 }));
 beforeEach(() => viewState.clear());
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.removeItem("noending.continue_mode");
+});
+async function renderCards(element: Parameters<typeof render>[0]) {
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(element); });
+  return view;
+}
 const session = { id: "s1", title: "修复布局", agent: "codex", cwd: "/test/project", started_at: "2026-09-21T00:00:00Z" } as Session;
-it("opens details separately from resume and trash actions", () => {
+it("opens details separately from resume and trash actions", async () => {
   const open = vi.fn(); const resume = vi.fn(); const trash = vi.fn();
-  render(<SessionCards sessions={[session]} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={open} onResume={resume} onArchive={trash} />);
+  await renderCards(<SessionCards sessions={[session]} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={open} onResume={resume} onArchive={trash} />);
   // 行内「继续」= 图标按钮（与聚合按钮默认设置一致）；统一显示桌面图标，可用性由格式能力 + 桌面端在场决定。
   const continueBtn = screen.getByLabelText("在桌面应用中继续修复布局");
   fireEvent.click(continueBtn);
@@ -25,14 +33,14 @@ it("opens details separately from resume and trash actions", () => {
   fireEvent.click(screen.getByText("修复布局"));
   expect(open).toHaveBeenCalledWith("s1");
 });
-it("limits initial rows and reveals more without losing sessions", () => {
-  render(<SessionCards sessions={Array.from({ length: 101 }, (_, i) => ({ ...session, id: String(i), title: `会话${i}` }))} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
+it("limits initial rows and reveals more without losing sessions", async () => {
+  await renderCards(<SessionCards sessions={Array.from({ length: 101 }, (_, i) => ({ ...session, id: String(i), title: `会话${i}` }))} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
   expect(screen.queryByText("会话100")).toBeNull();
   fireEvent.click(screen.getByText("显示更多（剩余 1）"));
   expect(screen.getByText("会话100")).toBeTruthy();
 });
-it("shows the single owner workstream and marks the unowned case", () => {
-  render(<SessionCards
+it("shows the single owner workstream and marks the unowned case", async () => {
+  await renderCards(<SessionCards
     sessions={[
       { ...session, id: "owned", title: "有归属", owner_workstream_id: "w1" },
       { ...session, id: "free", title: "没归属", owner_workstream_id: null },
@@ -47,10 +55,10 @@ it("shows the single owner workstream and marks the unowned case", () => {
   expect(screen.queryByText(/\+\d/)).toBeNull();
 });
 
-it("shows terminal continue button when continue mode is terminal or format is terminal only", () => {
+it("shows terminal continue button when continue mode is terminal or format is terminal only", async () => {
   const onTerminalResume = vi.fn();
   localStorage.setItem("noending.continue_mode", "terminal");
-  const { rerender } = render(
+  const { rerender } = await renderCards(
     <SessionCards
       sessions={[session]}
       workstreamTitleById={new Map()}

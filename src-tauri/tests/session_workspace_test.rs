@@ -14,11 +14,10 @@ use std::sync::{Arc, OnceLock};
 mod support;
 
 use noending::adapters::{adapter_for, DiscoveredMember, DiscoveredMemberKind};
-use noending::domain::{Agent, Session, SessionMessageRole};
+use noending::domain::{Agent, Session};
 use noending::error::Result;
 use noending::ingestion::{ingest_session, reconcile_all, session_title_sources};
 use noending::launcher::LaunchWorkspace;
-use noending::lifecycle;
 use noending::storage::session_paths::attach_session_workspace_path_conn;
 use noending::storage::workspace::{
     insert_workspace_path_conn, reassign_workspace_path_project_conn,
@@ -165,6 +164,10 @@ fn discovered_session_gets_a_workspace_path() {
         path_identity_of("/repo/app"),
         "the observed cwd became its WorkspacePath, by deterministic identity"
     );
+    assert_eq!(after.project_id.as_deref(), Some("p-repo"));
+    assert_eq!(after.cwd.as_deref(), Some("/repo/app"));
+    assert!(after.title.is_some());
+    assert!(after.owner_workstream_id.is_none());
     assert_eq!(
         db.list_workspace_paths().unwrap().len(),
         1,
@@ -257,33 +260,6 @@ fn an_unwired_workspace_layer_resolves_no_path() {
 }
 
 // 2/3. the derived Project
-
-#[test]
-fn session_gets_a_derived_project() {
-    let (_d, db) = temp_db("derived");
-    project(&db, "p-repo", "repo");
-
-    let s = discover_via_reconcile(
-        &db,
-        &unique_dir("derived-raw"),
-        "rollout-2026-09-13-d-1-2-3-4.jsonl",
-        "derived-1",
-        "/repo/app",
-        "hello",
-    );
-    let after = stored(&db, &s.id);
-    assert_eq!(after.project_id.as_deref(), Some("p-repo"));
-    // The read projection agrees with its path.
-    let wp = db
-        .get_workspace_path(after.workspace_path_id.as_ref().unwrap())
-        .unwrap()
-        .unwrap();
-    assert_eq!(wp.project_id.as_str(), "p-repo");
-    assert!(
-        after.owner_workstream_id.is_none(),
-        "a standalone Session has no Owner Workstream"
-    );
-}
 
 #[test]
 fn an_explicit_attach_derives_the_project_from_the_new_path() {
@@ -523,29 +499,6 @@ fn session_ingestion_alone_does_not_change_a_project() {
 
 // product-level discovery
 
-#[test]
-fn reconcile_discovers_and_attaches_sessions_to_workspace_paths() {
-    let dir = unique_dir("reconcile");
-    let root = dir.join("sessions");
-    let db = Db::open(&dir.join("noending.db")).unwrap();
-    project(&db, "p-repo", "repo");
-
-    let s = discover_via_reconcile(
-        &db,
-        &root,
-        "rollout-2026-09-13-r-1-2-3-4.jsonl",
-        "reconciled-1",
-        "/repo/app",
-        "hello",
-    );
-
-    let after = stored(&db, &s.id);
-    assert_eq!(after.workspace_path_id, path_identity_of("/repo/app"));
-    assert_eq!(after.project_id.as_deref(), Some("p-repo"));
-    assert_eq!(after.cwd.as_deref(), Some("/repo/app"));
-    assert!(after.title.is_some(), "the fixture yields a title");
-}
-
 /// Discovery skips transcripts whose stored cursor still matches the file on
 /// disk: a skipped file produces no DiscoveredMember at all, so nothing may
 /// refresh the row — observable by a sentinel `last_activity_at` surviving a
@@ -776,93 +729,9 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
     );
 }
 
-// 6. the detail ingredients
+// Root source availability
 
-/// `get_session_detail` is a thin Tauri command over storage/lifecycle queries.
-/// This pins exactly the rows those queries hand it, so the detail page's
-/// facts cannot drift from the store: the conversation, the aggregate stats,
-/// the two frontiers, and the fresh root source verdict.
-#[test]
-fn the_detail_ingredients_come_from_storage_queries() {
-    let dir = unique_dir("detail-src");
-    let file = dir.join("rollout-detail.jsonl");
-    std::fs::write(&file, "agent-owned transcript\n").unwrap();
-    let db = {
-        let (d, db) = {
-            let d = unique_dir("detail");
-            let db = Db::open(&d.join("noending.db")).unwrap();
-            (d, db)
-        };
-        let _ = d;
-        db
-    };
-    let root_id = "detail-root";
-    let (s, _) = db
-        .upsert_logical_session(
-            Agent::Codex,
-            root_id,
-            None,
-            Some("detail title"),
-            Some("/repo/detail"),
-            None,
-            None,
-            None,
-            None,
-            "test_root",
-            &file.to_string_lossy(),
-            &serde_json::json!({}),
-        )
-        .unwrap();
-
-    // One root conversation batch.
-    let messages = vec![
-        support::parsed_message("m1", SessionMessageRole::User, "detail first"),
-        support::parsed_message("m2", SessionMessageRole::Assistant, "detail reply"),
-    ];
-    let stored_messages = db
-        .commit_ingest(
-            &s,
-            &messages,
-            &noending::domain::SourceCursorUpdate {
-                file_identity: "identity".into(),
-                generation: 1,
-                byte_offset: 100,
-                last_seen_size: 100,
-                mtime: None,
-                start_byte_offset: 0,
-                prefix_hash: String::new(),
-            },
-        )
-        .unwrap();
-    db.index_new_messages(&stored_messages).unwrap();
-
-    // The conversation belongs to this session alone.
-    assert!(stored_messages.iter().all(|m| m.session_id == s));
-    assert_eq!(stored(&db, &s).cwd.as_deref(), Some("/repo/detail"));
-
-    // The two frontiers the detail page shows: messages ingested, and how far
-    // the explicit Session Context has consumed them (no Context row → 0).
-    assert_eq!(db.ingested_message_sequence(&s).unwrap(), 2);
-    assert_eq!(
-        db.get_session_context(&s)
-            .unwrap()
-            .map(|c| c.processed_through_seq)
-            .unwrap_or(0),
-        0,
-        "no Session Context has been generated yet"
-    );
-
-    // The fresh source verdict and the lifecycle flags it feeds.
-    let session = stored(&db, &s);
-    let status = lifecycle::root_source_status(&db, &session).unwrap();
-    assert_eq!(status, Some(noending::domain::SourceAvailability::Present));
-    assert!(!session.is_archived());
-}
-
-/// A stats delta so the commit above reads like the observation batch it is.
-/// The adapter resolved by `adapter_for` is the one the lifecycle verdicts
-/// consult: a Codex root pointing at a real file is Present, and pointing at
-/// a removed file is Missing — never something in between.
+/// The adapter's source verdict follows the actual file's presence on disk.
 #[test]
 fn the_source_verdict_follows_the_file_on_disk() {
     let dir = unique_dir("verdict-src");

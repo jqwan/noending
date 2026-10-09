@@ -1257,7 +1257,7 @@ mod fingerprint_tests {
     }
 
     #[test]
-    fn detect_format_reads_only_the_head_of_a_file() {
+    fn detect_format_skips_unrecognized_head_lines() {
         let dir = std::env::temp_dir().join(format!("noending-fp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mixed.jsonl");
@@ -1322,9 +1322,10 @@ mod fingerprint_tests {
     /// Code's line shapes and are therefore claimed by nobody —
     /// and a file nobody claims is not a misattribution.
     #[test]
-    #[ignore]
+    #[ignore = "requires real local Agent history; fails when no member is discovered"]
     fn real_agent_files_match_fingerprints() {
         use crate::platform::paths::resolve_agent_data_dir;
+        let mut checked = 0;
         for agent in Agent::all() {
             let Some(root) = resolve_agent_data_dir(*agent) else {
                 continue;
@@ -1335,6 +1336,7 @@ mod fingerprint_tests {
             let discovered = adapter_for(*agent)
                 .discover_members_in(&[root.clone()], &|_| false)
                 .unwrap_or_else(|e| panic!("{} discovery failed: {e}", agent.display_name()));
+            checked += discovered.len();
             for m in &discovered {
                 assert_eq!(
                     m.agent,
@@ -1356,6 +1358,10 @@ mod fingerprint_tests {
                 root.display()
             );
         }
+        assert!(
+            checked > 0,
+            "real-data check requires at least one discovered member"
+        );
     }
 }
 

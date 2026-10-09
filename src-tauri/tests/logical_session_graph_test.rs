@@ -97,35 +97,57 @@ const SIDE_ID: &str = "019fccd3-47be-78f2-89fd-9deec2e4c6d9";
 const FORK_ID: &str = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
 
 #[test]
-fn logical_session_creation_rolls_back_if_the_row_cannot_be_written() {
-    let db = open_db("root-transaction");
-    db.write()
-        .execute_batch(
-            "CREATE TRIGGER reject_session_insert BEFORE INSERT ON sessions
-             BEGIN SELECT RAISE(ABORT, 'test session insert failure'); END;",
-        )
-        .unwrap();
-
-    assert!(db
-        .upsert_logical_session(
-            Agent::Codex,
-            ROOT_ID,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "test",
-            "/tmp/root",
-            &serde_json::json!({}),
-        )
-        .is_err());
-    assert!(db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
-        .unwrap()
-        .is_none());
+fn logical_session_create_and_refresh_roll_back_when_search_indexing_fails() {
+    for existing in [false, true] {
+        let db = open_db("root-transaction");
+        if existing {
+            db.upsert_logical_session(
+                Agent::Codex,
+                ROOT_ID,
+                Some("original title"),
+                None,
+                Some("/original"),
+                None,
+                None,
+                None,
+                None,
+                "test",
+                "/original/source",
+                &serde_json::json!({"original": true}),
+            )
+            .unwrap();
+        }
+        let before = db
+            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .unwrap();
+        // The session INSERT/UPDATE succeeds before indexing reaches the missing table.
+        db.write()
+            .execute_batch("DROP TABLE search_index;")
+            .unwrap();
+        assert!(db
+            .upsert_logical_session(
+                Agent::Codex,
+                ROOT_ID,
+                Some("changed title"),
+                None,
+                Some("/changed"),
+                None,
+                None,
+                None,
+                None,
+                "changed",
+                "/changed/source",
+                &serde_json::json!({"changed": true}),
+            )
+            .is_err());
+        let after = db
+            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+    }
 }
 
 // child/side sources: recognized, then silently skipped
@@ -809,37 +831,6 @@ fn turn_final_flags_track_the_projection() {
     .unwrap();
     assert!(!flags_of(&db, "a3"), "the continuation demoted it");
     assert!(flags_of(&db, "a4"));
-}
-
-/// Append duplicate: the same messages committed again store nothing new
-/// (identity dedup,).
-#[test]
-fn duplicate_commits_dedup() {
-    let db = open_db("dedup");
-    let (session, first) = seed_root(&db);
-    assert_eq!(first.len(), 1);
-    let first_seq = first[0].sequence;
-
-    // Same source again (a full re-scan: start at genesis with a fresh
-    // generation) — the identical message dedups, nothing appends. Every
-    // identity input (id, role, ts, content) must equal the seed's.
-    let again = db
-        .commit_ingest(
-            &session.id,
-            &[noending::domain::ParsedSessionMessage {
-                source_message_id: Some("m1".into()),
-                source_position: "line:1".into(),
-                ts: Some("2026-09-20T13:01:48Z".into()),
-                role: SessionMessageRole::User,
-                content: "第一次的提问".into(),
-            }],
-            &seed_update(1, 40),
-        )
-        .unwrap();
-    assert!(again.is_empty(), "identical content stores nothing");
-    assert_eq!(db.message_count(&session.id).unwrap(), 1);
-    let messages = db.get_messages(&session.id, None, 10).unwrap();
-    assert_eq!(messages[0].sequence, first_seq, "sequence never re-issued");
 }
 
 /// A source rewrite (new generation, full rescan): the old conversation is

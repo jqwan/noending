@@ -82,6 +82,18 @@ class MigrationTests(unittest.TestCase):
                     self.assertEqual(c.execute("SELECT ref_id FROM search_index WHERE kind='message'").fetchall(), [('current',)])
                     self.assertEqual(c.execute("SELECT count(*) FROM search_index WHERE search_index MATCH 'conversation'").fetchone()[0], 1)
                     self.assertEqual(c.execute("SELECT count(*) FROM search_index WHERE search_index MATCH 'current'").fetchone()[0], 1)
+                    # Independent fixture expectations: do not rely only on convert's own row checks.
+                    self.assertEqual(c.execute("SELECT id,content FROM session_messages ORDER BY sequence").fetchall(), [('retired', 'Old evidence'), ('current', 'Current conversation')])
+                    self.assertEqual(c.execute("SELECT owner_workstream_id,cwd,workspace_path_id,source_byte_offset,fact_generation,latest_message_seq FROM sessions WHERE id='s'").fetchone(), ('w', '/work', 'path', 123, 2, 2))
+                    self.assertEqual(c.execute("SELECT forked_from_session_id FROM sessions WHERE id='fork'").fetchone(), ('s',))
+                    self.assertEqual(c.execute("SELECT id,source_ref,metadata FROM context_item_revisions ORDER BY id").fetchall(), [('r1', 'session-context:s:1', '{"evidence":["retired"]}'), ('r2', 'session-context:s:1', '{"evidence":["retired"]}')])
+                    self.assertEqual(c.execute("SELECT summary_current_state,decisions,open_questions,next_steps,revision,ingest_generation,processed_through_seq FROM session_contexts").fetchone(), ('Summary', '["Decision"]', '["Question"]', '["Next"]', 1, 2, 1))
+                    self.assertEqual(c.execute("SELECT * FROM workstream_session_frontiers").fetchone(), ('w', 's', 1, 2, 1))
+                    self.assertEqual(c.execute("SELECT value FROM settings WHERE key='setting'").fetchone(), ('preserved',))
+                    self.assertEqual(c.execute("SELECT content FROM assistant_messages WHERE id='a'").fetchone(), ('Assistant history',))
+                    self.assertEqual(c.execute("SELECT enabled,origin FROM ingest_sources WHERE id='source'").fetchone(), (1, 'user'))
+                    self.assertEqual(c.execute("SELECT left_revision_id FROM context_conflicts WHERE id='conflict'").fetchone(), ('r1',))
+                    self.assertEqual(c.execute("SELECT snapshot_json FROM context_conflict_events WHERE id='event'").fetchone(), ('{}',))
                     migration.integrity(c)
                 with sqlite3.connect(self.source) as old:
                     self.assertEqual(old.execute('PRAGMA user_version').fetchone()[0], version)

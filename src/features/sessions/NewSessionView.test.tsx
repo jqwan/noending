@@ -132,6 +132,8 @@ const preparedFixture = {
 } satisfies import("../../types").PreparedLaunch;
 
 beforeEach(() => {
+  vi.mocked(open).mockReset().mockResolvedValue(null);
+  vi.mocked(api.addProjectPath).mockReset();
   vi.mocked(api.launchEmbeddedNew).mockReset();
   vi.mocked(api.probeWorkspacePath).mockReset().mockResolvedValue(probeFixture);
   vi.mocked(api.cancelPrepared).mockClear();
@@ -290,34 +292,6 @@ describe("NewSessionView task and project selection", () => {
     },
   ];
 
-  it("renders task options containing only task title without directory", async () => {
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      {
-        id: "ws-1",
-        title: "我的功能开发",
-        description: "",
-
-        visibility: "normal",
-        created_at: "2026-10-01T00:00:00Z",
-        updated_at: "2026-10-01T00:00:00Z",
-        projects: [{ id: "p-1", name: "Project 1" }],
-        current_state: null,
-        goal: null,
-        last_activity_at: null,
-        session_count: 1,
-        latest_session: null,
-        path_count: 1,
-
-      },
-    ]);
-    render(<NewSessionView navigate={vi.fn()} />);
-
-    const taskSelect = (await screen.findByLabelText("所属任务（可选）")) as HTMLSelectElement;
-    const options = Array.from(taskSelect.querySelectorAll("option")).map((o) => o.textContent);
-    expect(options).toContain("我的功能开发");
-    expect(options).toContain("+ 新任务");
-    expect(options.some((t) => t?.includes("/repo/project-1"))).toBe(false);
-  });
 
   it("renders + 新任务 in task options and selecting it opens the new task modal", async () => {
     render(<NewSessionView navigate={vi.fn()} />);
@@ -594,13 +568,13 @@ it("shows the resolved fallback directory and uses the same default-path intent 
   vi.mocked(api.prepareNewSession).mockResolvedValue({
     ...preparedFixture,
     cwd: "/repo/fallback",
-    cwd_resolution: { ...preparedFixture.cwd_resolution, cwd: "/repo/fallback", fallback: true, note: "主目录不可用，使用备用目录" },
+    cwd_resolution: { ...preparedFixture.cwd_resolution, cwd: "/repo/fallback", fallback: true, note: "工作目录不可用，使用备用目录" },
   });
   vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
     launched_via: "内嵌终端", command_line: "codex", note: "已启动", launch_intent_id: null, terminal_id: "t-fallback",
   });
   render(<NewSessionView navigate={vi.fn()} />);
-  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("主目录不可用，使用备用目录"));
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("工作目录不可用，使用备用目录"));
   fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始任务" } });
   const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
   await waitFor(() => expect(send.disabled).toBe(false));
@@ -632,6 +606,6 @@ it("does not designate the first project of a multi-project task as its default"
   render(<NewSessionView workstreamId="multi" navigate={vi.fn()} />);
   const task = await screen.findByLabelText("所属任务（可选）");
   await waitFor(() => expect((task as HTMLSelectElement).value).toBe("multi"));
-  expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).not.toBe("p-1");
-  expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).not.toBe("p-2");
+  expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("default");
+  await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", "multi", "/tmp/workspace"));
 });

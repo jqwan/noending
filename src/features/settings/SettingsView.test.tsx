@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import SettingsView from "./SettingsView";
+import { api } from "../../api";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue("/custom/storage/dir"),
@@ -60,4 +61,6 @@ it("opens modal to change data storage directory and can submit new path", async
   fireEvent.click(screen.getByRole("button", { name: "登记并在下次启动迁移" }));
 
   await screen.findByText("待重启生效");
+  expect(api.setNoendingHome).toHaveBeenCalledTimes(1);
+  expect(api.setNoendingHome).toHaveBeenCalledWith("/custom/storage/dir");
 });

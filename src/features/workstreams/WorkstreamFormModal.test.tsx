@@ -33,6 +33,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(api.listRecentWorkspacePaths).mockResolvedValue([]);
   vi.mocked(api.listProjectCards).mockResolvedValue([]);
   vi.mocked(api.probeWorkspacePath).mockResolvedValue(null as unknown as PathProbe);
   vi.mocked(open).mockResolvedValue(null);
@@ -150,14 +152,14 @@ describe("WorkstreamFormModal project selection", () => {
     vi.mocked(api.listProjectCards).mockResolvedValueOnce([
       projectCard("p1", "项目 A", ["/repo/main", "/repo/worktree-1"]),
     ]);
-    vi.mocked(open).mockResolvedValueOnce("/repo/main/sub");
+    vi.mocked(open).mockResolvedValueOnce("/repo/worktree-1");
     vi.mocked(api.probeWorkspacePath).mockResolvedValueOnce({
-      raw: "/repo/main/sub",
+      raw: "/repo/worktree-1",
       status: "ok",
-      canonical_path: "/repo/main/sub",
+      canonical_path: "/repo/worktree-1",
       exists: true,
       git_state: "detected",
-      git_kind: "worktree",
+      git_kind: "linked",
       project: { id: "p1", name: "项目 A", known: true },
     });
     vi.mocked(api.createWorkstream).mockResolvedValue(report("w3", []));

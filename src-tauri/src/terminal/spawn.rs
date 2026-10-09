@@ -193,17 +193,41 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn unix_wrapper_quotes_every_argument_into_a_login_shell() {
+        let cwd =
+            std::env::temp_dir().join(format!("noending quote's {}", crate::storage::new_id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let literal_args = [
+            "thread with space",
+            "it's literal",
+            "line one\nline two",
+            "$(printf injected) $HOME `printf injected`",
+            "中文",
+        ];
         let cmd = AgentCommand {
-            program: "/usr/local/bin/codex".into(),
-            args: vec!["resume".into(), "thread with space".into()],
-            cwd: Some(std::path::PathBuf::from("/tmp/some dir")),
+            program: "/bin/sh".into(),
+            args: ["-c", r#"printf '%s\0' "$PWD" "$@""#, "--"]
+                .into_iter()
+                .chain(literal_args)
+                .map(str::to_string)
+                .collect(),
+            cwd: Some(cwd.clone()),
         };
         let wrapped = wrapped_command(&cmd);
-        // Not directly inspectable — CommandBuilder has no getters — so assert
-        // on the shell choice and rely on the integration tests to prove the
-        // quoting survives a real spawn.
-        let shell = login_shell();
-        assert!(shell == "/bin/zsh" || shell == "/bin/bash" || shell.starts_with('/'));
-        let _ = wrapped;
+        let argv = wrapped.get_argv();
+        assert_eq!(argv[0], std::ffi::OsString::from(login_shell()));
+        assert_eq!(&argv[1..3], ["-l", "-c"]);
+        // Execute the generated script without user-specific login startup files.
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&argv[3])
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let expected = std::iter::once(cwd.to_string_lossy().as_ref())
+            .chain(literal_args)
+            .map(|arg| format!("{arg}\0"))
+            .collect::<String>();
+        assert_eq!(output.stdout, expected.as_bytes());
     }
 }

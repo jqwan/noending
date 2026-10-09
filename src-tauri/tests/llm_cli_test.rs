@@ -284,7 +284,7 @@ fn add_without_kind_or_title_is_rejected() {
 // Real-model smoke tests (#[ignore]: need the authenticated agent CLIs)
 
 #[test]
-#[ignore]
+#[ignore = "requires Pi CLI and LM Studio serving qwen/qwen3.8-27b"]
 fn real_pi_local_qwen_headless() {
     let install = noending::platform::exec_resolver::resolve(Agent::Pi).expect("pi CLI");
     let adapter = noending::adapters::adapter_for(Agent::Pi);
@@ -310,9 +310,16 @@ fn real_pi_local_qwen_headless() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires installed, authenticated Codex CLI and a model call"]
 fn real_codex_assistant_chat_roundtrip() {
     let db = temp_db();
+    assert!(
+        noending::adapters::adapter_for(Agent::Codex)
+            .detect()
+            .is_some(),
+        "Codex CLI required"
+    );
+    db.set_setting("assistant.agent", "codex").unwrap();
     let ws = noending::domain::Workstream {
         id: "ws-chat-1".into(),
         title: "NoEnding 品牌".into(),
@@ -331,6 +338,11 @@ fn real_codex_assistant_chat_roundtrip() {
     )
     .expect("assistant chat should succeed");
     println!("assistant: {} [runtime={}]", reply.content, reply.runtime);
+    assert!(
+        reply.runtime.starts_with("cli:codex:"),
+        "unexpected fallback: {}",
+        reply.runtime
+    );
     assert!(!reply.content.is_empty());
     assert!(
         reply.content.contains("品牌") || reply.content.contains("Workstream"),

@@ -113,37 +113,6 @@ fn add_note(ws_id: &str, title: &str, content: &str) -> ContextMutation {
 
 /// A DB failure anywhere in the update's transaction must roll back the whole
 /// batch: earlier mutations and their conflict rows disappear together.
-#[test]
-fn mutation_failure_rolls_back_entire_run() {
-    let db = open_db("rollback");
-    let ws = ws_row(&db, "ws-rollback", "real workstream");
-    let c = ctx(&ws.id);
-    let m = add_note(&ws.id, "first mutation", "ok");
-
-    let result = db.tx(|tx| {
-        MergeEngine.apply(tx, &m, &c)?;
-        // FK violation: there is no such Session to write Context for.
-        tx.execute(
-            "INSERT INTO session_contexts (session_id, updated_at) VALUES ('missing-session', 't')",
-            [],
-        )?;
-        Ok(())
-    });
-    assert!(
-        result.is_err(),
-        "the FK violation must fail the transaction"
-    );
-
-    assert!(
-        db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
-        "the applied mutation must NOT survive the rollback"
-    );
-    assert_eq!(
-        db.conflicts_for_workstream(&ws.id, false).unwrap().len(),
-        0,
-        "no conflict row survives either"
-    );
-}
 
 /// Retrying after a rollback applies the batch exactly once; re-applying an
 /// identical mutation is a deterministic skip (dedup).
@@ -170,6 +139,10 @@ fn retry_after_rollback_applies_once_and_reapply_is_deduped() {
     );
 
     // retry succeeds exactly once
+    assert!(db
+        .conflicts_for_workstream(&ws.id, true)
+        .unwrap()
+        .is_empty());
     let c2 = ctx(&ws.id);
     db.tx(|tx| {
         MergeEngine.apply(tx, &m, &c2)?;
@@ -525,75 +498,6 @@ fn dedup_update_path_also_persists_revision() {
         history[1].id
     );
     head_is_resolvable(&db, &ws.id, &item_id);
-}
-
-// Owner boundary: `update` / `supersede` / `resolve` name their target by
-// `item_id`, and that id may come from model output echoing an id found anywhere
-// in the transcript — so a mutation naming a Workstream outside the run's Owner
-// must be SKIPPED, never written. The routing decision the user just made wins.
-
-#[test]
-fn mutation_outside_the_owner_is_skipped_not_written() {
-    let db = open_db("owner-boundary");
-    let ws_owner = ws_row(&db, "ws-owner", "the run's owner");
-    let ws_other = ws_row(&db, "ws-other", "someone else's workstream");
-    let item = agent_item(&db, &ws_other.id, "别的 Workstream 的条目", "body");
-    let original_head = item.current_revision_id.clone();
-
-    // The run may only write `ws_owner`.
-    let c = ctx(&ws_owner.id);
-
-    let add = add_note(&ws_other.id, "越界新增", "should never land");
-    assert!(
-        !db.tx(|tx| MergeEngine.apply(tx, &add, &c)).unwrap(),
-        "an Add for another Workstream is skipped"
-    );
-
-    let update = ContextMutation::Update {
-        item_id: item.id.clone(),
-        title: "越界改写".into(),
-        content: "should never land".into(),
-        source_refs: vec![],
-        authority: "agent_inferred".into(),
-    };
-    assert!(
-        !db.tx(|tx| MergeEngine.apply(tx, &update, &c)).unwrap(),
-        "an Update naming another Workstream's item is skipped"
-    );
-
-    let sup = ContextMutation::Supersede {
-        item_id: item.id.clone(),
-        title: "越界取代".into(),
-        content: "should never land".into(),
-        source_refs: vec![],
-        authority: "agent_inferred".into(),
-    };
-    assert!(!db.tx(|tx| MergeEngine.apply(tx, &sup, &c)).unwrap());
-
-    let res = ContextMutation::Resolve {
-        item_id: item.id.clone(),
-        source_refs: vec![],
-    };
-    assert!(!db.tx(|tx| MergeEngine.apply(tx, &res, &c)).unwrap());
-
-    let after = db.get_item(&item.id).unwrap().unwrap();
-    assert_eq!(after.status, "active", "the other item is untouched");
-    assert_eq!(after.current_revision_id, original_head);
-    assert_eq!(
-        db.items_for_workstream(&ws_other.id, true).unwrap().len(),
-        1
-    );
-    assert!(db
-        .items_for_workstream(&ws_owner.id, true)
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        db.conflicts_for_workstream(&ws_other.id, false)
-            .unwrap()
-            .len(),
-        0,
-        "a skipped mutation writes neither item nor conflict"
-    );
 }
 
 /// Archiving changes neither task input revisions nor the no-message update

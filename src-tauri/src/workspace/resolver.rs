@@ -1180,12 +1180,6 @@ bare
             git_state::MISSING,
             "already-missing stays missing"
         );
-        // losing Git must not detach a path from its Project, so a value
-        // that was never detected is never reported as `missing`.
-        assert_eq!(
-            git_state_after_observation(git_state::DETECTED, &GitDetection::None),
-            git_state::MISSING
-        );
         // "Could not ask" changes nothing at all — the whole point of keeping the
         // variant distinct.
         assert_eq!(

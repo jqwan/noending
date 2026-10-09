@@ -846,7 +846,7 @@ mod tests {
     /// User turn 14 → `19.2`; agent turn 15 → its prose (`20.1`, else `20.3`);
     /// tool calls (132) and API errors (17) are observations only.
     #[test]
-    fn ingests_the_conversation_and_counts_the_machine_traffic() {
+    fn ingests_the_conversation_and_excludes_machine_traffic() {
         let root = temp_dir("parse");
         let user_turn = [timestamp(1_789_480_258), msg(19, &str(2, "把日报整理一下"))].concat();
         let agent_turn = [

@@ -245,7 +245,7 @@ fn title_is_write_once() {
 }
 
 #[test]
-fn unchanged_upsert_rewrites_nothing() {
+fn unchanged_upsert_preserves_identity_and_metadata() {
     let database = db("stable");
     let root_id = format!("meta-{}", new_id());
 

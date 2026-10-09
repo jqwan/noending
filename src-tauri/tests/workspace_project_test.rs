@@ -1588,20 +1588,6 @@ fn the_core_writes_no_index_rows_and_the_wrapper_does() {
     assert_eq!(indexed(&db), 0);
 }
 
-#[test]
-fn an_unregistered_home_policy_leaves_the_registry_open() {
-    // The default policy is what every creation path and every test here uses:
-    // nothing reserved, no special name — so is fully exercisable with no
-    // filesystem and no Home at all.
-    let (_d, db) = temp_db();
-    let path = ensure(&db, &plain("/anything/at/all", true));
-    assert_eq!(project_of(&db, &path).name, "All");
-    let observer = Scripted::new();
-    let projection = ProjectProjection::new(&observer);
-    assert!(!projection.policy().is_reserved("/anything/at/all"));
-    assert_eq!(projection.policy().default_workspace(), None);
-}
-
 // The Windows case-alias claim can only be proven where the host's own rule
 // applies: `ensure_workspace_path_conn` re-derives the id through the host, so
 // these tests are `#[cfg(windows)]` and run on CI's windows-latest job only.
@@ -1812,22 +1798,6 @@ fn refresh_marks_deleted_directory_missing() {
 }
 
 #[test]
-fn unreferenced_missing_path_is_gc_d() {
-    let (_d, db) = temp_db_locked();
-    let observer = Scripted::new();
-    observer.set("/work/a", plain("/work/a", false));
-    let projection = ProjectProjection::new(&observer);
-    let wp = { ensure(&db, &plain("/work/a", true)) };
-
-    let report =
-        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
-    assert_eq!(report.outcome.deleted_paths, vec![wp.id.clone()]);
-    {
-        assert!(db.get_workspace_path(&wp.id).unwrap().is_none());
-    }
-}
-
-#[test]
 fn last_path_gc_retires_project() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
@@ -1841,6 +1811,8 @@ fn last_path_gc_retires_project() {
 
     let report =
         reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
+    assert_eq!(report.outcome.deleted_paths, vec![wp.id.clone()]);
+    assert!(db.get_workspace_path(&wp.id).unwrap().is_none());
     assert_eq!(report.outcome.deleted_projects, vec![project_id.clone()]);
     {
         assert!(db.get_project(&project_id).unwrap().is_none());
@@ -1920,6 +1892,17 @@ fn refresh_does_not_touch_session_history() {
         let s_hist = session(&db, "s-hist", "/work/a", &wp.id);
         (wp, s_hist)
     };
+    let history = db
+        .commit_ingest(
+            &s_hist.id,
+            &[support::parsed_message(
+                "history",
+                noending::domain::SessionMessageRole::User,
+                "preserved history",
+            )],
+            &support::seed_source(0),
+        )
+        .unwrap();
     let before = count_rows(
         &db,
         "SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?",
@@ -1940,11 +1923,37 @@ fn refresh_does_not_touch_session_history() {
     let s = { db.get_session(&s_hist.id).unwrap().expect("session intact") };
     assert!(s.archived_at.is_none());
     assert_eq!(s.workspace_path_id.as_deref(), Some(wp.id.as_str()));
+    let after = db.get_messages(&s_hist.id, None, 10).unwrap();
+    assert_eq!(
+        after
+            .iter()
+            .map(|m| (&m.id, &m.content))
+            .collect::<Vec<_>>(),
+        history
+            .iter()
+            .map(|m| (&m.id, &m.content))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn refresh_does_not_ingest_sessions() {
-    let (_d, db) = temp_db_locked();
+    let (dir, db) = temp_db_locked();
+    let source = dir.join("external-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("rollout-2026-10-09-external.jsonl"),
+        concat!(r#"{"ordinal":0,"type":"session_meta","payload":{"id":"external-root","cwd":"/work/a"}}"#, "\n",
+        r#"{"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"external transcript"}]}}"#, "\n")).unwrap();
+    db.add_ingest_source(Agent::Codex, &source.to_string_lossy(), true)
+        .unwrap();
+    assert_eq!(
+        noending::adapters::adapter_for(Agent::Codex)
+            .discover_members_in(&[source], &|_| false)
+            .unwrap()
+            .len(),
+        1,
+        "fixture must be discoverable if ingestion were accidentally invoked"
+    );
     let observer = Scripted::new();
     observer.set("/work/a", plain("/work/a", true));
     let projection = ProjectProjection::new(&observer);

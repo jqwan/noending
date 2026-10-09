@@ -45,7 +45,7 @@ fn session_row(db: &Db, agent: Agent) -> noending::domain::Session {
 }
 
 #[test]
-fn workstream_context_core_matches_resolve_core_context() {
+fn resolved_core_contains_only_core_kinds_with_item_provenance() {
     let db = open_db("core-match");
     let ws = ws_row(&db, "Core Match WS");
 

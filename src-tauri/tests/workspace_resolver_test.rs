@@ -46,8 +46,8 @@ fn scratch(tag: &str) -> PathBuf {
     PathBuf::from(normalized)
 }
 
-fn git() -> Option<PathBuf> {
-    resolve_executable("git")
+fn git() -> PathBuf {
+    resolve_executable("git").expect("real-Git integration tests require Git on PATH")
 }
 
 /// `git` with the fixture-only identity overrides, so a machine with
@@ -108,10 +108,7 @@ fn path_key_of(p: &Path) -> String {
 /// 必须测试: a normal git repo.
 #[test]
 fn a_plain_repository_is_detected() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     let root = scratch("plain");
     let repo = root.join("noending");
     init_repo(&program, &repo);
@@ -157,10 +154,7 @@ fn a_plain_repository_is_detected() {
 
 #[test]
 fn nested_plain_directories_derive_independent_projects_and_upgrade_in_place() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     use noending::storage::Db;
     use noending::workspace::project::{ensure_workspace_path, UnrestrictedWorkspace};
 
@@ -213,10 +207,7 @@ fn nested_plain_directories_derive_independent_projects_and_upgrade_in_place() {
 #[cfg(unix)]
 #[test]
 fn symlinks_preserve_path_identity_and_only_detect_git_at_the_directory_root() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     let root = scratch("symlink");
     let repo = root.join("repo");
     init_repo(&program, &repo);
@@ -240,10 +231,7 @@ fn symlinks_preserve_path_identity_and_only_detect_git_at_the_directory_root() {
 /// 必须测试: a linked worktree.
 #[test]
 fn a_linked_worktree_is_detected_as_linked() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     let root = scratch("worktree");
     let main = root.join("main-checkout");
     init_repo(&program, &main);
@@ -320,10 +308,7 @@ fn a_linked_worktree_is_detected_as_linked() {
 /// `git_state::MISSING` is derived by the caller from prior state.
 #[test]
 fn a_removed_git_directory_leaves_the_path_but_not_the_evidence() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     let root = scratch("missing");
     let repo = root.join("repo");
     init_repo(&program, &repo);
@@ -366,10 +351,7 @@ fn a_removed_git_directory_leaves_the_path_but_not_the_evidence() {
 /// toplevel IS the (fake) user Home.
 #[test]
 fn a_home_level_dotfiles_repository_is_not_evidence() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     let root = scratch("homegit");
     let fake_home = root.join("home");
     init_repo(&program, &fake_home);
@@ -461,10 +443,7 @@ fn a_real_noending_home_reserves_app_paths_and_allows_workspace() {
 /// does not exist at all.
 #[test]
 fn the_child_process_runs_in_the_requested_directory() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     let root = scratch("cwd");
     let repo = root.join("r");
     init_repo(&program, &repo);
@@ -527,10 +506,7 @@ fn the_child_process_runs_in_the_requested_directory() {
 /// repository, and nothing it returns may be a Project.
 #[test]
 fn observing_is_not_mutation() {
-    let Some(program) = git() else {
-        eprintln!("skip: git not found");
-        return;
-    };
+    let program = git();
     let root = scratch("readonly");
     let repo = root.join("r");
     init_repo(&program, &repo);
@@ -545,8 +521,8 @@ fn observing_is_not_mutation() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// A cheap fingerprint of a directory tree: names, sizes and file count.
-fn read_tree(dir: &Path) -> std::io::Result<Vec<(String, u64)>> {
+/// Snapshot every file by relative name and exact bytes.
+fn read_tree(dir: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -562,7 +538,7 @@ fn read_tree(dir: &Path) -> std::io::Result<Vec<(String, u64)>> {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                out.push((name, entry.metadata()?.len()));
+                out.push((name, std::fs::read(&path)?));
             }
         }
     }

@@ -24,7 +24,10 @@ vi.mock("../components/Toast", () => ({ default: () => null }));
 vi.mock("../components/CommandPalette", () => ({ default: () => null }));
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  appForeground.mockClear();
+});
 afterEach(cleanup);
 
 it("starts on the new-session page", () => {

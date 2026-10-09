@@ -16,17 +16,6 @@ function systemTheme(dark: boolean) {
   return media;
 }
 
-it("honors an explicit app theme over the system preference", () => {
-  systemTheme(true);
-  document.documentElement.dataset.theme = "light";
-  const light = readTerminalTheme();
-  expect(light.background).toBe("#ffffff");
-  document.documentElement.dataset.theme = "dark";
-  const dark = readTerminalTheme();
-  expect(dark.background).toBe("#141413");
-  expect(dark.foreground).not.toBe(light.foreground);
-  expect(dark.blue).not.toBe(light.blue);
-});
 
 it("uses the app's resolved surface, text and selection tokens", () => {
   const root = document.documentElement;
@@ -64,13 +53,22 @@ it("follows system changes only while the app uses the system theme", async () =
   const stop = observeTerminalTheme(term);
   try {
     expect(term.options.theme?.background).toBe("#ffffff");
+    const light = term.options.theme;
     media.matches = true;
     media.dispatchEvent(new Event("change"));
     expect(term.options.theme?.background).toBe("#141413");
+    expect(term.options.theme?.foreground).not.toBe(light?.foreground);
+    expect(term.options.theme?.blue).not.toBe(light?.blue);
     document.documentElement.dataset.theme = "light";
     await waitFor(() => expect(term.options.theme?.background).toBe("#ffffff"));
     media.dispatchEvent(new Event("change"));
     expect(term.options.theme?.background).toBe("#ffffff");
+    media.matches = false;
+    document.documentElement.dataset.theme = "dark";
+    await waitFor(() => expect(term.options.theme?.background).toBe("#141413"));
+    media.dispatchEvent(new Event("change"));
+    expect(term.options.theme?.background).toBe("#141413");
+    media.matches = true;
     delete document.documentElement.dataset.theme;
     await waitFor(() => expect(term.options.theme?.background).toBe("#141413"));
   } finally {

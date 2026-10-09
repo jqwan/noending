@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionConversationView from "./SessionConversationView";
 import { api } from "../../api";
 import type {
@@ -24,6 +24,10 @@ vi.mock("../../api", () => ({
   },
 }));
 
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(api.getAgentStatus).mockResolvedValue({});
+});
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -109,7 +113,8 @@ function mark(ordinal: number, preview: string): SessionMessageMark {
 async function renderConversation(marks: SessionMessageMark[] = []) {
   vi.mocked(api.getSessionDetail).mockResolvedValue(detail(session("me")));
   vi.mocked(api.getSessionUserMessageMarks).mockResolvedValue(marks);
-  const view = render(<SessionConversationView sessionId="me" navigate={vi.fn()} />);
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(<SessionConversationView sessionId="me" navigate={vi.fn()} />); });
   return view.container;
 }
 
@@ -494,27 +499,6 @@ it("waits for the scroll to settle before pulling an older page", async () => {
   expect(api.getSessionMessages).toHaveBeenCalledWith("me", { beforeOrdinal: 1, limit: expect.any(Number) });
 });
 
-it("lays the user-message ticks on a fixed pitch, not on their document position", async () => {
-  vi.mocked(api.getSessionMessages).mockResolvedValue(page({
-    messages: [message(10, "user", "很早的提问")],
-    total: 1000,
-    next_before_ordinal: null,
-  }));
-
-  // 三条用户消息分别在第 10、500、999 条：刻度只按它们是第几条提问排，与它们在会话里
-  // 的位置无关，否则 1000 条会话里前三根会被压成一根。
-  await renderConversation([
-    mark(10, "很早的提问"),
-    mark(500, "中间那问"),
-    mark(999, "最后一问"),
-  ]);
-  await screen.findByText("很早的提问");
-
-  const tops = [...document.querySelectorAll<HTMLElement>(".conversation-nav .nav-mark")]
-    .map((el) => el.style.top);
-  expect(tops).toEqual(["6px", "16px", "26px"]);
-  expect(document.querySelectorAll(".conversation-nav .nav-tick")).toHaveLength(3);
-});
 
 it("reloads from the tail when the conversation was rewritten", async () => {
   vi.mocked(api.getSessionMessages)

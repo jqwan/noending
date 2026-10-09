@@ -20,7 +20,7 @@
 
 use noending::domain::{Agent, SessionMessageRole};
 use noending::domain::{ParsedSessionMessage, SourceCursorUpdate};
-use noending::storage::{new_id, Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
+use noending::storage::{Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
@@ -335,6 +335,12 @@ fn logical_session_schema_enforces_its_invariants() {
         .unwrap();
 
     db.write()
+        .execute(
+            "INSERT INTO session_message_projection VALUES ('s1', 1, 'msg-1')",
+            [],
+        )
+        .unwrap();
+    db.write()
         .execute("DELETE FROM sessions WHERE id = 's1'", [])
         .unwrap();
 
@@ -413,7 +419,6 @@ fn storage_round_trip_matches_the_schema_promises() {
     assert!(replay.is_empty(), "a re-scan must not duplicate messages");
     assert_eq!(db.message_count(&s_id).unwrap(), 2);
     assert_eq!(db.ingested_message_sequence(&s_id).unwrap(), 2);
-    let _ = new_id();
 }
 
 /// Reopening a current-format database reads the format marker and checks the

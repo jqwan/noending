@@ -28,15 +28,20 @@ fn capabilities_are_the_backend_contract_not_the_discovery_result() {
 /// Exercises the real CLIs, so it is ignored by default:
 ///   cargo test --test agent_runtime_discovery_test -- --ignored --nocapture
 #[test]
-#[ignore]
+#[ignore = "requires at least one installed Agent CLI for discovery"]
 fn real_agents_answer_discovery_or_warn() {
     // Only Agents with a CLI can be asked anything: a history-only Agent has
     // no catalog and no effort vocabulary to report.
+    let mut checked = 0;
     for agent in Agent::all()
         .iter()
         .copied()
         .filter(|a| !noending::platform::exec_resolver::cli_names(*a).is_empty())
     {
+        if noending::platform::exec_resolver::resolve(agent).is_err() {
+            continue;
+        }
+        checked += 1;
         let d = noending::agent_runtime::discover_runtime_options(agent);
         println!(
             "{:?}: source={} models={} efforts={:?} warnings={:?}",
@@ -56,6 +61,10 @@ fn real_agents_answer_discovery_or_warn() {
             assert_eq!(m.provider.is_some(), agent == Agent::Pi);
         }
     }
+    assert!(
+        checked > 0,
+        "real discovery check requires an installed CLI"
+    );
 }
 
 /// The other half of that contract: an Agent with no CLI answers

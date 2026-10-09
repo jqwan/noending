@@ -123,7 +123,6 @@ fn archive_preserves_paths_context_and_ownership() {
     assert_eq!(after.owner_sessions, before.owner_sessions);
     assert_eq!(after.context_items, before.context_items);
     assert_eq!(after.revisions, before.revisions);
-    assert_eq!(after.project_projection(), before.project_projection());
     assert!(db.get_workstream_review_state(&w.id).unwrap().is_some());
     assert_eq!(
         db.get_item(&item.id).unwrap().unwrap().current_revision_id,
@@ -356,6 +355,10 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
         1
     );
     assert_eq!(db.conflict_history(&conflict.id).unwrap().len(), 1);
+    let revision_ids: Vec<String> = [&item.id, &second.id]
+        .into_iter()
+        .flat_map(|id| db.item_history(id).unwrap().into_iter().map(|r| r.id))
+        .collect();
     assert_eq!(
         count(
             &db,
@@ -369,14 +372,41 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     delete_workstream_permanently(&db, &w.id).unwrap();
 
     // …and all of it is gone, in the order fixes.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM context_conflict_events WHERE conflict_id = ?1",
+            &conflict.id
+        ),
+        0
+    );
+    for id in revision_ids {
+        assert!(
+            db.get_revision(&id).unwrap().is_none(),
+            "orphan revision {id}"
+        );
+    }
     for (label, sql) in [
-        ("conflict events", "SELECT COUNT(*) FROM context_conflict_events WHERE conflict_id IN (SELECT id FROM context_conflicts WHERE workstream_id = ?1)"),
-        ("conflicts", "SELECT COUNT(*) FROM context_conflicts WHERE workstream_id = ?1"),
-        ("revisions", "SELECT COUNT(*) FROM context_item_revisions WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)"),
-        ("items", "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1"),
-        ("workstream paths", "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1"),
-        ("review state", "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1"),
-        ("the workstream", "SELECT COUNT(*) FROM workstreams WHERE id = ?1"),
+        (
+            "conflicts",
+            "SELECT COUNT(*) FROM context_conflicts WHERE workstream_id = ?1",
+        ),
+        (
+            "items",
+            "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1",
+        ),
+        (
+            "workstream paths",
+            "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1",
+        ),
+        (
+            "review state",
+            "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1",
+        ),
+        (
+            "the workstream",
+            "SELECT COUNT(*) FROM workstreams WHERE id = ?1",
+        ),
     ] {
         assert_eq!(count(&db, sql, &w.id), 0, "{label} must be gone");
     }
@@ -577,9 +607,5 @@ impl Snapshot {
             revisions: count(db, "SELECT COUNT(*) FROM context_item_revisions WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)", workstream_id),
             review_state: count(db, "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1", workstream_id),
         }
-    }
-    /// The projection every card and detail page publishes.
-    fn project_projection(&self) -> Option<String> {
-        self.paths.first().map(|(id, _)| id.clone())
     }
 }

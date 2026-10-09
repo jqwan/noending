@@ -357,7 +357,7 @@ fn appended_source_ingests_only_the_delta() {
 /// Trash is a visibility filter, not an ingestion gate: a trashed Session keeps
 /// taking its source's facts.
 #[test]
-fn trashed_session_still_ingests_its_source() {
+fn archived_session_still_ingests_its_source() {
     let dir = unique_dir("trash");
     let db = open_db("trash");
     let file = write_transcript(&dir, 2);

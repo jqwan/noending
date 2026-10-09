@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AgentsView from "./AgentsView";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import type { AgentStatusEntry, IngestSource, IngestTaskStatus } from "../../types";
 
@@ -102,6 +103,8 @@ const mockIngestStatus: IngestTaskStatus = {
 };
 
 beforeEach(() => {
+  vi.mocked(api.addIngestSource).mockReset();
+  vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
   vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue("codex");
   vi.mocked(api.setDefaultAgent).mockReset().mockResolvedValue(undefined);
@@ -118,30 +121,20 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("AgentsView", () => {
-  it("renders centralized agent status and accurate discovered records metric without default agent controls", async () => {
+  it("renders synchronization counts, configured source counts and both Antigravity formats", async () => {
     render(<AgentsView navigate={vi.fn()} />);
 
     expect(await screen.findByText("代理")).toBeTruthy();
     // 验证口径：展示为同步发现 X 条记录，而非新会话数
     expect(await screen.findByText(/同步发现 5 条记录 · 写入 12 条新消息/)).toBeTruthy();
 
-    // 不再展示默认 Agent 徽标及设为默认按钮
-    expect(screen.queryByText("默认 Agent")).toBeNull();
-    expect(screen.queryByRole("button", { name: "设为默认" })).toBeNull();
+    expect(await screen.findByText(/共 3 个来源目录/)).toBeTruthy();
 
     // Antigravity 来源聚合与格式展示
     expect(screen.getByText("Desktop 格式")).toBeTruthy();
     expect(screen.getByText("CLI 格式")).toBeTruthy();
   });
 
-  it("renders sources with no toggle checkbox and displays total sources metric", async () => {
-    render(<AgentsView navigate={vi.fn()} />);
-
-    // No checkbox in source rows
-    expect(screen.queryByRole("checkbox")).toBeNull();
-    // Metric indicates total configured sources
-    expect(await screen.findByText(/共 3 个来源目录/)).toBeTruthy();
-  });
 
   it("opens modal on re-ingest explaining safe rescan", async () => {
     render(<AgentsView navigate={vi.fn()} />);
@@ -150,21 +143,21 @@ describe("AgentsView", () => {
     fireEvent.click(reingestButtons[0]);
 
     expect(await screen.findByText(/绝不会清库重建或删除已有记录/)).toBeTruthy();
+    expect(api.reingestSource).not.toHaveBeenCalled();
     const confirmBtn = screen.getAllByRole("button", { name: "全量同步" });
     // 弹窗内的确认按钮
     fireEvent.click(confirmBtn[confirmBtn.length - 1]);
 
     await waitFor(() => {
-      expect(api.reingestSource).toHaveBeenCalled();
+      expect(api.reingestSource).toHaveBeenCalledWith("src-1");
     });
   });
 
   it("opens native folder picker when clicking + 添加来源目录 and adds source", async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog");
     vi.mocked(open).mockResolvedValue("/custom/sessions/path");
     vi.mocked(api.addIngestSource).mockResolvedValue({
       id: "src-new",
-      agent: "claude_code",
+      agent: "codex",
       path: "/custom/sessions/path",
       enabled: true,
       origin: "user",
@@ -183,7 +176,7 @@ describe("AgentsView", () => {
     });
   });
 
-  it("renders filter tabs (全部, TUI, 桌面端) without 已就绪 or 桌面与历史, and switches filters properly", async () => {
+  it("filters Agents by terminal and desktop availability", async () => {
     render(<AgentsView navigate={vi.fn()} />);
 
     // Tabs exist
@@ -191,9 +184,6 @@ describe("AgentsView", () => {
     expect(screen.getByRole("tab", { name: /TUI/ })).toBeTruthy();
     expect(screen.getByRole("tab", { name: /桌面端/ })).toBeTruthy();
 
-    // Removed old tabs
-    expect(screen.queryByRole("tab", { name: /已就绪/ })).toBeNull();
-    expect(screen.queryByRole("tab", { name: /桌面与历史/ })).toBeNull();
 
     // Click TUI filter
     fireEvent.click(screen.getByRole("tab", { name: /TUI/ }));
@@ -208,7 +198,7 @@ describe("AgentsView", () => {
     expect(screen.getByText("Codex")).toBeTruthy();
   });
 
-  it("renders icon buttons for copy, incremental sync, and remove in source rows", async () => {
+  it("dispatches incremental sync and removal for the selected custom source", async () => {
     vi.mocked(api.listIngestSources).mockResolvedValue([
       {
         id: "src-user-1",
@@ -223,9 +213,7 @@ describe("AgentsView", () => {
 
     render(<AgentsView navigate={vi.fn()} />);
 
-    // Copy icon button
-    const copyBtn = await screen.findByRole("button", { name: "复制完整路径" });
-    expect(copyBtn).toBeTruthy();
+    await screen.findByRole("button", { name: "增量同步" });
 
     // Incremental sync icon button
     const syncBtn = screen.getByRole("button", { name: "增量同步" });

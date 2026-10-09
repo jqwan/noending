@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WorkspacePathField, { absolutePathHint } from "./WorkspacePathField";
 import { api } from "../api";
 import type { PathProbe, RecentWorkspacePath } from "../types";
@@ -15,6 +15,11 @@ vi.mock("../api", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
+
+beforeEach(() => {
+  vi.mocked(api.probeWorkspacePath).mockReset();
+  vi.mocked(api.listRecentWorkspacePaths).mockReset().mockResolvedValue([]);
+});
 
 function okProbe(raw: string, overrides: Partial<PathProbe> = {}): PathProbe {
   return {

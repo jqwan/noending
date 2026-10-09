@@ -1549,6 +1549,13 @@ mod tests {
         let (included, _, _) =
             select_workstream_inputs(&ws, &[], &targets, &[]).expect("first short target fits");
         assert!(!included.is_empty());
+        assert_eq!(
+            included.iter().map(|t| &t.session.id).collect::<Vec<_>>(),
+            targets[..included.len()]
+                .iter()
+                .map(|t| &t.session.id)
+                .collect::<Vec<_>>()
+        );
         assert!(
             included.len() < targets.len(),
             "the backlog is returned as a prefix"

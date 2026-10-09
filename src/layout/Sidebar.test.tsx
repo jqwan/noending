@@ -1,10 +1,10 @@
-// Sidebar 契约：一等导航 + 「运行中」终端列表（registry 运行时事实，事件刷新）。
-// 旧的最近任务/固定列表已由运行终端取代。
+// Sidebar 契约：会话导航、运行中终端及可分组的最近活动会话。
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
+import { viewState } from "../hooks/useViewState";
 import { disposeTerminal } from "../features/sessions/terminalCache";
 import { EVT_TERMINALS, EVT_SYNCED } from "../app/routes";
 import type { Route } from "../app/routes";
@@ -22,6 +22,7 @@ vi.mock("../api", () => ({
 vi.mock("../features/sessions/terminalCache", () => ({ disposeTerminal: vi.fn() }));
 
 beforeEach(() => {
+  viewState.clear();
   vi.mocked(disposeTerminal).mockClear();
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.terminalClose).mockReset().mockImplementation(async (terminalId) => terminal({ terminal_id: terminalId }));

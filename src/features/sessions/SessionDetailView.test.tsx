@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionDetailView, { sessionDetailCache } from "./SessionDetailView";
 import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
@@ -48,7 +48,19 @@ vi.mock("../../api", () => ({
   },
 }));
 
+const originalClipboard = navigator.clipboard;
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(api.getAgentStatus).mockResolvedValue({});
+  vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false });
+  vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
+  vi.mocked(api.listProjects).mockResolvedValue([]);
+  vi.mocked(api.listWorkstreams).mockResolvedValue([]);
+  vi.mocked(api.refreshSession).mockResolvedValue({ queued: true });
+});
+
 afterEach(() => {
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
   cleanup();
   vi.clearAllMocks();
   // 「显示统计」这类开关活在模块级 view state 里，会跨用例残留。
@@ -143,24 +155,6 @@ async function renderDetail(d: SessionDetail) {
   return { navigate, container: document.body, rerender: view.rerender, unmount: view.unmount };
 }
 
-it("renders agent icon before session title and plain agent name under session info", async () => {
-  const d = detail(session("s1", { title: "测试会话标题", agent: "codex" }));
-  await renderDetail(d);
-
-  // Title in header has session-title-with-icon containing agent icon and title text
-  const titleContainer = document.querySelector(".session-title-with-icon");
-  expect(titleContainer).toBeTruthy();
-  expect(titleContainer?.querySelector(".agent-icon")).toBeTruthy();
-  expect(titleContainer?.textContent).toContain("测试会话标题");
-
-  // In aside section "会话信息":
-  const aside = document.querySelector(".task-detail-aside");
-  expect(aside).toBeTruthy();
-  // Shows agent label "Codex"
-  expect(aside?.textContent).toContain("Codex");
-  // But has NO agent icon inside aside
-  expect(aside?.querySelector(".agent-icon")).toBeNull();
-});
 
 it("renders session message stats in session info aside", async () => {
   const d = detail(session("s1", { title: "测试统计会话" }), {
@@ -296,16 +290,6 @@ function archivedDetail(over: Partial<SessionDetail> = {}): SessionDetail {
   });
 }
 
-it("offers the same 删除 entry whatever the root source state", async () => {
-  // Trash is the only gate: the source verdict never renames or hides the entry.
-  for (const source_status of ["missing", "present"] as const) {
-    cleanup();
-    await renderDetail(archivedDetail({ source_status }));
-    screen.getByRole("button", { name: "永久删除…" });
-    expect(screen.queryByText(/重新入库…/)).toBeNull();
-    expect(screen.queryByText(/删除不可用/)).toBeNull();
-  }
-});
 
 // 点删除之后：先查源状态，告知这次是彻底删除还是会被重新入库，用户再确认。
 
@@ -475,7 +459,6 @@ it("shows structured Context failure details and copies the operation id", async
   vi.mocked(api.updateSessionContext).mockRejectedValue(
     { code: "stale_snapshot", message: "内容已变化，请重新更新", operation_id: "123e4567-e89b-12d3-a456-426614174000" },
   );
-  const originalClipboard = navigator.clipboard;
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   await renderDetail(detail(session("me"), {
@@ -488,7 +471,6 @@ it("shows structured Context failure details and copies the operation id", async
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(
     "内容已变化，请重新更新\n错误代码：stale_snapshot\n操作 ID：123e4567-e89b-12d3-a456-426614174000",
   ));
-  Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
 });
 
 it("keeps an update error visible across background sync refreshes", async () => {
@@ -563,7 +545,6 @@ it("renders immediately from cache on remount without flashing 加载中", async
 });
 
 it("renders copy icon buttons next to field labels and copies values on click", async () => {
-  const originalClipboard = navigator.clipboard;
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
@@ -591,7 +572,6 @@ it("renders copy icon buttons next to field labels and copies values on click", 
   fireEvent.click(copySourceBtn);
   await waitFor(() => expect(writeText).toHaveBeenCalledWith("/path/to/source.jsonl"));
 
-  Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
 });
 
 it("allows archived sessions to sync and generate summaries while blocking continue", async () => {

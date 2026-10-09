@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WorkstreamDetailView, { clearWorkstreamDetailCache } from "./WorkstreamDetailView";
 import { api } from "../../api";
 import type { WorkstreamContext, WorkstreamContextView, WorkstreamPathRow } from "../../types";
@@ -51,6 +51,11 @@ vi.mock("../../api", () => ({
   },
 }));
 
+beforeEach(() => {
+  vi.mocked(api.getWorkstreamContext).mockReset().mockResolvedValue(context());
+  vi.mocked(api.listWorkstreamPaths).mockReset().mockResolvedValue(PATHS);
+  vi.mocked(api.getWorkstreamContextState).mockReset().mockResolvedValue(contextState());
+});
 afterEach(() => {
   clearWorkstreamDetailCache();
   cleanup();
@@ -123,7 +128,7 @@ it("opens the new-session page with the current task selected", async () => {
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-it("lists the sessions owned by this task and nothing else", async () => {
+it("renders the returned task sessions and navigates to the selected session", async () => {
   const ctx = context();
   ctx.sessions = [{
     id: "s1",
@@ -155,18 +160,20 @@ it("lists the sessions owned by this task and nothing else", async () => {
   }];
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
   vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
-  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  const navigate = vi.fn();
+  render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
 
   await screen.findByText("任务概览");
   // 只有 owner Sessions 会出现在这里（后端按 owner_workstream_id 过滤）。
   screen.getByText("会话");
-  screen.getByText("归属于本任务的会话");
+  fireEvent.click(screen.getByText("归属于本任务的会话"));
+  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s1" }));
   expect(screen.queryByText("还没有会话归属到这项任务。")).toBeNull();
 });
 
 it("opens the 新建任务 form, prefilled with the current task", async () => {
   await renderDetail();
-  fireEvent.click(screen.getByRole("button", { name: "编辑任务" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "编辑任务" })); });
 
   const dialog = screen.getByRole("dialog", { name: "编辑任务" });
   screen.getByDisplayValue("接口设计");

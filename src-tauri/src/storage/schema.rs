@@ -552,49 +552,30 @@ mod tests {
             .into_iter()
             .map(|o| (o.kind, o.name))
             .collect();
-        for (kind, name) in [
-            ("table", "projects"),
-            ("table", "workstreams"),
-            ("table", "sessions"),
-            ("table", "session_messages"),
-            ("table", "session_message_projection"),
-            ("table", "context_items"),
-            ("table", "context_item_revisions"),
-            ("table", "session_contexts"),
-            ("table", "session_context_revisions"),
-            ("table", "workstream_context_state"),
-            ("table", "workstream_session_frontiers"),
-            ("table", "agent_installations"),
-            ("table", "settings"),
-            ("table", "launch_intents"),
-            ("table", "context_conflicts"),
-            ("table", "ingest_sources"),
-            ("table", "assistant_sessions"),
-            ("table", "assistant_messages"),
-            ("table", "context_conflict_events"),
-            ("table", "workstream_review_state"),
-            ("table", "git_identities"),
-            ("table", "workspace_paths"),
-            ("table", "workstream_paths"),
-            ("table", "search_index"),
-            ("index", "idx_sessions_workspace_path"),
-            ("index", "idx_item_revisions_item"),
-            ("index", "idx_conflicts_workstream"),
-            ("index", "idx_items_workstream"),
-            ("index", "idx_sessions_owner_workstream"),
-            ("index", "idx_projection_message"),
-            ("index", "idx_intents_status"),
-            ("index", "idx_workstream_frontiers_session"),
-            ("index", "idx_conflict_events_conflict"),
-            ("index", "idx_workspace_paths_project"),
-            ("index", "idx_workstream_paths_path"),
-            ("index", "idx_projects_git_id"),
-        ] {
-            assert!(
-                found.contains(&(kind, name)),
-                "required_objects() missed {kind} {name}"
-            );
-        }
+        let conn = Connection::open_in_memory().unwrap();
+        create(&conn).unwrap();
+        let actual = conn
+            .prepare(
+                "SELECT type, name FROM sqlite_master
+             WHERE type IN ('table', 'index') AND sql IS NOT NULL
+               AND name NOT LIKE 'sqlite_%'
+               AND name NOT IN (SELECT name FROM pragma_table_list WHERE type = 'shadow')",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()
+            .unwrap();
+        let parsed = found
+            .iter()
+            .map(|(kind, name)| (kind.to_string(), name.to_string()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            parsed, actual,
+            "the DDL reader must agree with SQLite's created objects"
+        );
         assert_eq!(
             found.len(),
             found
