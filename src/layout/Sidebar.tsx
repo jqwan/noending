@@ -183,7 +183,7 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading }: {
 }
 
 /**
- * 会话侧边栏：新会话、会话看板、最近会话与保留终端的统一列表。
+ * 会话侧边栏：新建、会话看板、最近会话与保留终端的统一列表。
  * 工作区导航由最左侧固定图标栏提供；切换工作区时保留本栏的数据与分组状态。
  */
 export default function Sidebar({ route, navigate, collapsed = false, hidden = false }: {
@@ -267,10 +267,10 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     <aside className={`sidebar${collapsed ? " collapsed" : ""}`} hidden={hidden} aria-label="会话侧边栏">
       <div className="sidebar-scroll">
         <button className={`nav-item ${route.view === "new-session" ? "active" : ""}`} onClick={() => navigate({ view: "new-session" })}>
-          <Icon name="plus" />新会话
+          <Icon name="chatPlus" />新建
         </button>
         <button className={`nav-item ${route.view === "sessions" ? "active" : ""}`} onClick={() => navigate({ view: "sessions" })}>
-          <Icon name="grid" />会话看板
+          <Icon name="chat" />会话
         </button>
 
         <div className="nav-section">会话</div>
@@ -297,7 +297,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
               aria-label="按项目归类"
               title="按项目归类"
             >
-              <Icon name="folder" />
+              <Icon name="project" />
               <span>项目</span>
             </button>
             <button
@@ -325,7 +325,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
               groupBy === "workstream"
                 ? (isCollapsed ? "tasksCollapsed" : "tasks")
                 : groupBy === "project"
-                ? (isCollapsed ? "folder" : "folderOpen")
+                ? "project"
                 : "bot";
 
             return (

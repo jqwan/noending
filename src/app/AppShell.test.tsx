@@ -64,7 +64,7 @@ it("keeps icon navigation fixed and shows the session sidebar only in the sessio
   expect(screen.queryByRole("separator")).toBeNull();
   expect(screen.queryByRole("button", { name: "收起侧边栏" })).toBeNull();
   expect(screen.getByRole("navigation", { name: "工作区导航" })).toBe(rail);
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  fireEvent.click(screen.getByRole("button", { name: "首页" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   expect(screen.getByRole("separator")).toBeTruthy();
@@ -79,7 +79,7 @@ it("preserves the session page's unsent state while switching sections or viewin
   fireEvent.click(screen.getByRole("button", { name: "查看搜索结果" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("search");
   expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  fireEvent.click(screen.getByRole("button", { name: "首页" }));
   expect((screen.getByRole("textbox", { name: "会话草稿" }) as HTMLInputElement).value).toBe("未发送的消息");
 });
 
@@ -93,7 +93,7 @@ it.each([
   fireEvent.click(screen.getByRole("button", { name: "项目" }));
   fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
   fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  fireEvent.click(screen.getByRole("button", { name: "首页" }));
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
 });
 
@@ -103,7 +103,7 @@ it("remembers a background launch result without changing the current section", 
   fireEvent.click(screen.getByRole("button", { name: "代理" }));
   act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  fireEvent.click(screen.getByRole("button", { name: "首页" }));
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "t-created" });
 });
 

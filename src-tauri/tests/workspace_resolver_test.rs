@@ -433,7 +433,7 @@ fn a_real_noending_home_reserves_app_paths_and_allows_workspace() {
             &ws.canonical_path,
             Some(home.default_workspace.to_str().unwrap())
         ),
-        "NoEnding Workspace"
+        "NoEnding Chat"
     );
     std::fs::remove_dir_all(&root).ok();
 }

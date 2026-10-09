@@ -82,7 +82,7 @@ pub trait WorkspacePolicy {
         false
     }
     /// The current default workspace. Git-free paths in this tree share the
-    /// "NoEnding Workspace" chat-directory Project.
+    /// "NoEnding Chat" chat-directory Project.
     fn default_workspace(&self) -> Option<String> {
         None
     }
@@ -107,7 +107,7 @@ pub fn chat_bucket_label(canonical: &str, policy: &dyn WorkspacePolicy) -> Optio
         .default_workspace()
         .is_some_and(|root| is_within(canonical, &root))
     {
-        Some("NoEnding Workspace")
+        Some("NoEnding Chat")
     } else {
         crate::platform::paths::app_chat_bucket_of(canonical)
     }
@@ -652,7 +652,7 @@ fn create_project_row(
     let project = Project {
         id: new_id(),
         // Automatic: the basename, capitalized, and the exact default workspace
-        // is "NoEnding Workspace". Never a guess about repositories or remotes.
+        // is "NoEnding Chat". Never a guess about repositories or remotes.
         name: auto_project_name(canonical_path, policy.default_workspace().as_deref()),
         // Project lifecycle is not a Project concern; it is derived from paths.
         git_id: git_id.map(|g| g.to_string()),

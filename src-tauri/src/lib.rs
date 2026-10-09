@@ -62,7 +62,7 @@ pub fn run() {
             app.manage(workspace::workstream::PathService::new(layer.clone()));
 
             // Ensure the active default workspace is registered as a WorkspacePath
-            // and has its "NoEnding Workspace" Project established.
+            // and has its "NoEnding Chat" Project established.
             {
                 let default_ws = home.default_workspace_str();
                 let observation = layer.projection().observer().observe(&default_ws);

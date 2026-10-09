@@ -73,7 +73,7 @@ export default function WorkstreamFormModal({
       for (const p of paths ?? []) {
         const pid =
           p.project_id ||
-          (p.project_name === "NoEnding Workspace" ? "default" : "") ||
+          (p.project_name === "NoEnding Chat" || p.project_name === "NoEnding Workspace" ? "default" : "") ||
           (p.canonical_path ? `path:${p.canonical_path}` : "");
         if (pid && !ids.includes(pid)) {
           ids.push(pid);
@@ -111,6 +111,7 @@ export default function WorkstreamFormModal({
 
   const defaultProject = projects.find(
     (p) =>
+      p.name === "NoEnding Chat" ||
       p.name === "NoEnding Workspace" ||
       (defaultWorkspace && p.search_paths?.includes(defaultWorkspace))
   );
@@ -130,6 +131,7 @@ export default function WorkstreamFormModal({
         const fromExisting = existing
           .filter(
             (p) =>
+              p.project_name === "NoEnding Chat" ||
               p.project_name === "NoEnding Workspace" ||
               (defaultWorkspace && p.canonical_path === defaultWorkspace)
           )
@@ -474,14 +476,14 @@ export default function WorkstreamFormModal({
                 ? defaultProject
                 : projects.find((p) => p.id === pid) ?? newProjects.find((p) => p.id === pid);
               const name = isDefault
-                ? "NoEnding Workspace"
+                ? (defaultProject?.name ?? "NoEnding Chat")
                 : proj?.name ??
                   existing.find((p) => p.project_id === pid || `path:${p.canonical_path}` === pid)?.project_name ??
                   existing.find((p) => `path:${p.canonical_path}` === pid)?.canonical_path ??
                   pid;
               return (
                 <div key={pid} className="workstream-project-chip">
-                  <Icon name="folder" />
+                  <Icon name="project" />
                   <span className="truncate" title={name}>
                     {name}
                   </span>
@@ -519,7 +521,7 @@ export default function WorkstreamFormModal({
           >
             <option value="">+ 添加关联项目…</option>
             {!selectedProjectIds.some(isDefaultProj) && (
-              <option value={defaultProjectId}>NoEnding Workspace</option>
+              <option value={defaultProjectId}>{defaultProject?.name ?? "NoEnding Chat"}</option>
             )}
             {projects
               .filter(
@@ -527,6 +529,7 @@ export default function WorkstreamFormModal({
                   !selectedProjectIds.includes(p.id) &&
                   !isDefaultProj(p.id) &&
                   !isAgentDefaultProject(p, defaultProjectId) &&
+                  p.name !== "NoEnding Chat" &&
                   p.name !== "NoEnding Workspace"
               )
               .map((p) => (

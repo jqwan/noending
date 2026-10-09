@@ -16,8 +16,8 @@ it.each([
 });
 
 it.each([
-  [{ view: "terminal", terminalId: "t1" }, "会话"],
-  [{ view: "session", sessionId: "s1" }, "会话"],
+  [{ view: "terminal", terminalId: "t1" }, "首页"],
+  [{ view: "session", sessionId: "s1" }, "首页"],
   [{ view: "search", query: "test" }, "搜索"],
   [{ view: "workstream", workstreamId: "w1" }, "任务"],
   [{ view: "project", projectId: "p1" }, "项目"],
@@ -33,7 +33,7 @@ it("opens search and restores the session section through their dedicated callba
   render(<NavigationRail route={{ view: "projects" }} navigate={navigate} onSessions={onSessions} onSearch={onSearch} />);
   fireEvent.click(screen.getByRole("button", { name: "搜索" }));
   expect(onSearch).toHaveBeenCalledOnce();
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  fireEvent.click(screen.getByRole("button", { name: "首页" }));
   expect(onSessions).toHaveBeenCalledOnce();
   expect(navigate).not.toHaveBeenCalled();
 });

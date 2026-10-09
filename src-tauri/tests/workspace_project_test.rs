@@ -100,7 +100,7 @@ fn chat_directories_under_an_app_root_share_one_bucket_project() {
         )
         .unwrap();
     assert_eq!(
-        name, "Qoder",
+        name, "Qoder Chat",
         "the bucket is named after the Agent, not the first chat dir"
     );
     assert_eq!(git_id, None);
@@ -120,7 +120,7 @@ fn chat_directories_under_an_app_root_share_one_bucket_project() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(wb_name, "WorkBuddy");
+    assert_eq!(wb_name, "WorkBuddy Chat");
 
     // Lookalikes are NOT the bucket: component-wise matching.
     let lookalike = ensure(&home_path("Documents/QoderBackup/x"));
@@ -1029,7 +1029,7 @@ fn workspace_attaching_returns_none_for_unresolvable_and_reserved_paths() {
         .expect("the default workspace is a normal path");
     assert_eq!(
         project_of(&db, &db.get_workspace_path(&workspace).unwrap().unwrap()).name,
-        "NoEnding Workspace",
+        "NoEnding Chat",
         "through the same door that created the row"
     );
 
@@ -1245,7 +1245,7 @@ fn default_workspace_project_is_named_noending_workspace() {
     );
     let dw =
         ensure_workspace_path(&db, &plain("/Users/me/.noending/workspace", true), &home).unwrap();
-    assert_eq!(project_of(&db, &dw).name, "NoEnding Workspace");
+    assert_eq!(project_of(&db, &dw).name, "NoEnding Chat");
 
     // After a Home move the OLD workspace is an ordinary directory and must not
     // keep the special name.
@@ -1271,7 +1271,7 @@ fn default_workspace_chat_directories_share_a_project_and_derive_kind_after_rena
     let root = ensure_workspace_path(&db, &plain("/app/noending/workspace", true), &home).unwrap();
     assert_eq!(a.project_id, b.project_id);
     assert_eq!(a.project_id, root.project_id);
-    assert_eq!(project_of(&db, &a).name, "NoEnding Workspace");
+    assert_eq!(project_of(&db, &a).name, "NoEnding Chat");
     let outside = ensure_workspace_path(
         &db,
         &plain("/app/noending/workspace-backup/chat-a", true),

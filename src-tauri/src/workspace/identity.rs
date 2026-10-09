@@ -214,7 +214,7 @@ pub fn basename(canonical: &str) -> String {
 /// Automatic Project naming.
 ///
 /// `default_workspace` is the absolute, normalized NoEnding default workspace;
-/// only that exact path is called "NoEnding Workspace". A relocated NoEnding
+/// only that exact path is called "NoEnding Chat". A relocated NoEnding
 /// Home leaves the old workspace as an ordinary path, so it must NOT keep
 /// the special name — which is why this is a parameter and not a
 /// `ends_with("/.noending/workspace")` test.
@@ -230,7 +230,7 @@ pub fn auto_project_name(canonical: &str, default_workspace: Option<&str>) -> St
         // case the same way the reserved paths do; on a Windows volume
         // `~\.NOENDING\workspace` is the directory this names.
         if !dw.trim().is_empty() && same_location(canonical, dw.trim()) {
-            return "NoEnding Workspace".to_string();
+            return "NoEnding Chat".to_string();
         }
     }
     let base = basename(&key);
@@ -792,7 +792,7 @@ mod tests {
                 "/Users/me/.noending/workspace",
                 Some("/Users/me/.noending/workspace")
             ),
-            "NoEnding Workspace"
+            "NoEnding Chat"
         );
         assert_eq!(
             auto_project_name(

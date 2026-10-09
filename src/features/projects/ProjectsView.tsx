@@ -249,7 +249,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
                 onClick={() => navigate({ view: "project", projectId: c.id, initialTitle: c.name })}
               >
                 <div className="project-list-title" title={c.name}>
-                  <Icon name="folder" />
+                  <Icon name="project" />
                   <span>{c.name}</span>
                   <span className="badge">{projectKindLabels[c.kind]}</span>
                   {c.missing_path_count > 0 && (
@@ -315,7 +315,7 @@ function ProjectCard({ card, navigate }: {
       }}
     >
       <div className="ws-card-head">
-        <div className="ws-card-title" title={card.name}><Icon name="folder" />{card.name}</div>
+        <div className="ws-card-title" title={card.name}><Icon name="project" />{card.name}</div>
         <div className="ws-card-side">
           <span className="badge">{projectKindLabels[card.kind]}</span>
           {card.missing_path_count > 0 && (

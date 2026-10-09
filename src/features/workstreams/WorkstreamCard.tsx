@@ -48,7 +48,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent, onA
         </div>
       </header>
 
-      {card.projects.map((p) => <div key={p.id} className="task-project" title={p.name}><Icon name="folder" /><span className="truncate">{p.name}</span></div>)}
+      {card.projects.map((p) => <div key={p.id} className="task-project" title={p.name}><Icon name="project" /><span className="truncate">{p.name}</span></div>)}
       {body && <p className="ws-card-body" title={body}>{body}</p>}
 
       <footer className="ws-card-meta">

@@ -63,9 +63,20 @@
   background: var(--bg-hover);
   color: var(--text-primary);
 }
-.new-session-picker:focus-within {
+.new-session-picker:focus-within,
+.new-session-picker.open {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-wash);
+}
+.new-session-picker.open {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.new-session-picker .new-session-chevron {
+  transition: transform 0.15s ease;
+}
+.new-session-picker.open .new-session-chevron {
+  transform: rotate(180deg);
 }
 .new-session-picker .new-session-picker-label {
   flex: 1;
@@ -90,6 +101,9 @@
   outline: none;
   -webkit-appearance: none;
   appearance: none;
+}
+.new-session-picker.has-custom-menu select {
+  pointer-events: none;
 }
 .new-session-picker select:disabled {
   cursor: default;
@@ -120,6 +134,119 @@
 .new-session-task { flex: 0 1 auto; max-width: 28%; }
 .new-session-project { flex: 0 1 auto; max-width: 28%; }
 .new-session-dir { flex: 1 1 auto; max-width: 42%; min-width: 140px; }
+
+/* Custom dropdown menu matching reference design */
+.new-session-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 220px;
+  max-width: 320px;
+  width: max-content;
+  padding: 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  user-select: none;
+  cursor: default;
+}
+.new-session-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.new-session-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+.new-session-menu-item:hover {
+  background: var(--bg-hover);
+}
+.new-session-menu-item .menu-item-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.new-session-menu-item:hover .menu-item-icon {
+  color: var(--text-primary);
+}
+.new-session-menu-item .menu-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.new-session-menu-item .menu-item-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.new-session-menu-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 2px;
+  flex-shrink: 0;
+}
+.new-session-menu-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+.new-session-menu-action:hover {
+  background: var(--bg-hover);
+}
+.new-session-menu-action .action-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.new-session-menu-action:hover .action-icon {
+  color: var(--text-primary);
+}
 .new-session-composer {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);

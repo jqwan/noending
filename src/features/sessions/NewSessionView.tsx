@@ -62,6 +62,12 @@ export default function NewSessionView({
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [showNewWorkstreamModal, setShowNewWorkstreamModal] = useState(false);
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [dirMenuOpen, setDirMenuOpen] = useState(false);
+  const taskRef = useRef<HTMLDivElement>(null);
+  const projectRef = useRef<HTMLDivElement>(null);
+  const dirRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
   const launching = useRef(false);
   const agentChanged = useRef(false);
@@ -70,6 +76,34 @@ export default function NewSessionView({
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+
+  useEffect(() => {
+    if (!taskMenuOpen && !projectMenuOpen && !dirMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (taskMenuOpen && !taskRef.current?.contains(e.target as Node)) {
+        setTaskMenuOpen(false);
+      }
+      if (projectMenuOpen && !projectRef.current?.contains(e.target as Node)) {
+        setProjectMenuOpen(false);
+      }
+      if (dirMenuOpen && !dirRef.current?.contains(e.target as Node)) {
+        setDirMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setTaskMenuOpen(false);
+        setProjectMenuOpen(false);
+        setDirMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handleClickOutside);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handleClickOutside);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [taskMenuOpen, projectMenuOpen, dirMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -133,6 +167,7 @@ export default function NewSessionView({
     return (
       projects.find(
         (p) =>
+          p.name === "NoEnding Chat" ||
           p.name === "NoEnding Workspace" ||
           (defaultWorkspace && p.search_paths?.includes(defaultWorkspace))
       ) ?? null
@@ -151,7 +186,7 @@ export default function NewSessionView({
       if (defaultProject) return defaultProject;
       return {
         id: defaultProjectId,
-        name: "NoEnding Workspace",
+        name: "NoEnding Chat",
         name_customized: false,
         kind: "chat_directory",
         path_count: defaultWorkspace ? 1 : 0,
@@ -171,6 +206,7 @@ export default function NewSessionView({
     return projects.filter(
       (p) =>
         p.id !== defaultProjectId &&
+        p.name !== "NoEnding Chat" &&
         p.name !== "NoEnding Workspace" &&
         !isAgentDefaultProject(p, defaultProjectId)
     );
@@ -296,6 +332,7 @@ export default function NewSessionView({
     }
   };
 
+
   const handleAgentChange = (next: Agent) => {
     agentChanged.current = true;
     if (next === selectedAgent) return;
@@ -343,8 +380,8 @@ export default function NewSessionView({
       : (selectedWorkstream?.title ?? "无所属任务");
 
   const projectLabel = isDefaultProject
-    ? "NoEnding Workspace"
-    : (selectedProject?.name ?? "NoEnding Workspace");
+    ? (defaultProject?.name ?? "NoEnding Chat")
+    : (selectedProject?.name ?? defaultProject?.name ?? "NoEnding Chat");
 
   const currentDir = selectedDirPath || projectDirs[0] || "";
   const dirLabel = useMemo(() => {
@@ -372,10 +409,37 @@ export default function NewSessionView({
 
         <form onSubmit={(e) => { e.preventDefault(); void start(); }}>
           <div className="new-session-context">
-            <label className="new-session-picker new-session-task">
+            <div
+              className={`new-session-picker new-session-task has-custom-menu${taskMenuOpen ? " open" : ""}`}
+              ref={taskRef}
+              onClick={(e) => {
+                if (busy) return;
+                if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                setTaskMenuOpen((v) => !v);
+                setProjectMenuOpen(false);
+                setDirMenuOpen(false);
+              }}
+              onKeyDown={(e) => {
+                if (busy) return;
+                if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+                  if (!taskMenuOpen) {
+                    e.preventDefault();
+                    setTaskMenuOpen(true);
+                    setProjectMenuOpen(false);
+                    setDirMenuOpen(false);
+                  }
+                }
+              }}
+              tabIndex={busy ? -1 : 0}
+              role="button"
+              aria-haspopup="menu"
+              aria-expanded={taskMenuOpen}
+              aria-label={`所属任务：${taskLabel}`}
+              title={taskLabel}
+            >
               <Icon name="tasks" />
               <span className="new-session-picker-label truncate">{taskLabel}</span>
-              <Icon name="chevronDown" />
+              <Icon name="chevronDown" className="new-session-chevron" />
               <select
                 aria-label="所属任务（可选）"
                 title={taskLabel}
@@ -388,6 +452,7 @@ export default function NewSessionView({
                   handleWsChange(e.target.value);
                 }}
                 disabled={busy}
+                tabIndex={-1}
               >
                 <option value={STANDALONE}>无所属任务</option>
                 {workstreams.map((w) => (
@@ -395,12 +460,93 @@ export default function NewSessionView({
                 ))}
                 <option value="__new_workstream__">+ 新任务</option>
               </select>
-            </label>
 
-            <label className="new-session-picker new-session-project">
-              <Icon name="folder" />
+              {taskMenuOpen && (
+                <div className="new-session-dropdown-menu" role="menu" aria-label="所属任务列表">
+                  <div className="new-session-menu-list">
+                    <button
+                      type="button"
+                      className={`new-session-menu-item${ownerWorkstreamId === STANDALONE ? " selected" : ""}`}
+                      onClick={() => {
+                        handleWsChange(STANDALONE);
+                        setTaskMenuOpen(false);
+                      }}
+                    >
+                      <span className="menu-item-icon"><Icon name="tasks" /></span>
+                      <span className="menu-item-label">无所属任务</span>
+                      {ownerWorkstreamId === STANDALONE && (
+                        <span className="menu-item-check"><Icon name="check" /></span>
+                      )}
+                    </button>
+                    {workstreams.map((w) => {
+                      const isSelected = ownerWorkstreamId === w.id;
+                      return (
+                        <button
+                          key={w.id}
+                          type="button"
+                          className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                          onClick={() => {
+                            handleWsChange(w.id);
+                            setTaskMenuOpen(false);
+                          }}
+                          title={w.title}
+                        >
+                          <span className="menu-item-icon"><Icon name="tasks" /></span>
+                          <span className="menu-item-label">{w.title}</span>
+                          {isSelected && (
+                            <span className="menu-item-check"><Icon name="check" /></span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="new-session-menu-divider" />
+                  <button
+                    type="button"
+                    className="new-session-menu-action"
+                    onClick={() => {
+                      setShowNewWorkstreamModal(true);
+                      setTaskMenuOpen(false);
+                    }}
+                  >
+                    <span className="action-icon"><Icon name="plus" /></span>
+                    <span>添加任务...</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div
+              className={`new-session-picker new-session-project has-custom-menu${projectMenuOpen ? " open" : ""}`}
+              ref={projectRef}
+              onClick={(e) => {
+                if (busy) return;
+                if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                setProjectMenuOpen((v) => !v);
+                setTaskMenuOpen(false);
+                setDirMenuOpen(false);
+              }}
+              onKeyDown={(e) => {
+                if (busy) return;
+                if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+                  if (!projectMenuOpen) {
+                    e.preventDefault();
+                    setProjectMenuOpen(true);
+                    setTaskMenuOpen(false);
+                    setDirMenuOpen(false);
+                  }
+                }
+              }}
+              tabIndex={busy ? -1 : 0}
+              role="button"
+              aria-haspopup="menu"
+              aria-expanded={projectMenuOpen}
+              aria-label={`所属项目：${projectLabel}`}
+              title={projectLabel}
+            >
+              <Icon name="project" />
               <span className="new-session-picker-label truncate">{projectLabel}</span>
-              <Icon name="chevronDown" />
+              <Icon name="chevronDown" className="new-session-chevron" />
               <select
                 aria-label="所属项目"
                 title={projectLabel}
@@ -413,35 +559,157 @@ export default function NewSessionView({
                   handleProjectChange(e.target.value);
                 }}
                 disabled={busy}
+                tabIndex={-1}
               >
-                <option value={defaultProjectId}>NoEnding Workspace</option>
+                <option value={defaultProjectId}>{defaultProject?.name ?? "NoEnding Chat"}</option>
                 {otherProjects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
                 <option value="__new_project__">+ 新项目</option>
               </select>
-            </label>
 
-            <label className="new-session-picker new-session-dir">
-              <Icon name={isGitDir ? "git" : "folder"} />
-              <span className="new-session-picker-label truncate" title={currentDir || dirLabel}>
-                {dirLabel}
-              </span>
-              <Icon name="chevronDown" />
-              <select
-                aria-label="项目目录"
-                title={currentDir || dirLabel}
-                value={selectedDirPath}
-                onChange={(e) => handleDirChange(e.target.value)}
-                disabled={busy || projectDirs.length <= 1}
-              >
-                {projectDirs.map((dir) => (
-                  <option key={dir} value={dir}>
-                    {dir}
-                  </option>
-                ))}
-              </select>
-            </label>
+              {projectMenuOpen && (
+                <div className="new-session-dropdown-menu" role="menu" aria-label="所属项目列表">
+                  <div className="new-session-menu-list">
+                    <button
+                      type="button"
+                      className={`new-session-menu-item${isDefaultProject ? " selected" : ""}`}
+                      onClick={() => {
+                        handleProjectChange(defaultProjectId);
+                        setProjectMenuOpen(false);
+                      }}
+                      title={defaultProject?.name ?? "NoEnding Chat"}
+                    >
+                      <span className="menu-item-icon"><Icon name="project" /></span>
+                      <span className="menu-item-label">{defaultProject?.name ?? "NoEnding Chat"}</span>
+                      {isDefaultProject && (
+                        <span className="menu-item-check"><Icon name="check" /></span>
+                      )}
+                    </button>
+                    {otherProjects.map((p) => {
+                      const isSelected = !isDefaultProject && selectedProjectId === p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                          onClick={() => {
+                            handleProjectChange(p.id);
+                            setProjectMenuOpen(false);
+                          }}
+                          title={p.name}
+                        >
+                          <span className="menu-item-icon"><Icon name="project" /></span>
+                          <span className="menu-item-label">{p.name}</span>
+                          {isSelected && (
+                            <span className="menu-item-check"><Icon name="check" /></span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="new-session-menu-divider" />
+                  <button
+                    type="button"
+                    className="new-session-menu-action"
+                    onClick={() => {
+                      void handleAddNewProject();
+                      setProjectMenuOpen(false);
+                    }}
+                  >
+                    <span className="action-icon"><Icon name="plus" /></span>
+                    <span>添加项目...</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {(() => {
+              const canSwitchDir = projectDirs.length > 1;
+              return (
+                <div
+                  className={`new-session-picker new-session-dir${canSwitchDir ? " has-custom-menu" : ""}${dirMenuOpen && canSwitchDir ? " open" : ""}`}
+                  ref={dirRef}
+                  onClick={(e) => {
+                    if (busy || !canSwitchDir) return;
+                    if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                    setDirMenuOpen((v) => !v);
+                    setTaskMenuOpen(false);
+                    setProjectMenuOpen(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (busy || !canSwitchDir) return;
+                    if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+                      if (!dirMenuOpen) {
+                        e.preventDefault();
+                        setDirMenuOpen(true);
+                        setTaskMenuOpen(false);
+                        setProjectMenuOpen(false);
+                      }
+                    }
+                  }}
+                  tabIndex={busy || !canSwitchDir ? -1 : 0}
+                  role={canSwitchDir ? "button" : undefined}
+                  aria-haspopup={canSwitchDir ? "menu" : undefined}
+                  aria-expanded={canSwitchDir ? dirMenuOpen : undefined}
+                  aria-label={`项目目录：${currentDir || dirLabel}`}
+                  title={currentDir || dirLabel}
+                >
+                  <Icon name={isGitDir ? "git" : "folder"} />
+                  <span className="new-session-picker-label truncate" title={currentDir || dirLabel}>
+                    {dirLabel}
+                  </span>
+                  {canSwitchDir && <Icon name="chevronDown" className="new-session-chevron" />}
+                  <select
+                    aria-label="项目目录"
+                    title={currentDir || dirLabel}
+                    value={selectedDirPath}
+                    onChange={(e) => handleDirChange(e.target.value)}
+                    disabled={busy || !canSwitchDir}
+                    tabIndex={-1}
+                  >
+                    {projectDirs.map((dir) => (
+                      <option key={dir} value={dir}>
+                        {dir}
+                      </option>
+                    ))}
+                  </select>
+
+                  {dirMenuOpen && canSwitchDir && (
+                    <div className="new-session-dropdown-menu" role="menu" aria-label="项目目录列表">
+                      <div className="new-session-menu-list">
+                        {projectDirs.map((dir) => {
+                          const isDirGit =
+                            selectedProject?.kind === "git" ||
+                            dirGitStates[dir] === true;
+                          const isSelected = (selectedDirPath || projectDirs[0]) === dir;
+                          return (
+                            <button
+                              key={dir}
+                              type="button"
+                              className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                              onClick={() => {
+                                handleDirChange(dir);
+                                setDirMenuOpen(false);
+                              }}
+                              title={dir}
+                            >
+                              <span className="menu-item-icon">
+                                <Icon name={isDirGit ? "git" : "folder"} />
+                              </span>
+                              <span className="menu-item-label">{dir}</span>
+                              {isSelected && (
+                                <span className="menu-item-check"><Icon name="check" /></span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           <div className="new-session-composer" aria-busy={busy}>

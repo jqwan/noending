@@ -16,8 +16,10 @@ const paths = {
   tasksCollapsed: "M3 5l1 1 2-2M8 5h7M4 10h11M6 14h7",
   folder: "M2 5V3h5l2 2h7v10H2Z",
   folderOpen: "M2 5V3h5l2 2h7v2H2ZM1.5 7.5h13a1 1 0 0 1 .95 1.32l-1.8 5.5A1 1 0 0 1 12.7 15H2.3a1 1 0 0 1-.95-.68l-1.8-5.5A1 1 0 0 1 .5 7.5Z",
+  project: "M9 2.5l6 3.5-6 3.5-6-3.5ZM3 6v6l6 3.5 6-3.5V6M9 9.5v6",
   git: "M5 3a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM5 6v6M5 12a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM13 4.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM5 11a4.5 4.5 0 0 1 4.5-4.5h2",
   chat: "M3 3h12v9H8l-5 3Z",
+  chatPlus: "M3 3h12v9H8l-5 3ZM9 5v5M6.5 7.5h5",
   spark: "M9 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2Z",
   chart: "M3.5 15V9M9 15V4M14.5 15V8",
   settings: "M3 5h12M3 13h12M6 3v4M12 11v4",
@@ -37,6 +39,6 @@ const paths = {
   list: "M3.5 4.5h11M3.5 9h11M3.5 13.5h11",
 };
 
-export default function Icon({ name }: { name: keyof typeof paths }) {
-  return <svg className="ui-icon" viewBox="0 0 18 18" aria-hidden="true"><path d={paths[name]} /></svg>;
+export default function Icon({ name, className }: { name: keyof typeof paths; className?: string }) {
+  return <svg className={`ui-icon${className ? ` ${className}` : ""}`} viewBox="0 0 18 18" aria-hidden="true"><path d={paths[name]} /></svg>;
 }

@@ -307,7 +307,7 @@ describe("NewSessionView task and project selection", () => {
       ...mockProjects,
       {
         id: "p-codex",
-        name: "Codex",
+        name: "Codex Chat",
         name_customized: false,
         kind: "chat_directory" as const,
         path_count: 1,
@@ -325,10 +325,10 @@ describe("NewSessionView task and project selection", () => {
     const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
     const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
     expect(options).toContain("Project 1");
-    expect(options).not.toContain("Codex");
+    expect(options).not.toContain("Codex Chat");
   });
 
-  it("in standalone mode, defaults to NoEnding Workspace and lists discovered projects and + 新项目", async () => {
+  it("in standalone mode, defaults to NoEnding Chat and lists discovered projects and + 新项目", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
     render(<NewSessionView navigate={vi.fn()} />);
 
@@ -339,7 +339,7 @@ describe("NewSessionView task and project selection", () => {
     });
 
     const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
-    expect(options).toContain("NoEnding Workspace");
+    expect(options).toContain("NoEnding Chat");
     expect(options).toContain("Project 1");
     expect(options).toContain("+ 新项目");
 

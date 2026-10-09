@@ -187,7 +187,7 @@ fn default_chat_path_probe_predicts_the_same_bucket_as_attachment_without_writin
         .unwrap()
         .project
         .unwrap();
-    assert_eq!(hint.name.as_deref(), Some("NoEnding Workspace"));
+    assert_eq!(hint.name.as_deref(), Some("NoEnding Chat"));
     assert!(!hint.known);
     assert!(
         db.list_projects().unwrap().is_empty(),

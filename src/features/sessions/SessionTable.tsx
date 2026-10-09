@@ -355,7 +355,7 @@ export default function SessionCards({
 
             {!project.dim && (
               <div className="session-card-prop" title={project.hint}>
-                <Icon name="folder" />
+                <Icon name="project" />
                 <span className="truncate">{project.text}</span>
               </div>
             )}

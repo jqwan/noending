@@ -79,9 +79,9 @@ pub fn agent_default_dir(agent: Agent) -> PathBuf {
 /// reports a Git family follows the normal family rules.
 pub fn app_chat_bucket_of(canonical: &str) -> Option<&'static str> {
     const ROOTS: [(&str, &str); 3] = [
-        ("Documents/Codex", "Codex"),
-        ("Documents/Qoder", "Qoder"),
-        ("Workbuddy", "WorkBuddy"),
+        ("Documents/Codex", "Codex Chat"),
+        ("Documents/Qoder", "Qoder Chat"),
+        ("Workbuddy", "WorkBuddy Chat"),
     ];
     let path = std::path::Path::new(canonical);
     let home = resolve_home()?;
@@ -404,20 +404,23 @@ mod tests {
         let home = resolve_home().expect("tests run with a home directory");
         let join = |rel: &str| home.join(rel).to_string_lossy().to_string();
 
-        assert_eq!(app_chat_bucket_of(&join("Documents/Codex")), Some("Codex"));
+        assert_eq!(
+            app_chat_bucket_of(&join("Documents/Codex")),
+            Some("Codex Chat")
+        );
         assert_eq!(
             app_chat_bucket_of(&join(
                 "Documents/Codex/2026-09-26/referenced-chatgpt-conversation"
             )),
-            Some("Codex")
+            Some("Codex Chat")
         );
         assert_eq!(
             app_chat_bucket_of(&join("Documents/Qoder/2026-09-19/b8a25663")),
-            Some("Qoder")
+            Some("Qoder Chat")
         );
         assert_eq!(
             app_chat_bucket_of(&join("Workbuddy/2026-07-04-12-00-30")),
-            Some("WorkBuddy")
+            Some("WorkBuddy Chat")
         );
 
         assert_eq!(app_chat_bucket_of(&join("Documents/CodexBackup/x")), None);

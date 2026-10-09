@@ -11,6 +11,7 @@ export function isNoEndingDefaultProject(
   defaultProjectId?: string,
 ): boolean {
   return (
+    project.name === "NoEnding Chat" ||
     project.name === "NoEnding Workspace" ||
     (Boolean(defaultProjectId) && project.id === defaultProjectId)
   );

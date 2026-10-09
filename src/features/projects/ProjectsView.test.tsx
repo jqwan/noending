@@ -236,17 +236,17 @@ describe("Projects Board", () => {
 
   it("does not render plus button for other agent default projects in card and list view", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      card({ id: "p-agent", name: "Codex", kind: "chat_directory" }),
-      card({ id: "p-noending", name: "NoEnding Workspace", kind: "chat_directory" }),
+      card({ id: "p-agent", name: "Codex Chat", kind: "chat_directory" }),
+      card({ id: "p-noending", name: "NoEnding Chat", kind: "chat_directory" }),
     ]);
     render(<ProjectsView navigate={navigate} />);
-    await screen.findByText("Codex");
+    await screen.findByText("Codex Chat");
 
-    // In card view: only NoEnding Workspace has the button
+    // In card view: only NoEnding Chat has the button
     const buttons = screen.getAllByRole("button", { name: "新建会话" });
     expect(buttons).toHaveLength(1);
 
-    // In list view: only NoEnding Workspace has the button
+    // In list view: only NoEnding Chat has the button
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
     const listButtons = screen.getAllByRole("button", { name: "新建会话" });
     expect(listButtons).toHaveLength(1);

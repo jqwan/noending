@@ -131,7 +131,7 @@ describe("Sidebar navigation", () => {
   it("opens the new-session page", async () => {
     const navigate = renderSidebar();
     await waitFor(() => expect(api.terminalList).toHaveBeenCalled());
-    const newSession = screen.getByRole("button", { name: "新会话" });
+    const newSession = screen.getByRole("button", { name: "新建" });
     expect(newSession.className).toContain("active");
     fireEvent.click(newSession);
     expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
@@ -139,7 +139,7 @@ describe("Sidebar navigation", () => {
 
   it("opens the sessions board from the session sidebar", async () => {
     const navigate = renderSidebar();
-    fireEvent.click(await screen.findByRole("button", { name: "会话看板" }));
+    fireEvent.click(await screen.findByRole("button", { name: "会话" }));
     expect(navigate).toHaveBeenCalledWith({ view: "sessions" });
   });
 });

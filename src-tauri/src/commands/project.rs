@@ -248,7 +248,7 @@ pub fn list_project_workstreams(
 /// rename, and nothing else. A Project's only user-editable fact.
 ///
 /// This sets `name_customized`, which is the durable statement that automatic
-/// naming (basename, `NoEnding Workspace`, a merge's survivor rule) may never
+/// naming (basename, `NoEnding Chat`, a merge's survivor rule) may never
 /// overwrite this row's name again. No other column is touched: `git_id` in
 /// particular has exactly one writer, `workspace::project`.
 #[tauri::command]

@@ -304,7 +304,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                       <div className="task-list-meta">
                         {c.projects.map((p) => (
                           <span key={p.id} title={p.name} className="task-list-project">
-                            <Icon name="folder" />
+                            <Icon name="project" />
                             <span>{p.name}</span>
                           </span>
                         ))}

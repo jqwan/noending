@@ -12,10 +12,10 @@ export default function NavigationRail({ route, navigate, onSessions, onSearch }
   onSearch: () => void;
 }) {
   const items = [
-    { view: "sessions", label: "会话", icon: "chat", active: isSessionRoute(route) },
+    { view: "sessions", label: "首页", icon: "home", active: isSessionRoute(route) },
     { view: "search", label: "搜索", icon: "search", active: route.view === "search" },
     { view: "workstreams", label: "任务", icon: "tasks", active: ["workstreams", "workstream"].includes(route.view) },
-    { view: "projects", label: "项目", icon: "folder", active: ["projects", "project"].includes(route.view) },
+    { view: "projects", label: "项目", icon: "project", active: ["projects", "project"].includes(route.view) },
     { view: "agents", label: "代理", icon: "bot", active: route.view === "agents" },
     { view: "assistant", label: "助手", icon: "spark", active: route.view === "assistant" },
   ] as const;
