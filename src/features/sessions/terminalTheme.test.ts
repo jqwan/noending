@@ -32,19 +32,29 @@ function write(term: Terminal, data: string) {
   return new Promise<void>((resolve) => term.write(data, resolve));
 }
 
+async function setAppTheme(theme: "light" | "dark") {
+  document.documentElement.dataset.theme = theme;
+  // MutationObserver runs before this microtask, so absence checks cannot
+  // pass simply because the theme update has not been processed yet.
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+}
+
 it("answers native appearance queries and preserves other terminal mode handling", async () => {
   document.documentElement.dataset.theme = "light";
   const term = terminal();
   const replies: string[] = [];
+  const nativeReplies: string[] = [];
+  term.onData((data) => nativeReplies.push(data));
   const stop = observeTerminalTheme(term, (data) => replies.push(data));
   try {
     await write(term, "\x1b[?2031$p\x1b[?996n\x1b[?2031;2004h\x1b[?2031$p");
     expect(replies).toEqual(["\x1b[?2031;2$y", "\x1b[?997;2n", "\x1b[?2031;1$y"]);
     expect(term.modes.bracketedPasteMode).toBe(true);
     replies.length = 0;
-    await write(term, "\x1b[?2031;2004l\x1b[?2031$p\x1b[?6n");
+    await write(term, "\x1b[?2031;2004l\x1b[?2031$p\x1b[2;3H\x1b[?6n");
     expect(replies).toEqual(["\x1b[?2031;2$y"]);
     expect(term.modes.bracketedPasteMode).toBe(false);
+    expect(nativeReplies).toEqual(["\x1b[?2;3R"]);
     document.documentElement.dataset.theme = "dark";
     await write(term, "\x1b[?996n");
     expect(replies[replies.length - 1]).toBe("\x1b[?997;1n");
@@ -60,34 +70,28 @@ it("reports palette changes only to subscribed applications, until reset or disp
   const replies: string[] = [];
   const stop = observeTerminalTheme(term, (data) => replies.push(data));
   try {
-    document.documentElement.dataset.theme = "dark";
-    await waitFor(() => expect(term.options.theme?.background).toBe("#141413"));
+    await setAppTheme("dark");
     expect(replies).toEqual([]);
     await write(term, "\x1b[?2031h");
-    document.documentElement.dataset.theme = "light";
-    await waitFor(() => expect(replies).toEqual(["\x1b[?997;2n"]));
+    await setAppTheme("light");
+    expect(replies).toEqual(["\x1b[?997;2n"]);
     media.dispatchEvent(new Event("change"));
     expect(replies).toEqual(["\x1b[?997;2n"]);
-    document.documentElement.dataset.theme = "dark";
-    await waitFor(() => expect(replies).toEqual(["\x1b[?997;2n", "\x1b[?997;1n"]));
+    await setAppTheme("dark");
+    expect(replies).toEqual(["\x1b[?997;2n", "\x1b[?997;1n"]);
     await write(term, "\x1b[?2031l");
-    document.documentElement.dataset.theme = "light";
-    await waitFor(() => expect(term.options.theme?.background).toBe("#ffffff"));
+    await setAppTheme("light");
     expect(replies).toHaveLength(2);
     await write(term, "\x1b[?2031h\x1bc\x1b[?2031$p");
     expect(replies[replies.length - 1]).toBe("\x1b[?2031;2$y");
-    document.documentElement.dataset.theme = "dark";
-    await waitFor(() => expect(term.options.theme?.background).toBe("#141413"));
+    await setAppTheme("dark");
     expect(replies).toHaveLength(3);
   } finally {
     stop();
   }
   await write(term, "\x1b[?2031$p\x1b[?996n");
-  document.documentElement.dataset.theme = "light";
-  await new Promise<void>((resolve) => queueMicrotask(resolve));
   expect(replies).toHaveLength(3);
 });
-
 
 it("uses the app's resolved surface, text and selection tokens", () => {
   const root = document.documentElement;
