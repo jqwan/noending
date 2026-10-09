@@ -50,6 +50,7 @@ const { FakeTerminal } = vi.hoisted(() => {
     disposed = false;
     cols = 80;
     rows = 24;
+    options: import("@xterm/xterm").ITerminalOptions = {};
     constructor(_opts?: unknown) {
       FakeTerminal.last = this;
     }
@@ -136,6 +137,7 @@ afterEach(() => {
   resetLiveTerminalsForTests();
   vi.clearAllMocks();
   FakeTerminal.last = null;
+  delete document.documentElement.dataset.theme;
 });
 
 function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
@@ -176,6 +178,25 @@ function renderView(navigate?: ReturnType<typeof vi.fn>) {
     <SessionTerminalView terminalId="t-1" navigate={navigate ?? vi.fn()} />,
   );
 }
+
+it("updates a detached cached terminal's theme without restarting or replaying it", async () => {
+  document.documentElement.dataset.theme = "light";
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ scrollback: btoa("saved output") }));
+  const view = renderView();
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  const terminal = FakeTerminal.last!;
+  expect(terminal.options.theme?.background).toBe("#ffffff");
+  view.unmount();
+  document.documentElement.dataset.theme = "dark";
+  await waitFor(() => expect(terminal.options.theme?.background).toBe("#141413"));
+  renderView();
+  await screen.findByLabelText("重新连接");
+  expect(FakeTerminal.last).toBe(terminal);
+  expect(terminal.written).toHaveLength(1);
+  expect(terminal.disposed).toBe(false);
+  expect(api.terminalInput).not.toHaveBeenCalled();
+  expect(api.terminalReconnect).not.toHaveBeenCalled();
+});
 
 it("attaches directly when the session already has an embedded terminal", async () => {
   vi.mocked(api.terminalForSession).mockResolvedValue(snapshot({}));

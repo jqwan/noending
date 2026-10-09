@@ -14,6 +14,7 @@ import { sessionDisplayTitle } from "./SessionTable";
 import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
 import type { Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal } from "./terminalCache";
+import { observeTerminalTheme } from "./terminalTheme";
 
 /**
  * 内嵌终端视图（一等独立路由）。PTY 与 scrollback 都归后端（terminal
@@ -185,6 +186,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         cursorBlink: true,
         scrollback: 5000,
       });
+      const stopTheme = observeTerminalTheme(term);
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(container);
@@ -382,9 +384,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       entry = {
         term,
         fit,
-        unlisteners: unlisteners.map((p) => () => {
+        unlisteners: [stopTheme, ...unlisteners.map((p) => () => {
           void p.then((u) => u()).catch(() => {});
-        }),
+        })],
         exited: !snapshot.live,
         onExit: null,
       };

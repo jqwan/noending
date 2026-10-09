@@ -686,7 +686,7 @@
 .terminal-host {
   flex: 1;
   min-width: 0;
-  background: #101014;
+  background: var(--bg-app);
 }
 .conversation-scroll {
   flex: 1;
