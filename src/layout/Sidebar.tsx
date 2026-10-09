@@ -168,15 +168,17 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading }: {
   return <div className={`nav-item sidebar-recent-item ${active ? "active" : ""}`}>
     <button className="sidebar-session-link" title={`${s.cwd ? `${title} · ${s.cwd}` : title}${s.archived_at ? " · 已归档" : ""}`}
       onClick={() => navigate(s.sessionId ? sessionDestination(s.sessionId, s.terminals, { title, agent: s.agent }) : terminalDestination(s.terminals[0]))}>
-      <AgentIcon agent={s.agent} size={14} /><span className="truncate">{title}</span>
+      <AgentIcon agent={s.agent} size={14} />
+      {s.terminals.length > 0 && <span role="img" aria-label={counts} title={counts}
+        className={`sidebar-session-dot ${s.terminals.some(t => t.live) ? "running" : "exited"}`} />}
+      <span className="truncate">{title}</span>
     </button>
     <span className="sidebar-session-actions">
-      {(selected || caps.terminal) && <button className={`sidebar-session-action ${selected ? selected.live ? "terminal-running" : "terminal-exited" : ""}`}
+      {(selected || caps.terminal) ? <button className="sidebar-session-action"
         aria-label={`${terminalLabel}：${title}`} title={selected ? `${terminalLabel} · ${counts}` : terminalLabel}
         disabled={busy || !selected && (loading || !s.sessionId || !!s.archived_at)} onClick={() => void openTerminal()}>
         <Icon name="terminal" />
-      </button>}
-      {s.sessionId && <DesktopContinueButton sessionId={s.sessionId} agent={s.agent} sourceKind={s.source_kind}
+      </button> : s.sessionId && <DesktopContinueButton sessionId={s.sessionId} agent={s.agent} sourceKind={s.source_kind}
         archived={!!s.archived_at} agentStatus={agentStatus} className="sidebar-session-action" label={`在桌面应用中继续：${title}`} />}
     </span>
   </div>;

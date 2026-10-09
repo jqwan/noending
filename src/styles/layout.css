@@ -484,7 +484,15 @@
   text-align: left;
   cursor: pointer;
 }
-.sidebar-session-actions { display: flex; flex: none; gap: 2px; }
+.sidebar-session-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.sidebar-session-dot.running { background: var(--success); }
+.sidebar-session-dot.exited { background: var(--text-muted); }
+.sidebar-session-actions { display: flex; flex: none; opacity: 0; pointer-events: none; }
+.sidebar-recent-item:hover .sidebar-session-actions,
+.sidebar-recent-item:focus-within .sidebar-session-actions { opacity: 1; pointer-events: auto; }
+@media (hover: none) {
+  .sidebar-session-actions { opacity: 1; pointer-events: auto; }
+}
 .sidebar-session-action {
   display: inline-flex;
   align-items: center;
