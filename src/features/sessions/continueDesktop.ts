@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { capsOf } from "./sessionFormats";
-import { sessionTerminals } from "./sessionNavigation";
-import type { Agent, AgentStatusEntry } from "../../types";
+import { preferredTerminal, terminalDestination, sessionTerminals } from "./sessionNavigation";
+import type { Agent, AgentStatusEntry, TerminalSummary } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
@@ -108,11 +108,26 @@ export async function continueSessionTerminalWithToast(
   }
 }
 
+/** Titlebar and sidebar both reopen retained instances (including exited ones) before launching. */
+export async function openSessionTerminal(
+  session: { id: string; title?: string | null; agent: Agent; archived_at?: string | null },
+  terminals: TerminalSummary[],
+  navigate: (r: Route) => void,
+): Promise<void> {
+  const existing = preferredTerminal(session.id, terminals.filter(t => t.session_id === session.id));
+  if (existing) {
+    navigate({ ...terminalDestination(existing), initialTitle: session.title ?? existing.session_title ?? undefined });
+    return;
+  }
+  await continueSessionTerminalWithToast(session, navigate);
+}
+
 /** Agent 状态表（桌面端名字与在场是「继续」置灰判断的输入）。读不到时返回
  *  null——在场未知不当作缺席。 */
-export function useAgentStatus(): Record<string, AgentStatusEntry> | null {
+export function useAgentStatus(enabled = true): Record<string, AgentStatusEntry> | null {
   const [status, setStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
   useEffect(() => {
+    if (!enabled) return;
     let live = true;
     api.getAgentStatus()
       .then((s) => {
@@ -124,6 +139,6 @@ export function useAgentStatus(): Record<string, AgentStatusEntry> | null {
     return () => {
       live = false;
     };
-  }, []);
+  }, [enabled]);
   return status;
 }

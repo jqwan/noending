@@ -62,22 +62,22 @@ export default function CommandPalette({ onClose, navigate }: {
     }
     for (const w of workstreams) {
       if (!ql || w.title.toLowerCase().includes(ql)) {
-        out.push({ key: `w-${w.id}`, kind: "任务", label: w.title, hint: "打开", route: { view: "workstream", workstreamId: w.id } });
+        out.push({ key: `w-${w.id}`, kind: "任务", label: w.title, hint: "打开", route: { view: "workstream", workstreamId: w.id, initialTitle: w.title } });
       }
     }
     for (const s of sessions) {
       if (!ql || (s.title ?? "").toLowerCase().includes(ql) || (s.cwd ?? "").toLowerCase().includes(ql)) {
-        out.push({ key: `s-${s.id}`, kind: "会话", label: s.title ?? s.root_agent_session_id, hint: s.cwd ?? undefined, route: { view: "session", sessionId: s.id } });
+        out.push({ key: `s-${s.id}`, kind: "会话", label: s.title ?? s.root_agent_session_id, hint: s.cwd ?? undefined, route: { view: "session", sessionId: s.id, initialTitle: s.title ?? "未命名会话", initialAgent: s.agent } });
       }
     }
     for (const h of hits) {
       const route: Route =
-        h.kind === "workstream" ? { view: "workstream", workstreamId: h.ref_id }
+        h.kind === "workstream" ? { view: "workstream", workstreamId: h.ref_id, initialTitle: h.title }
         : h.kind === "item" ? { view: "workstream", workstreamId: h.parent_id }
         // 消息命中：打开它所在的会话，ref_id 是消息 id，parent_id 才是会话 id。
         : h.kind === "message" ? { view: "session", sessionId: h.parent_id }
-        : h.kind === "session" ? { view: "session", sessionId: h.ref_id }
-        : h.kind === "project" ? { view: "project", projectId: h.ref_id }
+        : h.kind === "session" ? { view: "session", sessionId: h.ref_id, initialTitle: h.title }
+        : h.kind === "project" ? { view: "project", projectId: h.ref_id, initialTitle: h.title }
         : { view: "sessions" };
       out.push({
         key: `h-${h.kind}-${h.ref_id}`,

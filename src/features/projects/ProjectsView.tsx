@@ -246,7 +246,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
               <button
                 type="button"
                 className="project-open"
-                onClick={() => navigate({ view: "project", projectId: c.id })}
+                onClick={() => navigate({ view: "project", projectId: c.id, initialTitle: c.name })}
               >
                 <div className="project-list-title" title={c.name}>
                   <Icon name="folder" />
@@ -305,12 +305,12 @@ function ProjectCard({ card, navigate }: {
       className="ws-card full project-card"
       tabIndex={0}
       role="button"
-      onClick={() => navigate({ view: "project", projectId: card.id })}
+      onClick={() => navigate({ view: "project", projectId: card.id, initialTitle: card.name })}
       onKeyDown={(e) => {
         if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          navigate({ view: "project", projectId: card.id });
+          navigate({ view: "project", projectId: card.id, initialTitle: card.name });
         }
       }}
     >

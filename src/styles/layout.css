@@ -470,12 +470,37 @@
 .sidebar-recent-item.active::before {
   display: none;
 }
-.sidebar-recent-item .sidebar-recent-time {
-  font-size: 11px;
-  color: var(--text-muted);
-  flex: none;
-  margin-left: auto;
+.sidebar-session-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.sidebar-session-actions { display: flex; flex: none; gap: 2px; }
+.sidebar-session-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.sidebar-session-action .ui-icon { width: 14px; height: 14px; }
+.sidebar-session-action:hover:not(:disabled) { background: var(--bg-hover); }
+.sidebar-session-action:disabled { opacity: .4; cursor: default; }
 .sidebar-recent-empty {
   font-size: 12px;
   color: var(--text-muted);

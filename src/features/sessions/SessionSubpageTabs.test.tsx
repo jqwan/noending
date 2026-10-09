@@ -19,14 +19,14 @@ const terminal = (id: string, live = true, sessionId = "s1"): TerminalSummary =>
 });
 it("switches between history and detail without launching an Agent", async () => {
   const navigate = vi.fn();
-  const view = render(<SessionSubpageTabs sessionId="s1" navigate={navigate} />);
+  const view = render(<SessionSubpageTabs sessionId="s1" title="Session" agent="codex" navigate={navigate} />);
   await act(async () => {});
   fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation" });
-  view.rerender(<SessionSubpageTabs sessionId="s1" entry="conversation" navigate={navigate} />);
+  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "Session", initialAgent: "codex" });
+  view.rerender(<SessionSubpageTabs sessionId="s1" title="Session" agent="codex" entry="conversation" navigate={navigate} />);
   expect(screen.getByRole("button", { name: "历史消息" }).getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1" });
+  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", initialTitle: "Session", initialAgent: "codex" });
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
 });
 it("switches among this session's live and exited terminals and remembers the selected instance", async () => {

@@ -23,7 +23,7 @@ export default function SessionMiniList({ sessions, emptyText, navigate }: {
     <>
       {sessions.length === 0 && <div className="l1-none">{emptyText}</div>}
       {sessions.slice(0, showAll ? undefined : 12).map((s) => (
-        <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
+        <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id, initialTitle: sessionDisplayTitle(s.title), initialAgent: s.agent })}>
           <div className="grow">
             <div className="title mini-title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
               <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>

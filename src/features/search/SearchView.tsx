@@ -48,12 +48,12 @@ export default function SearchView({ query, navigate }: { query: string; navigat
       {hits.map((h) => (
         <button type="button" className="search-result" key={h.kind + h.ref_id}
           onClick={() => {
-            if (h.kind === "workstream") navigate({ view: "workstream", workstreamId: h.ref_id });
-            else if (h.kind === "session") navigate({ view: "session", sessionId: h.ref_id });
+            if (h.kind === "workstream") navigate({ view: "workstream", workstreamId: h.ref_id, initialTitle: h.title });
+            else if (h.kind === "session") navigate({ view: "session", sessionId: h.ref_id, initialTitle: h.title });
             else if (h.kind === "item") navigate({ view: "workstream", workstreamId: h.parent_id });
             // 消息命中：ref_id 是消息 id，打开它所在的逻辑会话（parent_id）。
             else if (h.kind === "message") navigate({ view: "session", sessionId: h.parent_id });
-            else if (h.kind === "project") navigate({ view: "project", projectId: h.ref_id });
+            else if (h.kind === "project") navigate({ view: "project", projectId: h.ref_id, initialTitle: h.title });
           }}>
           <div className="row">
             <span className="badge">{HIT_KIND_LABELS[h.kind] ?? h.kind}</span>

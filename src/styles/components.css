@@ -2098,5 +2098,3 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 .terminal-menu { min-width: 240px; max-width: min(400px, calc(100vw - 24px)); max-height: 320px; overflow-y: auto; }
 .terminal-menu .menu-label { min-width: 0; }
 .terminal-menu small { display: block; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-terminal-status { display: inline-flex; gap: 3px; align-items: center; flex: none; font-size: 11px; }
-.sidebar-terminal-status .ui-icon { width: 13px; height: 13px; }

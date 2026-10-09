@@ -429,7 +429,7 @@ export default function SessionsView({ navigate, scope }: {
               workstreamTitleById={workstreamTitleById}
               projectNameById={projectNameById}
               viewMode={viewMode}
-              onOpen={(id) => navigate({ view: "session", sessionId: id })}
+              onOpen={(id) => { const s = shown.find(s => s.id === id); navigate({ view: "session", sessionId: id, initialTitle: sessionDisplayTitle(s?.title), initialAgent: s?.agent }); }}
               onResume={resume}
               onArchive={setArchiveSessionId}
               onRestore={(id) => { const target = sessions?.find((s) => s.id === id); if (target) void unarchive(target); }}

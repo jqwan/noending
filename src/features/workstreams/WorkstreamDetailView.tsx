@@ -48,11 +48,13 @@ export function clearWorkstreamDetailCache() {
 
 export default function WorkstreamDetailView({
   workstreamId,
+  initialTitle,
   entry,
   navigate,
   goBack,
 }: {
   workstreamId: string;
+  initialTitle?: string;
   entry?: WorkstreamEntry;
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
@@ -228,7 +230,7 @@ export default function WorkstreamDetailView({
     if (loadError === "") {
       return (
         <div className="main task-detail" role="status">
-          <PageHeader title={<span className="skeleton" style={{ display: "inline-block", width: 180, height: 24, borderRadius: "var(--radius-sm)" }} />} />
+          <PageHeader title={initialTitle ?? ""} />
           <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
             <div className="skeleton" style={{ height: 120, borderRadius: "var(--radius-lg)" }} />
             <div className="skeleton" style={{ height: 200, borderRadius: "var(--radius-lg)" }} />
@@ -238,7 +240,7 @@ export default function WorkstreamDetailView({
     }
     return (
       <div className="main narrow" role="status">
-        <PageHeader title="读取任务失败">
+        <PageHeader title={initialTitle ?? ""}>
           <p>{loadError}</p>
           <button className="btn" onClick={() => setRetry(value => value + 1)}>重试</button>
         </PageHeader>
@@ -464,8 +466,8 @@ export default function WorkstreamDetailView({
           )}
           {paths !== null && projectRows.map((p) => (
             <div className="list-row" key={p.id} role="link" tabIndex={0}
-              onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id }); }}
-              onClick={() => navigate({ view: "project", projectId: p.id })}>
+              onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined }); }}
+              onClick={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}>
               <div className="grow">
                 <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名项目"}</div>
               </div>
@@ -555,6 +557,7 @@ function IntelligenceSections({
   ctx: WorkstreamContextData;
   entry?: WorkstreamEntry;
   workstreamId: string;
+  initialTitle?: string;
   navigate: (r: Route) => void;
   onChanged: () => void;
   ctxState: WorkstreamContextView | null;

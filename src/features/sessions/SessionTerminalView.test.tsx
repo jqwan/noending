@@ -280,7 +280,7 @@ it("an unbound terminal keeps the session-detail entry disabled; binding lights 
   await waitFor(() => expect(entry.disabled).toBe(false));
   await waitFor(() => expect(screen.getByText("页面匹配的会话")).toBeTruthy());
   fireEvent.click(entry);
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s9" });
+  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s9", initialTitle: "页面匹配的会话", initialAgent: "codex" }));
 });
 
 it("reconnects an exited terminal and navigates to the new PTY", async () => {
@@ -290,7 +290,7 @@ it("reconnects an exited terminal and navigates to the new PTY", async () => {
   await screen.findByText(/Agent 已退出/);
   const old = FakeTerminal.last!;
   fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-new", initialSessionId: "s1", initialAgent: "codex" })));
   expect(api.terminalReconnect).toHaveBeenCalledWith("t-1");
   expect(old.disposed).toBe(true);
 });
@@ -342,7 +342,7 @@ it("keeps a failed reconnect retryable and retains the terminal output", async (
   expect(old.disposed).toBe(false);
   expect((screen.getByRole("button", { name: "重新连接" }) as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-new", initialSessionId: "s1", initialAgent: "codex" })));
 });
 
 it("disables reconnect until the terminal has a verified Session", async () => {
@@ -372,7 +372,9 @@ it("does not navigate away from another page if reconnection finishes after unmo
 
 it("the route seed renders the final header on the first frame — no 新会话 flash", async () => {
   // attach 故意挂起不返回：种子必须独立于它成立（会话页跳转的防闪契约）。
-  vi.mocked(api.terminalAttach).mockReturnValue(new Promise(() => {}) as never);
+  const attach = deferred<TerminalSnapshot>();
+  vi.mocked(api.terminalAttach).mockReturnValue(attach.promise);
+  vi.mocked(api.getSessionDetail).mockReturnValue(new Promise(() => {}));
   const navigate = vi.fn();
 
   render(
@@ -389,7 +391,8 @@ it("the route seed renders the final header on the first frame — no 新会话 
   const entry = screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement;
   expect(entry.disabled).toBe(false);
   expect(screen.queryByText("新会话")).toBeNull();
-  await act(async () => {});
+  await act(async () => attach.resolve(snapshot({ session_id: "s1", session_title: null })));
+  expect(screen.getByRole("heading").textContent).toBe("修复布局");
 });
 
 it("a bound snapshot shows the session-detail entry enabled from the start", async () => {
@@ -434,9 +437,9 @@ it("follows A to B without rebuilding the terminal and ignores old or duplicate 
 
   pushIdentity("b", 2);
   expect(screen.queryByText("任务 A")).toBeNull();
-  expect(screen.getByRole("heading", { name: "新会话" })).toBeTruthy();
+  expect(screen.getByRole("heading").textContent).toBe("");
   fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "b" });
+  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "b", initialAgent: "codex" }));
   await act(async () => { pendingB.resolve(detail("任务 B")); });
   expect(screen.getByText("任务 B")).toBeTruthy();
 
@@ -471,7 +474,7 @@ it("clears the old title and detail target while the new native session is pendi
   pushIdentity("b", 3);
   await waitFor(() => expect(entry.disabled).toBe(false));
   fireEvent.click(entry);
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "b" });
+  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "b", initialAgent: "codex" }));
 });
 
 it("does not let a late attach snapshot replace a newer pending identity", async () => {

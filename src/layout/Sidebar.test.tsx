@@ -12,6 +12,7 @@ import type { TerminalSummary, Session, WorkstreamCardData, ProjectCardData } fr
 
 vi.mock("../api", () => ({
   api: {
+    getAgentStatus: vi.fn(), continueSessionDesktop: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn(),
     terminalList: vi.fn(),
     listSessions: vi.fn(),
     listWorkstreamCards: vi.fn(),
@@ -20,6 +21,10 @@ vi.mock("../api", () => ({
 }));
 
 beforeEach(() => {
+  vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue({});
+  vi.mocked(api.continueSessionDesktop).mockReset().mockResolvedValue({ note: "opened" } as never);
+  vi.mocked(api.terminalForSession).mockReset().mockResolvedValue(null);
+  vi.mocked(api.launchEmbeddedResume).mockReset().mockResolvedValue({ terminal_id: "spawned" } as never);
   viewState.clear();
   sessionPages.clear();
   sessionTerminals.clear();
@@ -147,9 +152,9 @@ describe("Sidebar unified sessions", () => {
       terminal({ terminal_id: "t2", session_id: "s1", session_title: "共享会话", live: false }),
     ]);
     const navigate = renderSidebar({ view: "terminal", terminalId: "t2" });
-    await screen.findByLabelText("1 个运行中终端，1 个已退出终端");
+    await screen.findByRole("button", { name: "终端 · 运行中：共享会话" });
     expect(screen.getAllByText("共享会话")).toHaveLength(1);
-    expect(screen.getByText("共享会话").closest("button")?.className).toContain("active");
+    expect(screen.getByText("共享会话").closest(".sidebar-recent-item")?.className).toContain("active");
     fireEvent.click(screen.getByText("共享会话"));
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t1" }));
   });
@@ -158,7 +163,7 @@ describe("Sidebar unified sessions", () => {
     vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s1", title: "旧会话", archived_at: "archived", last_conversation_at: "2020-01-01T00:00:00Z" })]);
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s1", live: false })]);
     renderSidebar();
-    await screen.findByLabelText("0 个运行中终端，1 个已退出终端");
+    await screen.findByRole("button", { name: "终端 · 已退出：旧会话" });
     expect(screen.getByText("旧会话")).toBeTruthy();
     expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "all");
   });
@@ -168,7 +173,7 @@ describe("Sidebar unified sessions", () => {
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ live: false })]);
     const navigate = renderSidebar();
     fireEvent.click(await screen.findByTitle("新会话 · /repo/x"));
-    expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-1" });
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-1", initialAgent: "codex" }));
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s1", session_title: "已绑定会话", identity_revision: 1 })]);
     act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
     await waitFor(() => expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull());
@@ -180,13 +185,46 @@ describe("Sidebar unified sessions", () => {
     rememberSessionPage("s1", { view: "session", sessionId: "s1", entry: "conversation" });
     const navigate = renderSidebar();
     fireEvent.click(await screen.findByText("修复侧栏问题"));
-    expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation" });
+    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
     rememberSessionPage("s1", { view: "terminal", terminalId: "moved" });
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "moved", session_id: "s2", session_title: "另一会话" })]);
     act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
     await screen.findByText("另一会话");
     fireEvent.click(screen.getByText("修复侧栏问题"));
-    expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation" });
+    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+  });
+
+  it("sidebar continue actions reuse the preferred retained terminal and open desktop independently", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s1", title: "共享会话" })]);
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ terminal_id: "live", session_id: "s1" }),
+      terminal({ terminal_id: "exited", session_id: "s1", live: false }),
+    ]);
+    sessionTerminals.set("s1", "exited");
+    const navigate = renderSidebar();
+    fireEvent.click(await screen.findByRole("button", { name: "终端 · 已退出：共享会话" }));
+    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "exited", initialSessionId: "s1", initialTitle: "共享会话" }));
+    expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
+    navigate.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续：共享会话" }));
+    await waitFor(() => expect(api.continueSessionDesktop).toHaveBeenCalledWith("s1"));
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("launches explicitly from the sidebar only when no terminal exists and respects archive/format availability", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s1", title: "待继续", agent: "pi" }),
+      session({ id: "s2", title: "桌面会话", agent: "workbuddy" }),
+      session({ id: "s3", title: "已归档", archived_at: "archived" }),
+    ]);
+    const navigate = renderSidebar({ view: "session", sessionId: "s3" });
+    fireEvent.click(await screen.findByRole("button", { name: "在终端中继续：待继续" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "spawned", initialTitle: "待继续", initialAgent: "pi" })));
+    expect(api.launchEmbeddedResume).toHaveBeenCalledWith("s1");
+    expect(screen.queryByRole("button", { name: "在桌面应用中继续：待继续" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "在终端中继续：桌面会话" })).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "在终端中继续：已归档" }).disabled).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "在桌面应用中继续：已归档" }).disabled).toBe(true);
   });
 
   it("ignores an old terminal list response after a newer identity refresh", async () => {
@@ -264,7 +302,7 @@ describe("Sidebar 最近活动", () => {
     const sessionItem = screen.getByText("修复侧栏问题");
 
     fireEvent.click(sessionItem);
-    expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "s-1", entry: "conversation" });
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
   });
 
   it("toggles group collapse when group header is clicked", async () => {

@@ -26,8 +26,9 @@ export function clearProjectDetailCache() {
   projectDetailCache.clear();
 }
 
-export default function ProjectDetail({ projectId, navigate }: {
+export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   projectId: string;
+  initialTitle?: string;
   navigate: (r: Route) => void;
 }) {
   const [data, setData] = useState<ProjectDetailData | null>(() => projectDetailCache.get(projectId) ?? null);
@@ -127,7 +128,7 @@ export default function ProjectDetail({ projectId, navigate }: {
       return (
         <div className="main project-detail" role="status">
           <PageHeader
-            title={<span className="skeleton" style={{ display: "inline-block", width: 160, height: 24, borderRadius: "var(--radius-sm)" }} />}
+            title={initialTitle ?? ""}
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
             <div className="skeleton" style={{ height: 100, borderRadius: "var(--radius-lg)" }} />
@@ -139,7 +140,7 @@ export default function ProjectDetail({ projectId, navigate }: {
     return (
       <div className="main project-detail">
         <PageHeader
-          title={gone ? "这个项目已经不存在" : "读取项目失败"}
+          title={initialTitle ?? ""}
         >
           {failure !== "" && <PathError text={failure} />}
           {gone && (
@@ -190,7 +191,7 @@ export default function ProjectDetail({ projectId, navigate }: {
           const summary = cardSummaryLine(w as unknown as WorkstreamCardData);
           return (
             <div key={w.id} className="list-row"
-              onClick={() => navigate({ view: "workstream", workstreamId: w.id })}>
+              onClick={() => navigate({ view: "workstream", workstreamId: w.id, initialTitle: w.title })}>
               <div className="grow">
                 <div className="title mini-title" title={w.title}>
                   <span><Icon name="tasks" /></span>

@@ -32,7 +32,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent, onA
   onDelete?: (card: WorkstreamCardData) => void;
   busy?: boolean;
 }) {
-  const openDetail = () => navigate({ view: "workstream", workstreamId: card.id });
+  const openDetail = () => navigate({ view: "workstream", workstreamId: card.id, initialTitle: card.title });
 
   const body = cardSummaryLine(card);
   const archived = card.visibility === "archived";

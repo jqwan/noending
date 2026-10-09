@@ -105,24 +105,9 @@ export default function SessionDetailView({
 
   const fallbackAgent = initialAgent;
   const fallbackRawTitle = initialTitle;
-  const fallbackDisplayTitle = fallbackRawTitle ? (
-    fallbackRawTitle === UNTITLED_SESSION ? "未命名会话" : fallbackRawTitle
-  ) : (
-    <span
-      className="skeleton"
-      style={{
-        display: "inline-block",
-        width: 140,
-        height: 20,
-        borderRadius: "var(--radius-sm)",
-        verticalAlign: "middle",
-      }}
-    />
-  );
+  const fallbackDisplayTitle = fallbackRawTitle ? sessionDisplayTitle(fallbackRawTitle) : "";
 
-  const fallbackHeaderTitle = failed ? (
-    "读取会话失败"
-  ) : fallbackAgent ? (
+  const fallbackHeaderTitle = fallbackAgent ? (
     <span className="session-title-with-icon" title={typeof fallbackDisplayTitle === "string" ? fallbackDisplayTitle : undefined}>
       <AgentIcon agent={fallbackAgent} size={18} />
       <span className="session-title-text">{fallbackDisplayTitle}</span>
@@ -138,7 +123,7 @@ export default function SessionDetailView({
   if (!detail) {
     return (
       <div className="main session-detail" role="status">
-        <PageHeader title={fallbackHeaderTitle} actions={<SessionSubpageTabs sessionId={sessionId} navigate={navigate} />}>
+        <PageHeader title={fallbackHeaderTitle} actions={<SessionSubpageTabs sessionId={sessionId} title={fallbackDisplayTitle} agent={fallbackAgent} navigate={navigate} />}>
           {failed && (
             <>
               <p className="muted small">
@@ -272,6 +257,7 @@ export default function SessionDetailView({
             {/* 顶部切换：历史消息、详情和终端实例。 */}
             <SessionSubpageTabs
               sessionId={sessionId}
+              title={title}
               entry={undefined}
               agent={session.agent}
               sourceKind={session.source_kind}
@@ -323,10 +309,10 @@ export default function SessionDetailView({
           role="link"
           tabIndex={0}
           title={`打开任务：${owner_workstream.title}`}
-          onClick={() => navigate({ view: "workstream", workstreamId: owner_workstream.id })}
+          onClick={() => navigate({ view: "workstream", workstreamId: owner_workstream.id, initialTitle: owner_workstream.title })}
           onKeyDown={(e) => {
             if (e.key === "Enter" && e.target === e.currentTarget) {
-              navigate({ view: "workstream", workstreamId: owner_workstream.id });
+              navigate({ view: "workstream", workstreamId: owner_workstream.id, initialTitle: owner_workstream.title });
             }
           }}
         >
@@ -505,7 +491,7 @@ export default function SessionDetailView({
                 <button
                   className="link"
                   title={`打开项目：${derivedProjectName}`}
-                  onClick={() => navigate({ view: "project", projectId: workspacePath.project_id })}
+                  onClick={() => navigate({ view: "project", projectId: workspacePath.project_id, initialTitle: derivedProjectName })}
                 >
                   {derivedProjectName}
                 </button>
@@ -644,7 +630,7 @@ export default function SessionDetailView({
                 className="link"
                 style={{ textAlign: "left", wordBreak: "break-word" }}
                 title={`打开来源会话：${sessionDisplayTitle(detail.forked_from.title)}`}
-                onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id })}
+                onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id, initialTitle: sessionDisplayTitle(detail.forked_from!.title), initialAgent: detail.forked_from!.agent })}
               >
                 分叉自：{sessionDisplayTitle(detail.forked_from.title)}
                 {detail.forked_from.archived_at !== null && (

@@ -5,16 +5,18 @@ import { showToast } from "../../components/Toast";
 import Icon from "../../components/Icon";
 import { capsOf } from "./sessionFormats";
 import { continueSessionDesktopWithToast, desktopContinueState, useAgentStatus } from "./continueDesktop";
-import type { Agent } from "../../types";
+import type { Agent, AgentStatusEntry } from "../../types";
 
-export function DesktopContinueButton({ sessionId, agent, sourceKind, archived }: {
+export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, agentStatus, className = "btn ghost icon-button", label = "在桌面应用中继续" }: {
   sessionId: string; agent: Agent; sourceKind?: string; archived: boolean;
+  agentStatus?: Record<string, AgentStatusEntry> | null; className?: string; label?: string;
 }) {
-  const status = useAgentStatus();
+  const localStatus = useAgentStatus(agentStatus === undefined);
+  const status = agentStatus === undefined ? localStatus : agentStatus;
   const [busy, setBusy] = useState(false);
   if (!capsOf(agent, sourceKind).desktop) return null;
   const availability = desktopContinueState({ agent, source_kind: sourceKind, archived_at: archived ? "archived" : null }, status?.[agent]);
-  return <button className="btn ghost icon-button" aria-label="在桌面应用中继续" title={availability.title}
+  return <button className={className} aria-label={label} title={availability.title}
     disabled={busy || availability.disabled} onClick={() => {
       if (busy) return;
       setBusy(true);

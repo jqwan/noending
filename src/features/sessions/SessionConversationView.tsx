@@ -506,7 +506,7 @@ export default function SessionConversationView({
   const rawTitle = session ? sessionDisplayTitle(session.title) : initialTitle;
   const displayTitle = rawTitle
     ? (rawTitle === UNTITLED_SESSION ? "未命名会话" : rawTitle)
-    : "会话消息";
+    : "";
 
   const headerTitle = currentAgent ? (
     <span className="session-title-with-icon" title={displayTitle}>
@@ -522,7 +522,7 @@ export default function SessionConversationView({
       <div className="main narrow" role="status">
         <PageHeader
           title={headerTitle}
-          actions={<SessionSubpageTabs sessionId={sessionId} entry="conversation" navigate={navigate} />}
+          actions={<SessionSubpageTabs sessionId={sessionId} title={displayTitle} agent={currentAgent ?? undefined} entry="conversation" navigate={navigate} />}
         />
         <div className="empty">
           读不到这个会话的消息。
@@ -540,6 +540,7 @@ export default function SessionConversationView({
           <span className="row" style={{ gap: 8 }}>
             <SessionSubpageTabs
               sessionId={sessionId}
+              title={displayTitle}
               entry="conversation"
               agent={currentAgent ?? undefined}
               sourceKind={cachedDetail?.session.source_kind}

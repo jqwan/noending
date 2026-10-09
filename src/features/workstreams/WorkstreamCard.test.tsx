@@ -11,7 +11,7 @@ it("keeps card navigation separate from the new-session action", () => {
   expect(navigate).toHaveBeenCalledWith({ view: "new-session", workstreamId: "w1" });
   fireEvent.click(screen.getByRole("button", { name: "优化看板" }));
   expect(navigate).toHaveBeenCalledTimes(2);
-  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1" });
+  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1", initialTitle: "优化看板" });
 });
 
 

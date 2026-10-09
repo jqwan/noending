@@ -33,7 +33,7 @@ export type SessionEntry = "conversation";
 export type Route =
   | { view: "new-session"; workstreamId?: string; agent?: Agent; projectId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
-  | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry }
+  | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry; initialTitle?: string }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
   | {
       view: "session";
@@ -52,7 +52,7 @@ export type Route =
   | { view: "agents"; agent?: Agent }
   | { view: "assistant"; scope?: AssistantScope }
   | { view: "projects" }
-  | { view: "project"; projectId: string }
+  | { view: "project"; projectId: string; initialTitle?: string }
   | { view: "settings"; section?: SettingsSection | LegacySettingsSection }
   | { view: "search"; query: string };
 

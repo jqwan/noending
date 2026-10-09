@@ -3,6 +3,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import AppShell from "./AppShell";
 import { sessionPages, sessionTerminals } from "../features/sessions/sessionNavigation";
 import type { Route } from "./routes";
+import { api } from "../api";
+import { sessionDetailCache } from "../features/sessions/SessionDetailView";
 import { useState } from "react";
 
 const focusListener = vi.hoisted(() => ({
@@ -19,7 +21,7 @@ vi.mock("@tauri-apps/api/window", () => ({
     },
   }),
 }));
-vi.mock("../api", () => ({ api: { appForeground } }));
+vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn() } }));
 vi.mock("../layout/Sidebar", () => ({ default: ({ hidden }: { hidden: boolean }) => <aside aria-label="会话侧边栏" hidden={hidden} /> }));
 const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navigate: (route: Route) => void }) => {
@@ -38,6 +40,8 @@ vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => {
+  sessionDetailCache.clear();
+  vi.mocked(api.getSessionDetail).mockReset();
   sessionPages.clear(); sessionTerminals.clear();
   localStorage.clear();
   appForeground.mockClear();
@@ -81,7 +85,7 @@ it("preserves the session page's unsent state while switching sections or viewin
 
 it.each([
   { view: "terminal", terminalId: "t-7" },
-  { view: "session", sessionId: "s-4", entry: "conversation" },
+  { view: "session", sessionId: "s-4", entry: "conversation", initialTitle: "Existing", initialAgent: "codex" },
   { view: "sessions", scope: "archived" },
 ] as Route[])("restores the last session page and parameters across history navigation: %j", (route) => {
   render(<AppShell />);
@@ -150,4 +154,18 @@ it("normalizes legacy settings sections to agents view", async () => {
   expect(normalizeRoute({ view: "settings", section: "general" })).toEqual({ view: "settings", section: "general" });
   expect(normalizeRoute({ view: "workstreams" })).toEqual({ view: "workstreams" });
   expect(normalizeRoute({ view: "sessions", action: "new" })).toEqual({ view: "new-session" });
+});
+
+it("resolves an ID-only destination before changing pages, and cancels a late result after newer navigation", async () => {
+  let resolve!: (value: Awaited<ReturnType<typeof api.getSessionDetail>>) => void;
+  vi.mocked(api.getSessionDetail).mockImplementation(() => new Promise(done => { resolve = done; }));
+  render(<AppShell />);
+  act(() => sessionNavigation.navigate!({ view: "session", sessionId: "pending" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  await act(async () => resolve({ session: { id: "pending", title: "Ready", agent: "codex" } } as never));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toMatchObject({ view: "session", initialTitle: "Ready", initialAgent: "codex" });
+  act(() => sessionNavigation.navigate!({ view: "session", sessionId: "late" }));
+  fireEvent.click(screen.getByRole("button", { name: "项目" }));
+  await act(async () => resolve({ session: { id: "late", title: "Late", agent: "codex" } } as never));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
 });

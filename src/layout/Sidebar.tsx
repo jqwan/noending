@@ -3,11 +3,13 @@ import { api } from "../api";
 import { onEvent, EVT_TERMINALS, EVT_SYNCED, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import AgentIcon from "../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type TerminalSummary, type Session, type WorkstreamCardData, type ProjectCardData } from "../types";
+import { AGENT_LABELS, type Agent, type TerminalSummary, type Session, type WorkstreamCardData, type ProjectCardData, type AgentStatusEntry } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
-import { timeAgo } from "../components/common";
+import { capsOf } from "../features/sessions/sessionFormats";
+import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions";
+import { openSessionTerminal, useAgentStatus } from "../features/sessions/continueDesktop";
 import { useViewState } from "../hooks/useViewState";
-import { sessionDestination } from "../features/sessions/sessionNavigation";
+import { preferredTerminal, sessionDestination, terminalDestination } from "../features/sessions/sessionNavigation";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -26,6 +28,7 @@ export function isSessionWithinSevenDays(session: Session, now = Date.now()): bo
 }
 
 type SidebarSession = Pick<Session, "id" | "agent" | "title" | "cwd" | "owner_workstream_id" | "project_id" | "last_conversation_at" | "archived_at"> & {
+  source_kind?: string;
   sessionId: string | null;
   terminals: TerminalSummary[];
   activityAt: number;
@@ -141,6 +144,44 @@ export function groupSidebarSessions(
   return Array.from(groupsMap.values()).sort((a, b) => b.latestTime - a.latestTime);
 }
 
+function SidebarSessionRow({ session, route, navigate, agentStatus, loading }: {
+  session: SidebarSession; route: Route; navigate: (r: Route) => void;
+  agentStatus: Record<string, AgentStatusEntry> | null; loading: boolean;
+}) {
+  const s = session;
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const active = route.view === "session" && route.sessionId === s.sessionId || route.view === "terminal" && s.terminals.some(t => t.terminal_id === route.terminalId);
+  const title = sessionDisplayTitle(s.title);
+  const selected = s.sessionId ? preferredTerminal(s.sessionId, s.terminals) : s.terminals[0];
+  const caps = capsOf(s.agent, s.source_kind);
+  const terminalLabel = selected ? `终端 · ${selected.live ? "运行中" : "已退出"}` : "在终端中继续";
+  const counts = `${s.terminals.filter(t => t.live).length} 个运行中终端，${s.terminals.filter(t => !t.live).length} 个已退出终端`;
+  const openTerminal = async () => {
+    if (pending.current) return;
+    if (!s.sessionId) { if (selected) navigate(terminalDestination(selected)); return; }
+    pending.current = true;
+    setBusy(true);
+    try { await openSessionTerminal({ ...s, id: s.sessionId, title }, s.terminals, navigate); }
+    finally { pending.current = false; setBusy(false); }
+  };
+  return <div className={`nav-item sidebar-recent-item ${active ? "active" : ""}`}>
+    <button className="sidebar-session-link" title={`${s.cwd ? `${title} · ${s.cwd}` : title}${s.archived_at ? " · 已归档" : ""}`}
+      onClick={() => navigate(s.sessionId ? sessionDestination(s.sessionId, s.terminals, { title, agent: s.agent }) : terminalDestination(s.terminals[0]))}>
+      <AgentIcon agent={s.agent} size={14} /><span className="truncate">{title}</span>
+    </button>
+    <span className="sidebar-session-actions">
+      {(selected || caps.terminal) && <button className={`sidebar-session-action ${selected ? selected.live ? "terminal-running" : "terminal-exited" : ""}`}
+        aria-label={`${terminalLabel}：${title}`} title={selected ? `${terminalLabel} · ${counts}` : terminalLabel}
+        disabled={busy || !selected && (loading || !s.sessionId || !!s.archived_at)} onClick={() => void openTerminal()}>
+        <Icon name="terminal" />
+      </button>}
+      {s.sessionId && <DesktopContinueButton sessionId={s.sessionId} agent={s.agent} sourceKind={s.source_kind}
+        archived={!!s.archived_at} agentStatus={agentStatus} className="sidebar-session-action" label={`在桌面应用中继续：${title}`} />}
+    </span>
+  </div>;
+}
+
 /**
  * 会话侧边栏：新会话、会话看板、最近会话与保留终端的统一列表。
  * 工作区导航由最左侧固定图标栏提供；切换工作区时保留本栏的数据与分组状态。
@@ -151,6 +192,8 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   collapsed?: boolean;
   hidden?: boolean;
 }) {
+  const agentStatus = useAgentStatus();
+  const [terminalsLoading, setTerminalsLoading] = useState(true);
   const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
@@ -165,9 +208,9 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     api
       .terminalList()
       .then((next) => {
-        if (seq === refreshSeq.current) setTerminals(next);
+        if (seq === refreshSeq.current) { setTerminals(next); setTerminalsLoading(false); }
       })
-      .catch(console.error);
+      .catch(error => { if (seq === refreshSeq.current) setTerminalsLoading(false); console.error(error); });
   }, []);
 
   const refreshSessions = useCallback(() => {
@@ -306,28 +349,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
                 </button>
                 {!isCollapsed && (
                   <div className="sidebar-recent-group-items">
-                    {group.sessions.map((s) => {
-                      const active = route.view === "session" && route.sessionId === s.sessionId || route.view === "terminal" && s.terminals.some(t => t.terminal_id === route.terminalId);
-                      const title = sessionDisplayTitle(s.title);
-                      const timeStr = s.last_conversation_at;
-                      const tooltip = s.cwd ? `${title} · ${s.cwd}` : title;
-                      return (
-                        <button
-                          key={s.id}
-                          type="button"
-                          className={`nav-item sidebar-recent-item ${active ? "active" : ""}`}
-                          title={`${tooltip}${s.archived_at ? " · 已归档" : ""}`}
-                          onClick={() => navigate(s.sessionId ? sessionDestination(s.sessionId, terminals) : { view: "terminal", terminalId: s.terminals[0].terminal_id })}
-                        >
-                          <AgentIcon agent={s.agent} size={14} />
-                          <span className="truncate" style={{ flex: 1 }}>{title}</span>
-                          {s.terminals.length > 0 ? <span className={`sidebar-terminal-status ${s.terminals.some(t => t.live) ? "terminal-running" : "terminal-exited"}`}
-                            aria-label={`${s.terminals.filter(t => t.live).length} 个运行中终端，${s.terminals.filter(t => !t.live).length} 个已退出终端`}>
-                            <Icon name="terminal" />{s.terminals.length > 1 && <span>{s.terminals.length}</span>}
-                          </span> : timeStr && <span className="sidebar-recent-time">{timeAgo(timeStr)}</span>}
-                        </button>
-                      );
-                    })}
+                    {group.sessions.map(s => <SidebarSessionRow key={s.id} session={s} route={route} navigate={navigate} agentStatus={agentStatus} loading={terminalsLoading} />)}
                   </div>
                 )}
               </div>

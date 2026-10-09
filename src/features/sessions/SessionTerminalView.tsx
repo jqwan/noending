@@ -100,7 +100,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     let title: string | null = null;
     if (update.session_id) {
       if (update.session_title != null) title = sessionDisplayTitle(update.session_title);
-      else if (update.identity_revision === current.revision) title = current.title;
+      else if (update.session_id === current.sessionId) title = current.title;
     }
     const next = { revision: update.identity_revision, sessionId: update.session_id, title };
     identityRef.current = next;
@@ -117,7 +117,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       if (!result.terminal_id) throw new Error("找不到重新连接的终端");
       // 旧实例已被后端替换，释放对应 xterm 与常驻监听。
       disposeTerminal(terminalId);
-      if (mountedRef.current) navigate({ view: "terminal", terminalId: result.terminal_id });
+      if (mountedRef.current) navigate({ view: "terminal", terminalId: result.terminal_id, initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent, initialSessionId: boundSessionId });
     } catch (e) {
       if (mountedRef.current) showToast(`重新连接失败：${String(e)}`);
     } finally {
@@ -140,7 +140,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const peers = remaining.filter(t => t.terminal_id !== terminalId && t.session_id === closed.session_id && !!closed.session_id);
       const next = closed.session_id ? preferredTerminal(closed.session_id, peers.filter(t => t.live)) ?? peers[0] : undefined;
       navigate(next ? terminalDestination(next)
-        : closed.session_id ? { view: "session", sessionId: closed.session_id, entry: "conversation" }
+        : closed.session_id ? { view: "session", sessionId: closed.session_id, entry: "conversation", ...(closed.session_id === boundSessionId ? { initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent } : {}) }
         : { view: "sessions" });
     } catch (e) { if (mountedRef.current) showToast(`关闭失败：${String(e)}`); }
     finally { closingRef.current = false; if (mountedRef.current) setClosing(false); }
@@ -477,7 +477,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
 
   // 未绑定的终端以「新会话」为名；绑定后标题换成会话本名。agent 在
   // attach 回来前用路由种子，避免首帧丢失图标。
-  const headerTitle = boundTitle ?? "新会话";
+  const headerTitle = boundTitle ?? (boundSessionId ? "" : "新会话");
   const headerAgent = snapshot?.agent ?? initialAgent ?? null;
   const meta = sessionMeta?.id === boundSessionId ? sessionMeta : null;
 
@@ -496,7 +496,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         }
         actions={
           <>
-            <SessionSubpageTabs sessionId={boundSessionId} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
+            <SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
               agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived} navigate={navigate} />
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}

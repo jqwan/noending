@@ -3,16 +3,17 @@ import Icon from "../../components/Icon";
 import type { Route, SessionEntry } from "../../app/routes";
 import type { Agent } from "../../types";
 import { capsOf } from "./sessionFormats";
-import { continueSessionTerminalWithToast } from "./continueDesktop";
+import { openSessionTerminal } from "./continueDesktop";
 import { preferredTerminal, rememberSessionPage, terminalDestination } from "./sessionNavigation";
 import { useSessionTerminals } from "./useSessionTerminals";
 
 /** One titlebar navigation group for history, detail and all bound terminals. */
-export default function SessionSubpageTabs({ sessionId, entry, terminalId, terminalLive, agent, sourceKind, archived = false, navigate }: {
+export default function SessionSubpageTabs({ sessionId, entry, terminalId, terminalLive, title, agent, sourceKind, archived = false, navigate }: {
   sessionId: string | null;
   entry?: SessionEntry;
   terminalId?: string;
   terminalLive?: boolean;
+  title?: string;
   agent?: Agent;
   sourceKind?: string;
   archived?: boolean;
@@ -33,9 +34,9 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   useEffect(() => {
     setOpen(false);
     if (sessionId) rememberSessionPage(sessionId, terminalId
-      ? { view: "terminal", terminalId }
-      : { view: "session", sessionId, entry });
-  }, [sessionId, terminalId, entry]);
+      ? { view: "terminal", terminalId, initialTitle: title, initialAgent: agent, initialSessionId: sessionId }
+      : { view: "session", sessionId, entry, initialTitle: title, initialAgent: agent });
+  }, [sessionId, terminalId, entry, title, agent]);
   useEffect(() => {
     if (!open) return;
     const pointer = (e: MouseEvent) => { if (!root.current?.contains(e.target as Node)) setOpen(false); };
@@ -47,11 +48,11 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
 
   const openTerminal = async () => {
     if (terminalId) return;
-    if (selected) { navigate(terminalDestination(selected)); return; }
+    if (selected) { navigate({ ...terminalDestination(selected), initialTitle: title ?? selected.session_title ?? undefined }); return; }
     if (!sessionId || !agent || archived || launchPending.current || loading) return;
     launchPending.current = true;
     setLaunching(true);
-    try { await continueSessionTerminalWithToast({ id: sessionId, agent }, navigate); }
+    try { await openSessionTerminal({ id: sessionId, title, agent, archived_at: archived ? "archived" : null }, peers, navigate); }
     finally { launchPending.current = false; setLaunching(false); }
   };
   const terminalLabel = terminalId || selected
@@ -71,10 +72,10 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
     <div className="settings-seg icon-seg" role="group" aria-label="会话子页">
       <button className={!terminalId && entry === "conversation" ? "on" : ""} aria-pressed={!terminalId && entry === "conversation"}
         aria-label="历史消息" title="历史消息" disabled={!sessionId}
-        onClick={() => sessionId && navigate({ view: "session", sessionId, entry: "conversation" })}><Icon name="chat" /></button>
+        onClick={() => sessionId && navigate({ view: "session", sessionId, entry: "conversation", initialTitle: title, initialAgent: agent })}><Icon name="chat" /></button>
       <button className={!terminalId && entry === undefined ? "on" : ""} aria-pressed={!terminalId && entry === undefined}
         aria-label="会话详情" title="会话详情" disabled={!sessionId}
-        onClick={() => sessionId && navigate({ view: "session", sessionId })}><Icon name="info" /></button>
+        onClick={() => sessionId && navigate({ view: "session", sessionId, initialTitle: title, initialAgent: agent })}><Icon name="info" /></button>
       {canTerminal && <>
         <button className={`${terminalId ? "on " : ""}${live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
           aria-pressed={!!terminalId} aria-label={terminalLabel} title={terminalLabel}
@@ -87,7 +88,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
     {open && <div className="continue-split-menu terminal-menu" role="menu" aria-label="会话终端">
       {peers.map(t => <button key={t.terminal_id} className="continue-menu-item" role="menuitemradio"
         aria-checked={t.terminal_id === (terminalId ?? selected?.terminal_id)}
-        title={t.cwd ?? undefined} onClick={() => { setOpen(false); navigate(terminalDestination(t)); }}>
+        title={t.cwd ?? undefined} onClick={() => { setOpen(false); navigate({ ...terminalDestination(t), initialTitle: title ?? t.session_title ?? undefined }); }}>
         <span className={t.live ? "terminal-running" : "terminal-exited"}><Icon name="terminal" /></span>
         <span className="menu-label">{t.cwd ?? "默认工作目录"}<small>{t.live ? "运行中" : "已退出"}{Number.isFinite(Date.parse(t.created_at)) ? ` · ${new Date(t.created_at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}</small></span>
         {t.terminal_id === (terminalId ?? selected?.terminal_id) && <Icon name="check" />}

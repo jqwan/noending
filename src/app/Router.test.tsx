@@ -8,7 +8,7 @@ const { detail, conversation, terminal } = vi.hoisted(() => ({
   conversation: vi.fn(() => <div>conversation</div>),
   terminal: vi.fn(() => <div>terminal</div>),
 }));
-vi.mock("../features/sessions/SessionDetailView", () => ({ default: detail }));
+vi.mock("../features/sessions/SessionDetailView", () => ({ default: detail, sessionDetailCache: new Map() }));
 vi.mock("../features/sessions/SessionConversationView", () => ({ default: conversation }));
 vi.mock("../features/sessions/SessionTerminalView", () => ({ default: terminal }));
 vi.mock("../features/sessions/NewSessionView", () => ({
@@ -50,6 +50,6 @@ it("dispatches session overview, conversation and terminal routes with their ide
   expect(conversation).not.toHaveBeenCalled();
   rerender(<Router route={{ ...sessionRoute, entry: "conversation", initialTotal: 12 }} {...props} />);
   expect(conversation).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", initialTotal: 12, navigate }), expect.anything());
-  rerender(<Router route={{ view: "terminal", terminalId: "t1" }} {...props} />);
-  expect(terminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "t1", navigate }), expect.anything());
+  rerender(<Router route={{ view: "terminal", terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1" }} {...props} />);
+  expect(terminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1", navigate }), expect.anything());
 });

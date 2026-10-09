@@ -8,7 +8,8 @@ import Router from "./Router";
 import { rememberSessionPage } from "../features/sessions/sessionNavigation";
 import CommandPalette from "../components/CommandPalette";
 import ErrorBoundary from "../components/ErrorBoundary";
-import ToastHost from "../components/Toast";
+import { prepareNavigationTitle } from "./navigationTitle";
+import ToastHost, { showToast } from "../components/Toast";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, EVT_TERMINALS, type Route } from "./routes";
 
@@ -44,12 +45,15 @@ function sameRoute(a: Route, b: Route): boolean {
   if (left.view === "session" && right.view === "session") {
     return left.sessionId === right.sessionId && left.entry === right.entry;
   }
+  if (left.view === "terminal" && right.view === "terminal") return left.terminalId === right.terminalId;
+  if (left.view === "project" && right.view === "project") return left.projectId === right.projectId;
+  if (left.view === "workstream" && right.view === "workstream") return left.workstreamId === right.workstreamId && left.entry === right.entry;
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**
  * AppShell：只负责骨架 —— Sidebar、RouterOutlet、
- * CommandPalette、全局事件与 Toast。业务数据由各页面自己加载。
+ * CommandPalette、全局事件与 Toast。ID-only 导航先准备标题，业务数据仍由页面加载。
  */
 export default function AppShell() {
   const [navigation, setNavigation] = useState<NavigationState>({
@@ -72,6 +76,8 @@ export default function AppShell() {
   // 带 action 的导航每次都递增，页面据此响应「已在目标页」的重复命令
   const [actionSeq, setActionSeq] = useState(0);
   const seqRef = useRef(0);
+  const navigationRequest = useRef(0);
+  useEffect(() => () => { ++navigationRequest.current; }, []);
   const route = navigation.entries[navigation.index];
   const sessionSection = isSessionRoute(route);
   const lastSessionRoute = useRef<Route>(route);
@@ -108,19 +114,28 @@ export default function AppShell() {
   }, []);
 
   const navigate = useCallback((target: Route) => {
-    const r = normalizeRoute(target);
-    setNavigation((current) => {
-      const entries = current.entries.slice(0, current.index + 1);
-      const currentRoute = entries[entries.length - 1];
-      if (sameRoute(currentRoute, r)) {
-        entries[entries.length - 1] = r;
+    const request = ++navigationRequest.current;
+    const commit = (r: Route) => {
+      if (request !== navigationRequest.current) return;
+      setNavigation((current) => {
+        const entries = current.entries.slice(0, current.index + 1);
+        const currentRoute = entries[entries.length - 1];
+        if (sameRoute(currentRoute, r)) {
+          entries[entries.length - 1] = r;
+          return { entries, index: entries.length - 1 };
+        }
+        entries[entries.length - 1] = withoutAction(currentRoute);
+        entries.push(r);
         return { entries, index: entries.length - 1 };
-      }
-      entries[entries.length - 1] = withoutAction(currentRoute);
-      entries.push(r);
-      return { entries, index: entries.length - 1 };
-    });
-    if ("action" in r && r.action) setActionSeq(++seqRef.current);
+      });
+      if ("action" in r && r.action) setActionSeq(++seqRef.current);
+    };
+    const prepared = prepareNavigationTitle(normalizeRoute(target));
+    if (prepared instanceof Promise) {
+      void prepared.then(commit).catch(error => {
+        if (request === navigationRequest.current) showToast(`无法打开：${String(error)}`);
+      });
+    } else commit(prepared);
   }, []);
 
   // An async launch can finish after switching sections. Remember its result
@@ -131,6 +146,7 @@ export default function AppShell() {
   }, [navigate]);
 
   const goBack = useCallback((fallback?: Route) => {
+    ++navigationRequest.current;
     setNavigation((current) => {
       if (current.index === 0) {
         return fallback ? { entries: [fallback], index: 0 } : current;
@@ -142,6 +158,7 @@ export default function AppShell() {
   }, []);
 
   const goForward = useCallback(() => {
+    ++navigationRequest.current;
     setNavigation((current) => {
       if (current.index >= current.entries.length - 1) return current;
       const entries = current.entries.slice();

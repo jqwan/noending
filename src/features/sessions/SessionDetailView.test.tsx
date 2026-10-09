@@ -249,7 +249,7 @@ it("links to the session it forked from", async () => {
   }));
 
   fireEvent.click(screen.getByRole("button", { name: "分叉自：原始会话" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "orig" });
+  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "orig", initialTitle: "原始会话", initialAgent: "codex" });
 });
 
 it("names the missing fork source instead of hiding the provenance", async () => {
@@ -338,7 +338,7 @@ it("shows the one owner workstream and links to it", async () => {
   const row = document.querySelector(".rail-row") as HTMLElement;
   expect(row).toBeTruthy();
   fireEvent.click(row);
-  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1" });
+  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1", initialTitle: "会话与 Workstream 重构" });
 
   // 只有一个所属任务：没有「添加」多任务入口。
   expect(screen.queryByRole("button", { name: /添加/ })).toBeNull();
@@ -587,4 +587,16 @@ it("allows archived sessions to sync and generate summaries while blocking conti
   fireEvent.click(terminal);
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
   expect(api.continueSessionDesktop).not.toHaveBeenCalled();
+});
+
+it("keeps the known session title throughout a delayed detail load", async () => {
+  let resolve!: (value: SessionDetail) => void;
+  vi.mocked(api.getSessionDetail).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+  const navigate = vi.fn();
+  render(<SessionDetailView sessionId="s1" initialTitle="稳定标题" initialAgent="codex" navigate={navigate} goBack={vi.fn()} />);
+  expect(screen.getByRole("heading").textContent).toBe("稳定标题");
+  fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
+  expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ initialTitle: "稳定标题", initialAgent: "codex" }));
+  await act(async () => resolve(detail(session("s1", { title: "稳定标题" }))));
+  expect(screen.getByRole("heading").textContent).toBe("稳定标题");
 });

@@ -19,7 +19,7 @@ it("ignores outdated responses and exposes results as keyboard buttons", async (
   await act(async () => resolveOld([hit("旧结果")]));
   expect(screen.queryByText("旧结果")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "任务 新结果" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "新结果" });
+  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "新结果", initialTitle: "新结果" });
 });
 it("retries errors and clears status when the query is emptied", async () => {
   vi.mocked(api.search).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce([]);

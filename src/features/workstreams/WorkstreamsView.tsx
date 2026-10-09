@@ -294,7 +294,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                     <button
                       type="button"
                       className="task-open"
-                      onClick={() => navigate({ view: "workstream", workstreamId: c.id })}
+                      onClick={() => navigate({ view: "workstream", workstreamId: c.id, initialTitle: c.title })}
                     >
                       <div className="task-list-title" title={c.title}>
                         <Icon name="tasks" />
@@ -383,7 +383,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
       {creatingWs && (
         <WorkstreamFormModal
           onClose={() => setCreatingWs(false)}
-          onCreated={(w) => navigate({ view: "workstream", workstreamId: w.id })}
+          onCreated={(w) => navigate({ view: "workstream", workstreamId: w.id, initialTitle: w.title })}
         />
       )}
     </div>

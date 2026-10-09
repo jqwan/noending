@@ -1,13 +1,13 @@
 import NewSessionView from "../features/sessions/NewSessionView";
 import WorkstreamsView from "../features/workstreams/WorkstreamsView";
-import WorkstreamDetailView from "../features/workstreams/WorkstreamDetailView";
+import WorkstreamDetailView, { workstreamDetailCache } from "../features/workstreams/WorkstreamDetailView";
 import SessionsView from "../features/sessions/SessionsView";
-import SessionDetailView from "../features/sessions/SessionDetailView";
+import SessionDetailView, { sessionDetailCache } from "../features/sessions/SessionDetailView";
 import SessionConversationView from "../features/sessions/SessionConversationView";
 import SessionTerminalView from "../features/sessions/SessionTerminalView";
 import AssistantView from "../features/assistant/AssistantView";
 import ProjectsView from "../features/projects/ProjectsView";
-import ProjectDetail from "../features/projects/ProjectDetail";
+import ProjectDetail, { projectDetailCache } from "../features/projects/ProjectDetail";
 import SettingsView from "../features/settings/SettingsView";
 import AgentsView from "../features/agents/AgentsView";
 import SearchView from "../features/search/SearchView";
@@ -42,6 +42,8 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
     case "workstream":
       return (
         <WorkstreamDetailView
+          key={route.workstreamId}
+          initialTitle={route.initialTitle ?? workstreamDetailCache.get(route.workstreamId)?.ctx.workstream.title}
           workstreamId={route.workstreamId}
           entry={route.entry}
           navigate={navigate}
@@ -60,16 +62,17 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
         <SessionConversationView
           key={route.sessionId}
           sessionId={route.sessionId}
-          initialTitle={route.initialTitle}
-          initialAgent={route.initialAgent}
+          initialTitle={route.initialTitle ?? sessionDetailCache.get(route.sessionId)?.session.title ?? undefined}
+          initialAgent={route.initialAgent ?? sessionDetailCache.get(route.sessionId)?.session.agent}
           initialTotal={route.initialTotal}
           navigate={navigate}
         />
       ) : (
         <SessionDetailView
+          key={route.sessionId}
           sessionId={route.sessionId}
-          initialTitle={route.initialTitle}
-          initialAgent={route.initialAgent}
+          initialTitle={route.initialTitle ?? sessionDetailCache.get(route.sessionId)?.session.title ?? undefined}
+          initialAgent={route.initialAgent ?? sessionDetailCache.get(route.sessionId)?.session.agent}
           navigate={navigate}
           goBack={goBack}
         />
@@ -79,6 +82,9 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
         <SessionTerminalView
           key={route.terminalId}
           terminalId={route.terminalId}
+          initialTitle={route.initialTitle}
+          initialAgent={route.initialAgent}
+          initialSessionId={route.initialSessionId}
           navigate={navigate}
         />
       );
@@ -87,7 +93,7 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
     case "projects":
       return <ProjectsView navigate={navigate} />;
     case "project":
-      return <ProjectDetail projectId={route.projectId} navigate={navigate} />;
+      return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} />;
     case "agents":
       return <AgentsView navigate={navigate} initialAgent={route.agent} />;
     case "settings":
