@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import AppShell from "./AppShell";
+import { sessionPages, sessionTerminals } from "../features/sessions/sessionNavigation";
 import type { Route } from "./routes";
 import { useState } from "react";
 
@@ -37,6 +38,7 @@ vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => {
+  sessionPages.clear(); sessionTerminals.clear();
   localStorage.clear();
   appForeground.mockClear();
   sessionNavigation.navigate = undefined;

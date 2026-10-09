@@ -522,6 +522,7 @@ export default function SessionConversationView({
       <div className="main narrow" role="status">
         <PageHeader
           title={headerTitle}
+          actions={<SessionSubpageTabs sessionId={sessionId} entry="conversation" navigate={navigate} />}
         />
         <div className="empty">
           读不到这个会话的消息。
@@ -540,6 +541,9 @@ export default function SessionConversationView({
             <SessionSubpageTabs
               sessionId={sessionId}
               entry="conversation"
+              agent={currentAgent ?? undefined}
+              sourceKind={cachedDetail?.session.source_kind}
+              archived={!!cachedDetail?.session.archived_at}
               navigate={navigate}
             />
             {currentAgent && (
@@ -549,7 +553,6 @@ export default function SessionConversationView({
                 sourceKind={cachedDetail?.session.source_kind}
                 title={displayTitle}
                 archived={!!cachedDetail?.session.archived_at}
-                navigate={navigate}
                 onChanged={reload}
               />
             )}

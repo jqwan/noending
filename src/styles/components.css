@@ -2087,3 +2087,16 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 }
 
 /* 会话看板的运行中伪行/伪卡：可点击、与真实会话行视觉同族但有一道 accent 边。 */
+
+/* Unified session titlebar: icon navigation, instance menu and contextual actions. */
+.session-navigation { position: relative; display: flex; flex: none; align-items: center; }
+.session-action-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
+.page-head .session-navigation .terminal-running, .terminal-running { color: var(--success); }
+.page-head .session-navigation .terminal-exited, .terminal-exited { color: var(--text-muted); }
+.page-head .session-navigation .terminal-dropdown { width: 18px; }
+.terminal-dropdown .ui-icon { width: 12px; height: 12px; }
+.terminal-menu { min-width: 240px; max-width: min(400px, calc(100vw - 24px)); max-height: 320px; overflow-y: auto; }
+.terminal-menu .menu-label { min-width: 0; }
+.terminal-menu small { display: block; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-terminal-status { display: inline-flex; gap: 3px; align-items: center; flex: none; font-size: 11px; }
+.sidebar-terminal-status .ui-icon { width: 13px; height: 13px; }

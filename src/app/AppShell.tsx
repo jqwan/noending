@@ -5,6 +5,7 @@ import { api } from "../api";
 import Sidebar from "../layout/Sidebar";
 import NavigationRail, { isSessionRoute } from "../layout/NavigationRail";
 import Router from "./Router";
+import { rememberSessionPage } from "../features/sessions/sessionNavigation";
 import CommandPalette from "../components/CommandPalette";
 import ErrorBoundary from "../components/ErrorBoundary";
 import ToastHost from "../components/Toast";
@@ -78,6 +79,7 @@ export default function AppShell() {
   const sessionRoute = sessionSection ? route : lastSessionRoute.current;
   useLayoutEffect(() => {
     currentRoute.current = route;
+    if (route.view === "session") rememberSessionPage(route.sessionId, route);
     if (isSessionRoute(route)) lastSessionRoute.current = withoutAction(route);
   }, [route]);
   const isMac = /Macintosh|Mac OS X/.test(navigator.userAgent);

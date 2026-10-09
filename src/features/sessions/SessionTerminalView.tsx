@@ -5,6 +5,9 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import PageHeader from "../../layout/PageHeader";
+import SessionSubpageTabs from "./SessionSubpageTabs";
+import { DesktopContinueButton } from "./SessionHeaderActions";
+import { preferredTerminal, terminalDestination } from "./sessionNavigation";
 import { copyToClipboard } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
@@ -12,13 +15,13 @@ import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { sessionDisplayTitle } from "./SessionTable";
 import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
-import type { Route } from "../../app/routes";
+import { EVT_TERMINALS, type Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
 import { connectTerminalInput } from "./terminalInput";
 
 /**
- * 内嵌终端视图（一等独立路由）。PTY 与 scrollback 都归后端（terminal
+ * 会话页的内嵌终端面板。路由保留 terminal_id 以访问尚未绑定的实例；PTY 与 scrollback 都归后端（terminal
  * registry），本组件只是 attach/detach 客户端——切走再切回（remount）进程
  * 照跑，xterm 实例按 terminal_id 常驻，重挂零重建。
  *
@@ -82,6 +85,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const boundTitle = identity.title;
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [reconnecting, setReconnecting] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+  const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(null);
   const reconnectingRef = useRef(false);
   const mountedRef = useRef(true);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
@@ -120,6 +126,26 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     }
   };
 
+  const closeTerminal = async () => {
+    if (closingRef.current || reconnectingRef.current) return;
+    closingRef.current = true;
+    setClosing(true);
+    try {
+      const closed = await api.terminalClose(terminalId);
+      disposeTerminal(terminalId);
+      window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
+      let remaining: import("../../types").TerminalSummary[] = [];
+      try { remaining = await api.terminalList(); } catch { /* Closing succeeded; still leave the removed terminal. */ }
+      if (!mountedRef.current) return;
+      const peers = remaining.filter(t => t.terminal_id !== terminalId && t.session_id === closed.session_id && !!closed.session_id);
+      const next = closed.session_id ? preferredTerminal(closed.session_id, peers.filter(t => t.live)) ?? peers[0] : undefined;
+      navigate(next ? terminalDestination(next)
+        : closed.session_id ? { view: "session", sessionId: closed.session_id, entry: "conversation" }
+        : { view: "sessions" });
+    } catch (e) { if (mountedRef.current) showToast(`关闭失败：${String(e)}`); }
+    finally { closingRef.current = false; if (mountedRef.current) setClosing(false); }
+  };
+
   /** 进入即用：按 terminalId 直接 attach——终端在新会话发送或「先跳后启」
    *  启动时就已存在，本视图从不负责 spawn。 */
   const bootstrap = () => setConnectionAttempt((attempt) => attempt + 1);
@@ -149,15 +175,17 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     };
   }, [terminalId, connectionAttempt, applyIdentity]);
 
-  // 事件不带标题时读取当前会话详情；版本检查同时防住 A→B→A 的迟到请求。
+  // 读取当前会话的格式、归档状态和标题；版本检查防住 A→B→A 的迟到请求。
   useEffect(() => {
-    if (!identity.sessionId || identity.revision < 0 || identity.title !== null) return;
+    if (!identity.sessionId || identity.revision < 0) return;
     const { sessionId, revision } = identity;
     let live = true;
     api.getSessionDetail(sessionId)
       .then((d) => {
         const current = identityRef.current;
-        if (!live || current.revision !== revision || current.sessionId !== sessionId || current.title !== null) return;
+        if (!live || current.revision !== revision || current.sessionId !== sessionId) return;
+        setSessionMeta({ id: sessionId, sourceKind: d.session.source_kind, archived: !!d.session.archived_at });
+        if (current.title !== null) return;
         const next = { ...current, title: sessionDisplayTitle(d.session.title) };
         identityRef.current = next;
         setIdentity(next);
@@ -451,6 +479,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   // attach 回来前用路由种子，避免首帧丢失图标。
   const headerTitle = boundTitle ?? "新会话";
   const headerAgent = snapshot?.agent ?? initialAgent ?? null;
+  const meta = sessionMeta?.id === boundSessionId ? sessionMeta : null;
 
   return (
     <div className="main fill">
@@ -467,26 +496,23 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         }
         actions={
           <>
+            <SessionSubpageTabs sessionId={boundSessionId} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
+              agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived} navigate={navigate} />
+            {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
+              sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
+            <span className="session-action-divider" aria-hidden="true" />
             <button
               className="btn ghost icon-button"
               aria-label={reconnecting ? "正在重新连接" : "重新连接"}
-              title={boundSessionId ? "重新连接会话" : "绑定会话后可重新连接"}
-              disabled={reconnecting || !boundSessionId || state.kind === "loading"}
+              title={meta?.archived ? "已归档的会话不能重新连接" : boundSessionId ? "重新连接会话" : "绑定会话后可重新连接"}
+              disabled={closing || reconnecting || !boundSessionId || !!meta?.archived || state.kind === "loading"}
               onClick={() => void reconnectTerminal()}
             >
               <Icon name="refresh" />
             </button>
-            <button
-              className="btn ghost icon-button"
-              aria-label="会话详情"
-              title="会话详情"
-              disabled={!boundSessionId}
-              onClick={() => {
-                if (boundSessionId) navigate({ view: "session", sessionId: boundSessionId });
-              }}
-            >
-              <Icon name="info" />
-            </button>
+            <button className="btn ghost icon-button" aria-label={exited ? "移除终端" : "关闭终端"}
+              title={exited ? "移除终端" : "关闭当前终端"} disabled={closing || reconnecting || state.kind === "loading"}
+              onClick={() => void closeTerminal()}><Icon name="close" /></button>
           </>
         }
       />

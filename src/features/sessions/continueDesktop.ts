@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { capsOf } from "./sessionFormats";
+import { sessionTerminals } from "./sessionNavigation";
 import type { Agent, AgentStatusEntry } from "../../types";
 import type { Route } from "../../app/routes";
 
@@ -78,6 +79,13 @@ export async function continueSessionTerminal(
     initialAgent: session.agent,
     initialSessionId: session.id,
   };
+  // A remembered instance is a UI preference, never a claim about current identity/liveness.
+  const preferredId = sessionTerminals.get(session.id);
+  if (preferredId) {
+    const rows = await api.terminalList().catch(() => []);
+    const preferred = rows.find(t => t.terminal_id === preferredId && t.session_id === session.id && t.live);
+    if (preferred) { navigate({ view: "terminal", terminalId: preferred.terminal_id, ...seed }); return; }
+  }
   const existing = await api.terminalForSession(session.id);
   if (existing?.live) {
     navigate({ view: "terminal", terminalId: existing.terminal_id, ...seed });

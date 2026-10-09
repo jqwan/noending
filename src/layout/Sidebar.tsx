@@ -7,11 +7,11 @@ import { AGENT_LABELS, type Agent, type TerminalSummary, type Session, type Work
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 import { timeAgo } from "../components/common";
 import { useViewState } from "../hooks/useViewState";
-import { disposeTerminal } from "../features/sessions/terminalCache";
+import { sessionDestination } from "../features/sessions/sessionNavigation";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-export function sessionConversationTime(session: Session): number | null {
+export function sessionConversationTime(session: Pick<Session, "last_conversation_at">): number | null {
   if (!session.last_conversation_at) return null;
   const time = new Date(session.last_conversation_at).getTime();
   return isNaN(time) ? null : time;
@@ -25,26 +25,51 @@ export function isSessionWithinSevenDays(session: Session, now = Date.now()): bo
   return diff >= -60000 && diff <= SEVEN_DAYS_MS;
 }
 
-export interface SidebarRecentGroup {
+type SidebarSession = Pick<Session, "id" | "agent" | "title" | "cwd" | "owner_workstream_id" | "project_id" | "last_conversation_at" | "archived_at"> & {
+  sessionId: string | null;
+  terminals: TerminalSummary[];
+  activityAt: number;
+};
+
+export function mergeSidebarSessions(sessions: Session[], terminals: TerminalSummary[], currentSessionId?: string): SidebarSession[] {
+  const rows = new Map<string, SidebarSession>();
+  for (const session of sessions) {
+    if (isSessionWithinSevenDays(session) || session.id === currentSessionId || terminals.some(t => t.session_id === session.id)) {
+      rows.set(session.id, { ...session, sessionId: session.id, terminals: [], activityAt: sessionConversationTime(session) ?? 0 });
+    }
+  }
+  for (const terminal of terminals) {
+    const key = terminal.session_id ?? `terminal:${terminal.terminal_id}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = { id: key, sessionId: terminal.session_id, agent: terminal.agent, title: terminal.session_title ?? "新会话", cwd: terminal.cwd,
+        owner_workstream_id: null, project_id: null, last_conversation_at: null, archived_at: null, terminals: [], activityAt: 0 };
+      rows.set(key, row);
+    }
+    row.terminals.push(terminal);
+    row.activityAt = Math.max(row.activityAt, Date.parse(terminal.created_at) || 0);
+  }
+  return [...rows.values()].sort((a, b) => b.activityAt - a.activityAt);
+}
+
+export interface SidebarSessionGroup {
   id: string;
   title: string;
   latestTime: number;
-  sessions: Session[];
+  sessions: SidebarSession[];
 }
 
-export function groupRecentSessions(
-  sessions: Session[],
+export function groupSidebarSessions(
+  sessions: SidebarSession[],
   groupBy: "workstream" | "project" | "agent",
   workstreamMap: Map<string, WorkstreamCardData>,
   projectMap: Map<string, ProjectCardData>,
-  now = Date.now(),
-): SidebarRecentGroup[] {
-  const recent = sessions.filter((s) => isSessionWithinSevenDays(s, now));
+): SidebarSessionGroup[] {
 
-  const groupsMap = new Map<string, SidebarRecentGroup>();
+  const groupsMap = new Map<string, SidebarSessionGroup>();
 
-  for (const s of recent) {
-    const time = sessionConversationTime(s) ?? 0;
+  for (const s of sessions) {
+    const time = s.activityAt;
 
     let groupId: string;
     let groupTitle: string;
@@ -117,7 +142,7 @@ export function groupRecentSessions(
 }
 
 /**
- * 会话侧边栏：新会话、会话看板、运行中（含保留的已退出终端）、最近活动。
+ * 会话侧边栏：新会话、会话看板、最近会话与保留终端的统一列表。
  * 工作区导航由最左侧固定图标栏提供；切换工作区时保留本栏的数据与分组状态。
  */
 export default function Sidebar({ route, navigate, collapsed = false, hidden = false }: {
@@ -134,8 +159,6 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   const refreshSeq = useRef(0);
-  const currentRoute = useRef(route);
-  currentRoute.current = route;
 
   const refreshTerminals = useCallback(() => {
     const seq = ++refreshSeq.current;
@@ -147,9 +170,9 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       .catch(console.error);
   }, []);
 
-  const refreshRecent = useCallback(() => {
+  const refreshSessions = useCallback(() => {
     Promise.all([
-      api.listSessions(),
+      api.listSessions(undefined, undefined, "all"),
       api.listWorkstreamCards(),
       api.listProjectCards(),
     ])
@@ -161,31 +184,14 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       .catch(console.error);
   }, []);
 
-  /** 「运行中」子项的显式关闭：杀掉内嵌 Agent 并移出列表。关闭时正看着
-   *  这个终端 → 跳回它的会话（未绑定则回会话看板），不让用户停在尸体上。 */
-  const closeTerminal = async (t: TerminalSummary) => {
-    try {
-      const closed = await api.terminalClose(t.terminal_id);
-      disposeTerminal(t.terminal_id);
-      setTerminals((current) => current.filter((item) => item.terminal_id !== t.terminal_id));
-      const displayed = currentRoute.current;
-      if (displayed.view === "terminal" && displayed.terminalId === t.terminal_id) {
-        if (closed.session_id) navigate({ view: "session", sessionId: closed.session_id });
-        else navigate({ view: "sessions" });
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   useEffect(() => {
     refreshTerminals();
     return () => { ++refreshSeq.current; };
   }, [refreshTerminals]);
   useEffect(() => onEvent(EVT_TERMINALS, refreshTerminals), [refreshTerminals]);
-  useEffect(refreshRecent, [refreshRecent]);
-  useEffect(() => onEvent(EVT_TERMINALS, refreshRecent), [refreshRecent]);
-  useEffect(() => onEvent(EVT_SYNCED, refreshRecent), [refreshRecent]);
+  useEffect(refreshSessions, [refreshSessions]);
+  useEffect(() => onEvent(EVT_TERMINALS, refreshSessions), [refreshSessions]);
+  useEffect(() => onEvent(EVT_SYNCED, refreshSessions), [refreshSessions]);
 
   const workstreamMap = useMemo(() => {
     const map = new Map<string, WorkstreamCardData>();
@@ -203,9 +209,9 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     return map;
   }, [projects]);
 
-  const recentGroups = useMemo(() => {
-    return groupRecentSessions(sessions, groupBy, workstreamMap, projectMap);
-  }, [sessions, groupBy, workstreamMap, projectMap]);
+  const sessionGroups = useMemo(() => {
+    return groupSidebarSessions(mergeSidebarSessions(sessions, terminals, route.view === "session" ? route.sessionId : undefined), groupBy, workstreamMap, projectMap);
+  }, [sessions, terminals, route, groupBy, workstreamMap, projectMap]);
 
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((prev) => ({
@@ -224,42 +230,9 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
           <Icon name="grid" />会话看板
         </button>
 
-        {terminals.length > 0 && (
-          <>
-            <div className="nav-section">运行中</div>
-            {terminals.map((t) => {
-              const active = route.view === "terminal" && route.terminalId === t.terminal_id;
-              const title = t.session_id && t.session_title
-                ? sessionDisplayTitle(t.session_title)
-                : "新会话";
-              return (
-                <div className="sidebar-task" key={t.terminal_id}>
-                  <button
-                    className={`nav-item ${active ? "active" : ""}${t.live ? "" : " terminal-exited"}`}
-                    title={`${t.cwd ? `${title} · ${t.cwd}` : title}${t.live ? "" : " · 已退出"}`}
-                    onClick={() => navigate({ view: "terminal", terminalId: t.terminal_id })}
-                  >
-                    <AgentIcon agent={t.agent} size={15} />
-                    <span className="truncate">{title}</span>
-                  </button>
-                  <button
-                    className="pin-button terminal-close"
-                    aria-label={`${t.live ? "关闭" : "移除"}终端：${title}`}
-                    title={t.live ? "关闭终端" : "移除终端"}
-                    onClick={() => void closeTerminal(t)}
-                  >
-                    <Icon name="close" />
-                  </button>
-                </div>
-              );
-            })}
-          </>
-        )}
-
-        {/* 最近活动 */}
-        <div className="nav-section">最近活动</div>
+        <div className="nav-section">会话</div>
         <div className="sidebar-recent-switcher">
-          <div className="sidebar-pill-seg" role="radiogroup" aria-label="最近活动归类方式">
+          <div className="sidebar-pill-seg" role="radiogroup" aria-label="会话归类方式">
             <button
               type="button"
               className={`sidebar-pill-btn ${groupBy === "workstream" ? "active" : ""}`}
@@ -299,10 +272,10 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
           </div>
         </div>
 
-        {recentGroups.length === 0 ? (
+        {sessionGroups.length === 0 ? (
           <div className="sidebar-recent-empty">最近 7 天无新消息</div>
         ) : (
-          recentGroups.map((group) => {
+          sessionGroups.map((group) => {
             const isCollapsed = Boolean(collapsedGroups[group.id]);
             const isKnownAgent = groupBy === "agent" && group.id in AGENT_LABELS;
             const iconName =
@@ -334,7 +307,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
                 {!isCollapsed && (
                   <div className="sidebar-recent-group-items">
                     {group.sessions.map((s) => {
-                      const active = route.view === "session" && route.sessionId === s.id;
+                      const active = route.view === "session" && route.sessionId === s.sessionId || route.view === "terminal" && s.terminals.some(t => t.terminal_id === route.terminalId);
                       const title = sessionDisplayTitle(s.title);
                       const timeStr = s.last_conversation_at;
                       const tooltip = s.cwd ? `${title} · ${s.cwd}` : title;
@@ -343,12 +316,15 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
                           key={s.id}
                           type="button"
                           className={`nav-item sidebar-recent-item ${active ? "active" : ""}`}
-                          title={tooltip}
-                          onClick={() => navigate({ view: "session", sessionId: s.id })}
+                          title={`${tooltip}${s.archived_at ? " · 已归档" : ""}`}
+                          onClick={() => navigate(s.sessionId ? sessionDestination(s.sessionId, terminals) : { view: "terminal", terminalId: s.terminals[0].terminal_id })}
                         >
                           <AgentIcon agent={s.agent} size={14} />
                           <span className="truncate" style={{ flex: 1 }}>{title}</span>
-                          {timeStr && <span className="sidebar-recent-time">{timeAgo(timeStr)}</span>}
+                          {s.terminals.length > 0 ? <span className={`sidebar-terminal-status ${s.terminals.some(t => t.live) ? "terminal-running" : "terminal-exited"}`}
+                            aria-label={`${s.terminals.filter(t => t.live).length} 个运行中终端，${s.terminals.filter(t => !t.live).length} 个已退出终端`}>
+                            <Icon name="terminal" />{s.terminals.length > 1 && <span>{s.terminals.length}</span>}
+                          </span> : timeStr && <span className="sidebar-recent-time">{timeAgo(timeStr)}</span>}
                         </button>
                       );
                     })}

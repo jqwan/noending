@@ -27,8 +27,7 @@ export type WorkstreamScope = "unarchived" | "archived";
 
 export type WorkstreamEntry = "review" | "conflicts";
 
-/** Session 的页内子入口：`conversation` 是整屏的消息阅读界面。终端不再是
- *  会话的子页——它是一等独立视图（见下方 `view:"terminal"`）。 */
+/** 会话页的历史消息入口。终端实例由 terminal_id 路由标识，与详情、历史消息共用顶部导航。 */
 export type SessionEntry = "conversation";
 
 export type Route =
@@ -44,7 +43,7 @@ export type Route =
       initialAgent?: Agent;
       initialTotal?: number;
     }
-  /** 内嵌终端视图（一等独立路由）：内嵌新建与「先跳后启」的共同落点。
+  /** 会话的内嵌终端面板（也容纳尚未绑定的实例）：内嵌新建与「先跳后启」的共同落点。
    *  会话身份由后端绑定（预指定 id 精确匹配 / 会话页按需校验匹配），绑定
    *  事实经 `terminal-bound` 事件推给视图，点亮会话详情入口。从会话页跳转
    *  时携带已知的身份种子（initialTitle/initialAgent/initialSessionId），

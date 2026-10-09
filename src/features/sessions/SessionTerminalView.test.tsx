@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionTerminalView, { resetLiveTerminalsForTests } from "./SessionTerminalView";
 import { disposeTerminal, liveTerminals } from "./terminalCache";
 import { api } from "../../api";
+import { sessionPages, sessionTerminals } from "./sessionNavigation";
 import type { TerminalBound, TerminalSnapshot } from "../../types";
 import { listen } from "@tauri-apps/api/event";
 
@@ -10,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 // 直接 attach / 失败可重试 / 身份切换与 pending / 退出横幅。
 vi.mock("../../api", () => ({
   api: {
+    terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({ codex: { terminal_cli: true } }),
     getSessionDetail: vi.fn().mockResolvedValue({
       session: { agent: "codex", source_kind: "codex", archived_at: null, title: "会话" },
@@ -19,6 +21,7 @@ vi.mock("../../api", () => ({
     terminalAttach: vi.fn(),
     terminalInput: vi.fn().mockResolvedValue(undefined),
     terminalReconnect: vi.fn(),
+    terminalClose: vi.fn(),
     terminalResize: vi.fn().mockResolvedValue(undefined),
     launchEmbeddedResume: vi.fn(),
     readClipboardForTerminal: vi.fn(),
@@ -136,6 +139,9 @@ vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
 
 const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", launch_intent_id: null };
 beforeEach(() => {
+  sessionPages.clear(); sessionTerminals.clear();
+  vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
+  vi.mocked(api.terminalClose).mockReset();
   vi.mocked(api.terminalReconnect).mockReset().mockResolvedValue(reconnected);
   vi.mocked(api.getSessionDetail).mockReset().mockResolvedValue(detail("会话"));
 });
@@ -383,6 +389,7 @@ it("the route seed renders the final header on the first frame — no 新会话 
   const entry = screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement;
   expect(entry.disabled).toBe(false);
   expect(screen.queryByText("新会话")).toBeNull();
+  await act(async () => {});
 });
 
 it("a bound snapshot shows the session-detail entry enabled from the start", async () => {
@@ -781,5 +788,62 @@ it("attaching by terminal id never launches and never navigates away on bind", a
   // 绑定事实到达：视图留在原地，只点亮入口（旧的"replace 跳子页"已退场）。
   pushIdentity("s-bound", 2, "t-free");
   await act(async () => { await tick(); });
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+it("closes only the selected terminal and switches to another live instance", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalClose).mockResolvedValue(snapshot({ session_id: "s1" }));
+  vi.mocked(api.terminalList).mockResolvedValue([
+    snapshot({ terminal_id: "t-dead", live: false }), snapshot({ terminal_id: "t-live" }),
+  ]);
+  const navigate = vi.fn();
+  renderView(navigate);
+  const button = await screen.findByRole("button", { name: "关闭终端" });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  const current = FakeTerminal.last!;
+  fireEvent.click(button);
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-live" })));
+  expect(api.terminalClose).toHaveBeenCalledTimes(1);
+  expect(api.terminalClose).toHaveBeenCalledWith("t-1");
+  expect(current.disposed).toBe(true);
+});
+
+it.each(["new-native-session", null])("uses the close result's verified identity for the final destination: %s", async (sessionId) => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false }));
+  vi.mocked(api.terminalClose).mockResolvedValue(snapshot({ session_id: sessionId }));
+  const navigate = vi.fn();
+  renderView(navigate);
+  fireEvent.click(await screen.findByRole("button", { name: "移除终端" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith(sessionId
+    ? { view: "session", sessionId, entry: "conversation" } : { view: "sessions" }));
+});
+
+it("does not interrupt the new page when an old terminal close finishes after leaving", async () => {
+  const close = deferred<TerminalSnapshot>();
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalClose).mockReturnValue(close.promise);
+  const navigate = vi.fn();
+  const view = renderView(navigate);
+  const button = await screen.findByRole("button", { name: "关闭终端" });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(button);
+  view.unmount();
+  await act(async () => { close.resolve(snapshot({})); });
+  expect(navigate).not.toHaveBeenCalled();
+  expect(liveTerminals.has("t-1")).toBe(false);
+});
+
+it("keeps a terminal usable when closing fails", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalClose).mockRejectedValue(new Error("close failed"));
+  const navigate = vi.fn();
+  renderView(navigate);
+  const button = await screen.findByRole("button", { name: "关闭终端" });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  const current = FakeTerminal.last!;
+  fireEvent.click(button);
+  await waitFor(() => expect(toastMock).toHaveBeenCalledWith(expect.stringContaining("close failed")));
+  expect(current.disposed).toBe(false);
   expect(navigate).not.toHaveBeenCalled();
 });

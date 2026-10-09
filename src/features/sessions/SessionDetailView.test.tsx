@@ -16,6 +16,7 @@ import type {
 // 已归档横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
+    terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({}),
     launchEmbeddedResume: vi.fn(),
     continueSessionDesktop: vi.fn(),
@@ -51,6 +52,7 @@ vi.mock("../../api", () => ({
 const originalClipboard = navigator.clipboard;
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false });
   vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
@@ -179,17 +181,15 @@ it("reveals the source by clicking the path itself", async () => {
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("me"));
 });
 
-it("renders aggregate continue button for codex session even if source is missing", async () => {
+it("renders separate terminal and desktop actions for codex session even if source is missing", async () => {
   await renderDetail(detail(session("me"), { source_status: "missing", can_resume: false }));
 
   screen.getByText("源会话已不存在");
-  // 聚合按钮在场（codex 兼具终端与桌面能力）
-  expect(screen.getByRole("button", { name: "切换继续方式" })).toBeTruthy();
+  // Codex supports both entries, which are separate titlebar controls.
   const resume = screen.getByRole("button", { name: "在桌面应用中继续" }) as HTMLButtonElement;
   expect(resume.disabled).toBe(false);
 
-  // 展开切换菜单能看到在终端中继续选项
-  fireEvent.click(screen.getByRole("button", { name: "切换继续方式" }));
+
   expect(screen.getByRole("button", { name: "在终端中继续" })).toBeTruthy();
 
   // 源不在，路径退回纯文本：没有可点的定位入口，只有警告。
@@ -222,7 +222,7 @@ it("previews the newest messages and links to the whole conversation", async () 
 
   screen.getByText("最近的一句话");
   screen.getByText("以上是最近 1 条。");
-  fireEvent.click(screen.getByRole("button", { name: "查看全部会话（共 420 条）" }));
+  fireEvent.click(screen.getByRole("button", { name: "查看全部历史消息（共 420 条）" }));
   expect(navigate).toHaveBeenCalledWith({
     view: "session",
     sessionId: "me",
@@ -236,7 +236,7 @@ it("previews the newest messages and links to the whole conversation", async () 
 it("offers no conversation entry for a session that has no messages", async () => {
   await renderDetail(detail(session("me")));
 
-  expect(screen.queryByRole("button", { name: /查看全部会话/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /查看全部历史消息/ })).toBeNull();
   screen.getByText(/还没有同步消息/);
 });
 
@@ -582,7 +582,6 @@ it("allows archived sessions to sync and generate summaries while blocking conti
   fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
   await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
   expect((screen.getByRole("button", { name: "在桌面应用中继续" }) as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(screen.getByRole("button", { name: "切换继续方式" }));
   const terminal = screen.getByRole("button", { name: "在终端中继续" });
   expect((terminal as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(terminal);

@@ -1,9 +1,10 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api";
+import { sessionTerminals } from "./sessionNavigation";
 import { continueSessionTerminal } from "./continueDesktop";
 import type { TerminalSummary } from "../../types";
 
-vi.mock("../../api", () => ({ api: { terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn() } }));
+vi.mock("../../api", () => ({ api: { terminalList: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn() } }));
 const session = { id: "s1", title: "Session", agent: "codex" as const };
 const terminal = (live: boolean): TerminalSummary => ({
   terminal_id: "old", session_id: "s1", identity_revision: 1, agent: "codex",
@@ -11,6 +12,8 @@ const terminal = (live: boolean): TerminalSummary => ({
 });
 beforeEach(() => {
   vi.resetAllMocks();
+  sessionTerminals.clear();
+  vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.launchEmbeddedResume).mockResolvedValue({
     terminal_id: "new", launched_via: "embedded", command_line: "", note: "", launch_intent_id: null,
   });
@@ -40,5 +43,19 @@ it("never falls back to an old terminal when launching fails", async () => {
 it("does not reopen an archived session", async () => {
   await expect(continueSessionTerminal({ ...session, archived_at: "archived" }, vi.fn())).rejects.toThrow("已归档");
   expect(api.terminalForSession).not.toHaveBeenCalled();
+  expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
+});
+
+it("prefers the last selected live instance, but validates its current native identity", async () => {
+  sessionTerminals.set("s1", "selected");
+  vi.mocked(api.terminalList).mockResolvedValue([{ ...terminal(true), terminal_id: "selected" }]);
+  const navigate = vi.fn();
+  await continueSessionTerminal(session, navigate);
+  expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "selected" }));
+  expect(api.terminalForSession).not.toHaveBeenCalled();
+  vi.mocked(api.terminalList).mockResolvedValue([{ ...terminal(true), terminal_id: "selected", session_id: "other" }]);
+  vi.mocked(api.terminalForSession).mockResolvedValue(terminal(true));
+  await continueSessionTerminal(session, navigate);
+  expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "old" }));
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
 });

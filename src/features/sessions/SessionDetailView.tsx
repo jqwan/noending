@@ -138,7 +138,7 @@ export default function SessionDetailView({
   if (!detail) {
     return (
       <div className="main session-detail" role="status">
-        <PageHeader title={fallbackHeaderTitle}>
+        <PageHeader title={fallbackHeaderTitle} actions={<SessionSubpageTabs sessionId={sessionId} navigate={navigate} />}>
           {failed && (
             <>
               <p className="muted small">
@@ -269,10 +269,13 @@ export default function SessionDetailView({
         }
         actions={(
           <>
-            {/* 子页切换：概览（本页）/ 对话。终端入口在右侧动作簇。 */}
+            {/* 顶部切换：历史消息、详情和终端实例。 */}
             <SessionSubpageTabs
               sessionId={sessionId}
               entry={undefined}
+              agent={session.agent}
+              sourceKind={session.source_kind}
+              archived={archived}
               navigate={navigate}
             />
             <SessionHeaderActions
@@ -281,7 +284,6 @@ export default function SessionDetailView({
               sourceKind={session.source_kind}
               title={title}
               archived={archived}
-              navigate={navigate}
               onChanged={refresh}
             />
           </>
@@ -432,7 +434,7 @@ export default function SessionDetailView({
               })
             }
           >
-            查看全部会话（共 {detail.ingested_message_sequence} 条）
+            查看全部历史消息（共 {detail.ingested_message_sequence} 条）
           </button>
         )}
       </div>
