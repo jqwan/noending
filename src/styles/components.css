@@ -2225,3 +2225,7 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 .terminal-menu { min-width: 240px; max-width: min(400px, calc(100vw - 24px)); max-height: 320px; overflow-y: auto; }
 .terminal-menu .menu-label { min-width: 0; }
 .terminal-menu small { display: block; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.summary-prompt-editor { min-height: 280px; resize: vertical; line-height: 1.7; }
+.summary-prompt-preview { max-height: 50vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); font-size: 12px; line-height: 1.7; }
+.summary-prompt-actions { gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 14px; }

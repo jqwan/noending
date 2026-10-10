@@ -33,6 +33,7 @@ vi.mock("../../api", () => ({
       updated_at: null,
       pending: false,
     }),
+    regenerateSessionContext: vi.fn().mockResolvedValue({ session_id: "", status: "updated", revision: 1 }),
     updateSessionContext: vi.fn().mockResolvedValue({
       session_id: "",
       status: "updated",
@@ -56,6 +57,7 @@ beforeEach(() => {
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false });
   vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
+  vi.mocked(api.regenerateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 2 });
   vi.mocked(api.listProjects).mockResolvedValue([]);
   vi.mocked(api.listWorkstreams).mockResolvedValue([]);
   vi.mocked(api.refreshSession).mockResolvedValue({ queued: true });
@@ -97,7 +99,7 @@ function session(id: string, over: Partial<Session> = {}): Session {
         source_tail_hash: "",
         fact_generation: 1,
         latest_message_seq: 2,
-    
+
     ...over,
   };
 }
@@ -277,7 +279,7 @@ function preview(over: Partial<LocalDeletePreview> = {}): LocalDeletePreview {
     root_source_status: "missing",
     message_count: 3,
     session_context_count: 0,
-    context_revision_redaction_count: 0,
+
     ...over,
   };
 }
@@ -306,7 +308,6 @@ it("checks the root source before confirming and says the copy will be rebuilt",
   // 而不是在生产里把整棵树渲染崩成黑屏。
   screen.getByText("3 条会话消息");
   screen.getByText("0 条 Context 摘要记录");
-  screen.getByText("上下文来源改写 0 条");
   screen.getByRole("button", { name: "删除" });
 });
 
@@ -398,14 +399,14 @@ function contextView(over: Partial<SessionContextView> = {}): SessionContextView
   };
 }
 
-it("offers 生成摘要 only when there are messages and no summary yet", async () => {
+it("offers 更新摘要 only when there are messages and no summary yet", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
   await renderDetail(detail(session("me"), {
     messages: [message("me", 1, "user", "开始吧")],
   }));
 
   screen.getByText("Context");
-  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
   // 更新成功后重新拉取 Context 与详情。
   await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
@@ -414,10 +415,7 @@ it("offers 生成摘要 only when there are messages and no summary yet", async 
 it("keeps the summary read-only and shows 更新摘要 while there is a pending increment", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary_current_state: "正在重构前端入口",
-      decisions: ["删掉 Context Intelligence 开关"],
-      open_questions: [],
-      next_steps: ["补测试"],
+      summary: "**正在重构前端入口**，删掉 Context Intelligence 开关。\n\n下一步补测试。",
     },
     pending: true,
     revision: 3,
@@ -426,20 +424,23 @@ it("keeps the summary read-only and shows 更新摘要 while there is a pending 
     messages: [message("me", 1, "user", "继续")],
   }));
 
-  screen.getByText(/正在重构前端入口/);
+  expect(screen.getByText("正在重构前端入口").tagName).toBe("STRONG");
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  fireEvent.click(screen.getByRole("button", { name: /^复制$/ }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+    "**正在重构前端入口**，删掉 Context Intelligence 开关。\n\n下一步补测试。",
+  ));
   screen.getByText(/删掉 Context Intelligence 开关/);
   screen.getByText(/补测试/);
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
 });
 
-it("hides the update button when there is nothing pending", async () => {
+it("allows regenerating a current summary without pending messages", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary_current_state: "已完成",
-      decisions: [],
-      open_questions: [],
-      next_steps: [],
+      summary: "已完成",
     },
     pending: false,
     revision: 1,
@@ -449,7 +450,15 @@ it("hides the update button when there is nothing pending", async () => {
   }));
 
   expect(screen.queryByRole("button", { name: "更新摘要" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "生成摘要" })).toBeNull();
+  let finish!: (value: { session_id: string; status: "updated"; revision: number }) => void;
+  vi.mocked(api.regenerateSessionContext).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  const regenerate = screen.getByRole("button", { name: "重新生成" });
+  fireEvent.click(regenerate);
+  expect(regenerate).toHaveProperty("disabled", true);
+  await waitFor(() => expect(api.regenerateSessionContext).toHaveBeenCalledWith("me"));
+  expect(api.updateSessionContext).not.toHaveBeenCalled();
+  await act(async () => finish({ session_id: "me", status: "updated", revision: 2 }));
+  await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
 });
 
 it("shows structured Context failure details and copies the operation id", async () => {
@@ -463,7 +472,7 @@ it("shows structured Context failure details and copies the operation id", async
     messages: [message("me", 1, "user", "开始吧")],
   }));
 
-  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await screen.findByText("内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000");
   fireEvent.click(screen.getByRole("button", { name: "复制错误详情" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(
@@ -482,7 +491,7 @@ it("keeps an update error visible across background sync refreshes", async () =>
     messages: [message("me", 1, "user", "开始吧")],
   }));
 
-  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   const failure = "内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000";
   await screen.findByText(failure);
 
@@ -502,7 +511,7 @@ it("clears a session's update error when the same detail view navigates to anoth
     messages: [message("session-a", 1, "user", "开始吧")],
   }));
 
-  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   const failure = "内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000";
   await screen.findByText(failure);
 
@@ -577,7 +586,7 @@ it("allows archived sessions to sync and generate summaries while blocking conti
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
   await renderDetail(archivedDetail({ messages: [message("me", 1, "user", "归档后依然可生成摘要")] }));
   screen.getByRole("button", { name: "增量同步" });
-  fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
   expect((screen.getByRole("button", { name: "在桌面应用中继续" }) as HTMLButtonElement).disabled).toBe(true);
   const terminal = screen.getByRole("button", { name: "在终端中继续" });

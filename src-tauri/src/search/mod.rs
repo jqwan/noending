@@ -1,5 +1,5 @@
 //! Search — FTS5, with a LIKE fallback for queries its tokenizer cannot match.
-//! Prioritizes current context (items / workstreams), then the conversation
+//! Prioritizes current context (task summaries), then the conversation
 //!: only Logical Session documents and ROOT SessionMessages are
 //! indexed — never child/side transcripts, tool traffic, thinking bodies,
 //! MemberStats or IngestionDiagnostics.
@@ -12,7 +12,7 @@ use crate::storage::Db;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
-    pub kind: String, // item | workstream | project | session | message
+    pub kind: String, // workstream | project | session | message
     pub ref_id: String,
     pub parent_id: String,
     pub title: String,

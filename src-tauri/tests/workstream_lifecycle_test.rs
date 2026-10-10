@@ -8,11 +8,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 mod support;
 
-use noending::domain::{
-    workstream_visibility, Agent, ContextConflict, Session, SessionMessageRole, Workstream,
-};
+use noending::domain::{workstream_visibility, Agent, Session, SessionMessageRole, Workstream};
 use noending::error::Result;
-use noending::storage::{new_id, now, Db};
+use noending::storage::Db;
 use noending::workspace::workstream::{
     add_workstream_path, apply_whole_object_edit, archive_workstream, create_workstream,
     delete_workstream_permanently, restore_workstream,
@@ -101,17 +99,13 @@ fn archive_preserves_paths_context_and_ownership() {
     let s = session(&db, "s-arch");
     set_owner(&db, &s.id, &w.id);
     add_workstream_path(&db, &FixedAttacher, &w.id, "/repo/docs").unwrap();
-    let item = noending::sync::create_item(
-        &db,
-        &w.id,
-        "current_state",
-        "状态",
-        "在已归档列表中也要在",
-        "user_edit",
-        "manual",
-        &[],
-        "user",
-    )
+    db.tx(|tx| {
+        noending::storage::context_repo::commit_workstream_summary_conn(
+            tx,
+            &w.id,
+            "在已归档列表中也要在",
+        )
+    })
     .unwrap();
     let before = Snapshot::take(&db, &w.id);
 
@@ -121,13 +115,7 @@ fn archive_preserves_paths_context_and_ownership() {
     let after = Snapshot::take(&db, &w.id);
     assert_eq!(after.paths, before.paths);
     assert_eq!(after.owner_sessions, before.owner_sessions);
-    assert_eq!(after.context_items, before.context_items);
-    assert_eq!(after.revisions, before.revisions);
-    assert!(db.get_workstream_review_state(&w.id).unwrap().is_some());
-    assert_eq!(
-        db.get_item(&item.id).unwrap().unwrap().current_revision_id,
-        item.current_revision_id
-    );
+    assert_eq!(after.summary, before.summary);
     // the Session is still a Session
     assert_eq!(db.get_session(&s.id).unwrap().unwrap().id, s.id);
 }
@@ -264,164 +252,53 @@ fn permanent_delete_clears_every_row_the_workstream_owns() {
     let (_d, db) = temp_db();
     let w = workstream(&db, "w-every");
     let s = session(&db, "s-every");
-    add_workstream_path(&db, &FixedAttacher, &w.id, "/repo/docs").unwrap();
-    let rows = db.list_workstream_paths(&w.id).unwrap();
-
-    // context item + two revisions + the search row create_item writes
-    let item = noending::sync::create_item(
-        &db,
-        &w.id,
-        "goal",
-        "目标",
-        "一版",
-        "user_explicit",
-        "manual",
-        &[],
-        "user",
-    )
-    .unwrap();
-    db.apply_status_change(&item.id, "resolved", "user", "改主意了", &[])
-        .unwrap();
-    // conflict + its audited resolution event
-    let second = noending::sync::create_item(
-        &db,
-        &w.id,
-        "goal",
-        "另一版",
-        "二版",
-        "system_observed",
-        "agent_statement",
-        &[],
-        "agent",
-    )
-    .unwrap();
-    let conflict = ContextConflict {
-        id: new_id(),
-        workstream_id: w.id.clone(),
-        left_item_id: item.id.clone(),
-        right_item_id: Some(second.id.clone()),
-        conflict_type: "authority".into(),
-        status: "open".into(),
-        resolution: None,
-        created_at: now(),
-        updated_at: now(),
-        left_revision_id: item.current_revision_id.clone(),
-        right_revision_id: second.current_revision_id.clone(),
-        candidate_snapshot_json: None,
-    };
-    db.insert_conflict(&conflict).unwrap();
-    db.update_conflict_status(&conflict.id, "resolved", Some("保留用户版"))
-        .unwrap();
-    // review state is Workstream-owned and must be purged with it
     set_owner(&db, &s.id, &w.id);
-    let rejected = session(&db, "s-rejected");
-    set_owner(&db, &rejected.id, &w.id);
-    assert!(db.get_workstream_review_state(&w.id).unwrap().is_some());
-
-    // Everything is there before the delete…
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1",
-            &w.id
-        ),
-        2
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM context_conflicts WHERE workstream_id = ?1",
-            &w.id
-        ),
-        1
-    );
-    assert_eq!(db.conflict_history(&conflict.id).unwrap().len(), 1);
-    let revision_ids: Vec<String> = [&item.id, &second.id]
-        .into_iter()
-        .flat_map(|id| db.item_history(id).unwrap().into_iter().map(|r| r.id))
-        .collect();
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1",
-            &w.id
-        ),
-        2
-    );
-
+    add_workstream_path(&db, &FixedAttacher, &w.id, "/repo/docs").unwrap();
+    db.tx(|tx| {
+        noending::storage::context_repo::commit_workstream_summary_conn(tx, &w.id, "当前任务摘要")?;
+        noending::storage::context_repo::set_workstream_frontier_conn(
+            tx,
+            &noending::domain::WorkstreamSessionFrontier {
+                workstream_id: w.id.clone(),
+                session_id: s.id.clone(),
+                session_context_revision: 0,
+            },
+        )
+    })
+    .unwrap();
     archive_workstream(&db, &w.id).unwrap();
     delete_workstream_permanently(&db, &w.id).unwrap();
-
-    // …and all of it is gone, in the order fixes.
+    for table in [
+        "workstream_paths",
+        "workstream_context_state",
+        "workstream_session_frontiers",
+    ] {
+        assert_eq!(
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM {table} WHERE workstream_id = ?1"),
+                &w.id
+            ),
+            0
+        );
+    }
+    assert!(db.get_workstream(&w.id).unwrap().is_none());
     assert_eq!(
         count(
             &db,
-            "SELECT COUNT(*) FROM context_conflict_events WHERE conflict_id = ?1",
-            &conflict.id
+            "SELECT COUNT(*) FROM search_index WHERE ref_id = ?1",
+            &w.id
         ),
         0
     );
-    for id in revision_ids {
-        assert!(
-            db.get_revision(&id).unwrap().is_none(),
-            "orphan revision {id}"
-        );
-    }
-    for (label, sql) in [
-        (
-            "conflicts",
-            "SELECT COUNT(*) FROM context_conflicts WHERE workstream_id = ?1",
-        ),
-        (
-            "items",
-            "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1",
-        ),
-        (
-            "workstream paths",
-            "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1",
-        ),
-        (
-            "review state",
-            "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1",
-        ),
-        (
-            "the workstream",
-            "SELECT COUNT(*) FROM workstreams WHERE id = ?1",
-        ),
-    ] {
-        assert_eq!(count(&db, sql, &w.id), 0, "{label} must be gone");
-    }
-    // The Workstream's own search row and its items' rows both have to go with
-    // them, or search keeps answering with facts nobody owns any more.
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM search_index WHERE ref_id = ?1 OR (kind = 'item' AND parent_id = ?1)",
-            &w.id
-        ),
-        0,
-        "search rows must be gone"
-    );
-    // The Sessions, their events, their cursors and the physical paths all live.
-    assert!(db.get_session(&s.id).unwrap().is_some());
-    assert!(db.get_session(&rejected.id).unwrap().is_some());
-    // …and both lost their Owner (ON DELETE SET NULL), not their identity.
     assert!(db
         .get_session(&s.id)
         .unwrap()
         .unwrap()
         .owner_workstream_id
         .is_none());
-    assert!(db
-        .get_session(&rejected.id)
-        .unwrap()
-        .unwrap()
-        .owner_workstream_id
-        .is_none());
     assert_eq!(db.list_workspace_paths().unwrap().len(), 2);
     assert!(db.get_project("p1").unwrap().is_some());
-    // Sanity: the two paths we purged really were this Workstream's.
-    assert!(rows.len() == 2);
 }
 
 /// Deleting one Workstream must not reach into a sibling that happens to share a
@@ -441,17 +318,9 @@ fn permanent_delete_leaves_a_sibling_alone() {
         shared_path,
         "both work on /repo/main, which is one WorkspacePath"
     );
-    noending::sync::create_item(
-        &db,
-        &b.id,
-        "goal",
-        "留在世上",
-        "别删我",
-        "user_explicit",
-        "manual",
-        &[],
-        "user",
-    )
+    db.tx(|tx| {
+        noending::storage::context_repo::commit_workstream_summary_conn(tx, &b.id, "别删我")
+    })
     .unwrap();
 
     archive_workstream(&db, &a.id).unwrap();
@@ -464,7 +333,7 @@ fn permanent_delete_leaves_a_sibling_alone() {
     assert_eq!(
         count(
             &db,
-            "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1",
+            "SELECT COUNT(*) FROM workstream_context_state WHERE workstream_id = ?1",
             &b.id
         ),
         1
@@ -558,9 +427,7 @@ struct Snapshot {
     created_at: String,
     paths: Vec<(String, i64)>,
     owner_sessions: Vec<String>,
-    context_items: i64,
-    revisions: i64,
-    review_state: i64,
+    summary: String,
 }
 
 impl Snapshot {
@@ -584,9 +451,10 @@ impl Snapshot {
                 .map(|p| (p.workspace_path_id, p.position))
                 .collect(),
             owner_sessions,
-            context_items: count(db, "SELECT COUNT(*) FROM context_items WHERE workstream_id = ?1", workstream_id),
-            revisions: count(db, "SELECT COUNT(*) FROM context_item_revisions WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)", workstream_id),
-            review_state: count(db, "SELECT COUNT(*) FROM workstream_review_state WHERE workstream_id = ?1", workstream_id),
+            summary: db
+                .get_workstream_context_state(workstream_id)
+                .unwrap()
+                .summary,
         }
     }
 }

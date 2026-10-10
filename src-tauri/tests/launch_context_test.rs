@@ -78,32 +78,6 @@ fn owner_of(db: &Db, session_id: &str) -> Option<String> {
 
 // Issue #8: storage / domain consistency
 
-fn seed_context(db: &Db, ws_id: &str, titles: &[&str]) -> Vec<noending::domain::ContextItem> {
-    titles
-        .iter()
-        .map(|t| {
-            noending::sync::create_item(
-                db,
-                ws_id,
-                "constraint",
-                t,
-                &format!("content of {}", t),
-                "user_edit",
-                "user_edit",
-                &[],
-                "user",
-            )
-            .unwrap()
-        })
-        .collect()
-}
-
-/// The list_sessions parameter bug: filtering by agent ONLY used to bind
-/// ?2 with a single parameter and fail. All four filter combinations work.
-///
-/// The Project half goes through the authoritative chain: the Session is
-/// a member because its `workspace_path_id` says so, not because the derived
-/// cache happens to hold a value.
 #[test]
 fn list_sessions_all_filter_combinations() {
     let db = open_db("session-filter");
@@ -326,10 +300,9 @@ fn prepare_resume_uses_current_owner_without_writing() {
 }
 
 #[test]
-fn state_fingerprint_stale_detection_on_context_change() {
+fn state_fingerprint_stale_detection_on_owner_metadata_change() {
     let db = open_db("stale-context-detection");
     let ws = ws_row(&db, "test ws");
-    seed_context(&db, &ws.id, &["初始约束"]);
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
@@ -346,8 +319,9 @@ fn state_fingerprint_stale_detection_on_context_change() {
         )
         .unwrap();
 
-    // Owner Context changes in the background (e.g. new item added)
-    seed_context(&db, &ws.id, &["新插入的约束"]);
+    let mut changed = ws.clone();
+    changed.title = "Changed task".into();
+    db.upsert_workstream(&changed).unwrap();
 
     // Attempting to launch with stale prepared launch MUST fail with stale error
     let err = launcher
@@ -367,7 +341,6 @@ fn state_fingerprint_stale_detection_on_context_change() {
 fn state_fingerprint_stale_detection_on_runtime_override_change() {
     let db = open_db("stale-runtime-detection");
     let ws = ws_row(&db, "test ws");
-    seed_context(&db, &ws.id, &["初始约束"]);
 
     let launcher = launcher::SessionLauncher {
         runtime_dir: std::env::temp_dir(),
@@ -437,7 +410,6 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
 fn prepared_launch_freezes_the_runtime_override_intent() {
     let db = open_db("prepared-runtime-intent");
     let ws = ws_row(&db, "test ws");
-    seed_context(&db, &ws.id, &["约束"]);
 
     noending::agent_runtime::set_runtime_overrides(
         &db,

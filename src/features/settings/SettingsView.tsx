@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
+import SummaryPromptSettings from "./SummaryPromptSettings";
 import PageHeader from "../../layout/PageHeader";
 import { Modal, copyToClipboard, openPath, submitsOnEnter } from "../../components/common";
 import { showToast } from "../../components/Toast";
@@ -18,10 +19,11 @@ export default function SettingsView({ section: _section, navigate: _navigate }:
     <div className="main settings-page">
       <PageHeader
         title="设置"
-        sub="配置主题外观、Context 诊断与本地存储数据。"
+        sub="配置主题外观、摘要提取与本地存储数据。"
       />
       <div className="settings-pane" style={{ marginTop: 18 }}>
         <AppearanceSettings />
+        <SummaryPromptSettings />
         <ContextDiagnosticsSettings />
         <WorkspaceStorageSettings />
       </div>

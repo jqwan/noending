@@ -75,12 +75,8 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
     setBusy(true);
     setErrorText(null);
     try {
-      const r = await api.permanentlyDeleteSession(sessionId);
-      const redaction =
-        r.redacted_revisions > 0
-          ? `，并脱敏了 ${fmtCount(r.redacted_revisions)} 条 Context 来源`
-          : "";
-      showToast(`已删除本地数据${redaction}${note.toast}`);
+      await api.permanentlyDeleteSession(sessionId);
+      showToast(`已删除本地数据${note.toast}`);
       onDeleted?.();
       onClose();
     } catch (e) {
@@ -130,7 +126,6 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
           <ul className="purge-list">
             <li>{fmtCount(preview.message_count)} 条会话消息</li>
             <li>{fmtCount(preview.session_context_count)} 条 Context 摘要记录</li>
-            <li>上下文来源改写 {fmtCount(preview.context_revision_redaction_count)} 条</li>
           </ul>
 
           <div style={{ margin: "10px 0 0", maxWidth: "72ch" }}>

@@ -309,8 +309,10 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         prompt: &str,
         runtime_dir: &Path,
     ) -> Result<AgentCommand> {
-        // Pi already marks its one-shot, tool-free invocation as ephemeral.
         let mut cmd = self.build_exec_command(install, opts, prompt)?;
+        // Disable default tools; explicitly enable file reads and result writes.
+        cmd.args
+            .splice(3..3, ["--tools".into(), "read,write".into()]);
         cmd.cwd = Some(runtime_dir.to_path_buf());
         Ok(cmd)
     }

@@ -1,24 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
-  ContextItem, ContextItemRevision, CreateWorkstreamReport,
+  CreateWorkstreamReport,
   IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
-  Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow,
+  Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow, ProjectContextView, ProjectUpdateOutcome,
   AddProjectPathResult,
   RecentWorkspacePath, WorkspaceSettings,
   WorkstreamPath, WorkstreamPathRow,
-  ReviewFrontier, SearchHit, Session, SessionContextView, SessionDetail,
+  SearchHit, Session, SessionContextView, SessionDetail,
   SessionMessageMark, SessionMessageWindow, TurnIntermediates,
-  SessionUpdateOutcome,
+  SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
-  WorkstreamReviewState, WorkstreamReviewWindow, WorkstreamReviewSummary,
   WorkstreamUpdateOutcome,
 } from "./types";
 
 export const api = {
   // Projects — v0.2 derives them from WorkspacePaths; reads and rename are the
-  // full client surface.
+  // client surface, alongside explicit summary extraction.
   listProjects: () => invoke<Project[]>("list_projects"),
   /** 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
   listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
@@ -83,53 +82,6 @@ export const api = {
 
   getWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamContext>("get_workstream_context", { workstreamId }),
-  addContextItem: (workstreamId: string, kind: string, title: string, content: string) =>
-    invoke<ContextItem>("add_context_item", { args: { workstreamId, kind, title, content } }),
-  editContextItem: (itemId: string, title: string, content: string) =>
-    invoke<void>("edit_context_item", { args: { itemId, title, content } }),
-  setItemStatus: (itemId: string, status: string) =>
-    invoke<void>("set_item_status", { itemId, status }),
-  getItemHistory: (itemId: string) =>
-    invoke<ContextItemRevision[]>("get_item_history", { itemId }),
-  deleteContextItem: (itemId: string) => invoke<void>("delete_context_item", { itemId }),
-  getContextRevisionSource: (revisionId: string) =>
-    invoke<import("./types").ContextSourceDetail | null>("get_context_revision_source", { revisionId }),
-  getWorkstreamReviewState: (workstreamId: string) =>
-    invoke<WorkstreamReviewState | null>("get_workstream_review_state", { workstreamId }),
-  getWorkstreamReviewWindow: (workstreamId: string) =>
-    invoke<WorkstreamReviewWindow>("get_workstream_review_window", { workstreamId }),
-  markWorkstreamReviewed: (workstreamId: string, frontier: ReviewFrontier) =>
-    invoke<WorkstreamReviewState>("mark_workstream_reviewed", { workstreamId, frontier }),
-  getWorkstreamReviewSummary: (workstreamId: string) =>
-    invoke<WorkstreamReviewSummary>("get_workstream_review_summary", { workstreamId }),
-  listWorkstreamReviewSummaries: () =>
-    invoke<WorkstreamReviewSummary[]>("list_workstream_review_summaries"),
-  listConflicts: (workstreamId: string, includeClosed?: boolean) =>
-    invoke<import("./types").ContextConflict[]>("list_conflicts", { workstreamId, includeClosed: includeClosed ?? false }),
-  resolveConflict: (conflictId: string, status: string, resolution?: string) =>
-    invoke<void>("resolve_conflict", { conflictId, status, resolution: resolution ?? null }),
-  resolveConflictWithEdit: (
-    conflictId: string,
-    status: string,
-    resolution?: string,
-    edit?: { title: string; content: string },
-  ) =>
-    invoke<void>("resolve_conflict_with_edit", {
-      args: {
-        conflict_id: conflictId,
-        status,
-        resolution: resolution ?? null,
-        edit: edit ?? null,
-      },
-    }),
-  getConflictReviewCase: (conflictId: string) =>
-    invoke<import("./types").ConflictReviewCase | null>("get_conflict_review_case", { conflictId }),
-  listConflictReviewCases: (workstreamId: string, includeClosed?: boolean) =>
-    invoke<import("./types").ConflictReviewCase[]>("list_conflict_review_cases", {
-      workstreamId,
-      includeClosed: includeClosed ?? false,
-    }),
-
   listSessions: (projectId?: string, agent?: Agent, scope?: "unarchived" | "archived" | "all") =>
     invoke<Session[]>("list_sessions", {
       projectId: projectId ?? null,
@@ -199,12 +151,32 @@ export const api = {
   /** Workstream 当前 Context + revision + 待更新状态。纯读取。 */
   getWorkstreamContextState: (workstreamId: string) =>
     invoke<WorkstreamContextView>("get_workstream_context_state", { workstreamId }),
-  /** 一次点击 → 最多一次模型调用 → 一份新的 Session 摘要。 */
+  /** 当前摘要与增量消息整合，最多启动一次 Agent。 */
   updateSessionContext: (sessionId: string) =>
     invoke<SessionUpdateOutcome>("update_session_context", { sessionId }),
+  /** 从完整有效历史重新生成，不沿用当前摘要。 */
+  regenerateSessionContext: (sessionId: string) =>
+    invoke<SessionUpdateOutcome>("regenerate_session_context", { sessionId }),
   /** 一次点击 → 最多一次模型调用 → 相关 Session 摘要与 Workstream 状态一起更新。 */
   updateWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamUpdateOutcome>("update_workstream_context", { workstreamId }),
+
+  getProjectContextState: (projectId: string) =>
+    invoke<ProjectContextView>("get_project_context_state", { projectId }),
+  updateProjectContext: (projectId: string) =>
+    invoke<ProjectUpdateOutcome>("update_project_context", { projectId }),
+  regenerateProjectContext: (projectId: string) =>
+    invoke<ProjectUpdateOutcome>("regenerate_project_context", { projectId }),
+
+  regenerateWorkstreamContext: (workstreamId: string) =>
+    invoke<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
+
+  getSummaryPromptSettings: () =>
+    invoke<SummaryPromptSettings>("get_summary_prompt_settings"),
+  setSummaryPromptTemplate: (kind: SummaryPromptKind, template: string | null) =>
+    invoke<SummaryPromptSettings>("set_summary_prompt_template", { kind, template }),
+  previewSummaryPrompt: (kind: SummaryPromptKind, templates: SummaryPromptTemplates) =>
+    invoke<string>("preview_summary_prompt", { kind, templates }),
 
   /** 新建 Session 最多带一个所属任务（`null` = standalone）。 */
   prepareNewSession: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string) =>

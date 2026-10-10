@@ -451,8 +451,14 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
             "--no-session-persistence".into(),
             "--output-format".into(),
             "text".into(),
+            "--tools".into(),
+            "Read,Write".into(),
+            "--allowedTools".into(),
+            "Read,Write".into(),
         ];
         args.extend(runtime_args(opts));
+        // Variadic --tools/--allowedTools must not consume the prompt.
+        args.push("--".into());
         args.push(prompt.to_string());
         Ok(AgentCommand {
             program: install.executable_path.clone(),

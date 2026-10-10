@@ -13,7 +13,7 @@
 //! session_ingest_state / ingestion_diagnostics rows). The RAW conversation is
 //! `session_messages` (append-only for provenance), the CURRENT conversation is
 //! `session_message_projection`, the Session summary frontier is
-//! `session_contexts` / `session_context_revisions`, and the Workstream
+//! `session_contexts`, and the Workstream
 //! revision pair is `workstream_context_state` / `workstream_session_frontiers`.
 //! The retired objects must stay absent.
 //!
@@ -121,6 +121,25 @@ fn fresh_database_uses_current_format_generation() {
         )
         .unwrap();
     assert_eq!(count, 0, "tasks have only archive state");
+    for table in [
+        "session_contexts",
+        "workstream_context_state",
+        "project_context_state",
+    ] {
+        assert!(has_column(&conn, table, "summary"));
+        for obsolete in [
+            "summary_current_state",
+            "decisions",
+            "open_questions",
+            "next_steps",
+        ] {
+            assert!(
+                !has_column(&conn, table, obsolete),
+                "{table} stores only Markdown"
+            );
+        }
+    }
+    assert!(!object_exists(&conn, "session_context_revisions"));
     drop(conn);
 
     // the old-generation tables are gone, not carried
@@ -145,6 +164,11 @@ fn fresh_database_uses_current_format_generation() {
         "session_ingest_state",
         "ingestion_diagnostics",
         "launch_intents",
+        "context_items",
+        "context_item_revisions",
+        "context_conflicts",
+        "context_conflict_events",
+        "workstream_review_state",
     ] {
         assert!(
             !object_exists(&db.read(), table),
@@ -181,6 +205,12 @@ fn fresh_database_uses_current_format_generation() {
         );
     }
 
+    assert!(!has_column(
+        &db.read(),
+        "workstream_session_frontiers",
+        "ingest_generation"
+    ));
+
     // The Logical Session model is the replacement: every table of the new
     // shape exists, and the session row carries the flattened source, cursor
     // and fact-frontier columns.
@@ -188,12 +218,11 @@ fn fresh_database_uses_current_format_generation() {
         "session_messages",
         "session_message_projection",
         "session_contexts",
-        "session_context_revisions",
         "workstream_context_state",
         "workstream_session_frontiers",
+        "project_context_state",
+        "project_session_frontiers",
         "idx_sessions_workspace_path",
-        "idx_item_revisions_item",
-        "idx_conflicts_workstream",
         "idx_projection_message",
     ] {
         assert!(

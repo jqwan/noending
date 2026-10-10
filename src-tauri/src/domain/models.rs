@@ -441,15 +441,11 @@ pub struct SessionMessage {
     pub source_identity_hash: String,
 }
 
-/// The fixed, system-derived Session Context structure. All four fields are
-/// always present (empty lists are legal); extra fields are rejected at the
-/// model boundary.
+/// A system-derived Markdown summary. Extra fields are rejected at the model
+/// boundary; revisions and processing positions remain backend-owned.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SessionContextFields {
-    pub summary_current_state: String,
-    pub decisions: Vec<String>,
-    pub open_questions: Vec<String>,
-    pub next_steps: Vec<String>,
+    pub summary: String,
 }
 
 /// The current Session Context plus its CAS/frontier state. No row means the
@@ -460,37 +456,27 @@ pub struct SessionContextRecord {
     pub fields: SessionContextFields,
     /// CAS guard: a committed update writes `revision + 1`.
     pub revision: i64,
-    /// The fact generation this summary was built against.
+    /// The fact generation of the last inspected message projection.
     pub ingest_generation: i64,
     /// How far into the current-message projection this summary consumed.
     pub processed_through_seq: i64,
     pub updated_at: String,
 }
 
-/// One entry of the append-only Session Context history, so a Workstream
-/// update can cite `session-context:<session_id>:<revision>`.
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionContextRevision {
-    pub session_id: Id,
-    pub revision: i64,
-    pub fields: SessionContextFields,
-    pub ingest_generation: i64,
-    pub processed_through_seq: i64,
-    pub created_at: String,
-}
-
 /// The Workstream side of the two-level revision scheme.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct WorkstreamContextState {
     pub workstream_id: Id,
-    /// Guard for every ContextItem write (manual + AI).
+    /// Guard for current task-summary writes.
     pub context_revision: i64,
-    /// Marks manual Context edits / Owner-set / title / description /
-    /// ownership changes that require re-synthesis.
+    /// Marks Owner-set / paths / title / description /
+    /// ownership changes that leave new materials pending.
     pub input_revision: i64,
     /// The `input_revision` the last successful AI update consumed. A
     /// Workstream is pending when `input_revision > consumed_input_revision`.
     pub consumed_input_revision: i64,
+    pub summary: String,
+    pub updated_at: Option<String>,
 }
 
 /// What a Workstream has already consumed from one Owner Session.
@@ -499,8 +485,6 @@ pub struct WorkstreamSessionFrontier {
     pub workstream_id: Id,
     pub session_id: Id,
     pub session_context_revision: i64,
-    pub ingest_generation: i64,
-    pub consumed_through_seq: i64,
 }
 
 /// The outcome vocabulary of an explicit Context update command. Every value
@@ -510,13 +494,12 @@ pub struct WorkstreamSessionFrontier {
 pub enum ContextUpdateStatus {
     /// Everything the snapshot covered was written.
     Updated,
-    /// Only a prefix of the pending work fit the input budget; the rest stays
-    /// pending.
+    /// Collection summary saved; failed sessions remain pending.
     Partial,
     /// Nothing to do — no new messages. The model was NOT called.
     NoChange,
-    /// The world moved under the model call; the user must click again.
-    StaleSnapshot,
+    /// Materials were inspected and contained no meaningful summary update.
+    Skipped,
 }
 
 /// Why an explicit Context update failed, so the UI can offer the right retry.
@@ -532,8 +515,6 @@ pub enum ContextUpdateError {
     InvalidOutput(String),
     /// The snapshot changed under the model call.
     ConcurrencyConflict(String),
-    /// The smallest possible request would already exceed the input budget.
-    InputTooLarge(String),
     /// Storage / IO failure.
     Storage(String),
 }
@@ -654,229 +635,6 @@ pub struct IngestSource {
 pub mod ingest_origin {
     pub const DEFAULT: &str = "default";
     pub const USER: &str = "user";
-}
-
-/// Where a piece of context came from and how strongly it is held. The values
-/// are the domain's own vocabulary: an authority is either known (the five
-/// origins below) or [`authority::UNKNOWN`], which says "this revision's origin
-/// cannot be determined" — a normal outcome, not a compatibility case.
-pub mod authority {
-    pub const USER_EXPLICIT: &str = "user_explicit";
-    pub const USER_EDIT: &str = "user_edit";
-    pub const SYSTEM_OBSERVED: &str = "system_observed";
-    pub const AGENT_STATEMENT: &str = "agent_statement";
-    pub const AGENT_INFERRED: &str = "agent_inferred";
-    /// The revision's provenance does not determine an authority. Callers must
-    /// never read this as permission to overwrite: it is the absence of a
-    /// statement, and the unified policy treats it as the weakest tier.
-    pub const UNKNOWN: &str = "unknown";
-}
-
-/// L2/L1 unit of Workstream context. History lives in revisions.
-#[derive(Debug, Clone, Serialize)]
-pub struct ContextItem {
-    pub id: Id,
-    pub workstream_id: Id,
-    pub kind: String,
-    pub status: String,     // active | superseded | resolved | obsolete | deleted
-    pub authority: String,  // see `authority`
-    pub created_by: String, // user | sync:<runtime> | assistant | ...
-    pub current_revision_id: Option<Id>,
-    pub supersedes_item_id: Option<Id>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextItemEditPayload {
-    pub title: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ContextItemRevision {
-    pub id: Id,
-    pub item_id: Id,
-    pub title: String,
-    pub content: String,
-    pub metadata: serde_json::Value,
-    pub source_type: Option<String>, // user_edit | session_message | manual | system | status_change
-    pub source_ref: Option<String>,  // e.g. "session-message:<message-id>" or "url:..."
-    pub created_at: String,
-}
-
-/// First-class conflict between two context items. Conflicts are kept, not
-/// auto-resolved; the older user-side item stays untouched until a human or
-/// stronger evidence resolves the conflict.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextConflict {
-    pub id: Id,
-    pub workstream_id: Id,
-    pub left_item_id: Id,          // usually the pre-existing (often user) side
-    pub right_item_id: Option<Id>, // the incoming agent side, when it became an item
-    pub conflict_type: String,     // authority | content | value
-    pub status: String,            // open | resolved | dismissed
-    pub resolution: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub left_revision_id: Option<Id>,
-    pub right_revision_id: Option<Id>,
-    pub candidate_snapshot_json: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextConflictEvent {
-    pub id: Id,
-    pub conflict_id: Id,
-    pub previous_status: String,
-    pub new_status: String,
-    pub resolution: Option<String>,
-    pub actor: String,
-    pub created_at: String,
-    pub snapshot_json: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevisionSnapshot {
-    pub id: Id,
-    pub item_id: Id,
-    pub title: String,
-    pub content: String,
-    pub authority: String,
-    pub created_at: String,
-    pub source_ref: Option<String>,
-    pub source_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CandidateSnapshot {
-    pub title: String,
-    pub content: String,
-    pub authority: String,
-    pub source_refs: Vec<String>,
-}
-
-/// Read model for conflict review guaranteeing user review sees exact
-/// conflict-time evidence alongside current fact state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConflictReviewCase {
-    pub conflict: ContextConflict,
-
-    pub left_at_conflict: Option<RevisionSnapshot>,
-    pub right_at_conflict: Option<RevisionSnapshot>,
-    pub candidate_at_conflict: Option<CandidateSnapshot>,
-
-    pub current_left: Option<RevisionSnapshot>,
-    pub current_right: Option<RevisionSnapshot>,
-
-    pub left_changed_since_conflict: bool,
-    pub right_changed_since_conflict: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextItemRef {
-    pub id: Id,
-    pub kind: String,
-    pub title: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextItemRelation {
-    pub item_id: Id,
-    pub supersedes: Option<ContextItemRef>,
-    pub superseded_by: Vec<ContextItemRef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextChange {
-    pub id: String,
-    pub item_id: Option<Id>,
-    pub conflict_id: Option<Id>,
-    pub kind: String, // added | edited | resolved | superseded | deleted | conflict_created | conflict_resolved
-    pub title: String,
-    pub actor: String,
-    pub source_type: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextSourceDetail {
-    pub revision_id: Id,
-    pub authority: String,
-    pub source_type: Option<String>,
-    pub source_ref: Option<String>,
-    pub session_id: Option<Id>,
-    pub session_title: Option<String>,
-    pub agent: Option<Agent>,
-    pub message_sequence: Option<i64>,
-    pub message_ts: Option<String>,
-    pub evidence: Option<String>,
-}
-
-/// Item types that make up the L1 Core Context projection.
-pub const CORE_ITEM_TYPES: [&str; 5] = [
-    "goal",
-    "current_state",
-    "constraint",
-    "decision",
-    "open_question",
-];
-
-/// Built-in domain-neutral extended types (first version).
-pub const BUILTIN_EXTENDED_TYPES: [&str; 10] = [
-    "todo",
-    "finding",
-    "issue",
-    "risk",
-    "note",
-    "reference",
-    "artifact",
-    "requirement",
-    "decision_detail",
-    "research_note",
-];
-
-/// Review Frontier marking the latest observed context mutation boundary for a Workstream.
-/// Ordering comparison relies strictly on local mutation commit time (`through_at`),
-/// with `boundary_change_ids` resolving any ties at the frontier timestamp losslessly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewFrontier {
-    pub through_at: String,
-    pub boundary_change_ids: Vec<Id>,
-}
-
-/// Durable review checkpoint for a Workstream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkstreamReviewState {
-    pub workstream_id: Id,
-    pub frontier: ReviewFrontier,
-    pub reviewed_at: String,
-}
-
-/// Window token presented to the user during context review.
-/// Guarantees that marking reviewed only advances through the changes actually observed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkstreamReviewWindow {
-    pub state: WorkstreamReviewState,
-    pub unseen_changes: Vec<ContextChange>,
-    pub mark_through: ReviewFrontier,
-}
-
-/// Lightweight summary of context updates and attention items for a Workstream since its last review.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkstreamReviewSummary {
-    pub workstream_id: Id,
-    pub unseen_change_count: usize,
-    pub open_conflict_count: usize,
-    pub new_facts: usize,
-    pub updated_facts: usize,
-    pub resolved_items: usize,
-    pub superseded_items: usize,
-    pub last_unseen_change_at: Option<String>,
-    pub reviewed_at: String,
-    pub has_updates: bool,
-    pub needs_attention: bool,
 }
 
 #[cfg(test)]

@@ -4,13 +4,12 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
+import ProjectSummary, { clearProjectSummaryCache } from "./ProjectSummary";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { httpsRemoteUrl } from "./remoteUrl";
 import { projectKindLabels, isChatDirectoryProject } from "./projectKind";
-import { cardSummaryLine } from "../workstreams/WorkstreamCard";
 import {
   type ProjectDetailData,
-  type WorkstreamCardData,
 } from "../../types";
 import type { Route } from "../../app/routes";
 
@@ -18,12 +17,13 @@ import type { Route } from "../../app/routes";
  * Project Detail：一次 `get_project_detail` 读到全部真相——它拥有的 WorkspacePaths、
  * 经由这些路径到达的 Workstreams，以及 cwd 落在这些路径上的
  * Sessions（走权威链，不走缓存列，M29）。
- * 用户在这页唯一能做的编辑是改名：其余事实都是派生的，手工新建 / 删除 / 移动都已退出产品 API。
+ * 项目事实由目录派生，当前摘要由用户主动更新或重新生成。
  */
 export const projectDetailCache = new Map<string, ProjectDetailData>();
 
 export function clearProjectDetailCache() {
   projectDetailCache.clear();
+  clearProjectSummaryCache();
 }
 
 export default function ProjectDetail({ projectId, initialTitle, navigate }: {
@@ -179,6 +179,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       {/* 概览数字与类型 / 命名 / 创建时间都收在右栏「属性」块里：标题栏只放标题与图标动作。 */}
       <div className="project-detail-layout">
       <div>
+      <ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
       <section className="rail-section">
         <div className="section-label">任务</div>
 
@@ -187,8 +188,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         )}
         {/* 展示所有通过工作路径关联的任务。 */}
         {detail.workstreams.map(({ workstream: w }) => {
-          // 与 Workstream 卡片同一条规则：摘要取 Agent 的 current_state，退回用户描述。
-          const summary = cardSummaryLine(w as unknown as WorkstreamCardData);
+          const summary = w.description;
           return (
             <div key={w.id} className="list-row"
               onClick={() => navigate({ view: "workstream", workstreamId: w.id, initialTitle: w.title })}>

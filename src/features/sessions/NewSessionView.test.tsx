@@ -438,8 +438,7 @@ describe("NewSessionView task and project selection", () => {
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-01T00:00:00Z",
         projects: [{ id: "p-1", name: "Project 1" }],
-        current_state: null,
-        goal: null,
+        summary: null,
         last_activity_at: null,
         session_count: 1,
         latest_session: null,
@@ -624,7 +623,7 @@ it("does not designate the first project of a multi-project task as its default"
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
     id: "multi", title: "跨项目任务", description: "", visibility: "normal",
     projects: [{ id: "p-1", name: "甲" }, { id: "p-2", name: "乙" }],
-    created_at: "", updated_at: "", current_state: null, goal: null,
+    created_at: "", updated_at: "", summary: null,
     last_activity_at: null, session_count: 0, latest_session: null, path_count: 2,
   }]);
   render(<NewSessionView workstreamId="multi" navigate={vi.fn()} />);

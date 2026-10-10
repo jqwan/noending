@@ -13,7 +13,6 @@ use noending::domain::{Agent, Session, Workstream};
 use noending::launcher::{LaunchWorkspace, SessionLauncher};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
-use noending::sync::ContextMutation;
 use noending::workspace::workstream::{
     add_workstream_path, archive_workstream, create_workstream, delete_workstream_permanently,
 };
@@ -384,111 +383,6 @@ fn workstream_session_stats_count_only_owned_sessions() {
 /// found anywhere in the transcript. The boundary therefore lives in the merge
 /// engine, on the deterministic side — an id from another Workstream is a
 /// skip, not a way in.
-#[test]
-fn mutations_outside_the_owner_are_skipped_not_written() {
-    use noending::sync::merge::MergeEngine;
-    use noending::sync::{create_item, MergeContext};
-
-    let db = open_db("merge-owner-boundary");
-    let a = workstream(&db, "A");
-    let b = workstream(&db, "B");
-
-    // B owns an item; the run below is owned by A and never names A's items.
-    let foreign = create_item(
-        &db,
-        &b.id,
-        "decision",
-        "属于 B 的决定",
-        "B 的内容",
-        "agent_inferred",
-        "session_message",
-        &[],
-        "sync:other",
-    )
-    .unwrap();
-    let before = db.get_item(&foreign.id).unwrap().unwrap();
-
-    let ctx = MergeContext {
-        runtime: "probe".into(),
-        workstream_id: a.id.clone(),
-    };
-    let mutations = vec![
-        ContextMutation::Add {
-            workstream_id: b.id.clone(),
-            item_kind: "decision".into(),
-            title: "偷渡进 B".into(),
-            content: "x".into(),
-            source_refs: vec![],
-            authority: "agent_statement".into(),
-        },
-        ContextMutation::Update {
-            item_id: foreign.id.clone(),
-            title: "被改写".into(),
-            content: "y".into(),
-            source_refs: vec![],
-            authority: "agent_statement".into(),
-        },
-        ContextMutation::Supersede {
-            item_id: foreign.id.clone(),
-            title: "被取代".into(),
-            content: "z".into(),
-            source_refs: vec![],
-            authority: "agent_statement".into(),
-        },
-        ContextMutation::Resolve {
-            item_id: foreign.id.clone(),
-            source_refs: vec![],
-        },
-        // The control: the same run CAN write its own Owner.
-        ContextMutation::Add {
-            workstream_id: a.id.clone(),
-            item_kind: "decision".into(),
-            title: "合法写入".into(),
-            content: "own".into(),
-            source_refs: vec![],
-            authority: "agent_statement".into(),
-        },
-    ];
-
-    let applied = db
-        .tx(|tx| {
-            let mut n = 0;
-            for m in &mutations {
-                if MergeEngine.apply(tx, m, &ctx)? {
-                    n += 1;
-                }
-            }
-            Ok(n)
-        })
-        .unwrap();
-
-    assert_eq!(applied, 1, "only the Owner's own mutation is applied");
-
-    // B is untouched: same head, same status, no new item, no conflict.
-    let after = db.get_item(&foreign.id).unwrap().unwrap();
-    assert_eq!(after.current_revision_id, before.current_revision_id);
-    assert_eq!(after.status, before.status);
-    assert_eq!(
-        db.items_for_workstream(&b.id, true).unwrap().len(),
-        1,
-        "nothing was added to B"
-    );
-    assert!(db.conflicts_for_workstream(&b.id, true).unwrap().is_empty());
-    assert!(
-        db.conflicts_for_workstream(&a.id, true).unwrap().is_empty(),
-        "a skipped foreign mutation must not create a conflict on A either"
-    );
-    assert_eq!(db.items_for_workstream(&a.id, true).unwrap().len(), 1);
-}
-
-// resume reads the Owner after the sync seam
-
-/// Resume preparation reads ownership AFTER its sync, never from the
-/// snapshot taken before it.
-///
-/// Sync runs without the DB lock, so the user can move the Session to another
-/// Workstream while it is in flight (sync's own owner CAS tolerates exactly
-/// that). The current Owner must be recorded without changing the directory.
 #[test]
 fn resume_preparation_follows_the_current_owner_after_the_sync_seam() {
     let db = open_db("owner-resume-fresh");

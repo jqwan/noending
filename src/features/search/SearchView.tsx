@@ -6,7 +6,6 @@ import type { SearchHit } from "../../types";
 
 /** 结果类型徽标（search/mod.rs 的 kind 定义域）。领域词按词表保留。 */
 const HIT_KIND_LABELS: Record<string, string> = {
-  item: "Context",
   workstream: "任务",
   project: "项目",
   session: "会话",
@@ -38,7 +37,7 @@ export default function SearchView({ query, navigate }: { query: string; navigat
   return (
     <div className="main narrow">
       <PageHeader title="搜索" />
-      <input aria-label="搜索" type="text" style={{ marginBottom: 18 }} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索任务、会话、Context 消息…" />
+      <input aria-label="搜索" type="text" style={{ marginBottom: 18 }} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索任务、会话、消息…" />
 
       {failed && (
         <div className="empty" role="alert">搜索失败 <button className="btn small" onClick={() => setRetry(value => value + 1)}>重试</button></div>
@@ -50,7 +49,6 @@ export default function SearchView({ query, navigate }: { query: string; navigat
           onClick={() => {
             if (h.kind === "workstream") navigate({ view: "workstream", workstreamId: h.ref_id, initialTitle: h.title });
             else if (h.kind === "session") navigate({ view: "session", sessionId: h.ref_id, initialTitle: h.title });
-            else if (h.kind === "item") navigate({ view: "workstream", workstreamId: h.parent_id });
             // 消息命中：ref_id 是消息 id，打开它所在的逻辑会话（parent_id）。
             else if (h.kind === "message") navigate({ view: "session", sessionId: h.parent_id });
             else if (h.kind === "project") navigate({ view: "project", projectId: h.ref_id, initialTitle: h.title });

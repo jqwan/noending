@@ -8,16 +8,8 @@
 //! `archive` / `restore` only flip visibility, and permanent deletion is
 //! reachable only from `archived`.
 //!
-//! Permanent deletion order: `context_conflict_events` → `context_conflicts` →
-//! `context_item_revisions` → `context_items` → `context_deliveries` →
-//! `workstream_paths` → `workstream_review_state` (cascades) → `workstreams`.
-//! Never touched: `sessions`, `session_members`, `session_messages`,
-//! `workspace_paths`, and the Agents' raw source data. A
-//! Session survives via its `owner_workstream_id` `ON DELETE SET NULL`.
-//!
-//! Removing a WorkstreamPath touches the
-//! path list only — Session Owner, cwd, `workspace_path_id` and `project_id` are
-//! independent facts and stay put.
+//! Permanent deletion removes task paths, summary/progress and its search document.
+//! Sessions and physical paths survive; sessions lose their owner via the FK.
 //!
 //! `create_workstream` treats an unresolvable path as "not this one" and reports
 //! it per entry; `add_workstream_path` errors instead, because there the user

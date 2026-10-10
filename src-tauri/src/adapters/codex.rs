@@ -429,7 +429,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             "exec".into(),
             "--ephemeral".into(),
             "-s".into(),
-            "read-only".into(),
+            "workspace-write".into(),
             "--skip-git-repo-check".into(),
         ];
         args.extend(runtime_args(opts));

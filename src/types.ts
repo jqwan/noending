@@ -191,8 +191,7 @@ export interface WorkstreamCardData {
   visibility: WorkstreamVisibility;
   created_at: string;
   updated_at: string;
-  current_state: string | null;
-  goal: string | null;
+  summary: string | null;
   last_activity_at: string | null;
   session_count: number;
   latest_session: LatestSessionInfo | null;
@@ -277,38 +276,13 @@ export interface LocalDeletePreview {
    *  同步作为新会话重新入库，所以弹窗要如实说明，而不是禁用按钮。 */
   root_source_status: SourceAvailability;
   message_count: number;
-  /** 本 Session 的 Context 摘要行及其历史版本行。 */
+  /** 本会话的当前摘要行。 */
   session_context_count: number;
-  context_revision_redaction_count: number;
 }
 
 /** outcome of permanently_delete_session. */
 export interface PermanentDeleteResult {
   purged: boolean;
-  redacted_revisions: number;
-}
-
-export interface ContextItem {
-  id: string;
-  workstream_id: string;
-  kind: string;
-  status: string;
-  authority: string;
-  current_revision_id: string | null;
-  supersedes_item_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ContextItemRevision {
-  id: string;
-  item_id: string;
-  title: string;
-  content: string;
-  metadata: Record<string, unknown>;
-  source_type: string | null;
-  source_ref: string | null;
-  created_at: string;
 }
 
 export interface IngestSource {
@@ -321,164 +295,26 @@ export interface IngestSource {
   exists: boolean;
 }
 
-/** Mirror of `sync::ContextMutation` (`#[serde(tag = "op")]`). */
-export type ContextMutation =
-  | { op: "add"; workstream_id: string; item_kind: string; title: string; content: string; source_refs: string[]; authority: string }
-  | { op: "update"; item_id: string; title: string; content: string; source_refs: string[]; authority: string }
-  | { op: "supersede"; item_id: string; title: string; content: string; source_refs: string[]; authority: string }
-  | { op: "resolve"; item_id: string; source_refs: string[] }
-  /** A Project is derived from paths in v0.2, so a discovered Workstream may legitimately have none. */
-  | { op: "create_workstream"; title: string; reason: string }
-  | { op: "conflict"; workstream_id: string; item_id: string; title: string; content: string; source_refs: string[]; reason: string };
-
-export interface ContextSection {
-  kind: string;
-  title: string;
-  content: string;
-  authority: string;
-  source_ref: string | null;
-  workstream_id?: string | null;
-  revision_id?: string | null;
-  conflict_id?: string | null;
-}
-
-export interface ContextConflict {
-  id: string;
-  workstream_id: string;
-  left_item_id: string;
-  right_item_id: string | null;
-  conflict_type: string;
-  status: string; // "open" | "resolved" | "dismissed"
-  resolution: string | null;
-  created_at: string;
-  updated_at: string;
-  left_revision_id?: string | null;
-  right_revision_id?: string | null;
-  candidate_snapshot_json?: string | null;
-}
-
-export interface ContextConflictEvent {
-  id: string;
-  conflict_id: string;
-  previous_status: string;
-  new_status: string;
-  resolution: string | null;
-  actor: string;
-  created_at: string;
-  snapshot_json?: string | null;
-}
-
-export interface ContextItemEditPayload {
-  title: string;
-  content: string;
-}
-
-export interface RevisionSnapshot {
-  id: string;
-  item_id: string;
-  title: string;
-  content: string;
-  authority: string;
-  created_at: string;
-  source_ref: string | null;
-  source_type: string | null;
-}
-
-export interface CandidateSnapshot {
-  title: string;
-  content: string;
-  authority: string;
-  source_refs?: string[];
-}
-
-export interface ConflictReviewCase {
-  conflict: ContextConflict;
-
-  left_at_conflict: RevisionSnapshot | null;
-  right_at_conflict: RevisionSnapshot | null;
-  candidate_at_conflict: CandidateSnapshot | null;
-
-  current_left: RevisionSnapshot | null;
-  current_right: RevisionSnapshot | null;
-
-  left_changed_since_conflict: boolean;
-  right_changed_since_conflict: boolean;
-}
-
-export interface ContextItemRef {
-  id: string;
-  kind: string;
-  title: string;
-  status: string;
-}
-
-export interface ContextItemRelation {
-  item_id: string;
-  supersedes: ContextItemRef | null;
-  superseded_by: ContextItemRef[];
-}
-
-export interface ContextChange {
-  id: string;
-  item_id: string | null;
-  conflict_id: string | null;
-  kind:
-    | "added"
-    | "edited"
-    | "resolved"
-    | "superseded"
-    | "deleted"
-    | "conflict_created"
-    | "conflict_resolved";
-  title: string;
-  actor: string;
-  source_type: string | null;
-  created_at: string;
-}
-
-export interface ContextSourceDetail {
-  revision_id: string;
-  authority: string;
-  source_type: string | null;
-  source_ref: string | null;
-  session_id: string | null;
-  session_title: string | null;
-  agent: Agent | null;
-  message_sequence: number | null;
-  message_ts: string | null;
-  evidence: string | null;
-}
-
 export interface WorkstreamContext {
   workstream: Workstream;
   projects: WorkstreamProject[];
-  core: ContextSection[];
-  items: [ContextItem, ContextItemRevision][];
-  /** owner_workstream_id == 当前 Workstream 的 Sessions（不再是 related）。 */
   sessions: Session[];
-  conflicts: ContextConflict[];
-  conflict_cases?: ConflictReviewCase[];
-  relations: ContextItemRelation[];
-  recent_changes: ContextChange[];
 }
 
 // Explicit Context update (read + one-click update)
 //
 // 两个显式 AI 更新入口：Session 摘要与 Workstream 状态。读命令纯读取
-// （不摄入、不调用模型）；更新命令每次用户动作最多一次模型调用。
+// （不摄入、不调用模型）；更新命令每次用户动作最多启动一次 Agent。
 
-/** Session 摘要的四字段（后端 `SessionContextFields`）。 */
+/** Session 的 Markdown 摘要（后端 `SessionContextFields`）。 */
 export interface SessionContextFields {
-  summary_current_state: string;
-  decisions: string[];
-  open_questions: string[];
-  next_steps: string[];
+  summary: string;
 }
 
 /** `get_session_context`：Session 摘要 + 待更新状态。纯读取。 */
 export interface SessionContextView {
   session_id: string;
-  /** `null` = 从未生成过摘要。 */
+  /** `null` = 当前没有有效摘要。 */
   fields: SessionContextFields | null;
   revision: number;
   ingest_generation: number;
@@ -489,34 +325,25 @@ export interface SessionContextView {
   pending: boolean;
 }
 
-/** `WorkstreamContextView.sections` 的一项（后端 `context::ContextSection`）。 */
-export interface WorkstreamContextSection {
-  kind: string;
-  title: string;
-  content: string;
-  authority: string;
-  source_ref: string | null;
-  item_id: string;
-  revision_id: string | null;
+export interface ProjectContextView extends Omit<WorkstreamContextView, "workstream_id"> {
+  project_id: string;
 }
 
-/** `get_workstream_context_state`：当前 Context + revision + 待更新状态。纯读取。 */
+export interface ProjectUpdateOutcome extends Omit<WorkstreamUpdateOutcome, "workstream_id"> {
+  project_id: string;
+}
+
 export interface WorkstreamContextView {
   workstream_id: string;
-  title: string;
-  description: string;
-  sections: WorkstreamContextSection[];
+  summary: string | null;
   context_revision: number;
-  input_revision: number;
-  consumed_input_revision: number;
-  /** 「更新状态」有东西可合成。 */
+  updated_at: string | null;
   pending: boolean;
-  /** 仍需要更新的相关 Session 数。 */
   pending_sessions: number;
 }
 
 /** 显式更新的结果词汇（后端 `ContextUpdateStatus`）。全部是成功。 */
-export type ContextUpdateStatus = "updated" | "partial" | "no_change" | "stale_snapshot";
+export type ContextUpdateStatus = "updated" | "partial" | "no_change" | "skipped";
 
 export interface SessionUpdateOutcome {
   session_id: string;
@@ -529,8 +356,9 @@ export interface WorkstreamUpdateOutcome {
   status: ContextUpdateStatus;
   context_revision: number;
   updated_sessions: string[];
-  mutations_applied: number;
-  /** 本次调用后仍待更新的 Session 数（受输入预算限制）。 */
+  skipped_session_ids: string[];
+  failed_sessions: { session_id: string; error: string }[];
+  /** 本次调用后仍待更新的 Session 数。 */
   remaining_pending: number;
 }
 
@@ -542,37 +370,6 @@ export interface IngestTaskStatus {
   discovered: number;
   messages: number;
   error: string | null;
-}
-
-export interface ReviewFrontier {
-  through_at: string;
-  boundary_change_ids: string[];
-}
-
-export interface WorkstreamReviewState {
-  workstream_id: string;
-  frontier: ReviewFrontier;
-  reviewed_at: string;
-}
-
-export interface WorkstreamReviewWindow {
-  state: WorkstreamReviewState;
-  unseen_changes: ContextChange[];
-  mark_through: ReviewFrontier;
-}
-
-export interface WorkstreamReviewSummary {
-  workstream_id: string;
-  unseen_change_count: number;
-  open_conflict_count: number;
-  new_facts: number;
-  updated_facts: number;
-  resolved_items: number;
-  superseded_items: number;
-  last_unseen_change_at: string | null;
-  reviewed_at: string;
-  has_updates: boolean;
-  needs_attention: boolean;
 }
 
 /** `get_session_detail.workspace_path` — the derived, read-only facts. */
@@ -831,29 +628,10 @@ export interface AgentStatusEntry {
   desktop_app_present: boolean;
 }
 
-export const KIND_LABELS: Record<string, string> = {
-  goal: "Goal",
-  current_state: "Current State",
-  constraint: "Constraint",
-  decision: "Decision",
-  open_question: "Open Question",
-  todo: "Todo",
-  finding: "Finding",
-  issue: "Issue",
-  risk: "Risk",
-  note: "Note",
-  reference: "Reference",
-  artifact: "Artifact",
-  requirement: "Requirement",
-  decision_detail: "Decision Detail",
-  research_note: "Research Note",
-};
-
-export const AUTHORITY_LABELS: Record<string, string> = {
-  user_explicit: "用户明确",
-  user_edit: "用户编辑",
-  system_observed: "系统观察",
-  agent_statement: "Agent 陈述",
-  agent_inferred: "Agent 推断",
-  unknown: "未知权威",
-};
+/** Summary requirements are editable; file/response protocols are fixed. */
+export type SummaryPromptKind = "session" | "task" | "project";
+export type SummaryPromptTemplates = Record<SummaryPromptKind, string>;
+export interface SummaryPromptSettings {
+  templates: SummaryPromptTemplates;
+  defaults: SummaryPromptTemplates;
+}

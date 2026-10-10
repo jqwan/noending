@@ -2,11 +2,10 @@
 //!
 //! Two shapes of state, deliberately kept apart:
 //!
-//! * **facts** — `session_ingest_state` (the fact generation of the current
+//! * **facts** — `sessions.fact_generation` (the fact generation of the current
 //!   conversation) and `session_message_projection` (which messages ARE that
 //!   conversation, in order). Only ingestion writes these.
-//! * **NoEnding-owned Context** — `session_contexts` /
-//!   `session_context_revisions` (the system-derived Session summary) and
+//! * **NoEnding-owned Context** — `session_contexts` (the current summary) and
 //!   `workstream_context_state` / `workstream_session_frontiers` (the two
 //!   revision counters and what a Workstream has already consumed). Only an
 //!   explicit user action writes these.
@@ -18,8 +17,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::domain::{
-    SessionContextFields, SessionContextRecord, SessionContextRevision, WorkstreamContextState,
-    WorkstreamSessionFrontier,
+    SessionContextFields, SessionContextRecord, WorkstreamContextState, WorkstreamSessionFrontier,
 };
 use crate::error::{other, Result};
 use crate::storage::{now, Db};
@@ -198,38 +196,7 @@ pub fn apply_projection_conn(
     Ok(ProjectionOutcome::NewGeneration)
 }
 
-/// Resolve the given identity hashes back to their stored message ids, in the
-/// order given. Used to build `current_ids` for a full re-scan, where an
-/// unchanged message dedups onto an existing row.
-pub fn message_ids_for_hashes_conn(
-    conn: &Connection,
-    member_id: &str,
-    hashes: &[String],
-) -> Result<Vec<String>> {
-    let mut st = conn.prepare(
-        "SELECT id FROM session_messages WHERE member_id = ?1 AND source_identity_hash = ?2",
-    )?;
-    let mut out = Vec::with_capacity(hashes.len());
-    for h in hashes {
-        let id: Option<String> = st
-            .query_row(params![member_id, h], |r| r.get(0))
-            .optional()?;
-        if let Some(id) = id {
-            out.push(id);
-        }
-    }
-    Ok(out)
-}
-
 // Session Context
-
-fn decode_list(v: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
-}
-
-fn encode_list(v: &[String]) -> String {
-    serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
-}
 
 pub fn get_session_context_conn(
     conn: &Connection,
@@ -237,53 +204,18 @@ pub fn get_session_context_conn(
 ) -> Result<Option<SessionContextRecord>> {
     Ok(conn
         .query_row(
-            "SELECT session_id, summary_current_state, decisions, open_questions, next_steps,
+            "SELECT session_id, summary,
                     revision, ingest_generation, processed_through_seq, updated_at
              FROM session_contexts WHERE session_id = ?1",
             params![session_id],
             |r| {
                 Ok(SessionContextRecord {
                     session_id: r.get(0)?,
-                    fields: SessionContextFields {
-                        summary_current_state: r.get(1)?,
-                        decisions: decode_list(&r.get::<_, String>(2)?),
-                        open_questions: decode_list(&r.get::<_, String>(3)?),
-                        next_steps: decode_list(&r.get::<_, String>(4)?),
-                    },
-                    revision: r.get(5)?,
-                    ingest_generation: r.get(6)?,
-                    processed_through_seq: r.get(7)?,
-                    updated_at: r.get(8)?,
-                })
-            },
-        )
-        .optional()?)
-}
-
-fn get_session_context_revision_conn(
-    conn: &Connection,
-    session_id: &str,
-    revision: i64,
-) -> Result<Option<SessionContextRevision>> {
-    Ok(conn
-        .query_row(
-            "SELECT session_id, revision, summary_current_state, decisions, open_questions,
-                    next_steps, ingest_generation, processed_through_seq, created_at
-             FROM session_context_revisions WHERE session_id = ?1 AND revision = ?2",
-            params![session_id, revision],
-            |r| {
-                Ok(SessionContextRevision {
-                    session_id: r.get(0)?,
-                    revision: r.get(1)?,
-                    fields: SessionContextFields {
-                        summary_current_state: r.get(2)?,
-                        decisions: decode_list(&r.get::<_, String>(3)?),
-                        open_questions: decode_list(&r.get::<_, String>(4)?),
-                        next_steps: decode_list(&r.get::<_, String>(5)?),
-                    },
-                    ingest_generation: r.get(6)?,
-                    processed_through_seq: r.get(7)?,
-                    created_at: r.get(8)?,
+                    fields: SessionContextFields { summary: r.get(1)? },
+                    revision: r.get(2)?,
+                    ingest_generation: r.get(3)?,
+                    processed_through_seq: r.get(4)?,
+                    updated_at: r.get(5)?,
                 })
             },
         )
@@ -313,42 +245,36 @@ pub fn commit_session_context_conn(
     let updated_at = now();
     conn.execute(
         "INSERT INTO session_contexts
-           (session_id, summary_current_state, decisions, open_questions, next_steps,
+           (session_id, summary,
             revision, ingest_generation, processed_through_seq, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(session_id) DO UPDATE SET
-           summary_current_state = ?2, decisions = ?3, open_questions = ?4, next_steps = ?5,
-           revision = ?6, ingest_generation = ?7, processed_through_seq = ?8, updated_at = ?9",
+           summary = ?2, revision = ?3, ingest_generation = ?4,
+           processed_through_seq = ?5, updated_at = ?6",
         params![
             session_id,
-            fields.summary_current_state,
-            encode_list(&fields.decisions),
-            encode_list(&fields.open_questions),
-            encode_list(&fields.next_steps),
+            fields.summary,
             revision,
-            ingest_generation,
-            processed_through_seq,
-            updated_at,
-        ],
-    )?;
-    conn.execute(
-        "INSERT INTO session_context_revisions
-           (session_id, revision, summary_current_state, decisions, open_questions, next_steps,
-            ingest_generation, processed_through_seq, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            session_id,
-            revision,
-            fields.summary_current_state,
-            encode_list(&fields.decisions),
-            encode_list(&fields.open_questions),
-            encode_list(&fields.next_steps),
             ingest_generation,
             processed_through_seq,
             updated_at,
         ],
     )?;
     Ok(revision)
+}
+
+/// Persist the current task summary after the caller validates its snapshot.
+pub fn commit_workstream_summary_conn(
+    conn: &Connection,
+    workstream_id: &str,
+    summary: &str,
+) -> Result<i64> {
+    ensure_workstream_state_conn(conn, workstream_id)?;
+    conn.execute("UPDATE workstream_context_state SET summary = ?2, updated_at = ?3,
+        context_revision = context_revision + 1, consumed_input_revision = input_revision WHERE workstream_id = ?1",
+        params![workstream_id, summary, now()])?;
+    crate::storage::workstream_paths::reindex_workstream_search_conn(conn, workstream_id)?;
+    Ok(get_workstream_context_state_conn(conn, workstream_id)?.context_revision)
 }
 
 // Workstream Context revisions and per-Session frontiers
@@ -359,7 +285,7 @@ pub fn get_workstream_context_state_conn(
 ) -> Result<WorkstreamContextState> {
     Ok(conn
         .query_row(
-            "SELECT workstream_id, context_revision, input_revision, consumed_input_revision
+            "SELECT workstream_id, context_revision, input_revision, consumed_input_revision, summary, updated_at
              FROM workstream_context_state WHERE workstream_id = ?1",
             params![workstream_id],
             |r| {
@@ -368,6 +294,8 @@ pub fn get_workstream_context_state_conn(
                     context_revision: r.get(1)?,
                     input_revision: r.get(2)?,
                     consumed_input_revision: r.get(3)?,
+                    summary: r.get(4)?,
+                    updated_at: r.get(5)?,
                 })
             },
         )
@@ -377,6 +305,8 @@ pub fn get_workstream_context_state_conn(
             context_revision: 0,
             input_revision: 0,
             consumed_input_revision: 0,
+            summary: String::new(),
+            updated_at: None,
         }))
 }
 
@@ -390,20 +320,8 @@ pub fn ensure_workstream_state_conn(conn: &Connection, workstream_id: &str) -> R
     Ok(())
 }
 
-/// Bump `context_revision` — called by every path that writes a ContextItem
-/// (manual edit, AI mutation, conflict resolution).
-pub fn bump_context_revision_conn(conn: &Connection, workstream_id: &str) -> Result<i64> {
-    ensure_workstream_state_conn(conn, workstream_id)?;
-    conn.execute(
-        "UPDATE workstream_context_state SET context_revision = context_revision + 1
-         WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
-    Ok(get_workstream_context_state_conn(conn, workstream_id)?.context_revision)
-}
-
 /// Bump `input_revision` — called by paths that change what the Workstream
-/// needs to RE-SYNTHESISE from: manual Context edits, Owner set, title /
+/// has pending inputs: Owner set, title /
 /// description change or Session ownership change.
 pub fn bump_input_revision_conn(conn: &Connection, workstream_id: &str) -> Result<i64> {
     ensure_workstream_state_conn(conn, workstream_id)?;
@@ -415,36 +333,17 @@ pub fn bump_input_revision_conn(conn: &Connection, workstream_id: &str) -> Resul
     Ok(get_workstream_context_state_conn(conn, workstream_id)?.input_revision)
 }
 
-/// Record that the AI has consumed the current `input_revision`, so a
-/// successful update does not leave the Workstream looking stale.
-pub fn consume_input_revision_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
-    ensure_workstream_state_conn(conn, workstream_id)?;
-    conn.execute(
-        "UPDATE workstream_context_state
-           SET consumed_input_revision = input_revision
-         WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
-    Ok(())
-}
-
 pub fn set_workstream_frontier_conn(
     conn: &Connection,
     f: &WorkstreamSessionFrontier,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO workstream_session_frontiers
-           (workstream_id, session_id, session_context_revision, ingest_generation, consumed_through_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+           (workstream_id, session_id, session_context_revision)
+         VALUES (?1, ?2, ?3)
          ON CONFLICT(workstream_id, session_id) DO UPDATE SET
-           session_context_revision = ?3, ingest_generation = ?4, consumed_through_seq = ?5",
-        params![
-            f.workstream_id,
-            f.session_id,
-            f.session_context_revision,
-            f.ingest_generation,
-            f.consumed_through_seq,
-        ],
+           session_context_revision = ?3",
+        params![f.workstream_id, f.session_id, f.session_context_revision,],
     )?;
     Ok(())
 }
@@ -486,7 +385,7 @@ pub fn frontiers_for_workstream_conn(
     workstream_id: &str,
 ) -> Result<Vec<WorkstreamSessionFrontier>> {
     let mut st = conn.prepare(
-        "SELECT workstream_id, session_id, session_context_revision, ingest_generation, consumed_through_seq
+        "SELECT workstream_id, session_id, session_context_revision
          FROM workstream_session_frontiers WHERE workstream_id = ?1",
     )?;
     let rows = st
@@ -495,8 +394,6 @@ pub fn frontiers_for_workstream_conn(
                 workstream_id: r.get(0)?,
                 session_id: r.get(1)?,
                 session_context_revision: r.get(2)?,
-                ingest_generation: r.get(3)?,
-                consumed_through_seq: r.get(4)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -515,15 +412,6 @@ impl Db {
     pub fn get_session_context(&self, session_id: &str) -> Result<Option<SessionContextRecord>> {
         let conn = self.read();
         get_session_context_conn(&conn, session_id)
-    }
-
-    pub fn get_session_context_revision(
-        &self,
-        session_id: &str,
-        revision: i64,
-    ) -> Result<Option<SessionContextRevision>> {
-        let conn = self.read();
-        get_session_context_revision_conn(&conn, session_id, revision)
     }
 
     pub fn get_workstream_context_state(

@@ -6,12 +6,12 @@
 //! `workspace`) so their boundaries stay explicit.
 //! This file owns the shared state and helpers the submodules borrow.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::*;
 use crate::error::{other, Result};
-use crate::storage::{new_id, now, Db};
+use crate::storage::Db;
 
 pub mod ingestion;
 pub mod project;
@@ -161,9 +161,8 @@ pub fn get_workstream_context_state(
     })
 }
 
-/// ONE user action → AT MOST ONE model call → one new Session Context.
-/// Returns `updated` / `partial` / `no_change`; a stale snapshot is an `Err`
-/// carrying the `stale_snapshot` reason so the UI can ask for a re-click.
+/// ONE user action → AT MOST ONE Agent invocation → one new Session Context.
+/// Returns `updated`, `skipped` or `no_change`; a stale snapshot is an error.
 ///
 /// Async on purpose: the model call blocks for up to the configured CLI
 /// timeout, so the body goes through [`run_on_blocking_worker`] and the UI
@@ -181,8 +180,24 @@ pub async fn update_session_context(
         .and_then(|outcome| outcome)
 }
 
-/// ONE user action → AT MOST ONE model call → every affected Session Context AND
-/// the Workstream Context mutations, committed atomically.
+/// Rebuild the summary from all current messages, ignoring the existing summary.
+#[tauri::command]
+pub async fn regenerate_session_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<crate::context::SessionUpdateOutcome> {
+    let db = state.inner().db.clone();
+    let home = noending_home(&app);
+    run_on_blocking_worker(move || {
+        crate::context::regenerate_session(&db, &session_id, home.as_ref())
+    })
+    .await
+    .and_then(|outcome| outcome)
+}
+
+/// ONE user action → AT MOST ONE Agent invocation → every affected Session Context AND
+/// the task summary, committed atomically.
 ///
 /// Async on purpose: same seam as [`update_session_context`] — the model call
 /// must never occupy the UI thread.
@@ -201,8 +216,83 @@ pub async fn update_workstream_context(
     .and_then(|outcome| outcome)
 }
 
-/// Open the active Home's Context extraction log folder in the system file
-/// manager. The directory may not exist until the first update, so create it.
+/// Regenerate the task summary without supplying its current summary.
+#[tauri::command]
+pub async fn regenerate_workstream_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workstream_id: String,
+) -> Result<crate::context::WorkstreamUpdateOutcome> {
+    let db = state.db.clone();
+    let home = noending_home(&app);
+    run_on_blocking_worker(move || {
+        crate::context::regenerate_workstream(&db, &workstream_id, home.as_ref())
+    })
+    .await?
+}
+
+/// Project summary reads never ingest or invoke an Agent.
+#[tauri::command]
+pub fn get_project_context_state(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<crate::context::ProjectContextView> {
+    with_db(&state, |db| {
+        crate::context::project_context_view(db, &project_id)
+    })
+}
+#[tauri::command]
+pub async fn update_project_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<crate::context::ProjectUpdateOutcome> {
+    let db = state.db.clone();
+    let home = noending_home(&app);
+    run_on_blocking_worker(move || crate::context::update_project(&db, &project_id, home.as_ref()))
+        .await?
+}
+#[tauri::command]
+pub async fn regenerate_project_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<crate::context::ProjectUpdateOutcome> {
+    let db = state.db.clone();
+    let home = noending_home(&app);
+    run_on_blocking_worker(move || {
+        crate::context::regenerate_project(&db, &project_id, home.as_ref())
+    })
+    .await?
+}
+
+/// Summary templates and previews are pure reads; previews never invoke an Agent.
+#[tauri::command]
+pub fn get_summary_prompt_settings(
+    state: State<AppState>,
+) -> Result<crate::context::prompts::PromptSettings> {
+    with_db(&state, crate::context::prompts::settings)
+}
+#[tauri::command]
+pub fn set_summary_prompt_template(
+    state: State<AppState>,
+    kind: crate::context::prompts::PromptKind,
+    template: Option<String>,
+) -> Result<crate::context::prompts::PromptSettings> {
+    with_db(&state, |db| {
+        crate::context::prompts::save(db, kind, template.as_deref())
+    })
+}
+#[tauri::command]
+pub fn preview_summary_prompt(
+    kind: crate::context::prompts::PromptKind,
+    templates: crate::context::prompts::PromptTemplates,
+) -> Result<String> {
+    templates.validate()?;
+    Ok(crate::context::summary::preview_prompt(kind, &templates))
+}
+
+/// Open the active Home's summary extraction log folder.
 #[tauri::command]
 pub fn open_context_extraction_logs(app: AppHandle) -> Result<()> {
     let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 尚未初始化"))?;
@@ -238,118 +328,13 @@ pub fn open_path(path: String) -> Result<()> {
     }
 }
 
-// ---------------- Context Items ----------------
-
-#[derive(Deserialize)]
-pub struct NewItemArgs {
-    pub workstream_id: String,
-    pub kind: String,
-    pub title: String,
-    pub content: String,
-}
-
-#[tauri::command]
-pub fn add_context_item(state: State<AppState>, args: NewItemArgs) -> Result<ContextItem> {
-    crate::storage::ensure_not_empty("条目标题", &args.title)?;
-    with_db(&state, |db| {
-        let item = crate::sync::create_item(
-            db,
-            &args.workstream_id,
-            &args.kind,
-            args.title.trim(),
-            &args.content,
-            "user_explicit",
-            "user_edit",
-            &[],
-            "user",
-        )?;
-        for project in
-            crate::workspace::workstream::projects_for_workstream(db, &args.workstream_id)?
-        {
-            db.touch_project(&project.id)?;
-        }
-        Ok(item)
-    })
-}
-
-#[derive(Deserialize)]
-pub struct EditItemArgs {
-    pub item_id: String,
-    pub title: String,
-    pub content: String,
-}
-
-#[tauri::command]
-pub fn edit_context_item(state: State<AppState>, args: EditItemArgs) -> Result<()> {
-    with_db(&state, |db| {
-        let mut item = db
-            .get_item(&args.item_id)?
-            .ok_or_else(|| other("条目不存在"))?;
-        let new_rev = ContextItemRevision {
-            id: new_id(),
-            item_id: item.id.clone(),
-            title: args.title.trim().to_string(),
-            content: args.content.clone(),
-            metadata: serde_json::json!({
-                "provenance": {
-                    "authority": "user_edit",
-                    "actor": "user",
-                    "source_type": "user_edit",
-                    "source_ref": serde_json::Value::Null,
-                }
-            }),
-            source_type: Some("user_edit".into()),
-            source_ref: None,
-            created_at: now(),
-        };
-        db.insert_revision(&new_rev)?;
-        db.set_item_head(&item.id, &new_rev.id, None)?;
-        db.set_item_authority(&item.id, "user_edit")?;
-        item.updated_at = now();
-        db.index_item(&item, &new_rev)?;
-        Ok(())
-    })
-}
-
-/// User-driven status change. Like every status transition this produces an
-/// audit revision (previous/new status, actor, reason).
-#[tauri::command]
-pub fn set_item_status(state: State<AppState>, item_id: String, status: String) -> Result<()> {
-    with_db(&state, |db| {
-        db.apply_status_change(&item_id, &status, "user", "用户手动修改状态", &[])
-    })
-}
-
-#[tauri::command]
-pub fn get_item_history(
-    state: State<AppState>,
-    item_id: String,
-) -> Result<Vec<ContextItemRevision>> {
-    with_db(&state, |db| db.item_history(&item_id))
-}
-
-#[tauri::command]
-pub fn delete_context_item(state: State<AppState>, item_id: String) -> Result<()> {
-    with_db(&state, |db| {
-        db.apply_status_change(&item_id, "deleted", "user", "用户删除", &[])?;
-        db.unindex("item", &item_id);
-        Ok(())
-    })
-}
+// ---------------- Task detail ----------------
 
 #[derive(Serialize)]
 pub struct WorkstreamContext {
     pub workstream: Workstream,
     pub projects: Vec<crate::workspace::workstream::WorkstreamProject>,
-    pub core: Vec<crate::context::ContextSection>,
-    pub items: Vec<(ContextItem, ContextItemRevision)>,
-    /// Sessions that own this Workstream. At most one Workstream
-    /// per Session, so a Session never appears in two of these lists.
     pub sessions: Vec<Session>,
-    pub conflicts: Vec<ContextConflict>,
-    pub conflict_cases: Vec<crate::domain::ConflictReviewCase>,
-    pub relations: Vec<ContextItemRelation>,
-    pub recent_changes: Vec<ContextChange>,
 }
 
 #[tauri::command]
@@ -358,158 +343,15 @@ pub fn get_workstream_context(
     workstream_id: String,
 ) -> Result<WorkstreamContext> {
     with_db(&state, |db| {
-        let workstream = db
-            .get_workstream(&workstream_id)?
-            .ok_or_else(|| other("Workstream 不存在"))?;
-        let core = crate::context::resolve_core_context(db, &workstream_id)?;
-        let items = db.items_for_workstream(&workstream_id, true)?;
-        // Task membership and Context inputs include both archive states.
-        let sessions = db.sessions_for_workstream(&workstream_id)?;
-        let conflicts = db.conflicts_for_workstream(&workstream_id, false)?;
-        let conflict_cases = db.list_conflict_review_cases(&workstream_id, false)?;
-        let relations = db.item_relations_for_workstream(&workstream_id)?;
-        let recent_changes = db.list_workstream_context_changes(&workstream_id, 20)?;
-        let projects = crate::workspace::workstream::projects_for_workstream(db, &workstream_id)?;
         Ok(WorkstreamContext {
-            workstream,
-            projects,
-            core,
-            items,
-            sessions,
-            conflicts,
-            conflict_cases,
-            relations,
-            recent_changes,
+            workstream: db
+                .get_workstream(&workstream_id)?
+                .ok_or_else(|| other("任务不存在"))?,
+            projects: crate::workspace::workstream::projects_for_workstream(db, &workstream_id)?,
+            sessions: db.sessions_for_workstream(&workstream_id)?,
         })
     })
 }
-
-#[tauri::command]
-pub fn get_context_revision_source(
-    state: State<AppState>,
-    revision_id: String,
-) -> Result<Option<ContextSourceDetail>> {
-    with_db(&state, |db| db.get_context_revision_source(&revision_id))
-}
-
-#[tauri::command]
-pub fn get_workstream_review_state(
-    state: State<AppState>,
-    workstream_id: String,
-) -> Result<Option<WorkstreamReviewState>> {
-    with_db(&state, |db| db.get_workstream_review_state(&workstream_id))
-}
-
-#[tauri::command]
-pub fn get_workstream_review_window(
-    state: State<AppState>,
-    workstream_id: String,
-) -> Result<WorkstreamReviewWindow> {
-    with_db(&state, |db| db.get_workstream_review_window(&workstream_id))
-}
-
-#[tauri::command]
-pub fn mark_workstream_reviewed(
-    state: State<AppState>,
-    workstream_id: String,
-    frontier: ReviewFrontier,
-) -> Result<WorkstreamReviewState> {
-    with_db(&state, |db| {
-        db.mark_workstream_reviewed(&workstream_id, &frontier)
-    })
-}
-
-#[tauri::command]
-pub fn get_workstream_review_summary(
-    state: State<AppState>,
-    workstream_id: String,
-) -> Result<WorkstreamReviewSummary> {
-    with_db(&state, |db| {
-        db.get_workstream_review_summary(&workstream_id)
-    })
-}
-
-#[tauri::command]
-pub fn list_workstream_review_summaries(
-    state: State<AppState>,
-) -> Result<Vec<WorkstreamReviewSummary>> {
-    with_db(&state, |db| db.list_workstream_review_summaries())
-}
-
-// ---------------- Conflicts ----------------
-
-#[tauri::command]
-pub fn list_conflicts(
-    state: State<AppState>,
-    workstream_id: String,
-    include_closed: Option<bool>,
-) -> Result<Vec<ContextConflict>> {
-    with_db(&state, |db| {
-        db.conflicts_for_workstream(&workstream_id, include_closed.unwrap_or(false))
-    })
-}
-
-#[tauri::command]
-pub fn get_conflict_review_case(
-    state: State<AppState>,
-    conflict_id: String,
-) -> Result<Option<crate::domain::ConflictReviewCase>> {
-    with_db(&state, |db| db.get_conflict_review_case(&conflict_id))
-}
-
-#[tauri::command]
-pub fn list_conflict_review_cases(
-    state: State<AppState>,
-    workstream_id: String,
-    include_closed: Option<bool>,
-) -> Result<Vec<crate::domain::ConflictReviewCase>> {
-    with_db(&state, |db| {
-        db.list_conflict_review_cases(&workstream_id, include_closed.unwrap_or(false))
-    })
-}
-
-#[derive(Deserialize)]
-pub struct ResolveConflictWithEditArgs {
-    pub conflict_id: String,
-    pub status: String,
-    pub resolution: Option<String>,
-    pub edit: Option<crate::domain::ContextItemEditPayload>,
-}
-
-#[tauri::command]
-pub fn resolve_conflict_with_edit(
-    state: State<AppState>,
-    args: ResolveConflictWithEditArgs,
-) -> Result<()> {
-    with_db(&state, |db| {
-        db.resolve_conflict_with_edit(
-            &args.conflict_id,
-            &args.status,
-            args.resolution.as_deref(),
-            args.edit.as_ref(),
-            "user",
-        )
-    })
-}
-
-#[tauri::command]
-pub fn resolve_conflict(
-    state: State<AppState>,
-    conflict_id: String,
-    status: String,
-    resolution: Option<String>,
-) -> Result<()> {
-    with_db(&state, |db| {
-        db.resolve_conflict_with_edit(&conflict_id, &status, resolution.as_deref(), None, "user")
-    })
-}
-
-// ---------------- Ingestion ----------------
-//
-// Background ingestion is queued through `commands::ingestion` (reconcile_all /
-// reconcile_source / reingest_source / app_foreground / get_ingestion_status).
-// Ingestion is automatic and never calls AI; Context is updated only by the
-// explicit commands above.
 
 // ---------------- Launcher ----------------
 

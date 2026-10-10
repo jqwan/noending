@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectDetail, { clearProjectDetailCache } from "./ProjectDetail";
 import { api } from "../../api";
@@ -8,6 +8,9 @@ vi.mock("../../api", () => ({
   api: {
     getProjectDetail: vi.fn(),
     renameProject: vi.fn(),
+    getProjectContextState: vi.fn(),
+    updateProjectContext: vi.fn(),
+    regenerateProjectContext: vi.fn(),
     getAgentStatus: vi.fn(),
     continueSessionDesktop: vi.fn(),
   },
@@ -18,6 +21,9 @@ const navigate = vi.fn();
 beforeEach(() => {
   clearProjectDetailCache();
   navigate.mockReset();
+  vi.mocked(api.getProjectContextState).mockReset().mockResolvedValue({project_id: "p1", summary: null, context_revision: 0, updated_at: null, pending: true, pending_sessions: 1});
+  vi.mocked(api.updateProjectContext).mockReset();
+  vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
   vi.mocked(api.getAgentStatus).mockResolvedValue({
     codex: {
@@ -155,6 +161,49 @@ describe("ProjectDetail", () => {
     expect(api.continueSessionDesktop).toHaveBeenCalledWith("s1");
     // Row click should NOT have navigated to session detail
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("reads Markdown without extracting, explicitly updates with partial feedback, and regenerates separately", async () => {
+    vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
+    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: "**当前结论**", context_revision: 1, updated_at: null, pending: true, pending_sessions: 1});
+    render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    const conclusion = await screen.findByText("当前结论");
+    expect(conclusion.tagName).toBe("STRONG");
+    expect(api.updateProjectContext).not.toHaveBeenCalled();
+    expect(api.regenerateProjectContext).not.toHaveBeenCalled();
+    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: "更新后的项目结论", context_revision: 2, updated_at: null, pending: true, pending_sessions: 1});
+    vi.mocked(api.updateProjectContext).mockResolvedValue({project_id: "p1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{session_id: "s1", error: "读取失败"}], remaining_pending: 1});
+    fireEvent.click(screen.getByRole("button", {name: "更新摘要"}));
+    await screen.findByText("更新后的项目结论");
+    expect(api.updateProjectContext).toHaveBeenCalledWith("p1");
+    expect(screen.getByRole("alert").textContent).toContain("Session 1：读取失败");
+    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: "重新生成的结论", context_revision: 3, updated_at: null, pending: false, pending_sessions: 0});
+    vi.mocked(api.regenerateProjectContext).mockResolvedValue({project_id: "p1", status: "updated", context_revision: 3, updated_sessions: ["s1"], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0});
+    fireEvent.click(screen.getByRole("button", {name: "重新生成"}));
+    await screen.findByText("重新生成的结论");
+    expect(api.regenerateProjectContext).toHaveBeenCalledWith("p1");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", {name: "更新摘要"})).toBeNull();
+  });
+
+  it("retains the current summary on extraction failure and does not show an old project's late result", async () => {
+    vi.mocked(api.getProjectDetail).mockImplementation(async id => ({...mockDetail(), project: {...mockDetail().project, id, name: id}}));
+    vi.mocked(api.getProjectContextState).mockImplementation(async id => ({project_id: id, summary: `${id} 当前结论`, context_revision: 1, updated_at: null, pending: true, pending_sessions: 1}));
+    vi.mocked(api.updateProjectContext).mockRejectedValueOnce("提取失败");
+    const {rerender} = render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    await screen.findByText("p1 当前结论");
+    fireEvent.click(screen.getByRole("button", {name: "更新摘要"}));
+    await screen.findByRole("alert");
+    expect(screen.getByText("p1 当前结论")).toBeTruthy();
+    let finish!: (value: Awaited<ReturnType<typeof api.updateProjectContext>>) => void;
+    vi.mocked(api.updateProjectContext).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    fireEvent.click(screen.getByRole("button", {name: "更新摘要"}));
+    await waitFor(() => expect(api.updateProjectContext).toHaveBeenCalledTimes(2));
+    rerender(<ProjectDetail projectId="p2" navigate={navigate} />);
+    await screen.findByText("p2 当前结论");
+    finish({project_id: "p1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{session_id: "s1", error: "旧项目结果"}], remaining_pending: 1});
+    await waitFor(() => expect(screen.queryByText(/旧项目结果/)).toBeNull());
+    expect(screen.getByText("p2 当前结论")).toBeTruthy();
   });
 
 });

@@ -204,54 +204,16 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
     )?;
     conn.execute(
         "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-         SELECT 'workstream', w.id, '', w.title, w.description
-         FROM workstreams w WHERE w.id = ?1",
+         SELECT 'workstream', w.id, '', w.title, w.description || char(10) || COALESCE(c.summary, '')
+         FROM workstreams w LEFT JOIN workstream_context_state c ON c.workstream_id = w.id WHERE w.id = ?1",
         params![workstream_id],
     )?;
     Ok(())
 }
 
-/// Delete every row a Workstream owns, in FK order, inside the caller's
-/// transaction. A permanent delete is all-or-nothing: a half-purged Workstream
-/// would keep Context rows whose owner no longer exists.
-///
-/// The search index is an FTS5 table with no FK, so its `kind='item'` rows
-/// (`parent_id = workstream_id`) must go with the items. `workstream_review_state`
-/// cascades; it is deleted explicitly anyway so the order is written down rather
-/// than inferred from the schema.
-///
-/// NOT touched, on purpose: `sessions` (only their `owner_workstream_id` is
-/// cleared by the FK in step 9; the rows survive), `session_members`,
-/// `session_messages`, `workspace_paths`, `projects`, the Session
-/// Contexts themselves and the Agents' raw source data.
+/// Delete task-owned paths, summary/progress and search rows in one transaction.
+/// Sessions, their summaries and messages, physical paths and Agent sources survive.
 pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> Result<()> {
-    // 1. conflict audit trail — references context_conflicts.
-    tx.execute(
-        "DELETE FROM context_conflict_events
-          WHERE conflict_id IN (SELECT id FROM context_conflicts WHERE workstream_id = ?1)",
-        params![workstream_id],
-    )?;
-    // 2. conflicts — they also reference context_items, so they must go first.
-    tx.execute(
-        "DELETE FROM context_conflicts WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
-    // 3. revision history — references context_items.
-    tx.execute(
-        "DELETE FROM context_item_revisions
-          WHERE item_id IN (SELECT id FROM context_items WHERE workstream_id = ?1)",
-        params![workstream_id],
-    )?;
-    // 4. the item search rows, while we can still see which items they were.
-    tx.execute(
-        "DELETE FROM search_index WHERE kind = 'item' AND parent_id = ?1",
-        params![workstream_id],
-    )?;
-    // 5. items.
-    tx.execute(
-        "DELETE FROM context_items WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
     // 6. the Workstream's own revision state and per-Session frontiers.
     tx.execute(
         "DELETE FROM workstream_session_frontiers WHERE workstream_id = ?1",
@@ -268,11 +230,6 @@ pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> 
     //    in step 9, where the FK's ON DELETE SET NULL clears it.
     tx.execute(
         "DELETE FROM workstream_paths WHERE workstream_id = ?1",
-        params![workstream_id],
-    )?;
-    // 8. review state.
-    tx.execute(
-        "DELETE FROM workstream_review_state WHERE workstream_id = ?1",
         params![workstream_id],
     )?;
     tx.execute(

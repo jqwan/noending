@@ -73,7 +73,6 @@ export default function CommandPalette({ onClose, navigate }: {
     for (const h of hits) {
       const route: Route =
         h.kind === "workstream" ? { view: "workstream", workstreamId: h.ref_id, initialTitle: h.title }
-        : h.kind === "item" ? { view: "workstream", workstreamId: h.parent_id }
         // 消息命中：打开它所在的会话，ref_id 是消息 id，parent_id 才是会话 id。
         : h.kind === "message" ? { view: "session", sessionId: h.parent_id }
         : h.kind === "session" ? { view: "session", sessionId: h.ref_id, initialTitle: h.title }
@@ -81,7 +80,7 @@ export default function CommandPalette({ onClose, navigate }: {
         : { view: "sessions" };
       out.push({
         key: `h-${h.kind}-${h.ref_id}`,
-        kind: h.kind === "message" ? "消息" : h.kind === "item" ? "Context" : h.kind,
+        kind: h.kind === "message" ? "消息" : h.kind,
         label: h.title.slice(0, 80),
         hint: h.kind === "message" ? "定位到所在会话" : "全文匹配",
         route,
@@ -106,7 +105,7 @@ export default function CommandPalette({ onClose, navigate }: {
         <input
           ref={inputRef}
           type="text"
-          placeholder="搜索任务、会话、Context…"
+          placeholder="搜索任务、会话、消息…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
@@ -130,7 +129,7 @@ export default function CommandPalette({ onClose, navigate }: {
             </div>
           ))}
           {items.length === 0 && (
-            <div className="palette-empty">没有匹配结果。输入至少两个字符以全文检索 Context 与消息。</div>
+            <div className="palette-empty">没有匹配结果。输入至少两个字符以全文检索任务摘要与消息。</div>
           )}
         </div>
       </div>
