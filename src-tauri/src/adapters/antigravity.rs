@@ -280,6 +280,33 @@ fn parse_member(
         let secs = pb_varint(ts, 1)? as i64;
         ms_epoch_to_rfc3339(secs * 1000)
     });
+
+    let mut first_user_text: Option<String> = None;
+    let mut first_agent_text: Option<String> = None;
+
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT step_type, step_payload FROM steps ORDER BY idx LIMIT 50")
+    {
+        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+        {
+            for row in rows.flatten() {
+                if first_user_text.is_none() && row.0 == 14 {
+                    if let Some(text) = user_text(&row.1) {
+                        first_user_text = Some(crate::adapters::truncate_text(&text, 400));
+                    }
+                } else if first_agent_text.is_none() && row.0 == 15 {
+                    let prose = agent_turn(&row.1);
+                    let text = prose.join("\n\n").trim().to_string();
+                    if !text.is_empty() {
+                        first_agent_text = Some(crate::adapters::truncate_text(&text, 400));
+                    }
+                }
+                if first_user_text.is_some() && first_agent_text.is_some() {
+                    break;
+                }
+            }
+        }
+    }
     drop(conn);
 
     let summary: Option<(String, String, Option<String>, String)> = summaries.and_then(|c| {
@@ -308,6 +335,19 @@ fn parse_member(
         return Ok(None);
     };
 
+    if first_user_text.is_none() {
+        let candidate = if !preview.trim().is_empty() {
+            Some(preview.trim())
+        } else if !title.trim().is_empty() {
+            Some(title.trim())
+        } else {
+            None
+        };
+        if let Some(c) = candidate {
+            first_user_text = Some(crate::adapters::truncate_text(c, 400));
+        }
+    }
+
     // `workspace_uris` is a JSON array of `file:///…` URIs; the metadata
     // blob's workspace message says the same thing.
     let workspace_uri: Option<String> = serde_json::from_str::<serde_json::Value>(&workspaces)
@@ -324,6 +364,11 @@ fn parse_member(
         .map(|uri| uri.strip_prefix("file://").unwrap_or(&uri).to_string())
         .filter(|p| !p.is_empty());
 
+    let is_root = parent
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .is_none();
     let parent = parent.filter(|p| !p.is_empty());
     let native_title = [title, preview]
         .into_iter()
@@ -339,10 +384,10 @@ fn parse_member(
     Ok(Some(DiscoveredMember {
         agent: Agent::Antigravity,
         source_member_id: conversation_id.to_string(),
-        kind: if parent.is_some() {
-            DiscoveredMemberKind::Child
-        } else {
+        kind: if is_root {
             DiscoveredMemberKind::Root
+        } else {
+            DiscoveredMemberKind::Child
         },
         parent_source_member_id: parent,
         root_hint: None,
@@ -352,8 +397,8 @@ fn parse_member(
         started_at,
         last_activity_at: last_activity,
         native_title,
-        first_user_text: None,
-        first_agent_text: None,
+        first_user_text: is_root.then_some(first_user_text).flatten(),
+        first_agent_text: is_root.then_some(first_agent_text).flatten(),
         metadata: serde_json::json!({}),
     }))
 }
@@ -1001,6 +1046,43 @@ mod tests {
         assert_eq!(root_m.native_title.as_deref(), Some("工程项目介绍"));
         assert_eq!(root_m.cwd.as_deref(), Some("/repo"));
         assert!(root_m.started_at.is_some());
+        assert_eq!(root_m.first_user_text.as_deref(), Some("工程项目介绍"));
+        assert_eq!(child.first_user_text, None);
+    }
+
+    /// Steps-backed discovery regression: first_user_text and first_agent_text
+    /// are extracted from steps 14 and 15 so new sessions pass the ingestion gate.
+    #[test]
+    fn discovery_extracts_first_user_and_agent_text_from_steps() {
+        let root = temp_dir("steps-first-turn");
+        let id = "55555555-6666-4777-8888-999999999999";
+        store(
+            &root,
+            id,
+            &[
+                (
+                    14,
+                    [timestamp(1_789_480_100), msg(19, &str(2, "分析代码性能"))].concat(),
+                ),
+                (
+                    15,
+                    [
+                        timestamp(1_789_480_105),
+                        msg(20, &str(1, "已完成性能分析。")),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        summaries(&root, &[(id, "性能分析", "预览", "[\"file:///repo\"]")]);
+
+        let found = AntigravityAdapter
+            .discover_members_in(&[root], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        let m = &found[0];
+        assert_eq!(m.first_user_text.as_deref(), Some("分析代码性能"));
+        assert_eq!(m.first_agent_text.as_deref(), Some("已完成性能分析。"));
     }
 
     /// A member that is not a conversation DB shape is refused at discovery.
