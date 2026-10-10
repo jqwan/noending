@@ -438,18 +438,6 @@ impl Db {
         self.index_workstream(w)
     }
 
-    /// Is any LaunchIntent still waiting for a Session? Cheap gate for the
-    /// discovery path, which would otherwise run the matcher once per
-    /// ownerless Session on every pass.
-    pub fn has_pending_launch_intents(&self) -> Result<bool> {
-        let conn = self.read();
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM launch_intents WHERE status IN (?1, ?2))",
-            params![launch_status::PENDING, launch_status::AMBIGUOUS],
-            |r| r.get(0),
-        )?)
-    }
-
     /// Delete a Workstream and everything it owns — in full FK order, which a
     /// bare `DELETE FROM workstreams` violates under
     /// `PRAGMA foreign_keys = ON` (it fails the moment the Workstream has ever
@@ -539,21 +527,6 @@ impl Db {
         })
     }
 
-    /// Sessions that may still owe a LaunchIntent match: ownerless Sessions,
-    /// trashed ones included. An owned Session has already matched.
-    pub fn reconcile_retry_sessions(&self, agent: Option<Agent>) -> Result<Vec<Session>> {
-        let conn = self.read();
-        let mut st = conn.prepare(&format!(
-            "{SESSION_SELECT}
-             WHERE owner_workstream_id IS NULL AND (?1 IS NULL OR agent = ?1)
-             ORDER BY COALESCE(last_conversation_at, last_activity_at, started_at) DESC"
-        ))?;
-        let rows = st
-            .query_map(params![agent.map(|a| a.as_str())], row_session)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.read();
         Ok(conn
@@ -566,7 +539,7 @@ impl Db {
     }
 
     /// The Logical Session for a root Resume identity. This is THE
-    /// session lookup for LaunchIntent matching and Resume.
+    /// session lookup for terminal binding and Resume.
     pub fn find_session_by_root_agent_id(
         &self,
         agent: Agent,
@@ -1154,6 +1127,40 @@ impl Db {
         set_session_owner_conn(&conn, session_id, workstream_id)
     }
 
+    /// Assign a launch's chosen task only to the exact native Session and
+    /// only while it remains ownerless. Preserve later explicit user choices;
+    /// a task deleted before discovery leaves the Session ownerless.
+    pub fn inherit_terminal_owner(
+        &self,
+        session: &Session,
+        workstream_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        self.tx(|tx| {
+            let (agent, native_id, mut owner): (String, String, Option<String>) = tx.query_row(
+                "SELECT agent, root_agent_session_id, owner_workstream_id FROM sessions WHERE id = ?1",
+                [&session.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if agent != session.agent.as_str() || native_id != session.root_agent_session_id {
+                return Err(other("终端会话身份已变化，无法同步所属任务"));
+            }
+            if owner.is_none() {
+                if let Some(id) = workstream_id {
+                    let exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM workstreams WHERE id = ?1)",
+                        [id],
+                        |row| row.get(0),
+                    )?;
+                    if exists {
+                        set_session_owner_conn(tx, &session.id, Some(id))?;
+                        owner = Some(id.to_string());
+                    }
+                }
+            }
+            Ok(owner)
+        })
+    }
+
     /// Sessions owned by `workstream_id`, including archived sessions.
     /// A Session appears in at most one Workstream's list.
     pub fn sessions_for_workstream(&self, workstream_id: &str) -> Result<Vec<Session>> {
@@ -1515,53 +1522,6 @@ impl Db {
     ) -> Result<Vec<ConflictReviewCase>> {
         let conn = self.read();
         list_conflict_review_cases_conn(&conn, workstream_id, include_closed)
-    }
-
-    // Launch intents
-
-    pub fn insert_launch_intent(&self, i: &LaunchIntent) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "INSERT INTO launch_intents
-             (id, agent, owner_workstream_id, cwd, launched_at, matched_session_id, status, note, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                i.id, i.agent.as_str(),
-                i.owner_workstream_id,
-                i.cwd,
-                i.launched_at, i.matched_session_id, i.status, i.note, i.created_at, i.updated_at
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_launch_intent(&self, id: &str) -> Result<Option<LaunchIntent>> {
-        let conn = self.read();
-        crate::storage::get_launch_intent_conn(&conn, id)
-    }
-
-    pub fn list_launch_intents(&self, statuses: &[&str], limit: i64) -> Result<Vec<LaunchIntent>> {
-        let conn = self.read();
-        let filter = if statuses.is_empty() {
-            String::new()
-        } else {
-            let placeholders = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-            format!(" WHERE status IN ({})", placeholders)
-        };
-        let sql = format!(
-            "SELECT *
-             FROM launch_intents{} ORDER BY created_at DESC LIMIT {}",
-            filter, limit
-        );
-        let mut st = conn.prepare(&sql)?;
-        let statuses: Vec<String> = statuses.iter().map(|s| s.to_string()).collect();
-        let rows = st
-            .query_map(
-                rusqlite::params_from_iter(statuses.iter()),
-                row_launch_intent,
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
     }
 
     // Ingest sources
@@ -2082,7 +2042,7 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
 }
 
 /// Set (or clear) a Session's single Owner Workstream through a caller-held
-/// connection, so a launch match can write ownership together with everything
+/// connection, so terminal binding can write ownership together with everything
 /// that must agree with it in ONE transaction.
 ///
 /// The target Workstream must exist — a Session pointing at a missing row
@@ -2129,78 +2089,6 @@ pub fn set_session_owner_conn(
         }
     }
     index_session_conn(conn, session_id)
-}
-
-/// Read one LaunchIntent through a caller-held connection — inside a matching
-/// transaction the *current* row decides, never the copy read before it.
-pub fn get_launch_intent_conn(conn: &Connection, id: &str) -> Result<Option<LaunchIntent>> {
-    Ok(conn
-        .query_row(
-            "SELECT *
-             FROM launch_intents WHERE id = ?1",
-            params![id],
-            row_launch_intent,
-        )
-        .optional()?)
-}
-
-/// Consume a LaunchIntent's match, exactly once: the row must still be waiting
-/// (PENDING or AMBIGUOUS) and unclaimed. Returns false when someone else got
-/// there first — the caller must abandon its own match rather than overwrite
-/// theirs: a plain `UPDATE … WHERE id` would let both succeed.
-pub fn mark_launch_intent_matched_conn(
-    conn: &Connection,
-    id: &str,
-    session_id: &str,
-    note: &str,
-) -> Result<bool> {
-    let updated = conn.execute(
-        "UPDATE launch_intents
-            SET status = ?2, matched_session_id = ?3, note = ?4, updated_at = ?5
-          WHERE id = ?1
-            AND status IN (?6, ?7)
-            AND matched_session_id IS NULL",
-        params![
-            id,
-            launch_status::MATCHED,
-            session_id,
-            note,
-            now(),
-            launch_status::PENDING,
-            launch_status::AMBIGUOUS
-        ],
-    )?;
-    Ok(updated == 1)
-}
-
-/// Move an intent that is still WAITING (PENDING/AMBIGUOUS, unclaimed) to
-/// another status, and report whether it still was. Every transition that is not
-/// the match itself goes through here (parking a tie as AMBIGUOUS, expiring a
-/// stale intent, recording the pid note after spawning). None of them may
-/// overwrite a match: "still waiting" written over an already-consumed intent
-/// would make it consumable a second time.
-pub fn update_waiting_launch_intent_conn(
-    conn: &Connection,
-    id: &str,
-    status: &str,
-    note: &str,
-) -> Result<bool> {
-    let updated = conn.execute(
-        "UPDATE launch_intents
-            SET status = ?2, note = ?3, updated_at = ?4
-          WHERE id = ?1
-            AND status IN (?5, ?6)
-            AND matched_session_id IS NULL",
-        params![
-            id,
-            status,
-            note,
-            now(),
-            launch_status::PENDING,
-            launch_status::AMBIGUOUS
-        ],
-    )?;
-    Ok(updated == 1)
 }
 
 /// Rebuild the search documents of the Sessions that OWN `workstream_id`: a
@@ -3025,21 +2913,6 @@ fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
         enabled: r.get::<_, i64>(3)? != 0,
         origin: r.get(4)?,
         created_at: r.get(5)?,
-    })
-}
-
-fn row_launch_intent(r: &Row) -> rusqlite::Result<LaunchIntent> {
-    Ok(LaunchIntent {
-        id: r.get("id")?,
-        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
-        owner_workstream_id: r.get("owner_workstream_id")?,
-        cwd: r.get("cwd")?,
-        launched_at: r.get("launched_at")?,
-        matched_session_id: r.get("matched_session_id")?,
-        status: r.get("status")?,
-        note: r.get("note")?,
-        created_at: r.get("created_at")?,
-        updated_at: r.get("updated_at")?,
     })
 }
 

@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::adapters::{AgentAdapter, DiscoveredMember, DiscoveredMemberKind};
-use crate::domain::{Session, SourceAvailability};
+use crate::domain::{Agent, Session, SourceAvailability};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
@@ -154,7 +154,6 @@ fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> 
 /// first, children/sides second — so a parent discovered later in the same
 /// batch is still found, and scan order never decides identity.
 struct ResolvedBatch {
-    roots_for_intent: Vec<(Session, bool)>,
     touched_session_ids: BTreeSet<String>,
 }
 
@@ -165,7 +164,6 @@ fn resolve_batch(
 ) -> Result<ResolvedBatch> {
     let agent = adapter.agent();
     let attacher = crate::workspace::session::workspace_attacher();
-    let mut roots_for_intent = Vec::new();
     let mut touched_session_ids = BTreeSet::new();
 
     for d in discovered {
@@ -173,9 +171,8 @@ fn resolve_batch(
             continue;
         }
         match ensure_logical_session(db, d, attacher.as_ref()) {
-            Ok(Some((s, is_new))) => {
+            Ok(Some((s, _))) => {
                 touched_session_ids.insert(s.id.clone());
-                roots_for_intent.push((s, is_new));
             }
             Ok(None) => {}
 
@@ -213,7 +210,6 @@ fn resolve_batch(
     // 派生页）被识别后静默跳过——识别必须保留，否则 codex 的子代理 rollout
     // 会被误当成独立逻辑会话。
     Ok(ResolvedBatch {
-        roots_for_intent,
         touched_session_ids,
     })
 }
@@ -285,42 +281,8 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
     Ok(stored.len() as i64)
 }
 
-/// Root-only LaunchIntent matching. The gate is "new OR still ownerless", not
-/// `is_new` alone: the ROW is already persisted by the time this runs, so
-/// `is_new` is true exactly once and a single transient failure would burn that
-/// one chance for good. The matcher's own agent and time-window rules keep it from
-/// matching a session that never had an intent. A match failure is logged, never
-/// fatal.
-pub fn finalize_newly_discovered_root(
-    db: &Db,
-    session: &Session,
-    is_new: bool,
-    workspace: &crate::launcher::LaunchWorkspace,
-) -> Result<()> {
-    // The ROW decides, not the caller's copy: it may be behind a concurrent
-    // ownership change.
-    let Some(current) = db.get_session(&session.id)? else {
-        return Ok(());
-    };
-    if !is_new && current.owner_workstream_id.is_some() {
-        return Ok(());
-    }
-    // Nothing waiting for a Session: skip the per-Session matcher entirely.
-    // On a first pass over a large history this is the common answer.
-    if !db.has_pending_launch_intents()? {
-        return Ok(());
-    }
-    match crate::launcher::try_match_launch_intents_in(db, &current, workspace) {
-        Ok(true) => eprintln!("[ingest] launch intent matched to session {}", current.id),
-        Ok(false) => {}
-        Err(e) => eprintln!("[ingest] intent match failed for {}: {}", current.id, e),
-    }
-    Ok(())
-}
-
 fn process_resolved_batch<F>(
     db: &Db,
-    workspace: &crate::launcher::LaunchWorkspace,
     batch: ResolvedBatch,
     on_session: &F,
     reingest: bool,
@@ -329,9 +291,6 @@ fn process_resolved_batch<F>(
 where
     F: Fn(&Session),
 {
-    for (session, is_new) in &batch.roots_for_intent {
-        finalize_newly_discovered_root(db, session, *is_new, workspace)?;
-    }
     let mut total_messages = 0;
     let mut processed = BTreeSet::new();
     for id in batch.touched_session_ids {
@@ -359,75 +318,54 @@ where
     Ok((total_messages, processed))
 }
 
-fn retry_candidate_in_source(
-    _db: &Db,
-    session: &Session,
-    source: &crate::domain::IngestSource,
-) -> Result<bool> {
-    Ok(session.owner_workstream_id.is_none()
-        && crate::workspace::is_within(&session.source_path, &source.path))
-}
-
-/// Sessions with no Owner that may still claim a pending LaunchIntent, so a
-/// later pass can (re)attempt the match and ingest them. Nothing is written
-/// for Context here.
-fn process_retry_sessions<F>(
+/// Discovery may skip a stored source that is missing, unreadable or no longer
+/// recognized. Retry its facts within the selected roots; task ownership plays
+/// no role in ingestion. Missing sources preserve the cursor, while read errors
+/// remain visible in the reconciliation report.
+fn retry_undiscovered_sessions<F>(
     db: &Db,
-    workspace: &crate::launcher::LaunchWorkspace,
+    agent: Agent,
+    roots: &[PathBuf],
+    processed: &BTreeSet<String>,
     on_session: &F,
-    scope: Option<&crate::domain::IngestSource>,
-    skip: &BTreeSet<String>,
     failures: &mut Vec<String>,
 ) -> Result<i64>
 where
     F: Fn(&Session),
 {
-    let retry_intents = db.has_pending_launch_intents()?;
-    let agent = scope.map(|source| source.agent);
-    let mut total_messages = 0;
-    for candidate in db.reconcile_retry_sessions(agent)? {
-        if skip.contains(&candidate.id) {
+    let mut messages = 0;
+    for session in db.list_sessions(crate::storage::SessionFilter {
+        agent: Some(agent),
+        scope: crate::domain::SessionListScope::All,
+        ..Default::default()
+    })? {
+        if processed.contains(&session.id)
+            || !roots.iter().any(|root| {
+                crate::workspace::is_within(&session.source_path, &root.to_string_lossy())
+            })
+        {
             continue;
         }
-        if let Some(source) = scope {
-            if !retry_candidate_in_source(db, &candidate, source)? {
-                continue;
-            }
-        }
-        if candidate.owner_workstream_id.is_none() && retry_intents {
-            finalize_newly_discovered_root(db, &candidate, false, workspace)?;
-        }
-        let Some(session) = db.get_session(&candidate.id)? else {
-            continue;
-        };
         on_session(&session);
         match ingest_session(db, &session) {
-            Ok(messages) => total_messages += messages,
-            Err(e) => {
-                eprintln!("[reconcile] retry {} failed: {}", session.id, e);
-                failures.push(format!("retry Session {} ingest failed: {e}", session.id));
-            }
+            Ok(count) => messages += count,
+            Err(error) => failures.push(format!(
+                "Session {} ingest retry failed: {error}",
+                session.id
+            )),
         }
     }
-    Ok(total_messages)
+    Ok(messages)
 }
 
 /// Full reconcile over every agent's enabled sources: discover members,
 /// resolve the logical graph, then ingest each active session — facts only,
 /// no AI. `on_session` observes each session being processed.
-///
-/// `workspace` is a launch-level fact: a freshly discovered root may claim a
-/// pending LaunchIntent, and matching it asks whether that session's cwd is
-/// just the shared default workspace, which is not in the DB.
-pub fn reconcile_all<F>(
-    db: &Db,
-    workspace: &crate::launcher::LaunchWorkspace,
-    on_session: &F,
-) -> Result<(usize, i64)>
+pub fn reconcile_all<F>(db: &Db, on_session: &F) -> Result<(usize, i64)>
 where
     F: Fn(&Session),
 {
-    let report = reconcile_all_report(db, workspace, on_session)?;
+    let report = reconcile_all_report(db, on_session)?;
     if !report.failures.is_empty() {
         return Err(other(format!(
             "部分来源摄入失败：{}",
@@ -446,11 +384,7 @@ pub struct ReconcileReport {
     pub failures: Vec<String>,
 }
 
-pub fn reconcile_all_report<F>(
-    db: &Db,
-    workspace: &crate::launcher::LaunchWorkspace,
-    on_session: &F,
-) -> Result<ReconcileReport>
+pub fn reconcile_all_report<F>(db: &Db, on_session: &F) -> Result<ReconcileReport>
 where
     F: Fn(&Session),
 {
@@ -458,11 +392,7 @@ where
     let unchanged = unchanged_since_cursor(db)?;
     let mut total_discovered = 0usize;
     let mut total_messages = 0i64;
-    let mut processed_session_ids = BTreeSet::new();
     let mut failures = Vec::new();
-
-    // housekeeping: expire launch intents that never got a session
-    let _ = crate::launcher::expire_stale_launch_intents(db);
 
     for adapter in &adapters {
         let roots: Vec<String> = db.enabled_roots(adapter.agent())?;
@@ -498,19 +428,17 @@ where
             }
         };
         let (messages, processed) =
-            process_resolved_batch(db, workspace, resolved, on_session, false, &mut failures)?;
+            process_resolved_batch(db, resolved, on_session, false, &mut failures)?;
         total_messages += messages;
-        processed_session_ids.extend(processed);
+        total_messages += retry_undiscovered_sessions(
+            db,
+            adapter.agent(),
+            &roots,
+            &processed,
+            on_session,
+            &mut failures,
+        )?;
     }
-
-    total_messages += process_retry_sessions(
-        db,
-        workspace,
-        on_session,
-        None,
-        &processed_session_ids,
-        &mut failures,
-    )?;
 
     // The one piece of workspace work a skipped Session still owes. It runs
     // AFTER the loop so a path first registered by this very pass is already
@@ -532,13 +460,10 @@ where
 }
 
 /// Ingest one specific ingest source: discover members under that source's own
-/// path only, resolve + ingest them. Takes the
-/// [`crate::launcher::LaunchWorkspace`] because first discovery can happen
-/// here as easily as in a full reconcile.
+/// path only, resolve + ingest them.
 pub fn reconcile_source<F>(
     db: &Db,
     source: &crate::domain::IngestSource,
-    workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
@@ -553,14 +478,14 @@ where
     let mut failures = Vec::new();
     let resolved = resolve_batch(db, adapter, &discovered)?;
     let (messages, processed) =
-        process_resolved_batch(db, workspace, resolved, on_session, false, &mut failures)?;
+        process_resolved_batch(db, resolved, on_session, false, &mut failures)?;
     total_messages += messages;
-    total_messages += process_retry_sessions(
+    total_messages += retry_undiscovered_sessions(
         db,
-        workspace,
-        on_session,
-        Some(source),
+        source.agent,
+        &roots,
         &processed,
+        on_session,
         &mut failures,
     )?;
     if !failures.is_empty() {
@@ -584,7 +509,6 @@ where
 pub fn reingest_source<F>(
     db: &Db,
     source: &crate::domain::IngestSource,
-    workspace: &crate::launcher::LaunchWorkspace,
     on_session: &F,
 ) -> Result<(usize, i64)>
 where
@@ -597,8 +521,7 @@ where
     let mut total_messages = 0i64;
     let mut failures = Vec::new();
     let resolved = resolve_batch(db, adapter, &discovered)?;
-    total_messages +=
-        process_resolved_batch(db, workspace, resolved, on_session, true, &mut failures)?.0;
+    total_messages += process_resolved_batch(db, resolved, on_session, true, &mut failures)?.0;
     if !failures.is_empty() {
         return Err(other(format!("部分来源重扫失败：{}", failures.join("; "))));
     }

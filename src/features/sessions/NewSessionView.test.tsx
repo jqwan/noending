@@ -475,7 +475,6 @@ describe("NewSessionView task and project selection", () => {
     launched_via: "内嵌终端",
     command_line: "codex",
     note: "已在内嵌终端启动。",
-    launch_intent_id: "intent-1",
     terminal_id: "t-new-1",
   });
   const navigate = vi.fn();
@@ -507,7 +506,7 @@ describe("NewSessionView message composer", () => {
 
   it("supports Enter to send, while Shift+Enter and IME Enter do not launch", async () => {
     vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
-      launched_via: "内嵌终端", command_line: "codex", note: "已启动", launch_intent_id: null, terminal_id: "t-keyboard",
+      launched_via: "内嵌终端", command_line: "codex", note: "已启动", terminal_id: "t-keyboard",
     });
     const navigate = vi.fn();
     render(<NewSessionView navigate={navigate} />);
@@ -541,7 +540,7 @@ describe("NewSessionView message composer", () => {
       },
     ]);
     vi.mocked(api.launchEmbeddedNew).mockRejectedValueOnce("CLI unavailable").mockResolvedValue({
-      launched_via: "内嵌终端", command_line: "claude", note: "已启动", launch_intent_id: null, terminal_id: "t-retry",
+      launched_via: "内嵌终端", command_line: "claude", note: "已启动", terminal_id: "t-retry",
     });
     const navigate = vi.fn();
     render(<NewSessionView navigate={navigate} />);
@@ -571,7 +570,7 @@ it("shows the resolved fallback directory and uses the same default-path intent 
     cwd_resolution: { ...preparedFixture.cwd_resolution, cwd: "/repo/fallback", fallback: true, note: "工作目录不可用，使用备用目录" },
   });
   vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
-    launched_via: "内嵌终端", command_line: "codex", note: "已启动", launch_intent_id: null, terminal_id: "t-fallback",
+    launched_via: "内嵌终端", command_line: "codex", note: "已启动", terminal_id: "t-fallback",
   });
   render(<NewSessionView navigate={vi.fn()} />);
   await waitFor(() => expect(screen.getByRole("status").textContent).toBe("工作目录不可用，使用备用目录"));

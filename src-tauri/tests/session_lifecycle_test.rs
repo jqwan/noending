@@ -13,10 +13,10 @@
 //! Adapter verdicts are driven with REAL files via `inspect_file_source`; only
 //! temp dirs are used, never the real ~/.codex, ~/.claude or ~/.pi.
 
-use noending::domain::{Agent, LaunchIntent, SessionMessageRole, SourceAvailability};
+use noending::domain::{Agent, SessionMessageRole, SourceAvailability};
 use noending::lifecycle;
 use noending::search;
-use noending::storage::{new_id, now, Db};
+use noending::storage::{new_id, Db};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -162,22 +162,6 @@ fn context_frontier(db: &Db, session_id: &str) -> i64 {
         .unwrap()
         .map(|c| c.processed_through_seq)
         .unwrap_or(0)
-}
-
-fn launch_intent(db: &Db, session_id: &str, agent: Agent) {
-    db.insert_launch_intent(&LaunchIntent {
-        id: new_id(),
-        agent,
-        owner_workstream_id: None,
-        cwd: None,
-        launched_at: now(),
-        matched_session_id: Some(session_id.to_string()),
-        status: "matched".into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    })
-    .unwrap();
 }
 
 /// A context item whose head revision points at one of the session's messages
@@ -474,7 +458,6 @@ fn permanent_delete_purges_local_rows_only() {
     let ws = workstream(&db, "Surviving WS");
     set_owner(&db, &s.id, &ws.id);
     let (item_id, _) = context_item_pointing_at(&db, &ws.id, &s.id);
-    launch_intent(&db, &s.id, Agent::Codex);
     // Stats via the production delta path.
     db.commit_ingest(
         &s.id,
@@ -506,7 +489,7 @@ fn permanent_delete_purges_local_rows_only() {
     assert_eq!(preview.root_source_status, SourceAvailability::Missing);
     assert_eq!(preview.counts.message_count, 1);
     assert!(preview.counts.session_context_count >= 1);
-    assert_eq!(preview.counts.launch_intent_count, 1);
+
     assert!(
         preview.counts.context_revision_redaction_count >= 1,
         "the item revision pointing at this session is counted: {:?}",
@@ -546,15 +529,7 @@ fn permanent_delete_purges_local_rows_only() {
         0,
         "summary revision history gone"
     );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM launch_intents WHERE matched_session_id = ?",
-            &s.id
-        ),
-        0,
-        "matched launch history gone"
-    );
+
     assert_eq!(
         count(
             &db,

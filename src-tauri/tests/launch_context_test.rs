@@ -1,15 +1,13 @@
-//! LaunchIntent, storage/domain consistency, and prepared-launch identity tests
+//! storage/domain consistency, and prepared-launch identity tests
 //! (Issues #5, #6, #8).
 //!
 //! Single-Owner model: a Session has at most one Owner Workstream, so an
-//! intent's `owner_workstream_id` is inherited by the matched Session verbatim —
+//! embedded terminal's selected task is assigned on its first exact native binding —
 //! there are no primary/related roles or bundles. A launch carries launch facts
-//! only (Agent, cwd, runtime, Owner, LaunchIntent) and never syncs or injects
+//! only (Agent, cwd, runtime, Owner) and never syncs or injects
 //! Context, so there is no delivery level or snapshot to assert on.
 
-use noending::domain::{
-    launch_status, Agent, LaunchIntent, Session, SessionMessageRole, SourceCursorUpdate,
-};
+use noending::domain::{Agent, Session, SessionMessageRole, SourceCursorUpdate};
 use noending::launcher;
 use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
@@ -70,203 +68,12 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
     db.get_session(&id).unwrap().unwrap()
 }
 
-/// A pending New Session intent carrying the user's single Owner selection.
-fn pending_intent(db: &Db, agent: Agent, owner: Option<&str>, cwd: Option<String>) -> LaunchIntent {
-    let i = LaunchIntent {
-        id: new_id(),
-        agent,
-        owner_workstream_id: owner.map(str::to_string),
-        cwd,
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&i).unwrap();
-    i
-}
-
 /// The Session's current Owner, straight from the store.
 fn owner_of(db: &Db, session_id: &str) -> Option<String> {
     db.get_session(session_id)
         .unwrap()
         .unwrap()
         .owner_workstream_id
-}
-
-// Issue #5: LaunchIntent
-
-/// Launch → discovery → Owner: a pending intent matches a newly discovered
-/// session and the user's explicit Workstream selection becomes the Session's
-/// Owner Workstream. This is also the crash-recovery path: the intent was
-/// persisted before the "crash", the session is discovered by a later reconcile.
-#[test]
-fn pending_intent_matches_new_session_and_sets_owner() {
-    let db = open_db("intent-match");
-    let ws_a = ws_row(&db, "Workstream A");
-
-    // user picks A in the New Session dialog, then NoEnding launches
-    let intent = pending_intent(&db, Agent::Codex, Some(&ws_a.id), None);
-
-    // the agent CLI creates its session; we discover it afterwards
-    let session = session_row(&db, Agent::Codex, Some(now()), None);
-    assert!(
-        launcher::try_match_launch_intents_in(&db, &session, &LaunchWorkspace::default()).unwrap(),
-        "the fresh session must claim the pending intent"
-    );
-
-    // the explicit selection becomes the single Owner Workstream
-    assert_eq!(
-        owner_of(&db, &session.id).as_deref(),
-        Some(ws_a.id.as_str())
-    );
-    let owned = db.sessions_for_workstream(&ws_a.id).unwrap();
-    assert_eq!(owned.len(), 1, "exactly one owned Session");
-    assert_eq!(owned[0].id, session.id);
-
-    let intent = db.get_launch_intent(&intent.id).unwrap().unwrap();
-    assert_eq!(intent.status, launch_status::MATCHED);
-    assert_eq!(
-        intent.matched_session_id.as_deref(),
-        Some(session.id.as_str())
-    );
-}
-
-/// Zero selected workstreams is a valid state: the intent matches but the
-/// Session stays unowned, and no classification adds an owner behind the
-/// user's back.
-#[test]
-fn contextless_launch_matches_but_stays_unowned() {
-    let db = open_db("intent-zero");
-    let _ws = ws_row(&db, "Unrelated");
-    let intent = pending_intent(&db, Agent::Pi, None, None);
-
-    let session = session_row(&db, Agent::Pi, Some(now()), None);
-    assert!(
-        launcher::try_match_launch_intents_in(&db, &session, &LaunchWorkspace::default()).unwrap()
-    );
-    assert_eq!(owner_of(&db, &session.id), None);
-    assert_eq!(
-        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
-        launch_status::MATCHED
-    );
-}
-
-/// Several similarly-plausible candidates → ambiguous, never a silent guess.
-#[test]
-fn ambiguous_candidates_wait_for_the_user() {
-    let db = open_db("intent-ambiguous");
-    let ws = ws_row(&db, "WS");
-    // two intents launched at nearly the same time for the same agent
-    let i1 = pending_intent(&db, Agent::ClaudeCode, Some(&ws.id), None);
-    let i2 = pending_intent(&db, Agent::ClaudeCode, Some(&ws.id), None);
-    let _ = (&i1, &i2);
-
-    let session = session_row(&db, Agent::ClaudeCode, Some(now()), None);
-    assert!(
-        !launcher::try_match_launch_intents_in(&db, &session, &LaunchWorkspace::default()).unwrap(),
-        "must not silently pick one"
-    );
-    let ambiguous = db
-        .list_launch_intents(&[launch_status::AMBIGUOUS], 10)
-        .unwrap();
-    assert!(
-        !ambiguous.is_empty(),
-        "the best candidate is marked ambiguous"
-    );
-    assert_eq!(
-        owner_of(&db, &session.id),
-        None,
-        "no owner before the user resolves"
-    );
-
-    // user resolves manually
-    launcher::apply_match(
-        &db,
-        &ambiguous[0].id,
-        &session,
-        &launcher::LaunchWorkspace::default(),
-    )
-    .unwrap();
-    let resolved = db.get_launch_intent(&ambiguous[0].id).unwrap().unwrap();
-    assert_eq!(resolved.status, launch_status::MATCHED);
-    assert_eq!(owner_of(&db, &session.id).as_deref(), Some(ws.id.as_str()));
-}
-
-/// Wrong agent / stale sessions never match; stale intents expire.
-#[test]
-fn stale_intents_expire_and_wrong_agent_never_matches() {
-    let db = open_db("intent-expire");
-    let ws = ws_row(&db, "WS");
-    let intent = pending_intent(&db, Agent::Codex, Some(&ws.id), None);
-
-    // a Claude session cannot claim a Codex intent
-    let claude_session = session_row(&db, Agent::ClaudeCode, Some(now()), None);
-    assert!(!launcher::try_match_launch_intents_in(
-        &db,
-        &claude_session,
-        &LaunchWorkspace::default()
-    )
-    .unwrap());
-
-    // expire pending intents that are older than the TTL
-    db.tx(|tx| {
-        noending::storage::update_waiting_launch_intent_conn(
-            tx,
-            &intent.id,
-            launch_status::PENDING,
-            "",
-        )
-    })
-    .unwrap();
-    db.write()
-        .execute(
-            "UPDATE launch_intents SET launched_at = ?2 WHERE id = ?1",
-            rusqlite::params![
-                intent.id,
-                (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339()
-            ],
-        )
-        .unwrap();
-    let expired = launcher::expire_stale_launch_intents(&db).unwrap();
-    assert_eq!(expired, 1);
-    assert_eq!(
-        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
-        launch_status::EXPIRED
-    );
-
-    // ...and an old session cannot claim a fresh intent either
-    let old_session = session_row(
-        &db,
-        Agent::Codex,
-        Some((chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339()),
-        None,
-    );
-    let fresh = pending_intent(&db, Agent::Codex, Some(&ws.id), None);
-    assert!(
-        !launcher::try_match_launch_intents_in(&db, &old_session, &LaunchWorkspace::default())
-            .unwrap()
-    );
-    assert_eq!(
-        db.get_launch_intent(&fresh.id).unwrap().unwrap().status,
-        launch_status::PENDING
-    );
-}
-
-/// Resume uses the stored Owner; discovery never re-derives it.
-#[test]
-fn resume_does_not_reguess_owner() {
-    let db = open_db("resume-no-guess");
-    let ws = ws_row(&db, "WS");
-    let s = session_row(&db, Agent::Codex, Some(now()), None);
-    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
-
-    // No pending intent exists, so the discovery path has nothing to match:
-    // the Owner is a stored fact and must survive untouched.
-    assert!(!launcher::try_match_launch_intents_in(&db, &s, &LaunchWorkspace::default()).unwrap());
-    assert_eq!(owner_of(&db, &s.id).as_deref(), Some(ws.id.as_str()));
 }
 
 // Issue #8: storage / domain consistency
@@ -440,9 +247,9 @@ fn session_cursor_roundtrip() {
 // Prepared launch: side-effect contract & preview identity
 
 /// `prepare_new` is a pure preview: it resolves the launch directory and freezes
-/// the runtime intent, and writes nothing — no LaunchIntent, no file.
+/// the runtime intent, and writes nothing — no session or file.
 #[test]
-fn prepare_new_does_not_create_intent_or_file() {
+fn prepare_new_does_not_create_session_or_file() {
     let db = open_db("prep-new-no-side-effects");
     let ws = ws_row(&db, "test ws");
 
@@ -469,12 +276,7 @@ fn prepare_new_does_not_create_intent_or_file() {
     );
     assert!(!prepared.state_fingerprint.is_empty());
 
-    // 2. INVARIANT: No LaunchIntent created
-    let intents = db.list_launch_intents(&[], 100).unwrap();
-    assert!(
-        intents.is_empty(),
-        "prepare_new must not insert LaunchIntent"
-    );
+    assert!(db.list_sessions(Default::default()).unwrap().is_empty());
 
     // 3. INVARIANT: nothing written to disk
     assert!(
@@ -519,7 +321,7 @@ fn prepare_resume_uses_current_owner_without_writing() {
     assert_eq!(owner_of(&db, &session.id).as_deref(), Some(ws1.id.as_str()));
 
     // INVARIANT: nothing written
-    assert!(db.list_launch_intents(&[], 100).unwrap().is_empty());
+
     assert!(!tmp_dir.exists());
 }
 
@@ -787,24 +589,4 @@ fn prepared_launch_lazy_ttl_cleanup() {
     let fresh_res = noending::commands::consume_prepared_launch(&map, &fresh_prepared.id);
     assert!(fresh_res.is_ok());
     assert_eq!(fresh_res.unwrap().id, fresh_prepared.id);
-}
-
-#[test]
-fn launch_intent_roundtrip_keeps_distinct_creation_and_update_times() {
-    let db = open_db("intent-timestamps");
-    let mut intent = pending_intent(&db, Agent::Codex, None, None);
-    intent.updated_at = "2026-10-08T12:34:56Z".into();
-    db.write()
-        .execute(
-            "UPDATE launch_intents SET updated_at = ?2 WHERE id = ?1",
-            rusqlite::params![intent.id, intent.updated_at],
-        )
-        .unwrap();
-    for stored in [
-        db.get_launch_intent(&intent.id).unwrap().unwrap(),
-        db.list_launch_intents(&[], 10).unwrap().remove(0),
-    ] {
-        assert_eq!(stored.created_at, intent.created_at);
-        assert_eq!(stored.updated_at, intent.updated_at);
-    }
 }

@@ -7,7 +7,9 @@
 //! Triggers:
 //! * App startup → `ReconcileAll`
 //! * Return to foreground past the freshness threshold → `ReconcileAll`
-//! * New launch success → `ReconcileAll`
+//! * External new launch success → `ReconcileAll`
+//! * Agent lifecycle notification → that Agent's enabled sources when unbound,
+//!   or `RefreshSession` when the terminal is already bound
 //! * Resume launch success → `RefreshSession`
 //! * Advanced maintenance page → `ReconcileAll` / `ReconcileSource` /
 //!   `ReingestSource`
@@ -206,7 +208,6 @@ fn spawn_worker(app: AppHandle) {
 
 fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String>) {
     let state = app.state::<AppState>();
-    let workspace = super::launch_workspace(app);
     let notify = |s: &crate::domain::Session| {
         eprintln!(
             "[ingest] processing: {}",
@@ -214,25 +215,20 @@ fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String
         );
     };
     let result = match scope {
-        IngestScope::ReconcileAll => {
-            crate::ingestion::reconcile_all_report(&state.db, &workspace, &notify).map(|report| {
+        IngestScope::ReconcileAll => crate::ingestion::reconcile_all_report(&state.db, &notify)
+            .map(|report| {
                 let error = (!report.failures.is_empty()).then(|| report.failures.join("; "));
                 (report.discovered, report.messages, error)
-            })
-        }
+            }),
         IngestScope::ReconcileSource(id) => match state.db.get_ingest_source(id) {
-            Ok(Some(source)) => {
-                crate::ingestion::reconcile_source(&state.db, &source, &workspace, &notify)
-                    .map(|(d, m)| (d, m, None))
-            }
+            Ok(Some(source)) => crate::ingestion::reconcile_source(&state.db, &source, &notify)
+                .map(|(d, m)| (d, m, None)),
             Ok(None) => Ok((0, 0, None)),
             Err(e) => Err(e),
         },
         IngestScope::ReingestSource(id) => match state.db.get_ingest_source(id) {
-            Ok(Some(source)) => {
-                crate::ingestion::reingest_source(&state.db, &source, &workspace, &notify)
-                    .map(|(d, m)| (d, m, None))
-            }
+            Ok(Some(source)) => crate::ingestion::reingest_source(&state.db, &source, &notify)
+                .map(|(d, m)| (d, m, None)),
             Ok(None) => Ok((0, 0, None)),
             Err(e) => Err(e),
         },

@@ -158,6 +158,11 @@ fn agent_extra_ingest_dirs(agent: Agent) -> Vec<PathBuf> {
     }
 }
 
+/// CLI-only configuration and conversation store, separate from the IDE.
+pub fn resolve_antigravity_cli_dir() -> Option<PathBuf> {
+    resolve_home().map(|home| home.join(".gemini").join("antigravity-cli"))
+}
+
 /// Every root an Agent's conversations are known to live under: the resolved
 /// data dir first, then any extra official surface. The default-ingest
 /// seeding (`reconcile_runtime_defaults`) runs over this list.

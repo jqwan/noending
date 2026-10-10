@@ -45,7 +45,7 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
   return {
     terminal_id: "t-1",
     session_id: null,
-    identity_revision: 0,
+    owner_workstream_id: null, identity_revision: 0,
     agent: "codex",
     cwd: "/repo/x",
     created_at: new Date().toISOString(),
@@ -306,6 +306,28 @@ describe("Sidebar 最近活动", () => {
 
     fireEvent.click(sessionItem);
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+  });
+
+  it("keeps an unbound terminal in its selected task and retains that group after ingestion", async () => {
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([workstreamCard({ title: "启动任务" })]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ owner_workstream_id: "ws-1" })]);
+    const navigate = renderSidebar();
+    const group = await screen.findByRole("button", { name: /启动任务/ });
+    expect(screen.getByTitle("新会话 · /repo/x")).toBeTruthy();
+    expect(screen.queryByText("未归属任务")).toBeNull();
+    fireEvent.click(group);
+    expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull();
+    fireEvent.click(group);
+    fireEvent.click(screen.getByTitle("新会话 · /repo/x"));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "t-1" }));
+    vi.mocked(api.listSessions).mockResolvedValue([session({ title: "摄入会话" })]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s-1", owner_workstream_id: "ws-1" })]);
+    act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); window.dispatchEvent(new CustomEvent(EVT_SYNCED)); });
+    await waitFor(() => expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull());
+    await screen.findByText("摄入会话");
+    expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /启动任务/ }));
+    expect(screen.queryByText("摄入会话")).toBeNull();
   });
 
   it("toggles group collapse when group header is clicked", async () => {

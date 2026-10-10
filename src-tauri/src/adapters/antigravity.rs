@@ -10,13 +10,13 @@
 //! with "trajectory not found"), so a resume only works for sessions that were
 //! discovered from the CLI store. Both stores are default ingest sources
 //! (`agent_ingest_roots`), so covering agy-created sessions end to end —
-//! LaunchIntent discovery included — is one enable in Settings.
+//! CLI and IDE discovery included — is one enable in Settings.
 //!
 //! The `steps` table is the event log, ordered by `idx`; payloads are
 //! protobuf with no published schema. Field paths verified against the real
 //! corpus:
 //! - 14 user turn: prompt at `payload.19.2` (fallback `19.3.1`), timestamp
-//!   `5.1`;
+//!   `5.1`; CLI workspace URI at `19.12.12` when the summary/metadata lack it;
 //! - 15 agent turn: the turn's answer at `payload.20.1` per part, falling back
 //!   to the model's narration at `20.3` when a part has no answer (the two are
 //!   disjoint — see `agent_turn`); a `20.7` part only ANNOUNCES a tool call —
@@ -236,8 +236,49 @@ fn agent_turn(payload: &[u8]) -> Vec<String> {
     prose
 }
 
-/// One conversation DB's facts for discovery: cwd + start time from its
-/// metadata blob, title / parent / workspace from the summaries store.
+/// Only explicit workspace facts are paths; prose and tool arguments are not.
+fn workspace_path(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.starts_with("file:") {
+        tauri::Url::parse(raw)
+            .ok()?
+            .to_file_path()
+            .ok()?
+            .to_str()
+            .map(String::from)
+    } else {
+        Path::new(raw).is_absolute().then(|| raw.to_string())
+    }
+}
+
+/// The CLI can leave both summary and trajectory workspaces empty while later
+/// user steps carry the workspace URI at `19.12.12` (verified in the CLI store).
+fn user_workspace(payload: &[u8]) -> Option<String> {
+    let turn = pb_sub(payload, 19)?;
+    let context = pb_sub(turn, 12)?;
+    workspace_path(&pb_str(context, 12)?)
+}
+
+/// Whether a native lifecycle notification belongs to a confirmed root.
+pub(crate) fn is_root_conversation(store_root: &Path, conversation_id: &str) -> bool {
+    // Hooks also fire for subagents. Unknown relations must wait for a later
+    // native event, just as discovery waits for the summaries row.
+    open_read_only(&store_root.join("conversation_summaries.db"))
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT parent_conversation_id FROM conversation_summaries WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+        })
+        .is_some_and(|parent| parent.is_none_or(|id| id.trim().is_empty()))
+}
+
+/// One conversation DB's facts for discovery: start time from its metadata
+/// blob, title / parent from the summaries store, and cwd from the summary,
+/// metadata or CLI user-step context, in that order.
 ///
 /// The summaries ROW is load-bearing, not decoration: `parent_conversation_id`
 /// decides Root vs Child. When the row is missing — the summaries store lags
@@ -280,8 +321,6 @@ fn parse_member(
         let secs = pb_varint(ts, 1)? as i64;
         ms_epoch_to_rfc3339(secs * 1000)
     });
-    drop(conn);
-
     let summary: Option<(String, String, Option<String>, String)> = summaries.and_then(|c| {
         c.query_row(
             "SELECT title, preview, parent_conversation_id, workspace_uris
@@ -310,21 +349,48 @@ fn parse_member(
 
     // `workspace_uris` is a JSON array of `file:///…` URIs; the metadata
     // blob's workspace message says the same thing.
-    let workspace_uri: Option<String> = serde_json::from_str::<serde_json::Value>(&workspaces)
+    let mut cwd = serde_json::from_str::<Vec<String>>(&workspaces)
         .ok()
-        .and_then(|v| v.get(0).cloned())
-        .and_then(|u| u.as_str().map(String::from))
+        .and_then(|uris| uris.iter().find_map(|uri| workspace_path(uri)))
         .or_else(|| {
             metadata
                 .as_deref()
                 .and_then(|m| pb_sub(m, 1))
                 .and_then(|w| pb_str(w, 1))
+                .and_then(|uri| workspace_path(&uri))
         });
-    let cwd = workspace_uri
-        .map(|uri| uri.strip_prefix("file://").unwrap_or(&uri).to_string())
-        .filter(|p| !p.is_empty());
 
-    let parent = parent.filter(|p| !p.is_empty());
+    let parent = parent.filter(|p| !p.trim().is_empty());
+    let is_root = parent.is_none();
+    let mut first_user_text = None;
+    let mut first_agent_text = None;
+    // There is no fixed step cutoff: metadata and tool announcements may
+    // precede visible text, and the workspace may first appear on a later turn.
+    let mut stmt = conn.prepare(
+        "SELECT step_type, step_payload FROM steps WHERE step_type IN (14, 15) ORDER BY idx",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+    for row in rows {
+        let (step_type, payload) = row?;
+        if step_type == 14 {
+            if cwd.is_none() {
+                cwd = user_workspace(&payload);
+            }
+            if is_root && first_user_text.is_none() {
+                first_user_text =
+                    user_text(&payload).map(|text| crate::adapters::truncate_text(&text, 400));
+            }
+        } else if is_root && first_agent_text.is_none() {
+            let text = agent_turn(&payload).join("\n\n");
+            if !text.trim().is_empty() {
+                first_agent_text = Some(crate::adapters::truncate_text(text.trim(), 400));
+            }
+        }
+        if cwd.is_some() && (!is_root || (first_user_text.is_some() && first_agent_text.is_some()))
+        {
+            break;
+        }
+    }
     let native_title = [title, preview]
         .into_iter()
         .map(|t| t.trim().to_string())
@@ -352,8 +418,8 @@ fn parse_member(
         started_at,
         last_activity_at: last_activity,
         native_title,
-        first_user_text: None,
-        first_agent_text: None,
+        first_user_text,
+        first_agent_text,
         metadata: serde_json::json!({}),
     }))
 }
@@ -721,7 +787,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "noending-antigravity-{}-{}",
             tag,
-            std::process::id()
+            uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -758,6 +824,18 @@ mod tests {
         msg(5, &msg(1, &[int(1, secs), int(2, 500_000_000)].concat()))
     }
 
+    fn repo_uri() -> &'static str {
+        if cfg!(windows) {
+            "file:///C:/repo"
+        } else {
+            "file:///repo"
+        }
+    }
+
+    fn repo_workspaces() -> String {
+        serde_json::json!([repo_uri()]).to_string()
+    }
+
     /// The store layout: `<root>/conversations/<id>.db` plus the sibling
     /// `conversation_summaries.db`.
     fn store(root: &Path, id: &str, steps: &[(i64, Vec<u8>)]) -> PathBuf {
@@ -772,7 +850,7 @@ mod tests {
         )
         .unwrap();
         let metadata = [
-            msg(1, &str(1, "file:///repo")),
+            msg(1, &str(1, repo_uri())),
             msg(2, &[int(1, 1_789_480_089), int(2, 0)].concat()),
         ]
         .concat();
@@ -877,7 +955,7 @@ mod tests {
                 "336f551c-58e8-491b-a31f-13b362786c85",
                 "",
                 "把日报整理一下",
-                "[\"file:///repo\"]",
+                &repo_workspaces(),
             )],
         );
 
@@ -931,7 +1009,7 @@ mod tests {
                 ),
             ],
         );
-        summaries(&root, &[(id, "", "把日报整理一下", "[\"file:///repo\"]")]);
+        summaries(&root, &[(id, "", "把日报整理一下", &repo_workspaces())]);
 
         let db = root.join("conversations").join(format!("{id}.db"));
         let delta = AntigravityAdapter
@@ -956,8 +1034,12 @@ mod tests {
     #[test]
     fn discovery_claims_conversations_and_maps_parents_to_children() {
         let root = temp_dir("discover");
-        store(&root, "11111111-2222-4333-8444-555555555555", &[]);
-        store(&root, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", &[]);
+        let steps = [
+            (14, msg(19, &str(2, "分析代码性能"))),
+            (15, msg(20, &str(1, "已完成性能分析。"))),
+        ];
+        store(&root, "11111111-2222-4333-8444-555555555555", &steps);
+        store(&root, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", &steps);
         summaries(
             &root,
             &[
@@ -965,7 +1047,7 @@ mod tests {
                     "11111111-2222-4333-8444-555555555555",
                     "工程项目介绍",
                     "工程项目介绍",
-                    "[\"file:///repo\"]",
+                    &repo_workspaces(),
                 ),
                 ("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "", "", "[]"),
             ],
@@ -999,8 +1081,174 @@ mod tests {
         let root_m = by_id("11111111-2222-4333-8444-555555555555");
         assert_eq!(root_m.kind, DiscoveredMemberKind::Root);
         assert_eq!(root_m.native_title.as_deref(), Some("工程项目介绍"));
-        assert_eq!(root_m.cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            root_m.cwd.as_deref(),
+            Some(if cfg!(windows) { "C:\\repo" } else { "/repo" })
+        );
         assert!(root_m.started_at.is_some());
+        assert_eq!(root_m.first_user_text.as_deref(), Some("分析代码性能"));
+        assert_eq!(root_m.first_agent_text.as_deref(), Some("已完成性能分析。"));
+        assert_eq!(child.first_user_text, None);
+        assert_eq!(child.first_agent_text, None);
+    }
+
+    fn reconcile_store(db: &crate::storage::Db, root: &Path) -> i64 {
+        let source = crate::domain::IngestSource {
+            id: "ag-test-source".into(),
+            agent: Agent::Antigravity,
+            path: root.to_string_lossy().into_owned(),
+            enabled: true,
+            origin: crate::domain::ingest_origin::USER.into(),
+            created_at: "2026-10-10T00:00:00Z".into(),
+        };
+        crate::ingestion::reconcile_source(db, &source, &|_| {})
+            .unwrap()
+            .1
+    }
+
+    /// CLI workspace facts can first appear after the first complete exchange.
+    /// Reconcile must admit late messages and repair an existing NULL cwd.
+    #[test]
+    fn reconcile_recovers_late_cli_messages_and_workspace() {
+        let base = temp_dir("late-workspace");
+        let root = base.join("antigravity-cli");
+        let id = "55555555-6666-4777-8888-999999999999";
+        let mut steps = vec![(23, vec![]); 60];
+        steps.push((14, msg(19, &str(2, "分析代码性能"))));
+        steps.push((15, msg(20, &str(1, "已完成性能分析。"))));
+        let path = store(&root, id, &steps);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE trajectory_metadata_blob SET data = ?1 WHERE id = 'main'",
+            rusqlite::params![msg(2, &int(1, 1_789_480_089))],
+        )
+        .unwrap();
+        summaries(&root, &[(id, "性能分析", "预览", "")]);
+        let db = crate::storage::Db::open(&base.join("noending.db")).unwrap();
+        let found = AntigravityAdapter
+            .discover_members_in(std::slice::from_ref(&root), &|_| false)
+            .unwrap();
+        assert_eq!(found[0].first_user_text.as_deref(), Some("分析代码性能"));
+        assert_eq!(
+            found[0].first_agent_text.as_deref(),
+            Some("已完成性能分析。")
+        );
+        assert_eq!(reconcile_store(&db, &root), 2);
+        let before = db
+            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.cwd, None);
+        assert_eq!(before.source_kind, "antigravity_cli_conversation");
+
+        let workspace = base.join("工作目录 with spaces");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let uri = tauri::Url::from_file_path(&workspace).unwrap().to_string();
+        let payload = msg(19, &[str(2, "继续分析"), msg(12, &str(12, &uri))].concat());
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, step_payload) VALUES (62, 14, ?1)",
+            rusqlite::params![payload],
+        )
+        .unwrap();
+        assert_eq!(reconcile_store(&db, &root), 1);
+        let after = db.get_session(&before.id).unwrap().unwrap();
+        assert_eq!(after.cwd.as_deref(), workspace.to_str());
+        let messages = db.get_messages(&after.id, None, 10).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            ["分析代码性能", "已完成性能分析。", "继续分析"]
+        );
+        assert_eq!(reconcile_store(&db, &root), 0);
+        drop(conn);
+        drop(db);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Native titles/previews and tool-only parts do not prove visible messages.
+    #[test]
+    fn reconcile_requires_visible_messages_even_with_a_summary() {
+        let root = temp_dir("empty-summary");
+        let id = "55555555-6666-4777-8888-999999999999";
+        let path = store(&root, id, &[(15, msg(20, &msg(7, &str(2, "list_dir"))))]);
+        summaries(&root, &[(id, "命名的空会话", "预览", &repo_workspaces())]);
+        let db = crate::storage::Db::open(&root.join("noending.db")).unwrap();
+        assert_eq!(reconcile_store(&db, &root), 0);
+        assert!(db
+            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .unwrap()
+            .is_none());
+
+        // An assistant-only visible answer is sufficient; no user text is invented.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 15, ?1)",
+            rusqlite::params![msg(20, &str(1, "可见回答"))],
+        )
+        .unwrap();
+        let found = AntigravityAdapter
+            .discover_members_in(std::slice::from_ref(&root), &|_| false)
+            .unwrap();
+        assert_eq!(found[0].first_user_text, None);
+        assert_eq!(found[0].first_agent_text.as_deref(), Some("可见回答"));
+        assert_eq!(reconcile_store(&db, &root), 1);
+        drop(conn);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_prefers_summary_then_metadata_over_step_workspace() {
+        let root = temp_dir("workspace-precedence");
+        let id = "55555555-6666-4777-8888-999999999999";
+        let summary_path = root.join("summary workspace");
+        let step_path = root.join("step workspace");
+        let summary_uri = tauri::Url::from_file_path(&summary_path)
+            .unwrap()
+            .to_string();
+        let step_uri = tauri::Url::from_file_path(&step_path).unwrap().to_string();
+        store(
+            &root,
+            id,
+            &[(
+                14,
+                msg(
+                    19,
+                    &[str(2, "检查目录"), msg(12, &str(12, &step_uri))].concat(),
+                ),
+            )],
+        );
+        summaries(
+            &root,
+            &[(
+                id,
+                "",
+                "",
+                &serde_json::json!(["", summary_uri]).to_string(),
+            )],
+        );
+        let discover = || {
+            AntigravityAdapter
+                .discover_members_in(std::slice::from_ref(&root), &|_| false)
+                .unwrap()
+                .remove(0)
+        };
+        assert_eq!(discover().cwd.as_deref(), summary_path.to_str());
+
+        let conn = Connection::open(root.join("conversation_summaries.db")).unwrap();
+        conn.execute(
+            "UPDATE conversation_summaries SET workspace_uris = '[]'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            discover().cwd.as_deref(),
+            Some(if cfg!(windows) { "C:\\repo" } else { "/repo" })
+        );
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A member that is not a conversation DB shape is refused at discovery.

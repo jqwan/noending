@@ -18,12 +18,9 @@ use rusqlite::Connection;
 mod support;
 
 use noending::adapters::AgentCommand;
-use noending::domain::{launch_status, Agent, LaunchIntent, Session};
+use noending::domain::{Agent, Session};
 use noending::error::Result;
-use noending::launcher::{
-    apply_match, resolve_resume_cwd, try_match_launch_intents_in, CwdSource, LaunchWorkspace,
-    SessionLauncher,
-};
+use noending::launcher::{resolve_resume_cwd, CwdSource, LaunchWorkspace, SessionLauncher};
 use noending::platform::exec_resolver::AgentInstallation;
 use noending::platform::launcher::LaunchOutcome;
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -489,7 +486,7 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
 
 // no phantom Session
 
-/// a launch records a durable `LaunchIntent` and creates **no** Session,
+/// a launch creates **no** Session,
 /// no WorkspacePath and no WorkstreamPath. Those appear only when the real
 /// Agent transcript is discovered.
 #[test]
@@ -511,7 +508,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
             &LaunchWorkspace::default(),
         )
         .unwrap();
-    assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 0);
+
     assert_eq!(count(&db, "SELECT COUNT(*) FROM sessions"), 0);
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM workstream_paths"),
@@ -545,293 +542,6 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
         count(&db, "SELECT COUNT(*) FROM workstream_paths"),
         paths_before,
         "and does not invent WorkstreamPath rows either"
-    );
-    assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 1);
-    let intents = db.list_launch_intents(&[], 10).unwrap();
-    assert_eq!(intents[0].status, launch_status::PENDING);
-    assert_eq!(intents[0].cwd.as_deref(), Some(primary.as_str()));
-    assert_eq!(intents[0].owner_workstream_id.as_deref(), Some(w.as_str()));
-}
-
-/// / when discovery finds the real Session and its transcript
-/// matches the intent, the Session's Owner becomes the intent's Owner and
-/// NOTHING else is written: matching never grows a WorkstreamPath and never
-/// invents a path row. Project membership keeps coming from the derived
-/// cache on the Session's own WorkspacePath, independently of the Owner.
-#[test]
-fn a_matched_session_inherits_the_owner_and_leaves_paths_untouched() {
-    let db = open_db("matched");
-    let dir = real_dir("matched", "repo");
-    let session_path = db
-        .tx(|tx| insert_workspace_path_conn(tx, &dir, PROJECT))
-        .unwrap();
-    let w = create_workstream(&db, &LexicalPaths, "launched", "", &[])
-        .unwrap()
-        .workstream
-        .id;
-    let intent = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(w.clone()),
-        cwd: Some(dir.clone()),
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-
-    // Discovery observed the Session: its cwd resolved to a WorkspacePath, whose
-    // Project was derived inside `upsert_session`.
-    let s = session_row(&db, Some(&dir), Some(&session_path));
-    assert_eq!(s.project_id.as_deref(), Some(PROJECT));
-    assert!(s.owner_workstream_id.is_none());
-    assert_eq!(count(&db, "SELECT COUNT(*) FROM workstream_paths"), 0);
-
-    apply_match(&db, &intent.id, &s, &LaunchWorkspace::default()).unwrap();
-
-    // The Owner is the intent's, verbatim.
-    let matched = db.get_session(&s.id).unwrap().unwrap();
-    assert_eq!(matched.owner_workstream_id.as_deref(), Some(w.as_str()));
-
-    // setting an Owner is the ONLY write: the Workstream's path list is
-    // not grown by the physical directory the Session happened to use.
-    assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM workstream_paths"),
-        0,
-        "a match must not invent a WorkstreamPath"
-    );
-    assert!(db.list_workstream_paths(&w).unwrap().is_empty());
-    assert!(
-        noending::workspace::workstream::projects_for_workstream(&db, &w)
-            .unwrap()
-            .is_empty()
-    );
-    // Physical membership is independent of semantic ownership: the Project
-    // still comes from the Session's own path.
-    assert_eq!(matched.project_id.as_deref(), Some(PROJECT));
-    assert_eq!(
-        matched.workspace_path_id.as_deref(),
-        Some(session_path.as_str())
-    );
-
-    let stored = db.get_launch_intent(&intent.id).unwrap().unwrap();
-    assert_eq!(stored.status, launch_status::MATCHED);
-    assert_eq!(stored.matched_session_id.as_deref(), Some(s.id.as_str()));
-}
-
-/// 's third tier routes independent launches into ONE shared directory, so
-/// cwd stops being evidence: two standalone launches at the default workspace
-/// must not auto-match each other's Session. They stay unresolved for a human,
-/// and a human decision applies each intent's Owner to its own Session.
-#[test]
-fn concurrent_default_workspace_launches_stay_ambiguous() {
-    let db = open_db("m15");
-    let default_ws = real_dir("m15", "workspace");
-    let a = ws_with_paths(&db, "A", &[real_dir("m15", "a")]);
-    let b = ws_with_paths(&db, "B", &[real_dir("m15", "b")]);
-    let launch = |ws: &str| LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(ws.to_string()),
-        cwd: Some(default_ws.clone()),
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    let intent_a = launch(&a);
-    let intent_b = launch(&b);
-    db.insert_launch_intent(&intent_a).unwrap();
-    db.insert_launch_intent(&intent_b).unwrap();
-    let discovered = session_row(&db, Some(&default_ws), None);
-
-    let matched =
-        try_match_launch_intents_in(&db, &discovered, &workspace(Some(&default_ws))).unwrap();
-    assert!(!matched, "a shared directory is not evidence: never guess");
-
-    let intents = db.list_launch_intents(&[], 10).unwrap();
-    assert_eq!(
-        intents
-            .iter()
-            .filter(|i| i.status == launch_status::AMBIGUOUS)
-            .count(),
-        2,
-        "双双 AMBIGUOUS — every tied candidate surfaces for the user, \
-         and neither may be auto-consumed by a directory they merely share"
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM sessions WHERE owner_workstream_id IS NOT NULL"
-        ),
-        0,
-        "an ambiguous match must not assign an Owner"
-    );
-
-    // The human decision is what assigns the Owner, and it cannot cross the two
-    // intents.
-    apply_match(&db, &intent_a.id, &discovered, &LaunchWorkspace::default()).unwrap();
-    assert_eq!(
-        db.get_session(&discovered.id)
-            .unwrap()
-            .unwrap()
-            .owner_workstream_id
-            .as_deref(),
-        Some(a.as_str())
-    );
-    let after = db.get_launch_intent(&intent_a.id).unwrap().unwrap();
-    assert_eq!(after.status, launch_status::MATCHED);
-    let other = db.get_launch_intent(&intent_b.id).unwrap().unwrap();
-    assert_eq!(other.status, launch_status::AMBIGUOUS);
-    assert_eq!(
-        other.matched_session_id, None,
-        "the other intent is untouched and stays available for its own Session"
-    );
-}
-
-/// / matching a Session back never teaches the Workstream the
-/// directory it happened to run in.
-///
-/// A New Session in a Workstream whose own paths are unusable lands in NoEnding
-/// Home's shared `workspace/` (tier 3). When that Session is matched back,
-/// the Owner is the user's launch-time decision and is recorded verbatim, but
-/// the directory NoEnding invented must not be appended to the Workstream's
-/// ordered list: it would outlive the fallback and misrepresent where the work
-/// happens.
-#[test]
-fn a_match_never_teaches_the_workstream_a_foreign_path() {
-    let db = open_db("no-laundering");
-    let default_ws = real_dir("no-laundering", "workspace");
-    let own = real_dir("no-laundering", "repo");
-    let w = ws_with_paths(&db, "Laundering", &[own.clone()]);
-    let intent = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(w.clone()),
-        cwd: Some(default_ws.clone()),
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-    // Discovery observed the Session running in the shared directory, so its
-    // cwd resolved to a WorkspacePath just like production's would.
-    let shared_path = db
-        .tx(|tx| insert_workspace_path_conn(tx, &default_ws, PROJECT))
-        .unwrap();
-    let s = session_row(&db, Some(&default_ws), Some(&shared_path));
-
-    apply_match(&db, &intent.id, &s, &workspace(Some(&default_ws))).unwrap();
-
-    assert_eq!(
-        db.get_session(&s.id)
-            .unwrap()
-            .unwrap()
-            .owner_workstream_id
-            .as_deref(),
-        Some(w.as_str()),
-        "the launch-time Owner is recorded"
-    );
-    assert_eq!(
-        path_count(&db, &w),
-        1,
-        "the shared fallback must not enter the Workstream's path list"
-    );
-    assert_eq!(
-        display_paths(&db, &w),
-        vec![own],
-        "the one path it has is still the one the user added"
-    );
-}
-
-fn path_count(db: &Db, workstream_id: &str) -> i64 {
-    db.read()
-        .query_row(
-            "SELECT COUNT(*) FROM workstream_paths WHERE workstream_id = ?1",
-            rusqlite::params![workstream_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap()
-}
-
-fn display_paths(db: &Db, workstream_id: &str) -> Vec<String> {
-    db.read()
-        .prepare(
-            "SELECT wp.canonical_path FROM workstream_paths p
-             JOIN workspace_paths wp ON wp.id = p.workspace_path_id
-             WHERE p.workstream_id = ?1 ORDER BY p.position",
-        )
-        .unwrap()
-        .query_map(rusqlite::params![workstream_id], |r| r.get::<_, String>(0))
-        .unwrap()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap()
-}
-
-/// A tie is only a tie when nothing else distinguishes the candidates. An
-/// explicit Workstream selection is a user statement, so it outranks a
-/// coincidental shared directory — but only against an equally-scored intent
-/// that selected nothing.
-#[test]
-fn an_explicit_selection_breaks_a_tie_a_shared_directory_cannot() {
-    let db = open_db("m15-tie");
-    let default_ws = real_dir("m15-tie", "workspace");
-    let selected = ws_with_paths(&db, "selected", &[real_dir("m15-tie", "p")]);
-    let chosen = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(selected.clone()),
-        cwd: Some(default_ws.clone()),
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    let standalone = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: None,
-        cwd: Some(default_ws.clone()),
-        launched_at: now(),
-        matched_session_id: None,
-        status: launch_status::PENDING.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&chosen).unwrap();
-    db.insert_launch_intent(&standalone).unwrap();
-    let discovered = session_row(&db, Some(&default_ws), None);
-
-    assert!(
-        try_match_launch_intents_in(&db, &discovered, &workspace(Some(&default_ws))).unwrap(),
-        "exactly one candidate named an Owner Workstream: that is the user's intent"
-    );
-    assert_eq!(
-        db.get_session(&discovered.id)
-            .unwrap()
-            .unwrap()
-            .owner_workstream_id
-            .as_deref(),
-        Some(selected.as_str())
-    );
-    assert_eq!(
-        db.get_launch_intent(&standalone.id)
-            .unwrap()
-            .unwrap()
-            .status,
-        launch_status::PENDING,
-        "the unselected intent is untouched, not consumed"
     );
 }
 

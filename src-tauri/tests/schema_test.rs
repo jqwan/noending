@@ -144,6 +144,7 @@ fn fresh_database_uses_current_format_generation() {
         "session_member_cursors",
         "session_ingest_state",
         "ingestion_diagnostics",
+        "launch_intents",
     ] {
         assert!(
             !object_exists(&db.read(), table),
@@ -156,16 +157,11 @@ fn fresh_database_uses_current_format_generation() {
         ("sessions", "project_id"),
         ("projects", "description"),
         ("session_messages", "raw_ref"),
-        ("launch_intents", "launch_type"),
-        ("launch_intents", "process_id"),
         ("sessions", "parent_agent_session_id"),
         ("projects", "archived"),
         ("workstreams", "project_id"),
         ("workstreams", "default_cwd"),
         ("workstream_paths", "source"),
-        ("launch_intents", "selected_workstream_ids"),
-        ("launch_intents", "context_bundle_markdown"),
-        ("launch_intents", "context_bundle_revisions"),
     ] {
         assert!(
             !has_column(&db.read(), table, column),
@@ -248,20 +244,6 @@ fn fresh_database_uses_current_format_generation() {
         assert!(
             has_column(&conn, "sessions", "owner_workstream_id"),
             "sessions.owner_workstream_id is missing"
-        );
-        // A pending LaunchIntent's chosen Owner follows the same rule:
-        // deleting the Workstream nulls it instead of dangling.
-        let intent_owner_fk: String = conn
-            .query_row(
-                "SELECT \"table\" || '|' || on_delete FROM pragma_foreign_key_list('launch_intents')
-                  WHERE \"from\" = 'owner_workstream_id'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap();
-        assert_eq!(
-            intent_owner_fk, "workstreams|SET NULL",
-            "launch_intents.owner_workstream_id must be workstreams(id) ON DELETE SET NULL"
         );
     }
 }

@@ -49,7 +49,8 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// 删除数据库重建。
 /// v2 — Workstream has only archive state; Session trash becomes archived_at.
 /// v3 — remove unused fields and the Session Project cache; slim FTS metadata.
-pub const DATABASE_FORMAT_VERSION: i64 = 3;
+/// v4 — remove launch intents; embedded terminals assign ownership by native ID.
+pub const DATABASE_FORMAT_VERSION: i64 = 4;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -409,18 +410,6 @@ const CURRENT_SCHEMA: &str = r#"
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS launch_intents (
-      id TEXT PRIMARY KEY,
-      agent TEXT NOT NULL,
-      owner_workstream_id TEXT REFERENCES workstreams(id) ON DELETE SET NULL,
-      cwd TEXT,
-      launched_at TEXT NOT NULL,
-      matched_session_id TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      note TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
     CREATE TABLE IF NOT EXISTS context_conflicts (
       id TEXT PRIMARY KEY,
       workstream_id TEXT NOT NULL REFERENCES workstreams(id),
@@ -449,7 +438,6 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_conflicts_workstream ON context_conflicts(workstream_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
-    CREATE INDEX IF NOT EXISTS idx_intents_status ON launch_intents(status);
     CREATE INDEX IF NOT EXISTS idx_workstream_frontiers_session
       ON workstream_session_frontiers(session_id);
 

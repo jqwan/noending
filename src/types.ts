@@ -205,7 +205,7 @@ export interface WorkstreamCardData {
 export interface Session {
   id: string;
   agent: Agent;
-  /** Root 成员的 Agent 侧 Resume 身份；LaunchIntent 匹配与 Resume 的唯一依据。 */
+  /** Root 成员的 Agent 侧 Resume 身份；终端绑定与 Resume 的唯一依据。 */
   root_agent_session_id: string;
   title: string | null;
   cwd: string | null;
@@ -216,7 +216,7 @@ export interface Session {
   /**
    * 语义归属：这条执行属于哪项持续工作。`null` = 未归属任务。
    * A Session has at most one Owner Workstream. 只由显式用户动作或匹配到的
-   * LaunchIntent 设置，fork 不继承。
+   * 新建终端首次绑定设置，fork 不继承。
    */
   owner_workstream_id: string | null;
   /** 若本会话是独立 fork，其来源会话（仅 provenance；生命周期完全独立）。 */
@@ -279,7 +279,6 @@ export interface LocalDeletePreview {
   message_count: number;
   /** 本 Session 的 Context 摘要行及其历史版本行。 */
   session_context_count: number;
-  launch_intent_count: number;
   context_revision_redaction_count: number;
 }
 
@@ -713,8 +712,6 @@ export interface LaunchResult {
   launched_via: string;
   command_line: string;
   note: string;
-  /** 本次启动留下的 LaunchIntent 行；crash recovery 与人工配对都靠它。 */
-  launch_intent_id: string | null;
   /** 内嵌终端启动才有：终端子页 attach 所需的 terminal_id。 */
   terminal_id?: string | null;
 }
@@ -726,6 +723,8 @@ export interface TerminalSummary {
   terminal_id: string;
   /** 当前原生会话尚未被摄入或身份未知时为 null。 */
   session_id: string | null;
+  /** 首次绑定前为启动时所选任务；绑定后为当前会话的所属任务。只在内存中保存。 */
+  owner_workstream_id: string | null;
   /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
   identity_revision: number;
   agent: Agent;

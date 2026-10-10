@@ -7,7 +7,7 @@ import type { TerminalSummary } from "../../types";
 vi.mock("../../api", () => ({ api: { terminalList: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn() } }));
 const session = { id: "s1", title: "Session", agent: "codex" as const };
 const terminal = (live: boolean): TerminalSummary => ({
-  terminal_id: "old", session_id: "s1", identity_revision: 1, agent: "codex",
+  terminal_id: "old", session_id: "s1", owner_workstream_id: null, identity_revision: 1, agent: "codex",
   live, exit_code: live ? null : 0, cwd: "/work", created_at: "", session_title: "Session",
 });
 beforeEach(() => {
@@ -15,8 +15,7 @@ beforeEach(() => {
   sessionTerminals.clear();
   vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.launchEmbeddedResume).mockResolvedValue({
-    terminal_id: "new", launched_via: "embedded", command_line: "", note: "", launch_intent_id: null,
-  });
+    terminal_id: "new", launched_via: "embedded", command_line: "", note: "", });
 });
 it("reuses a live terminal", async () => {
   vi.mocked(api.terminalForSession).mockResolvedValue(terminal(true));

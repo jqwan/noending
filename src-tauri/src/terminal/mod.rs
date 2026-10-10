@@ -64,6 +64,8 @@ pub struct TerminalBound {
 pub struct TerminalSummary {
     pub terminal_id: String,
     pub session_id: Option<String>,
+    /// Selected task before first binding; current Session's owner afterwards.
+    pub owner_workstream_id: Option<String>,
     pub identity_revision: u64,
     pub agent: Agent,
     pub cwd: Option<String>,
@@ -136,6 +138,8 @@ struct TerminalRecord {
     /// Current native root identity, supplied by the launch or an Agent event.
     /// It also retains a switched-to identity while its source is not ingested.
     root_agent_session_id: Option<String>,
+    /// One-shot task assignment for the launch's first native conversation.
+    pending_ownership: Option<PendingOwnership>,
     identity_bridge: Option<std::sync::Arc<identity::IdentityBridge>>,
     scrollback: Scrollback,
     cols: u16,
@@ -145,11 +149,19 @@ struct TerminalRecord {
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
 }
 
+struct PendingOwnership {
+    workstream_id: String,
+    native_id: Option<String>,
+}
+
 /// The backend's set of embedded terminals, keyed by `terminal_id`.
 /// Managed app state; `app` is `Some` in production (events flow to the
 /// webview) and `None` in tests (emits are skipped, everything else runs).
 pub struct TerminalRegistry {
     records: Mutex<HashMap<String, std::sync::Arc<Mutex<TerminalRecord>>>>,
+    /// Prevent close/switch from racing the first binding's ownership write.
+    /// Database work happens without holding a terminal record or PTY lock.
+    identity_mutations: Mutex<()>,
     /// Serializes NoEnding's own Resume launches; Agent-reported identity
     /// changes do not acquire this lock or impose exclusive Session ownership.
     /// Always acquired before `records`; never held across a process spawn.
@@ -176,6 +188,7 @@ impl TerminalRegistry {
     pub fn new(app: Option<AppHandle>) -> Self {
         Self {
             records: Mutex::new(HashMap::new()),
+            identity_mutations: Mutex::new(()),
             resume_reservations: Mutex::new(HashSet::new()),
             app,
         }
@@ -344,6 +357,7 @@ impl TerminalRegistry {
             return None;
         }
         let (summary, changed) = {
+            let _identity = self.identity_mutations.lock().ok()?;
             let records = self.records.lock().ok()?;
             let mut record = records.get(terminal_id)?.lock().ok()?;
             // Turn completion only refreshes the current conversation. It
@@ -363,9 +377,26 @@ impl TerminalRegistry {
                 .as_ref()
                 .is_some_and(|cwd| record.summary.cwd.as_ref() != Some(cwd));
             if identity_changed {
+                if let Some(pending) = &mut record.pending_ownership {
+                    if pending
+                        .native_id
+                        .as_ref()
+                        .is_some_and(|id| id != &event.native_id)
+                    {
+                        // The TUI switched before initial ingestion completed.
+                        // The launch task never follows an unrelated conversation.
+                        record.pending_ownership = None;
+                    } else {
+                        pending.native_id = Some(event.native_id.clone());
+                    }
+                }
                 record.root_agent_session_id = Some(event.native_id.clone());
                 record.summary.session_id = None;
                 record.summary.session_title = None;
+                record.summary.owner_workstream_id = record
+                    .pending_ownership
+                    .as_ref()
+                    .map(|pending| pending.workstream_id.clone());
             }
             if let Some(cwd) = &event.cwd {
                 record.summary.cwd = Some(cwd.clone());
@@ -393,7 +424,7 @@ impl TerminalRegistry {
         native_id: &str,
     ) {
         if let Ok(Some(session)) = db.find_session_by_root_agent_id(summary.agent, native_id) {
-            self.finish_native_binding(summary, native_id, &session);
+            self.finish_native_binding(db, summary, native_id, &session);
         }
     }
 
@@ -401,18 +432,22 @@ impl TerminalRegistry {
     /// Comparing both version and native ID also protects A -> B -> A switches.
     fn finish_native_binding(
         &self,
+        db: &crate::storage::Db,
         expected: &TerminalSummary,
         native_id: &str,
         session: &crate::domain::Session,
     ) {
-        let bound = {
+        let Ok(identity_guard) = self.identity_mutations.lock() else {
+            return;
+        };
+        let owner = {
             let Ok(records) = self.records.lock() else {
                 return;
             };
             let Some(record) = records.get(&expected.terminal_id) else {
                 return;
             };
-            let Ok(mut record) = record.lock() else {
+            let Ok(record) = record.lock() else {
                 return;
             };
             if record.summary.identity_revision != expected.identity_revision
@@ -423,16 +458,42 @@ impl TerminalRegistry {
             {
                 return;
             }
+            record
+                .pending_ownership
+                .as_ref()
+                .filter(|pending| pending.native_id.as_deref() == Some(native_id))
+                .map(|pending| pending.workstream_id.clone())
+        };
+        let current_owner = match db.inherit_terminal_owner(session, owner.as_deref()) {
+            Ok(owner) => owner,
+            Err(error) => {
+                eprintln!("[terminal] native binding failed: {error}");
+                return;
+            }
+        };
+        let bound = {
+            let Ok(records) = self.records.lock() else {
+                return;
+            };
+            let Some(record) = records.get(&expected.terminal_id) else {
+                return;
+            };
+            let Ok(mut record) = record.lock() else {
+                return;
+            };
             record.summary.session_id = Some(session.id.clone());
+            record.summary.owner_workstream_id = current_owner;
+            record.pending_ownership = None;
             record.summary.session_title = session.title.clone();
             record.summary.identity_revision += 1;
             record.summary.clone()
         };
+        drop(identity_guard);
         self.emit_identity(&bound);
     }
 
     /// Ingestion resolves pending native IDs. There is deliberately no message,
-    /// cwd, timestamp, LaunchIntent or exclusive-occupancy inference here.
+    /// cwd, timestamp or exclusive-occupancy inference here.
     pub fn bind_discovered(&self, db: &crate::storage::Db) {
         let waiting: Vec<_> = {
             let Ok(records) = self.records.lock() else {
@@ -465,6 +526,7 @@ impl TerminalRegistry {
     /// corpse. The wait thread still reaps the child (it holds its own Arc)
     /// and publishes terminal-exit + terminals-changed.
     pub fn close(&self, terminal_id: &str) -> Option<TerminalSummary> {
+        let _identity = self.identity_mutations.lock().ok()?;
         let removed = {
             let Ok(mut records) = self.records.lock() else {
                 return None;
@@ -594,6 +656,15 @@ impl TerminalRegistry {
     ) -> TerminalSummary {
         let terminal_id = summary.terminal_id.clone();
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
+            pending_ownership: summary
+                .session_id
+                .is_none()
+                .then(|| summary.owner_workstream_id.clone())
+                .flatten()
+                .map(|workstream_id| PendingOwnership {
+                    workstream_id,
+                    native_id: root_agent_session_id.clone(),
+                }),
             summary: summary.clone(),
             root_agent_session_id,
             identity_bridge,
@@ -672,7 +743,7 @@ impl TerminalRegistry {
     }
 }
 
-/// What an embedded Resume spawn needs beyond the `AgentCommand`. The
+/// What an embedded New / Resume spawn needs beyond the `AgentCommand`. The
 /// launcher builds this; [`spawn_embedded`] consumes it. Kept in this module
 /// so the dependency direction stays launcher → terminal.
 pub struct EmbeddedTarget<'a> {
@@ -681,6 +752,8 @@ pub struct EmbeddedTarget<'a> {
     /// registry entry starts unbound and binds when its native identity is
     /// available in the ingested Session store.
     pub session_id: Option<&'a str>,
+    /// New launches assign this task once; Resume reads its current owner.
+    pub owner_workstream_id: Option<&'a str>,
     /// Prespecified ID for NEW, or the known native ID for Resume. Future
     /// Agent events replace this identity when its TUI switches conversations.
     pub root_agent_session_id: Option<&'a str>,
@@ -709,6 +782,11 @@ pub fn spawn_embedded(
         .unwrap_or(cmd);
     let pty = spawn::PtyPair::open()?;
     let mut wrapped = spawn::wrapped_command(runtime_cmd);
+    if let Some(prepared) = &prepared_identity {
+        for (name, value) in &prepared.environment {
+            wrapped.env(name, value);
+        }
+    }
     // The webview uses xterm; a GUI launch may have no TERM or inherit "dumb",
     // which makes Codex stop before its lifecycle hooks can run.
     wrapped.env("TERM", "xterm-256color");
@@ -721,6 +799,7 @@ pub fn spawn_embedded(
     let summary = TerminalSummary {
         terminal_id: terminal_id.clone(),
         session_id: target.session_id.map(str::to_string),
+        owner_workstream_id: target.owner_workstream_id.map(str::to_string),
         identity_revision: 0,
         agent: target.agent,
         cwd: cmd.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
@@ -815,6 +894,7 @@ mod tests {
         EmbeddedTarget {
             registry,
             session_id: Some(session),
+            owner_workstream_id: None,
             root_agent_session_id: None,
             agent: Agent::Codex,
         }
@@ -850,6 +930,16 @@ mod tests {
         native_id: Option<&str>,
         session_id: Option<&str>,
     ) -> String {
+        identity_terminal_with_owner(registry, agent, native_id, session_id, None)
+    }
+
+    fn identity_terminal_with_owner(
+        registry: &TerminalRegistry,
+        agent: Agent,
+        native_id: Option<&str>,
+        session_id: Option<&str>,
+        owner: Option<&str>,
+    ) -> String {
         let pty = spawn::PtyPair::open().unwrap();
         let writer = pty.take_writer().unwrap();
         let terminal_id = new_id();
@@ -857,6 +947,7 @@ mod tests {
             summary: TerminalSummary {
                 terminal_id: terminal_id.clone(),
                 session_id: session_id.map(str::to_string),
+                owner_workstream_id: owner.map(str::to_string),
                 identity_revision: 0,
                 agent,
                 cwd: Some(fixture_cwd()),
@@ -866,6 +957,10 @@ mod tests {
                 session_title: None,
             },
             root_agent_session_id: native_id.map(str::to_string),
+            pending_ownership: owner.map(|owner| PendingOwnership {
+                workstream_id: owner.into(),
+                native_id: native_id.map(str::to_string),
+            }),
             identity_bridge: None,
             scrollback: Scrollback::default(),
             cols: INITIAL_COLS,
@@ -915,6 +1010,314 @@ mod tests {
             .unwrap()
             .0;
         db.get_session(&id).unwrap().unwrap()
+    }
+
+    fn selected_task(db: &crate::storage::Db, title: &str) -> String {
+        let id = new_id();
+        db.upsert_workstream(&crate::domain::Workstream {
+            id: id.clone(),
+            title: title.into(),
+            description: String::new(),
+            visibility: "normal".into(),
+            created_at: now(),
+            updated_at: now(),
+        })
+        .unwrap();
+        id
+    }
+
+    fn owner(db: &crate::storage::Db, session: &crate::domain::Session) -> Option<String> {
+        db.get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .owner_workstream_id
+    }
+
+    #[test]
+    fn launch_task_binds_by_agent_and_native_id_once_for_all_four_clis() {
+        let registry = registry();
+        let db = binding_db();
+        for agent in [
+            Agent::Codex,
+            Agent::ClaudeCode,
+            Agent::Pi,
+            Agent::Antigravity,
+        ] {
+            let first_task = selected_task(&db, "Initialtask");
+            let second_task = selected_task(&db, "Concurrenttask");
+            let initial = matches!(agent, Agent::ClaudeCode | Agent::Pi).then_some("native-a");
+            let terminal =
+                identity_terminal_with_owner(&registry, agent, initial, None, Some(&first_task));
+            let other = identity_terminal_with_owner(
+                &registry,
+                agent,
+                Some("native-b"),
+                None,
+                Some(&second_task),
+            );
+            registry
+                .report_native_identity(&db, &terminal, &native_event("native-a"))
+                .unwrap();
+            let b = ingested_native(&db, agent, "native-b");
+            registry.bind_discovered(&db);
+            assert!(registry
+                .attach(&terminal)
+                .unwrap()
+                .summary
+                .session_id
+                .is_none());
+            assert_eq!(owner(&db, &b).as_deref(), Some(second_task.as_str()));
+            assert_eq!(
+                registry
+                    .attach(&other)
+                    .unwrap()
+                    .summary
+                    .session_id
+                    .as_deref(),
+                Some(b.id.as_str())
+            );
+            let a = ingested_native(&db, agent, "native-a");
+            assert_eq!(
+                owner(&db, &a),
+                None,
+                "ingestion alone does not infer ownership from cwd or time"
+            );
+            registry.bind_discovered(&db);
+            assert_eq!(owner(&db, &a).as_deref(), Some(first_task.as_str()));
+            assert_eq!(
+                registry
+                    .attach(&terminal)
+                    .unwrap()
+                    .summary
+                    .owner_workstream_id
+                    .as_deref(),
+                Some(first_task.as_str())
+            );
+            assert!(crate::search::search(&db, "Initialtask", 50)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.kind == "session" && hit.ref_id == a.id));
+            // Clearing ownership explicitly cannot be undone by another lifecycle notice.
+            db.set_session_owner(&a.id, None).unwrap();
+            registry.report_native_identity(&db, &terminal, &native_event("native-a"));
+            registry.bind_discovered(&db);
+            assert_eq!(owner(&db, &a), None);
+            // Switching to another conversation reads that conversation's current task.
+            let current = registry
+                .report_native_identity(&db, &terminal, &native_event("native-b"))
+                .unwrap();
+            assert_eq!(
+                current.owner_workstream_id.as_deref(),
+                Some(second_task.as_str())
+            );
+            let c = ingested_native(&db, agent, "native-c");
+            registry.report_native_identity(&db, &terminal, &native_event("native-c"));
+            assert_eq!(owner(&db, &c), None);
+        }
+    }
+
+    #[test]
+    fn native_notice_after_unchanged_source_scan_still_assigns_the_launch_task() {
+        let registry = registry();
+        let db = binding_db();
+        let task = selected_task(&db, "Afterdiscovery");
+        let native = new_id();
+        let terminal =
+            identity_terminal_with_owner(&registry, Agent::Codex, None, None, Some(&task));
+        let root = std::env::temp_dir().join(format!("noending-owner-rollout-{}", new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = db
+            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+            .unwrap();
+        let meta = serde_json::json!({"ordinal": 0, "type": "session_meta", "timestamp": now(), "payload": {
+            "id": native, "timestamp": now(), "cwd": fixture_cwd(),
+        }});
+        let message = serde_json::json!({"ordinal": 1, "type": "response_item", "timestamp": now(), "payload": {
+            "type": "message", "id": "first", "role": "user", "content": [{"type": "input_text", "text": "真实首条消息"}],
+        }});
+        std::fs::write(
+            root.join(format!("rollout-2026-10-10T12-00-00-{native}.jsonl")),
+            format!("{meta}\n{message}\n"),
+        )
+        .unwrap();
+        let (discovered, messages) =
+            crate::ingestion::reconcile_source(&db, &source, &|_| {}).unwrap();
+        assert_eq!((discovered, messages), (1, 1));
+        let session = db
+            .find_session_by_root_agent_id(Agent::Codex, &native)
+            .unwrap()
+            .unwrap();
+        registry.bind_discovered(&db);
+        assert_eq!(owner(&db, &session), None);
+        assert!(registry
+            .attach(&terminal)
+            .unwrap()
+            .summary
+            .session_id
+            .is_none());
+        assert_eq!(
+            crate::ingestion::reconcile_source(&db, &source, &|_| {}).unwrap(),
+            (0, 0)
+        );
+        let bound = registry
+            .report_native_identity(&db, &terminal, &native_event(&native))
+            .unwrap();
+        assert_eq!(bound.session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(owner(&db, &session).as_deref(), Some(task.as_str()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn binding_preserves_explicit_owner_and_handles_deleted_launch_task() {
+        let registry = registry();
+        let db = binding_db();
+        let chosen = selected_task(&db, "Chosen");
+        let explicit = selected_task(&db, "Explicit");
+        let terminal = identity_terminal_with_owner(
+            &registry,
+            Agent::Codex,
+            Some("existing"),
+            None,
+            Some(&chosen),
+        );
+        let session = ingested_native(&db, Agent::Codex, "existing");
+        db.set_session_owner(&session.id, Some(&explicit)).unwrap();
+        registry.bind_discovered(&db);
+        assert_eq!(owner(&db, &session).as_deref(), Some(explicit.as_str()));
+        assert_eq!(
+            registry
+                .attach(&terminal)
+                .unwrap()
+                .summary
+                .owner_workstream_id
+                .as_deref(),
+            Some(explicit.as_str())
+        );
+        let terminal = identity_terminal_with_owner(
+            &registry,
+            Agent::Pi,
+            Some("deleted"),
+            None,
+            Some(&chosen),
+        );
+        db.delete_workstream(&chosen).unwrap();
+        let session = ingested_native(&db, Agent::Pi, "deleted");
+        registry.bind_discovered(&db);
+        let current = registry.attach(&terminal).unwrap().summary;
+        assert_eq!(current.session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(current.owner_workstream_id, None);
+        assert_eq!(owner(&db, &session), None);
+    }
+
+    #[test]
+    fn failed_ownership_write_retries_without_publishing_partial_binding() {
+        let registry = registry();
+        let db = binding_db();
+        let task = selected_task(&db, "Retrytask");
+        let terminal =
+            identity_terminal_with_owner(&registry, Agent::Codex, Some("retry"), None, Some(&task));
+        let session = ingested_native(&db, Agent::Codex, "retry");
+        db.write().execute_batch("CREATE TRIGGER reject_owner BEFORE UPDATE OF owner_workstream_id ON sessions BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        registry.bind_discovered(&db);
+        assert!(registry
+            .attach(&terminal)
+            .unwrap()
+            .summary
+            .session_id
+            .is_none());
+        assert_eq!(owner(&db, &session), None);
+        assert!(!crate::search::search(&db, "Retrytask", 50)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.kind == "session" && hit.ref_id == session.id));
+        db.write()
+            .execute_batch("DROP TRIGGER reject_owner;")
+            .unwrap();
+        registry.bind_discovered(&db);
+        assert_eq!(
+            registry
+                .attach(&terminal)
+                .unwrap()
+                .summary
+                .session_id
+                .as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(owner(&db, &session).as_deref(), Some(task.as_str()));
+    }
+
+    #[test]
+    fn launch_task_is_lost_on_close_restart_or_switch_before_binding() {
+        let db = binding_db();
+        let task = selected_task(&db, "Losttask");
+        let registry = registry();
+        let closed =
+            identity_terminal_with_owner(&registry, Agent::Pi, Some("closed"), None, Some(&task));
+        let delayed = registry.attach(&closed).unwrap().summary;
+        registry.close(&closed).unwrap();
+        let session = ingested_native(&db, Agent::Pi, "closed");
+        registry.finish_native_binding(&db, &delayed, "closed", &session);
+        registry.bind_discovered(&db);
+        assert_eq!(owner(&db, &session), None);
+        let switched =
+            identity_terminal_with_owner(&registry, Agent::Pi, Some("original"), None, Some(&task));
+        registry.report_native_identity(&db, &switched, &native_event("switched"));
+        let original = ingested_native(&db, Agent::Pi, "original");
+        let later = ingested_native(&db, Agent::Pi, "switched");
+        registry.bind_discovered(&db);
+        assert_eq!(owner(&db, &original), None);
+        assert_eq!(owner(&db, &later), None);
+        assert_eq!(
+            registry
+                .attach(&switched)
+                .unwrap()
+                .summary
+                .session_id
+                .as_deref(),
+            Some(later.id.as_str())
+        );
+        identity_terminal_with_owner(&registry, Agent::Codex, Some("restart"), None, Some(&task));
+        drop(registry);
+        let session = ingested_native(&db, Agent::Codex, "restart");
+        TerminalRegistry::new(None).bind_discovered(&db);
+        assert_eq!(owner(&db, &session), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_new_terminal_retains_task_until_discovery_even_after_agent_exits() {
+        let registry = registry();
+        let db = binding_db();
+        let task = selected_task(&db, "Actualspawn");
+        let outcome = spawn_embedded(
+            &sh("exit 0"),
+            &EmbeddedTarget {
+                registry: &registry,
+                session_id: None,
+                owner_workstream_id: Some(&task),
+                root_agent_session_id: Some("spawned-native"),
+                agent: Agent::Pi,
+            },
+        )
+        .unwrap();
+        let id = outcome.terminal_id.unwrap();
+        let initial = registry.attach(&id).unwrap().summary;
+        assert_eq!(initial.owner_workstream_id.as_deref(), Some(task.as_str()));
+        assert!(initial.session_id.is_none());
+        until("spawned terminal to exit", || {
+            registry
+                .attach(&id)
+                .ok()
+                .filter(|snapshot| !snapshot.summary.live)
+        });
+        let session = ingested_native(&db, Agent::Pi, "spawned-native");
+        registry.bind_discovered(&db);
+        assert_eq!(owner(&db, &session).as_deref(), Some(task.as_str()));
+        assert_eq!(
+            registry.attach(&id).unwrap().summary.session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        registry.close(&id).unwrap();
     }
 
     #[test]
@@ -988,33 +1391,39 @@ mod tests {
     fn native_switch_to_uningested_b_clears_a_and_waits_only_for_b() {
         let registry = registry();
         let db = binding_db();
-        let a = ingested_native(&db, Agent::ClaudeCode, "native-a");
-        let terminal =
-            identity_terminal(&registry, Agent::ClaudeCode, Some("native-a"), Some(&a.id));
-        let waiting = registry
-            .report_native_identity(&db, &terminal, &native_event("native-b"))
-            .unwrap();
-        assert!(waiting.session_id.is_none());
-        assert!(waiting.session_title.is_none());
-        assert!(registry.for_session(&a.id).is_none());
+        for agent in [Agent::ClaudeCode, Agent::Antigravity] {
+            let a = ingested_native(&db, agent, "native-a");
+            let terminal = identity_terminal(&registry, agent, Some("native-a"), Some(&a.id));
+            let waiting = registry
+                .report_native_identity(&db, &terminal, &native_event("native-b"))
+                .unwrap();
+            assert!(waiting.session_id.is_none());
+            assert!(waiting.session_title.is_none());
+            assert!(registry.for_session(&a.id).is_none());
 
-        registry.bind_discovered(&db);
-        let still_waiting = registry.attach(&terminal).unwrap().summary;
-        assert!(still_waiting.session_id.is_none());
-        assert_eq!(still_waiting.identity_revision, waiting.identity_revision);
-        let b = ingested_native(&db, Agent::ClaudeCode, "native-b");
-        registry.bind_discovered(&db);
-        let bound = registry.attach(&terminal).unwrap().summary;
-        assert_eq!(bound.session_id.as_deref(), Some(b.id.as_str()));
-        assert!(bound.identity_revision > waiting.identity_revision);
-        assert!(registry.for_session(&a.id).is_none());
+            registry.bind_discovered(&db);
+            let still_waiting = registry.attach(&terminal).unwrap().summary;
+            assert!(still_waiting.session_id.is_none());
+            assert_eq!(still_waiting.identity_revision, waiting.identity_revision);
+            let b = ingested_native(&db, agent, "native-b");
+            registry.bind_discovered(&db);
+            let bound = registry.attach(&terminal).unwrap().summary;
+            assert_eq!(bound.session_id.as_deref(), Some(b.id.as_str()));
+            assert!(bound.identity_revision > waiting.identity_revision);
+            assert!(registry.for_session(&a.id).is_none());
+        }
     }
 
     #[test]
     fn late_turn_completion_cannot_restore_a_previous_native_identity() {
         let registry = registry();
         let db = binding_db();
-        for (agent, completion_source) in [(Agent::ClaudeCode, "Stop"), (Agent::Pi, "agent_end")] {
+        for (agent, completion_source) in [
+            (Agent::ClaudeCode, "Stop"),
+            (Agent::Codex, "Stop"),
+            (Agent::Pi, "agent_end"),
+            (Agent::Antigravity, "Stop"),
+        ] {
             let a = ingested_native(&db, agent, "native-a");
             let b = ingested_native(&db, agent, "native-b");
             let terminal = identity_terminal(&registry, agent, Some("native-a"), Some(&a.id));
@@ -1082,7 +1491,7 @@ mod tests {
             .unwrap();
         assert!(current.session_id.is_none());
 
-        registry.finish_native_binding(&old_lookup, "native-a", &a);
+        registry.finish_native_binding(&db, &old_lookup, "native-a", &a);
         let after_old_lookup = registry.attach(&terminal).unwrap().summary;
         assert!(after_old_lookup.session_id.is_none());
         assert_eq!(
@@ -1126,7 +1535,7 @@ mod tests {
         assert!(current.session_id.is_none());
         assert!(current.identity_revision > old_lookup.identity_revision);
 
-        registry.finish_native_binding(&old_lookup, "native-a", &a);
+        registry.finish_native_binding(&db, &old_lookup, "native-a", &a);
         let after_old_lookup = registry.attach(&terminal).unwrap().summary;
         assert!(
             after_old_lookup.session_id.is_none(),
@@ -1150,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_native_identity_does_not_infer_from_prompt_cwd_time_or_launch_intent() {
+    fn unknown_native_identity_does_not_infer_from_prompt_cwd_or_time() {
         let registry = registry();
         let db = binding_db();
         let source = ingested_native(&db, Agent::Codex, "external-native");
@@ -1176,19 +1585,6 @@ mod tests {
         )
         .unwrap();
         let ts = source.started_at.as_ref().unwrap();
-        db.insert_launch_intent(&crate::domain::LaunchIntent {
-            id: "intent-matched".into(),
-            agent: Agent::Codex,
-            owner_workstream_id: None,
-            cwd: source.cwd.clone(),
-            launched_at: ts.clone(),
-            matched_session_id: Some(source.id.clone()),
-            status: crate::domain::launch_status::MATCHED.into(),
-            note: String::new(),
-            created_at: ts.clone(),
-            updated_at: ts.clone(),
-        })
-        .unwrap();
         for native_id in [None, Some("not-in-the-store")] {
             let terminal = identity_terminal(&registry, Agent::Codex, native_id, None);
             {
@@ -1235,7 +1631,7 @@ mod tests {
             Some(claude.id.as_str())
         );
         let expected_pi = registry.attach(&pi_terminal).unwrap().summary;
-        registry.finish_native_binding(&expected_pi, "same-native", &codex);
+        registry.finish_native_binding(&db, &expected_pi, "same-native", &codex);
         assert!(registry
             .attach(&pi_terminal)
             .unwrap()
@@ -1252,7 +1648,7 @@ mod tests {
         let terminal = identity_terminal(&registry, Agent::Pi, Some("native-a"), None);
         let pending_lookup = registry.attach(&terminal).unwrap().summary;
         assert!(registry.close(&terminal).is_some());
-        registry.finish_native_binding(&pending_lookup, "native-a", &session);
+        registry.finish_native_binding(&db, &pending_lookup, "native-a", &session);
         assert!(registry
             .report_native_identity(&db, &terminal, &native_event("native-a"))
             .is_none());
@@ -1534,6 +1930,7 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: None,
+                owner_workstream_id: None,
                 root_agent_session_id: Some("root-born-identity"),
                 agent: Agent::Pi,
             },
@@ -1583,6 +1980,7 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: Some("s-live"),
+                owner_workstream_id: None,
                 root_agent_session_id: None,
                 agent: Agent::Codex,
             },

@@ -1,14 +1,11 @@
 //! Session Launcher — New / Resume flows (技术实现).
 //!
-//! New Session: a durable LaunchIntent is created BEFORE the agent starts
-//! (the external session id is unknowable at that point). When reconcile
-//! later discovers the new external session, the intent is matched and the
-//! user's chosen Workstream becomes the Session's single Owner.
-//! Nothing else is written: no WorkstreamPath and no confidence.
+//! New Session: the embedded terminal holds the chosen task in memory and
+//! assigns it once when its native conversation is ingested.
 //!
 //! Resume: starts the Agent in the Session's own directory. Neither flow
 //! synchronizes or injects Context: a launch carries only launch facts (Agent,
-//! cwd, runtime, Owner, LaunchIntent) and an optional first user turn for New.
+//! cwd, runtime, Owner) and an optional first user turn for New.
 //! Context is consumed on demand from the Session / Workstream pages.
 //!
 //! Working directory: every launch resolves
@@ -21,21 +18,13 @@
 
 use std::path::PathBuf;
 
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::{AgentCommand, DesktopResume};
 use crate::agent_runtime::AgentRuntimeOverrides;
-use crate::domain::{launch_status, Agent, LaunchIntent, Session};
+use crate::domain::Agent;
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
-
-/// LaunchIntent matching window: a discovered session may only claim an
-/// intent launched within this range before the session started.
-const MATCH_WINDOW_SECS: i64 = 6 * 3600;
-const MATCH_CLOCK_SKEW_SECS: i64 = 120;
-/// Pending intents older than this never match again.
-const INTENT_TTL_SECS: i64 = 24 * 3600;
 
 /// How a prepared launch decided the directory the Agent will start in
 ///. This is a *user-visible* fact, not an implementation detail:
@@ -201,7 +190,6 @@ pub struct LaunchResult {
     pub launched_via: String,
     pub command_line: String,
     pub note: String,
-    pub launch_intent_id: Option<String>,
     /// Set when this launch opened the embedded terminal: the id the
     /// frontend attaches the terminal subpage to.
     #[serde(default)]
@@ -233,7 +221,7 @@ impl SessionLauncher {
     /// Resolves cwd, freezes the runtime intent, and captures a state
     /// fingerprint. NO Context is built or injected.
     ///
-    /// INVARIANT: Zero premature side effects. Does NOT insert LaunchIntent,
+    /// INVARIANT: Zero premature side effects. Does NOT write launch history,
     /// does NOT write any file, and does NOT touch Context.
     ///
     /// `cwd` is the caller's explicit directory: when present it IS the launch
@@ -404,7 +392,7 @@ impl SessionLauncher {
     /// 2. Identity preservation: passes the EXACT prepared runtime overrides
     ///    (NO re-reading Settings) and starts the Agent in `prepared.cwd` (NO
     ///    re-resolving).
-    /// 3. Commits the LaunchIntent (new) only upon actual launch. No Context
+    /// 3. New embedded terminals receive the chosen task in memory. No Context
     ///    file, no injection, no pre-sync.
     /// `launch_prepared` with the current [`LaunchWorkspace`].
     ///
@@ -477,20 +465,6 @@ impl SessionLauncher {
             if let Some(owner) = prepared.owner_workstream_id.as_deref() {
                 require_unarchived_owner(db, owner)?;
             }
-            let intent = LaunchIntent {
-                id: new_id(),
-                agent: prepared.agent,
-                owner_workstream_id: prepared.owner_workstream_id.clone(),
-                cwd: prepared.cwd.clone(),
-                launched_at: now(),
-                matched_session_id: None,
-                status: launch_status::PENDING.into(),
-                note: String::new(),
-                created_at: now(),
-                updated_at: now(),
-            };
-            db.insert_launch_intent(&intent)?;
-
             let install = resolve_install(db, prepared.agent)?;
             let adapter = crate::adapters::adapter_for(prepared.agent);
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
@@ -532,6 +506,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: None,
+                        owner_workstream_id: prepared.owner_workstream_id.as_deref(),
                         root_agent_session_id: expected_root_session_id.as_deref(),
                         agent: prepared.agent,
                     },
@@ -540,39 +515,16 @@ impl SessionLauncher {
                 spawn(&cmd)?
             };
 
-            // Record how the Agent was started. Guarded like every other write
-            // to a waiting intent: this note describes an intent that is still
-            // PENDING, and a match that landed in between must not be reset to
-            // waiting by it.
-            if let Err(e) = db.tx(|tx| {
-                crate::storage::update_waiting_launch_intent_conn(
-                    tx,
-                    &intent.id,
-                    launch_status::PENDING,
-                    &format!(
-                        "launched_via={};pid={:?};runtime={}",
-                        outcome.launched_via,
-                        outcome.pid,
-                        prepared.runtime.intent_summary()
-                    ),
-                )
-            }) {
-                // The OS process is already running. A bookkeeping write must
-                // not turn that successful launch into a reported failure.
-                eprintln!(
-                    "[launcher] Agent started (pid {:?}) but LaunchIntent detail could not be saved: {e}",
-                    outcome.pid
-                );
-            }
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
                 command_line: public_command_line.unwrap_or(outcome.command_line),
-                note: if prepared.owner_workstream_id.is_some() {
-                    "新 Session 启动后会在发现时通过 LaunchIntent 自动归属所选任务。".into()
+                note: if prepared.owner_workstream_id.is_some() && prepared.embedded {
+                    "会话摄入并绑定终端后，将归属所选任务。".into()
+                } else if prepared.owner_workstream_id.is_some() {
+                    "已在外部终端启动；摄入后请手动设置所属任务。".into()
                 } else {
                     "已直接启动；本次未选择所属任务。".into()
                 },
-                launch_intent_id: Some(intent.id),
                 terminal_id: outcome.terminal_id,
             })
         } else {
@@ -595,7 +547,7 @@ impl SessionLauncher {
             // A desktop-open Continue never reaches the terminal: the frozen
             // URI is dispatched via the platform's open-uri, and the CLI-
             // specific steps below (installation resolution, argv building,
-            // terminal spawn) do not apply. No LaunchIntent: the session
+            // terminal spawn) do not apply: the session
             // already exists and was not launched anew.
             if let Some(desktop) = &prepared.desktop_open {
                 open(&desktop.uri)?;
@@ -603,7 +555,6 @@ impl SessionLauncher {
                     launched_via: "desktop app".into(),
                     command_line: desktop.uri.clone(),
                     note: desktop.note.clone(),
-                    launch_intent_id: None,
                     terminal_id: None,
                 });
             }
@@ -647,6 +598,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: Some(session_id),
+                        owner_workstream_id: session.owner_workstream_id.as_deref(),
                         root_agent_session_id: Some(&session.root_agent_session_id),
                         agent: session.agent,
                     },
@@ -667,7 +619,6 @@ impl SessionLauncher {
                 } else {
                     "已直接在原工作目录恢复该会话。".into()
                 },
-                launch_intent_id: None,
                 terminal_id: outcome.terminal_id,
             })
         }
@@ -1067,236 +1018,6 @@ fn recompute_launch_cwd(
     resolve_new_cwd(None, workspace)
 }
 
-// ---------------------------------------------------------------------------
-// LaunchIntent matching
-// ---------------------------------------------------------------------------
-
-/// Try to match a newly discovered session against pending LaunchIntents.
-/// Signals: agent type (required), launch→session timing, cwd. One clear
-/// winner → auto-match; several close candidates → ambiguous (never
-/// silently guess); nothing → stays pending for a later reconcile.
-///
-/// Run against the real Home so 's shared-default-workspace rule can
-/// be applied.
-///
-/// The matcher is told which directory every "no Workstream path" launch shares.
-///
-/// 's third tier routes several independent launches into the
-/// *same* cwd, and cwd was worth `+3.0` — enough on its own to look decisive.
-/// A directory that many intents share carries no distinguishing evidence, so
-/// against the default workspace it is worth `+1.0`, and a real cwd match still
-/// outranks it. When scores are otherwise tied, the intent whose user *chose an
-/// Owner Workstream* wins: an explicit choice is a stronger statement than a
-/// coincidental directory. Anything still tied stays AMBIGUOUS for a human — no
-/// guessing.
-pub fn try_match_launch_intents_in(
-    db: &Db,
-    session: &Session,
-    workspace: &LaunchWorkspace,
-) -> Result<bool> {
-    let pending =
-        db.list_launch_intents(&[launch_status::PENDING, launch_status::AMBIGUOUS], 100)?;
-    if pending.is_empty() {
-        return Ok(false);
-    }
-    let session_start = session
-        .started_at
-        .as_deref()
-        .or(session.last_activity_at.as_deref())
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .map(|t| t.with_timezone(&chrono::Utc));
-
-    let mut scored: Vec<(LaunchIntent, f64)> = Vec::new();
-    for intent in pending {
-        if intent.agent != session.agent {
-            continue;
-        }
-        if intent.matched_session_id.as_deref() == Some(session.id.as_str()) {
-            continue;
-        }
-        let launched = match chrono::DateTime::parse_from_rfc3339(&intent.launched_at) {
-            Ok(t) => t.with_timezone(&chrono::Utc),
-            Err(_) => continue,
-        };
-        let Some(start) = session_start else { continue };
-        let lower = launched - chrono::Duration::seconds(MATCH_CLOCK_SKEW_SECS);
-        let upper = launched + chrono::Duration::seconds(MATCH_WINDOW_SECS);
-        if start < lower || start > upper {
-            continue;
-        }
-        let mut score = 1.0;
-        match (&intent.cwd, &session.cwd) {
-            (Some(ic), Some(sc)) if !ic.is_empty() => {
-                if sc.starts_with(ic) || ic.starts_with(sc) {
-                    // the shared default workspace is not a
-                    // discriminator, however exact the match looks.
-                    score += if Some(ic) == workspace.default_workspace.as_ref() {
-                        1.0
-                    } else {
-                        3.0
-                    };
-                }
-            }
-            _ => {}
-        }
-        // closeness bonus: the sooner after launch, the stronger the signal
-        if let Ok(delta) = (start - launched).to_std() {
-            let secs = delta.as_secs() as f64;
-            if secs < 60.0 {
-                score += 2.0;
-            } else if secs < 600.0 {
-                score += 1.0;
-            }
-        }
-        scored.push((intent, score));
-    }
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    match scored.len() {
-        0 => Ok(false),
-        1 => {
-            let (intent, _) = scored.remove(0);
-            apply_match(db, &intent.id, session, workspace)?;
-            Ok(true)
-        }
-        _ => {
-            let best_score = scored[0].1;
-            let second = scored[1].1;
-            let clear = best_score - second >= 2.0;
-            // A tie is only a tie if nothing else distinguishes the candidates:
-            // one intent with an explicit Workstream selection wins it.
-            let tied = |score: f64| (score - best_score).abs() < f64::EPSILON;
-            let selected: Vec<&LaunchIntent> = scored
-                .iter()
-                .filter(|(_, s)| tied(*s))
-                .map(|(i, _)| i)
-                .filter(|i| i.owner_workstream_id.is_some())
-                .collect();
-            if clear {
-                let (intent, _) = scored.remove(0);
-                apply_match(db, &intent.id, session, workspace)?;
-                Ok(true)
-            } else if selected.len() == 1 {
-                apply_match(db, &selected[0].id, session, workspace)?;
-                Ok(true)
-            } else {
-                // every tied top candidate is awaiting the user, not
-                // just the first one — marking only one would hide the other
-                // behind a PENDING state that says "still being discovered".
-                let note = format!(
-                    "多个候选 Session（score {:.1} vs {:.1}），等待用户确认",
-                    best_score, second
-                );
-                // One transaction, and every write is guarded: "still waiting"
-                // must never be written over an intent another match already
-                // consumed (, one-shot capability).
-                db.tx(|tx| {
-                    for (intent, _) in scored.iter().filter(|(_, s)| tied(*s)) {
-                        crate::storage::update_waiting_launch_intent_conn(
-                            tx,
-                            &intent.id,
-                            launch_status::AMBIGUOUS,
-                            &format!(
-                                "{}（{}）",
-                                note,
-                                if intent.owner_workstream_id.is_some() {
-                                    "已选所属任务"
-                                } else {
-                                    "未归属"
-                                }
-                            ),
-                        )?;
-                    }
-                    Ok(())
-                })?;
-                Ok(false)
-            }
-        }
-    }
-}
-
-/// Consume a LaunchIntent for `session`: the ONE Session that gets to inherit
-/// its Owner and its delivery snapshot.
-///
-/// `intent_id` is the whole input — the intent is re-read INSIDE the writer
-/// transaction, because the copy the caller matched on can be arbitrarily old
-/// by the time the lock is taken. Everything the match depends on is verified
-/// there:
-///
-/// * the intent still waits (PENDING/AMBIGUOUS) and no Session has claimed it;
-/// * its Agent is the Session's Agent;
-/// * the Session still exists;
-/// * the final status write is a CAS whose affected rows must be 1.
-///
-/// Together those make the intent a capability that can be spent once: two
-/// resolvers reading the same PENDING intent cannot both hand it out, and a
-/// failure anywhere leaves the intent exactly as waiting as it was.
-///
-/// `_workspace` stays in the signature because every caller and test drives
-/// this through the same launcher seam; matching itself no longer consults the
-/// default workspace, since a match writes ownership only.
-pub fn apply_match(
-    db: &Db,
-    intent_id: &str,
-    session: &Session,
-    _workspace: &LaunchWorkspace,
-) -> Result<()> {
-    db.tx(|tx| {
-        let intent = crate::storage::get_launch_intent_conn(tx, intent_id)?
-            .ok_or_else(|| other("LaunchIntent 不存在"))?;
-        let waiting = matches!(
-            intent.status.as_str(),
-            launch_status::PENDING | launch_status::AMBIGUOUS
-        );
-        if !waiting || intent.matched_session_id.is_some() {
-            return Err(other("该 LaunchIntent 已被其他匹配处理，本次匹配作废"));
-        }
-        if intent.agent != session.agent {
-            return Err(other("LaunchIntent 与 Session 的 Agent 不一致，拒绝匹配"));
-        }
-        // The Session row decides, not the caller's copy: it may have been
-        // removed since the match was computed. Trash is not a refusal — a
-        // trashed Session still follows its source and still takes its Owner.
-        let current: Option<String> = tx
-            .query_row(
-                "SELECT agent FROM sessions WHERE id = ?1",
-                rusqlite::params![session.id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match current {
-            Some(agent) if agent == intent.agent.as_str() => {}
-            _ => return Err(other("Session 不存在，无法匹配 LaunchIntent")),
-        }
-
-        // The matched Session inherits the intent's Owner Workstream verbatim
-        //. Nothing else is written: no WorkstreamPath is added, and
-        // the Session's cwd / workspace_path_id / project_id stay untouched.
-        // Reading the intent here also means a Workstream deleted after the
-        // match was computed is seen as the NULL the FK already wrote, rather
-        // than as the stale id the caller read.
-        if let Some(ws_id) = intent.owner_workstream_id.as_deref() {
-            crate::storage::set_session_owner_conn(tx, &session.id, Some(ws_id))?;
-        }
-        // Status LAST, and as a CAS: an intent that says MATCHED always has the
-        // Session and its Owner to go with it, and neither can land without the
-        // other. Zero affected rows means another writer consumed the intent
-        // between our read and this statement — the transaction rolls back
-        // rather than overwrite their match.
-        let claimed = crate::storage::mark_launch_intent_matched_conn(
-            tx,
-            &intent.id,
-            &session.id,
-            &format!("自动匹配：session {}", session.id),
-        )?;
-        if !claimed {
-            return Err(other("该 LaunchIntent 已被其他匹配消费，本次匹配作废"));
-        }
-        Ok(())
-    })
-}
-
 /// Is the Session still the one a preparation was built for? True only while it
 /// exists, is not trashed, and still names `owner` as its Owner Workstream.
 ///
@@ -1314,41 +1035,6 @@ pub fn preparation_matches_current_owner(
         .get_session(session_id)?
         .map(|s| !s.is_archived() && s.owner_workstream_id.as_deref() == owner)
         .unwrap_or(false))
-}
-
-/// Pending intents that never produced a session expire; ambiguous ones
-/// wait for the user and only expire after 3× the TTL.
-pub fn expire_stale_launch_intents(db: &Db) -> Result<usize> {
-    let pending =
-        db.list_launch_intents(&[launch_status::PENDING, launch_status::AMBIGUOUS], 500)?;
-    let now_ts = chrono::Utc::now();
-    let mut expired = 0;
-    // One transaction, and each write only touches intent that still wait:
-    // expiring by id alone would overwrite a match that landed after the list
-    // above was read.
-    for intent in pending {
-        let ttl = if intent.status == launch_status::AMBIGUOUS {
-            INTENT_TTL_SECS * 3
-        } else {
-            INTENT_TTL_SECS
-        };
-        if let Ok(launched) = chrono::DateTime::parse_from_rfc3339(&intent.launched_at) {
-            if now_ts - launched.with_timezone(&chrono::Utc) > chrono::Duration::seconds(ttl) {
-                let expired_now = db.tx(|tx| {
-                    crate::storage::update_waiting_launch_intent_conn(
-                        tx,
-                        &intent.id,
-                        launch_status::EXPIRED,
-                        "超时未发现匹配 Session",
-                    )
-                })?;
-                if expired_now {
-                    expired += 1;
-                }
-            }
-        }
-    }
-    Ok(expired)
 }
 
 fn require_unarchived_owner(db: &Db, owner: &str) -> Result<()> {

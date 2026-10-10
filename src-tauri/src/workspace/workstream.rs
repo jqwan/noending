@@ -12,7 +12,7 @@
 //! `context_item_revisions` → `context_items` → `context_deliveries` →
 //! `workstream_paths` → `workstream_review_state` (cascades) → `workstreams`.
 //! Never touched: `sessions`, `session_members`, `session_messages`,
-//! `launch_intents`, `workspace_paths`, and the Agents' raw source data. A
+//! `workspace_paths`, and the Agents' raw source data. A
 //! Session survives via its `owner_workstream_id` `ON DELETE SET NULL`.
 //!
 //! Removing a WorkstreamPath touches the

@@ -224,7 +224,7 @@ export const api = {
     invoke<{ uri: string; note: string }>("continue_session_desktop", { sessionId }),
 
   /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
-   *  摄入发现后经 LaunchIntent 绑定）。返回携带 terminal_id。 */
+   *  Agent 通知或预设原生 ID 与摄入记录精确匹配后绑定）。返回携带 terminal_id。 */
   launchEmbeddedNew: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string, initialMessage?: string) =>
     invoke<LaunchResult>("launch_embedded_new", {
       agent,

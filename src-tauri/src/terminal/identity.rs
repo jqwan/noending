@@ -2,7 +2,10 @@
 //!
 //! Nothing is inferred from terminal output or message text. Each embedded
 //! launch gets its own authenticated loopback listener and temporary, explicit
-//! CLI resources; the user's persistent configuration is never changed.
+//! CLI resources. Antigravity uses a dedicated persistent plugin, gated by
+//! per-launch environment; existing user configuration is never replaced.
+
+mod antigravity;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -88,6 +91,7 @@ impl Drop for IdentityBridge {
 pub struct PreparedIdentityBridge {
     pub command: AgentCommand,
     pub bridge: IdentityBridge,
+    pub environment: Vec<(String, String)>,
 }
 
 /// Add lifecycle observation to supported CLIs without changing their prompt
@@ -97,7 +101,25 @@ pub fn prepare(
     agent: Agent,
     terminal_id: &str,
 ) -> Result<Option<PreparedIdentityBridge>> {
-    if !matches!(agent, Agent::ClaudeCode | Agent::Codex | Agent::Pi) {
+    let root = (agent == Agent::Antigravity)
+        .then(|| {
+            crate::platform::paths::resolve_antigravity_cli_dir()
+                .ok_or_else(|| other("无法定位 Antigravity CLI 配置目录"))
+        })
+        .transpose()?;
+    prepare_at(command, agent, terminal_id, root.as_deref())
+}
+
+fn prepare_at(
+    command: &AgentCommand,
+    agent: Agent,
+    terminal_id: &str,
+    antigravity_root: Option<&Path>,
+) -> Result<Option<PreparedIdentityBridge>> {
+    if !matches!(
+        agent,
+        Agent::ClaudeCode | Agent::Codex | Agent::Pi | Agent::Antigravity
+    ) {
         return Ok(None);
     }
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
@@ -112,7 +134,19 @@ pub fn prepare(
         resource_dir,
     };
 
+    let mut environment = Vec::new();
     let args = match agent {
+        Agent::Antigravity => {
+            let root = antigravity_root.ok_or_else(|| other("Antigravity CLI root missing"))?;
+            antigravity::install_plugin(root, &std::env::current_exe()?)?;
+            environment.push(antigravity::environment(
+                address,
+                &token,
+                terminal_id,
+                root,
+            )?);
+            Vec::new()
+        }
         Agent::ClaudeCode => {
             let plugin = bridge.resource_dir.join("claude-plugin");
             create_private_dir(&plugin)?;
@@ -188,6 +222,7 @@ pub fn prepare(
     Ok(Some(PreparedIdentityBridge {
         command: observed,
         bridge,
+        environment,
     }))
 }
 
@@ -468,21 +503,33 @@ fn hook_event(value: serde_json::Value) -> Option<NativeIdentityEvent> {
     })
 }
 
-/// Called before Tauri startup. Hook helpers do not open the app/database or
+/// Called before Tauri startup. Hook helpers do not open the app/NoEnding database or
 /// run an Agent. A stale/closed listener is harmless to the Agent lifecycle.
 pub fn run_hook_helper_if_requested() -> Option<i32> {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() != Some(HELPER_FLAG) {
-        return None;
-    }
-    if let Err(error) = run_hook_helper(args.collect(), std::io::stdin().lock()) {
+    let arguments = match args.next().as_deref() {
+        Some(antigravity::HELPER_FLAG) => {
+            let source = args.next().unwrap_or_default();
+            // Always return the neutral protocol response, even for a stale
+            // listener or a normal CLI launched outside NoEnding.
+            println!("{}", antigravity::response(&source));
+            match antigravity::helper_arguments(&source) {
+                Some(arguments) => arguments,
+                None => return Some(0),
+            }
+        }
+        Some(HELPER_FLAG) => args.collect(),
+        _ => return None,
+    };
+    if let Err(error) = run_hook_helper(arguments, std::io::stdin().lock()) {
         eprintln!("[noending] identity notification: {error}");
     }
     Some(0)
 }
 
 fn run_hook_helper(args: Vec<String>, input: impl Read) -> Result<()> {
-    if args.len() != 4 {
+    let is_antigravity = args.get(3).is_some_and(|agent| agent == "antigravity");
+    if args.len() != if is_antigravity { 6 } else { 4 } {
         return Err(other("invalid identity helper arguments"));
     }
     let address: SocketAddr = args[0]
@@ -496,7 +543,13 @@ fn run_hook_helper(args: Vec<String>, input: impl Read) -> Result<()> {
     if bytes.len() as u64 > MAX_EVENT_BYTES {
         return Err(other("identity notification exceeds size limit"));
     }
-    let Some(event) = hook_event(serde_json::from_slice(&bytes)?) else {
+    let value = serde_json::from_slice(&bytes)?;
+    let event = if args[3] == "antigravity" {
+        antigravity::hook_event(value, &args[4], Path::new(&args[5]))
+    } else {
+        hook_event(value)
+    };
+    let Some(event) = event else {
         return Ok(());
     };
     let active_record = if args[3] == "claude_code" {
@@ -653,7 +706,7 @@ mod tests {
             drop(prepared);
             assert!(!dir.exists());
         }
-        assert!(prepare(&command(), Agent::Antigravity, "terminal")
+        assert!(prepare(&command(), Agent::ZCode, "terminal")
             .unwrap()
             .is_none());
     }

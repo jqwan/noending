@@ -511,47 +511,6 @@ pub fn resolve_conflict(
 // Ingestion is automatic and never calls AI; Context is updated only by the
 // explicit commands above.
 
-// ---------------- Launch intents ----------------
-
-#[tauri::command]
-pub fn list_launch_intents(
-    state: State<AppState>,
-    statuses: Option<Vec<String>>,
-    limit: Option<i64>,
-) -> Result<Vec<LaunchIntent>> {
-    with_db(&state, |db| {
-        let default = vec![
-            launch_status::PENDING.to_string(),
-            launch_status::AMBIGUOUS.to_string(),
-        ];
-        let statuses = statuses.unwrap_or(default);
-        let refs: Vec<&str> = statuses.iter().map(|s| s.as_str()).collect();
-        db.list_launch_intents(&refs, limit.unwrap_or(50))
-    })
-}
-
-/// Manual resolution of an ambiguous LaunchIntent: the user picks which
-/// discovered session the launch actually produced.
-#[tauri::command]
-pub fn resolve_launch_intent(
-    app: AppHandle,
-    state: State<AppState>,
-    intent_id: String,
-    session_id: String,
-) -> Result<()> {
-    let workspace = launch_workspace(&app);
-    with_db(&state, |db| {
-        let intent = db
-            .get_launch_intent(&intent_id)?
-            .ok_or_else(|| other("LaunchIntent 不存在"))?;
-        let session = db
-            .get_session(&session_id)?
-            .ok_or_else(|| other("Session 不存在"))?;
-        // Ownership follows the source; `apply_match` owns the rule.
-        crate::launcher::apply_match(db, &intent.id, &session, &workspace)
-    })
-}
-
 // ---------------- Launcher ----------------
 
 #[tauri::command]
@@ -752,8 +711,9 @@ pub fn launch_embedded_resume(
 /// session in ONE step. The spawned terminal starts UNBOUND — the session
 /// does not exist until the TUI writes its file and ingestion discovers it,
 /// at which point an exact native identity binds the terminal
-/// and the board's pseudo-row becomes a real session. A reconcile is enqueued
-/// right away so discovery happens as soon as the file lands.
+/// and the board's pseudo-row becomes a real session. Agent lifecycle
+/// notifications enqueue ingestion for that Agent; spawning the terminal
+/// itself does not enqueue a full reconcile.
 #[tauri::command]
 pub fn launch_embedded_new(
     app: AppHandle,
@@ -784,11 +744,9 @@ pub fn launch_embedded_new(
         registry: &terminal,
         spawn: crate::terminal::spawn_embedded,
     };
-    let result = with_db(&state, |db| {
+    with_db(&state, |db| {
         launcher.launch_prepared_in(db, &prepared, &workspace, Some(&embedded))
-    })?;
-    ingestion::enqueue(&app, ingestion::IngestScope::ReconcileAll);
-    Ok(result)
+    })
 }
 
 /// Retained embedded terminals (including exited), newest first, with each
@@ -806,6 +764,7 @@ pub fn terminal_list(
                 if let Some(session_id) = &t.session_id {
                     if let Ok(Some(session)) = db.get_session(session_id) {
                         t.session_title = session.title;
+                        t.owner_workstream_id = session.owner_workstream_id;
                     }
                 }
             }
@@ -991,11 +950,10 @@ pub fn terminal_attach(
 ) -> Result<crate::terminal::TerminalSnapshot> {
     let mut snapshot = terminal.attach(&terminal_id)?;
     if let Some(session_id) = &snapshot.summary.session_id {
-        snapshot.summary.session_title = with_db(&state, |db| {
-            Ok(db
-                .get_session(session_id)?
-                .and_then(|session| session.title))
-        })?;
+        if let Some(session) = with_db(&state, |db| db.get_session(session_id))? {
+            snapshot.summary.session_title = session.title;
+            snapshot.summary.owner_workstream_id = session.owner_workstream_id;
+        }
     }
     Ok(snapshot)
 }

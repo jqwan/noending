@@ -222,7 +222,7 @@ pub fn reindex_workstream_search_conn(conn: &Connection, workstream_id: &str) ->
 ///
 /// NOT touched, on purpose: `sessions` (only their `owner_workstream_id` is
 /// cleared by the FK in step 9; the rows survive), `session_members`,
-/// `session_messages`, `launch_intents`, `workspace_paths`, `projects`, the Session
+/// `session_messages`, `workspace_paths`, `projects`, the Session
 /// Contexts themselves and the Agents' raw source data.
 pub fn purge_workstream_data_conn(tx: &Transaction<'_>, workstream_id: &str) -> Result<()> {
     // 1. conflict audit trail — references context_conflicts.

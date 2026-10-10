@@ -17,7 +17,6 @@ use noending::adapters::{adapter_for, DiscoveredMember, DiscoveredMemberKind};
 use noending::domain::{Agent, Session};
 use noending::error::Result;
 use noending::ingestion::{ingest_session, reconcile_all, session_title_sources};
-use noending::launcher::LaunchWorkspace;
 use noending::storage::session_paths::attach_session_workspace_path_conn;
 use noending::storage::workspace::{
     insert_workspace_path_conn, reassign_workspace_path_project_conn,
@@ -133,7 +132,7 @@ fn discover_via_reconcile(
         db.add_ingest_source(Agent::Codex, &root_str, true).unwrap();
     }
     let _ = shared_attacher();
-    reconcile_all(db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(db, &|_| {}).unwrap();
     db.find_session_by_root_agent_id(Agent::Codex, agent_session_id)
         .unwrap()
         .expect("discovered through the real adapter")
@@ -176,7 +175,7 @@ fn discovered_session_gets_a_workspace_path() {
 
     // Re-discovery of the same transcript skips the unchanged source, so no
     // second attach happens and no second path row can appear.
-    reconcile_all(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(&db, &|_| {}).unwrap();
     assert_eq!(
         db.list_workspace_paths().unwrap().len(),
         1,
@@ -446,7 +445,7 @@ fn project_membership_changes_without_refreshing_session_rows() {
         Some("p2")
     );
     assert_eq!(
-        db.reconcile_retry_sessions(None).unwrap()[0]
+        db.list_sessions(Default::default()).unwrap()[0]
             .project_id
             .as_deref(),
         Some("p2")
@@ -534,7 +533,7 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
             rusqlite::params![s.id],
         )
         .unwrap();
-    reconcile_all(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(&db, &|_| {}).unwrap();
     let after = stored(&db, &s.id);
     assert_eq!(
         after.last_activity_at.as_deref(),
@@ -550,7 +549,7 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
             rusqlite::params![s.id],
         )
         .unwrap();
-    reconcile_all(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+    reconcile_all(&db, &|_| {}).unwrap();
     let healed = stored(&db, &s.id);
     assert!(
         healed.title.is_some(),

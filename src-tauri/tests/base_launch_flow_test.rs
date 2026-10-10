@@ -1,9 +1,9 @@
 //! Base Experience launch tests: the simplified New / Resume flow, where New
 //! Session always runs `prepare_new_in → launch_prepared` (the UI-side
 //! direct-launch path is gone), even standalone with zero Workstreams. A
-//! launch carries launch facts only (Agent, cwd, runtime, Owner, LaunchIntent)
+//! launch carries launch facts only (Agent, cwd, runtime, Owner)
 //! — never a Context sync, a Context file or an injection. Preparation commits
-//! nothing, launching commits exactly one single-use LaunchIntent, and the
+//! nothing; the capability is single-use and the
 //! spawn step is injected via `launch_prepared_with_in` so no Terminal opens.
 
 use rusqlite::Connection;
@@ -11,7 +11,7 @@ mod support;
 
 use noending::adapters::adapter_for;
 use noending::adapters::{AgentCommand, DesktopResume, ResumeRoute};
-use noending::domain::{Agent, LaunchIntent};
+use noending::domain::Agent;
 use noending::error::Result;
 use noending::launcher::{CwdSource, LaunchWorkspace, PreparedLaunch, SessionLauncher};
 use noending::platform::exec_resolver::AgentInstallation;
@@ -50,12 +50,6 @@ impl WorkspaceAttaching for LexicalPaths {
             None => None,
         })
     }
-}
-
-fn count(db: &Db, sql: &str) -> i64 {
-    db.read()
-        .query_row(sql, [], |r| r.get::<_, i64>(0))
-        .unwrap()
 }
 
 /// Point the resolver at a binary that certainly exists so `resolve_install`
@@ -122,11 +116,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     assert!(prepared.owner_workstream_id.is_none());
     assert!(prepared.cwd.is_none());
     assert!(prepared.runtime.is_default());
-    assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM launch_intents"),
-        0,
-        "prepare must not commit a LaunchIntent"
-    );
+
     assert!(
         !bundle_dir.exists(),
         "prepare must not write a context file, even for a launch that will succeed"
@@ -143,25 +133,16 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
         )
         .expect("standalone prepared launch must succeed");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
-    assert!(result.launch_intent_id.is_some());
-
-    // The user's explicit (empty) selection is still durably recorded for reconcile.
-    let intents: Vec<LaunchIntent> = db.list_launch_intents(&[], 100).unwrap();
-    assert_eq!(intents.len(), 1, "one launch = one LaunchIntent");
-    assert!(
-        intents[0].owner_workstream_id.is_none(),
-        "standalone launch records no Owner, never a guessed one"
-    );
 
     assert!(!bundle_dir.exists(), "no context file may be written");
 }
 
 /// An embedded NEW launch goes through the same seam with an UNBOUND
-/// terminal: the LaunchResult carries the terminal id, the LaunchIntent is
-/// still committed for attribution, and the target's session_id is None —
+/// terminal: the LaunchResult carries the terminal id and the target's
+/// session_id is None —
 /// the registry entry starts unbound and ingestion binds it later.
 #[test]
-fn an_embedded_new_launch_spawns_unbound_and_still_commits_the_intent() {
+fn an_embedded_new_launch_spawns_unbound() {
     let db = open_db("embedded-new");
     seed_installation(&db, Agent::Codex);
     let launcher = launcher_in("embedded-new");
@@ -194,14 +175,6 @@ fn an_embedded_new_launch_spawns_unbound_and_still_commits_the_intent() {
         .expect("embedded new launch must succeed");
     assert_eq!(result.launched_via, "test-embedded-spawn");
     assert_eq!(result.terminal_id.as_deref(), Some("term-test-1"));
-    assert!(
-        result.launch_intent_id.is_some(),
-        "attribution still rides the LaunchIntent"
-    );
-
-    let intents: Vec<LaunchIntent> = db.list_launch_intents(&[], 100).unwrap();
-    assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0].status, noending::domain::launch_status::PENDING);
 }
 
 const FIRST_MESSAGE: &str = "  请开始实现\n$(id) 'literal' \"message\"  ";
@@ -211,6 +184,7 @@ fn capture_embedded_new_message(
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
+    assert_eq!(target.owner_workstream_id, Some("first-message-task"));
     assert_eq!(
         target.root_agent_session_id.is_some(),
         matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
@@ -242,8 +216,13 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
         seed_installation(&db, agent);
         let launcher = launcher_in("first-message");
         let workspace = LaunchWorkspace::default();
+        db.upsert_workstream(&support::workstream(
+            "first-message-task".into(),
+            "Chosen task",
+        ))
+        .unwrap();
         let mut prepared = launcher
-            .prepare_new_in(&db, agent, None, None, &workspace)
+            .prepare_new_in(&db, agent, Some("first-message-task"), None, &workspace)
             .unwrap();
         assert!(prepared.initial_message.is_none());
         prepared.embedded = true;
@@ -268,40 +247,7 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
         assert!(!result.command_line.contains("请开始实现"), "{agent:?}");
         assert!(!result.command_line.contains("$(id)"), "{agent:?}");
         assert_eq!(result.terminal_id.as_deref(), Some("term-first-message"));
-        assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 1);
     }
-}
-
-#[test]
-fn bookkeeping_failure_after_spawn_keeps_the_successful_launch_result() {
-    let db = open_db("post-spawn-bookkeeping-failure");
-    seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("post-spawn-bookkeeping-failure");
-    let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
-        .unwrap();
-    db.write()
-        .execute_batch(
-            "CREATE TRIGGER reject_launch_note BEFORE UPDATE OF note ON launch_intents
-             BEGIN SELECT RAISE(ABORT, 'simulated bookkeeping failure'); END;",
-        )
-        .unwrap();
-
-    let result = launcher
-        .launch_prepared_with_in(
-            &db,
-            &prepared,
-            &LaunchWorkspace::default(),
-            fake_spawn,
-            fake_open,
-            None,
-        )
-        .expect("a successful OS spawn remains a successful launch");
-    assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
-    assert!(result.launch_intent_id.is_some());
-    let intents = db.list_launch_intents(&[], 10).unwrap();
-    assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0].note, "");
 }
 
 /// The New modal consumes its capability on click; a second click (or a
@@ -337,7 +283,6 @@ fn prepared_launch_capability_is_single_use() {
         consume_once(&map, &id).is_err(),
         "a consumed prepared launch must never be consumable again"
     );
-    assert_eq!(count(&db, "SELECT COUNT(*) FROM launch_intents"), 1);
 }
 
 /// The cwd the New Session form shows is the backend's resolution, not a
@@ -560,7 +505,7 @@ fn the_continue_route_follows_the_source_format() {
 
 /// Launch honors the frozen desktop route: the URI goes through the
 /// injected open, the terminal spawn never runs, no CLI installation is
-/// required, and no LaunchIntent is committed (nothing new was launched).
+/// required, and no new Session is created.
 #[test]
 fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
     let db = open_db("desktop-open-resume");
@@ -600,15 +545,6 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
     assert_eq!(result.launched_via, "desktop app");
     assert_eq!(result.command_line, "workbuddy://chat/test-session");
     assert_eq!(result.note, "test note");
-    assert!(
-        result.launch_intent_id.is_none(),
-        "a desktop open resumes an existing session; it launches nothing new"
-    );
-    assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM launch_intents"),
-        0,
-        "no LaunchIntent without a terminal launch"
-    );
 }
 
 /// The antigravity adapter keys its route on the SOURCE FORMAT: the CLI
@@ -749,8 +685,8 @@ fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
     assert_eq!(result.launched_via, "test-embedded-spawn");
     assert_eq!(result.terminal_id.as_deref(), Some("term-test-1"));
     assert!(result.note.contains("内嵌终端"));
-    // Embedded launches nothing new in the ingestion sense: no LaunchIntent.
-    assert!(result.launch_intent_id.is_none());
+    // Resume does not create a new ingested Session.
+
     assert!(
         registry.reserve_resume(&sid).is_ok(),
         "the reservation is released after the injected spawn returns"
@@ -902,6 +838,7 @@ fn reconnect_fixture(
         &noending::terminal::EmbeddedTarget {
             registry,
             session_id: Some(sid),
+            owner_workstream_id: None,
             root_agent_session_id: Some(&session.root_agent_session_id),
             agent: session.agent,
         },

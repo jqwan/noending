@@ -295,12 +295,12 @@ pub struct Session {
     pub id: Id, // internal stable id (app-owned)
     pub agent: Agent,
     /// The root source's Agent-side Resume identity. Authority for
-    /// LaunchIntent matching and `resume`.
+    /// terminal binding and `resume`.
     pub root_agent_session_id: String,
     pub title: Option<String>,
     /// Semantic ownership: the one Workstream this Logical Session belongs to,
     /// or `None`. At most one Owner. Only an explicit user action
-    /// or a matched LaunchIntent sets it — never fork inheritance.
+    /// or the first native terminal binding sets it — never fork inheritance.
     pub owner_workstream_id: Option<Id>,
     pub cwd: Option<String>,
     pub workspace_path_id: Option<Id>,
@@ -654,31 +654,6 @@ pub struct IngestSource {
 pub mod ingest_origin {
     pub const DEFAULT: &str = "default";
     pub const USER: &str = "user";
-}
-
-/// Stable, recoverable record of "user launched an agent and chose this
-/// Workstream" — created before the agent session id is knowable, matched
-/// when discovery finds the new external session.
-#[derive(Debug, Clone, Serialize)]
-pub struct LaunchIntent {
-    pub id: Id,
-    pub agent: Agent,
-    pub owner_workstream_id: Option<Id>,
-    pub cwd: Option<String>,
-    pub launched_at: String,
-    pub matched_session_id: Option<Id>,
-    pub status: String, // pending | matched | ambiguous | expired | failed
-    pub note: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-pub mod launch_status {
-    pub const PENDING: &str = "pending";
-    pub const MATCHED: &str = "matched";
-    pub const AMBIGUOUS: &str = "ambiguous";
-    pub const EXPIRED: &str = "expired";
-    pub const FAILED: &str = "failed";
 }
 
 /// Where a piece of context came from and how strongly it is held. The values

@@ -277,7 +277,6 @@ function preview(over: Partial<LocalDeletePreview> = {}): LocalDeletePreview {
     root_source_status: "missing",
     message_count: 3,
     session_context_count: 0,
-    launch_intent_count: 0,
     context_revision_redaction_count: 0,
     ...over,
   };
@@ -307,7 +306,6 @@ it("checks the root source before confirming and says the copy will be rebuilt",
   // 而不是在生产里把整棵树渲染崩成黑屏。
   screen.getByText("3 条会话消息");
   screen.getByText("0 条 Context 摘要记录");
-  screen.getByText("0 条启动记录");
   screen.getByText("上下文来源改写 0 条");
   screen.getByRole("button", { name: "删除" });
 });

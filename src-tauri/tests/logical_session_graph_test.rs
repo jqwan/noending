@@ -1,5 +1,5 @@
 //! Logical Session resolution end-to-end: discovery batch → session
-//! resolution → atomic ingest commit → LaunchIntent root-only.
+//! resolution → atomic ingest commit.
 //!
 //! Fixtures are Codex rollouts (plain JSONL), the one adapter whose sources
 //! express child threads (`thread_source=subagent`), side threads
@@ -9,9 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use noending::adapters::all_adapters;
-use noending::domain::{Agent, LaunchIntent, ParsedSessionMessage, Session, SessionMessageRole};
+use noending::domain::{Agent, ParsedSessionMessage, Session, SessionMessageRole};
 use noending::ingestion;
-use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
 
 fn temp_root(tag: &str) -> PathBuf {
@@ -27,7 +26,7 @@ fn temp_root(tag: &str) -> PathBuf {
 
 /// A Codex session-meta envelope. Extra fields (thread_source,
 /// parent_thread_id, history_base) ride in the payload. Timestamps are
-/// `now` so LaunchIntent match windows stay open.
+/// `now` as the fixture timestamp.
 fn meta_line(id: &str, extra: serde_json::Value) -> String {
     let mut payload = serde_json::json!({
         "session_id": id, "id": id,
@@ -88,7 +87,7 @@ fn enable_codex_source(db: &Db, root: &Path) {
 }
 
 fn reconcile(db: &Db) -> (usize, i64) {
-    ingestion::reconcile_all(db, &LaunchWorkspace::default(), &|_| {}).unwrap()
+    ingestion::reconcile_all(db, &|_| {}).unwrap()
 }
 
 const ROOT_ID: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
@@ -288,77 +287,102 @@ fn child_transcript_text_never_becomes_conversation() {
 
 #[test]
 fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
-    let root_dir = temp_root("missing-root");
-    let root_path = write_rollout(
-        &root_dir,
-        &rollout_name(ROOT_ID),
-        &[
-            meta_line(ROOT_ID, serde_json::json!({})),
-            message_line(1, "m1", "user", "最初的提问"),
-        ],
-    );
-    let db = open_db("missing-root");
-    enable_codex_source(&db, &root_dir);
-    reconcile(&db);
+    for owned in [false, true] {
+        let root_dir = temp_root("missing-root");
+        let root_path = write_rollout(
+            &root_dir,
+            &rollout_name(ROOT_ID),
+            &[
+                meta_line(ROOT_ID, serde_json::json!({})),
+                message_line(1, "m1", "user", "最初的提问"),
+            ],
+        );
+        let db = open_db("missing-root");
+        enable_codex_source(&db, &root_dir);
+        reconcile(&db);
 
-    let session = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
-        .unwrap()
+        let session = db
+            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .unwrap()
+            .unwrap();
+        if owned {
+            let task = noending::domain::Workstream {
+                id: new_id(),
+                title: "Selected task".into(),
+                description: String::new(),
+                visibility: "normal".into(),
+                created_at: now(),
+                updated_at: now(),
+            };
+            db.upsert_workstream(&task).unwrap();
+            db.set_session_owner(&session.id, Some(&task.id)).unwrap();
+        }
+        let cursor = db
+            .get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor();
+
+        std::fs::remove_file(&root_path).unwrap();
+        for _ in 0..2 {
+            let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(db.message_count(&session.id).unwrap(), 1);
+            assert_eq!(
+                db.get_session(&session.id)
+                    .unwrap()
+                    .unwrap()
+                    .source_cursor()
+                    .byte_offset,
+                cursor.byte_offset,
+                "a missing source must not advance its cursor"
+            );
+        }
+
+        // The source returns and GREW: the stored session resumes from its cursor.
+        std::fs::write(
+            &root_path,
+            format!(
+                "{}\n{}\n{}\n",
+                meta_line(ROOT_ID, serde_json::json!({})),
+                message_line(1, "m1", "user", "最初的提问"),
+                message_line(2, "m2", "assistant", "后续回答")
+            ),
+        )
         .unwrap();
-    let cursor = db
-        .get_session(&session.id)
-        .unwrap()
-        .unwrap()
-        .source_cursor();
-
-    std::fs::remove_file(&root_path).unwrap();
-    for _ in 0..2 {
-        let report =
-            ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
+        let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert_eq!(db.message_count(&session.id).unwrap(), 1);
-        assert_eq!(
+        assert_eq!(db.message_count(&session.id).unwrap(), 2);
+        assert!(
             db.get_session(&session.id)
                 .unwrap()
                 .unwrap()
                 .source_cursor()
-                .byte_offset,
-            cursor.byte_offset,
-            "a missing source must not advance its cursor"
+                .byte_offset
+                > cursor.byte_offset,
+            "the returning file must be ingested"
         );
+
+        // A path that exists but is not a readable file is still an error.
+        std::fs::remove_file(&root_path).unwrap();
+        std::fs::create_dir(&root_path).unwrap();
+        let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+        assert!(!report.failures.is_empty());
+        let source = db
+            .list_ingest_sources()
+            .unwrap()
+            .into_iter()
+            .find(|source| source.path == root_dir.to_string_lossy())
+            .unwrap();
+        assert!(ingestion::reconcile_source(&db, &source, &|_| {}).is_err());
+        db.set_ingest_source_enabled(&source.id, false).unwrap();
+        let disabled_report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+        assert!(
+            disabled_report.failures.is_empty(),
+            "disabled sources must not be retried"
+        );
+        assert_eq!(db.message_count(&session.id).unwrap(), 2);
     }
-
-    // The source returns and GREW: the stored session resumes from its cursor.
-    std::fs::write(
-        &root_path,
-        format!(
-            "{}\n{}\n{}\n",
-            meta_line(ROOT_ID, serde_json::json!({})),
-            message_line(1, "m1", "user", "最初的提问"),
-            message_line(2, "m2", "assistant", "后续回答")
-        ),
-    )
-    .unwrap();
-    let report =
-        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
-    assert!(report.failures.is_empty(), "{:?}", report.failures);
-    assert_eq!(db.message_count(&session.id).unwrap(), 2);
-    assert!(
-        db.get_session(&session.id)
-            .unwrap()
-            .unwrap()
-            .source_cursor()
-            .byte_offset
-            > cursor.byte_offset,
-        "the returning file must be ingested"
-    );
-
-    // A path that exists but is not a readable file is still an error.
-    std::fs::remove_file(&root_path).unwrap();
-    std::fs::create_dir(&root_path).unwrap();
-    let report =
-        ingestion::reconcile_all_report(&db, &LaunchWorkspace::default(), &|_| {}).unwrap();
-    assert!(!report.failures.is_empty());
 }
 
 /// A child rollout whose cwd differs is invisible: it never becomes a
@@ -617,125 +641,6 @@ fn support_workstream(id: &str) -> noending::domain::Workstream {
         created_at: now(),
         updated_at: now(),
     }
-}
-
-/// LaunchIntent matching is ROOT-only: a child/side discovery can
-/// never claim a pending intent; the root discovery does.
-#[test]
-fn launch_intents_match_roots_only() {
-    let root_dir = temp_root("intent");
-    write_rollout(
-        &root_dir,
-        &rollout_name(CHILD_ID),
-        &[meta_line(
-            CHILD_ID,
-            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
-        )],
-    );
-    let db = open_db("intent");
-    enable_codex_source(&db, &root_dir);
-    let ws = support_workstream("ws-intent");
-    db.upsert_workstream(&ws).unwrap();
-    let intent = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(ws.id.clone()),
-        cwd: Some("/repo-a".into()),
-        // Within the match window of the fixture timestamps (both are now).
-        launched_at: chrono_now(),
-        matched_session_id: None,
-        status: "pending".into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-
-    // Pass 1: only the child. Nothing may match.
-    reconcile(&db);
-    let after_child = db.get_launch_intent(&intent.id).unwrap().unwrap();
-    assert_eq!(
-        after_child.status, "pending",
-        "a child never claims an intent"
-    );
-    assert_eq!(after_child.matched_session_id, None);
-
-    // Pass 2: the root arrives and claims it.
-    write_rollout(
-        &root_dir,
-        &rollout_name(ROOT_ID),
-        &[
-            meta_line(ROOT_ID, serde_json::json!({})),
-            message_line(1, "m1", "user", "提问"),
-        ],
-    );
-    reconcile(&db);
-    let after_root = db.get_launch_intent(&intent.id).unwrap().unwrap();
-    assert_eq!(after_root.status, "matched");
-    let sessions = db.list_sessions(Default::default()).unwrap();
-    let root_session = sessions
-        .iter()
-        .find(|s| s.root_agent_session_id == ROOT_ID)
-        .unwrap();
-    assert_eq!(
-        after_root.matched_session_id.as_deref(),
-        Some(root_session.id.as_str())
-    );
-    assert_eq!(
-        root_session.owner_workstream_id.as_deref(),
-        Some(ws.id.as_str()),
-        "the matched intent sets the Root session's Owner"
-    );
-}
-
-#[test]
-fn unchanged_root_retries_a_pending_launch_intent() {
-    let root_dir = temp_root("intent-retry");
-    write_rollout(
-        &root_dir,
-        &rollout_name(ROOT_ID),
-        &[
-            meta_line(ROOT_ID, serde_json::json!({})),
-            message_line(1, "m1", "user", "提问"),
-        ],
-    );
-    let db = open_db("intent-retry");
-    enable_codex_source(&db, &root_dir);
-    reconcile(&db);
-    let session = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
-        .unwrap()
-        .unwrap();
-    let owner = support_workstream("ws-intent-retry");
-    db.upsert_workstream(&owner).unwrap();
-    let intent = LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(owner.id.clone()),
-        cwd: Some("/repo-a".into()),
-        launched_at: chrono_now(),
-        matched_session_id: None,
-        status: "pending".into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-
-    reconcile(&db);
-
-    assert_eq!(
-        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
-        "matched"
-    );
-    assert_eq!(
-        db.get_session(&session.id)
-            .unwrap()
-            .unwrap()
-            .owner_workstream_id
-            .as_deref(),
-        Some(owner.id.as_str())
-    );
 }
 
 // ingestion atomicity

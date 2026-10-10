@@ -220,22 +220,6 @@ fn permanent_delete_preserves_sessions_and_their_events() {
     ];
     db.commit_ingest(&s.id, &messages, &support::seed_source(0))
         .unwrap();
-    // A LaunchIntent naming this Workstream is historical evidence:
-    // forbids a fourth path column on it, and M6 forbids touching it at all.
-    let intent = noending::domain::LaunchIntent {
-        id: new_id(),
-        agent: Agent::Codex,
-        owner_workstream_id: Some(w.id.clone()),
-        cwd: Some("/repo/docs".into()),
-        launched_at: now(),
-        matched_session_id: Some(s.id.clone()),
-        status: noending::domain::launch_status::MATCHED.into(),
-        note: String::new(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.insert_launch_intent(&intent).unwrap();
-
     archive_workstream(&db, &w.id).unwrap();
     delete_workstream_permanently(&db, &w.id).unwrap();
 
@@ -257,10 +241,7 @@ fn permanent_delete_preserves_sessions_and_their_events() {
         2,
         "the fact frontier survives the purge"
     );
-    assert_eq!(
-        db.get_launch_intent(&intent.id).unwrap().unwrap().status,
-        noending::domain::launch_status::MATCHED
-    );
+
     assert_eq!(db.list_workspace_paths().unwrap().len(), 2);
     assert!(
         db.get_project("p1").unwrap().is_some(),

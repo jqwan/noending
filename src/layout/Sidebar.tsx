@@ -46,7 +46,7 @@ export function mergeSidebarSessions(sessions: Session[], terminals: TerminalSum
     let row = rows.get(key);
     if (!row) {
       row = { id: key, sessionId: terminal.session_id, agent: terminal.agent, title: terminal.session_title ?? "新会话", cwd: terminal.cwd,
-        owner_workstream_id: null, project_id: null, last_conversation_at: null, archived_at: null, terminals: [], activityAt: 0 };
+        owner_workstream_id: terminal.owner_workstream_id, project_id: null, last_conversation_at: null, archived_at: null, terminals: [], activityAt: 0 };
       rows.set(key, row);
     }
     row.terminals.push(terminal);

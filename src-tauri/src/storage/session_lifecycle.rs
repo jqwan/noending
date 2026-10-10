@@ -77,7 +77,6 @@ pub struct PermanentDeletionCounts {
     pub message_count: i64,
     /// Committed Session Context rows and their revision history.
     pub session_context_count: i64,
-    pub launch_intent_count: i64,
     /// Revisions whose provenance will be redacted to `deleted_session`
     /// (their content survives — only the source pointers die).
     pub context_revision_redaction_count: i64,
@@ -93,9 +92,6 @@ impl PermanentDeletionCounts {
             session_context_count: count(
                 "SELECT (SELECT COUNT(*) FROM session_contexts WHERE session_id = ?1)
                       + (SELECT COUNT(*) FROM session_context_revisions WHERE session_id = ?1)",
-            )?,
-            launch_intent_count: count(
-                "SELECT COUNT(*) FROM launch_intents WHERE matched_session_id = ?1",
             )?,
             context_revision_redaction_count: count_redactable_revisions_conn(conn, session_id)?,
         })
@@ -271,11 +267,6 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usi
     // 1+2. Redact Context provenance while the refs still resolve.
     let redacted = redact_session_provenance_conn(tx, session_id)?;
 
-    // 3. Launch history that matched this session.
-    tx.execute(
-        "DELETE FROM launch_intents WHERE matched_session_id = ?1",
-        params![session_id],
-    )?;
     // 4. The Session's summaries, their revision history, and its place in
     //    every Workstream's consumption frontier.
     tx.execute(

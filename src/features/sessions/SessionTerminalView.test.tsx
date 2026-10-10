@@ -137,7 +137,7 @@ class FakeResizeObserver {
 const { toastMock } = vi.hoisted(() => ({ toastMock: vi.fn() }));
 vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
 
-const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", launch_intent_id: null };
+const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", };
 beforeEach(() => {
   sessionPages.clear(); sessionTerminals.clear();
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
@@ -159,6 +159,7 @@ function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
   return {
     terminal_id: "t-1",
     session_id: "s1",
+    owner_workstream_id: null,
     identity_revision: 1,
     agent: "codex",
     cwd: "/tmp/work",

@@ -130,7 +130,6 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
           <ul className="purge-list">
             <li>{fmtCount(preview.message_count)} 条会话消息</li>
             <li>{fmtCount(preview.session_context_count)} 条 Context 摘要记录</li>
-            <li>{fmtCount(preview.launch_intent_count)} 条启动记录</li>
             <li>上下文来源改写 {fmtCount(preview.context_revision_redaction_count)} 条</li>
           </ul>
 
