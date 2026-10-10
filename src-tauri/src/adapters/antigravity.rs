@@ -1034,9 +1034,20 @@ mod tests {
     #[test]
     fn discovery_claims_conversations_and_maps_parents_to_children() {
         let root = temp_dir("discover");
+        // Timestamped native steps supply visible text independently of titles.
         let steps = [
-            (14, msg(19, &str(2, "分析代码性能"))),
-            (15, msg(20, &str(1, "已完成性能分析。"))),
+            (
+                14,
+                [timestamp(1_789_480_100), msg(19, &str(2, "分析代码性能"))].concat(),
+            ),
+            (
+                15,
+                [
+                    timestamp(1_789_480_105),
+                    msg(20, &str(1, "已完成性能分析。")),
+                ]
+                .concat(),
+            ),
         ];
         store(&root, "11111111-2222-4333-8444-555555555555", &steps);
         store(&root, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", &steps);
