@@ -1208,28 +1208,46 @@ fn reconcile_sweep_keeps_existing_unreferenced_git_worktrees() {
 #[test]
 fn reconcile_sweep_removes_unreferenced_paths_even_when_present() {
     let (_d, db) = temp_db_locked();
+    let default = "/app/noending/workspace";
+    let agent = home_path("Documents/Codex/chat-gc");
+    let home = Home::new("/app/noending", &[], Some(default));
     let observer = Scripted::new();
-    observer.set("/aaa/first", plain("/aaa/first", true));
-    observer.set("/bbb/second", plain("/bbb/second", true));
-    let projection = ProjectProjection::new(&observer);
-    let ids = {
-        (
-            ensure(&db, &plain("/aaa/first", true)).id,
-            ensure(&db, &plain("/bbb/second", true)).id,
-        )
-    };
+    let projection = ProjectProjection::with_policy(&observer, &home);
+    let raws = ["/aaa/ordinary", default, agent.as_str()];
+    let mut expected = Vec::new();
+    for raw in raws {
+        observer.set(raw, plain(raw, true));
+        expected.push(
+            ensure_workspace_path(&db, &plain(raw, true), &home)
+                .unwrap()
+                .id,
+        );
+    }
 
     let report = reconcile_workspace_paths(&db, &projection, 500).unwrap();
-    assert_eq!(report.scanned, 2);
+    assert_eq!(report.scanned, 3);
     let mut deleted = report.outcome.deleted_paths.clone();
     deleted.sort();
-    let mut expected = vec![ids.0.clone(), ids.1.clone()];
     expected.sort();
     assert_eq!(deleted, expected);
-    assert_eq!(report.outcome.deleted_projects.len(), 2);
-    assert!(db.get_workspace_path(&ids.0).unwrap().is_none());
-    assert!(db.get_workspace_path(&ids.1).unwrap().is_none());
+    assert_eq!(report.outcome.deleted_projects.len(), 3);
+    assert!(db.list_workspace_paths().unwrap().is_empty());
     assert!(db.list_projects().unwrap().is_empty());
+
+    // A default-directory session protects its path just like any other session.
+    let retained = ensure_workspace_path(&db, &plain(default, true), &home).unwrap();
+    let observed_session = session(&db, "default-chat", default, &retained.id);
+    let report = reconcile_workspace_paths(&db, &projection, 500).unwrap();
+    assert_eq!(report.scanned, 1);
+    assert!(report.outcome.deleted_paths.is_empty());
+    assert!(db.get_workspace_path(&retained.id).unwrap().is_some());
+    assert_eq!(
+        db.get_session(&observed_session.id)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        Some(retained.project_id)
+    );
     registry_is_consistent(&db).expect("consistent");
 }
 

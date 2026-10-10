@@ -161,12 +161,11 @@ pub fn probe_workspace_path(
                     },
                     None => ProjectHint {
                         id: None,
-                        name: Some(bucket_label.map(str::to_owned).unwrap_or_else(|| {
-                            auto_project_name(
-                                &observation.canonical_path,
-                                policy.default_workspace().as_deref(),
-                            )
-                        })),
+                        name: Some(
+                            bucket_label
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| auto_project_name(&observation.canonical_path)),
+                        ),
                         known: false,
                     },
                 }

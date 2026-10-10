@@ -18,7 +18,7 @@ import {
   type WorkstreamCardData,
 } from "../../types";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
-import { isAgentDefaultProject } from "../projects/projectKind";
+import { isChatDirectoryProject } from "../projects/projectKind";
 
 /** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
 export type NewSessionViewProps = {
@@ -26,13 +26,13 @@ export type NewSessionViewProps = {
   workstreamId?: string | null;
   /** 单次指定 Agent，不修改全局默认设置。 */
   agent?: Agent | null;
-  /** 预置选中的项目 ID；省略或 "none" = 默认项目 NoEnding Workspace。 */
+  /** 预置选中的项目 ID；省略或 "none" = 未归属项目，使用默认工作目录。 */
   projectId?: string | null;
   navigate: (r: Route) => void;
 };
 
 const STANDALONE = "none";
-const DEFAULT_PROJECT_ID = "default";
+const UNASSIGNED_PROJECT = "none";
 
 /** 支持终端 CLI 启动的 Agent 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI Agent 不在此列） */
 const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
@@ -49,7 +49,7 @@ export default function NewSessionView({
     workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
   );
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    initialProjectId && initialProjectId !== "none" ? initialProjectId : DEFAULT_PROJECT_ID
+    initialProjectId && initialProjectId !== "none" ? initialProjectId : UNASSIGNED_PROJECT
   );
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(() => {
@@ -113,7 +113,7 @@ export default function NewSessionView({
         if (!cancelled) {
           const normal = ws.filter((w) => w.visibility === "normal");
           setWorkstreams(normal);
-          if ((!initialProjectId || initialProjectId === "none" || initialProjectId === DEFAULT_PROJECT_ID) && workstreamId && workstreamId !== STANDALONE) {
+          if ((!initialProjectId || initialProjectId === UNASSIGNED_PROJECT) && workstreamId && workstreamId !== STANDALONE) {
             const targetWs = normal.find((w) => w.id === workstreamId);
             if (targetWs?.projects.length === 1) {
               setSelectedProjectId(targetWs.projects[0].id);
@@ -163,64 +163,22 @@ export default function NewSessionView({
       )
     : CLI_AGENTS;
 
-  const defaultProject = useMemo(() => {
-    return (
-      projects.find(
-        (p) =>
-          p.name === "NoEnding Chat" ||
-          p.name === "NoEnding Workspace" ||
-          (defaultWorkspace && p.search_paths?.includes(defaultWorkspace))
-      ) ?? null
-    );
-  }, [projects, defaultWorkspace]);
+  const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
+  const isUnassignedProject = selectedProjectId === UNASSIGNED_PROJECT ||
+    (selectedProject !== null && isChatDirectoryProject(selectedProject));
 
-  const defaultProjectId = defaultProject?.id ?? DEFAULT_PROJECT_ID;
-
-  const isDefaultProject =
-    selectedProjectId === DEFAULT_PROJECT_ID ||
-    selectedProjectId === "none" ||
-    (defaultProject !== null && selectedProjectId === defaultProject.id);
-
-  const selectedProject = useMemo(() => {
-    if (isDefaultProject) {
-      if (defaultProject) return defaultProject;
-      return {
-        id: defaultProjectId,
-        name: "NoEnding Chat",
-        name_customized: false,
-        kind: "chat_directory",
-        path_count: defaultWorkspace ? 1 : 0,
-        missing_path_count: 0,
-        workstream_count: 0,
-        session_count: 0,
-        representative_paths: defaultWorkspace ? [defaultWorkspace] : [],
-        search_paths: defaultWorkspace ? [defaultWorkspace] : [],
-        last_activity_at: null,
-        updated_at: "",
-      } as ProjectCardData;
-    }
-    return projects.find((p) => p.id === selectedProjectId) ?? null;
-  }, [isDefaultProject, defaultProject, defaultProjectId, defaultWorkspace, projects, selectedProjectId]);
-
-  const otherProjects = useMemo(() => {
-    return projects.filter(
-      (p) =>
-        p.id !== defaultProjectId &&
-        p.name !== "NoEnding Chat" &&
-        p.name !== "NoEnding Workspace" &&
-        !isAgentDefaultProject(p, defaultProjectId)
-    );
-  }, [projects, defaultProjectId]);
+  const otherProjects = useMemo(
+    () => projects.filter((p) => !isChatDirectoryProject(p)),
+    [projects],
+  );
 
   const projectDirs: string[] = useMemo(() => {
-    if (!selectedProject) return defaultWorkspace ? [defaultWorkspace] : [];
-    const paths =
-      selectedProject.search_paths && selectedProject.search_paths.length > 0
-        ? selectedProject.search_paths
-        : selectedProject.representative_paths;
-    if (paths && paths.length > 0) return paths;
-    return defaultWorkspace ? [defaultWorkspace] : [];
-  }, [selectedProject, defaultWorkspace]);
+    if (isUnassignedProject) return defaultWorkspace ? [defaultWorkspace] : [];
+    if (!selectedProject) return [];
+    return selectedProject.search_paths?.length
+      ? selectedProject.search_paths
+      : selectedProject.representative_paths;
+  }, [isUnassignedProject, selectedProject, defaultWorkspace]);
 
   const [selectedDirPath, setSelectedDirPath] = useState<string>("");
   const [dirGitStates, setDirGitStates] = useState<Record<string, boolean>>({});
@@ -231,7 +189,8 @@ export default function NewSessionView({
     }
   }, [projectDirs, selectedDirPath]);
 
-  const probeTarget = selectedDirPath || projectDirs[0] || defaultWorkspace;
+  const probeTarget = isUnassignedProject ? defaultWorkspace :
+    projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
   useEffect(() => {
     const target = probeTarget;
     if (!target || selectedProject?.kind === "git" || dirGitStates[target] !== undefined) return;
@@ -253,19 +212,10 @@ export default function NewSessionView({
     };
   }, [probeTarget, selectedProject?.kind, dirGitStates]);
 
-  // 新建会话的工作路径：由选中的项目目录决定；若为 NoEnding Workspace 默认项目且为独立会话，传 undefined 走后端默认解析
-  const launchCwd = useMemo(() => {
-    if (isDefaultProject) {
-      if (ownerWorkstreamId !== STANDALONE) {
-        return selectedDirPath || defaultWorkspace || undefined;
-      }
-      if (selectedDirPath && defaultWorkspace && selectedDirPath !== defaultWorkspace) {
-        return selectedDirPath;
-      }
-      return undefined;
-    }
-    return selectedDirPath || projectDirs[0] || undefined;
-  }, [isDefaultProject, ownerWorkstreamId, selectedDirPath, defaultWorkspace, projectDirs]);
+  // 未归属项目由后端解析当前默认工作目录，与任务关联保持独立。
+  const launchCwd = isUnassignedProject
+    ? undefined
+    : projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
 
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
     if (!selectedAgent) return null;
@@ -284,13 +234,13 @@ export default function NewSessionView({
     releasePrepared();
     setOwnerWorkstreamId(next);
     if (next === STANDALONE) {
-      setSelectedProjectId(defaultProjectId);
+      setSelectedProjectId(UNASSIGNED_PROJECT);
     } else {
       const ws = workstreams.find((w) => w.id === next);
       if (ws?.projects.length === 1) {
         setSelectedProjectId(ws.projects[0].id);
       } else if (!ws?.projects.some((p) => p.id === selectedProjectId)) {
-        setSelectedProjectId(defaultProjectId);
+        setSelectedProjectId(UNASSIGNED_PROJECT);
       }
     }
   };
@@ -379,11 +329,9 @@ export default function NewSessionView({
       ? "无所属任务"
       : (selectedWorkstream?.title ?? "无所属任务");
 
-  const projectLabel = isDefaultProject
-    ? (defaultProject?.name ?? "NoEnding Chat")
-    : (selectedProject?.name ?? defaultProject?.name ?? "NoEnding Chat");
+  const projectLabel = isUnassignedProject ? "未归属项目" : (selectedProject?.name ?? "未归属项目");
 
-  const currentDir = selectedDirPath || projectDirs[0] || "";
+  const currentDir = isUnassignedProject ? defaultWorkspace : launchCwd || "";
   const dirLabel = useMemo(() => {
     if (!currentDir) return "默认工作目录";
     return ellipsisPathMiddle(currentDir, 42);
@@ -550,7 +498,7 @@ export default function NewSessionView({
               <select
                 aria-label="所属项目"
                 title={projectLabel}
-                value={isDefaultProject ? defaultProjectId : selectedProjectId}
+                value={isUnassignedProject ? UNASSIGNED_PROJECT : selectedProjectId}
                 onChange={(e) => {
                   if (e.target.value === "__new_project__") {
                     void handleAddNewProject();
@@ -561,7 +509,7 @@ export default function NewSessionView({
                 disabled={busy}
                 tabIndex={-1}
               >
-                <option value={defaultProjectId}>{defaultProject?.name ?? "NoEnding Chat"}</option>
+                <option value={UNASSIGNED_PROJECT}>未归属项目</option>
                 {otherProjects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
@@ -573,21 +521,21 @@ export default function NewSessionView({
                   <div className="new-session-menu-list">
                     <button
                       type="button"
-                      className={`new-session-menu-item${isDefaultProject ? " selected" : ""}`}
+                      className={`new-session-menu-item${isUnassignedProject ? " selected" : ""}`}
                       onClick={() => {
-                        handleProjectChange(defaultProjectId);
+                        handleProjectChange(UNASSIGNED_PROJECT);
                         setProjectMenuOpen(false);
                       }}
-                      title={defaultProject?.name ?? "NoEnding Chat"}
+                      title="未归属项目"
                     >
                       <span className="menu-item-icon"><Icon name="project" /></span>
-                      <span className="menu-item-label">{defaultProject?.name ?? "NoEnding Chat"}</span>
-                      {isDefaultProject && (
+                      <span className="menu-item-label">未归属项目</span>
+                      {isUnassignedProject && (
                         <span className="menu-item-check"><Icon name="check" /></span>
                       )}
                     </button>
                     {otherProjects.map((p) => {
-                      const isSelected = !isDefaultProject && selectedProjectId === p.id;
+                      const isSelected = !isUnassignedProject && selectedProjectId === p.id;
                       return (
                         <button
                           key={p.id}
@@ -812,7 +760,7 @@ export default function NewSessionView({
             setOwnerWorkstreamId(newWs.id);
             setShowNewWorkstreamModal(false);
           }}
-          initialProjectId={!isDefaultProject ? selectedProjectId : undefined}
+          initialProjectId={!isUnassignedProject ? selectedProjectId : undefined}
         />
       )}
     </main>

@@ -6,20 +6,6 @@ export const projectKindLabels: Record<ProjectKind, string> = {
   chat_directory: "默认项目",
 };
 
-export function isNoEndingDefaultProject(
-  project: { name?: string | null; id?: string; kind?: ProjectKind },
-  defaultProjectId?: string,
-): boolean {
-  return (
-    project.name === "NoEnding Chat" ||
-    project.name === "NoEnding Workspace" ||
-    (Boolean(defaultProjectId) && project.id === defaultProjectId)
-  );
-}
-
-export function isAgentDefaultProject(
-  project: { name?: string | null; id?: string; kind?: ProjectKind },
-  defaultProjectId?: string,
-): boolean {
-  return project.kind === "chat_directory" && !isNoEndingDefaultProject(project, defaultProjectId);
+export function isChatDirectoryProject(project: { kind?: ProjectKind }): boolean {
+  return project.kind === "chat_directory";
 }

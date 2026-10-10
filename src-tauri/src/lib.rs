@@ -61,20 +61,6 @@ pub fn run() {
             let _ = workspace::session::register_workspace_attacher(layer.clone());
             app.manage(workspace::workstream::PathService::new(layer.clone()));
 
-            // Ensure the active default workspace is registered as a WorkspacePath
-            // and has its "NoEnding Chat" Project established.
-            {
-                let default_ws = home.default_workspace_str();
-                let observation = layer.projection().observer().observe(&default_ws);
-                if let Err(e) = crate::workspace::project::ensure_workspace_path_outcome(
-                    &db,
-                    &observation,
-                    layer.projection().policy(),
-                ) {
-                    eprintln!("[noending] failed to ensure default workspace: {e}");
-                }
-            }
-
             // refresh + cache agent CLI detections (ExecutableResolver).
             // Snapshot semantics: a failed resolve REMOVES the cached row so
             // an uninstalled CLI is no longer reported as detected and can

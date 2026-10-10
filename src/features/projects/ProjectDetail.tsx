@@ -6,7 +6,7 @@ import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from 
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { httpsRemoteUrl } from "./remoteUrl";
-import { projectKindLabels, isAgentDefaultProject } from "./projectKind";
+import { projectKindLabels, isChatDirectoryProject } from "./projectKind";
 import { cardSummaryLine } from "../workstreams/WorkstreamCard";
 import {
   type ProjectDetailData,
@@ -211,7 +211,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       <section className="rail-section">
         <div className="rail-head">
           <div className="section-label" style={{ margin: 0 }}>会话</div>
-          {!isAgentDefaultProject({ ...detail.project, kind: detail.kind }) && (
+          {!isChatDirectoryProject({ ...detail.project, kind: detail.kind }) && (
             <button
               className="btn ghost icon-button"
               title="新建会话"

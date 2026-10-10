@@ -424,16 +424,13 @@ fn a_real_noending_home_reserves_app_paths_and_allows_workspace() {
     }
 
     // The allowed default workspace is a normal path with a normal identity,
-    // and it is the directory `identity::auto_project_name` calls special.
+    // whose automatic basename is independent of chat-directory grouping.
     let ws = resolver.observe(home.default_workspace.to_str().unwrap());
     assert!(is_observable(&ws));
     assert!(ws.exists);
     assert_eq!(
-        noending::workspace::identity::auto_project_name(
-            &ws.canonical_path,
-            Some(home.default_workspace.to_str().unwrap())
-        ),
-        "NoEnding Chat"
+        noending::workspace::identity::auto_project_name(&ws.canonical_path),
+        "Workspace"
     );
     std::fs::remove_dir_all(&root).ok();
 }

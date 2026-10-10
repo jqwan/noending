@@ -9,7 +9,7 @@ import type {
   Workstream,
   WorkstreamPathRow,
 } from "../../types";
-import { isAgentDefaultProject } from "../projects/projectKind";
+import { isChatDirectoryProject } from "../projects/projectKind";
 
 /** 任务表单弹窗：新建与编辑共用，统一按项目维度关联（支持关联多个项目）。 */
 
@@ -62,7 +62,6 @@ export default function WorkstreamFormModal({
 
   // 项目选择状态：支持关联多个项目
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [defaultWorkspace, setDefaultWorkspace] = useState<string>("");
   const [newProjects, setNewProjects] = useState<
     Array<{ id: string; name: string; paths: string[] }>
   >([]);
@@ -73,7 +72,6 @@ export default function WorkstreamFormModal({
       for (const p of paths ?? []) {
         const pid =
           p.project_id ||
-          (p.project_name === "NoEnding Chat" || p.project_name === "NoEnding Workspace" ? "default" : "") ||
           (p.canonical_path ? `path:${p.canonical_path}` : "");
         if (pid && !ids.includes(pid)) {
           ids.push(pid);
@@ -81,7 +79,7 @@ export default function WorkstreamFormModal({
       }
       return ids;
     }
-    return [initialProjectId && initialProjectId !== "none" ? initialProjectId : "default"];
+    return initialProjectId && initialProjectId !== "none" ? [initialProjectId] : [];
   });
   const [browsingProject, setBrowsingProject] = useState(false);
 
@@ -98,47 +96,13 @@ export default function WorkstreamFormModal({
         if (!cancelled) setProjects(cards);
       })
       .catch(console.error);
-    api
-      .getWorkspaceSettings?.()
-      ?.then((s) => {
-        if (!cancelled && s?.default_workspace) setDefaultWorkspace(s.default_workspace);
-      })
-      ?.catch(console.error);
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const defaultProject = projects.find(
-    (p) =>
-      p.name === "NoEnding Chat" ||
-      p.name === "NoEnding Workspace" ||
-      (defaultWorkspace && p.search_paths?.includes(defaultWorkspace))
-  );
-  const defaultProjectId = defaultProject?.id ?? "default";
-
-  const isDefaultProj = useCallback(
-    (pid: string) => pid === "default" || pid === defaultProjectId || pid === defaultProject?.id,
-    [defaultProjectId, defaultProject]
-  );
-
   const getProjectPaths = useCallback(
     (pid: string): string[] => {
-      if (isDefaultProj(pid)) {
-        if (defaultProject?.search_paths?.length) return defaultProject.search_paths;
-        if (defaultProject?.representative_paths?.length) return defaultProject.representative_paths;
-        if (defaultWorkspace) return [defaultWorkspace];
-        const fromExisting = existing
-          .filter(
-            (p) =>
-              p.project_name === "NoEnding Chat" ||
-              p.project_name === "NoEnding Workspace" ||
-              (defaultWorkspace && p.canonical_path === defaultWorkspace)
-          )
-          .map((p) => p.canonical_path);
-        if (fromExisting.length > 0) return fromExisting;
-        return [];
-      }
       const fromProjects = projects.find((p) => p.id === pid);
       if (fromProjects?.search_paths?.length) return fromProjects.search_paths;
       if (fromProjects?.representative_paths?.length) return fromProjects.representative_paths;
@@ -150,7 +114,7 @@ export default function WorkstreamFormModal({
       if (fromExisting.length > 0) return fromExisting;
       return [];
     },
-    [isDefaultProj, defaultProject, defaultWorkspace, projects, newProjects, existing]
+    [projects, newProjects, existing]
   );
 
   const selectedProjectPaths = useMemo(() => {
@@ -167,22 +131,13 @@ export default function WorkstreamFormModal({
 
   const handleAddProject = (pid: string) => {
     setSelectedProjectIds((prev) => {
-      if (isDefaultProj(pid)) {
-        if (prev.some(isDefaultProj)) return prev;
-        return [...prev, pid];
-      }
       if (prev.includes(pid)) return prev;
       return [...prev, pid];
     });
   };
 
   const handleRemoveProject = (pid: string) => {
-    setSelectedProjectIds((prev) => {
-      if (isDefaultProj(pid)) {
-        return prev.filter((id) => !isDefaultProj(id));
-      }
-      return prev.filter((id) => id !== pid);
-    });
+    setSelectedProjectIds((prev) => prev.filter((id) => id !== pid));
   };
 
   const handleAddNewProject = async () => {
@@ -430,7 +385,7 @@ export default function WorkstreamFormModal({
         <p className="small muted" style={{ marginBottom: 12 }}>
           {created
             ? allRejected
-              ? "没有工作目录的任务依然有效：新建会话会从 NoEnding 的默认工作目录启动，也不归属任何项目。你可以在详情页随时添加工作路径。"
+              ? "没有工作目录的任务依然有效：新建会话可从 NoEnding 的默认工作目录启动。你可以在详情页随时添加工作路径。"
               : "被拒绝的路径不影响其余路径：任务按提交顺序带上了被接受的部分。"
             : "没生效的路径不影响其余改动：其余工作目录、标题与描述都已经保存。可以在列表里改好这条路径后重新编辑。"}
         </p>
@@ -471,16 +426,11 @@ export default function WorkstreamFormModal({
         {selectedProjectIds.length > 0 ? (
           <div className="workstream-project-chips">
             {selectedProjectIds.map((pid) => {
-              const isDefault = isDefaultProj(pid);
-              const proj = isDefault
-                ? defaultProject
-                : projects.find((p) => p.id === pid) ?? newProjects.find((p) => p.id === pid);
-              const name = isDefault
-                ? (defaultProject?.name ?? "NoEnding Chat")
-                : proj?.name ??
-                  existing.find((p) => p.project_id === pid || `path:${p.canonical_path}` === pid)?.project_name ??
-                  existing.find((p) => `path:${p.canonical_path}` === pid)?.canonical_path ??
-                  pid;
+              const proj = projects.find((p) => p.id === pid) ?? newProjects.find((p) => p.id === pid);
+              const name = proj?.name ??
+                existing.find((p) => p.project_id === pid || `path:${p.canonical_path}` === pid)?.project_name ??
+                existing.find((p) => `path:${p.canonical_path}` === pid)?.canonical_path ??
+                pid;
               return (
                 <div key={pid} className="workstream-project-chip">
                   <Icon name="project" />
@@ -520,17 +470,11 @@ export default function WorkstreamFormModal({
             aria-label="关联项目选择"
           >
             <option value="">+ 添加关联项目…</option>
-            {!selectedProjectIds.some(isDefaultProj) && (
-              <option value={defaultProjectId}>{defaultProject?.name ?? "NoEnding Chat"}</option>
-            )}
             {projects
               .filter(
                 (p) =>
                   !selectedProjectIds.includes(p.id) &&
-                  !isDefaultProj(p.id) &&
-                  !isAgentDefaultProject(p, defaultProjectId) &&
-                  p.name !== "NoEnding Chat" &&
-                  p.name !== "NoEnding Workspace"
+                  !isChatDirectoryProject(p)
               )
               .map((p) => (
                 <option key={p.id} value={p.id}>

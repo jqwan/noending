@@ -90,7 +90,11 @@ async function submit() {
 
 describe("WorkstreamFormModal project selection", () => {
 
-  it("submits empty paths when created with default 'NoEnding Chat' without paths", async () => {
+  it("creates a task without any project even when chat-directory projects exist", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      { ...projectCard("p-noending", "NoEnding Chat", ["/tmp/workspace"]), kind: "chat_directory" },
+      { ...projectCard("p-agent", "Codex Chat", ["/Documents/Codex/chat"]), kind: "chat_directory" },
+    ]);
     vi.mocked(api.createWorkstream).mockResolvedValue(report("w1", []));
     const onCreated = vi.fn();
     render(<WorkstreamFormModal onClose={vi.fn()} onCreated={onCreated} />);
@@ -109,8 +113,7 @@ describe("WorkstreamFormModal project selection", () => {
     render(<WorkstreamFormModal onClose={vi.fn()} />);
     await screen.findByRole("option", { name: "项目 A" });
 
-    // 移除默认项目，添加项目 A
-    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Chat" }));
+    // 添加项目 A
     const select = screen.getByRole("combobox", { name: "关联项目选择" });
     fireEvent.change(select, { target: { value: "p1" } });
 
@@ -133,8 +136,7 @@ describe("WorkstreamFormModal project selection", () => {
     render(<WorkstreamFormModal onClose={vi.fn()} />);
     await screen.findByRole("option", { name: "项目 A" });
 
-    // 移除默认项目，添加项目 A 和项目 B
-    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Chat" }));
+    // 添加项目 A 和项目 B
     const select = screen.getByRole("combobox", { name: "关联项目选择" });
     fireEvent.change(select, { target: { value: "p1" } });
     fireEvent.change(select, { target: { value: "p2" } });
@@ -167,7 +169,6 @@ describe("WorkstreamFormModal project selection", () => {
     render(<WorkstreamFormModal onClose={vi.fn()} />);
     await screen.findByRole("option", { name: "项目 A" });
 
-    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Chat" }));
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "新增项目" }));
@@ -196,7 +197,6 @@ describe("WorkstreamFormModal project selection", () => {
     vi.mocked(api.createWorkstream).mockResolvedValue(report("w4", []));
 
     render(<WorkstreamFormModal onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Chat" }));
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "新增项目" }));
@@ -223,7 +223,7 @@ describe("WorkstreamFormModal project selection", () => {
     expect(onCreated).not.toHaveBeenCalled();
   });
 
-  it("excludes other agent default projects from the project dropdown list", async () => {
+  it("excludes all chat-directory projects from the project dropdown list", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       projectCard("p-normal", "普通单目录项目", ["/repo/normal"]),
       { ...projectCard("p-codex", "Codex Chat", ["/repo/codex"]), kind: "chat_directory" },
@@ -237,6 +237,7 @@ describe("WorkstreamFormModal project selection", () => {
 
     expect(optionTexts).toContain("普通单目录项目");
     expect(optionTexts).not.toContain("Codex Chat");
+    expect(optionTexts).not.toContain("NoEnding Chat");
   });
 
   it("says per path what did not land instead of silently dropping it", async () => {
@@ -261,7 +262,6 @@ describe("WorkstreamFormModal project selection", () => {
     render(<WorkstreamFormModal onClose={onClose} onCreated={onCreated} />);
     await screen.findByRole("option", { name: "Main" });
 
-    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Chat" }));
     const select = screen.getByRole("combobox", { name: "关联项目选择" });
     fireEvent.change(select, { target: { value: "p1" } });
 
@@ -299,7 +299,6 @@ describe("WorkstreamFormModal project selection", () => {
     render(<WorkstreamFormModal onClose={vi.fn()} onCreated={onCreated} />);
     await screen.findByRole("option", { name: "Ghost" });
 
-    fireEvent.click(screen.getByRole("button", { name: "移除项目 NoEnding Chat" }));
     const select = screen.getByRole("combobox", { name: "关联项目选择" });
     fireEvent.change(select, { target: { value: "p1" } });
 
@@ -403,6 +402,21 @@ describe("WorkstreamFormModal edit mode", () => {
     expect(api.reorderWorkstreamPaths).not.toHaveBeenCalled();
     expect(onSaved).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("preserves existing chat-directory associations when editing a task", async () => {
+    const existing = [row("chat", 0, "/tmp/workspace", "p-chat", "NoEnding Chat")];
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      { ...projectCard("p-chat", "NoEnding Chat", ["/tmp/workspace"]), kind: "chat_directory" },
+    ]);
+    render(<WorkstreamFormModal workstream={current()} paths={existing} onClose={vi.fn()} />);
+    await screen.findByText("NoEnding Chat");
+    fireEvent.change(screen.getByDisplayValue("接口设计"), { target: { value: "新标题" } });
+    await act(async () => { fireEvent.click(saveButton()); });
+    expect(api.updateWorkstream).toHaveBeenCalledWith(expect.objectContaining({ title: "新标题" }));
+    expect(api.addWorkstreamPath).not.toHaveBeenCalled();
+    expect(api.removeWorkstreamPath).not.toHaveBeenCalled();
+    expect(api.reorderWorkstreamPaths).not.toHaveBeenCalled();
   });
 
   it("says what a dropped project means, then removes its paths and reorders the rest", async () => {

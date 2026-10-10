@@ -302,12 +302,12 @@ describe("NewSessionView task and project selection", () => {
     expect(await screen.findByRole("heading", { name: "新建任务" })).toBeTruthy();
   });
 
-  it("excludes other agent default projects from the project dropdown", async () => {
+  it.each(["Codex Chat", "NoEnding Chat", "用户改名的聊天项目"])("excludes chat-directory project %s from selection", async (name) => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       ...mockProjects,
       {
         id: "p-codex",
-        name: "Codex Chat",
+        name,
         name_customized: false,
         kind: "chat_directory" as const,
         path_count: 1,
@@ -325,21 +325,21 @@ describe("NewSessionView task and project selection", () => {
     const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
     const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
     expect(options).toContain("Project 1");
-    expect(options).not.toContain("Codex Chat");
+    expect(options).not.toContain(name);
   });
 
-  it("in standalone mode, defaults to NoEnding Chat and lists discovered projects and + 新项目", async () => {
+  it("defaults to unassigned project and lists discovered projects and + 新项目", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
     render(<NewSessionView navigate={vi.fn()} />);
 
     const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
 
     await waitFor(() => {
-      expect(projectSelect.value).toBe("default");
+      expect(projectSelect.value).toBe("none");
     });
 
     const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
-    expect(options).toContain("NoEnding Chat");
+    expect(options).toContain("未归属项目");
     expect(options).toContain("Project 1");
     expect(options).toContain("+ 新项目");
 
@@ -426,7 +426,7 @@ describe("NewSessionView task and project selection", () => {
     });
   });
 
-  it("when created from a task with project, defaults to that project and its first workspace path", async () => {
+  it("can switch a task session from its project to the default directory without losing task ownership", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
     vi.mocked(api.listWorkstreamCards).mockResolvedValue([
       {
@@ -455,6 +455,31 @@ describe("NewSessionView task and project selection", () => {
     await waitFor(() => {
       expect(projectSelect.value).toBe("p-1");
       expect(api.prepareNewSession).toHaveBeenCalledWith("codex", "ws-1", "/repo/project-1");
+    });
+
+    fireEvent.change(projectSelect, { target: { value: "none" } });
+    await waitFor(() => {
+      expect((screen.getByLabelText("项目目录") as HTMLSelectElement).value).toBe("/tmp/workspace");
+      expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", "ws-1");
+    });
+    vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
+      launched_via: "内嵌终端", command_line: "codex", note: "已启动", terminal_id: "t-unassigned",
+    });
+    fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "继续这个任务" } });
+    const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+    await waitFor(() => expect(send.disabled).toBe(false));
+    fireEvent.click(send);
+    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", "ws-1", undefined, "继续这个任务"));
+  });
+
+  it("allows a Git project named NoEnding Chat to be selected normally", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      { ...mockProjects[0], name: "NoEnding Chat", search_paths: ["/tmp/workspace"] },
+    ]);
+    render(<NewSessionView projectId="p-1" navigate={vi.fn()} />);
+    await waitFor(() => {
+      expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("p-1");
+      expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", null, "/tmp/workspace");
     });
   });
 
@@ -605,6 +630,6 @@ it("does not designate the first project of a multi-project task as its default"
   render(<NewSessionView workstreamId="multi" navigate={vi.fn()} />);
   const task = await screen.findByLabelText("所属任务（可选）");
   await waitFor(() => expect((task as HTMLSelectElement).value).toBe("multi"));
-  expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("default");
-  await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", "multi", "/tmp/workspace"));
+  expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("none");
+  await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", "multi"));
 });

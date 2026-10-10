@@ -118,14 +118,14 @@ describe("ProjectDetail", () => {
     expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p1" });
   });
 
-  it("does not render + button in sessions section for other agent default projects", async () => {
+  it.each(["Codex Chat", "NoEnding Chat", "用户改名的聊天项目"])("does not offer new sessions in chat-directory project %s", async (name) => {
     const agentDetail = mockDetail();
     agentDetail.kind = "chat_directory";
-    agentDetail.project.name = "Codex";
+    agentDetail.project.name = name;
     vi.mocked(api.getProjectDetail).mockResolvedValue(agentDetail);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
-    await screen.findByText("Codex");
+    await screen.findByText(name);
     expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   });
 

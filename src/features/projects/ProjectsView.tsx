@@ -10,7 +10,7 @@ import { timeAgo, useRefreshSignal } from "../../components/common";
 import { PathText } from "../workstreams/WorkspacePaths";
 import type { Route } from "../../app/routes";
 import type { ProjectCardData, ProjectKind } from "../../types";
-import { projectKindLabels, isAgentDefaultProject } from "./projectKind";
+import { projectKindLabels, isChatDirectoryProject } from "./projectKind";
 
 /**
  * Projects Board：Projects 是一等浏览页面——物理工作空间，由工作目录自动派生。
@@ -274,7 +274,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
                 )}
               </button>
               <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
-                {!isAgentDefaultProject(c) && (
+                {!isChatDirectoryProject(c) && (
                   <button
                     type="button"
                     className="btn small ghost icon-button"
@@ -341,7 +341,7 @@ function ProjectCard({ card, navigate }: {
       <div className="ws-card-meta">
         <span className="muted small">{timeAgo(card.last_activity_at)}</span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-          {!isAgentDefaultProject(card) && (
+          {!isChatDirectoryProject(card) && (
             <button
               type="button"
               className="btn small ghost icon-button"

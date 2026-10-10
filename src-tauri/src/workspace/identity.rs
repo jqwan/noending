@@ -213,26 +213,12 @@ pub fn basename(canonical: &str) -> String {
 
 /// Automatic Project naming.
 ///
-/// `default_workspace` is the absolute, normalized NoEnding default workspace;
-/// only that exact path is called "NoEnding Chat". A relocated NoEnding
-/// Home leaves the old workspace as an ordinary path, so it must NOT keep
-/// the special name — which is why this is a parameter and not a
-/// `ends_with("/.noending/workspace")` test.
-///
 /// Only the first character is capitalized, so a lowercase directory yields
 /// `Noending`. Recovering internal capitals would require a dictionary or a
 /// Git remote name, both of which are exactly the "looks smarter, is a guess"
 /// the design forbids.
-pub fn auto_project_name(canonical: &str, default_workspace: Option<&str>) -> String {
+pub fn auto_project_name(canonical: &str) -> String {
     let key = path_key(canonical);
-    if let Some(dw) = default_workspace {
-        // "Is this THE default workspace" is a location question, so it folds
-        // case the same way the reserved paths do; on a Windows volume
-        // `~\.NOENDING\workspace` is the directory this names.
-        if !dw.trim().is_empty() && same_location(canonical, dw.trim()) {
-            return "NoEnding Chat".to_string();
-        }
-    }
     let base = basename(&key);
     capitalize_first(&base)
 }
@@ -767,7 +753,7 @@ mod tests {
             "c:/users/me/data"
         );
         assert_eq!(basename("C:\\Users\\ME\\Data"), "Data");
-        assert_eq!(auto_project_name("C:\\Users\\ME\\Data", None), "Data");
+        assert_eq!(auto_project_name("C:\\Users\\ME\\Data"), "Data");
         // The identity key IS the folded one, so two Windows case
         // variants are one WorkspacePath — while `path_key`, which feeds display
         // strings, keeps them apart. macOS is unchanged either way, and the unit
@@ -785,26 +771,15 @@ mod tests {
 
     #[test]
     fn auto_naming() {
-        assert_eq!(auto_project_name("/Users/me/research", None), "Research");
-        assert_eq!(auto_project_name("/Users/me/noending", None), "Noending");
+        assert_eq!(auto_project_name("/Users/me/research"), "Research");
+        assert_eq!(auto_project_name("/Users/me/noending"), "Noending");
         assert_eq!(
-            auto_project_name(
-                "/Users/me/.noending/workspace",
-                Some("/Users/me/.noending/workspace")
-            ),
-            "NoEnding Chat"
+            auto_project_name("/Users/me/.noending/workspace"),
+            "Workspace"
         );
-        assert_eq!(
-            auto_project_name(
-                "/Users/other/.noending/workspace",
-                Some("/Users/me/.noending/workspace")
-            ),
-            "Workspace",
-            "an old workspace after a Home move is an ordinary path"
-        );
-        assert_eq!(auto_project_name("/", None), "/");
-        assert_eq!(auto_project_name("C:\\Users\\me", None), "Me");
-        assert_eq!(auto_project_name("/Users/me/数据", None), "数据");
+        assert_eq!(auto_project_name("/"), "/");
+        assert_eq!(auto_project_name("C:\\Users\\me"), "Me");
+        assert_eq!(auto_project_name("/Users/me/数据"), "数据");
     }
 
     #[test]
