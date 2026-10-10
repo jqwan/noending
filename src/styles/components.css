@@ -2218,8 +2218,22 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 /* Unified session titlebar: icon navigation, instance menu and contextual actions. */
 .session-navigation { position: relative; display: flex; flex: none; align-items: center; }
 .session-action-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
-.page-head .session-navigation .terminal-running, .terminal-running { color: var(--success); }
-.page-head .session-navigation .terminal-exited, .terminal-exited { color: var(--text-muted); }
+button.btn.ghost.terminal-running,
+.btn.terminal-running,
+.page-head .session-navigation .terminal-running,
+.terminal-running {
+  color: var(--success);
+}
+button.btn.ghost.terminal-running:hover:not(:disabled),
+.btn.terminal-running:hover:not(:disabled) {
+  color: var(--success);
+}
+button.btn.ghost.terminal-exited,
+.btn.terminal-exited,
+.page-head .session-navigation .terminal-exited,
+.terminal-exited {
+  color: var(--text-muted);
+}
 .page-head .session-navigation .terminal-dropdown { width: 18px; }
 .terminal-dropdown .ui-icon { width: 12px; height: 12px; }
 .terminal-menu { min-width: 240px; max-width: min(400px, calc(100vw - 24px)); max-height: 320px; overflow-y: auto; }

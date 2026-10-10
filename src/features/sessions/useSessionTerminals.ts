@@ -9,7 +9,8 @@ export function useSessionTerminals() {
   const sequence = useRef(0);
   const refresh = useCallback(() => {
     const mine = ++sequence.current;
-    void api.terminalList().then(rows => {
+    const fetcher = typeof api.terminalList === "function" ? api.terminalList() : Promise.resolve([]);
+    void fetcher.then(rows => {
       if (sequence.current === mine) { setTerminals(rows); setLoading(false); }
     }).catch(() => { if (sequence.current === mine) setLoading(false); });
   }, []);

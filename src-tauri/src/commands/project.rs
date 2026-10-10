@@ -63,6 +63,7 @@ pub struct ProjectCardData {
     pub search_paths: Vec<String>,
     /// max(session activity, workstream update) — the Board's default sort.
     pub last_activity_at: Option<String>,
+    pub created_at: String,
     pub updated_at: String,
 }
 
@@ -194,6 +195,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
                 representative_paths: representative.get(&p.id).cloned().unwrap_or_default(),
                 search_paths: search_paths.get(&p.id).cloned().unwrap_or_default(),
                 last_activity_at: later_ts(&session_activity, &workstream_activity),
+                created_at: p.created_at,
                 id: p.id,
                 name: p.name,
                 name_customized: p.name_customized,

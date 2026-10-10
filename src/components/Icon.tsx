@@ -37,6 +37,7 @@ const paths = {
   check: "M3.5 9.5l3.5 3.5 7.5-7.5",
   grid: "M3.5 3.5h4.5v4.5h-4.5ZM10 3.5h4.5v4.5h-4.5ZM3.5 10h4.5v4.5h-4.5ZM10 10h4.5v4.5h-4.5Z",
   list: "M3.5 4.5h11M3.5 9h11M3.5 13.5h11",
+  filter: "M2.5 3.5h13l-5 5.5v5.5l-3-2v-3.5Z",
 };
 
 export default function Icon({ name, className }: { name: keyof typeof paths; className?: string }) {

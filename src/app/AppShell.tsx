@@ -10,6 +10,7 @@ import CommandPalette from "../components/CommandPalette";
 import ErrorBoundary from "../components/ErrorBoundary";
 import { prepareNavigationTitle } from "./navigationTitle";
 import ToastHost, { showToast } from "../components/Toast";
+import Icon from "../components/Icon";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, EVT_TERMINALS, type Route } from "./routes";
 
@@ -213,7 +214,7 @@ export default function AppShell() {
   }, []);
 
   return (
-    <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}${!sessionSection || sidebarCollapsed ? " without-session-sidebar" : ""}`}>
+    <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed without-session-sidebar" : ""}`}>
       <header className="app-titlebar">
         {isMac && <div className="window-drag-region" data-tauri-drag-region />}
         <div className="history-controls" aria-label="页面导航">
@@ -239,7 +240,15 @@ export default function AppShell() {
               <path d="M4 9h10M9 4l5 5-5 5" />
             </svg>
           </button>
-          {sessionSection && <button
+          <button
+            className="history-button"
+            aria-label="搜索"
+            title={isMac ? "搜索 (⌘K)" : "搜索 (Ctrl+K)"}
+            onClick={() => setPaletteOpen(true)}
+          >
+            <Icon name="search" />
+          </button>
+          <button
             className="history-button"
             aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
             title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
@@ -249,18 +258,16 @@ export default function AppShell() {
               <rect x="3" y="4" width="12" height="10" rx="2.5" />
               <path d="M7 4v10" />
             </svg>
-          </button>}
+          </button>
         </div>
       </header>
-      <NavigationRail route={route} navigate={navigate}
-        onSessions={() => navigate(lastSessionRoute.current)} onSearch={() => setPaletteOpen(true)} />
+      <NavigationRail route={route} navigate={navigate} />
       <Sidebar
         route={route}
         navigate={navigate}
         collapsed={sidebarCollapsed}
-        hidden={!sessionSection}
       />
-      {sessionSection && !sidebarCollapsed && <div
+      {!sidebarCollapsed && <div
         className="sidebar-resizer" role="separator" tabIndex={0}
         aria-label="侧边栏宽度" aria-orientation="vertical"
         aria-valuemin={200} aria-valuemax={360} aria-valuenow={sidebarWidth}

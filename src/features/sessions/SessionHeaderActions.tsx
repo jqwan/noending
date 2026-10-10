@@ -17,7 +17,8 @@ export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, 
   if (!capsOf(agent, sourceKind).desktop) return null;
   const availability = desktopContinueState({ agent, source_kind: sourceKind, archived_at: archived ? "archived" : null }, status?.[agent]);
   return <button className={className} aria-label={label} title={availability.title}
-    disabled={busy || availability.disabled} onClick={() => {
+    disabled={busy || availability.disabled} onClick={(e) => {
+      e.stopPropagation();
       if (busy) return;
       setBusy(true);
       void continueSessionDesktopWithToast(sessionId).finally(() => setBusy(false));
