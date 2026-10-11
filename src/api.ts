@@ -191,9 +191,10 @@ export const api = {
     invoke<string>("preview_summary_prompt", { kind, templates }),
 
   /** 新建 Session 最多带一个所属任务（`null` = standalone）。 */
-  prepareNewSession: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string) =>
+  prepareNewSession: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<import("./types").PreparedLaunch>("prepare_new_session", {
       agent,
+      runtime: runtime ?? null,
       ownerWorkstreamId,
       cwd: cwd ?? null,
     }),
@@ -209,9 +210,10 @@ export const api = {
 
   /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
    *  Agent 通知或预设原生 ID 与摄入记录精确匹配后绑定）。返回携带 terminal_id。 */
-  launchEmbeddedNew: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string, initialMessage?: string) =>
+  launchEmbeddedNew: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<LaunchResult>("launch_embedded_new", {
       agent,
+      runtime: runtime ?? null,
       ownerWorkstreamId,
       cwd: cwd ?? null,
       initialMessage: initialMessage ?? null,
@@ -257,6 +259,9 @@ export const api = {
   search: (query: string, limit?: number) => invoke<SearchHit[]>("search", { query, limit: limit ?? 30 }),
   getAgentStatus: () =>
     invoke<Record<string, import("./types").AgentStatusEntry>>("get_agent_status"),
+
+  setAgentLaunchEnabled: (agent: Agent, enabled: boolean) => invoke<void>("set_agent_launch_enabled", { agent, enabled }),
+  redetectAgent: (agent: Agent) => invoke<AgentRuntimeSettings>("redetect_agent", { agent }),
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
   setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),

@@ -7,9 +7,8 @@
 //! Triggers:
 //! * App startup → `ReconcileAll`
 //! * Return to foreground past the freshness threshold → `ReconcileAll`
-//! * External new launch success → `ReconcileAll`
-//! * Agent lifecycle notification → that Agent's enabled sources when unbound,
-//!   or `RefreshSession` when the terminal is already bound
+//! * Agent lifecycle notification → exact native root, including metadata
+//!   updates after binding (independent of enabled history sources)
 //! * Resume launch success → `RefreshSession`
 //! * Advanced maintenance page → `ReconcileAll` / `ReconcileSource` /
 //!   `ReingestSource`
@@ -36,6 +35,11 @@ pub enum IngestScope {
     ReconcileAll,
     ReconcileSource(String),
     RefreshSession(String),
+    ReconcileNative {
+        agent: crate::domain::Agent,
+        native_id: String,
+        source_path: Option<String>,
+    },
     ReingestSource(String),
 }
 
@@ -45,6 +49,9 @@ impl IngestScope {
             IngestScope::ReconcileAll => "reconcile_all".into(),
             IngestScope::ReconcileSource(id) => format!("reconcile_source:{id}"),
             IngestScope::RefreshSession(id) => format!("refresh_session:{id}"),
+            IngestScope::ReconcileNative {
+                agent, native_id, ..
+            } => format!("reconcile_native:{}:{native_id}", agent.as_str()),
             IngestScope::ReingestSource(id) => format!("reingest_source:{id}"),
         }
     }
@@ -75,22 +82,14 @@ pub struct IngestionCoordinator {
 }
 
 impl IngestionCoordinator {
-    /// Merge a new task into the queue. `ReconcileAll` subsumes any queued
-    /// partial reconciles; a re-ingest is semantically different and is kept.
+    /// Merge duplicate scopes only. A full enabled-history pass does not
+    /// cover explicit refreshes or disabled sources requested by the user.
     fn enqueue(&self, scope: IngestScope) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if inner.queue.contains(&scope) {
             // The queued task already belongs to the active worker. Returning
             // true here would start a second worker against the same queue.
             return false;
-        }
-        if scope == IngestScope::ReconcileAll {
-            inner.queue.retain(|s| {
-                !matches!(
-                    s,
-                    IngestScope::ReconcileSource(_) | IngestScope::RefreshSession(_)
-                )
-            });
         }
         inner.queue.push(scope);
         if inner.running {
@@ -232,6 +231,18 @@ fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String
             Ok(None) => Ok((0, 0, None)),
             Err(e) => Err(e),
         },
+        IngestScope::ReconcileNative {
+            agent,
+            native_id,
+            source_path,
+        } => crate::ingestion::reconcile_native(
+            &state.db,
+            *agent,
+            native_id,
+            source_path.as_deref(),
+            &notify,
+        )
+        .map(|(d, m)| (d, m, None)),
         IngestScope::RefreshSession(id) => {
             crate::ingestion::refresh_session(&state.db, id).map(|n| (0usize, n, None))
         }
@@ -259,6 +270,30 @@ mod tests {
         }
 
         assert!(!coordinator.enqueue(IngestScope::ReconcileAll));
+    }
+
+    #[test]
+    fn full_history_scan_never_swallows_native_binding_work() {
+        let coordinator = IngestionCoordinator::default();
+        let native = IngestScope::ReconcileNative {
+            agent: crate::domain::Agent::Codex,
+            native_id: "native".into(),
+            source_path: None,
+        };
+        assert!(coordinator.enqueue(native.clone()));
+        assert!(!coordinator.enqueue(IngestScope::RefreshSession("owned".into())));
+        assert!(!coordinator.enqueue(IngestScope::ReconcileSource("disabled".into())));
+        assert!(!coordinator.enqueue(IngestScope::ReconcileAll));
+        assert_eq!(coordinator.next(), Some(native));
+        assert_eq!(
+            coordinator.next(),
+            Some(IngestScope::RefreshSession("owned".into()))
+        );
+        assert_eq!(
+            coordinator.next(),
+            Some(IngestScope::ReconcileSource("disabled".into()))
+        );
+        assert_eq!(coordinator.next(), Some(IngestScope::ReconcileAll));
     }
 
     #[test]

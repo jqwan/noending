@@ -6,6 +6,7 @@
 //! returns a value, not a `Result`, and every failure path folds into
 //! `warnings` + `ModelCatalog::Unavailable`.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod pi;
@@ -85,12 +86,8 @@ pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
         Agent::Codex => codex::discover(),
         Agent::ClaudeCode => claude::discover(),
         Agent::Pi => pi::discover(),
-        // No wired catalog discovery: Qoder/WorkBuddy/dsh have no CLI, ZCode
-        // has no models command, and `agy models` is not parsed yet (the
-        // FreeForm model capability already covers the UI). `Unavailable` is
-        // the honest answer and the UI renders it as "无法获取模型列表"
-        // rather than as a broken install.
-        Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode | Agent::Antigravity => {
+        Agent::Antigravity => antigravity::discover(),
+        Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode => {
             (ModelCatalog::Unavailable, vec![])
         }
     };

@@ -3,6 +3,7 @@ import { useViewState } from "../../hooks/useViewState";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import { onEvent, EVT_SYNCED, type Route } from "../../app/routes";
+import AgentConfiguration from "./AgentConfiguration";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import PageHeader from "../../layout/PageHeader";
@@ -71,6 +72,7 @@ function SourceRow({
   onReingest,
   onRemove,
   onCopy,
+  onToggle,
 }: {
   src: IngestSource;
   running: boolean;
@@ -78,6 +80,7 @@ function SourceRow({
   onReingest: (src: IngestSource) => void;
   onRemove: (src: IngestSource) => void;
   onCopy: (path: string) => void;
+  onToggle: (src: IngestSource, enabled: boolean) => void;
 }) {
   return (
     <div className="agent-source-row">
@@ -147,6 +150,7 @@ function SourceRow({
         )}
       </div>
 
+      <label className="agent-toggle"><input type="checkbox" aria-label={`自动同步 ${src.path}`} checked={src.enabled} disabled={running} onChange={(e) => onToggle(src, e.target.checked)} />自动同步历史</label>
       <button
         type="button"
         className="btn small ghost agent-reingest-btn"
@@ -161,7 +165,7 @@ function SourceRow({
 }
 
 export default function AgentsView({
-  navigate: _navigate,
+  navigate,
   initialAgent,
 }: {
   navigate: (r: Route) => void;
@@ -276,7 +280,9 @@ export default function AgentsView({
     clearMessages();
     setRunning(true);
     try {
-      await api.reconcileAll();
+      if (initialAgent) {
+        for (const source of sources.filter((s) => s.agent === initialAgent)) await api.reconcileSource(source.id);
+      } else await api.reconcileAll();
       showToast("正在增量同步…");
       await reloadStatus();
     } catch (e) {
@@ -321,6 +327,7 @@ export default function AgentsView({
   // 过滤展示的 Agent 列表
   const visibleAgents = ALL_AGENTS.filter((agent) => {
     const entry = agentStatus?.[agent];
+    if (initialAgent) return agent === initialAgent;
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       const matchName = AGENT_LABELS[agent].toLowerCase().includes(q);
@@ -339,7 +346,7 @@ export default function AgentsView({
 
   return (
     <div className="main agents-page">
-      <PageHeader title="代理" />
+      <PageHeader title={initialAgent ? AGENT_LABELS[initialAgent] : "代理"} back={initialAgent ? "所有代理" : undefined} onBack={() => navigate({ view: "agents" })} />
 
       <div className="agents-content">
         {error && (
@@ -348,6 +355,7 @@ export default function AgentsView({
           </div>
         )}
 
+      {initialAgent && <AgentConfiguration key={initialAgent} agent={initialAgent} entry={agentStatus?.[initialAgent]} reload={reloadAgents} navigate={navigate} />}
       {/* 顶部全局状态栏 */}
       <div className="agents-overview-card card">
         <div className="agents-overview-top">
@@ -358,7 +366,7 @@ export default function AgentsView({
             </span>
             <span className="agents-stat-pill">
               <span className="dot" style={{ color: "var(--accent)" }} />
-              共 {sources.length} 个来源目录
+              共 {sources.filter((s) => !initialAgent || s.agent === initialAgent).length} 个来源目录
             </span>
             {running && (
               <span className="agents-stat-pill active">
@@ -370,11 +378,11 @@ export default function AgentsView({
           <div>
             <button
               className="btn primary"
-              disabled={running || sources.length === 0}
+              disabled={running || sources.filter((s) => !initialAgent || s.agent === initialAgent).length === 0}
               onClick={handleScanAll}
               title="增量同步"
             >
-              增量同步全部来源
+              {initialAgent ? "增量同步当前代理" : "增量同步全部来源"}
             </button>
           </div>
         </div>
@@ -393,7 +401,7 @@ export default function AgentsView({
       </div>
 
       {/* 快速分类与搜索栏 */}
-      <div className="agents-filter-bar">
+      {!initialAgent && <div className="agents-filter-bar">
         <div className="agents-filter-pills" role="tablist" aria-label="代理分类筛选">
           <button
             type="button"
@@ -473,10 +481,9 @@ export default function AgentsView({
             </button>
           </div>
         </div>
-      </div>
-
+      </div>}
       {/* Agent 展示 */}
-      <div className={viewMode === "cards" ? "agents-grid" : "agents-list"}>
+      <div className={initialAgent ? "agent-detail-sources" : viewMode === "cards" ? "agents-grid" : "agents-list"}>
         {visibleAgents.map((agent) => {
           const entry = agentStatus?.[agent];
           const isInitialTarget = initialAgent === agent;
@@ -534,7 +541,9 @@ export default function AgentsView({
               </div>
 
               {/* 会话存储格式与来源目录列表 */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {initialAgent ? <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <h2>历史会话来源</h2>
+                <p className="muted small">自动同步仅控制此目录的历史扫描。NoEnding 启动的终端仍会按 Agent 通知同步当前会话并绑定；手动同步不受此开关影响。</p>
                 {agentFormats.map((fmt, fIdx) => {
                   const formatSources = agentSources.filter((s) => formatOf(s) === fmt.id);
                   const isMultiFormat = agentFormats.length > 1;
@@ -583,6 +592,7 @@ export default function AgentsView({
                               onReingest={setReingestTarget}
                               onRemove={handleRemoveSource}
                               onCopy={copyPath}
+                              onToggle={(source, enabled) => { void (async () => { try { await api.setIngestSourceEnabled(source.id, enabled); await reloadSources(); } catch (e) { setError(String(e)); } })(); }}
                             />
                           ))
                         )}
@@ -598,7 +608,11 @@ export default function AgentsView({
                     </div>
                   );
                 })}
-              </div>
+              </div> : <div className="agent-overview-summary">
+                <span className="muted small">历史来源 {agentSources.filter((s) => s.enabled).length} / {agentSources.length} 已启用</span>
+                {hasCli && <span className="small">{entry?.launch_enabled ? "新建会话已启用" : "新建会话已关闭"}</span>}
+                <button className="btn small" onClick={() => navigate({ view: "agents", agent })}>配置 {AGENT_LABELS[agent]}</button>
+              </div>}
             </div>
           );
         })}

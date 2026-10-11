@@ -94,7 +94,7 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
     case "project":
       return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} />;
     case "agents":
-      return <AgentsView navigate={navigate} initialAgent={route.agent} />;
+      return <AgentsView key={route.agent ?? "overview"} navigate={navigate} initialAgent={route.agent} />;
     case "settings":
       return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
     case "search":

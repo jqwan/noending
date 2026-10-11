@@ -162,6 +162,9 @@ pub struct PreparedLaunch {
     /// Preview and Launch invalidates the preview instead of silently
     /// launching with parameters the user never saw.
     pub runtime: AgentRuntimeOverrides,
+    /// None inherits saved settings; Some(empty) explicitly uses native defaults.
+    #[serde(default)]
+    pub runtime_override: Option<AgentRuntimeOverrides>,
     /// Set when Continue for this session means opening the Agent's desktop
     /// app instead of the terminal. The route is decided per ROOT member's
     /// SOURCE FORMAT at prepare time (`AgentAdapter::continue_route`) — the
@@ -235,6 +238,21 @@ impl SessionLauncher {
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
+        self.prepare_new_with_runtime_in(db, agent, owner_workstream_id, cwd, workspace, None)
+    }
+
+    pub fn prepare_new_with_runtime_in(
+        &self,
+        db: &Db,
+        agent: Agent,
+        owner_workstream_id: Option<&str>,
+        cwd: Option<&str>,
+        workspace: &LaunchWorkspace,
+        runtime_override: Option<&AgentRuntimeOverrides>,
+    ) -> Result<PreparedLaunch> {
+        if !crate::agent_runtime::store::launch_enabled(db, agent)? {
+            return Err(other("该 Agent 已关闭用于新建会话，请在代理设置中启用"));
+        }
         // A Workstream is the Owner (or there is none): an Owner that was
         // deleted mid-flight leaves nothing to launch against.
         if let Some(ws_id) = owner_workstream_id {
@@ -242,8 +260,8 @@ impl SessionLauncher {
         }
 
         let resolution = resolve_new_cwd(cwd, workspace)?;
-        let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
-        let fingerprint = compute_state_fingerprint_in(
+        let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
+        let fingerprint = compute_state_fingerprint_with_runtime(
             db,
             "new",
             None,
@@ -251,6 +269,7 @@ impl SessionLauncher {
             agent,
             workspace,
             &resolution,
+            runtime_override,
         )?;
 
         Ok(PreparedLaunch {
@@ -262,6 +281,7 @@ impl SessionLauncher {
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
+            runtime_override: runtime_override.map(AgentRuntimeOverrides::normalized),
             desktop_open: None,
             embedded: false,
             initial_message: None,
@@ -371,6 +391,7 @@ impl SessionLauncher {
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
+            runtime_override: None,
             desktop_open,
             // The embedded flag is a command-layer freeze (it needs the
             // terminal registry for the double-open refusal); a launcher-level
@@ -442,7 +463,7 @@ impl SessionLauncher {
         // on a different fingerprint, so a plan whose directory moved is
         // refused here — the spawn below keeps using `prepared.cwd` verbatim.
         let resolution = recompute_launch_cwd(db, prepared, workspace)?;
-        let current_fingerprint = compute_state_fingerprint_in(
+        let current_fingerprint = compute_state_fingerprint_with_runtime(
             db,
             &prepared.mode,
             prepared.session_id.as_deref(),
@@ -450,6 +471,7 @@ impl SessionLauncher {
             prepared.agent,
             workspace,
             &resolution,
+            prepared.runtime_override.as_ref(),
         )?;
         if current_fingerprint != prepared.state_fingerprint {
             return Err(other(
@@ -713,6 +735,43 @@ pub fn compute_state_fingerprint_in(
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
 ) -> Result<String> {
+    compute_state_fingerprint_with_runtime(
+        db,
+        mode,
+        session_id,
+        owner_workstream_id,
+        agent,
+        workspace,
+        resolution,
+        None,
+    )
+}
+
+fn resolve_launch_runtime(
+    db: &Db,
+    agent: Agent,
+    one_time: Option<&AgentRuntimeOverrides>,
+) -> Result<AgentRuntimeOverrides> {
+    match one_time {
+        Some(overrides) => {
+            crate::agent_runtime::validate_runtime_overrides(agent, overrides)?;
+            Ok(overrides.normalized())
+        }
+        None => crate::agent_runtime::runtime_overrides_for_launch(db, agent),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_state_fingerprint_with_runtime(
+    db: &Db,
+    mode: &str,
+    session_id: Option<&str>,
+    owner_workstream_id: Option<&str>,
+    agent: Agent,
+    workspace: &LaunchWorkspace,
+    resolution: &CwdResolution,
+    runtime_override: Option<&AgentRuntimeOverrides>,
+) -> Result<String> {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
@@ -723,7 +782,10 @@ pub fn compute_state_fingerprint_in(
     // an override edited after Preview must abort the launch, never be picked
     // up silently. Only the intent is hashed — NoEnding has no resolved
     // default to hash.
-    let runtime = crate::agent_runtime::runtime_overrides_for_launch(db, agent)?;
+    if mode == "new" && !crate::agent_runtime::store::launch_enabled(db, agent)? {
+        return Err(other("该 Agent 已关闭用于新建会话"));
+    }
+    let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
     hasher.update(b"runtime:");
     hasher.update(agent.as_str().as_bytes());
     hasher.update(b"=");

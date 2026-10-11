@@ -617,3 +617,109 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
         }
     }
 }
+
+#[test]
+fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
+    use noending::agent_runtime::{
+        get_runtime_overrides, set_runtime_overrides, AgentRuntimeOverrides,
+    };
+    let db = open_db("one-time-runtime");
+    seed_installation(&db, Agent::Codex);
+    let l = launcher_in("one-time-runtime");
+    let ws = workspace(Some(&real_dir("one-time-runtime", "cwd")));
+    let saved = AgentRuntimeOverrides {
+        model: Some("saved".into()),
+        ..Default::default()
+    };
+    set_runtime_overrides(&db, Agent::Codex, &saved).unwrap();
+    let custom = AgentRuntimeOverrides {
+        model: Some("single".into()),
+        effort: Some("low".into()),
+        provider: None,
+    };
+    let prepared = l
+        .prepare_new_with_runtime_in(&db, Agent::Codex, None, None, &ws, Some(&custom))
+        .unwrap();
+    assert_eq!(
+        get_runtime_overrides(&db, Agent::Codex)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("saved")
+    );
+    // Saved defaults may change after preview; an explicit launch is independent.
+    set_runtime_overrides(
+        &db,
+        Agent::Codex,
+        &AgentRuntimeOverrides {
+            model: Some("changed".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fn assert_custom(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+        assert!(cmd.args.windows(2).any(|w| w == ["-m", "single"]));
+        assert!(cmd
+            .args
+            .iter()
+            .any(|a| a == "model_reasoning_effort=\"low\""));
+        fake_spawn(cmd)
+    }
+    l.launch_prepared_with_in(&db, &prepared, &ws, assert_custom, fake_open, None)
+        .unwrap();
+    let native = l
+        .prepare_new_with_runtime_in(
+            &db,
+            Agent::Codex,
+            None,
+            None,
+            &ws,
+            Some(&AgentRuntimeOverrides::default()),
+        )
+        .unwrap();
+    fn assert_native(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+        assert!(!cmd
+            .args
+            .iter()
+            .any(|a| a == "-m" || a.contains("model_reasoning_effort")));
+        fake_spawn(cmd)
+    }
+    l.launch_prepared_with_in(&db, &native, &ws, assert_native, fake_open, None)
+        .unwrap();
+    assert_eq!(
+        get_runtime_overrides(&db, Agent::Codex)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("changed")
+    );
+}
+
+#[test]
+fn disabling_new_launches_rejects_new_and_prepared_new_but_allows_resume() {
+    use noending::agent_runtime::store::{launch_enabled, set_launch_enabled};
+    let db = open_db("launch-preference");
+    seed_installation(&db, Agent::Codex);
+    let cwd = real_dir("launch-preference", "cwd");
+    let ws = workspace(Some(&cwd));
+    let l = launcher_in("launch-preference");
+    let prepared = l
+        .prepare_new_in(&db, Agent::Codex, None, None, &ws)
+        .unwrap();
+    let session = session_row(&db, Some(&cwd), None);
+    set_launch_enabled(&db, Agent::Codex, false).unwrap();
+    assert!(!launch_enabled(&db, Agent::Codex).unwrap());
+    assert!(db.get_installation(Agent::Codex).unwrap().is_some());
+    assert!(l
+        .prepare_new_in(&db, Agent::Codex, None, None, &ws)
+        .is_err());
+    assert!(l
+        .launch_prepared_with_in(&db, &prepared, &ws, fake_spawn, fake_open, None)
+        .is_err());
+    let resume = l.prepare_resume_in(&db, &session.id, &ws).unwrap();
+    l.launch_prepared_with_in(&db, &resume, &ws, fake_spawn, fake_open, None)
+        .unwrap();
+    set_launch_enabled(&db, Agent::Codex, true).unwrap();
+    assert!(l.prepare_new_in(&db, Agent::Codex, None, None, &ws).is_ok());
+    assert!(set_launch_enabled(&db, Agent::Dsh, true).is_err());
+}
