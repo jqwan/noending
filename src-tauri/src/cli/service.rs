@@ -529,7 +529,7 @@ impl Service {
                         session_value(&session)
                     }
                     Kind::Project => {
-                        return Err(CliError::new("invalid_arguments", "项目不提供归档状态"))
+                        json!({"project":crate::workspace::project::set_project_archived(&self.db, &id, archived)?})
                     }
                 };
                 (self.changed)();
@@ -776,8 +776,7 @@ impl Service {
                 "无效的范围或分页大小（1～50）",
             ));
         }
-        if kind == Kind::Project
-            && (project.is_some() || task.is_some() || agent.is_some() || scope != "unarchived")
+        if kind == Kind::Project && (project.is_some() || task.is_some() || agent.is_some())
             || kind == Kind::Task && (task.is_some() || agent.is_some())
         {
             return Err(CliError::new(
@@ -804,7 +803,7 @@ impl Service {
         let sql=match kind {
             Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR wp.project_id=?2) AND (?3 IS NULL OR s.owner_workstream_id=?3) AND (?4 IS NULL OR s.agent=?4) AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL) OR (?5='unarchived' AND s.archived_at IS NULL)) AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?8 COLLATE NOCASE) ORDER BY s.id LIMIT ?6",
             Kind::Task=>"SELECT s.id FROM workstreams s WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM workstream_paths p JOIN workspace_paths wp ON wp.id=p.workspace_path_id WHERE p.workstream_id=s.id AND wp.project_id=?2)) AND (?5='all' OR (?5='archived' AND s.visibility='archived') OR (?5='unarchived' AND s.visibility='normal')) AND ?3 IS NULL AND ?4 IS NULL AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workstream_paths p JOIN workspace_paths wp ON wp.id=p.workspace_path_id WHERE p.workstream_id=s.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY s.id LIMIT ?6",
-            Kind::Project=>"SELECT id FROM projects WHERE id>?1 AND ?2 IS NULL AND ?3 IS NULL AND ?4 IS NULL AND ?5='unarchived' AND (?7 IS NULL OR instr(lower(name),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.project_id=projects.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY id LIMIT ?6",
+            Kind::Project=>"SELECT id FROM projects WHERE id>?1 AND ?2 IS NULL AND ?3 IS NULL AND ?4 IS NULL AND (?5='all' OR (?5='archived' AND visibility='archived') OR (?5='unarchived' AND visibility='normal')) AND (?7 IS NULL OR instr(lower(name),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.project_id=projects.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY id LIMIT ?6",
         };
         let sql = sql.replace(
             "COLLATE NOCASE",

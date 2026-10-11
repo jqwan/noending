@@ -113,8 +113,8 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
   return {
     id: "p-1",
     name: "项目A",
-    name_customized: false,
-    kind: "directory" as const,
+    name_customized: false, visibility: "normal",
+    kind: "single_directory" as const,
     path_count: 1,
     missing_path_count: 0,
     workstream_count: 1,
@@ -1202,14 +1202,16 @@ it("scopes the assistant sidebar to its project and its unbound terminals", asyn
     terminal({ terminal_id: "assistant-pending", cwd: "/home/app/assistant", session_title: "待绑定助手" }),
     terminal({ terminal_id: "regular-bound", session_id: "regular-session", session_title: "普通会话" }),
     terminal({ terminal_id: "lookalike", cwd: "/home/app/assistant-other", session_title: "其他终端" }),
+    terminal({ terminal_id: "child", cwd: "/home/app/assistant/tmp", session_title: "子目录终端" }),
   ]);
-  const workspace: import("../types").AssistantWorkspace = { project: { id: "assistant-project", name: "助手", git_id: null, name_customized: false, created_at: "", updated_at: "" }, directory: "/home/app/assistant" };
+  const workspace: import("../types").AssistantWorkspace = { project: { id: "assistant-project", name: "助手", git_id: null, name_customized: false, visibility: "normal", created_at: "", updated_at: "" }, directory: "/home/app/assistant" };
   const navigate = vi.fn();
   const { rerender } = render(<Sidebar route={{ view: "assistant" }} navigate={navigate} assistantMode assistantWorkspace={workspace} />);
   await screen.findByText("助手原生会话");
   expect(screen.getByText("待绑定助手")).toBeTruthy();
   expect(screen.queryByText("普通会话")).toBeNull();
   expect(screen.queryByText("其他终端")).toBeNull();
+  expect(screen.queryByText("子目录终端")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "新建" }));
   expect(navigate).toHaveBeenCalledWith({ view: "assistant" });
   rerender(<Sidebar route={{ view: "sessions" }} navigate={navigate} />);

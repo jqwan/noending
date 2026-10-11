@@ -5,10 +5,12 @@ import PageHeader from "../../layout/PageHeader";
 import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import PreferenceList from "../preferences/PreferenceList";
+import ProjectLifecycleActions from "./ProjectLifecycleActions";
+import { clearProjectCardsCache } from "./ProjectsView";
 import ProjectSummary, { clearProjectSummaryCache } from "./ProjectSummary";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { httpsRemoteUrl } from "./remoteUrl";
-import { projectKindLabels, isChatDirectoryProject } from "./projectKind";
+import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject } from "./projectKind";
 import {
   type ProjectDetailData,
 } from "../../types";
@@ -146,9 +148,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           {failure !== "" && <PathError text={failure} />}
           {gone && (
             <p className="muted small">
-              项目没有归档、也没有「删除」这个操作：当它拥有的最后一个工作目录
-              不再被任务或会话引用并被清理，或被别的项目认领时，它就自动消失了。
-              它下面的任务与会话不会被删除 —— 项目从来不是它们的生命周期所有者。
+              项目已被永久删除或合并到其他项目。关联任务和会话不会因此被删除。
             </p>
           )}
           {!gone && failure !== "" && (
@@ -170,10 +170,15 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       <PageHeader
         title={<span style={{ overflowWrap: "anywhere" }}>{project.name}</span>}
         actions={
+          <>
+          <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, session_count: detail.sessions.length }}
+            onChanged={() => { clearProjectCardsCache(); refresh(); }}
+            onDeleted={() => { clearProjectDetailCache(); navigate({ view: "projects", scope: "archived" }); }} />
           <button className="btn ghost icon-button" title="重命名" aria-label="重命名"
             onClick={() => { setNameInput(project.name); setRenameError(""); setRenaming(true); }}>
             <Icon name="edit" />
           </button>
+          </>
         }
       />
 
@@ -213,12 +218,12 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       <section className="rail-section">
         <div className="rail-head">
           <div className="section-label" style={{ margin: 0 }}>会话</div>
-          {(detail.builtin_assistant || !isChatDirectoryProject({ ...detail.project, kind: detail.kind })) && (
+          {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
             <button
               className="btn ghost icon-button"
               title="新建会话"
               aria-label="新建会话"
-              onClick={() => navigate(detail.builtin_assistant ? { view: "assistant" } : { view: "new-session", projectId: project.id })}
+              onClick={() => navigate(detail.purpose === "assistant" ? { view: "assistant" } : { view: "new-session", projectId: project.id })}
             >
               <Icon name="plus" />
             </button>
@@ -236,8 +241,10 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         <div className="section-label">属性</div>
         <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <span className={`badge ${detail.kind === "git" ? "accent" : ""}`}>
-            {detail.builtin_assistant ? "内置助手" : projectKindLabels[detail.kind]}
+            {projectKindLabels[detail.kind]}
           </span>
+          {detail.purpose && <span className="badge accent">{projectPurposeLabels[detail.purpose]}</span>}
+          <span className="badge">{project.visibility === "archived" ? "已归档" : "未归档"}</span>
           {project.name_customized && <span className="small muted">自定义名称</span>}
         </div>
         {detail.remote_url && (
@@ -272,7 +279,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         <div className="section-label">工作目录</div>
         {sortedWorkspacePaths.length === 0 && (
           <div className="l1-none">
-            这个项目已经不再拥有任何目录 —— 它会在下一次整理时自动消失。
+            这个项目目前没有登记目录。
           </div>
         )}
         {sortedWorkspacePaths.map((p) => (

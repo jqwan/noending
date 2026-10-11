@@ -164,13 +164,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Projects are derived from WorkspacePaths; the UI gets read + rename.
+            // Projects derive membership from paths; lifecycle is user managed.
             commands::project::list_projects,
             commands::project::list_project_cards,
             commands::project::get_project_detail,
             commands::project::list_project_workstreams,
             commands::project::rename_project,
             commands::project::add_project_path,
+            commands::project::archive_project,
+            commands::project::restore_project,
+            commands::project::delete_project_permanently,
             commands::workspace::get_workspace_settings,
             commands::workspace::set_noending_home,
             commands::workstream::create_workstream,

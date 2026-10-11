@@ -22,7 +22,7 @@ import {
   type WorkstreamCardData,
 } from "../../types";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
-import { isChatDirectoryProject } from "../projects/projectKind";
+import { isDirectoryGroupProject } from "../projects/projectKind";
 
 /** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
 export type NewSessionViewProps = {
@@ -187,10 +187,10 @@ export default function NewSessionView({
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
   const isUnassignedProject = selectedProjectId === UNASSIGNED_PROJECT ||
-    (selectedProject !== null && isChatDirectoryProject(selectedProject));
+    (selectedProject !== null && isDirectoryGroupProject(selectedProject));
 
   const otherProjects = useMemo(
-    () => projects.filter((p) => !isChatDirectoryProject(p)),
+    () => projects.filter((p) => !isDirectoryGroupProject(p)),
     [projects],
   );
 

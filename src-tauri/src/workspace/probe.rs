@@ -22,7 +22,7 @@ use crate::storage::workspace::{
 use crate::storage::Db;
 use crate::workspace::identity::auto_project_name;
 use crate::workspace::project::{
-    chat_bucket_label, find_chat_bucket_project_conn, resolve_common_dir, WorkspacePolicy,
+    directory_group_label, find_directory_group_project_conn, resolve_common_dir, WorkspacePolicy,
 };
 use crate::workspace::resolver::{
     exists_on_disk, is_observable, ProbeRejection, WorkspaceObserving,
@@ -130,7 +130,7 @@ pub fn probe_workspace_path(
                 let bucket_label = if matches!(observation.git, GitDetection::Detected { .. }) {
                     None
                 } else {
-                    chat_bucket_label(&observation.canonical_path, policy)
+                    directory_group_label(&observation.canonical_path, policy)
                 };
                 let family_project = match &observation.git {
                     GitDetection::Detected { common_dir, .. } => {
@@ -146,7 +146,7 @@ pub fn probe_workspace_path(
                         }
                     }
                     _ => match bucket_label {
-                        Some(label) => find_chat_bucket_project_conn(&conn, label)?,
+                        Some(label) => find_directory_group_project_conn(&conn, label, policy)?,
                         None => None,
                     },
                 };

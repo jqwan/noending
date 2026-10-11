@@ -224,7 +224,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                             description,
                         }
                     }
-                    "archive" | "unarchive" if kind != Kind::Project => Command::Archive {
+                    "archive" | "unarchive" => Command::Archive {
                         kind,
                         id: id(&words)?,
                         archived: action == "archive",
@@ -376,7 +376,7 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         None => vec!["ne status", "ne search --help", "ne session/task/project --help", "ne preference --help", "ne summary --help", "ne job --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("session") => vec!["ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
         Some("task") => vec!["ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID", "ne task create --title TEXT [--description TEXT] [--path PATH ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task path list ID", "ne task path add ID --path PATH", "ne task path remove ID --path-id WORKSPACE_PATH_ID", "ne task path reorder ID [--path-id WORKSPACE_PATH_ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
-        Some("project") => vec!["ne project rename ID --name TEXT", "ne project list [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID"],
+        Some("project") => vec!["ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID"],
         Some("summary") => vec!["ne summary update session|task|project ID [--wait] [--timeout 600]", "ne summary regenerate session|task|project ID [--wait] [--timeout 600]", "ne summary set session|task|project ID --file FILE --revision REVISION"],
         Some("preference") => vec!["ne preference list --scope user|project [--project ID]", "ne preference add --scope user|project [--project ID] --content TEXT", "ne preference update ID --content TEXT", "ne preference delete ID"],
         Some("job") => vec!["ne job list", "ne job show ID", "ne job wait ID [--timeout 600]"],

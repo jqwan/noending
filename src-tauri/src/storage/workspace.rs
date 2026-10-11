@@ -85,6 +85,7 @@ fn row_project_row(r: &Row) -> rusqlite::Result<Project> {
         name: r.get("name")?,
         git_id: r.get("git_id")?,
         name_customized: r.get::<_, i64>("name_customized")? != 0,
+        visibility: r.get("visibility")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -204,20 +205,8 @@ pub fn reassign_workspace_path_project_conn(
     Ok(())
 }
 
-/// Whether a WorkspacePath has no references. Project policy additionally
-/// protects existing Git directories and the active default workspace.
-pub fn workspace_path_is_gcable(conn: &Connection, path_id: &str) -> Result<bool> {
-    let refs: i64 = conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?1)
-              + (SELECT COUNT(*) FROM workstream_paths WHERE workspace_path_id = ?1)",
-        params![path_id],
-        |r| r.get(0),
-    )?;
-    Ok(refs == 0)
-}
-
-/// Delete a WorkspacePath the caller has already proven GC-eligible. Returns
-/// its former Project so the caller can run the zero-path check.
+/// Remove a path in an explicit transaction; foreign keys protect references.
+/// The project itself remains registered.
 pub fn delete_workspace_path_conn(conn: &Connection, path_id: &str) -> Result<Option<String>> {
     let project: Option<String> = conn
         .query_row(
@@ -411,9 +400,7 @@ pub fn touch_git_identity_conn(conn: &Connection, git_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The zero-path test a caller runs after removing a path. The delete
-/// itself is [`delete_zero_path_project_conn`] (borrowed connection, caller's
-/// transaction, FTS row left for the post-commit `unindex`).
+/// Merge guard: absorbed projects must have transferred all paths.
 pub fn project_is_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
     let owned: i64 = conn.query_row(
         "SELECT COUNT(*) FROM workspace_paths WHERE project_id = ?1",
@@ -440,6 +427,15 @@ pub fn adopt_git_identity_conn(conn: &Connection, project_id: &str, git_id: &str
           WHERE id = ?1 AND git_id IS NULL",
         params![project_id, git_id, now()],
     )? > 0)
+}
+
+/// Release a confirmed obsolete Git anchor; grouping decisions stay in project.
+pub fn clear_git_identity_conn(conn: &Connection, project_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET git_id = NULL, updated_at = ?2 WHERE id = ?1",
+        params![project_id, now()],
+    )?;
+    Ok(())
 }
 
 /// A merge may hand the survivor a user-provided name. `customized` is written
@@ -478,34 +474,12 @@ pub fn rename_project_conn(conn: &Connection, project_id: &str, name: &str) -> R
     get_project_conn(conn, project_id)?.ok_or_else(|| other(format!("Project {project_id} 不存在")))
 }
 
-/// Delete a Project that no longer owns any WorkspacePath.
-///
-/// Sessions derive membership through paths, so a zero-path Project has no
-/// Session references to clear. The FTS row is NOT dropped here: `unindex` belongs after the commit
-/// (`ProjectionEffect::projects_deleted` carries the ids), and an un-committed
-/// delete must not leave search with a hole if this transaction rolls back.
-///
-/// A Project that still owns a path is refused rather than silently emptied: a
-/// Project exists exactly while it owns one, so reaching this point with paths is
-/// a caller bug.
-pub fn delete_zero_path_project_conn(conn: &Connection, project_id: &str) -> Result<bool> {
-    if get_project_conn(conn, project_id)?.is_none() {
-        return Ok(false);
-    }
+/// Remove an absorbed project after every path has moved to its merge survivor.
+/// This is an internal identity fold, not the user-facing permanent-delete API.
+pub fn delete_merged_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
     if !project_is_unowned(conn, project_id)? {
-        return Err(other(format!(
-            "Project {project_id} 仍然拥有 WorkspacePath，不能删除"
-        )));
+        return Err(other(format!("合并后的项目 {project_id} 仍然拥有工作目录")));
     }
     conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
-    Ok(true)
-}
-
-/// The zero-path rule as an action: retire a Project the moment it owns
-/// nothing. Returns true when it is gone, so callers can record the FTS cleanup.
-pub fn retire_project_if_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
-    if !project_is_unowned(conn, project_id)? {
-        return Ok(false);
-    }
-    delete_zero_path_project_conn(conn, project_id)
+    Ok(())
 }

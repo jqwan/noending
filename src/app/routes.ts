@@ -43,7 +43,7 @@ export type Route = (
   | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
   | { view: "agents"; agent?: Agent }
   | { view: "assistant" }
-  | { view: "projects" }
+  | { view: "projects"; scope?: "unarchived" | "archived" }
   | { view: "project"; projectId: string; initialTitle?: string }
   | { view: "settings"; section?: SettingsSection | LegacySettingsSection }
   | { view: "search"; query: string }) & { assistant?: boolean };

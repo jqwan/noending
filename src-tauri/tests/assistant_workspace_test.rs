@@ -1,7 +1,7 @@
 //! Built-in project identity and persistent user instructions.
 use noending::{
     assistant,
-    domain::ProjectKind,
+    domain::{GitDetection, GitWorktreeKind, ProjectKind, ProjectPurpose},
     storage::{new_id, Db},
     workspace::{home::NoEndingHome, path_identity, project, wiring::WorkspaceLayer},
 };
@@ -67,8 +67,8 @@ fn assistant_project_keeps_identity_after_rename_and_empty_registry_sweep() {
         .is_file());
     let projection = f.layer.projection();
     let root_id = path_identity(&second.directory);
-    let swept = project::gc_gone_workspace_paths(f.db(), &[root_id.clone()]).unwrap();
-    assert!(swept.deleted_paths.is_empty());
+    project::reconcile_workspace_paths(f.db(), &projection, usize::MAX).unwrap();
+    assert!(f.db().get_workspace_path(&root_id).unwrap().is_some());
     let child = PathBuf::from(&second.directory).join("conversations");
     std::fs::create_dir(&child).unwrap();
     let child_path = project::ensure_workspace_path(
@@ -77,7 +77,12 @@ fn assistant_project_keeps_identity_after_rename_and_empty_registry_sweep() {
         projection.policy(),
     )
     .unwrap();
-    assert_eq!(child_path.project_id, first.project.id);
+    assert_ne!(child_path.project_id, first.project.id);
+    let child_detail = project::project_detail(f.db(), &child_path.project_id, projection.policy())
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_detail.kind, ProjectKind::SingleDirectory);
+    assert_eq!(child_detail.purpose, None);
     let default = project::ensure_workspace_path(
         f.db(),
         &projection
@@ -90,14 +95,52 @@ fn assistant_project_keeps_identity_after_rename_and_empty_registry_sweep() {
     let detail = project::project_detail(f.db(), &first.project.id, projection.policy())
         .unwrap()
         .unwrap();
-    assert_eq!(detail.kind, ProjectKind::ChatDirectory);
-    assert!(detail.builtin_assistant);
+    assert_eq!(detail.kind, ProjectKind::SingleDirectory);
+    assert_eq!(detail.purpose, Some(ProjectPurpose::Assistant));
     assert!(detail.sessions.is_empty());
-    // Missing directories with no references still follow ordinary cleanup.
+    let mut observation = projection.observer().observe(&second.directory);
+    observation.git = GitDetection::Detected {
+        common_dir: PathBuf::from(&second.directory)
+            .join(".git")
+            .to_string_lossy()
+            .to_string(),
+        toplevel: Some(second.directory.clone()),
+        kind: GitWorktreeKind::Main,
+        worktrees: vec![],
+        remotes: vec![],
+    };
+    let upgraded =
+        project::ensure_workspace_path(f.db(), &observation, projection.policy()).unwrap();
+    assert_eq!(upgraded.project_id, first.project.id);
+    let git_detail = project::project_detail(f.db(), &first.project.id, projection.policy())
+        .unwrap()
+        .unwrap();
+    assert_eq!(git_detail.kind, ProjectKind::Git);
+    assert_eq!(git_detail.purpose, Some(ProjectPurpose::Assistant));
+    observation.git = GitDetection::None;
+    project::ensure_workspace_path(f.db(), &observation, projection.policy()).unwrap();
+    let returned = project::project_detail(f.db(), &first.project.id, projection.policy())
+        .unwrap()
+        .unwrap();
+    assert_eq!(returned.kind, ProjectKind::SingleDirectory);
+    assert_eq!(returned.purpose, Some(ProjectPurpose::Assistant));
+    assert_eq!(returned.project.name, custom);
+
+    // Missing directories stay registered, and built-in purpose still forbids deletion.
     std::fs::remove_dir_all(&child).unwrap();
     std::fs::remove_dir_all(&second.directory).unwrap();
     project::reconcile_workspace_paths(f.db(), &projection, 100).unwrap();
-    assert!(f.db().get_project(&first.project.id).unwrap().is_none());
+    let retained = f.db().get_workspace_path(&root_id).unwrap().unwrap();
+    assert!(!retained.exists);
+    assert!(f.db().get_project(&first.project.id).unwrap().is_some());
+    project::set_project_archived(f.db(), &first.project.id, true).unwrap();
+    assert!(
+        project::delete_project_permanently(f.db(), &first.project.id, projection.policy())
+            .is_err()
+    );
+    let recreated = assistant::ensure_workspace(f.db(), &f.home, &f.layer).unwrap();
+    assert_eq!(recreated.project.id, first.project.id);
+    assert_eq!(recreated.project.visibility, "archived");
 }
 
 #[test]
@@ -112,6 +155,7 @@ fn assistant_cli_access_does_not_grant_access_to_application_data_or_other_works
         None,
         Some(f.home.default_workspace_str()),
         Some(format!("{}-other", workspace.directory)),
+        Some(format!("{}/tmp", workspace.directory)),
     ] {
         assert!(
             assistant::cli_writable_directories(&f.home.runtime_dir, cwd.as_deref()).is_empty()

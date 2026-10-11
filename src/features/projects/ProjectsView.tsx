@@ -8,15 +8,16 @@ import EmptyState from "../../components/EmptyState";
 import { showToast } from "../../components/Toast";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import { PathText } from "../workstreams/WorkspacePaths";
-import type { Route } from "../../app/routes";
+import { EVT_SYNCED, type Route } from "../../app/routes";
+import ProjectLifecycleActions, { canDeleteProject, ProjectDeleteModal } from "./ProjectLifecycleActions";
 import type { ProjectCardData, ProjectKind } from "../../types";
-import { projectKindLabels, isChatDirectoryProject } from "./projectKind";
+import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject } from "./projectKind";
 
 /**
  * Projects Board：Projects 是一等浏览页面——物理工作空间，由工作目录自动派生。
  * 数据来自**一次** `list_project_cards` 调用，不再是 1 + N 的 detail 读取。
  * 卡片强调「地方」（路径、可用性、任务 / 会话数、最近活动）；诊断信息（uuid、
- * git_id、内部 identity）属于 Detail。这里没有创建入口：Project 是派生的。
+ * git_id、内部 identity）属于 Detail。归档状态由用户管理。
  */
 type FilterKey = "all" | "ok" | "missing";
 type ProjectKindFilter = "all" | ProjectKind;
@@ -54,12 +55,16 @@ export function clearProjectCardsCache() {
   cachedProjectCards = null;
 }
 
-export default function ProjectsView({ navigate }: { navigate: (r: Route) => void }) {
+export default function ProjectsView({ navigate, scope }: { navigate: (r: Route) => void; scope?: "unarchived" | "archived" }) {
+  const archivedMode = scope === "archived";
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
   const [cards, setCards] = useState<ProjectCardData[] | null>(cachedProjectCards);
   const [listError, setListError] = useState("");
   const [query, setQuery] = useViewState("projects.query", "");
   const [filter, setFilter] = useViewState<FilterKey>("projects.filter", "all");
   const [kindFilter, setKindFilter] = useViewState<ProjectKindFilter>("projects.kindFilter", "all");
+  const effectiveKindFilter = kindFilter === "all" || kindFilter in projectKindLabels ? kindFilter : "all";
   const [sort, setSort] = useViewState<SortKey>("projects.sort", "recent");
   const [viewMode, setViewMode] = useViewState<"cards" | "list">("projects.viewMode", "cards");
 
@@ -110,11 +115,30 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
   const list = useMemo(() => {
     if (cards === null) return null;
     return cards
+      .filter((c) => c.visibility === (archivedMode ? "archived" : "normal"))
       .filter(FILTERS[filter])
-      .filter((c) => kindFilter === "all" || c.kind === kindFilter)
+      .filter((c) => effectiveKindFilter === "all" || c.kind === effectiveKindFilter)
       .filter((c) => cardMatches(c, query))
       .sort(SORTERS[sort]);
-  }, [cards, query, filter, kindFilter, sort]);
+  }, [cards, query, filter, effectiveKindFilter, sort, archivedMode]);
+
+  const deletableProjects = cards?.filter(canDeleteProject) ?? [];
+  const bulkDelete = async () => {
+    if (bulkDeleteBusy || deletableProjects.length === 0) return;
+    const targets = [...deletableProjects];
+    setBulkDeleteBusy(true);
+    let deleted = 0;
+    for (const project of targets) {
+      try { await api.deleteProjectPermanently(project.id); deleted += 1; }
+      catch (e) { console.error(e); }
+    }
+    setBulkDeleteBusy(false);
+    setBulkDeleteOpen(false);
+    clearProjectCardsCache();
+    refresh();
+    window.dispatchEvent(new Event(EVT_SYNCED));
+    showToast(`已永久删除 ${deleted} 个项目${deleted < targets.length ? `，${targets.length - deleted} 个删除失败` : ""}`);
+  };
 
   const scrollRef = useViewScroll("projects.scroll", cards !== null);
 
@@ -123,15 +147,23 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
       <PageHeader
         title="项目"
         actions={
-          <button
-            className="btn ghost icon-button"
-            disabled={addingProject}
-            aria-label="新增项目"
-            title="新增项目"
-            onClick={handleAddProject}
-          >
-            <Icon name="plus" />
-          </button>
+          <>
+            <div className="settings-seg icon-seg archive-scope" role="group" aria-label="项目列表范围">
+              <button className={archivedMode ? "" : "on"} aria-pressed={!archivedMode} aria-label="未归档" title="未归档"
+                onClick={() => navigate({ view: "projects", scope: "unarchived" })}><Icon name="project" /></button>
+              <button className={archivedMode ? "on" : ""} aria-pressed={archivedMode} aria-label="已归档" title="已归档"
+                onClick={() => navigate({ view: "projects", scope: "archived" })}><Icon name="archive" /></button>
+            </div>
+            <span className="session-action-divider" aria-hidden="true" />
+            {archivedMode ? (
+              <button className="btn ghost icon-button danger" aria-label="删除全部" title="删除全部可删除的已归档项目"
+                disabled={deletableProjects.length === 0 || bulkDeleteBusy} onClick={() => setBulkDeleteOpen(true)}><Icon name="trash" /></button>
+            ) : (
+              <button className="btn ghost icon-button" disabled={addingProject} aria-label="新增项目" title="新增项目" onClick={handleAddProject}>
+                <Icon name="plus" />
+              </button>
+            )}
+          </>
         }
       />
 
@@ -158,7 +190,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
           <span className="muted small">项目类型</span>
           <select
             aria-label="项目类型"
-            value={kindFilter}
+            value={effectiveKindFilter}
             onChange={(e) => setKindFilter(e.target.value as ProjectKindFilter)}
           >
             <option value="all">全部类型</option>
@@ -175,7 +207,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
             <option value="paths">目录数</option>
           </select>
         </label>
-        {(query || filter !== "all" || kindFilter !== "all") && <button className="btn small ghost" onClick={() => { setQuery(""); setFilter("all"); setKindFilter("all"); }}>清除筛选</button>}
+        {(query || filter !== "all" || effectiveKindFilter !== "all") && <button className="btn small ghost" onClick={() => { setQuery(""); setFilter("all"); setKindFilter("all"); }}>清除筛选</button>}
         {list && <span className="muted small">{list.length} 个项目</span>}
         <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
           <button
@@ -222,22 +254,22 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
           <button className="btn small" style={{ marginTop: 8 }} onClick={refresh}>重试</button>
         </div>
       )}
-      {list !== null && list.length === 0 && cards !== null && cards.length > 0 && (
+      {list !== null && list.length === 0 && cards !== null && cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
         <EmptyState
           title="没有匹配的项目"
           hint="换个关键词，或把筛选切回「全部」。"
         />
       )}
-      {cards !== null && cards.length === 0 && (
+      {cards !== null && !cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
         <EmptyState
-          title="还没有项目"
-          hint="打开会话或给任务添加工作路径后，项目会自动出现在这里。"
+          title={archivedMode ? "没有已归档项目" : "还没有项目"}
+          hint={archivedMode ? "归档的项目会显示在这里。" : "添加目录、打开会话或给任务添加工作路径后，项目会出现在这里。"}
         />
       )}
 
       {viewMode === "cards" ? (
         <div className="ws-grid board-grid">
-          {list?.map((c) => <ProjectCard key={c.id} card={c} navigate={navigate} />)}
+          {list?.map((c) => <ProjectCard key={c.id} card={c} navigate={navigate} onChanged={refresh} />)}
         </div>
       ) : (
         <div className="project-list">
@@ -252,7 +284,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
                   <Icon name="project" />
                   <span>{c.name}</span>
                   <span className="badge">{projectKindLabels[c.kind]}</span>
-                  {c.builtin_assistant && <span className="badge accent">内置助手</span>}
+                  {c.purpose && <span className="badge accent">{projectPurposeLabels[c.purpose]}</span>}
                   {c.missing_path_count > 0 && (
                     <span className="badge warn">{c.missing_path_count} 个目录缺失</span>
                   )}
@@ -275,13 +307,14 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
                 )}
               </button>
               <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
-                {(c.builtin_assistant || !isChatDirectoryProject(c)) && (
+                <ProjectLifecycleActions project={c} onChanged={refresh} />
+                {(c.purpose === "assistant" || !isDirectoryGroupProject(c)) && (
                   <button
                     type="button"
                     className="btn small ghost icon-button"
                     aria-label="新建会话"
                     title="新建会话"
-                    onClick={() => navigate(c.builtin_assistant ? { view: "assistant" } : { view: "new-session", projectId: c.id })}
+                    onClick={() => navigate(c.purpose === "assistant" ? { view: "assistant" } : { view: "new-session", projectId: c.id })}
                   >
                     <Icon name="plus" />
                   </button>
@@ -291,13 +324,17 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
           ))}
         </div>
       )}
+      {bulkDeleteOpen && <ProjectDeleteModal names={deletableProjects.map((p) => p.name)} busy={bulkDeleteBusy}
+        onClose={() => setBulkDeleteOpen(false)} onConfirm={() => void bulkDelete()} />}
+
     </div>
   );
 }
 
 /** 信息密度受控的卡片：名字、可用性、两条代表路径、计数、最近活动。 */
-function ProjectCard({ card, navigate }: {
+function ProjectCard({ card, navigate, onChanged }: {
   card: ProjectCardData;
+  onChanged: () => void;
   navigate: (r: Route) => void;
 }) {
   const restPaths = Math.max(0, card.path_count - 1);
@@ -319,7 +356,7 @@ function ProjectCard({ card, navigate }: {
         <div className="ws-card-title" title={card.name}><Icon name="project" />{card.name}</div>
         <div className="ws-card-side">
           <span className="badge">{projectKindLabels[card.kind]}</span>
-          {card.builtin_assistant && <span className="badge accent">内置助手</span>}
+          {card.purpose && <span className="badge accent">{projectPurposeLabels[card.purpose]}</span>}
           {card.missing_path_count > 0 && (
             <span className="badge warn">{card.missing_path_count} 个目录缺失</span>
           )}
@@ -343,13 +380,14 @@ function ProjectCard({ card, navigate }: {
       <div className="ws-card-meta">
         <span className="muted small">{timeAgo(card.last_activity_at)}</span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-          {(card.builtin_assistant || !isChatDirectoryProject(card)) && (
+          <ProjectLifecycleActions project={card} onChanged={onChanged} />
+          {(card.purpose === "assistant" || !isDirectoryGroupProject(card)) && (
             <button
               type="button"
               className="btn small ghost icon-button"
               aria-label="新建会话"
               title="新建会话"
-              onClick={() => navigate(card.builtin_assistant ? { view: "assistant" } : { view: "new-session", projectId: card.id })}
+              onClick={() => navigate(card.purpose === "assistant" ? { view: "assistant" } : { view: "new-session", projectId: card.id })}
             >
               <Icon name="plus" />
             </button>

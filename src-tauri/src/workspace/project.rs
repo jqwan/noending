@@ -10,25 +10,26 @@
 //!
 //! The decision table, in one place:
 //!
-//! * known path, no Git now → keep Project + `git_id`; `detected → missing`
+//! * known ordinary path, no Git now → keep Project + `git_id`; `detected → missing`
+//! * confirmed Git removal in built-in chat/assistant directories → return to application grouping
 //! * new path, no Git → create a path-backed Project (`git_id = NULL`)
 //!   (default chat directories instead join their app's shared Project)
 //! * new path, Git `G` known to Project B → join B
 //! * new path, Git `G` unrecognized → create `git_identities` row + git-backed Project
 //! * known path upgrades to `G` → adopt in place, or merge into `G`'s Project
 //!   (a shared chat Project moves only the path that supplied Git evidence)
-//! * known path reports a different `G2` → reassign only this path; retire the old Project if empty
+//! * known path reports a different `G2` → reassign only this path; retain the old Project
 //!
 //! Hard rules:
 //!
 //! * `projects.git_id` is UNIQUE when non-null and `workspace_paths.project_id`
-//!   is NOT NULL: a WorkspacePath belongs to exactly one Project, and a Project
-//!   owns at least one.
-//! * Deleting the last WorkspacePath deletes the Project — in FK order
-//!   `projects`, then `unindex("project", id)` after commit.
-//! * An unreferenced ordinary WorkspacePath can be GC'd even while it exists.
-//!   Paths owned by Git Projects are kept while their directories exist; missing
-//!   paths are removed only with 0 Session and 0 WorkstreamPath references.
+//!   is NOT NULL: a WorkspacePath belongs to exactly one Project.
+//! * Split-created projects inherit the source archive state; joining an existing
+//!   project keeps the destination state, and in-place conversions keep their own.
+//! * Projects and registered paths are never garbage-collected. Users can
+//!   archive any project independently of its tasks and sessions.
+//! * Permanent deletion requires archive state, no associated sessions and no
+//!   chat/assistant purpose; it detaches task paths and never deletes directories.
 //! * `name_customized` wins over every automatic rename, and automatic naming
 //!   happens at Project creation only: no reconcile, worktree discovery or merge
 //!   renames an existing row (a merge may only carry a `name_customized` name
@@ -45,21 +46,20 @@
 //! them reports a different family. Evidence is per-path, so swallowing paths
 //! that produced none would invent membership.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::domain::{
-    git_state, GitDetection, GitWorktreeKind, Project, ProjectKind, Session, WorkspaceObservation,
-    WorkspacePath, Workstream,
+    git_state, GitDetection, GitWorktreeKind, Project, ProjectKind, ProjectPurpose, Session,
+    WorkspaceObservation, WorkspacePath, Workstream,
 };
 use crate::error::{other, Result};
 use crate::storage::workspace::{
-    adopt_git_identity_conn, delete_workspace_path_conn, ensure_git_identity_conn,
-    get_project_conn, get_workspace_path_conn, insert_workspace_path_conn,
-    list_workspace_paths_for_project_conn, project_by_git_id_conn,
-    reassign_workspace_path_project_conn, retire_project_if_unowned, scan_workspace_paths_conn,
-    set_project_name_conn, touch_git_identity_conn, update_workspace_path_observation_conn,
-    workspace_path_is_gcable,
+    adopt_git_identity_conn, clear_git_identity_conn, delete_merged_project_conn,
+    ensure_git_identity_conn, get_project_conn, get_workspace_path_conn,
+    insert_workspace_path_conn, list_workspace_paths_for_project_conn, project_by_git_id_conn,
+    reassign_workspace_path_project_conn, scan_workspace_paths_conn, set_project_name_conn,
+    touch_git_identity_conn, update_workspace_path_observation_conn,
 };
 use crate::storage::{new_id, now, upsert_project_conn, Db};
 use crate::workspace::identity::{
@@ -105,19 +105,36 @@ pub struct UnrestrictedWorkspace;
 
 /// App-created chat directories share a Project per root. Git evidence always
 /// takes priority; callers apply this only after ruling out a Git identity.
-pub fn chat_bucket_label(canonical: &str, policy: &dyn WorkspacePolicy) -> Option<&'static str> {
+pub fn directory_group_label(
+    canonical: &str,
+    policy: &dyn WorkspacePolicy,
+) -> Option<&'static str> {
     if policy
-        .assistant_workspace()
-        .is_some_and(|root| is_within(canonical, &root))
-    {
-        Some("NoEnding Assistant")
-    } else if policy
         .default_workspace()
         .is_some_and(|root| is_within(canonical, &root))
     {
         Some("NoEnding Chat")
     } else {
         crate::platform::paths::app_chat_bucket_of(canonical)
+    }
+}
+
+fn is_assistant_directory(canonical: &str, policy: &dyn WorkspacePolicy) -> bool {
+    policy
+        .assistant_workspace()
+        .is_some_and(|root| same_location(canonical, &root))
+}
+
+pub fn project_purpose(paths: &[String], policy: &dyn WorkspacePolicy) -> Option<ProjectPurpose> {
+    if paths.iter().any(|p| is_assistant_directory(p, policy)) {
+        Some(ProjectPurpose::Assistant)
+    } else if paths
+        .iter()
+        .any(|p| directory_group_label(p, policy).is_some())
+    {
+        Some(ProjectPurpose::Chat)
+    } else {
+        None
     }
 }
 
@@ -128,10 +145,13 @@ pub fn project_kind(
 ) -> ProjectKind {
     if project.git_id.is_some() {
         ProjectKind::Git
-    } else if paths.iter().any(|p| chat_bucket_label(p, policy).is_some()) {
-        ProjectKind::ChatDirectory
+    } else if paths
+        .iter()
+        .any(|p| directory_group_label(p, policy).is_some())
+    {
+        ProjectKind::DirectoryGroup
     } else {
-        ProjectKind::Directory
+        ProjectKind::SingleDirectory
     }
 }
 
@@ -184,7 +204,7 @@ impl<'a> ProjectProjection<'a> {
 pub struct ProjectionEffect {
     /// Created, Git-upgraded or renamed: refresh `index_project` after commit.
     pub projects_touched: Vec<String>,
-    /// Deleted as zero-path: `unindex("project", id)` after commit.
+    /// Absorbed by a merge: `unindex("project", id)` after commit.
     pub projects_deleted: Vec<String>,
 }
 
@@ -202,7 +222,7 @@ impl ProjectionEffect {
     }
 
     /// Fold a nested decision's bookkeeping into this one (a merge inside an
-    /// `ensure`, a GC inside a sweep).
+    /// `ensure`, a fold inside a sweep).
     pub fn merge(&mut self, other: &ProjectionEffect) {
         for id in &other.projects_touched {
             self.touch(id);
@@ -243,19 +263,11 @@ pub struct MergeOutcome {
     pub adopted_name: Option<String>,
 }
 
-/// What a GC pass removed.
-#[derive(Debug, Default, Clone)]
-pub struct GcOutcome {
-    pub deleted_paths: Vec<String>,
-    pub deleted_projects: Vec<String>,
-}
-
 /// One reconcile sweep.
 #[derive(Debug, Default, Clone)]
 pub struct ReconcileReport {
     pub scanned: usize,
-    /// Swept paths observed as absent from disk THIS round — before the GC
-    /// reference check, so this counts surviving referenced paths too. It is
+    /// Swept paths observed as absent from disk this round. It is
     /// the refresh summary's "N 个目录变为不可用".
     pub missing_paths: usize,
     /// Paths that ended up under a different Project than they started.
@@ -266,7 +278,6 @@ pub struct ReconcileReport {
     /// the sweep: a filesystem or `git` problem must not become a user-visible
     /// failure, and the registry is per-path independent anyway.
     pub failed: Vec<(String, String)>,
-    pub outcome: GcOutcome,
 }
 
 // The door
@@ -308,7 +319,8 @@ pub fn ensure_workspace_path_conn(
 
     let family = git_family(conn, &canonical, &observation.git)?;
     let known = get_workspace_path_conn(conn, &id)?;
-    let (state, kind) = next_git_observation(known.as_ref().map(|p| p.git_state.as_str()), &family);
+    let (mut state, kind) =
+        next_git_observation(known.as_ref().map(|p| p.git_state.as_str()), &family);
     let mut effect = ProjectionEffect::default();
     let mut discovered = Vec::new();
 
@@ -321,17 +333,42 @@ pub fn ensure_workspace_path_conn(
             let project_id = match &family {
                 Some(f) => match project_by_git_id_conn(conn, &f.git_id)? {
                     Some(owner) => owner.id,
-                    None => create_project_row(conn, &canonical, Some(&f.git_id), &mut effect)?.id,
+                    None => {
+                        create_project_row(
+                            conn,
+                            &canonical,
+                            Some(&f.git_id),
+                            "normal",
+                            &mut effect,
+                        )?
+                        .id
+                    }
                 },
                 None => {
                     // A chat scratch directory joins its Agent's ONE bucket;
                     // everything else becomes its own path-backed Project.
-                    match chat_bucket_label(&canonical, policy) {
+                    match directory_group_label(&canonical, policy) {
                         Some(label) => {
-                            app_chat_bucket_project(conn, label, &canonical, policy, &mut effect)?
-                                .id
+                            directory_group_project(
+                                conn,
+                                label,
+                                &canonical,
+                                policy,
+                                "normal",
+                                &mut effect,
+                            )?
+                            .id
                         }
-                        None => create_project_row(conn, &canonical, None, &mut effect)?.id,
+                        None => {
+                            create_single_directory_project(
+                                conn,
+                                &canonical,
+                                policy,
+                                "normal",
+                                &mut effect,
+                            )?
+                            .id
+                        }
                     }
                 }
             };
@@ -343,10 +380,71 @@ pub fn ensure_workspace_path_conn(
             let mine = get_project_conn(conn, &row.project_id)?
                 .ok_or_else(|| other(format!("WorkspacePath {} 指向了不存在的 Project", row.id)))?;
             match &family {
-                // No evidence, so NOTHING about ownership changes. This is the
-                // branch that keeps a lost `.git` from detaching a path, splitting
-                // a Project or starting a new one.
-                None => {}
+                None => {
+                    let group = directory_group_label(&canonical, policy);
+                    let assistant = is_assistant_directory(&canonical, policy);
+                    let confirmed_plain = observation.exists
+                        && matches!(observation.git, GitDetection::None | GitDetection::Missing);
+                    if confirmed_plain && mine.git_id.is_some() && (group.is_some() || assistant) {
+                        let paths = list_workspace_paths_for_project_conn(conn, &mine.id)?;
+                        let existing = group
+                            .map(|label| find_directory_group_project_conn(conn, label, policy))
+                            .transpose()?
+                            .flatten();
+                        if paths.len() == 1 {
+                            // Preserve this project's name, summary and preferences. If
+                            // its directory group exists, fold the two non-Git projects.
+                            clear_git_identity_conn(conn, &mine.id)?;
+                            effect.touch(&mine.id);
+                            if let Some(existing) = existing {
+                                let merged = merge_projects_conn(conn, &mine.id, &existing.id)?;
+                                effect.delete(&merged.loser);
+                                effect.touch(&merged.survivor);
+                            }
+                        } else {
+                            // Other worktrees remain in their family; only this plain
+                            // built-in directory returns to its application grouping.
+                            let destination = match group {
+                                Some(label) => directory_group_project(
+                                    conn,
+                                    label,
+                                    &canonical,
+                                    policy,
+                                    &mine.visibility,
+                                    &mut effect,
+                                )?,
+                                None => create_single_directory_project(
+                                    conn,
+                                    &canonical,
+                                    policy,
+                                    &mine.visibility,
+                                    &mut effect,
+                                )?,
+                            };
+                            reassign_workspace_path_project_conn(conn, &id, &destination.id)?;
+                            effect.touch(&mine.id);
+                            effect.touch(&destination.id);
+                        }
+                        state = git_state::NONE.to_string();
+                    } else if mine.git_id.is_none() && !assistant {
+                        let paths = list_workspace_paths_for_project_conn(conn, &mine.id)?;
+                        if paths
+                            .iter()
+                            .any(|p| is_assistant_directory(&p.canonical_path, policy))
+                        {
+                            // Assistant is a single directory, not a parent tree.
+                            let destination = create_single_directory_project(
+                                conn,
+                                &canonical,
+                                policy,
+                                &mine.visibility,
+                                &mut effect,
+                            )?;
+                            reassign_workspace_path_project_conn(conn, &id, &destination.id)?;
+                            effect.touch(&mine.id);
+                        }
+                    }
+                }
                 Some(f) => {
                     // A chat bucket can own unrelated conversation directories.
                     // Git appearing in one of them must not carry the others into
@@ -362,7 +460,7 @@ pub fn ensure_workspace_path_conn(
                                     .map(|p| p.canonical_path)
                                     .collect::<Vec<_>>(),
                                 policy,
-                            ) != ProjectKind::ChatDirectory
+                            ) != ProjectKind::DirectoryGroup
                     } else {
                         false
                     };
@@ -393,9 +491,7 @@ pub fn ensure_workspace_path_conn(
                                 if owner.id != row.project_id {
                                     reassign_workspace_path_project_conn(conn, &id, &owner.id)?;
                                 }
-                                if retire_project_if_unowned(conn, &mine.id)? {
-                                    effect.delete(&mine.id);
-                                }
+                                effect.touch(&mine.id);
                             }
                         }
                         None => {
@@ -409,17 +505,16 @@ pub fn ensure_workspace_path_conn(
                             } else {
                                 // A known path meets an unseen family: the new
                                 // Project is created git-backed, this path moves
-                                // into it, and the old one dies if it is now empty.
+                                // into it, and the old one remains registered.
                                 let fresh = create_project_row(
                                     conn,
                                     &canonical,
                                     Some(&f.git_id),
+                                    &mine.visibility,
                                     &mut effect,
                                 )?;
                                 reassign_workspace_path_project_conn(conn, &id, &fresh.id)?;
-                                if retire_project_if_unowned(conn, &mine.id)? {
-                                    effect.delete(&mine.id);
-                                }
+                                effect.touch(&mine.id);
                             }
                         }
                     }
@@ -454,6 +549,66 @@ pub fn rename_project(db: &Db, id: &str, name: &str) -> Result<Project> {
         let project = crate::storage::workspace::rename_project_conn(tx, id, name)?;
         crate::storage::project_context_repo::reindex(tx, id)?;
         Ok(project)
+    })
+}
+
+/// Project archive state is independent of its tasks and sessions.
+pub fn set_project_archived(db: &Db, id: &str, archived: bool) -> Result<Project> {
+    db.tx(|tx| {
+        let project =
+            get_project_conn(tx, id)?.ok_or_else(|| other(format!("Project {id} 不存在")))?;
+        let visibility = if archived { "archived" } else { "normal" };
+        if project.visibility != visibility {
+            tx.execute(
+                "UPDATE projects SET visibility=?2, updated_at=?3 WHERE id=?1",
+                rusqlite::params![id, visibility, now()],
+            )?;
+        }
+        get_project_conn(tx, id)?.ok_or_else(|| other(format!("Project {id} 不存在")))
+    })
+}
+
+/// Delete only archived, non-built-in projects with no sessions (including
+/// archived sessions). Check and unlink in one transaction to prevent races.
+pub fn delete_project_permanently(db: &Db, id: &str, policy: &dyn WorkspacePolicy) -> Result<()> {
+    db.tx(|tx| {
+        let project = get_project_conn(tx, id)?
+            .ok_or_else(|| other(format!("Project {id} 不存在")))?;
+        if project.visibility != "archived" {
+            return Err(other("只能永久删除已归档的项目"));
+        }
+        let paths = list_workspace_paths_for_project_conn(tx, id)?;
+        let canonical: Vec<String> = paths.iter().map(|p| p.canonical_path.clone()).collect();
+        if project_purpose(&canonical, policy).is_some() {
+            return Err(other("聊天和助手项目不能永久删除"));
+        }
+        let sessions: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM sessions s JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE wp.project_id=?1",
+            [id], |row| row.get(0),
+        )?;
+        if sessions > 0 {
+            return Err(other("项目仍有关联会话，不能永久删除（包括已归档会话）"));
+        }
+        let tasks: Vec<String> = {
+            let mut st = tx.prepare(
+                "SELECT DISTINCT wsp.workstream_id FROM workstream_paths wsp JOIN workspace_paths wp ON wp.id=wsp.workspace_path_id WHERE wp.project_id=?1",
+            )?;
+            let rows = st.query_map([id], |row| row.get(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        tx.execute(
+            "DELETE FROM workstream_paths WHERE workspace_path_id IN (SELECT id FROM workspace_paths WHERE project_id=?1)",
+            [id],
+        )?;
+        for task in tasks {
+            crate::storage::workstream_paths::recompact_workstream_positions_conn(tx, &task)?;
+            tx.execute("UPDATE workstreams SET updated_at=?2 WHERE id=?1", rusqlite::params![task, now()])?;
+            crate::storage::workstream_paths::reindex_workstream_search_conn(tx, &task)?;
+        }
+        tx.execute("DELETE FROM workspace_paths WHERE project_id=?1", [id])?;
+        tx.execute("DELETE FROM projects WHERE id=?1", [id])?;
+        tx.execute("DELETE FROM search_index WHERE kind='project' AND ref_id=?1", [id])?;
+        Ok(())
     })
 }
 
@@ -658,6 +813,7 @@ fn create_project_row(
     conn: &Connection,
     canonical_path: &str,
     git_id: Option<&str>,
+    visibility: &str,
     effect: &mut ProjectionEffect,
 ) -> Result<Project> {
     let ts = now();
@@ -665,10 +821,10 @@ fn create_project_row(
         id: new_id(),
         // Automatic names use the directory basename.
         name: auto_project_name(canonical_path),
-        // Project lifecycle is not a Project concern; it is derived from paths.
         git_id: git_id.map(|g| g.to_string()),
         // App-named by construction; only `rename_project` may set this.
         name_customized: false,
+        visibility: visibility.into(),
         created_at: ts.clone(),
         updated_at: ts,
     };
@@ -677,53 +833,56 @@ fn create_project_row(
     Ok(project)
 }
 
-/// The ONE Git-less Project an Agent's chat directories share (see
-/// [`crate::platform::paths::app_chat_bucket_of`]). Found by its automatic
-/// name — never a customized one: once the user renames a bucket it is their
-/// project, and a fresh, correctly named bucket is created beside it. Created
-/// on first sight and named after the Agent, not after whichever chat
-/// directory happened to land there first.
-fn app_chat_bucket_project(
+/// Directory groups are only defined by application roots, never by a name or
+/// user-selected parent. Renaming a group does not change its membership.
+fn directory_group_project(
     conn: &Connection,
     label: &str,
     seed_path: &str,
     policy: &dyn WorkspacePolicy,
+    visibility: &str,
     effect: &mut ProjectionEffect,
 ) -> Result<Project> {
-    if label == "NoEnding Assistant" {
-        if let Some(root) = policy.assistant_workspace() {
-            if let Some(path) = get_workspace_path_conn(conn, &path_identity(&root))? {
-                if let Some(project) = get_project_conn(conn, &path.project_id)? {
-                    return Ok(project);
-                }
-            }
-        }
-    }
-    if let Some(existing) = find_chat_bucket_project_conn(conn, label)? {
+    if let Some(existing) = find_directory_group_project_conn(conn, label, policy)? {
         return Ok(existing);
     }
-    let fresh = create_project_row(conn, seed_path, None, effect)?;
+    let fresh = create_project_row(conn, seed_path, None, visibility, effect)?;
     set_project_name_conn(conn, &fresh.id, label, false)?;
     Ok(fresh)
 }
 
-pub(crate) fn find_chat_bucket_project_conn(
+pub(crate) fn find_directory_group_project_conn(
     conn: &Connection,
     label: &str,
+    policy: &dyn WorkspacePolicy,
 ) -> Result<Option<Project>> {
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT id FROM projects
-             WHERE name = ?1 AND git_id IS NULL AND name_customized = 0
-             ORDER BY created_at LIMIT 1",
-            params![label],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(id) = existing {
-        return get_project_conn(conn, &id);
+    let mut st = conn.prepare(
+        "SELECT p.id, wp.canonical_path FROM projects p
+        JOIN workspace_paths wp ON wp.project_id = p.id WHERE p.git_id IS NULL
+        ORDER BY p.created_at, p.id",
+    )?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, path) = row?;
+        if directory_group_label(&path, policy) == Some(label) {
+            return get_project_conn(conn, &id);
+        }
     }
     Ok(None)
+}
+
+fn create_single_directory_project(
+    conn: &Connection,
+    path: &str,
+    policy: &dyn WorkspacePolicy,
+    visibility: &str,
+    effect: &mut ProjectionEffect,
+) -> Result<Project> {
+    let project = create_project_row(conn, path, None, visibility, effect)?;
+    if is_assistant_directory(path, policy) {
+        set_project_name_conn(conn, &project.id, "NoEnding Assistant", false)?;
+    }
+    Ok(project)
 }
 
 /// A Git family's worktree list becomes WorkspacePaths, and only that.
@@ -732,8 +891,8 @@ pub(crate) fn find_chat_bucket_project_conn(
 /// adding a WorkstreamPath), and an existing row is left alone: we hold no
 /// observation of our own about a sibling, so we must not overwrite facts another
 /// call owns. Only siblings present on disk are adopted: Git may still list a
-/// removed worktree, and registering it would undo the missing-path GC on every
-/// refresh. Existing missing rows with references are left for the direct scan.
+/// removed worktree; new missing siblings need not be registered. Existing missing
+/// rows remain registered and are refreshed by the direct scan.
 fn adopt_sibling_worktrees(
     conn: &Connection,
     path: &WorkspacePath,
@@ -823,7 +982,7 @@ fn pick_canonical(a: &Project, b: &Project) -> (Project, Project) {
 /// statement. The survivor adopts the loser's `git_id` if it has none. A
 /// user-chosen name always survives: if the loser had one and the survivor did
 /// not, the name and the `name_customized` flag move together. The loser is then
-/// deleted, because a zero-path Project may not exist.
+/// absorbed into the survivor. Archive state stays with the canonical owner.
 ///
 /// Two different Git families are never merged: that is not a projection
 /// question but a real contradiction in the evidence, and the honest answer is
@@ -873,13 +1032,8 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
         "UPDATE preferences SET project_id=?1,revision=revision+1 WHERE project_id=?2",
         rusqlite::params![survivor.id, loser.id],
     )?;
-    let deleted = retire_project_if_unowned(conn, &loser.id)?;
-    if !deleted {
-        return Err(other(format!(
-            "合并后 Project {} 仍然拥有路径，零路径 Project 规则被破坏",
-            loser.id
-        )));
-    }
+    // Preserve the canonical Git owner's lifecycle during identity merges.
+    delete_merged_project_conn(conn, &loser.id)?;
     Ok(MergeOutcome {
         survivor: survivor.id,
         loser: loser.id,
@@ -900,96 +1054,13 @@ pub fn merge_projects(db: &Db, a: &str, b: &str) -> Result<MergeOutcome> {
     Ok(outcome)
 }
 
-/// Move one path to another Project and refresh everything that reads through it
-/// (the derived Session cache and the affected Workstream search parents). The
-/// Project the path leaves is retired in the same transaction, so
-/// `Ok(Some(project_id))` names that retired row — its FTS entry is what the
-/// caller must drop after commit.
+/// Move a path without deleting the project it leaves, even if now empty.
 pub fn reassign_workspace_path_conn(
     conn: &Connection,
     path_id: &str,
     project_id: &str,
-) -> Result<Option<String>> {
-    let former = get_workspace_path_conn(conn, path_id)?
-        .map(|p| p.project_id)
-        .ok_or_else(|| other(format!("WorkspacePath {path_id} 不存在")))?;
-    reassign_workspace_path_project_conn(conn, path_id, project_id)?;
-    if former != project_id && retire_project_if_unowned(conn, &former)? {
-        // Retiring it in the SAME transaction is what keeps true at every
-        // committed moment; only its FTS row waits for the commit.
-        return Ok(Some(former));
-    }
-    Ok(None)
-}
-
-// GC
-
-/// Physically remove candidate WorkspacePaths with no references.
-///
-/// The candidate list is scoped by the caller's scan. Session and WorkstreamPath
-/// references always protect a path. An existing directory also protects a path
-/// owned by a Git Project, even when its Git evidence is temporarily unavailable.
-/// Ordinary directories retain the reference-only GC rule.
-///
-/// Deleting the last path of a Project deletes the Project, which is why
-/// this returns the Project ids it retired: their FTS rows go after the commit.
-pub fn gc_unreferenced_workspace_paths_conn(
-    conn: &Connection,
-    path_ids: &[String],
-) -> Result<GcOutcome> {
-    let mut outcome = GcOutcome::default();
-    let assistant_project: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'builtin.assistant.project_id'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    for path_id in path_ids {
-        let Some(path) = get_workspace_path_conn(conn, path_id)? else {
-            continue; // already gone; a replay must not fail
-        };
-        if !workspace_path_is_gcable(conn, path_id)? {
-            continue;
-        }
-        if path.exists
-            && (assistant_project.as_deref() == Some(path.project_id.as_str())
-                || get_project_conn(conn, &path.project_id)?.is_some_and(|p| p.git_id.is_some()))
-        {
-            continue;
-        }
-        let former = delete_workspace_path_conn(conn, path_id)?;
-        outcome.deleted_paths.push(path_id.clone());
-        if let Some(project_id) = former {
-            if retire_project_if_unowned(conn, &project_id)? {
-                push_unique(&mut outcome.deleted_projects, &project_id);
-            }
-        }
-    }
-    Ok(outcome)
-}
-
-/// The `Db`-scoped GC.
-pub fn gc_unreferenced_workspace_paths(db: &Db, path_ids: &[String]) -> Result<GcOutcome> {
-    let outcome = db.tx(|tx| gc_unreferenced_workspace_paths_conn(tx, path_ids))?;
-    for id in &outcome.deleted_projects {
-        db.unindex("project", id);
-    }
-    Ok(outcome)
-}
-
-/// Compatibility wrapper for callers that already provide a disappeared-path
-/// candidate list. The candidate list's provenance no longer changes the GC
-/// decision.
-pub fn gc_gone_workspace_paths_conn(
-    conn: &Connection,
-    gone_path_ids: &[String],
-) -> Result<GcOutcome> {
-    gc_unreferenced_workspace_paths_conn(conn, gone_path_ids)
-}
-
-pub fn gc_gone_workspace_paths(db: &Db, gone_path_ids: &[String]) -> Result<GcOutcome> {
-    gc_unreferenced_workspace_paths(db, gone_path_ids)
+) -> Result<()> {
+    reassign_workspace_path_project_conn(conn, path_id, project_id)
 }
 
 // Reconcile
@@ -1027,11 +1098,7 @@ impl ProjectProjection<'_> {
 ///
 /// * Ordered by `path_id` and capped by `limit`, so a restart cannot reshuffle the
 ///   pass and move `last_seen_at` across the whole table at once.
-/// * GC considers only scanned paths and newly discovered worktrees. Existing
-///   Git Project directories survive without references; missing ones require
-///   no Session or WorkstreamPath references before removal. A stale Git listing
-///   cannot recreate a missing sibling. Ordinary directories keep their existing
-///   reference-only GC rule.
+/// * Updates availability without removing missing or unreferenced paths.
 /// * Writes `workspace_paths` / `projects` / the derived Session cache and the FTS
 ///   parents, nothing else. It never writes `workstream_paths` and never
 ///   advances a cursor.
@@ -1057,11 +1124,11 @@ pub fn reconcile_workspace_paths_with_progress(
 }
 
 /// The shared targeted primitive: reconcile an explicit SUBSET of
-/// registered path ids through exactly the same observe → ensure → GC rules
+/// registered path ids through exactly the same observe → ensure rules
 /// as the global sweep. The global refresh passes every registered id; a
 /// Project refresh passes only the Project's own ids. One rule set, no drift.
 ///
-/// Unknown ids are skipped quietly (a GC'd path between listing and sweeping
+/// Unknown ids are skipped quietly (a deleted path between listing and sweeping
 /// is simply no longer a target), never an error.
 pub fn reconcile_workspace_path_ids(
     db: &Db,
@@ -1096,7 +1163,6 @@ fn reconcile_workspace_path_targets(
     progress: &dyn Fn(usize, usize),
 ) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
-    let mut candidate_ids: Vec<String> = targets.iter().map(|(id, _)| id.clone()).collect();
 
     for (path_id, canonical) in &targets {
         // No lock is held here — this is where `git` runs.
@@ -1129,7 +1195,6 @@ fn reconcile_workspace_path_targets(
                 }
                 for discovered in &outcome.discovered {
                     push_unique(&mut report.discovered_paths, &discovered.id);
-                    push_unique(&mut candidate_ids, &discovered.id);
                 }
             }
             Err(message) => report.failed.push((path_id.clone(), message)),
@@ -1138,8 +1203,6 @@ fn reconcile_workspace_path_targets(
         progress(report.scanned, targets.len());
     }
 
-    let gc = gc_unreferenced_workspace_paths(db, &candidate_ids)?;
-    report.outcome = gc;
     Ok(report)
 }
 
@@ -1156,7 +1219,7 @@ pub struct ProjectWorkstream {
 pub struct ProjectDetail {
     pub project: Project,
     pub kind: ProjectKind,
-    pub builtin_assistant: bool,
+    pub purpose: Option<ProjectPurpose>,
     pub workspace_paths: Vec<WorkspacePath>,
     pub workstreams: Vec<ProjectWorkstream>,
     pub sessions: Vec<Session>,
@@ -1204,7 +1267,7 @@ pub fn project_detail(
         }
         None => None,
     };
-    let builtin_assistant = is_assistant_project(
+    let purpose = project_purpose(
         &workspace_paths
             .iter()
             .map(|p| p.canonical_path.clone())
@@ -1212,7 +1275,7 @@ pub fn project_detail(
         policy,
     );
     Ok(Some(ProjectDetail {
-        builtin_assistant,
+        purpose,
         project,
         kind,
         workspace_paths,
@@ -1261,11 +1324,6 @@ pub fn registry_is_consistent(db: &Db) -> std::result::Result<(), String> {
     check(
         "SELECT COUNT(*) FROM workspace_paths wp LEFT JOIN projects p ON p.id = wp.project_id WHERE p.id IS NULL",
         "workspace path without a project",
-    )?;
-    check(
-        "SELECT COUNT(*) FROM projects p WHERE NOT EXISTS (
-            SELECT 1 FROM workspace_paths wp WHERE wp.project_id = p.id)",
-        "zero-path project",
     )?;
     // Structural through `idx_projects_git_id` (a partial UNIQUE index), so this
     // can only fire if that index is ever dropped or made conditional — which is
@@ -1384,6 +1442,7 @@ mod tests {
             name: id.into(),
             git_id: git.map(Into::into),
             name_customized: customized,
+            visibility: "normal".into(),
             created_at: created.into(),
             updated_at: created.into(),
         };
@@ -1405,10 +1464,4 @@ mod tests {
         assert_eq!(pick_canonical(&plain, &same_age).0.id, "a");
         assert_eq!(pick_canonical(&same_age, &plain).0.id, "a");
     }
-}
-
-pub fn is_assistant_project(paths: &[String], policy: &dyn WorkspacePolicy) -> bool {
-    policy
-        .assistant_workspace()
-        .is_some_and(|root| paths.iter().any(|p| is_within(p, &root)))
 }

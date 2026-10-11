@@ -38,6 +38,7 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
         name: name.into(),
         git_id: None,
         name_customized: false,
+        visibility: "normal".into(),
         created_at: now(),
         updated_at: now(),
     };

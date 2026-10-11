@@ -726,7 +726,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     if (t.session_id) return sessions.some(s => s.id === t.session_id);
     const cwd = t.cwd?.replace(/\\/g, "/").replace(/\/$/, "");
     const root = assistantWorkspace.directory.replace(/\\/g, "/").replace(/\/$/, "");
-    return cwd === root || cwd?.startsWith(`${root}/`);
+    return cwd === root;
   }) : allTerminals, [allTerminals, assistantMode, assistantWorkspace, sessions]);
 
   const allMergedSessions = useMemo(() => {

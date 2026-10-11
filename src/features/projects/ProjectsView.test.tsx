@@ -1,7 +1,7 @@
 import { viewState } from "../../hooks/useViewState";
 // Projects Board 契约：一次卡片查询、名称/路径搜索、缺失筛选。
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectsView, { clearProjectCardsCache } from "./ProjectsView";
 import { api } from "../../api";
@@ -13,6 +13,9 @@ vi.mock("../../api", () => ({
     listProjectCards: vi.fn(),
     getProjectDetail: vi.fn(),
     addProjectPath: vi.fn(),
+    archiveProject: vi.fn(),
+    restoreProject: vi.fn(),
+    deleteProjectPermanently: vi.fn(),
   },
 }));
 
@@ -26,6 +29,9 @@ beforeEach(() => {
   navigate.mockReset();
   vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.addProjectPath).mockReset();
+  vi.mocked(api.archiveProject).mockReset();
+  vi.mocked(api.restoreProject).mockReset();
+  vi.mocked(api.deleteProjectPermanently).mockReset();
   clearProjectCardsCache();
   viewState.clear();
   vi.mocked(api.listProjectCards).mockReset();
@@ -38,7 +44,7 @@ function card(over: Partial<ProjectCardData> = {}): ProjectCardData {
   return {
     id: "p-1",
     name: "NoEnding",
-    name_customized: false,
+    name_customized: false, visibility: "normal",
     kind: "git",
     path_count: 2,
     missing_path_count: 0,
@@ -68,7 +74,7 @@ describe("Projects Board", () => {
       card({
         id: "p-2",
         name: "My App",
-        kind: "directory",
+        kind: "single_directory",
         representative_paths: ["/Users/me/dev/my-app"],
         search_paths: ["/Users/me/dev/my-app"],
       }),
@@ -128,9 +134,9 @@ describe("Projects Board", () => {
 
   it("kind_filter_separates_git_single_directories_and_default_chats", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      card({ id: "p-1", name: "Git Project", kind: "git" }),
-      card({ id: "p-2", name: "Normal Directory", kind: "directory" }),
-      card({ id: "p-3", name: "Renamed Chats", kind: "chat_directory" }),
+      card({ id: "p-1", name: "Git Project", kind: "git", purpose: "chat" }),
+      card({ id: "p-2", name: "Normal Directory", kind: "single_directory", purpose: "assistant" }),
+      card({ id: "p-3", name: "Renamed Chats", kind: "directory_group", purpose: "chat" }),
     ]);
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("Normal Directory");
@@ -143,15 +149,17 @@ describe("Projects Board", () => {
     expect(screen.queryByText("Normal Directory")).toBeNull();
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "directory" } });
+    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "single_directory" } });
     const normal = screen.getByRole("button", { name: /Normal Directory/ });
-    expect(normal.textContent).toContain("普通项目");
+    expect(normal.textContent).toContain("单目录项目");
+    expect(normal.textContent).toContain("助手");
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "chat_directory" } });
+    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "directory_group" } });
     const chat = screen.getByRole("button", { name: /Renamed Chats/ });
-    expect(chat.textContent).toContain("默认项目");
+    expect(chat.textContent).toContain("目录组项目");
+    expect(chat.textContent).toContain("聊天");
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Normal Directory")).toBeNull();
   });
@@ -236,8 +244,8 @@ describe("Projects Board", () => {
 
   it("does not render new-session actions for any chat-directory project in card and list view", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      card({ id: "p-agent", name: "Codex Chat", kind: "chat_directory" }),
-      card({ id: "p-noending", name: "NoEnding Chat", kind: "chat_directory" }),
+      card({ id: "p-agent", name: "Codex Chat", kind: "directory_group" }),
+      card({ id: "p-noending", name: "NoEnding Chat", kind: "directory_group" }),
     ]);
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("Codex Chat");
@@ -247,4 +255,56 @@ describe("Projects Board", () => {
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
     expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   });
+  it("archive moves the project to the archive scope and restoration brings it back", async () => {
+    const active = card({ id: "p-active", name: "Active" });
+    const archived = card({ id: "p-archived", name: "Archived", visibility: "archived" });
+    vi.mocked(api.listProjectCards).mockResolvedValue([active, archived]);
+    vi.mocked(api.archiveProject).mockResolvedValue({ id: active.id, name: active.name, git_id: null, visibility: "archived", name_customized: false, created_at: "", updated_at: "" });
+    vi.mocked(api.restoreProject).mockResolvedValue({ id: archived.id, name: archived.name, git_id: null, visibility: "normal", name_customized: false, created_at: "", updated_at: "" });
+    const { rerender } = render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("Active");
+    expect(screen.queryByText("Archived")).toBeNull();
+    vi.mocked(api.listProjectCards).mockResolvedValue([{ ...active, visibility: "archived" }, archived]);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "归档项目" })); });
+    expect(api.archiveProject).toHaveBeenCalledWith(active.id);
+    await vi.waitFor(() => expect(screen.queryByText("Active")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "已归档" }));
+    expect(navigate).toHaveBeenCalledWith({ view: "projects", scope: "archived" });
+    rerender(<ProjectsView navigate={navigate} scope="archived" />);
+    await screen.findByText("Archived");
+    const row = screen.getByText("Archived").closest("article")!;
+    vi.mocked(api.listProjectCards).mockResolvedValue([{ ...active, visibility: "archived" }, { ...archived, visibility: "normal" }]);
+    await act(async () => { fireEvent.click(within(row).getByRole("button", { name: "恢复项目" })); });
+    expect(api.restoreProject).toHaveBeenCalledWith(archived.id);
+    await vi.waitFor(() => expect(screen.queryByText("Archived")).toBeNull());
+  });
+
+  it.each(["cards", "list"] as const)("archive %s view restricts delete and bulk deletion to eligible projects", async (mode) => {
+    viewState.set("projects.viewMode", mode);
+    const projects = [
+      card({ id: "normal", name: "Normal", visibility: "normal", session_count: 0 }),
+      card({ id: "empty", name: "Empty", visibility: "archived", session_count: 0 }),
+      card({ id: "occupied", name: "Occupied", visibility: "archived", session_count: 1 }),
+      card({ id: "chat", name: "Chat", visibility: "archived", session_count: 0, purpose: "chat" }),
+      card({ id: "assistant", name: "Assistant", visibility: "archived", session_count: 0, purpose: "assistant" }),
+    ];
+    vi.mocked(api.listProjectCards).mockResolvedValue(projects);
+    vi.mocked(api.deleteProjectPermanently).mockResolvedValue(undefined);
+    render(<ProjectsView navigate={navigate} scope="archived" />);
+    await screen.findByText("Empty");
+    expect(screen.queryByText("Normal")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新增项目" })).toBeNull();
+    const row = (name: string) => within(screen.getByText(name).closest("article")!);
+    expect((row("Empty").getByRole("button", { name: "永久删除项目" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((row("Occupied").getByRole("button", { name: "永久删除项目" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(row("Chat").queryByRole("button", { name: "永久删除项目" })).toBeNull();
+    expect(row("Assistant").queryByRole("button", { name: "永久删除项目" })).toBeNull();
+    // Confirmation is required; bulk deletion excludes occupied and built-in projects.
+    fireEvent.click(screen.getByRole("button", { name: "删除全部" }));
+    expect(api.deleteProjectPermanently).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /^永久删除$/ })); });
+    expect(api.deleteProjectPermanently).toHaveBeenCalledTimes(1);
+    expect(api.deleteProjectPermanently).toHaveBeenCalledWith("empty");
+  });
+
 });

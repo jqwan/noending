@@ -1,11 +1,16 @@
-import type { ProjectKind } from "../../types";
+import type { ProjectKind, ProjectPurpose } from "../../types";
 
 export const projectKindLabels: Record<ProjectKind, string> = {
   git: "Git 项目",
-  directory: "普通项目",
-  chat_directory: "默认项目",
+  single_directory: "单目录项目",
+  directory_group: "目录组项目",
 };
 
-export function isChatDirectoryProject(project: { kind?: ProjectKind }): boolean {
-  return project.kind === "chat_directory";
+export const projectPurposeLabels: Record<ProjectPurpose, string> = {
+  chat: "聊天",
+  assistant: "助手",
+};
+
+export function isDirectoryGroupProject(project: { kind?: ProjectKind }): boolean {
+  return project.kind === "directory_group";
 }

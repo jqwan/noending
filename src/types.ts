@@ -13,9 +13,11 @@ export type Agent =
 
 /** Task archive state; there is no active/completed classification. */
 export type WorkstreamVisibility = "normal" | "archived";
-/** `missing` = used to be Git-backed; it never detaches the path from its Project. */
+/** `missing` = Git evidence is gone; ordinary projects retain their identity. */
 export type WorkspaceGitState = "none" | "detected" | "missing";
-export type ProjectKind = "git" | "directory" | "chat_directory";
+export type ProjectKind = "git" | "single_directory" | "directory_group";
+
+export type ProjectPurpose = "chat" | "assistant";
 
 export interface Project {
   id: string;
@@ -24,6 +26,7 @@ export interface Project {
   git_id: string | null;
   /** The user renamed it — automatic naming must stop overwriting the name. */
   name_customized: boolean;
+  visibility: "normal" | "archived";
   created_at: string;
   updated_at: string;
 }
@@ -33,8 +36,9 @@ export interface ProjectCardData {
   id: string;
   name: string;
   name_customized: boolean;
+  visibility: "normal" | "archived";
   kind: ProjectKind;
-  builtin_assistant?: boolean;
+  purpose?: ProjectPurpose | null;
   path_count: number;
   missing_path_count: number;
   workstream_count: number;
@@ -152,7 +156,7 @@ export interface WorkspaceSettings {
 export interface ProjectDetailData {
   project: Project;
   kind: ProjectKind;
-  builtin_assistant?: boolean;
+  purpose?: ProjectPurpose | null;
   workspace_paths: WorkspacePath[];
   workstreams: ProjectWorkstreamRow[];
   sessions: Session[];

@@ -296,7 +296,7 @@ describe("NewSessionView task and project selection", () => {
     {
       id: "p-1",
       name: "Project 1",
-      name_customized: false,
+      name_customized: false, visibility: "normal" as const,
       kind: "git" as const,
       path_count: 1,
       missing_path_count: 0,
@@ -325,8 +325,8 @@ describe("NewSessionView task and project selection", () => {
       {
         id: "p-codex",
         name,
-        name_customized: false,
-        kind: "chat_directory" as const,
+        name_customized: false, visibility: "normal" as const,
+        kind: "directory_group" as const,
         path_count: 1,
         missing_path_count: 0,
         workstream_count: 0,
@@ -383,7 +383,7 @@ describe("NewSessionView task and project selection", () => {
       {
         id: "p-multi",
         name: "Multi Project",
-        name_customized: false,
+        name_customized: false, visibility: "normal" as const,
         kind: "git" as const,
         path_count: 2,
         missing_path_count: 0,
@@ -451,7 +451,7 @@ describe("NewSessionView task and project selection", () => {
         title: "我的功能开发",
         description: "",
 
-        visibility: "normal",
+        visibility: "normal" as const,
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-01T00:00:00Z",
         projects: [{ id: "p-1", name: "Project 1" }],
@@ -534,7 +534,7 @@ describe("NewSessionView task and project selection", () => {
 it("renders inbox icon for unassigned task and project pickers and their menu items", async () => {
   vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
-    id: "ws-1", title: "测试任务", description: "", visibility: "normal",
+    id: "ws-1", title: "测试任务", description: "", visibility: "normal" as const,
     projects: [], created_at: "", updated_at: "", summary: null,
     last_activity_at: null, session_count: 0, latest_session: null, path_count: 0,
   }]);
@@ -620,7 +620,7 @@ describe("NewSessionView message composer", () => {
       {
         id: "p-1",
         name: "Project 1",
-        name_customized: false,
+        name_customized: false, visibility: "normal" as const,
         kind: "git" as const,
         path_count: 1,
         missing_path_count: 0,
@@ -690,7 +690,7 @@ it("does not prepare another launch if the user leaves while startup fails", asy
 
 it("does not designate the first project of a multi-project task as its default", async () => {
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
-    id: "multi", title: "跨项目任务", description: "", visibility: "normal",
+    id: "multi", title: "跨项目任务", description: "", visibility: "normal" as const,
     projects: [{ id: "p-1", name: "甲" }, { id: "p-2", name: "乙" }],
     created_at: "", updated_at: "", summary: null,
     last_activity_at: null, session_count: 0, latest_session: null, path_count: 2,
@@ -767,7 +767,7 @@ describe("NewSessionView runtime selection", () => {
 it("launches an ordinary assistant conversation without a separate target or agent exclusion", async () => {
   const navigate = vi.fn();
   const workspace: import("../../types").AssistantWorkspace = {
-    project: { id: "assistant-project", name: "我的助手", git_id: null, name_customized: true, created_at: "", updated_at: "" },
+    project: { id: "assistant-project", name: "我的助手", git_id: null, name_customized: true, visibility: "normal" as const, created_at: "", updated_at: "" },
     directory: "/tmp/custom-home/assistant"
   };
   vi.mocked(api.listProjectCards).mockResolvedValue([{ id: "target-project", name: "真实项目", kind: "git", search_paths: ["/repo/target"], representative_paths: ["/repo/target"] }] as never);

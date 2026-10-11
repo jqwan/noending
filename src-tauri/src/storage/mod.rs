@@ -279,7 +279,7 @@ impl Db {
 
     // Projects
 
-    /// Every Project currently derived from at least one WorkspacePath.
+    /// All registered projects, including archived and currently empty projects.
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let conn = self.read();
         let mut st = conn.prepare("SELECT * FROM projects ORDER BY updated_at DESC")?;
@@ -1484,8 +1484,8 @@ impl Db {
 
 pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
     conn.execute(
-        "INSERT INTO projects (id, name, git_id, name_customized, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO projects (id, name, git_id, name_customized, created_at, updated_at, visibility)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
            -- A customized name is user intent: no automatic rename (worktree
            -- discovery, Git upgrade, Project merge) may overwrite it.
@@ -1502,7 +1502,8 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
             p.git_id,
             p.name_customized as i64,
             p.created_at,
-            p.updated_at
+            p.updated_at,
+            p.visibility
         ],
     )?;
     Ok(())
@@ -1944,6 +1945,7 @@ fn row_project(r: &Row) -> rusqlite::Result<Project> {
         name: r.get("name")?,
         git_id: r.get("git_id")?,
         name_customized: r.get::<_, i64>("name_customized")? != 0,
+        visibility: r.get("visibility")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })

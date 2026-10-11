@@ -1,5 +1,5 @@
 //! Project projection and the WorkspacePath registry: the `WorkspaceAttaching`
-//! implementation, the reconcile sweep, GC, automatic naming and the detail shape.
+//! implementation, the reconcile sweep, archive lifecycle, automatic naming and the detail shape.
 //!
 //! No test touches a real repository, a real NoEnding Home or `git`: observations
 //! are constructed by script (the `WorkspaceObserving` / `WorkspacePolicy` seams).
@@ -13,19 +13,17 @@ use std::sync::Mutex;
 mod support;
 
 use noending::domain::{
-    git_state, Agent, GitDetection, GitWorktreeKind, Project, ProjectKind, Session,
+    git_state, Agent, GitDetection, GitWorktreeKind, Project, ProjectKind, ProjectPurpose, Session,
     WorkspaceObservation, WorkspacePath,
 };
-use noending::storage::workspace::{
-    delete_zero_path_project_conn, insert_workspace_path_conn, rename_project_conn,
-};
+use noending::storage::workspace::{insert_workspace_path_conn, rename_project_conn};
 use noending::storage::workstream_paths::append_workstream_path_conn;
 use noending::storage::Db;
 use noending::workspace::project::{
-    apply_projection_effect, ensure_workspace_path, ensure_workspace_path_conn,
-    gc_gone_workspace_paths, merge_projects_conn, project_detail, reassign_workspace_path_conn,
-    reconcile_workspace_paths, registry_is_consistent, ProjectProjection, ProjectionEffect,
-    UnrestrictedWorkspace, WorkspacePolicy,
+    apply_projection_effect, delete_project_permanently, ensure_workspace_path,
+    ensure_workspace_path_conn, merge_projects_conn, project_detail, reassign_workspace_path_conn,
+    reconcile_workspace_paths, registry_is_consistent, set_project_archived, ProjectProjection,
+    ProjectionEffect, UnrestrictedWorkspace, WorkspacePolicy,
 };
 use noending::workspace::resolver::WorkspaceObserving;
 use noending::workspace::{is_within, normalize_path, path_identity, WorkspaceAttaching};
@@ -307,6 +305,10 @@ impl WorkspacePolicy for Home {
 
     fn default_workspace(&self) -> Option<String> {
         self.default_workspace.clone()
+    }
+
+    fn assistant_workspace(&self) -> Option<String> {
+        Some(canon(&format!("{}/assistant", self.root)))
     }
 
     fn exists_on_disk(&self, canonical_path: &str) -> bool {
@@ -611,7 +613,7 @@ fn git_missing_does_not_detach_the_path() {
 }
 
 #[test]
-fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
+fn different_git_family_moves_the_path_and_preserves_the_empty_old_project() {
     let (_d, db) = temp_db();
     let a = ensure(
         &db,
@@ -665,7 +667,7 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
     );
 
     // When the remaining path reports G2 too, the old Project loses its last path
-    // and is deleted.
+    // and remains registered until explicitly deleted.
     let joined = ensure(
         &db,
         &repo(
@@ -676,8 +678,8 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
         ),
     );
     assert_eq!(joined.project_id, moved.project_id);
-    assert!(db.get_project(&a.project_id).unwrap().is_none());
-    assert_eq!(db.list_projects().unwrap().len(), 1);
+    assert!(db.get_project(&a.project_id).unwrap().is_some());
+    assert_eq!(db.list_projects().unwrap().len(), 2);
     assert_eq!(paths_of(&db, &moved.project_id).len(), 2);
     assert_eq!(
         count_rows(
@@ -686,7 +688,7 @@ fn different_git_family_moves_the_path_and_old_project_dies_if_empty() {
             &a.project_id
         ),
         0,
-        "no Session projects onto a Project that is gone"
+        "the empty old project has no remaining session association"
     );
     registry_is_consistent(&db).expect("holds at every committed moment");
 }
@@ -869,30 +871,14 @@ fn one_workspace_path_never_belongs_to_two_projects() {
 }
 
 #[test]
-fn zero_path_project_cannot_survive() {
+fn project_deletion_requires_explicit_archive() {
     let (_d, db) = temp_db();
     let path = ensure(&db, &plain("/doomed/path", true));
     let doomed = path.project_id.clone();
-
-    // A Project that still owns a path is refused rather than quietly emptied:
-    // deleting it would break the chain every other fact reads through.
-    assert!(db
-        .tx(|tx| delete_zero_path_project_conn(tx, &doomed).map(|_| ()))
-        .is_err());
-    assert!(db.get_project(&doomed).unwrap().is_some());
-    assert_eq!(
-        db.get_workspace_path(&path.id)
-            .unwrap()
-            .map(|p| p.project_id)
-            .as_deref(),
-        Some(doomed.as_str())
-    );
-
-    // Remove the path (nothing references it) and the Project goes in the same
-    // transaction, not "eventually".
-    let outcome = gc_gone_workspace_paths(&db, &[path.id.clone()]).unwrap();
-    assert_eq!(outcome.deleted_paths, vec![path.id.clone()]);
-    assert_eq!(outcome.deleted_projects, vec![doomed.clone()]);
+    assert!(delete_project_permanently(&db, &doomed, &UnrestrictedWorkspace).is_err());
+    assert!(db.get_workspace_path(&path.id).unwrap().is_some());
+    set_project_archived(&db, &doomed, true).unwrap();
+    delete_project_permanently(&db, &doomed, &UnrestrictedWorkspace).unwrap();
     assert!(db.get_workspace_path(&path.id).unwrap().is_none());
     assert!(db.get_project(&doomed).unwrap().is_none());
 
@@ -925,52 +911,217 @@ fn zero_path_project_cannot_survive() {
     assert!(taken.is_err(), "one Git family is exactly one Project");
 }
 
-// GC
+#[test]
+fn project_archive_is_independent_and_all_sessions_block_permanent_deletion() {
+    let (_d, db) = temp_db();
+    let path = ensure(&db, &plain("/project/archive", true));
+    let s = session(&db, "archive-ref", "/project/archive", &path.id);
+    workstream(&db, "normal-task", "Normal");
+    workstream(&db, "archived-task", "Archived");
+    add_ws_path(&db, "normal-task", &path.id);
+    add_ws_path(&db, "archived-task", &path.id);
+    noending::workspace::workstream::archive_workstream(&db, "archived-task").unwrap();
+    set_project_archived(&db, &path.project_id, true).unwrap();
+    assert!(db
+        .get_session(&s.id)
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_none());
+    assert_eq!(
+        db.get_workstream("normal-task")
+            .unwrap()
+            .unwrap()
+            .visibility,
+        "normal"
+    );
+    assert_eq!(
+        db.get_workstream("archived-task")
+            .unwrap()
+            .unwrap()
+            .visibility,
+        "archived"
+    );
+    assert!(delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).is_err());
+    noending::lifecycle::archive_session(&db, &s.id).unwrap();
+    assert!(delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).is_err());
+    assert_eq!(
+        db.list_workstream_paths("normal-task").unwrap().len(),
+        1,
+        "rejection does not detach tasks"
+    );
+    // Re-observation/upserts must never undo a user's archive decision.
+    ensure(&db, &plain("/project/archive", true));
+    assert_eq!(
+        db.get_project(&path.project_id)
+            .unwrap()
+            .unwrap()
+            .visibility,
+        "archived"
+    );
+    set_project_archived(&db, &path.project_id, false).unwrap();
+    assert_eq!(
+        db.get_project(&path.project_id)
+            .unwrap()
+            .unwrap()
+            .visibility,
+        "normal"
+    );
+    assert!(db
+        .get_session(&s.id)
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_some());
+    assert_eq!(
+        db.get_workstream("archived-task")
+            .unwrap()
+            .unwrap()
+            .visibility,
+        "archived"
+    );
+}
 
 #[test]
-fn gc_only_removes_paths_nothing_references_and_that_we_observed_gone() {
+fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
     let (_d, db) = temp_db();
-    let dead = ensure(&db, &plain("/gone/forever", true));
-    let by_session = ensure(&db, &plain("/gone/session", true));
-    let by_workstream = ensure(&db, &plain("/gone/workstream", true));
-    let never_asked = ensure(&db, &plain("/still/here", true));
-    let s_ref = session(&db, "s-ref", "/gone/session", &by_session.id);
-    workstream(&db, "w-ref", "still listed");
-    add_ws_path(&db, "w-ref", &by_workstream.id);
-
-    let outcome = gc_gone_workspace_paths(
+    let real = unique_dir("keep-directory");
+    let raw = real.to_str().unwrap();
+    std::fs::write(real.join("keep.txt"), "keep").unwrap();
+    let path = ensure(&db, &plain(raw, true));
+    let other = ensure(&db, &plain("/project/other", true));
+    for (id, archived) in [("task-active", false), ("task-archived", true)] {
+        workstream(&db, id, "Keep task");
+        add_ws_path(&db, id, &path.id);
+        add_ws_path(&db, id, &other.id);
+        if archived {
+            noending::workspace::workstream::archive_workstream(&db, id).unwrap();
+        }
+    }
+    db.tx(|tx| {
+        tx.execute(
+            "INSERT INTO project_context_state (project_id,summary) VALUES (?1,'summary')",
+            [&path.project_id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    noending::storage::preferences::save_item(
         &db,
-        &[
-            dead.id.clone(),
-            by_session.id.clone(),
-            by_workstream.id.clone(),
-            // Not in the registry at all: a replay must not fail.
-            "path-never-registered".to_string(),
-        ],
+        None,
+        Some(&path.project_id),
+        "Keep concise",
+        false,
     )
     .unwrap();
-
-    assert_eq!(outcome.deleted_paths, vec![dead.id.clone()]);
-    assert_eq!(outcome.deleted_projects.len(), 1, "goes with it");
-    assert!(db.get_workspace_path(&by_session.id).unwrap().is_some());
-    assert!(db.get_workspace_path(&by_workstream.id).unwrap().is_some());
-    assert!(db.get_workspace_path(&never_asked.id).unwrap().is_some());
-    assert!(
-        db.get_session(&s_ref.id).unwrap().is_some(),
-        "the Session survives"
+    set_project_archived(&db, &path.project_id, true).unwrap();
+    delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).unwrap();
+    for (id, visibility) in [("task-active", "normal"), ("task-archived", "archived")] {
+        assert_eq!(
+            db.get_workstream(id).unwrap().unwrap().visibility,
+            visibility
+        );
+        let paths = db.list_workstream_paths(id).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].workspace_path_id, other.id);
+        assert_eq!(paths[0].position, 0);
+    }
+    assert!(db.get_project(&path.project_id).unwrap().is_none());
+    assert!(db.get_workspace_path(&path.id).unwrap().is_none());
+    assert!(db.get_project(&other.project_id).unwrap().is_some());
+    for table in ["project_context_state", "preferences"] {
+        let count: i64 = db
+            .read()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project_id=?1"),
+                [&path.project_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    assert_eq!(
+        std::fs::read_to_string(real.join("keep.txt")).unwrap(),
+        "keep"
     );
-    assert_eq!(db.list_workstream_paths("w-ref").unwrap().len(), 1);
-    assert!(db.get_project(&dead.project_id).unwrap().is_none());
+    registry_is_consistent(&db).unwrap();
+    let foreign_keys: i64 = db
+        .read()
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(foreign_keys, 0);
+    std::fs::remove_dir_all(real).unwrap();
+}
 
-    // A path that merely looks absent is not enough either: existence is never by
-    // itself a reason to delete, only a candidate list.
-    let temp_gone = ensure(&db, &plain("/away/temporarily", true));
-    let seen_missing = ensure(&db, &plain("/away/temporarily", false));
-    assert_eq!(seen_missing.id, temp_gone.id);
-    assert!(db.get_workspace_path(&temp_gone.id).unwrap().is_some());
-    gc_gone_workspace_paths(&db, &[temp_gone.id.clone()]).unwrap();
-    assert!(db.get_workspace_path(&temp_gone.id).unwrap().is_none());
-    registry_is_consistent(&db).expect("consistent");
+#[test]
+fn chat_and_assistant_projects_cannot_be_deleted_even_after_git_conversion() {
+    let (_d, db) = temp_db();
+    let home = Home::new("/app/noending", &[], Some("/app/noending/workspace"));
+    for raw in [
+        "/app/noending/workspace",
+        "/app/noending/assistant",
+        &home_path("Documents/Codex/protected"),
+    ] {
+        let path = ensure_workspace_path(&db, &plain(raw, true), &home).unwrap();
+        set_project_archived(&db, &path.project_id, true).unwrap();
+        assert!(delete_project_permanently(&db, &path.project_id, &home).is_err());
+        let upgraded = ensure_workspace_path(
+            &db,
+            &repo(raw, &format!("{raw}/.git"), GitWorktreeKind::Main, &[]),
+            &home,
+        )
+        .unwrap();
+        assert_eq!(upgraded.project_id, path.project_id);
+        assert!(delete_project_permanently(&db, &path.project_id, &home).is_err());
+        assert!(db.get_workspace_path(&path.id).unwrap().is_some());
+        assert_eq!(
+            project_of(&db, &upgraded).visibility,
+            "archived",
+            "in-place upgrade preserves state"
+        );
+        let external_raw = format!("/external/{}", path.project_id);
+        let external = ensure_workspace_path(
+            &db,
+            &repo(
+                &external_raw,
+                &format!("{raw}/.git"),
+                GitWorktreeKind::Linked,
+                &[],
+            ),
+            &home,
+        )
+        .unwrap();
+        assert_eq!(external.project_id, upgraded.project_id);
+        let returned = ensure_workspace_path(&db, &plain(raw, true), &home).unwrap();
+        assert_ne!(
+            returned.project_id, upgraded.project_id,
+            "other worktree stays in its Git family"
+        );
+        assert_eq!(
+            project_of(&db, &returned).visibility,
+            "archived",
+            "new split destination inherits source state"
+        );
+        assert_eq!(project_of(&db, &external).visibility, "archived");
+        assert!(delete_project_permanently(&db, &returned.project_id, &home).is_err());
+        set_project_archived(&db, &returned.project_id, false).unwrap();
+        assert_eq!(project_of(&db, &returned).visibility, "normal");
+        assert_eq!(
+            project_of(&db, &external).visibility,
+            "archived",
+            "restoring the split project does not restore its source"
+        );
+        set_project_archived(&db, &path.project_id, false).unwrap();
+        assert_eq!(
+            db.get_project(&path.project_id)
+                .unwrap()
+                .unwrap()
+                .visibility,
+            "normal"
+        );
+    }
 }
 
 // the WorkspaceAttaching seam
@@ -1193,20 +1344,16 @@ fn reconcile_sweep_keeps_existing_unreferenced_git_worktrees() {
     assert_eq!(report.scanned, 1);
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(report.discovered_paths, vec![path_id_of(&sibling)]);
-    assert!(report.outcome.deleted_paths.is_empty());
-    assert!(report.outcome.deleted_projects.is_empty());
     assert_eq!(paths_of(&db, &seeded.project_id).len(), 2);
 
     // Both paths remain without task/session references; no repeat discoveries.
     let repeated = reconcile_workspace_paths(&db, &projection, 500).unwrap();
     assert!(repeated.discovered_paths.is_empty());
-    assert!(repeated.outcome.deleted_paths.is_empty());
-    assert!(repeated.outcome.deleted_projects.is_empty());
     registry_is_consistent(&db).expect("consistent after the sweep");
 }
 
 #[test]
-fn reconcile_sweep_removes_unreferenced_paths_even_when_present() {
+fn reconcile_sweep_preserves_unreferenced_registered_paths() {
     let (_d, db) = temp_db_locked();
     let default = "/app/noending/workspace";
     let agent = home_path("Documents/Codex/chat-gc");
@@ -1226,20 +1373,22 @@ fn reconcile_sweep_removes_unreferenced_paths_even_when_present() {
 
     let report = reconcile_workspace_paths(&db, &projection, 500).unwrap();
     assert_eq!(report.scanned, 3);
-    let mut deleted = report.outcome.deleted_paths.clone();
-    deleted.sort();
+    let mut retained_ids: Vec<String> = db
+        .list_workspace_paths()
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    retained_ids.sort();
     expected.sort();
-    assert_eq!(deleted, expected);
-    assert_eq!(report.outcome.deleted_projects.len(), 3);
-    assert!(db.list_workspace_paths().unwrap().is_empty());
-    assert!(db.list_projects().unwrap().is_empty());
+    assert_eq!(retained_ids, expected);
+    assert_eq!(db.list_projects().unwrap().len(), 3);
 
     // A default-directory session protects its path just like any other session.
     let retained = ensure_workspace_path(&db, &plain(default, true), &home).unwrap();
     let observed_session = session(&db, "default-chat", default, &retained.id);
     let report = reconcile_workspace_paths(&db, &projection, 500).unwrap();
-    assert_eq!(report.scanned, 1);
-    assert!(report.outcome.deleted_paths.is_empty());
+    assert_eq!(report.scanned, 3);
     assert!(db.get_workspace_path(&retained.id).unwrap().is_some());
     assert_eq!(
         db.get_session(&observed_session.id)
@@ -1264,6 +1413,22 @@ fn default_workspace_project_is_named_noending_workspace() {
     let dw =
         ensure_workspace_path(&db, &plain("/Users/me/.noending/workspace", true), &home).unwrap();
     assert_eq!(project_of(&db, &dw).name, "NoEnding Chat");
+    let git = ensure_workspace_path(
+        &db,
+        &repo(
+            "/Users/me/.noending/workspace",
+            "/Users/me/.noending/workspace/.git",
+            GitWorktreeKind::Main,
+            &[],
+        ),
+        &home,
+    )
+    .unwrap();
+    assert_eq!(git.project_id, dw.project_id);
+    let plain_again =
+        ensure_workspace_path(&db, &plain("/Users/me/.noending/workspace", true), &home).unwrap();
+    assert_eq!(plain_again.project_id, dw.project_id);
+    assert!(project_of(&db, &plain_again).git_id.is_none());
 
     // After a Home move the OLD workspace is an ordinary directory and must not
     // keep the special name.
@@ -1300,13 +1465,20 @@ fn default_workspace_chat_directories_share_a_project_and_derive_kind_after_rena
     let ordinary = project_detail(&db, &outside.project_id, &home)
         .unwrap()
         .unwrap();
-    assert_eq!(ordinary.kind, ProjectKind::Directory);
+    assert_eq!(ordinary.kind, ProjectKind::SingleDirectory);
 
     db.tx(|tx| rename_project_conn(tx, &a.project_id, "我的默认聊天"))
         .unwrap();
     let detail = project_detail(&db, &a.project_id, &home).unwrap().unwrap();
     assert_eq!(detail.project.name, "我的默认聊天");
-    assert_eq!(detail.kind, ProjectKind::ChatDirectory);
+    assert_eq!(detail.kind, ProjectKind::DirectoryGroup);
+    assert_eq!(detail.purpose, Some(ProjectPurpose::Chat));
+    let c =
+        ensure_workspace_path(&db, &plain("/app/noending/workspace/chat-c", true), &home).unwrap();
+    assert_eq!(
+        c.project_id, a.project_id,
+        "renaming does not create a second directory group"
+    );
     let cards = noending::commands::project::project_cards(&db, &home).unwrap();
     assert_eq!(
         cards.iter().find(|c| c.id == a.project_id).unwrap().kind,
@@ -1317,14 +1489,23 @@ fn default_workspace_chat_directories_share_a_project_and_derive_kind_after_rena
 
 #[test]
 fn git_in_one_chat_directory_does_not_absorb_other_chats() {
-    for existing_family in [false, true] {
+    for (existing_family, root_path) in [(false, false), (true, false), (false, true), (true, true)]
+    {
         let (_d, db) = temp_db();
         let home = Home::new("/app/noending", &[], Some("/app/noending/workspace"));
-        let a =
-            ensure_workspace_path(&db, &plain("/app/noending/workspace/a", true), &home).unwrap();
+        let path = if root_path {
+            "/app/noending/workspace"
+        } else {
+            "/app/noending/workspace/a"
+        };
+        let a = ensure_workspace_path(&db, &plain(path, true), &home).unwrap();
+        let observed_session = session(&db, "roundtrip", path, &a.id);
+        workstream(&db, "roundtrip-task", "目录转换任务");
+        add_ws_path(&db, "roundtrip-task", &a.id);
         let b =
             ensure_workspace_path(&db, &plain("/app/noending/workspace/b", true), &home).unwrap();
         assert_eq!(a.project_id, b.project_id);
+        set_project_archived(&db, &a.project_id, true).unwrap();
         let existing = existing_family.then(|| {
             ensure_workspace_path(
                 &db,
@@ -1335,12 +1516,7 @@ fn git_in_one_chat_directory_does_not_absorb_other_chats() {
         });
         let upgraded = ensure_workspace_path(
             &db,
-            &repo(
-                "/app/noending/workspace/a",
-                "/work/main/.git",
-                GitWorktreeKind::Linked,
-                &[],
-            ),
+            &repo(path, "/work/main/.git", GitWorktreeKind::Linked, &[]),
             &home,
         )
         .unwrap();
@@ -1356,9 +1532,78 @@ fn git_in_one_chat_directory_does_not_absorb_other_chats() {
         let git = project_detail(&db, &upgraded.project_id, &home)
             .unwrap()
             .unwrap();
-        assert_eq!(chat.kind, ProjectKind::ChatDirectory);
+        assert_eq!(chat.kind, ProjectKind::DirectoryGroup);
         assert_eq!(chat.workspace_paths.len(), 1);
+        assert_eq!(chat.project.visibility, "archived");
         assert_eq!(git.kind, ProjectKind::Git);
+        assert_eq!(
+            git.project.visibility,
+            if existing_family {
+                "normal"
+            } else {
+                "archived"
+            }
+        );
+        assert_eq!(git.purpose, Some(ProjectPurpose::Chat));
+        let mut unavailable = plain(path, true);
+        unavailable.git = GitDetection::Unavailable;
+        assert_eq!(
+            ensure_workspace_path(&db, &unavailable, &home)
+                .unwrap()
+                .project_id,
+            upgraded.project_id
+        );
+        assert_eq!(
+            ensure_workspace_path(&db, &plain(path, false), &home)
+                .unwrap()
+                .project_id,
+            upgraded.project_id
+        );
+        let returned = ensure_workspace_path(&db, &plain(path, true), &home).unwrap();
+        let group = db.get_workspace_path(&b.id).unwrap().unwrap();
+        assert_eq!(returned.id, a.id);
+        assert_eq!(returned.project_id, group.project_id);
+        assert_eq!(returned.git_state, git_state::NONE);
+        let detail = project_detail(&db, &returned.project_id, &home)
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.kind, ProjectKind::DirectoryGroup);
+        assert_eq!(
+            detail.project.visibility, "archived",
+            "existing destination keeps its state"
+        );
+        assert_eq!(detail.purpose, Some(ProjectPurpose::Chat));
+        assert!(detail.sessions.iter().any(|s| s.id == observed_session.id));
+        assert!(detail
+            .workstreams
+            .iter()
+            .any(|w| w.workstream.id == "roundtrip-task"));
+        if existing_family {
+            let external = db
+                .get_workspace_path(&path_identity("/work/main"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(external.project_id, upgraded.project_id);
+            assert!(project_of(&db, &external).git_id.is_some());
+        }
+        let again = ensure_workspace_path(
+            &db,
+            &repo(path, "/work/main/.git", GitWorktreeKind::Linked, &[]),
+            &home,
+        )
+        .unwrap();
+        assert_eq!(again.id, a.id);
+        assert_ne!(
+            again.project_id,
+            db.get_workspace_path(&b.id).unwrap().unwrap().project_id
+        );
+        assert_eq!(
+            db.get_session(&observed_session.id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            Some(again.project_id)
+        );
         registry_is_consistent(&db).unwrap();
     }
 }
@@ -1377,7 +1622,7 @@ fn all_agent_chat_roots_are_classified_without_using_project_names() {
         let detail = project_detail(&db, &path.project_id, &UnrestrictedWorkspace)
             .unwrap()
             .unwrap();
-        assert_eq!(detail.kind, ProjectKind::ChatDirectory);
+        assert_eq!(detail.kind, ProjectKind::DirectoryGroup);
     }
 }
 
@@ -1512,9 +1757,9 @@ fn project_detail_has_the_frozen_shape() {
     assert_eq!(
         keys,
         vec![
-            "builtin_assistant",
             "kind",
             "project",
+            "purpose",
             "remote_url",
             "sessions",
             "workspace_paths",
@@ -1557,8 +1802,10 @@ fn list_projects_reports_every_derived_project_and_no_ghost() {
     // A Project remains listed while it still owns a WorkspacePath.
     assert_eq!(db.list_projects().unwrap().len(), 2);
 
-    // And a Project that loses its last path leaves the list by ceasing to exist.
-    gc_gone_workspace_paths(&db, &[b.id.clone()]).unwrap();
+    // Explicitly archived projects remain listed until permanent deletion.
+    set_project_archived(&db, &b.project_id, true).unwrap();
+    assert_eq!(db.list_projects().unwrap().len(), 2);
+    delete_project_permanently(&db, &b.project_id, &UnrestrictedWorkspace).unwrap();
     let rest: Vec<String> = db
         .list_projects()
         .unwrap()
@@ -1726,7 +1973,7 @@ fn windows_case_aliases_cannot_create_two_projects() {
 // Projects Experience v0.2 workspace refresh contract.
 // The two refresh entries (global / per-project) ride ONE rule set: the
 // reconcile_workspace_path_ids primitive below is the same observe → ensure →
-// GC pipeline the global sweep runs. These tests lock that contract without
+// observation pipeline the global sweep runs. These tests lock that contract without
 // any real git or real Home.
 
 use noending::workspace::project::{
@@ -1743,7 +1990,7 @@ fn global_refresh_reobserves_registered_paths() {
     {
         ensure(&db, &plain("/work/a", true));
         let b = ensure(&db, &plain("/work/b", true));
-        // 一条引用，让 b 免于 GC——本测试观察的是"重观察"本身。
+        // 会话关联应在目录重新观察后保留。
         session(&db, "s-b", "/work/b", &b.id);
     }
     // /work/b 在两次刷新之间从磁盘上消失了。
@@ -1764,7 +2011,7 @@ fn global_refresh_reobserves_registered_paths() {
     let b = db
         .get_workspace_path(&path_id_of("/work/b"))
         .unwrap()
-        .expect("b survives: it is only missing, GC is a separate decision");
+        .expect("missing registered paths are retained");
     assert!(!b.exists, "the observation is committed to the registry");
 }
 
@@ -1802,7 +2049,7 @@ fn refresh_marks_deleted_directory_missing() {
     let projection = ProjectProjection::new(&observer);
     let wp = {
         let wp = ensure(&db, &plain("/work/a", true));
-        // 引用让路径在 GC 判定下存活，好观察 missing 标记本身。
+        // 目录缺失不能改变会话关联。
         session(&db, "s-a", "/work/a", &wp.id);
         wp
     };
@@ -1813,11 +2060,10 @@ fn refresh_marks_deleted_directory_missing() {
     let after = { db.get_workspace_path(&wp.id).unwrap() };
     let after = after.expect("row survives the observation");
     assert!(!after.exists);
-    assert!(report.outcome.deleted_paths.is_empty());
 }
 
 #[test]
-fn last_path_gc_retires_project() {
+fn missing_unreferenced_directory_and_project_survive_reconciliation() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
     observer.set("/work/a", plain("/work/a", false));
@@ -1830,15 +2076,10 @@ fn last_path_gc_retires_project() {
 
     let report =
         reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
-    assert_eq!(report.outcome.deleted_paths, vec![wp.id.clone()]);
-    assert!(db.get_workspace_path(&wp.id).unwrap().is_none());
-    assert_eq!(report.outcome.deleted_projects, vec![project_id.clone()]);
-    {
-        assert!(db.get_project(&project_id).unwrap().is_none());
-    }
-    {
-        registry_is_consistent(&db).expect("registry stays consistent");
-    }
+    assert_eq!(report.missing_paths, 1);
+    assert!(!db.get_workspace_path(&wp.id).unwrap().unwrap().exists);
+    assert!(db.get_project(&project_id).unwrap().is_some());
+    registry_is_consistent(&db).expect("registry stays consistent");
 }
 
 #[test]

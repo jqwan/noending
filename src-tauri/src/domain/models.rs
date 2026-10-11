@@ -11,13 +11,9 @@ use serde::{Deserialize, Serialize};
 
 pub type Id = String;
 
-/// A physical workspace family, maintained entirely by the app.
-///
-/// Users never create, delete, or pick a Project — they may only rename it
-/// (`name_customized`). A Project exists exactly while it owns at least one
-/// [`WorkspacePath`]; the last path being deleted or reassigned deletes it.
-/// `git_id` is the optional Git anchor; `None` means the Project is currently
-/// only anchored by its path(s), which is a normal state, not a degraded one.
+/// A physical workspace family derived from registered paths.
+/// Users manage archive state independently of tasks and sessions. Projects and
+/// paths persist until explicit deletion; Git merges retain one canonical owner.
 #[derive(Debug, Clone, Serialize)]
 pub struct Project {
     pub id: Id,
@@ -27,6 +23,7 @@ pub struct Project {
     /// A user renamed this Project: automatic naming must stop overwriting it,
     /// including after a Project merge or worktree discovery.
     pub name_customized: bool,
+    pub visibility: String, // normal | archived
     pub created_at: String,
     pub updated_at: String,
 }
@@ -37,8 +34,16 @@ pub struct Project {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectKind {
     Git,
-    Directory,
-    ChatDirectory,
+    SingleDirectory,
+    DirectoryGroup,
+}
+
+/// Purpose is independent of directory aggregation and survives Git conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectPurpose {
+    Chat,
+    Assistant,
 }
 
 /// One observed physical working path — the bridge between the filesystem and
@@ -89,8 +94,8 @@ pub mod git_state {
     /// `.git` detected and resolvable.
     pub const DETECTED: &str = "detected";
     /// This path used to be Git-backed and the evidence is gone. Distinct from
-    /// `none` on purpose: losing `.git` must never detach the path from its
-    /// Project, and `missing` is how we remember that.
+    /// `none` on purpose: ordinary projects retain their Git identity; built-in directories can
+    /// return to their application-defined grouping after confirmed removal.
     pub const MISSING: &str = "missing";
 }
 

@@ -23,8 +23,7 @@ async function invokeWithPreferences<T>(command: string, args: Record<string, un
 }
 
 export const api = {
-  // Projects — v0.2 derives them from WorkspacePaths; reads and rename are the
-  // client surface, alongside explicit summary extraction.
+  // Project membership derives from paths; archive state is independent.
   listProjects: () => invoke<Project[]>("list_projects"),
   /** 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
   listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
@@ -34,6 +33,9 @@ export const api = {
     invoke<ProjectWorkstreamRow[]>("list_project_workstreams", { projectId }),
   renameProject: (projectId: string, name: string) =>
     invoke<Project>("rename_project", { projectId, name }),
+  archiveProject: (projectId: string) => invoke<Project>("archive_project", { projectId }),
+  restoreProject: (projectId: string) => invoke<Project>("restore_project", { projectId }),
+  deleteProjectPermanently: (projectId: string) => invoke<void>("delete_project_permanently", { projectId }),
   addProjectPath: (path: string) =>
     invoke<AddProjectPathResult>("add_project_path", { path }),
 

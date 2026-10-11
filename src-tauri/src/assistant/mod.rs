@@ -78,7 +78,6 @@ pub fn ensure_workspace(
     let project = db
         .get_project(&path.project_id)?
         .ok_or_else(|| other("助手项目未注册"))?;
-    db.set_setting("builtin.assistant.project_id", &project.id)?;
     Ok(AssistantWorkspace {
         project,
         directory: root.clone(),
@@ -94,7 +93,9 @@ pub fn cli_writable_directories(runtime: &Path, cwd: Option<&str>) -> Vec<String
         return Vec::new();
     };
     let root = directory(&home);
-    if cwd.is_some_and(|cwd| crate::workspace::identity::is_within(cwd, &root.to_string_lossy())) {
+    if cwd
+        .is_some_and(|cwd| crate::workspace::identity::same_location(cwd, &root.to_string_lossy()))
+    {
         vec![runtime.join("cli").to_string_lossy().into_owned()]
     } else {
         Vec::new()

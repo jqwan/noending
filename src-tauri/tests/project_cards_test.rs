@@ -115,7 +115,7 @@ fn board_card_projection_counts_and_paths() {
     assert_eq!(card.missing_path_count, 1, "gamma is observed missing");
     assert_eq!(card.workstream_count, 2);
     assert_eq!(card.session_count, 2, "archived sessions still count");
-    assert_eq!(card.kind, ProjectKind::Directory);
+    assert_eq!(card.kind, ProjectKind::SingleDirectory);
     let other_card = cards.iter().find(|c| c.id == "p-2").unwrap();
     assert_eq!(other_card.workstream_count, 1);
 

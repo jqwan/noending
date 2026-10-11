@@ -1,20 +1,7 @@
 //! Project commands.
 //!
-//! v0.2 makes a Project entirely app-managed: it is derived from the physical
-//! workspace registry, users may only rename it, and it disappears when its last
-//! WorkspacePath goes. Only the current read and rename surface remains here.
-//!
-//! The v0.2 surface is exactly three reads and one write:
-//!
-//! ```text
-//! list_projects                          → every derived Project
-//! get_project_detail(project_id)         → frozen shape
-//! list_project_workstreams(project_id)   → 全部关联任务
-//! rename_project(project_id, name)       → the only user-editable Project fact
-//! ```
-//!
-//! `rename_project` is deliberately narrow: automatic identity fields cannot be
-//! overwritten by a whole-object UI payload.
+//! Projects are derived from registered directories. Archive and permanent-delete
+//! actions are explicit; task/session lifecycle remains independent.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -45,8 +32,9 @@ pub struct ProjectCardData {
     pub id: String,
     pub name: String,
     pub name_customized: bool,
+    pub visibility: String,
     pub kind: ProjectKind,
-    pub builtin_assistant: bool,
+    pub purpose: Option<ProjectPurpose>,
     pub path_count: i64,
     /// Paths last observed as gone from disk; the card's "有目录缺失" signal.
     pub missing_path_count: i64,
@@ -184,7 +172,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
             let session_activity = session_activity.get(&p.id).cloned().flatten();
             let workstream_activity = workstream_activity.get(&p.id).cloned().flatten();
             ProjectCardData {
-                builtin_assistant: crate::workspace::project::is_assistant_project(
+                purpose: crate::workspace::project::project_purpose(
                     search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),
                     policy,
                 ),
@@ -204,6 +192,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
                 id: p.id,
                 name: p.name,
                 name_customized: p.name_customized,
+                visibility: p.visibility,
                 updated_at: p.updated_at,
             }
         })
@@ -219,9 +208,7 @@ pub fn list_project_cards(
     with_db(&state, |db| project_cards(db, layer.projection().policy()))
 }
 
-/// Every Project the app derives. There is no filter and no lifecycle: a Project
-/// exists exactly while it owns a WorkspacePath, so this list is the registry
-/// grouped by owner.
+/// Every registered project, including archived projects.
 #[tauri::command]
 pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>> {
     with_db(&state, |db| db.list_projects())
@@ -304,5 +291,34 @@ pub fn add_project_path(
         path: outcome.path,
         project_id,
         project_name,
+    })
+}
+
+#[tauri::command]
+pub fn archive_project(state: State<AppState>, project_id: String) -> Result<Project> {
+    with_db(&state, |db| {
+        crate::workspace::project::set_project_archived(db, &project_id, true)
+    })
+}
+
+#[tauri::command]
+pub fn restore_project(state: State<AppState>, project_id: String) -> Result<Project> {
+    with_db(&state, |db| {
+        crate::workspace::project::set_project_archived(db, &project_id, false)
+    })
+}
+
+#[tauri::command]
+pub fn delete_project_permanently(
+    state: State<AppState>,
+    layer: State<'_, Arc<WorkspaceLayer>>,
+    project_id: String,
+) -> Result<()> {
+    with_db(&state, |db| {
+        crate::workspace::project::delete_project_permanently(
+            db,
+            &project_id,
+            layer.projection().policy(),
+        )
     })
 }

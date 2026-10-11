@@ -64,8 +64,8 @@ function projectCard(id: string, name: string, paths: string[]): ProjectCardData
   return {
     id,
     name,
-    name_customized: false,
-    kind: "directory" as const,
+    name_customized: false, visibility: "normal",
+    kind: "single_directory" as const,
     path_count: paths.length,
     missing_path_count: 0,
     workstream_count: 0,
@@ -92,8 +92,8 @@ describe("WorkstreamFormModal project selection", () => {
 
   it("creates a task without any project even when chat-directory projects exist", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      { ...projectCard("p-noending", "NoEnding Chat", ["/tmp/workspace"]), kind: "chat_directory" },
-      { ...projectCard("p-agent", "Codex Chat", ["/Documents/Codex/chat"]), kind: "chat_directory" },
+      { ...projectCard("p-noending", "NoEnding Chat", ["/tmp/workspace"]), kind: "directory_group" },
+      { ...projectCard("p-agent", "Codex Chat", ["/Documents/Codex/chat"]), kind: "directory_group" },
     ]);
     vi.mocked(api.createWorkstream).mockResolvedValue(report("w1", []));
     const onCreated = vi.fn();
@@ -226,8 +226,8 @@ describe("WorkstreamFormModal project selection", () => {
   it("excludes all chat-directory projects from the project dropdown list", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       projectCard("p-normal", "普通单目录项目", ["/repo/normal"]),
-      { ...projectCard("p-codex", "Codex Chat", ["/repo/codex"]), kind: "chat_directory" },
-      { ...projectCard("p-noending", "NoEnding Chat", ["/repo/noending"]), kind: "chat_directory" },
+      { ...projectCard("p-codex", "Codex Chat", ["/repo/codex"]), kind: "directory_group" },
+      { ...projectCard("p-noending", "NoEnding Chat", ["/repo/noending"]), kind: "directory_group" },
     ]);
 
     render(<WorkstreamFormModal onClose={vi.fn()} />);
@@ -407,7 +407,7 @@ describe("WorkstreamFormModal edit mode", () => {
   it("preserves existing chat-directory associations when editing a task", async () => {
     const existing = [row("chat", 0, "/tmp/workspace", "p-chat", "NoEnding Chat")];
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      { ...projectCard("p-chat", "NoEnding Chat", ["/tmp/workspace"]), kind: "chat_directory" },
+      { ...projectCard("p-chat", "NoEnding Chat", ["/tmp/workspace"]), kind: "directory_group" },
     ]);
     render(<WorkstreamFormModal workstream={current()} paths={existing} onClose={vi.fn()} />);
     await screen.findByText("NoEnding Chat");

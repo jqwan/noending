@@ -9,7 +9,7 @@ import type {
   Workstream,
   WorkstreamPathRow,
 } from "../../types";
-import { isChatDirectoryProject } from "../projects/projectKind";
+import { isDirectoryGroupProject } from "../projects/projectKind";
 
 /** 任务表单弹窗：新建与编辑共用，统一按项目维度关联（支持关联多个项目）。 */
 
@@ -474,7 +474,7 @@ export default function WorkstreamFormModal({
               .filter(
                 (p) =>
                   !selectedProjectIds.includes(p.id) &&
-                  !isChatDirectoryProject(p)
+                  !isDirectoryGroupProject(p)
               )
               .map((p) => (
                 <option key={p.id} value={p.id}>

@@ -98,7 +98,7 @@ export default function Router({ route, navigate, goBack, actionSeq, assistantWo
     case "assistant":
       return <AssistantView navigate={navigate} workspace={assistantWorkspace} error={assistantError} retry={retryAssistant} />;
     case "projects":
-      return <ProjectsView navigate={navigate} />;
+      return <ProjectsView navigate={navigate} scope={route.scope} />;
     case "project":
       return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} />;
     case "agents":

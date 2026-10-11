@@ -15,6 +15,7 @@ pub fn project(id: Id, name: impl Into<String>) -> Project {
         name: name.into(),
         git_id: None,
         name_customized: false,
+        visibility: "normal".into(),
         created_at: ts.clone(),
         updated_at: ts,
     }

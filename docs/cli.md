@@ -39,7 +39,7 @@ ne session messages <id> --limit 8
 ne session search <id> --query "关键词"
 ne task list
 ne task show <id>
-ne project list
+ne project list --scope unarchived
 ne project show <id>
 ne project summary <id>
 ```
@@ -72,6 +72,8 @@ ne task unarchive <任务id>
 ne session archive <会话id>
 ne session unarchive <会话id>
 ne project rename <项目id> --name "新名称"
+ne project archive <项目id>
+ne project unarchive <项目id>
 ne path register --path /absolute/existing/directory
 ne task path list <任务id>
 ne task path add <任务id> --path /absolute/existing/directory

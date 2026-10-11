@@ -743,6 +743,7 @@ fn project_fixture(
         name: format!("Project {id}"),
         git_id: None,
         name_customized: false,
+        visibility: "normal".into(),
         created_at: crate::storage::now(),
         updated_at: crate::storage::now(),
     };
@@ -962,12 +963,13 @@ fn project_metadata_and_membership_changes_mark_pending_without_discarding_summa
         Some("旧项目摘要")
     );
     assert!(!project_context_view(f.db(), &p.id).unwrap().pending);
-    f.db()
-        .tx(|tx| {
-            crate::storage::workspace::retire_project_if_unowned(tx, &p.id)?;
-            Ok(())
-        })
-        .unwrap();
+    crate::workspace::project::set_project_archived(f.db(), &p.id, true).unwrap();
+    crate::workspace::project::delete_project_permanently(
+        f.db(),
+        &p.id,
+        &crate::workspace::project::UnrestrictedWorkspace,
+    )
+    .unwrap();
     let conn = f.db().read();
     assert_eq!(
         conn.query_row(

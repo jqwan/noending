@@ -925,6 +925,43 @@ fn cli_directory_registration_and_task_paths_preserve_projects_sessions_and_disk
             .unwrap()["items"][0]["session_id"],
         sid
     );
+    f.call(&["project", "archive", pid]).unwrap();
+    assert!(f.call(&["project", "list"]).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["id"] != pid));
+    assert!(
+        f.call(&["project", "list", "--scope", "archived"]).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == pid)
+    );
+    assert!(
+        f.call(&["project", "list", "--scope", "all"]).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == pid)
+    );
+    assert_eq!(
+        f.db().get_workstream(tid).unwrap().unwrap().visibility,
+        "normal"
+    );
+    assert!(f
+        .db()
+        .get_session(&sid)
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_none());
+    f.call(&["project", "unarchive", pid]).unwrap();
+    assert!(f.call(&["project", "list"]).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == pid));
     let conn = f.db().read();
     let title: String = conn
         .query_row(

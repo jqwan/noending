@@ -53,7 +53,8 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// v5 — current session/task/project Markdown summaries; retire Context history,
 /// items, conflicts and review; task consumption no longer duplicates fact generations.
 /// v6 — current user/project preferences with user-controlled Agent locks.
-pub const DATABASE_FORMAT_VERSION: i64 = 6;
+/// v7 — independent project archive state and explicit project deletion.
+pub const DATABASE_FORMAT_VERSION: i64 = 7;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -223,6 +224,7 @@ const CURRENT_SCHEMA: &str = r#"
       name TEXT NOT NULL,
       git_id TEXT,
       name_customized INTEGER NOT NULL DEFAULT 0,
+      visibility TEXT NOT NULL DEFAULT 'normal' CHECK (visibility IN ('normal', 'archived')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );

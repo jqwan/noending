@@ -56,7 +56,7 @@ function mockDetail(): ProjectDetailData {
       id: "p1",
       name: "Test Project",
       git_id: "git-1",
-      name_customized: false,
+      name_customized: false, visibility: "normal",
       created_at: "2026-10-01T00:00:00Z",
       updated_at: "2026-10-01T00:00:00Z",
     },
@@ -117,8 +117,11 @@ function mockDetail(): ProjectDetailData {
 }
 
 describe("ProjectDetail", () => {
-  it("renders + button in sessions section and navigates to new-session on click", async () => {
-    vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
+  it.each(["git", "single_directory"] as const)("keeps project type and assistant purpose separate for %s", async (kind) => {
+    const detail = mockDetail();
+    detail.kind = kind;
+    detail.purpose = "assistant";
+    vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
     await screen.findByText("Test Project");
@@ -126,12 +129,14 @@ describe("ProjectDetail", () => {
     expect(newSessionBtn).toBeTruthy();
 
     fireEvent.click(newSessionBtn);
-    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p1" });
+    expect(navigate).toHaveBeenCalledWith({ view: "assistant" });
+    expect(screen.getByText(kind === "git" ? "Git 项目" : "单目录项目")).toBeTruthy();
+    expect(screen.getByText("助手")).toBeTruthy();
   });
 
   it.each(["Codex Chat", "NoEnding Chat", "用户改名的聊天项目"])("does not offer new sessions in chat-directory project %s", async (name) => {
     const agentDetail = mockDetail();
-    agentDetail.kind = "chat_directory";
+    agentDetail.kind = "directory_group";
     agentDetail.project.name = name;
     vi.mocked(api.getProjectDetail).mockResolvedValue(agentDetail);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
