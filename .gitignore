@@ -1,7 +1,8 @@
 # Node / frontend
 node_modules/
 dist/
-docs/
+docs/*
+!docs/cli.md
 
 # Rust / Tauri
 src-tauri/target/

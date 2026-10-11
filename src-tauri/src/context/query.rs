@@ -6,8 +6,6 @@ use crate::storage::Db;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
-const PART_SIZE: i64 = 2000;
-
 #[derive(Clone)]
 pub(super) enum Input {
     Session {
@@ -80,8 +78,12 @@ impl Input {
             } => {
                 snapshot.validate(conn, None)?;
                 let from = if *full_history { 0 } else { snapshot.from };
-                let parts: i64 = conn.query_row("SELECT COALESCE(SUM(MAX(1,(LENGTH(m.content)+1999)/2000)),0) FROM session_message_projection p JOIN session_messages m ON m.id=p.session_message_id WHERE p.session_id=?1 AND p.ordinal>?2 AND p.ordinal<=?3", params![snapshot.session.id,from,snapshot.latest], |r|r.get(0))?;
-                Ok(parts as usize + 2)
+                Ok(crate::storage::message_query::part_count(
+                    conn,
+                    &snapshot.session.id,
+                    from,
+                    snapshot.latest,
+                )? + 2)
             }
             Self::Batch { sessions, .. } => Ok(sessions.len() + 2),
             Self::Preferences(_) => Ok(1),
@@ -197,53 +199,15 @@ fn session_page(
             "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":if full_history {None} else {s.summary_through_at.as_deref()},
             "from_sequence":from+1,"through_sequence":s.latest,"message_count":s.latest-from}}));
     }
-    // SQL computes virtual part offsets without transferring message bodies.
-    // instr searches the full original text, including across part boundaries.
-    let mut st = conn.prepare("WITH sizes AS (
-        SELECT p.ordinal,m.id,m.role,m.ts,MAX(1,(LENGTH(m.content)+1999)/2000) AS parts
-        FROM session_message_projection p JOIN session_messages m ON m.id=p.session_message_id
-        WHERE p.session_id=?1 AND p.ordinal>?2 AND p.ordinal<=?3
-    ), numbered AS (
-        SELECT *,COALESCE(SUM(parts) OVER (ORDER BY ordinal ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) AS base FROM sizes
-    ) SELECT n.ordinal,n.id,n.role,n.ts,n.parts,n.base FROM numbered n
-      JOIN session_messages m ON m.id=n.id
-      WHERE n.base+n.parts>=?4 AND (?5 IS NULL OR INSTR(m.content,?5)>0)
-      ORDER BY n.ordinal LIMIT ?6")?;
-    let rows = st.query_map(
-        params![
-            s.session.id,
-            from,
-            s.latest,
-            cursor as i64,
-            search,
-            (limit + 1) as i64
-        ],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-            ))
-        },
-    )?;
-    'messages: for row in rows {
-        let (seq, id, role, ts, parts, base) = row?;
-        let first = (cursor as i64 - base - 1).max(0);
-        for part in first..parts {
-            if records.len() > limit {
-                break 'messages;
-            }
-            let content: String = conn.query_row(
-                "SELECT SUBSTR(content,?2,?3) FROM session_messages WHERE id=?1",
-                params![id, part * PART_SIZE + 1, PART_SIZE],
-                |r| r.get(0),
-            )?;
-            records.push(json!({"cursor":base+part+1,"record":{"type":"message","sequence":seq,"role":role,"timestamp":ts,"part":part+1,"last_part":part+1==parts,"content":content}}));
-        }
-    }
+    records.extend(crate::storage::message_query::parts(
+        conn,
+        &s.session.id,
+        from,
+        s.latest,
+        cursor,
+        limit + 1,
+        search,
+    )?);
     if search.is_none() && records.len() <= limit && cursor <= total - 1 {
         records.push(
             json!({"cursor":total-1,"record":{"type":"end","marker":"END_OF_SESSION_INPUT"}}),

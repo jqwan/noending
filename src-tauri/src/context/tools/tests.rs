@@ -236,15 +236,23 @@ fn cli_is_read_only_reply_is_required_and_connection_expires() {
         let args = vec![
             "--connection".into(),
             connection.to_string_lossy().into_owned(),
+            "extraction".into(),
             "inputs".into(),
         ];
-        assert_eq!(cli(&args)?["inputs"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            crate::cli::execute(&args).map_err(other)?["inputs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         let mut invalid = args.clone();
         invalid.extend(["--sql".into(), "DELETE FROM sessions".into()]);
-        assert!(cli(&invalid).is_err());
-        assert!(cli(&[
+        assert!(crate::cli::execute(&invalid).is_err());
+        assert!(crate::cli::execute(&[
             "--connection".into(),
             connection.to_string_lossy().into_owned(),
+            "extraction".into(),
             "submit".into()
         ])
         .is_err());

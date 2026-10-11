@@ -20,6 +20,7 @@ use crate::error::{other, Result};
 // The WorkspacePath registry, ordered WorkstreamPath list and Session→path
 // attach each live in their own impl file rather than growing this monolith.
 pub mod context_repo;
+pub mod message_query;
 pub mod preferences;
 pub mod project_context_repo;
 pub mod schema;
@@ -384,13 +385,7 @@ impl Db {
     /// first, falling back to its title. Returns None when absent or empty.
     pub fn get_workstream(&self, id: &str) -> Result<Option<Workstream>> {
         let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT * FROM workstreams WHERE id = ?1",
-                params![id],
-                row_workstream,
-            )
-            .optional()?)
+        get_workstream_conn(&conn, id)
     }
 
     pub fn upsert_workstream(&self, w: &Workstream) -> Result<()> {
@@ -1581,6 +1576,16 @@ pub fn upsert_project_conn(conn: &Connection, p: &Project) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+pub fn get_workstream_conn(conn: &Connection, id: &str) -> Result<Option<Workstream>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM workstreams WHERE id = ?1",
+            params![id],
+            row_workstream,
+        )
+        .optional()?)
 }
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {

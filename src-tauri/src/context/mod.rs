@@ -1,6 +1,8 @@
 //! Explicit current-summary reads and extraction. One user action launches one
 //! Agent; model replies and files validate before a snapshot-guarded transaction.
 pub(crate) mod diagnostics;
+mod edit;
+pub use edit::edit_summary;
 mod preferences;
 mod project;
 pub mod prompts;

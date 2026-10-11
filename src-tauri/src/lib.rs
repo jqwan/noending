@@ -4,6 +4,7 @@
 pub mod adapters;
 pub mod agent_runtime;
 pub mod assistant;
+pub mod cli;
 pub mod commands;
 pub mod context;
 pub mod domain;
@@ -91,6 +92,19 @@ pub fn run() {
             // PTY reader/wait threads can emit to the webview without ever
             // touching app state from a thread.
             app.manage(terminal::TerminalRegistry::new(Some(app.handle().clone())));
+
+            // CLI requests use the same app-owned DB/services as Tauri commands.
+            // A scoped extraction connection never routes through this server.
+            {
+                let state: tauri::State<commands::AppState> = app.state();
+                let handle = app.handle().clone();
+                match cli::start(state.db.clone(), home.clone(), layer.clone(), move || {
+                    let _ = handle.emit("cli-data-changed", ());
+                }) {
+                    Ok(server) => { app.manage(server); }
+                    Err(error) => eprintln!("[noending] CLI unavailable: {error}"),
+                }
+            }
 
             // make pre-existing messages searchable (idempotent)
             {
@@ -245,6 +259,9 @@ pub fn run() {
             // Documented product behavior: closing NoEnding ends every
             // embedded Agent. The external-terminal path is unaffected.
             if let tauri::RunEvent::Exit = event {
+                if let Some(server) = app.try_state::<cli::Server>() {
+                    server.shutdown();
+                }
                 if let Some(registry) = app.try_state::<terminal::TerminalRegistry>() {
                     registry.kill_all();
                 }

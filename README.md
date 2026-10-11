@@ -63,4 +63,6 @@ pnpm tauri build
 
 「设置」中可选择浅色、深色或跟随系统，内嵌终端同步切换主题。默认存储目录为 macOS 的 `~/.noending/`、Windows 的 `%USERPROFILE%\.noending\`，可在设置中更改，重启后生效。
 
+也可通过 CLI 查询历史、管理偏好和任务、更新摘要。保持应用运行，使用 `ne --help` 查看命令；`ne` 和 `noending` 使用同一套命令。安装及用法见 [CLI 使用说明](docs/cli.md)。
+
 开发约定与验证规则见 [AGENTS.md](AGENTS.md)。

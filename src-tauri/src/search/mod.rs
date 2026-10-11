@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::storage::Db;
+pub(crate) mod sessions;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {

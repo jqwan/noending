@@ -150,6 +150,11 @@ pub fn reorder_workstream_paths_conn(
         mapped.collect::<std::result::Result<Vec<_>, _>>()?
     };
     if current.len() != ordered_workspace_path_ids.len()
+        || ordered_workspace_path_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != current.len()
         || !ordered_workspace_path_ids
             .iter()
             .all(|p| current.contains(p))

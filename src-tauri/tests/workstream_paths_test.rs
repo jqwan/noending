@@ -427,6 +427,13 @@ fn reorder_is_deterministic() {
     // An id from another Workstream is not part of this list either.
     assert!(reorder_workstream_paths(&f.db, &w.id, &["not-a-path".into()]).is_err());
     assert_eq!(ordered_path_ids(&f.db, &w.id), promoted);
+    let duplicates = vec![
+        promoted[0].clone(),
+        promoted[0].clone(),
+        promoted[1].clone(),
+    ];
+    assert!(reorder_workstream_paths(&f.db, &w.id, &duplicates).is_err());
+    assert_eq!(ordered_path_ids(&f.db, &w.id), promoted);
 }
 
 /// + one directory is one entry, however many ways there are to

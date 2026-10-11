@@ -223,9 +223,24 @@ pub fn add_workstream_path(
     Ok(row)
 }
 
-/// Remove one entry and recompact display positions. Sessions are
-/// not affected: this changes the Workstream's path list, never a Session's
-/// ownership.
+/// Associate an already registered directory, retaining its derived project.
+pub fn add_registered_workstream_path(
+    db: &Db,
+    workstream_id: &str,
+    workspace_path_id: &str,
+) -> Result<WorkstreamPath> {
+    db.tx(|tx| {
+        if crate::storage::get_workstream_conn(tx, workstream_id)?.is_none() {
+            return Err(other("任务不存在"));
+        }
+        if get_workspace_path_conn(tx, workspace_path_id)?.is_none() {
+            return Err(other("目录未注册"));
+        }
+        append_workstream_path_conn(tx, workstream_id, workspace_path_id)
+    })
+}
+
+/// Remove one entry and recompact positions without changing session ownership.
 pub fn remove_workstream_path(
     db: &Db,
     workstream_id: &str,
@@ -294,11 +309,50 @@ pub fn restore_workstream(db: &Db, workstream_id: &str) -> Result<Workstream> {
 }
 
 fn set_visibility(db: &Db, workstream_id: &str, visibility: &str) -> Result<Workstream> {
-    let mut w = require_workstream(db, workstream_id)?;
-    w.visibility = visibility.into();
-    w.updated_at = now();
-    db.upsert_workstream(&w)?;
-    Ok(w)
+    edit_fields(db, workstream_id, None, None, Some(visibility))
+}
+
+/// Partial edits preserve every field not explicitly supplied, including
+/// archive state. Read, write, revision and search updates share a transaction.
+pub fn update_workstream_fields(
+    db: &Db,
+    id: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> Result<Workstream> {
+    if title.is_none() && description.is_none() {
+        return Err(other("需要提供任务标题或说明"));
+    }
+    if let Some(title) = title {
+        crate::storage::ensure_not_empty("任务标题", title)?;
+    }
+    edit_fields(db, id, title, description, None)
+}
+
+fn edit_fields(
+    db: &Db,
+    id: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    visibility: Option<&str>,
+) -> Result<Workstream> {
+    db.tx(|tx| {
+        let mut w =
+            crate::storage::get_workstream_conn(tx, id)?.ok_or_else(|| other("任务不存在"))?;
+        if let Some(title) = title {
+            w.title = title.trim().into();
+        }
+        if let Some(description) = description {
+            w.description = description.into();
+        }
+        if let Some(visibility) = visibility {
+            w.visibility = visibility.into();
+        }
+        w.updated_at = now();
+        crate::storage::upsert_workstream_conn(tx, &w)?;
+        reindex_workstream_search_conn(tx, id)?;
+        Ok(w)
+    })
 }
 
 /// The rules for the whole-object write (`update_workstream`), which the

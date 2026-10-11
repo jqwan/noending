@@ -5,24 +5,14 @@ use crate::error::{other, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-const MAX_REQUEST: u64 = 4 * 1024 * 1024;
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const SKILL: &str = include_str!("../../skills/noending-extraction/SKILL.md");
 const PROTOCOL: &str = include_str!("../../skills/noending-extraction/references/protocol.md");
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Connection {
-    version: u8,
-    directory: std::path::PathBuf,
-    token: String,
-}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -242,18 +232,6 @@ impl Bridge<'_> {
     }
 }
 
-fn private_write(path: &Path, content: &str) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)?.write_all(content.as_bytes())?;
-    Ok(())
-}
-
 /// The Agent runs on the caller thread. Only scoped requests touch the bridge;
 /// Filesystem IPC works inside Agent workspace sandboxes without network access.
 /// All durable writes remain in the existing snapshot-guarded transaction.
@@ -263,61 +241,45 @@ pub(super) fn run(
     requirements: &str,
     invoke: impl FnOnce(&str) -> Result<String>,
 ) -> Result<String> {
-    let directory = files.dir.join("requests");
-    std::fs::create_dir_all(&directory)?;
-    let connection = Connection {
-        version: 1,
-        directory,
-        token: crate::storage::new_id(),
-    };
-    private_write(&connection.directory.join("active"), &connection.token)?;
+    let connection =
+        crate::cli::transport::Connection::create(files.dir.join("requests")).map_err(other)?;
     let connection_path = files.dir.join("connection.json");
-    private_write(&connection_path, &serde_json::to_string(&connection)?)?;
+    connection.publish(&connection_path).map_err(other)?;
     let skill_dir = files.dir.join("noending-extraction");
     std::fs::create_dir_all(skill_dir.join("references"))?;
-    private_write(&skill_dir.join("SKILL.md"), SKILL)?;
-    private_write(&skill_dir.join("references/protocol.md"), PROTOCOL)?;
-    private_write(&skill_dir.join("references/requirements.md"), requirements)?;
-    let exe = std::env::current_exe()?;
-    let prompt=format!("使用提取 skill：{}。先完整读取该 SKILL.md，再按其中的流程查询材料并生成结果。\nCLI 前缀：{} extraction --connection {}\n提取要求：{}\n最终回复必须是协议规定的单个状态 JSON 对象，不带 Markdown 代码块或其他说明。后端在调用正常结束后校验结果文件并入库。",serde_json::to_string(&skill_dir.join("SKILL.md"))?,executable_command(&exe),shell_quote(&connection_path),serde_json::to_string(&skill_dir.join("references/requirements.md"))?);
+    crate::cli::transport::private_write(&skill_dir.join("SKILL.md"), SKILL).map_err(other)?;
+    crate::cli::transport::private_write(&skill_dir.join("references/protocol.md"), PROTOCOL)
+        .map_err(other)?;
+    crate::cli::transport::private_write(
+        &skill_dir.join("references/requirements.md"),
+        requirements,
+    )
+    .map_err(other)?;
+    let exe = crate::cli::executable()?;
+    let prompt=format!("使用提取 skill：{}。先完整读取该 SKILL.md，再按其中的流程查询材料并生成结果。\nCLI 前缀：{} --connection {} extraction\n提取要求：{}\n最终回复必须是协议规定的单个状态 JSON 对象，不带 Markdown 代码块或其他说明。后端在调用正常结束后校验结果文件并入库。",serde_json::to_string(&skill_dir.join("SKILL.md"))?,executable_command(&exe),shell_quote(&connection_path),serde_json::to_string(&skill_dir.join("references/requirements.md"))?);
     let bridge = Bridge {
         db,
         files,
-        token: connection.token,
+        token: connection.token.clone(),
         delivered: Mutex::default(),
     };
     let stopped = AtomicBool::new(false);
     std::thread::scope(|scope| {
         scope.spawn(|| {
             while !stopped.load(Ordering::Acquire) {
-                if let Ok(entries) = std::fs::read_dir(&connection.directory) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().and_then(|e| e.to_str()) != Some("request") {
-                            continue;
-                        }
-                        let result = (|| -> Result<Value> {
-                            let meta = std::fs::symlink_metadata(&path)?;
-                            if !meta.file_type().is_file() || meta.len() > MAX_REQUEST {
-                                return Err(other("请求过长或不是普通文件"));
-                            }
-                            bridge.dispatch(serde_json::from_str(&std::fs::read_to_string(&path)?)?)
-                        })();
-                        let response = match result {
-                            Ok(data) => json!({"schema_version":1,"ok":true,"data":data}),
-                            Err(error) => json!({"ok":false,"error":error.to_string()}),
-                        };
-                        let output = path.with_extension("response");
-                        let temp = path.with_extension("tmp");
-                        if private_write(&temp, &response.to_string()).is_ok() {
-                            let _ = std::fs::rename(temp, output);
-                        }
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
+                crate::cli::transport::serve_pending(&connection, |command| {
+                    let command = serde_json::from_value(command)
+                        .map_err(|e| crate::cli::CliError::new("invalid_command", e))?;
+                    bridge
+                        .dispatch(Request {
+                            token: connection.token.clone(),
+                            command,
+                        })
+                        .map_err(Into::into)
+                });
                 std::thread::park_timeout(Duration::from_millis(10));
             }
-            let _ = std::fs::remove_file(connection.directory.join("active"));
+            connection.deactivate();
         });
         // Stop even if a test runner panics. No query worker can outlive its scope.
         struct Stop<'a>(&'a AtomicBool);
@@ -361,151 +323,12 @@ pub(super) fn input_available(path: &Path) -> bool {
         .any(|i| i["name"].as_str() == Some(name.as_ref()))
 }
 fn shell_quote(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        format!("'{}'", text.replace('\'', "''"))
-    }
-    #[cfg(not(windows))]
-    {
-        format!("'{}'", text.replace('\'', "'\\''"))
-    }
+    crate::cli::shell_quote(path)
 }
+#[cfg(test)]
 fn request(path: &Path, command: Command) -> Result<Value> {
-    let connection: Connection = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-    if connection.version != 1 {
-        return Err(other("提取连接协议版本不匹配"));
-    }
-    let active = connection.directory.join("active");
-    if std::fs::read_to_string(&active).ok().as_deref() != Some(connection.token.as_str()) {
-        return Err(other("提取连接已结束"));
-    }
-    let name = crate::storage::new_id();
-    let input = connection.directory.join(format!("{name}.request"));
-    let temp = input.with_extension("tmp");
-    let output = input.with_extension("response");
-    private_write(
-        &temp,
-        &serde_json::to_string(&Request {
-            token: connection.token,
-            command,
-        })?,
-    )?;
-    std::fs::rename(temp, &input)?;
-    let start = std::time::Instant::now();
-    let response = loop {
-        match std::fs::read_to_string(&output) {
-            Ok(text) => {
-                let _ = std::fs::remove_file(&output);
-                break serde_json::from_str::<Value>(&text)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if !active.exists() || start.elapsed() > IO_TIMEOUT {
-                    let _ = std::fs::remove_file(&input);
-                    return Err(other("提取连接已结束或请求超时"));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(error.into()),
-        }
-    };
-    if response["ok"] != true {
-        return Err(other(response["error"].as_str().unwrap_or("查询失败")));
-    }
-    Ok(response["data"].clone())
+    crate::cli::transport::request(path, serde_json::to_value(command)?).map_err(other)
 }
-
-/// Same executable, a small explicit command surface; no app startup or DB open.
-pub fn run_cli_if_requested() -> Option<i32> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) != Some("extraction") {
-        return None;
-    }
-    let result = cli(&args[1..]);
-    match result {
-        Ok(data) => {
-            println!("{}", json!({"schema_version":1,"ok":true,"data":data}));
-            Some(0)
-        }
-        Err(error) => {
-            println!(
-                "{}",
-                json!({"schema_version":1,"ok":false,"error":{"code":"extraction_request_failed","message":error.to_string()}})
-            );
-            Some(1)
-        }
-    }
-}
-fn cli(args: &[String]) -> Result<Value> {
-    if args == ["--help"] {
-        return Ok(
-            json!({"commands":["inputs","read","search"],"connection":"使用当前提取运行提供的 --connection 路径","writes":"只读查询，不提供 SQL 或业务编辑"}),
-        );
-    }
-    let mut options = HashMap::new();
-    let mut action = None;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
-        if let Some(key) = arg.strip_prefix("--") {
-            let value = args.get(index + 1).ok_or_else(|| other("参数缺少值"))?;
-            if value.starts_with("--") || options.insert(key, value.as_str()).is_some() {
-                return Err(other("参数无效或重复"));
-            }
-            index += 2;
-        } else {
-            if action.replace(arg.as_str()).is_some() {
-                return Err(other("多余参数"));
-            }
-            index += 1;
-        }
-    }
-    let connection = options
-        .remove("connection")
-        .ok_or_else(|| other("缺少 --connection"))?;
-    let command = match action {
-        Some("inputs") => Command::Inputs,
-        Some("read") | Some("search") => {
-            let name = options
-                .remove("input")
-                .ok_or_else(|| other("缺少 --input"))?
-                .to_string();
-            let cursor = options
-                .remove("cursor")
-                .unwrap_or("0")
-                .parse::<usize>()
-                .map_err(|_| other("游标无效"))?;
-            let limit = options
-                .remove("limit")
-                .unwrap_or("8")
-                .parse::<usize>()
-                .map_err(|_| other("limit 无效"))?;
-            if action == Some("search") {
-                Command::Search {
-                    name,
-                    cursor,
-                    limit,
-                    query: options
-                        .remove("query")
-                        .ok_or_else(|| other("缺少 --query"))?
-                        .into(),
-                }
-            } else {
-                Command::Read {
-                    name,
-                    cursor,
-                    limit,
-                }
-            }
-        }
-        _ => return Err(other("支持 inputs、read、search")),
-    };
-    if !options.is_empty() {
-        return Err(other("未知参数"));
-    }
-    request(Path::new(connection), command)
-}
-
 #[cfg(test)]
 pub(super) fn read_input(path: &Path) -> Vec<Value> {
     let connection = path.parent().unwrap().join("connection.json");

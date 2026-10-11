@@ -439,6 +439,15 @@ pub fn ensure_workspace_path_conn(
     })
 }
 
+/// Rename the editable display name and refresh project/session search in one transaction.
+pub fn rename_project(db: &Db, id: &str, name: &str) -> Result<Project> {
+    db.tx(|tx| {
+        let project = crate::storage::workspace::rename_project_conn(tx, id, name)?;
+        crate::storage::project_context_repo::reindex(tx, id)?;
+        Ok(project)
+    })
+}
+
 /// The self-transacting form. Use this when you are not already inside a
 /// write; use [`ensure_workspace_path_conn`] when you are.
 pub fn ensure_workspace_path(

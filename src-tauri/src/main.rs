@@ -3,10 +3,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    if let Some(code) = noending::context::tools::run_cli_if_requested() {
+    if let Some(code) = noending::terminal::identity::run_hook_helper_if_requested() {
         std::process::exit(code);
     }
-    if let Some(code) = noending::terminal::identity::run_hook_helper_if_requested() {
+    if let Some(code) = noending::cli::run_if_requested() {
         std::process::exit(code);
     }
     noending::run()

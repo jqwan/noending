@@ -255,14 +255,8 @@ pub fn list_project_workstreams(
 /// particular has exactly one writer, `workspace::project`.
 #[tauri::command]
 pub fn rename_project(state: State<AppState>, project_id: String, name: String) -> Result<Project> {
-    crate::storage::ensure_not_empty("项目名称", &name)?;
-    let name = name.trim().to_string();
     with_db(&state, |db| {
-        let project =
-            db.tx(|tx| crate::storage::workspace::rename_project_conn(tx, &project_id, &name))?;
-        // The search row carries the name, so it follows the rename.
-        let _ = db.index_project(&project);
-        Ok(project)
+        crate::workspace::project::rename_project(db, &project_id, &name)
     })
 }
 

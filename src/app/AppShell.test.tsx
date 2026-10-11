@@ -6,6 +6,8 @@ import type { Route } from "./routes";
 import { api } from "../api";
 import { sessionDetailCache } from "../features/sessions/SessionDetailView";
 import { useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { useRefreshSignal } from "../components/common";
 
 const focusListener = vi.hoisted(() => ({
   callback: undefined as undefined | ((event: { payload: boolean }) => void),
@@ -40,6 +42,7 @@ vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => {
+  vi.mocked(listen).mockClear();
   sessionDetailCache.clear();
   vi.mocked(api.getSessionDetail).mockReset();
   sessionPages.clear(); sessionTerminals.clear();
@@ -48,6 +51,19 @@ beforeEach(() => {
   sessionNavigation.navigate = undefined;
 });
 afterEach(cleanup);
+
+it("refreshes visible data when a CLI business operation completes", async () => {
+  function RefreshConsumer() {
+    const [count, setCount] = useState(0);
+    useRefreshSignal(() => setCount(value => value + 1));
+    return <output aria-label="数据刷新次数">{count}</output>;
+  }
+  render(<><AppShell /><RefreshConsumer /></>);
+  const listener = vi.mocked(listen).mock.calls.find(([name]) => name === "cli-data-changed")?.[1];
+  expect(listener).toBeDefined();
+  await act(async () => { listener!({ event: "cli-data-changed", id: 1, payload: null }); });
+  expect(screen.getByRole("status", { name: "数据刷新次数" }).textContent).toBe("1");
+});
 
 it("starts on the new-session page", () => {
   render(<AppShell />);
